@@ -1661,8 +1661,8 @@ class AgentPool:
         slot_info = ""
         if hasattr(self, 'api_router') and self.api_router:
             sched = self.api_router.scheduler
-            with sched._lock:
-                totals = {k: v['active_count'] for k, v in sched._schedules.items() if v['active_count'] > 0}
+            status = sched.get_status()
+            totals = {k: v['active_count'] for k, v in status.items() if v['active_count'] > 0}
             if totals:
                 slot_info = f" active_slots={totals}"
         
@@ -2679,33 +2679,13 @@ class AgentPool:
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id, child_instance_name=child_instance_name)
         
-        # Phase 3 (Gap A fix): Parent reserves its pool while waiting for async child result.
-        # This prevents unrelated agents from grabbing the slot during parent's wait period.
-        try:
-            caller_instance = self.get_instance(instance_name)
-            if caller_instance and hasattr(self, 'api_router') and self.api_router:
-                ancestor_chain = self._build_ancestor_chain_for_reservation(caller_instance)
-                self.api_router.scheduler.reserve(
-                    instance_name=instance_name,
-                    ancestor_chain=ancestor_chain,
-                    reason="async_child",
-                    agent_class=caller_instance.agent_class,
-                )
-        except Exception as e:
-            # Non-critical — proceed without reservation.
-            # Risk: unrelated agents may grab the slot during parent's async wait.
-            logger.warning(
-                f"[RESERVATION] Failed to reserve for {instance_name} during async spawn: {e}. "
-                f"Risk: slot may be taken by unrelated agent while parent waits."
-            )
+        # NOTE: No reservation here. Reservation happens when parent actually enters
+        # SLEEPING state (execution_engine._transition_to_sleeping), not at spawn time.
+        # Reserving at spawn would block the parent's own sync children — they run inline
+        # on parent's thread and inherit its permit via Rule 4, so they don't need a slot
+        # acquisition that would be blocked by this reservation.
 
-    def _build_ancestor_chain_for_reservation(self, instance) -> Tuple[str, ...]:
-        """Build ancestor chain from instance to root for reservation self-exemption.
-
-        Delegates to shared utility in slot_queue to avoid duplication.
-        """
-        from agent_cascade.slot_queue import build_ancestor_chain
-        return build_ancestor_chain(instance, self.get_instance)
+    # ── Pause/Resume state management ───────────────────────────────────────
 
     # ── Pause/Resume state management ───────────────────────────────────────
 
