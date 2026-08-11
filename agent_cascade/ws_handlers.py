@@ -331,16 +331,15 @@ class WsMessageHandler:
             # Diagnostic: Check for stuck slots after stop
             if hasattr(self.agent_pool, 'api_router') and self.agent_pool.api_router:
                 sched = self.agent_pool.api_router.scheduler
-                with sched._lock:
-                    stuck = {k: v for k, v in sched._schedules.items() if v['active_count'] > 0}
-                    stuck_holders = {k: v for k, v in sched._slot_holders.items() if v}
+                status = sched.get_status()
+                stuck = {k: v for k, v in status.items() if v['active_count'] > 0}
                 if stuck:
                     logger.warning(
-                        f"Stuck slots detected after stop: "
-                        f"active={stuck}, holders={stuck_holders}"
+                        f"Stuck slots detected after stop_session: "
+                        f"{stuck}"
                     )
                 else:
-                    logger.debug("All slots released cleanly")
+                    logger.debug("All slots released cleanly after stop_session")
 
             logger.debug(f"Transitioned {transitioned} agent(s) to IDLE, generation now={self.agent_pool._run_generation}")
 
