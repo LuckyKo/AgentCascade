@@ -245,7 +245,7 @@ class EndpointScheduler:
     """
     
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock needed for reentrant calls (e.g., _start_sweeper from within _get_or_create_pool)
         # Per-endpoint SlotPool for FIFO queueing + capacity control.
         # api_base -> SlotPool(key=api_base, capacity=N)
         self._pools: Dict[str, SlotPool] = {}
