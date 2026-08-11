@@ -31,6 +31,7 @@ from agent_cascade.settings import (
 )
 from agent_cascade.exceptions import ContextWindowExceeded, AgentTerminatedError
 from agent_cascade.retry_policy import calculate_backoff, RetryPolicy, POLICY_DEFAULT
+from agent_cascade.slot_queue import SlotPool, QUEUE_WAIT_TIMEOUT, RESERVATION_TIMEOUT
 
 
 # ── Termination check helpers (used by interruptible sleep patterns) ─────────
@@ -228,7 +229,7 @@ class EndpointScheduler:
     """
     Manages per-API-base scheduling with lifecycle-aware serialization.
     
-    Uses threading.Semaphore per endpoint for race-free capacity control.
+    Phase 2: Uses SlotPool per endpoint for FIFO queueing + strict capacity control.
     For concurrency=0 endpoints: agents are strictly serialized — one at a time,
     from task submission to full completion (including all LLM calls and tool waits).
     All concurrency=0 endpoints share the SAME slot to avoid cache trashing from
@@ -239,27 +240,109 @@ class EndpointScheduler:
     This operates at the AGENT TASK level (entire agent lifecycle), NOT the
     individual API call level. This prevents interleaving of LLM calls between
     different agents on the same endpoint.
+    
+    Public API unchanged from semaphore-based version — all existing call sites work.
     """
     
     def __init__(self):
         self._lock = threading.Lock()
-        # Per-endpoint semaphore for blocking acquire + active counter
-        # api_base -> {'sem': Semaphore(max_active), 'active_count': int}
-        self._schedules: Dict[str, Dict] = {}
-        # SLOT_TIMEOUT FIX v2: Track which instances hold slots for better debugging
-        # slot_key -> list of (instance_name, agent_class, acquired_at_timestamp, acquisition_id) tuples
-        # ISSUE #2 FIX: Use unique acquisition_id to match acquire/release pairs correctly
-        self._slot_holders: Dict[str, List[tuple]] = {}
-        self._next_acquisition_id = 0  # Counter for unique acquisition IDs
+        # Per-endpoint SlotPool for FIFO queueing + capacity control.
+        # api_base -> SlotPool(key=api_base, capacity=N)
+        self._pools: Dict[str, SlotPool] = {}
+        # Lazy counter for acquisition IDs (for backward compat with diagnostics).
+        self._next_acquisition_id = 0
+        
+        # Stale reservation sweeper thread (Phase 3 — plan lines ~294-295)
+        self._sweeper_thread: Optional[threading.Thread] = None
+        self._sweeper_stop = threading.Event()
+
+    def _start_sweeper(self):
+        """Start the stale reservation sweeper daemon thread (lazy init on first pool)."""
+        with self._lock:
+            if self._sweeper_thread is not None and self._sweeper_thread.is_alive():
+                return  # Already running
+            
+            self._sweeper_stop.clear()
+            self._sweeper_thread = threading.Thread(
+                target=self._sweeper_loop,
+                name="slot-scheduler-stale-reservation-sweeper",
+                daemon=True,
+            )
+            self._sweeper_thread.start()
+            logger.info("[EndpointScheduler] Stale reservation sweeper started (interval=60s)")
+
+    def _stop_sweeper(self):
+        """Stop the stale reservation sweeper thread gracefully."""
+        if self._sweeper_thread is not None:
+            self._sweeper_stop.set()
+            self._sweeper_thread.join(timeout=5.0)
+            self._sweeper_thread = None
+            logger.info("[EndpointScheduler] Stale reservation sweeper stopped")
+
+    def _sweeper_loop(self):
+        """Background loop: scan pools for stale reservations every 60 seconds."""
+        while not self._sweeper_stop.is_set():
+            self._sweeper_stop.wait(timeout=60.0)
+            if self._sweeper_stop.is_set():
+                break
+            
+            try:
+                total_cleaned = 0
+                with self._lock:
+                    pools_snapshot = list(self._pools.values())
+                
+                for pool in pools_snapshot:
+                    stale_tokens = pool.detect_stale_reservations(RESERVATION_TIMEOUT)
+                    for token in stale_tokens:
+                        try:
+                            pool.unreserve(token)
+                            total_cleaned += 1
+                            logger.info(f"[SCHEDULER_STALE_RESERVATION] Cleaned stale reservation "
+                                       f"token={token[:8]}... on pool '{pool.key}'")
+                        except Exception as e:
+                            logger.debug(f"[SCHEDULER_STALE_RESERVATION] Failed to unreserve {token}: {e}")
+                
+                if total_cleaned > 0:
+                    logger.info(f"[EndpointScheduler] Sweeper cleaned {total_cleaned} stale reservation(s)")
+            except Exception as e:
+                # Non-critical — sweeper should never crash the process.
+                logger.error(f"[EndpointScheduler] Sweeper loop error: {e}", exc_info=True)
+
+    def _get_or_create_pool(self, api_base: str, concurrency_limit: int) -> Optional[SlotPool]:
+        """Get or lazily create a SlotPool for the given endpoint.
+        
+        Args:
+            api_base: The API base URL of the endpoint
+            concurrency_limit: -1=unlimited, 0=sequential, N>0=max parallel
+            
+        Returns:
+            SlotPool instance, or None if unlimited (-1).
+        """
+        if concurrency_limit == -1:
+            return None
+        
+        # BUG FIX: All concurrency=0 endpoints share the same slot to avoid cache trashing.
+        is_sequential = (concurrency_limit == 0)
+        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
+        
+        capacity = concurrency_limit if concurrency_limit > 0 else 1  # 0→1 (sequential)
+        
+        with self._lock:
+            if slot_key not in self._pools:
+                pool = SlotPool(key=slot_key, capacity=capacity)
+                self._pools[slot_key] = pool
+                logger.info(f"[EndpointScheduler] Created pool '{slot_key}' with capacity={capacity}")
+                # Start sweeper on first pool creation.
+                self._start_sweeper()
+            return self._pools[slot_key]
     
-    def acquire(self, api_base: str, concurrency_limit: int, instance_name: str = "unknown", agent_class: str = "unknown", pool=None) -> Optional[Callable[[], None]]:
+    def acquire(self, api_base: str, concurrency_limit: int, instance_name: str = "unknown", agent_class: str = "unknown", pool=None, ancestor_chain: tuple = None, timeout: float = None) -> Optional[Callable[[], None]]:
         """
         Acquire a slot on the endpoint. Blocks if at capacity.
         Returns a cleanup callback to release the slot, or None if unlimited.
         
-        If the concurrency limit has changed since this endpoint was last scheduled,
-        the semaphore is safely resized — active agents retain their slots, and
-        new agents see the updated capacity.
+        Phase 2: Uses SlotPool.acquire() for FIFO queueing + strict capacity control.
+        Public API unchanged — same signature and return type as semaphore version.
         
         Args:
             api_base: The API base URL of the endpoint
@@ -267,218 +350,92 @@ class EndpointScheduler:
             instance_name: Name of the agent instance acquiring the slot (for tracking)
             agent_class: Class of the agent instance (for tracking)
             pool: Optional AgentPool reference for termination checks during blocking acquire
+            ancestor_chain: Optional tuple of ancestor instance names for self-exemption (Phase 4)
+            timeout: Optional override for wait timeout in seconds (Phase 4 re-acquire uses 30s)
             
         Returns:
             A callable that releases the slot when called, or None if no scheduling needed.
+            
+        Raises:
+            TimeoutError: If slot cannot be acquired within ENDPOINT_SLOT_ACQUIRE_TIMEOUT.
+            AgentTerminatedError: If instance is terminated while waiting.
         """
         if concurrency_limit == -1:  # unlimited — no scheduling needed
             logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, concurrency=-1 (unlimited), returning None")
             return None
         
         # BUG FIX: All concurrency=0 endpoints share the same slot to avoid cache trashing.
-        # Use a shared slot key for sequential endpoints instead of the api_base.
         is_sequential = (concurrency_limit == 0)
         slot_key = '_shared_sequential_slot_' if is_sequential else api_base
         
-        new_max = concurrency_limit if concurrency_limit > 0 else 1  # 0→1 (sequential), -1 handled above
         logger.debug(
             f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, "
-            f"concurrency_limit={concurrency_limit}, slot_key={slot_key}, new_max={new_max}, "
+            f"concurrency_limit={concurrency_limit}, slot_key={slot_key}, "
             f"instance_name={instance_name}, agent_class={agent_class}"
         )
         
-        with self._lock:
-            if slot_key not in self._schedules:
-                self._schedules[slot_key] = {
-                    'sem': threading.Semaphore(new_max),
-                    'active_count': 0,
-                    'max_active': new_max,
-                }
-            else:
-                sched = self._schedules[slot_key]
-                # Check if concurrency limit changed and resize if needed
-                if sched['max_active'] != new_max:
-                    old_max = sched['max_active']
-                    sched['max_active'] = new_max
-                    
-                    # Resize the semaphore safely: create a new one and transfer
-                    # active_count worth of permits to reflect currently running agents.
-                    new_sem = threading.Semaphore(new_max)
-                    
-                    # Pre-acquire slots in new sem equal to current active count
-                    # (these agents already hold their slots, so the new sem should
-                    # have fewer available permits accordingly).
-                    for _ in range(sched['active_count']):
-                        new_sem.acquire()
-                    
-                    # Swap atomically under lock — all subsequent acquire/release
-                    # calls will use the resized semaphore.
-                    sched['sem'] = new_sem
-                    
-                    # Log with original api_base for clarity, but note if using shared slot
-                    log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
-                    logger.info(f"[EndpointScheduler] Resized '{log_target}' from {old_max} → {new_max}")
-            
-            sched = self._schedules[slot_key]
+        # Get or create the pool (handles lazy initialization + capacity mapping).
+        sched_pool = self._get_or_create_pool(api_base, concurrency_limit)
+        if sched_pool is None:
+            return None
         
-        # Interruptible slot acquisition: check termination every CHECK_INTERVAL seconds
-        # instead of blocking for the full ENDPOINT_SLOT_ACQUIRE_TIMEOUT.
-        import time as _time
+        # Use QUEUE_WAIT_TIMEOUT (300s) as primary; ENDPOINT_SLOT_ACQUIRE_TIMEOUT as fallback for backward compat.
+        effective_timeout = timeout if timeout is not None else (QUEUE_WAIT_TIMEOUT or ENDPOINT_SLOT_ACQUIRE_TIMEOUT)
         
-        CHECK_INTERVAL = 1.0  # Check termination every second while waiting
-        acquire_start = _time.monotonic()
-        deadline = acquire_start + ENDPOINT_SLOT_ACQUIRE_TIMEOUT
-        
-        logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — blocking on semaphore for api_base={api_base}")
-        
-        while True:
-            remaining = deadline - _time.monotonic()
-            if remaining <= 0:
-                # SLOT_TIMEOUT FIX v2: Include slot holder information in timeout error
-                holder_info = ""
-                with self._lock:
-                    holders = self._slot_holders.get(slot_key, [])
-                    if holders:
-                        holder_names = [f"{h[0]} ({h[1]})" for h in holders]
-                        holder_info = f". Currently held by: {', '.join(holder_names)}"
-                
-                raise TimeoutError(
-                    f"Timed out after {ENDPOINT_SLOT_ACQUIRE_TIMEOUT}s waiting for endpoint slot on {api_base}. "
-                    f"Current active count: {sched['active_count']}, max allowed: {sched['max_active']}{holder_info}"
-                )
+        try:
+            # Phase 2: Call SlotPool.acquire() — FIFO queueing, strict capacity, interruptible ticks.
+            # ancestor_chain passed as (instance_name,) for now; Phase 3 will wire up real chains.
+            effective_chain = ancestor_chain if ancestor_chain is not None else (instance_name,)
+            release_from_pool = sched_pool.acquire(
+                instance_name=instance_name,
+                agent_class=agent_class,
+                ancestor_chain=effective_chain,
+                timeout=effective_timeout,
+            )
             
-            # Check if instance was terminated while waiting
-            if _check_termination(pool, instance_name):
-                raise AgentTerminatedError(instance_name)
-            
-            wait_time = min(remaining, CHECK_INTERVAL)
-            if sched['sem'].acquire(timeout=wait_time):
-                break  # Successfully acquired
-        
-        with self._lock:
-            # ISSUE #2 FIX: Generate unique acquisition ID BEFORE incrementing active_count
-            # This ensures atomic assignment of both the ID and the counter update
-            acquisition_id = self._next_acquisition_id
-            self._next_acquisition_id += 1
-            
-            sched['active_count'] += 1
-            current = sched['active_count']
-            
-            # SLOT_TIMEOUT FIX v2: Track which instance holds the slot with unique ID
-            if slot_key not in self._slot_holders:
-                self._slot_holders[slot_key] = []
-            self._slot_holders[slot_key].append((instance_name, agent_class, time.monotonic(), acquisition_id))
+            # Generate acquisition_id for backward-compat diagnostics logging.
+            with self._lock:
+                acquisition_id = self._next_acquisition_id
+                self._next_acquisition_id += 1
             
             logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) acquired slot on '{api_base}' "
-                       f"(active: {current}, limit: {sched['max_active']})")
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — successfully acquired, "
-                f"api_base={api_base}, active_count={current}, max_active={sched['max_active']}, "
-                f"instance_name={instance_name}, agent_class={agent_class}"
-            )
-        
-        # Return cleanup callback that releases the semaphore when called.
-        # IMPORTANT: reads the CURRENT semaphore from the live schedule entry,
-        # not a captured reference — this is critical because the semaphore may
-        # have been resized (swapped) since acquire() was called.
-        # Capture slot_key in the closure to ensure correct schedule lookup on release.
-        
-        # FIX C1: Double-release protection using nonlocal flag in closure
-        _released = False  # Flag to track if release has been called
-        
-        # ISSUE #2 FIX: Capture acquisition_id for precise holder removal matching
-        captured_acquisition_id = acquisition_id
-        
-        def release():
-            nonlocal _released  # Use nonlocal for cleaner Python 3 syntax
+                       f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
             
-            # FIX C1: Guard against double-release - if already released, return silently
-            if _released:
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] EndpointScheduler.release — already released for slot_key={slot_key}, "
-                    f"skipping double-release"
-                )
-                return
-            
-            with self._lock:
-                # Log with original api_base for clarity, but note if using shared slot
-                log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
-                
-                current_sched = self._schedules.get(slot_key)
-                if not current_sched:
-                    # FIX: Handle case where schedule entry was deleted (e.g., stale cleanup)
-                    logger.error(
-                        f"[SLOT_RELEASE_ERROR] No schedule found for slot_key={slot_key} on release. "
-                        f"Slot may be permanently held. {log_target}"
-                    )
-                    _released = True  # Mark as released even on error
-                    return
-                
-                # FIX: Release semaphore FIRST, then decrement counter
-                # This prevents deadlock where active_count=0 but semaphore blocks forever
+            # Wrap the pool's release callback to preserve existing logging behavior.
+            def release():
                 try:
-                    current_sched['sem'].release()
+                    release_from_pool()
                 except Exception as e:
-                    logger.error(
-                        f"[SLOT_RELEASE_ERROR] Failed to release semaphore for {log_target}: {e}",
-                        exc_info=True
-                    )
-                    # On sem.release() failure, slot remains held (don't decrement counter)
-                    _released = True  # Mark as released even on error
+                    log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
+                    logger.error(f"[SLOT_RELEASE_ERROR] Failed to release slot for {log_target}: {e}", exc_info=True)
                     return
                 
-                # Decrement counter AFTER successful sem.release()
-                old_count = current_sched['active_count']
-                if old_count < 0:
-                    logger.error(
-                        f"[SLOT_RELEASE_ERROR] active_count was {old_count} (negative) on release "
-                        f"for {log_target}. This indicates a double-release or tracking bug."
-                    )
-                elif old_count == 0:
-                    logger.warning(
-                        f"[SLOT_RELEASE_WARNING] active_count was {old_count} on release for {log_target}. "
-                        f"This may indicate the schedule was recreated or there's a tracking issue."
-                    )
-                
-                # SLOT_TIMEOUT FIX v2: Remove this instance from slot holders list
-                # ISSUE #2 FIX: Match by unique acquisition_id for precise removal
-                if slot_key in self._slot_holders:
-                    original_len = len(self._slot_holders[slot_key])
-                    self._slot_holders[slot_key] = [
-                        h for h in self._slot_holders[slot_key] 
-                        if h[3] != captured_acquisition_id  # Match by unique acquisition ID
-                    ]
-                    removed_count = original_len - len(self._slot_holders[slot_key])
-                    if removed_count == 1:
-                        logger.debug(
-                            f"[CALL_AGENT_DEBUG] EndpointScheduler.release — removed holder entry "
-                            f"for instance_name={instance_name}, agent_class={agent_class}, acquisition_id={captured_acquisition_id}"
-                        )
-                    elif removed_count > 1:
-                        logger.warning(
-                            f"[SLOT_RELEASE_WARNING] Removed {removed_count} holder entries for acquisition_id={captured_acquisition_id}. "
-                            f"This should typically be 1. instance_name={instance_name}, agent_class={agent_class}"
-                        )
-                    elif removed_count == 0:
-                        logger.debug(
-                            f"[CALL_AGENT_DEBUG] EndpointScheduler.release — holder entry already removed for acquisition_id={captured_acquisition_id}. "
-                            f"instance_name={instance_name}, agent_class={agent_class}"
-                        )
-                
-                current_sched['active_count'] = max(0, old_count - 1)
-                new_count = current_sched['active_count']
-                
+                # Log release with current pool stats.
+                log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
                 logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) released slot on '{log_target}' "
-                           f"(active: {new_count}, limit: {current_sched['max_active']})")
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] EndpointScheduler.release — api_base={api_base}, "
-                    f"slot_key={slot_key}, active_count={new_count}, max_active={current_sched['max_active']}, "
-                    f"instance_name={instance_name}, agent_class={agent_class}"
-                )
-                
-                _released = True  # Mark as successfully released
+                           f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
+            
+            # TODO Phase 3: On release, check for stale reservations and unreserve if needed.
+            #   Call sched_pool.unreserve_for_agent(instance_name) when agent terminates abnormally.
+            return release
+            
+        except TimeoutError as e:
+            # Wrap with holder info for diagnostics (same format as semaphore version).
+            holder_info = ""
+            holders = list(sched_pool._running.values())
+            if holders:
+                holder_names = [f"{h.instance_name} ({h.agent_name})" for h in holders]
+                holder_info = f". Currently held by: {', '.join(holder_names)}"
+            
+            raise TimeoutError(
+                f"Timed out after {timeout}s waiting for endpoint slot on {api_base}. "
+                f"Current active count: {len(sched_pool._running)}, max allowed: {sched_pool.capacity}{holder_info}"
+            ) from e
         
-        return release
+        except Exception as e:
+            # Catch-all for unexpected errors during acquire.
+            logger.error(f"[EndpointScheduler] Acquire failed for '{instance_name}' on '{api_base}': {e}", exc_info=True)
+            raise
     
     def count_active(self, api_base: str, concurrency_limit: int) -> int:
         """Count active tasks on an endpoint.
@@ -490,11 +447,12 @@ class EndpointScheduler:
         Returns:
             Number of currently active agents on this endpoint
         """
-        # For concurrency=0, use shared slot key; otherwise use api_base directly
+        if concurrency_limit == -1:
+            return 0
+        
         slot_key = '_shared_sequential_slot_' if concurrency_limit == 0 else api_base
-        with self._lock:
-            sched = self._schedules.get(slot_key)
-            return sched['active_count'] if sched else 0
+        pool = self._pools.get(slot_key)
+        return len(pool._running) if pool else 0
     
     def get_status(self) -> Dict[str, Dict]:
         """Get status of all scheduled endpoints (for diagnostics).
@@ -504,80 +462,81 @@ class EndpointScheduler:
             Shared sequential slots are labeled as '[SHARED] _shared_sequential_slot_'
             to distinguish them from per-endpoint schedules.
         """
-        with self._lock:
-            result = {}
-            for key, sched in self._schedules.items():
-                # Use meaningful label for shared slot to avoid confusion in diagnostics
-                display_key = f"[SHARED] {key}" if 'shared' in key.lower() else key
-                # Semaphore._value is implementation detail but useful for diagnostics
-                sem_value = sched['sem']._value if hasattr(sched['sem'], '_value') else 'unknown'
-                
-                # SLOT_TIMEOUT FIX v2: Include slot holder information in status
-                holders_info = []
-                if key in self._slot_holders:
-                    # FIX CRITICAL BUG #2: Tuple has 4 elements (instance_name, agent_class, acquired_at, acquisition_id)
-                    for instance_name, agent_class, acquired_at, _acquisition_id in self._slot_holders[key]:
-                        held_duration = time.monotonic() - acquired_at
-                        holders_info.append({
-                            'instance_name': instance_name,
-                            'agent_class': agent_class,
-                            'held_duration_seconds': held_duration
-                        })
-                
-                result[display_key] = {
-                    'active_count': sched['active_count'],
-                    'max_active': sched['max_active'],
-                    'semaphore_slots': sem_value,
-                    'slot_holders': holders_info,  # List of instances holding slots with metadata
-                }
-            return result
+        result = {}
+        for key, pool in self._pools.items():
+            display_key = f"[SHARED] {key}" if 'shared' in key.lower() else key
+            
+            # Build slot holders info from pool._running (SlotHolder has instance_name, agent_name).
+            holders_info = []
+            for holder in pool._running.values():
+                held_duration = time.monotonic() - holder.granted_at
+                holders_info.append({
+                    'instance_name': holder.instance_name,
+                    'agent_class': holder.agent_name,  # agent_name used as display name
+                    'held_duration_seconds': held_duration,
+                })
+            
+            result[display_key] = {
+                'active_count': len(pool._running),
+                'max_active': pool.capacity,
+                'semaphore_slots': pool.capacity - len(pool._running),  # Backward compat field name
+                'waiters_count': len(pool._waiters),
+                'slot_holders': holders_info,
+            }
+        return result
     
     def cleanup_stale(self):
         """Remove schedule entries for endpoints with no activity.
         
-        A schedule is stale when active_count is 0 AND all semaphore permits
-        are available (no waiting agents). This prevents memory leaks from
-        endpoints that were used temporarily and have since gone idle.
+        A pool is stale when _running is empty AND _waiters is empty (no active or waiting agents).
+        This prevents memory leaks from endpoints that were used temporarily and have since gone idle.
         
         Note: The shared sequential slot (_shared_sequential_slot_) is NOT cleaned up
-        to avoid unnecessary recreation of the shared semaphore across different
+        to avoid unnecessary recreation of the shared pool across different
         concurrency=0 endpoints.
         """
         with self._lock:
-            stale = [ab for ab, s in self._schedules.items()
-                     if ab != '_shared_sequential_slot_'  # Protect shared slot from cleanup
-                     and s['active_count'] == 0 and s['sem']._value >= s['max_active']]
-            for ab in stale:
-                del self._schedules[ab]
-                # Also clean up slot holders for this endpoint
-                if ab in self._slot_holders:
-                    del self._slot_holders[ab]
+            stale = [key for key, pool in self._pools.items()
+                     if key != '_shared_sequential_slot_'  # Protect shared slot from cleanup
+                     and len(pool._running) == 0 and len(pool._waiters) == 0]
+            for key in stale:
+                del self._pools[key]
             if stale:
                 logger.info(f"[EndpointScheduler] Cleaned up {len(stale)} stale schedule(s)")
 
     def get_slot_holders(self, slot_key: str = None) -> Dict[str, List[tuple]]:
         """Get information about which instances are holding slots.
         
-        SLOT_TIMEOUT FIX v2: Diagnostic method to identify slot holders for debugging.
+        Phase 2: Returns data from SlotPool._running as tuples for backward compat.
         
         Args:
             slot_key: Optional specific slot key to query. If None, returns all.
             
         Returns:
             Dictionary mapping slot keys to lists of (instance_name, agent_class, acquired_at, acquisition_id) tuples.
-            Returns deep copies to prevent external modification of internal state (Issue #3).
         """
         import copy
-        with self._lock:
-            if slot_key:
-                holders = self._slot_holders.get(slot_key, [])
-                return {slot_key: copy.deepcopy(holders)}  # ISSUE #3 FIX: Return deep copy
-            return copy.deepcopy(self._slot_holders)  # ISSUE #3 FIX: Return deep copy
+        result = {}
+        
+        if slot_key:
+            pool = self._pools.get(slot_key)
+            if pool:
+                holders = [(h.instance_name, h.agent_name, h.granted_at, h.acquisition_id) 
+                           for h in pool._running.values()]
+                result[slot_key] = copy.deepcopy(holders)
+        else:
+            for key, pool in self._pools.items():
+                holders = [(h.instance_name, h.agent_name, h.granted_at, h.acquisition_id) 
+                           for h in pool._running.values()]
+                if holders:
+                    result[key] = copy.deepcopy(holders)
+        
+        return result
 
     def detect_stuck_slots(self, threshold_seconds: float = 60.0) -> List[dict]:
         """Detect slots that have been held for longer than the threshold.
         
-        SLOT_TIMEOUT FIX v2: Diagnostic method to identify potentially stuck slots.
+        Phase 2: Uses SlotPool._running to check hold durations.
         
         Args:
             threshold_seconds: Time in seconds after which a slot is considered "stuck"
@@ -593,28 +552,65 @@ class EndpointScheduler:
         stuck_slots = []
         current_time = time.monotonic()
         
-        with self._lock:
-            for slot_key, holders in self._slot_holders.items():
-                # ISSUE #6 FIX: Cross-reference with _schedules to verify slot is still active
-                sched = self._schedules.get(slot_key)
-                if not sched or sched['active_count'] == 0:
-                    continue  # Skip if no schedule or no active agents
-                
-                # FIX CRITICAL BUG #1: Tuple has 4 elements (instance_name, agent_class, acquired_at, acquisition_id)
-                for instance_name, agent_class, acquired_at, _acquisition_id in holders:
-                    held_duration = current_time - acquired_at
-                    if held_duration > threshold_seconds:
-                        stuck_slots.append({
-                            'slot_key': slot_key,
-                            'instance_name': instance_name,
-                            'agent_class': agent_class,
-                            'held_duration': held_duration,
-                            'acquired_at': acquired_at
-                        })
-                        logger.warning(
-                            f"[SLOT_STUCK_DETECTION] Slot on '{slot_key}' held by '{instance_name}' "
-                            f"({agent_class}) for {held_duration:.1f}s (threshold: {threshold_seconds}s)"
-                        )
+        # Check held slots — _running access is safe without lock for diagnostics.
+        for key, pool in self._pools.items():
+            with pool._cond:
+                holders_snapshot = list(pool._running.values())
+            for holder in holders_snapshot:
+                held_duration = current_time - holder.granted_at
+                if held_duration > threshold_seconds:
+                    stuck_slots.append({
+                        'slot_key': key,
+                        'instance_name': holder.instance_name,
+                        'agent_class': holder.agent_name,
+                        'held_duration': held_duration,
+                        'acquired_at': holder.granted_at,
+                    })
+                    logger.warning(
+                        f"[SLOT_STUCK_DETECTION] Slot on '{key}' held by '{holder.instance_name}' "
+                        f"({holder.agent_name}) for {held_duration:.1f}s (threshold: {threshold_seconds}s)"
+                    )
+        
+        # Phase 4: Also flag waiters older than QUEUE_WAIT_TIMEOUT and stale reservations.
+        # Copy data under lock with short critical section, then iterate outside.
+        for key, pool in self._pools.items():
+            with pool._cond:
+                waiters_snapshot = list(pool._waiters.values())
+                reservations_snapshot = list(pool._reservations.values())
+            
+            # Flag aged waiters (outside lock)
+            for ticket in waiters_snapshot:
+                age = current_time - ticket.created_at
+                if age > QUEUE_WAIT_TIMEOUT:
+                    stuck_slots.append({
+                        'slot_key': key,
+                        'instance_name': ticket.instance_name,
+                        'agent_class': ticket.agent_class,
+                        'held_duration': age,
+                        'acquired_at': ticket.created_at,
+                        'issue': 'waiter_expired',
+                    })
+                    logger.warning(
+                        f"[SLOT_STUCK_DETECTION] Waiter '{ticket.instance_name}' on '{key}' "
+                        f"has waited {age:.1f}s > QUEUE_WAIT_TIMEOUT={QUEUE_WAIT_TIMEOUT}s"
+                    )
+            
+            # Flag stale reservations (outside lock)
+            for res in reservations_snapshot:
+                age = current_time - res.created_at
+                if age > RESERVATION_TIMEOUT:
+                    stuck_slots.append({
+                        'slot_key': key,
+                        'instance_name': res.agent_name,
+                        'agent_class': '',
+                        'held_duration': age,
+                        'acquired_at': res.created_at,
+                        'issue': 'stale_reservation',
+                    })
+                    logger.warning(
+                        f"[SLOT_STUCK_DETECTION] Stale reservation for '{res.agent_name}' on '{key}' "
+                        f"age={age:.1f}s > RESERVATION_TIMEOUT={RESERVATION_TIMEOUT}s"
+                    )
         
         return stuck_slots
     
@@ -634,6 +630,212 @@ class EndpointScheduler:
             'is_sequential': is_sequential,
             'concurrency_limit': concurrency_limit,
         }
+    
+    # ── Reservation API (Phase 3 — Gap A fix) ───────────────────────────────
+
+    def _get_pool_for_agent(self, instance_name: str, agent_class: str, caller_agent_type: str = None) -> Optional[SlotPool]:
+        """Get the SlotPool that an agent would use based on its endpoint config.
+        
+        Phase 3 helper: used by reserve/unreserve to find the correct pool.
+        Resolves the same slot_key that acquire() would use for this agent class.
+        
+        Args:
+            instance_name: The agent instance name (for logging).
+            agent_class: The agent class to resolve endpoints for.
+            caller_agent_type: Optional caller type for endpoint inheritance.
+            
+        Returns:
+            SlotPool if a scheduling pool exists, None otherwise.
+        """
+        # Need APIRouter reference to resolve concurrency and api_base.
+        # This is set when EndpointScheduler is attached to APIRouter.
+        router = getattr(self, '_router_ref', None)
+        if not router:
+            logger.debug(f"[RESERVATION] No router ref for {instance_name}, cannot resolve pool")
+            return None
+        
+        concurrency_limit = router.get_effective_concurrency(agent_class, caller_agent_type=caller_agent_type)
+        if concurrency_limit == -1:
+            return None  # Unlimited — no pool.
+        
+        llm_cfg = router.get_llm_config(agent_class, caller_agent_type=caller_agent_type)
+        api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+        
+        is_sequential = (concurrency_limit == 0)
+        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
+        
+        return self._pools.get(slot_key)
+
+    def reserve(self, instance_name: str, ancestor_chain: tuple, reason: str, agent_class: str = None, caller_agent_type: str = None) -> Optional[str]:
+        """Reserve a slot for an agent (Phase 3 — Gap A fix).
+        
+        Called when an agent sleeps or spawns async children to prevent unrelated
+        agents from grabbing its slot. The reservation blocks grants to non-ancestor
+        agents while allowing the reserving agent and its descendants to proceed.
+        
+        Args:
+            instance_name: Name of the agent making the reservation.
+            ancestor_chain: Tuple of instance names in the call chain (e.g., ("A", "B")).
+                           Used for self-exemption — any name in this chain can bypass the reservation.
+            reason: Human-readable reason for the reservation (e.g., "sleeping").
+            agent_class: Agent class for pool resolution (if not stored on instance).
+            caller_agent_type: Optional caller type for endpoint inheritance.
+            
+        Returns:
+            Reservation token string, or None if no pool exists for this agent.
+        """
+        pool = self._get_pool_for_agent(instance_name, agent_class, caller_agent_type)
+        if pool is None:
+            return None
+        
+        token = pool.reserve(
+            agent_name=instance_name,
+            ancestor_chain=ancestor_chain,
+            reason=reason,
+            acquisition_id=0,  # Phase 3: not currently used for reservation matching; plan doesn't require it.
+        )
+        
+        logger.info(f"[RESERVATION] {instance_name} reserved slot (reason={reason}, chain={ancestor_chain})")
+        return token
+
+    def unreserve(self, token: str) -> bool:
+        """Unreserve a previously made reservation.
+        
+        Called when an agent wakes from sleep or completes async wait.
+        Must be called BEFORE re-acquiring the slot (order matters per plan).
+        
+        Args:
+            token: The reservation token returned by reserve().
+            
+        Returns:
+            True if a reservation was removed, False if token was not found.
+        """
+        # Find which pool holds this reservation.
+        for pool in self._pools.values():
+            if pool.unreserve(token):
+                logger.debug(f"[RESERVATION] Unreserved token={token}")
+                return True
+        
+        logger.debug(f"[RESERVATION] Token {token} not found (already cleared?)")
+        return False
+
+    def unreserve_for_agent(self, agent_name: str) -> int:
+        """Unreserve all reservations held by an agent.
+        
+        Called during termination or cleanup to clear stale reservations.
+        
+        Args:
+            agent_name: Name of the agent whose reservations to clear.
+            
+        Returns:
+            Number of reservations cleared.
+        """
+        total = 0
+        for pool in self._pools.values():
+            count = pool.unreserve_for_agent(agent_name)
+            total += count
+        
+        if total > 0:
+            logger.info(f"[RESERVATION] Cleared {total} reservation(s) for agent={agent_name}")
+        
+        return total
+
+    def cancel(self, instance_name: str = None, ticket_id: str = None) -> bool:
+        """Cancel a waiting ticket in the queue.
+        
+        Called during termination to remove pending waiters from the queue.
+        
+        Args:
+            instance_name: Cancel all tickets for this agent.
+            ticket_id: Cancel a specific ticket by ID.
+            
+        Returns:
+            True if any ticket was cancelled, False otherwise.
+        """
+        for pool in self._pools.values():
+            if ticket_id:
+                if pool.cancel(ticket_id=ticket_id):
+                    logger.debug(f"[CANCELLATION] Cancelled ticket {ticket_id}")
+                    return True
+            elif instance_name:
+                count = pool.cancel(agent_name=instance_name)
+                if count > 0:
+                    logger.info(f"[CANCELLATION] Cancelled {count} ticket(s) for {instance_name}")
+                    return True
+        
+        return False
+
+    def cancel_all(self) -> int:
+        """Cancel ALL waiting tickets across all pools.
+        
+        Called during stop_session() to clean up all pending waiters.
+        
+        Returns:
+            Total number of tickets cancelled.
+        """
+        total = 0
+        for pool in self._pools.values():
+            count = len(pool._waiters)
+            if count > 0:
+                with pool._cond:
+                    for ticket in pool._waiters.values():
+                        ticket.cancelled.set()
+                    pool._waiters.clear()
+                    pool._cond.notify_all()
+                total += count
+        
+        if total > 0:
+            logger.info(f"[CANCELLATION] Cancelled {total} total tickets across all pools")
+        
+        return total
+    
+    def clear_all_reservations(self) -> int:
+        """Clear ALL reservations across all pools. Used during stop_session.
+        
+        Returns:
+            Total number of reservations cleared.
+        """
+        total_cleared = 0
+        for pool in self._pools.values():
+            with pool._cond:
+                total_cleared += len(pool._reservations)
+                pool._reservations.clear()
+        if total_cleared > 0:
+            logger.info(f"[RESERVATION] Cleared {total_cleared} reservation(s) across all pools")
+        return total_cleared
+
+    def terminate_for_agent(self, agent_name: str) -> tuple:
+        """Cancel all tickets and reservations for an agent.
+        
+        Called during AgentInstance.terminate() to fully clean up that agent's
+        presence in all scheduling queues.
+        
+        Args:
+            agent_name: Name of the agent to terminate from queues.
+            
+        Returns:
+            Tuple of (tickets_cancelled, reservations_cleared).
+        """
+        tickets = 0
+        reservations = 0
+        
+        for pool in self._pools.values():
+            # Cancel all waiting tickets for this agent.
+            with pool._cond:
+                to_remove = [tid for tid, t in pool._waiters.items() if t.instance_name == agent_name]
+                for tid in to_remove:
+                    pool._waiters[tid].cancelled.set()
+                    pool._waiters.pop(tid)
+                    tickets += 1
+                pool._cond.notify_all()
+            
+            # Clear all reservations held by this agent.
+            reservations += pool.unreserve_for_agent(agent_name)
+        
+        if tickets > 0 or reservations > 0:
+            logger.info(f"[TERMINATION] Cleaned up {agent_name}: {tickets} ticket(s), {reservations} reservation(s)")
+        
+        return (tickets, reservations)
 
 
 # ── API Router ───────────────────────────────────────────────────────────────
@@ -678,6 +880,8 @@ class APIRouter:
         # Acquires a slot at task submission time and holds it for the entire
         # agent lifecycle — prevents interleaving of LLM calls between agents.
         self.scheduler = EndpointScheduler()
+        # Phase 3: Give scheduler a reference back to this router for endpoint resolution.
+        self.scheduler._router_ref = self
 
         # Track the last successfully used endpoint config for automatic recovery.
         # When an agent's configured endpoints become unavailable, this provides
@@ -900,9 +1104,16 @@ class APIRouter:
                 the agent has no enabled endpoints (mirrors get_endpoint_chain behavior)
             
         Returns:
-            Dict with keys: slot_key, is_sequential, concurrency_limit, api_base, needs_slot.
-            When concurrency_limit is -1 (unlimited), slot_key and api_base will be None.
+            Dict with keys: slot_key, is_sequential, concurrency_limit, api_base, needs_slot,
+            has_own_endpoints. When concurrency_limit is -1 (unlimited), slot_key and 
+            api_base will be None. has_own_endpoints indicates whether the agent class
+            has its own enabled endpoints vs inheriting from caller (Phase 4 Rule 4).
         """
+        # Phase 4: Check if agent has own endpoints (for inheritance rule)
+        inherited_endpoints, had_own_endpoints = self._resolve_inherited_endpoints(
+            agent_class, caller_agent_type
+        )
+        
         concurrency = self.get_effective_concurrency(agent_class, caller_agent_type=caller_agent_type)
         if concurrency == -1:
             return {
@@ -911,6 +1122,7 @@ class APIRouter:
                 'concurrency_limit': -1,
                 'api_base': None,
                 'needs_slot': False,
+                'has_own_endpoints': had_own_endpoints,
             }
         
         llm_cfg = self.get_llm_config(agent_class, caller_agent_type=caller_agent_type)
@@ -919,6 +1131,7 @@ class APIRouter:
         slot_info = self.scheduler.get_slot_info(api_base, concurrency)
         slot_info['api_base'] = api_base
         slot_info['needs_slot'] = True
+        slot_info['has_own_endpoints'] = had_own_endpoints
         
         return slot_info
 
@@ -1724,9 +1937,13 @@ class APIRouter:
     def reset_semaphores(self):
         """Reset all per-API-call semaphores to their initial state.
         
-        Releases all held permits to restore each semaphore to its initial state.
-        This avoids replacing the semaphore object (which could cause lost releases
-        from generator finally blocks).
+        DEPRECATED: This method resets the legacy per-API-call semaphore pool used by
+        call_with_fallback(). It does NOT affect EndpointScheduler's SlotPool-based
+        agent-level scheduling (Phase 2). Kept for backward compat with stop_session()
+        in agent_pool.py which calls this during session cleanup.
+        
+        TODO Phase 3: Replace this with SlotPool.terminate_for_agent() calls when
+        reservation hooks are wired up in execution_engine.py and tool_dispatcher.py.
         """
         with self._sem_lock:
             for base, (sem, size) in list(self._semaphores.items()):

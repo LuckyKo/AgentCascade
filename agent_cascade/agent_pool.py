@@ -864,6 +864,9 @@ class AgentPool:
             compression_summary=None,
             latest_marker_index=-1,
         )
+        # Phase 3: Give instance a reference back to the pool for queue cleanup on terminate().
+        instance._pool_ref = self
+        
         # Register instance atomically under _pool_lock to prevent race during creation
         with self._pool_lock:
             self.instances[instance_name] = instance
@@ -1593,6 +1596,21 @@ class AgentPool:
                 self.api_router.reset_semaphores()
             except Exception as e:
                 logger.debug(f"Semaphore reset during stop_session (non-critical): {e}")
+        
+        # ── Step 2.6: Cancel all queue tickets and reservations (Phase 3) ───────
+        # Clean up any pending waiters and stale reservations to prevent blocked grants on resume.
+        if hasattr(self, 'api_router') and self.api_router:
+            try:
+                cancelled = self.api_router.scheduler.cancel_all()
+                if cancelled > 0:
+                    logger.info(f"[STOP_SESSION] Cancelled {cancelled} pending queue ticket(s)")
+                
+                # Clear all reservations for remaining instances.
+                cleared = self.api_router.scheduler.clear_all_reservations()
+                if cleared > 0:
+                    logger.info(f"[STOP_SESSION] Cleared {cleared} reservation(s)")
+            except Exception as e:
+                logger.debug(f"Queue cancellation during stop_session (non-critical): {e}")
 
         # ── Step 3: Clear cached message sets, message queues, and async results ──
         # After stop, the cached working sets may be stale (from interrupted turns).
@@ -2656,6 +2674,50 @@ class AgentPool:
                 return f"[Agent '{child_instance_name}' Failed]:\n{str(e)}"
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id, child_instance_name=child_instance_name)
+        
+        # Phase 3 (Gap A fix): Parent reserves its pool while waiting for async child result.
+        # This prevents unrelated agents from grabbing the slot during parent's wait period.
+        try:
+            caller_instance = self.get_instance(instance_name)
+            if caller_instance and hasattr(self, 'api_router') and self.api_router:
+                ancestor_chain = self._build_ancestor_chain_for_reservation(caller_instance)
+                self.api_router.scheduler.reserve(
+                    instance_name=instance_name,
+                    ancestor_chain=ancestor_chain,
+                    reason="async_child",
+                    agent_class=caller_instance.agent_class,
+                )
+        except Exception as e:
+            # Non-critical — proceed without reservation.
+            logger.warning(f"[RESERVATION] Failed to reserve for {instance_name} during async spawn: {e}")
+
+    def _build_ancestor_chain_for_reservation(self, instance) -> tuple:
+        """Build ancestor chain from instance to root for reservation self-exemption.
+        
+        Phase 3 helper (duplicate of execution_engine's version — kept here because
+        agent_pool is independent and this method may be needed without engine).
+        
+        Args:
+            instance: The agent instance whose ancestors to collect.
+            
+        Returns:
+            Tuple of instance names from root to this instance, e.g., ("main", "A", "B").
+        """
+        chain = []
+        current = instance
+        visited = set()
+        
+        while current is not None and current.instance_name not in visited:
+            visited.add(current.instance_name)
+            chain.append(current.instance_name)
+            
+            parent_name = getattr(current, 'parent_instance', None)
+            if parent_name:
+                current = self.get_instance(parent_name)
+            else:
+                break
+        
+        return tuple(reversed(chain))
 
     # ── Pause/Resume state management ───────────────────────────────────────
 

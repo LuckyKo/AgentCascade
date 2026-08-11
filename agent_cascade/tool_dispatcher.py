@@ -290,9 +290,11 @@ class ToolDispatcher:
         # 2. If B uses conc=0 (shared sequential pool): always SYNC
         #    - Only one agent can use the shared sequential slot at a time
         # 3. If A holds no slot: ASYNC is safe (A doesn't block anything)
-        # 4. If A holds a parallel slot (conc>0) and B uses a DIFFERENT slot pool:
+        # 4. [Phase 4] If child inherits caller's slot (no own endpoints, same pool):
+        #    - SYNC inline on parent's thread — borrows permit implicitly, NO acquire needed
+        # 5. If A holds a parallel slot (conc>0) and B uses a DIFFERENT slot pool:
         #    - ASYNC: A keeps its slot, B acquires its own in engine.run()
-        # 5. If B would need the SAME slot pool as A (same api_base with limited conc):
+        # 6. If B would need the SAME slot pool as A (same api_base with limited conc):
         #    - SYNC: A releases, B acquires that slot, runs to completion
 
         caller_slot_holder = self.pool.get_instance(caller_name)
@@ -320,17 +322,27 @@ class ToolDispatcher:
                 
                 # Case 3: Caller holds no slot → ASYNC is safe (handled by else branch below)
                 
-                # Case 4/5: Caller holds a slot. Check for collision.
-                if caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
+                # Phase 4 Rule 4: Child inherits caller's slot (no own endpoints).
+                # Run SYNC inline on parent's thread — borrows permit implicitly, NO acquire needed.
+                # This check MUST happen BEFORE collision detection to avoid being overridden.
+                if caller_holds_slot and child_slot_info and not child_slot_info.get('has_own_endpoints'):
+                    logger.debug(
+                        f"[SLOT_RULE4_INHERIT] Child '{instance_name}' ({agent_class}) has no own endpoints, "
+                        f"inherits caller '{caller_name}' slot — SYNC inline (no acquire)"
+                    )
+                    # Rule 4 is final for this path — skip collision check below.
+                    pass  # caller_holds_slot already True from earlier check
+                elif caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
+                    # Case 5/6: Caller holds a slot. Check for collision (only if Rule 4 didn't apply).
                     caller_slot_key = self._compute_slot_key(caller_slot_holder.agent_class)
                     
                     child_slot_key = child_slot_info['slot_key']
                     
-                    # Case 5: Same slot pool → collision → SYNC
+                    # Case 6: Same slot pool → collision → SYNC
                     if caller_slot_key == child_slot_key:
                         caller_holds_slot = True  # Keep sync path (collision detected)
                     else:
-                        # Case 4: Different slot pools → no collision → ASYNC is safe
+                        # Case 5: Different slot pools → no collision → ASYNC is safe
                         caller_holds_slot = False
 
                 # Deadlock prevention (A→B→C scenario): If caller doesn't hold a slot but child needs one,
@@ -664,9 +676,15 @@ class ToolDispatcher:
         slot_holder_name: str,
         context_label: str
     ) -> bool:
-        """Re-acquire caller's slot with retry logic.
+        """Re-acquire caller's concurrency slot after a sync child completes.
         
-        Lifted from nested function in ExecutionEngine._handle_call_agent() - Phase 4.3
+        Phase 4: Queue-aware re-acquire with ancestor-chain self-exemption and proper timeout.
+        Replaces the old 2×0.1s give-up attempts that silently left callers without slots.
+        
+        Algorithm:
+        1. Try immediate acquire via pool._acquire_slot (slot may already be free)
+        2. If blocked, use scheduler.acquire() with ancestor_chain for self-exemption, wait up to 30s
+        3. On failure: clear _slot_release and fall back to async-only
         
         Args:
             slot_holder: Instance holding the slot (has .agent_class attr)
@@ -677,39 +695,105 @@ class ToolDispatcher:
             True if successfully re-acquired, False otherwise.
             
         Note:
-            On failure, _slot_release is NOT set to None — it retains whatever 
-            value it had before (or remains unchanged). The caller's outer context 
-            handles cleanup via its own finally block.
+            On failure, _slot_release is cleared to None under _state_lock to prevent stale permit assumptions.
         """
+        from agent_cascade.slot_queue import SlotQueueTimeout, SlotCancelled
+        
         if not slot_holder:
             return False
-            
-        # Reverted from 20 back to 2: the original inline code used 2 attempts (0.2s total).
-        # Higher retry counts cause unnecessary blocking during stop cleanup.
-        max_attempts = 2
-        retry_delay = 0.1
         
-        for attempt in range(max_attempts):
-            try:
-                release_cb = self.pool._acquire_slot(
-                    slot_holder.agent_class, slot_holder_name
-                )
-                # BUG FIX: _acquire_slot returns None for unlimited endpoints.
-                # Store the result (None is valid - means no concurrency limit).
+        # Step 1: Try immediate acquire via pool._acquire_slot (slot may already be free).
+        # This is fast and avoids the full queue path when contention has cleared.
+        try:
+            release_cb = self.pool._acquire_slot(
+                slot_holder.agent_class, slot_holder_name
+            )
+            if release_cb is not None or release_cb is None:  # Both are valid (None = unlimited)
                 slot_holder._slot_release = release_cb
                 return True
-            except Exception as e:
-                if attempt < max_attempts - 1:
-                    logger.debug(f"Attempt {attempt + 1}/{max_attempts} failed to re-acquire caller slot after {context_label}: {e}. Retrying...")
-                    time.sleep(retry_delay)
-                else:
-                    # If pool is stopped, no need to re-acquire - just release and return False
-                    if self.pool.stopped:
-                        logger.debug(f"Pool stopped during slot re-acquisition for '{slot_holder_name}' after {context_label}")
-                        return False
-                    logger.warning(f"Failed to re-acquire caller slot after {context_label} ({max_attempts} attempts, ~{max_attempts * retry_delay}s total): {e}. Subsequent calls will use ASYNC path.")
+        except Exception as e:
+            logger.debug(f"Immediate re-acquire failed for '{slot_holder_name}' after {context_label}: {e}")
         
+        # Step 2: Queue-aware acquire with reservation exemption.
+        # Build ancestor chain including self so self-exemption applies.
+        ancestor_chain = self._build_ancestor_chain_for_reacquire(slot_holder)
+        
+        # Resolve the slot's api_base and concurrency_limit via router
+        router = self.pool.api_router
+        if not router:
+            logger.warning(f"[SLOT_SYNC_REACQUIRE_FAILED] No router available for '{slot_holder_name}'")
+            return False
+        
+        slot_info = router.get_agent_slot_info(slot_holder.agent_class)
+        if not slot_info or not slot_info.get('needs_slot'):
+            # Unlimited endpoints — no slot needed
+            slot_holder._slot_release = None
+            return True
+        
+        api_base = slot_info['api_base']
+        concurrency_limit = slot_info['concurrency_limit']
+        
+        REACQUIRE_TIMEOUT = 30.0  # seconds — long enough for contention, short enough to fail fast on deadlock
+        
+        try:
+            release_cb = router.scheduler.acquire(
+                api_base=api_base,
+                concurrency_limit=concurrency_limit,
+                instance_name=slot_holder_name,
+                agent_class=slot_holder.agent_class,
+                ancestor_chain=ancestor_chain,  # enables self-exemption
+                timeout=REACQUIRE_TIMEOUT,
+            )
+            if release_cb is not None:
+                slot_holder._slot_release = release_cb
+                logger.debug(
+                    f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{slot_holder_name}' after {context_label} "
+                    f"(ancestor_chain={ancestor_chain})"
+                )
+                return True
+            else:
+                # Unlimited — no callback needed
+                slot_holder._slot_release = None
+                return True
+        except (SlotQueueTimeout, SlotCancelled):
+            pass
+        
+        # Step 3: On failure — clean state and degrade to async-only.
+        with slot_holder._state_lock:
+            slot_holder._slot_release = None
+        
+        logger.warning(
+            f"[SLOT_SYNC_REACQUIRE_FAILED] {context_label} for '{slot_holder_name}' "
+            f"after {REACQUIRE_TIMEOUT}s. Subsequent calls will use ASYNC path only."
+        )
         return False
+    
+    def _build_ancestor_chain_for_reacquire(self, instance: 'AgentInstance') -> tuple:
+        """Build ancestor chain from root to this instance for re-acquire self-exemption.
+        
+        Phase 4 helper: same mechanism as reservation ancestor chains. Includes self at end.
+        
+        Args:
+            instance: The agent instance whose ancestors to collect.
+            
+        Returns:
+            Tuple of instance names from root to this instance, e.g., ("main", "A", "B").
+        """
+        chain = []
+        current = instance
+        visited = set()
+        
+        while current is not None and current.instance_name not in visited:
+            visited.add(current.instance_name)
+            chain.append(current.instance_name)
+            
+            parent_name = getattr(current, 'parent_instance', None)
+            if parent_name:
+                current = self.pool.get_instance(parent_name)
+            else:
+                break
+        
+        return tuple(reversed(chain))  # Root first, this instance last.
 
     def _validate_call_agent_args(
         self,

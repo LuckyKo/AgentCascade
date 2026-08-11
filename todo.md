@@ -90,18 +90,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] check how async shell cmd handles timeout, it doesn't seems like its respected very precisely
 - [x] add elapsed timer to heartbeat responses. Implemented: added elapsed computation in _send_heartbeat() using existing task.start_time, updated both no-output and with-output heartbeat message branches to include ({elapsed:.0f}s) after beat count. Minimal 3-line change, tests pass. See review_async_shell_heartbeat_timer.md.
 - [ ] path discovery error, that path is in RW and valid, should work: `ERROR: Path error for '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' — Path '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' is outside the allowed RO directories`
-- [ ] model trashing due to two sync agents running in parallel (something we should never allow). A (sync) calls B (async) and continues then calls D (sync), B calls C (sync), D fails with timeout once but then A and C start sending messages in parallel, causing model trashing. Out APi router should properly schedule sync threads (or any other limited but shared slot) one after another in the order they came, keep slot until they release it, never allow multiple sync agents on the same slot to run their turns interleaved. the fail on timeout for call_agent is fine but not great, still causes issues. we need proper que system in place for each API endpoint slot, with much longer timeouts, this half-assed scheduler ain't doing it, need a proper multi-thread style scheduler implemented
+- [x] model trashing due to two sync agents running in parallel — IMPLEMENTED: Replaced semaphore-based EndpointScheduler with ticket-based FIFO queue system. New module `agent_cascade/slot_queue.py` with OrderedDict-based SlotPool (O(1) removal), strict FIFO ordering, reservation registry preventing slot stealing during async waits, self-exemption via ancestor chains, cancel-on-termination hooks, stale reservation sweeper thread (60s interval). Timeout bumped from 30s to 300s default. Rule 4 inheritance for no-endpoint children runs SYNC inline on parent's thread. All phases reviewed and approved. See `plans/api_scheduler_queue_refactor_plan.md`.
 - [x] check if dismiss_agent actually terminates a running agent thread. INVESTIGATED: No, it was cooperative-only with no forced termination and a latent bug where termination signal was lost after pool removal. IMPLEMENTED: Added AgentInstance.terminate() method that sets durable is_terminated=True flag; refactored terminate_instance()/dismiss_instance() to use it; added interruptible stop-checks during slot acquire (every 1s), rate-limit waits (every 0.5s), retry backoff, and wait_for_message blocks; introduced InstanceDismissedError exception for clean abort propagation through sync children; all phases reviewed and approved. See plan_dismiss_agent_proper_termination.md and investigation_report_dismiss_agent_thread_termination.md.
 
 
 # Errors to investigate:
 
-# [RESOLVED 2026-08-10] re-indent tool messes up code - the diff shows code changes instead of indenting it
-# Investigation: N:\work\WD\AgentWorkspace\logs\re_indent_bug_analysis.md
-# Root cause: Misleading diff display (8+8 truncation dropped hunk headers), NOT actual corruption.
-# Shift logic verified correct byte-for-byte against backup chain.
-# Fixes applied to file_operations.py re_indent method:
-#   1. Uniform whitespace shifts now show compact summary "(uniform indent shift: N lines: +Xsp each)" instead of misleading diff
-#   2. Non-uniform diffs now truncate per-hunk preserving @@ headers
-#   3. Re-read-after-approval added to prevent stale-content race condition
-#   4. Sanity warning when >70% changed in uniform shift: "confirm block boundaries are intended"
