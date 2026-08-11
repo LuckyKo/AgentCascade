@@ -336,6 +336,35 @@ class SlotPool:
             # Wake all waiters; only head will proceed (FIFO guarantee).
             self._cond.notify_all()
 
+    def create_held_slot(self, agent_name: str, instance_name: Optional[str] = None) -> SlotHolder:
+        """Create a held slot for testing purposes.
+        
+        Properly initializes a SlotHolder under the pool lock without bypassing the API.
+        This is the test-friendly replacement for direct _running manipulation.
+        
+        Args:
+            agent_name: The agent name for this holder.
+            instance_name: Optional override; defaults to agent_name.
+            
+        Returns:
+            A SlotHolder that can be released with pool.release().
+            
+        Raises:
+            RuntimeError: If the slot is already held by this instance.
+        """
+        inst = instance_name or agent_name
+        with self._cond:
+            if inst in self._running:
+                raise RuntimeError(f"Slot already held by '{inst}'")
+            holder = SlotHolder(
+                agent_name=agent_name,
+                instance_name=inst,
+                acquisition_id=next(self._acquisition_counter),
+                granted_at=time.monotonic(),
+            )
+            self._running[inst] = holder
+            return holder
+
     def cancel(self, ticket_id: Optional[int] = None, agent_name: Optional[str] = None) -> bool:
         """Cancel a waiter's ticket, removing it from the queue.
         

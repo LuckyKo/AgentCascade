@@ -1,7 +1,7 @@
 """
-Comprehensive integration and stress tests for the API scheduler queue system.
+Integration and stress tests for the API scheduler queue system.
 
-Verifies the FIFO queue + reservation system prevents model trashing under realistic
+Verifies FIFO queue + reservation system prevents model trashing under realistic
 agent call interleaving scenarios. Uses ThreadPoolExecutor to simulate concurrent agent
 threads with mocked LLM calls — no actual API needed.
 
@@ -23,19 +23,25 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import pytest
 
 from agent_cascade.api_router import APIRouter, EndpointScheduler, APIEndpoint
 from agent_cascade.slot_queue import (
     SlotPool,
-    QueueTicket,
-    SlotHolder,
-    Reservation,
     SlotQueueTimeout,
     SlotCancelled,
 )
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+FIFO_TEST_WAITERS = 5          # Small contended queue for FIFO tests
+STRESS_TEST_WAITERS = 20       # Larger contention for stress tests
+PROCEDURAL_SEEDS = [42, 123, 999, 7777]
 
 
 # ============================================================================
@@ -105,75 +111,205 @@ class ConcurrencyTracker:
             pytest.fail(f"{test_name} had concurrency violations:\n{msgs}")
 
 
-def _make_test_router(conc_map: Optional[Dict[str, int]] = None) -> APIRouter:
-    """Create an isolated APIRouter with configurable endpoint concurrency.
+class AgentNode:
+    """Represents a node in a procedurally generated agent call graph."""
 
-    Args:
-        conc_map: Dict of api_base -> concurrency_limit (e.g., {'http://seq': 0, 'http://par': 3})
-    """
-    import tempfile
-    import os
+    def __init__(self, name: str):
+        self.name = name
+        self.children: List["AgentNode"] = []
+        self.is_async_child: bool = False  # True if spawned async
+
+
+# ============================================================================
+# Pytest Fixtures
+# ============================================================================
+
+@pytest.fixture
+def test_pool(capacity: int = 1) -> SlotPool:
+    """Create a SlotPool with automatic cleanup."""
+    pool = SlotPool(key=f"test_{_new_id()}", capacity=capacity)
+    yield pool
+
+
+@pytest.fixture
+def test_router():
+    """Create an isolated APIRouter with default sequential endpoint."""
+    import tempfile, os
     from unittest.mock import patch
 
     test_dir = tempfile.mkdtemp()
     with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_dir}):
         router = APIRouter(default_llm_cfg={
-            'api_base': 'http://default',
-            'model': 'default-model',
-            'max_tokens': 2048,
+            'api_base': 'http://default', 'model': 'default-model', 'max_tokens': 2048,
+        })
+        ep = APIEndpoint(
+            id="ep_default", name="Default", api_base='http://default', model='default-model',
+            enabled=True, concurrency_limit=0,
+        )
+        router.add_endpoint(ep)
+        yield router
+
+
+@pytest.fixture
+def violation_tracker() -> ViolationRecorder:
+    """Create a fresh ViolationRecorder."""
+    return ViolationRecorder()
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _get_scheduler(router: APIRouter) -> EndpointScheduler:
+    return router.scheduler
+
+
+def _make_test_router(conc_map: Optional[Dict[str, int]] = None) -> APIRouter:
+    """Create an isolated APIRouter with configurable endpoint concurrency."""
+    import tempfile, os
+    from unittest.mock import patch
+
+    test_dir = tempfile.mkdtemp()
+    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_dir}):
+        router = APIRouter(default_llm_cfg={
+            'api_base': 'http://default', 'model': 'default-model', 'max_tokens': 2048,
         })
 
         if conc_map:
             for api_base, conc in conc_map.items():
                 ep = APIEndpoint(
-                    id=f"ep_{_new_id()}",
-                    name=f"Test-{api_base}",
-                    api_base=api_base,
-                    model='test-model',
-                    enabled=True,
-                    concurrency_limit=conc,
+                    id=f"ep_{_new_id()}", name=f"Test-{api_base}", api_base=api_base,
+                    model='test-model', enabled=True, concurrency_limit=conc,
                 )
                 router.add_endpoint(ep)
         else:
-            # Default: one sequential endpoint
             ep = APIEndpoint(
-                id="ep_default",
-                name="Default",
-                api_base='http://default',
-                model='default-model',
-                enabled=True,
-                concurrency_limit=0,  # sequential
+                id="ep_default", name="Default", api_base='http://default', model='default-model',
+                enabled=True, concurrency_limit=0,
             )
             router.add_endpoint(ep)
 
         return router
 
 
-def _get_scheduler(router: APIRouter) -> EndpointScheduler:
-    """Get the EndpointScheduler from an APIRouter."""
-    return router.scheduler
+class FIFOWaiterSetup:
+    """Reusable setup for FIFO ordering tests with deterministic enqueue via gates."""
+
+    def __init__(self, pool: SlotPool, names: List[str], work_duration: float = 0.05):
+        self.pool = pool
+        self.names = names
+        self.work_duration = work_duration
+        self.n = len(names)
+        self.gates = [threading.Event() for _ in range(self.n)]
+        self.ready = [threading.Event() for _ in range(self.n)]
+        self.threads: List[threading.Thread] = []
+        self.granted_order: List[str] = []
+        self.lock = threading.Lock()
+
+    def start_threads(self):
+        """Start all waiter threads (they block on gates until opened)."""
+        for i, name in enumerate(self.names):
+            t = threading.Thread(target=self._waiter, args=(name, i))
+            t.start()
+            self.threads.append(t)
+
+    def _waiter(self, name: str, idx: int):
+        self.gates[idx].wait()
+        self.ready[idx].set()
+        release_cb = self.pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,), timeout=5.0)
+        with self.lock:
+            self.granted_order.append(name)
+        time.sleep(self.work_duration)
+        release_cb()
+
+    def open_gates_sequentially(self):
+        """Open gates one at a time, confirming each waiter started acquiring."""
+        for i in range(self.n):
+            self.gates[i].set()
+            assert self.ready[i].wait(timeout=2), f"{self.names[i]} should have started acquiring"
+
+    def join_all(self, timeout: float = 10):
+        """Join all threads with timeout."""
+        for t in self.threads:
+            t.join(timeout=timeout)
 
 
-def _get_pool_key(api_base: str, conc: int) -> str:
-    """Compute slot_key for a given api_base and concurrency."""
-    if conc == -1:
-        return None
-    if conc == 0:
-        return '_shared_sequential_slot_'
-    return api_base
+class SchedulerFIFOWaiterSetup:
+    """Like FIFOWaiterSetup but acquires through EndpointScheduler instead of SlotPool directly.
 
+    Uses the same gate-based deterministic enqueue pattern for robust FIFO ordering tests.
+    Adds a small delay between gates to account for EndpointScheduler's extra locking layer.
+    """
 
-def _acquire_immediate(pool: SlotPool, instance_name: str) -> SlotHolder:
-    """Acquire a slot immediately (non-blocking). Caller must ensure capacity."""
-    with pool._cond:
-        holder = SlotHolder(
-            agent_name=instance_name,
-            instance_name=instance_name,
-            acquisition_id=next(pool._acquisition_counter),
-            granted_at=time.monotonic(),
+    def __init__(self, scheduler: EndpointScheduler, api_base: str, names: List[str], work_duration: float = 0.05):
+        self.scheduler = scheduler
+        self.api_base = api_base
+        self.names = names
+        self.work_duration = work_duration
+        self.n = len(names)
+        self.gates = [threading.Event() for _ in range(self.n)]
+        self.ready = [threading.Event() for _ in range(self.n)]
+        self.threads: List[threading.Thread] = []
+        self.granted_order: List[str] = []
+        self.lock = threading.Lock()
+
+    def start_threads(self):
+        """Start all waiter threads (they block on gates until opened)."""
+        for i, name in enumerate(self.names):
+            t = threading.Thread(target=self._waiter, args=(name, i))
+            t.start()
+            self.threads.append(t)
+
+    def _waiter(self, name: str, idx: int):
+        self.gates[idx].wait()
+        self.ready[idx].set()
+        release_cb = self.scheduler.acquire(
+            api_base=self.api_base,
+            concurrency_limit=0,
+            instance_name=name,
+            agent_class="test",
+            timeout=5.0,
         )
-        pool._running[instance_name] = holder
-        return holder
+        with self.lock:
+            self.granted_order.append(name)
+        time.sleep(self.work_duration)
+        release_cb()
+
+    def open_gates_sequentially(self):
+        """Open gates one at a time with small delay between each to ensure deterministic enqueue order through EndpointScheduler."""
+        for i in range(self.n):
+            self.gates[i].set()
+            assert self.ready[i].wait(timeout=2), f"{self.names[i]} should have started acquiring"
+            # Small delay ensures previous waiter's ticket is fully enqueued before next starts acquire.
+            # Needed because EndpointScheduler.acquire() has extra locking (_get_or_create_pool) before pool.acquire().
+            time.sleep(0.01)
+
+    def join_all(self, timeout: float = 10):
+        """Join all threads with timeout."""
+        for t in self.threads:
+            t.join(timeout=timeout)
+
+
+def sequential_open_gates(gates: List[threading.Event], ready_events: List[threading.Event], names: List[str]):
+    """Open gates one at a time, confirming each waiter has started acquiring before opening the next."""
+    for i in range(len(names)):
+        gates[i].set()
+        assert ready_events[i].wait(timeout=2), f"{names[i]} should have started acquiring"
+
+
+def sequential_open_gates_with_delay(gates: List[threading.Event], ready_events: List[threading.Event], names: List[str]):
+    """Like sequential_open_gates — waits for each waiter to start acquiring before opening next gate."""
+    for i in range(len(names)):
+        gates[i].set()
+        assert ready_events[i].wait(timeout=2), f"{names[i]} should have started acquiring"
+
+
+def assert_fifo_order(granted: List[str], expected: Optional[List[str]] = None):
+    """Verify FIFO ordering: all present, no duplicates, in expected order."""
+    if expected is not None:
+        assert granted == expected, f"FIFO order violated: expected {expected}, got {granted}"
+    else:
+        assert len(granted) == len(set(granted)), "Duplicate grants detected"
 
 
 # ============================================================================
@@ -184,237 +320,79 @@ class TestFIFOOrderingUnderContention:
     """Test strict FIFO ordering under realistic contention scenarios."""
 
     def test_fifo_grant_order_sequential(self):
-        """Multiple agents queue on same sequential slot — grants in exact enqueue order.
-        
-        Uses per-waiter handshake: each waiter signals ready BEFORE calling acquire,
-        then we open the next gate only after confirming previous waiter has started acquiring.
-        This guarantees deterministic ordering regardless of OS thread scheduling.
-        """
+        """Multiple agents queue on same sequential slot — grants in exact enqueue order."""
         pool = SlotPool(key="test_seq", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        gates = [threading.Event() for _ in range(5)]  # Gate to start each waiter
-        ready = [threading.Event() for _ in range(5)]   # Signal when thread is about to call acquire
-
-        names = ["T1", "T2", "T3", "T4", "T5"]
-
-        def waiter(name: str, idx: int):
-            gates[idx].wait()  # Wait until it's our turn to enqueue
-            ready[idx].set()   # Signal we're about to call acquire (before blocking)
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
-            with lock:
-                granted_order.append(name)
-            time.sleep(0.05)  # Hold briefly so grants are sequential
-            release_cb()
-
-        threads = []
-        for idx, name in enumerate(names):
-            t = threading.Thread(target=waiter, args=(name, idx))
-            t.start()
-            threads.append(t)
-
-        # Sequentially open gates — each waiter must signal ready before next gate opens.
-        # The key insight: once a thread passes the gate and sets ready, it's either already
-        # inside acquire() or about to be, so its ticket is enqueued (or will be atomically).
-        for idx in range(5):
-            gates[idx].set()
-            assert ready[idx].wait(timeout=2), f"{names[idx]} should have started acquiring"
-
-        # Release A — T1 (head) should get it first, then T2, etc.
+        names = [f"T{i+1}" for i in range(FIFO_TEST_WAITERS)]
+        setup = FIFOWaiterSetup(pool, names, work_duration=0.05)
+        setup.start_threads()
+        setup.open_gates_sequentially()
         pool.release(holder_a)
+        setup.join_all(timeout=10)
 
-        for t in threads:
-            t.join(timeout=10)
-
-        assert granted_order == names, \
-            f"FIFO order violated: got {granted_order}"
+        assert_fifo_order(setup.granted_order, names)
 
     def test_fifo_grant_order_parallel_pool(self):
-        """Multiple agents queue on parallel pool (conc=3) — grants respect capacity + FIFO.
-        
-        Uses handshake gates for deterministic enqueue ordering and exact batch verification.
-        """
+        """Multiple agents queue on parallel pool (conc=3) — grants respect capacity + FIFO."""
         pool = SlotPool(key="test_par", capacity=3)
-
-        granted_order: List[str] = []  # Track overall grant order
-        lock = threading.Lock()
         n_waiters = 9
-        gates = [threading.Event() for _ in range(n_waiters)]  # Per-waiter start gate
-        ready = [threading.Event() for _ in range(n_waiters)]   # Signal before acquire blocks
+        names = [f"T{i+1}" for i in range(n_waiters)]
 
-        def waiter(name: str, idx: int):
-            gates[idx].wait()
-            ready[idx].set()  # Signal BEFORE blocking in acquire
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
-            with lock:
-                granted_order.append(name)
-            time.sleep(0.08)  # Hold briefly so we get distinct batches
-            release_cb()
+        setup = FIFOWaiterSetup(pool, names, work_duration=0.08)
+        setup.start_threads()
+        setup.open_gates_sequentially()
+        setup.join_all(timeout=10)
 
-        threads = []
-        for i in range(n_waiters):
-            t = threading.Thread(target=waiter, args=(f"T{i+1}", i))
-            t.start()
-            threads.append(t)
+        granted = setup.granted_order
+        assert len(granted) == n_waiters, f"All waiters should be granted: got {len(granted)}"
 
-        # Sequentially enqueue all waiters using handshake — guarantees FIFO order
-        for i in range(n_waiters):
-            gates[i].set()
-            assert ready[i].wait(timeout=2), f"T{i+1} should have started acquiring"
+        batch1, batch2, batch3 = granted[0:3], granted[3:6], granted[6:9]
+        assert batch1 == ["T1", "T2", "T3"], f"First batch must be T1,T2,T3 in FIFO order, got {batch1}"
+        assert batch2 == ["T4", "T5", "T6"], f"Second batch must be T4,T5,T6 in FIFO order, got {batch2}"
+        assert batch3 == ["T7", "T8", "T9"], f"Third batch must be T7,T8,T9 in FIFO order, got {batch3}"
 
-        for t in threads:
-            t.join(timeout=10)
-
-        # Verify capacity + FIFO: first 3 granted immediately, then next 3 after releases, etc.
-        # With deterministic enqueue order T1..T9 and capacity=3:
-        # Batch 1 (immediate): T1, T2, T3 (first to enqueue, all within capacity)
-        # Batch 2 (after batch 1 releases): T4, T5, T6
-        # Batch 3 (after batch 2 releases): T7, T8, T9
-        assert len(granted_order) == n_waiters, \
-            f"All waiters should be granted: got {len(granted_order)}"
-
-        # Verify no duplicates
-        assert len(set(granted_order)) == n_waiters, "No duplicate grants allowed"
-
-        # Verify FIFO order within each batch of 3 (capacity=3)
-        batch1 = granted_order[0:3]
-        batch2 = granted_order[3:6]
-        batch3 = granted_order[6:9]
-
-        assert batch1 == ["T1", "T2", "T3"], \
-            f"First batch must be T1,T2,T3 in FIFO order, got {batch1}"
-        assert batch2 == ["T4", "T5", "T6"], \
-            f"Second batch must be T4,T5,T6 in FIFO order, got {batch2}"
-        assert batch3 == ["T7", "T8", "T9"], \
-            f"Third batch must be T7,T8,T9 in FIFO order, got {batch3}"
-
-        # Verify FIFO across batches: earlier enqueued agents granted before later ones
         for i in range(n_waiters - 1):
-            idx_i = int(granted_order[i][1:]) - 1
-            idx_j = int(granted_order[i + 1][1:]) - 1
-            assert idx_i < idx_j, \
-                f"VIOLATION: T{idx_i+1} granted after T{idx_j+1}, breaking cross-batch FIFO"
+            idx_i = int(granted[i][1:]) - 1
+            idx_j = int(granted[i + 1][1:]) - 1
+            assert idx_i < idx_j, f"VIOLATION: T{idx_i+1} granted after T{idx_j+1}, breaking cross-batch FIFO"
 
     def test_fifo_no_barging_under_contention(self):
-        """Later waiters never granted before earlier ones — even under high contention.
-        
-        Uses per-waiter handshake gates for deterministic enqueue ordering (no timing assumptions).
-        """
+        """Later waiters never granted before earlier ones — even under high contention."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        n_waiters = 20
-        gates = [threading.Event() for _ in range(n_waiters)]  # Per-waiter start gate
-        ready = [threading.Event() for _ in range(n_waiters)]   # Signal before acquire blocks
-
-        def waiter(name: str, idx: int):
-            gates[idx].wait()
-            ready[idx].set()  # Signal BEFORE blocking in acquire
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
-            with lock:
-                granted_order.append(name)
-            time.sleep(0.01)
-            release_cb()
-
-        threads = []
-        for i in range(n_waiters):
-            t = threading.Thread(target=waiter, args=(f"W{i}", i))
-            t.start()
-            threads.append(t)
-
-        # Sequentially enqueue all waiters using handshake — guarantees FIFO order
-        for i in range(n_waiters):
-            gates[i].set()
-            assert ready[i].wait(timeout=2), f"W{i} should have started acquiring"
-
-        # Release A — grants must follow exact enqueue order: W0, W1, ..., W19
+        names = [f"W{i}" for i in range(STRESS_TEST_WAITERS)]
+        setup = FIFOWaiterSetup(pool, names, work_duration=0.01)
+        setup.start_threads()
+        setup.open_gates_sequentially()
         pool.release(holder_a)
+        setup.join_all(timeout=15)
 
-        for t in threads:
-            t.join(timeout=15)
-
-        expected = [f"W{i}" for i in range(n_waiters)]
-        assert granted_order == expected, \
-            f"VIOLATION: FIFO barging detected. Expected exact order {expected}, got {granted_order}"
+        assert_fifo_order(setup.granted_order, names)
 
     def test_fifo_mixed_conc_pools(self):
-        """Agents on conc=0 and conc=N pools queue independently — no cross-pool interference.
-        
-        Uses handshake gates for deterministic enqueue ordering with FIFO verification.
-        """
+        """Agents on conc=0 and conc=N pools queue independently — no cross-pool interference."""
         seq_pool = SlotPool(key="_shared_sequential_slot_", capacity=1)
         par_pool = SlotPool(key="http://parallel", capacity=2)
 
-        seq_order: List[str] = []
-        par_order: List[str] = []
-        lock = threading.Lock()
+        holder_a = seq_pool.create_held_slot("A")
 
-        # Per-waiter handshake events for deterministic ordering
-        n_seq, n_par = 5, 4
-        seq_gates = [threading.Event() for _ in range(n_seq)]
-        seq_ready = [threading.Event() for _ in range(n_seq)]
-        par_gates = [threading.Event() for _ in range(n_par)]
-        par_ready = [threading.Event() for _ in range(n_par)]
+        n_seq, n_par = FIFO_TEST_WAITERS, 4
+        seq_setup = FIFOWaiterSetup(seq_pool, [f"S{i}" for i in range(n_seq)], work_duration=0.03)
+        par_setup = FIFOWaiterSetup(par_pool, [f"P{i}" for i in range(n_par)], work_duration=0.03)
 
-        def seq_waiter(name: str, idx: int):
-            seq_gates[idx].wait()
-            seq_ready[idx].set()
-            release_cb = seq_pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
-            with lock:
-                seq_order.append(name)
-            time.sleep(0.03)
-            release_cb()
+        seq_setup.start_threads()
+        par_setup.start_threads()
+        seq_setup.open_gates_sequentially()
+        par_setup.open_gates_sequentially()
 
-        def par_waiter(name: str, idx: int):
-            par_gates[idx].wait()
-            par_ready[idx].set()
-            release_cb = par_pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
-            with lock:
-                par_order.append(name)
-            time.sleep(0.03)
-            release_cb()
-
-        # Hold sequential slot so seq waiters queue
-        holder_a = _acquire_immediate(seq_pool, "A")
-
-        threads = []
-        for i in range(n_seq):
-            t = threading.Thread(target=seq_waiter, args=(f"S{i}", i))
-            t.start()
-            threads.append(t)
-
-        for i in range(n_par):
-            t = threading.Thread(target=par_waiter, args=(f"P{i}", i))
-            t.start()
-            threads.append(t)
-
-        # Sequentially enqueue seq waiters using handshake
-        for i in range(n_seq):
-            seq_gates[i].set()
-            assert seq_ready[i].wait(timeout=2), f"S{i} should have started acquiring"
-
-        # Sequentially enqueue par waiters using handshake
-        for i in range(n_par):
-            par_gates[i].set()
-            assert par_ready[i].wait(timeout=2), f"P{i} should have started acquiring"
-
-        # Release sequential — seq waiters should get exact FIFO order S0..S4
         seq_pool.release(holder_a)
+        seq_setup.join_all(timeout=10)
+        par_setup.join_all(timeout=10)
 
-        for t in threads:
-            t.join(timeout=10)
-
-        # Verify sequential pool: exact FIFO order S0, S1, S2, S3, S4
-        assert seq_order == [f"S{i}" for i in range(n_seq)], \
-            f"Sequential pool FIFO violated. Expected S0..S4, got {seq_order}"
-
-        # Verify parallel pool: capacity=2 grants P0,P1 immediately, then P2,P3 after release
-        assert par_order == ["P0", "P1", "P2", "P3"], \
-            f"Parallel pool FIFO violated. Expected P0,P1,P2,P3 in order, got {par_order}"
+        assert_fifo_order(seq_setup.granted_order, [f"S{i}" for i in range(n_seq)])
+        assert_fifo_order(par_setup.granted_order, ["P0", "P1", "P2", "P3"])
 
 
 # ============================================================================
@@ -426,36 +404,23 @@ class TestReservationBlocking:
 
     def test_todo_md_93_scenario(self):
         """Exact scenario: A(sync,P)->B(async,Q); A->D(sync,P); B->C(sync,P).
-        
+
         When A sleeps awaiting B, C's acquire blocked by A's reservation; no interleaving.
-        Uses synchronization events instead of timing sleeps.
         """
         pool_p = SlotPool(key="_shared_sequential_slot_", capacity=1)
+        holder_a = pool_p.create_held_slot("A")
 
-        # Timeline:
-        # 1. A holds slot P
-        # 2. A spawns async child B on pool Q (different, so not relevant here)
-        # 3. A sleeps awaiting B -> reserves pool P
-        # 4. A's sync child D would need P but A reserved it
-        # 5. B's sync child C needs P -> blocked by A's reservation
-
-        holder_a = _acquire_immediate(pool_p, "A")
-
-        # A spawns async B and sleeps awaiting B
         a_chain = ("A",)
         pool_p.reserve(agent_name="A", ancestor_chain=a_chain, reason="async_child", acquisition_id=1)
-
-        # A releases slot while sleeping (permit goes back to pool)
         pool_p.release(holder_a)
 
         granted_order: List[str] = []
         lock = threading.Lock()
-        c_ready = threading.Event()  # C is about to call acquire (before blocking)
+        c_ready = threading.Event()
         c_granted_event = threading.Event()
 
         def waiter_c():
-            """B's child C tries to acquire P — should be blocked by A's reservation."""
-            c_ready.set()  # Signal BEFORE blocking in acquire
+            c_ready.set()
             release_cb = pool_p.acquire(instance_name="C", agent_class="test", ancestor_chain=("B", "C"))
             with lock:
                 granted_order.append("C")
@@ -464,195 +429,146 @@ class TestReservationBlocking:
 
         t_c = threading.Thread(target=waiter_c)
         t_c.start()
-
-        # Wait for C to start acquiring — deterministic instead of time.sleep(0.2)
         assert c_ready.wait(timeout=5), "C should have started acquiring"
 
-        # C should NOT be granted yet — blocked by A's reservation
         assert not c_granted_event.is_set(), \
             "VIOLATION: C was granted while A had active reservation (Gap A not fixed!)"
 
-        # Check pool state: C should be waiting
         status = pool_p.get_status()
         assert status["waiting_count"] == 1, f"C should be waiting in queue"
         assert any(r["agent_name"] == "A" for r in status["reservations"]), \
             "A's reservation should still be active"
 
-        # A wakes up -> unreserve first (per plan)
         pool_p.unreserve_for_agent("A")
-
         t_c.join(timeout=5)
 
-        # Now C should be granted
         assert c_granted_event.is_set(), "C should be granted after A unreserves"
-        assert granted_order == ["C"], f"C should be the only grantee: {granted_order}"
+        assert_fifo_order(granted_order, ["C"])
 
     def test_parent_reserves_child_inherits_exemption(self):
         """Parent reserves on sleep, child inherits chain exemption.
-        
-        Scenario: A holds slot and reserves (sleeping). U queues but is blocked by reservation.
-        B (A's descendant) also queues — B is exempt from A's reservation but still must wait
-        behind U in FIFO order until unreserve happens. Then U gets granted first, then B.
-        
-        Key: We keep the slot held so both U and B can queue before any grants happen.
-        Uses handshake events instead of timing sleeps.
+
+        A holds slot and reserves (sleeping). U queues but blocked by reservation.
+        B (A's descendant) is exempt from A's reservation but must wait behind U in FIFO order.
+        After unreserve: U granted first, then B. Slot kept held so both can queue before grants.
         """
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        # A reserves with its chain — only agents sharing names in this chain are exempt
         a_chain = ("root", "A")
         pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
-        # NOTE: Do NOT release holder_a yet — we want U and B to queue first
 
         granted_order: List[str] = []
         lock = threading.Lock()
-        u_ready = threading.Event()  # U about to call acquire
-        b_ready = threading.Event()  # B about to call acquire
-        grant_b_gate = threading.Event()  # Prevent B from releasing too early
+        u_ready = threading.Event()
+        b_ready = threading.Event()
+        grant_b_gate = threading.Event()
 
         def waiter_b():
-            """A's child B — should be exempt from A's reservation (shares 'A' in chain)."""
-            b_chain = ("root", "A", "B")  # Contains "A" -> exempt
+            b_chain = ("root", "A", "B")
+            b_ready.set()
             release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=b_chain)
             with lock:
                 granted_order.append("B")
-            grant_b_gate.wait(timeout=5)  # Hold slot until test verifies order
+            grant_b_gate.wait(timeout=5)
             release_cb()
 
         def waiter_unrelated():
-            """Unrelated agent — should be blocked (no overlap with A's chain)."""
-            u_chain = ("other", "U")  # No overlap with ("root", "A") -> blocked
-            u_ready.set()  # Signal BEFORE blocking in acquire
+            u_chain = ("other", "U")
+            u_ready.set()
             release_cb = pool.acquire(instance_name="U", agent_class="test", ancestor_chain=u_chain)
             with lock:
                 granted_order.append("U")
-            grant_b_gate.wait(timeout=5)  # Hold until B is also verified
+            grant_b_gate.wait(timeout=5)
             release_cb()
 
-        # Start U first, wait for it to start acquiring (handshake)
         t_u = threading.Thread(target=waiter_unrelated)
         t_u.start()
         assert u_ready.wait(timeout=2), "U should have started acquiring"
 
-        # Now start B and wait for it to start acquiring (handshake)
         t_b = threading.Thread(target=waiter_b)
         t_b.start()
-        b_ready.set()  # No need to wait — B starts immediately, just give it a moment
-        time.sleep(0.05)  # Tiny gap for B thread to reach acquire (acceptable here, non-critical path)
+        assert b_ready.wait(timeout=2), "B should have started acquiring"
 
-        # Verify queue state: U is head, B is second (both waiting behind held slot + reservation)
         status = pool.get_status()
         assert status["waiting_count"] == 2, f"Both should be waiting, got {status['waiting_count']}"
         waiters = [w["instance_name"] for w in status["waiters"]]
         assert waiters[0] == "U", f"U should be head of queue: {waiters}"
 
-        # U is head but blocked by reservation. B is exempt but not head (strict FIFO).
-        # Neither should be granted yet because slot is held and U is blocked.
         assert len(granted_order) == 0, \
-            f"No one should be granted yet: U blocked by reservation, B exempt but not head. Got: {granted_order}"
+            f"No one should be granted yet. Got: {granted_order}"
 
-        # Unreserve — now U (head) gets it first due to strict FIFO, then B after U releases
         pool.unreserve_for_agent("A")
-
-        # Release A's held slot so waiters can proceed
         pool.release(holder_a)
 
         t_u.join(timeout=5)
-        grant_b_gate.set()  # Let both release so we can verify order
+        grant_b_gate.set()
         t_b.join(timeout=5)
 
-        assert granted_order == ["U", "B"], \
-            f"FIFO order should be preserved: U then B, got {granted_order}"
+        assert_fifo_order(granted_order, ["U", "B"])
 
     def test_multiple_reservations_same_pool_all_must_clear(self):
-        """Multiple reservations on same pool — all must clear before unrelated grants.
-        
-        Uses synchronization events instead of timing sleeps.
-        """
+        """Multiple reservations on same pool — all must clear before unrelated grants."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        # A and B both reserve (e.g., both sleeping with async children)
         pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
         pool.reserve(agent_name="B", ancestor_chain=("B",), reason="async_child", acquisition_id=2)
-
         pool.release(holder_a)
 
-        c_ready = threading.Event()  # C is about to call acquire (before blocking)
+        c_ready = threading.Event()
         granted_event = threading.Event()
 
         def waiter_c():
-            c_ready.set()  # Signal BEFORE blocking in acquire
+            c_ready.set()
             release_cb = pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",))
             granted_event.set()
             release_cb()
 
         t_c = threading.Thread(target=waiter_c)
         t_c.start()
-
-        # Wait for C to start acquiring — deterministic instead of time.sleep(0.2)
         assert c_ready.wait(timeout=5), "C should have started acquiring"
 
-        # C blocked by both reservations
         assert not granted_event.is_set(), "C should be blocked by multiple reservations"
 
-        # Clear only A's reservation — C still blocked by B's
         pool.unreserve_for_agent("A")
-        # Use a very short sleep just to let the scheduler check — this is non-critical timing
-        time.sleep(0.05)
         assert not granted_event.is_set(), \
             "C should still be blocked after clearing only one of two reservations"
 
-        # Clear B's too
         pool.unreserve_for_agent("B")
-
         t_c.join(timeout=5)
         assert granted_event.is_set(), "C should be granted after all reservations clear"
 
     def test_reservation_blocks_unrelated_chain(self):
-        """Negative test: reservation actually blocks unrelated agents (no bypass).
-        
-        Creates a reservation on a pool, then attempts to acquire with an unrelated chain.
-        Verifies the agent blocks/times out — proving the reservation mechanism works.
-        Uses short timeout for fast test execution.
-        """
+        """Negative test: reservation actually blocks unrelated agents (no bypass)."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        # A reserves with chain ("root", "A")
         a_chain = ("root", "A")
         pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
-
-        # Release the slot so it's available but reservation is active
         pool.release(holder_a)
 
         granted_event = threading.Event()
-        blocked_event = threading.Event()  # Signals that acquire timed out (blocked by reservation)
+        blocked_event = threading.Event()
 
         def waiter_unrelated():
-            """Agent with unrelated chain — should be blocked by A's reservation."""
             try:
-                u_chain = ("other", "U")  # No overlap with ("root", "A") -> blocked
+                u_chain = ("other", "U")
                 release_cb = pool.acquire(
                     instance_name="U", agent_class="test", ancestor_chain=u_chain, timeout=1.0
                 )
                 granted_event.set()
                 release_cb()
             except (SlotQueueTimeout, TimeoutError):
-                # Expected: timed out because blocked by reservation
                 blocked_event.set()
 
         t_u = threading.Thread(target=waiter_unrelated)
         t_u.start()
-
-        # Wait for U to either be granted or blocked
         t_u.join(timeout=5)
 
         assert not granted_event.is_set(), \
             "VIOLATION: Unrelated agent U was granted despite active reservation (reservation bypass!)"
-        assert blocked_event.is_set(), \
-            "U should have been blocked by reservation and timed out"
+        assert blocked_event.is_set(), "U should have been blocked by reservation and timed out"
 
 
 # ============================================================================
@@ -665,14 +581,12 @@ class TestSelfExemption:
     def test_self_reserve_reacquire_succeeds(self):
         """A reserves pool P -> A re-acquires succeeds immediately."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        # A reserves with its own chain
         a_chain = ("root", "A")
         pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
         pool.release(holder_a)
 
-        # A re-acquires — should succeed immediately via self-exemption
         reacquired = threading.Event()
 
         def waiter_a():
@@ -690,7 +604,7 @@ class TestSelfExemption:
     def test_self_reserve_descendant_granted_unrelated_blocked(self):
         """A reserves -> A's descendant granted -> unrelated B blocked until A unreserves."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
         a_chain = ("root", "A")
         pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
@@ -698,47 +612,44 @@ class TestSelfExemption:
 
         granted_order: List[str] = []
         lock = threading.Lock()
+        child_ready = threading.Event()
+        b_ready = threading.Event()
         b_blocked_event = threading.Event()
 
         def waiter_child():
-            """A's child — exempt."""
             child_chain = ("root", "A", "child")
+            child_ready.set()
             release_cb = pool.acquire(instance_name="child", agent_class="test", ancestor_chain=child_chain)
             with lock:
                 granted_order.append("child")
-            time.sleep(0.1)
+            time.sleep(0.1)  # Hold slot briefly to allow B to queue
             release_cb()
 
         def waiter_b():
-            """Unrelated B — blocked."""
             b_chain = ("other", "B")
+            b_ready.set()
             release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=b_chain)
             with lock:
                 granted_order.append("B")
-            b_blocked_event.set()  # Only set if B actually gets through
+            b_blocked_event.set()
             release_cb()
 
-        # Enqueue child first, then B
         t_child = threading.Thread(target=waiter_child)
         t_child.start()
-        time.sleep(0.05)
+        assert child_ready.wait(timeout=2), "Child should have started acquiring"
 
         t_b = threading.Thread(target=waiter_b)
         t_b.start()
-        time.sleep(0.15)
+        assert b_ready.wait(timeout=2), "B should have started acquiring"
 
-        # Child should be granted (exempt and head), B should be blocked
         assert "child" in granted_order, "Child should be granted via self-exemption"
         assert not b_blocked_event.is_set(), "B should still be blocked by A's reservation"
 
-        # Unreserve — B can proceed
         pool.unreserve_for_agent("A")
-
         t_child.join(timeout=5)
         t_b.join(timeout=5)
 
-        assert granted_order == ["child", "B"], \
-            f"Expected child then B after unreserve: {granted_order}"
+        assert_fifo_order(granted_order, ["child", "B"])
 
 
 # ============================================================================
@@ -751,27 +662,29 @@ class TestCancelOnTermination:
     def test_cancel_queued_agent_next_waiter_granted(self):
         """Agent queued on slot, terminated -> ticket cancelled within ≤1s, next waiter granted."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
         b_granted_event = threading.Event()
         b_released_event = threading.Event()
+        b_ready = threading.Event()
 
         def waiter_b():
+            b_ready.set()
             release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
             b_granted_event.set()
-            time.sleep(0.5)  # Hold slot long enough for C to queue and test to cancel it
+            time.sleep(0.5)  # Hold slot while C waits in queue
             release_cb()
             b_released_event.set()
 
-        # Enqueue B first
         t_b = threading.Thread(target=waiter_b)
         t_b.start()
-        time.sleep(0.1)
+        assert b_ready.wait(timeout=2), "B should have started acquiring"
 
-        # C also queues behind B
         c_cancelled = threading.Event()
+        c_ready = threading.Event()
 
         def waiter_c():
+            c_ready.set()
             try:
                 pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",))
             except SlotCancelled:
@@ -779,13 +692,11 @@ class TestCancelOnTermination:
 
         t_c = threading.Thread(target=waiter_c)
         t_c.start()
-        time.sleep(0.1)
+        assert c_ready.wait(timeout=2), "C should have started acquiring"
 
-        # Release A — B gets the slot
         pool.release(holder_a)
         assert b_granted_event.wait(timeout=2), "B should be granted after A releases"
 
-        # Now cancel C while it's waiting (use agent_name which matches instance_name field)
         start = time.monotonic()
         cancelled = pool.cancel(agent_name="C")
         elapsed = time.monotonic() - start
@@ -800,27 +711,26 @@ class TestCancelOnTermination:
     def test_cancel_holding_reservation_queue_proceeds(self):
         """Agent holding reservation, terminated -> reservation cleared, queue proceeds."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        # A reserves then releases (sleeping pattern)
         pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
         pool.release(holder_a)
 
         b_granted_event = threading.Event()
+        b_ready = threading.Event()
 
         def waiter_b():
+            b_ready.set()
             release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
             b_granted_event.set()
             release_cb()
 
         t_b = threading.Thread(target=waiter_b)
         t_b.start()
-        time.sleep(0.15)
+        assert b_ready.wait(timeout=2), "B should have started acquiring"
 
-        # B blocked by A's reservation
         assert not b_granted_event.is_set(), "B should be blocked"
 
-        # A terminates — cancel tickets + clear reservations
         result = pool.terminate_for_agent("A")
         tickets_cancelled, reservations_cleared = result
 
@@ -832,12 +742,14 @@ class TestCancelOnTermination:
     def test_mass_termination_active_queue_all_cleaned(self):
         """Mass termination during active queue — all tickets cleaned."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
         n_agents = 50
         cancelled_events = {f"agent_{i}": threading.Event() for i in range(n_agents)}
+        ready_events = {f"agent_{i}": threading.Event() for i in range(n_agents)}
 
         def waiter(name: str):
+            ready_events[name].set()
             try:
                 pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,), timeout=10)
             except SlotCancelled:
@@ -849,13 +761,13 @@ class TestCancelOnTermination:
             t.start()
             threads.append(t)
 
-        time.sleep(0.3)  # Let all enqueue
+        # Wait for all agents to reach acquire (be in queue)
+        for i in range(n_agents):
+            assert ready_events[f"agent_{i}"].wait(timeout=3), f"agent_{i} should have started acquiring"
 
         status_before = pool.get_status()
-        assert status_before["waiting_count"] == n_agents, \
-            f"All {n_agents} agents should be waiting"
+        assert status_before["waiting_count"] == n_agents, f"All {n_agents} agents should be waiting"
 
-        # Mass terminate: cancel all tickets for first half
         start = time.monotonic()
         for i in range(n_agents // 2):
             pool.cancel(agent_name=f"agent_{i}")
@@ -866,12 +778,9 @@ class TestCancelOnTermination:
         assert status_after["waiting_count"] == expected_remaining, \
             f"After mass cancel: expected {expected_remaining} remaining, got {status_after['waiting_count']}"
 
-        # Verify cancelled agents received the signal
         for i in range(n_agents // 2):
-            assert cancelled_events[f"agent_{i}"].wait(timeout=3), \
-                f"agent_{i} should have been cancelled"
+            assert cancelled_events[f"agent_{i}"].wait(timeout=3), f"agent_{i} should have been cancelled"
 
-        # Cleanup remaining threads by cancelling all their tickets
         for i in range(n_agents // 2, n_agents):
             pool.cancel(agent_name=f"agent_{i}")
         for t in threads:
@@ -888,19 +797,16 @@ class TestReacquireReliability:
     def test_reacquire_after_sync_child_release(self):
         """Caller releases slot for sync child, re-acquires with proper self-exemption."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
         a_chain = ("root", "A")
-
-        # A reserves (simulating async child spawn), then releases for sync child D
         pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="async_child", acquisition_id=1)
         pool.release(holder_a)
 
         # Sync child D runs and releases back to pool
-        holder_d = _acquire_immediate(pool, "D")
+        holder_d = pool.create_held_slot("D")
         pool.release(holder_d)
 
-        # A re-acquires — should succeed via self-exemption
         a_reacquired_event = threading.Event()
 
         def waiter_a():
@@ -918,18 +824,18 @@ class TestReacquireReliability:
     def test_no_silent_slotless_continuation(self):
         """Verify caller doesn't give up after brief wait — waits full timeout."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        # Someone else holds the slot; A tries to re-acquire with self-exemption
         a_chain = ("root", "A")
         pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="async_child", acquisition_id=1)
         pool.release(holder_a)
 
-        # Another agent B grabs the slot (unrelated, will be blocked by reservation)
         b_granted_event = threading.Event()
         b_cancelled = threading.Event()
+        b_ready = threading.Event()
 
         def waiter_b():
+            b_ready.set()
             try:
                 release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",), timeout=5)
                 b_granted_event.set()
@@ -939,9 +845,8 @@ class TestReacquireReliability:
 
         t_b = threading.Thread(target=waiter_b)
         t_b.start()
-        time.sleep(0.15)
+        assert b_ready.wait(timeout=2), "B should have started acquiring"
 
-        # B blocked by reservation, A should be able to acquire immediately via self-exemption
         a_acquired_event = threading.Event()
 
         def waiter_a():
@@ -956,7 +861,6 @@ class TestReacquireReliability:
             "A should acquire immediately via self-exemption even with B waiting"
         t_a.join(timeout=5)
 
-        # Clean up: cancel B's ticket so it doesn't timeout
         pool.cancel(agent_name="B")
         t_b.join(timeout=3)
 
@@ -967,6 +871,17 @@ class TestReacquireReliability:
 
 class TestStressAndSoak:
     """Stress tests with many concurrent agents on shared pools."""
+
+    def _stress_agent_task(self, name: str, pool: SlotPool, tracker: ConcurrencyTracker,
+                           pool_key: str, sleep_range: Tuple[float, float]):
+        """Common agent task for stress tests."""
+        release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+        tracker.enter(pool_key, name)
+        try:
+            time.sleep(random.uniform(*sleep_range))
+        finally:
+            tracker.leave(pool_key, name)
+            release_cb()
 
     def test_concurrent_agents_shared_sequential_pool(self):
         """Many concurrent agents on conc=0 pool — never more than 1 running simultaneously."""
@@ -979,14 +894,7 @@ class TestStressAndSoak:
         lock = threading.Lock()
 
         def agent_task(name: str):
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
-            over = tracker.enter("_shared_sequential_slot_", name)
-            try:
-                # Simulate work with random delay
-                time.sleep(random.uniform(0.01, 0.05))
-            finally:
-                tracker.leave("_shared_sequential_slot_", name)
-                release_cb()
+            self._stress_agent_task(name, pool, tracker, "_shared_sequential_slot_", (0.01, 0.05))
             with lock:
                 completed[0] += 1
 
@@ -1009,13 +917,7 @@ class TestStressAndSoak:
         lock = threading.Lock()
 
         def agent_task(name: str):
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
-            tracker.enter("http://parallel", name)
-            try:
-                time.sleep(random.uniform(0.01, 0.04))
-            finally:
-                tracker.leave("http://parallel", name)
-                release_cb()
+            self._stress_agent_task(name, pool, tracker, "http://parallel", (0.01, 0.04))
             with lock:
                 completed[0] += 1
 
@@ -1038,7 +940,6 @@ class TestStressAndSoak:
         tracker_par.set_capacity("http://parallel", 2)
 
         violations = ViolationRecorder()
-
         completed = [0]
         lock = threading.Lock()
 
@@ -1056,12 +957,10 @@ class TestStressAndSoak:
                 completed[0] += 1
 
         def async_parent(name: str):
-            # Parent acquires sequential, spawns async child on parallel
             parent_chain = ("root", name)
             seq_release = seq_pool.acquire(instance_name=name, agent_class="test", ancestor_chain=parent_chain)
             tracker_seq.enter("_shared_sequential_slot_", name)
 
-            # Spawn async child
             child_done = threading.Event()
 
             def async_child():
@@ -1081,10 +980,7 @@ class TestStressAndSoak:
             child_thread = threading.Thread(target=async_child)
             child_thread.start()
 
-            # Parent does work while child runs
             time.sleep(random.uniform(0.01, 0.02))
-
-            # Wait for child
             child_done.wait(timeout=5)
             child_thread.join(timeout=6)
 
@@ -1133,14 +1029,11 @@ class TestStressAndSoak:
 
             token = None
             try:
-                # Sometimes reserve and release (simulate async spawn pattern)
                 if do_reserve:
                     token = pool.reserve(agent_name=name, ancestor_chain=chain, reason="async_child", acquisition_id=_new_id())
                     with lock:
                         reserve_count[0] += 1
-                    # Release the slot temporarily (simulating sleep/wait for child)
                     release_cb()
-                    # Re-acquire immediately via self-exemption
                     release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=chain)
 
                 time.sleep(random.uniform(0.005, 0.02))
@@ -1152,7 +1045,6 @@ class TestStressAndSoak:
             with lock:
                 completed[0] += 1
 
-        # Run multiple rounds
         for round_i in range(n_iterations):
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = []
@@ -1177,10 +1069,10 @@ class TestStressAndSoak:
 class TestProceduralBruteForce:
     """Randomly generated agent call graphs under contention."""
 
-    @pytest.mark.parametrize("seed", [42, 123, 999, 7777])
+    @pytest.mark.parametrize("seed", PROCEDURAL_SEEDS)
     def test_random_agent_call_graphs(self, seed: int):
         """Randomly generates agent call graphs and runs them under contention.
-        
+
         Monitors for violations: >capacity running, FIFO order broken, reservation bypassed.
         """
         rng = random.Random(seed)
@@ -1191,13 +1083,6 @@ class TestProceduralBruteForce:
         violations = ViolationRecorder()
         completed = [0]
         lock = threading.Lock()
-
-        # Generate random call graph: agents with random sync/async children
-        class AgentNode:
-            def __init__(self, name: str):
-                self.name = name
-                self.children: List[AgentNode] = []
-                self.is_async_child: bool = False  # True if spawned async
 
         def generate_graph(root_name: str, depth: int, max_children: int) -> AgentNode:
             node = AgentNode(root_name)
@@ -1218,13 +1103,11 @@ class TestProceduralBruteForce:
 
             token = None
             try:
-                # Maybe reserve (simulating async wait)
                 if rng.random() < 0.25:
                     token = pool.reserve(agent_name=node.name, ancestor_chain=chain, reason="async_child", acquisition_id=_new_id())
 
                 time.sleep(rng.uniform(0.005, 0.015))
 
-                # Run children (sync or async)
                 child_threads = []
                 for child in node.children:
                     t = threading.Thread(target=run_agent, args=(child, chain))
@@ -1242,7 +1125,6 @@ class TestProceduralBruteForce:
             with lock:
                 completed[0] += 1
 
-        # Run multiple graphs in parallel
         n_graphs = 5
         root_nodes = [generate_graph(f"root_{i}", 0, 3) for i in range(n_graphs)]
 
@@ -1259,83 +1141,68 @@ class TestProceduralBruteForce:
 
     def test_stress_fifo_order_under_random_cancellation(self):
         """Randomly cancel waiters — verify remaining FIFO order is preserved.
-        
-        Uses per-waiter handshake to guarantee deterministic enqueue ordering.
+
         Cancels a subset BEFORE releasing the held slot, verifying:
         - Cancelled tickets are removed from queue
         - Only non-cancelled agents are granted in FIFO order
         """
         rng = random.Random(42)
         pool = SlotPool(key="cancel_test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
         n_waiters = 30
         granted_order: List[str] = []
         lock = threading.Lock()
-        gates = [threading.Event() for _ in range(n_waiters)]  # Gate to start each waiter
-        ready = [threading.Event() for _ in range(n_waiters)]   # Signal when about to call acquire
+        names = [f"W{i}" for i in range(n_waiters)]
         cancelled_set: Set[str] = set()
 
         def waiter(name: str, idx: int):
             gates[idx].wait()
-            ready[idx].set()  # Signal before blocking in acquire
+            ready[idx].set()
             try:
                 release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
                 with lock:
                     granted_order.append(name)
-                time.sleep(0.01)  # Brief hold
+                time.sleep(0.01)
                 release_cb()
             except SlotCancelled:
                 pass
 
-        threads = []
-        for i in range(n_waiters):
-            t = threading.Thread(target=waiter, args=(f"W{i}", i))
+        gates = [threading.Event() for _ in range(n_waiters)]
+        ready = [threading.Event() for _ in range(n_waiters)]
+        threads = [threading.Thread(target=waiter, args=(name, i)) for i, name in enumerate(names)]
+        for t in threads:
             t.start()
-            threads.append(t)
 
-        # Sequentially enqueue all waiters using handshake
-        for i in range(n_waiters):
-            gates[i].set()
-            assert ready[i].wait(timeout=2), f"W{i} should have started acquiring"
+        sequential_open_gates(gates, ready, names)
 
-        # Randomly cancel some waiters BEFORE releasing A (all are still queued)
         to_cancel = rng.sample([f"W{i}" for i in range(1, n_waiters)], k=n_waiters // 3)
         with lock:
             cancelled_set.update(to_cancel)
         for name in to_cancel:
             pool.cancel(agent_name=name)
 
-        # Verify cancelled tickets are removed from queue
         status = pool.get_status()
         waiting_names = {w["instance_name"] for w in status["waiters"]}
         assert not (waiting_names & cancelled_set), \
             f"Cancelled agents still in queue: {waiting_names & cancelled_set}"
 
-        # Release A — only non-cancelled waiters should be granted in FIFO order
         pool.release(holder_a)
-
         for t in threads:
             t.join(timeout=15)
 
-        # Verify: no cancelled agent was granted
         for name in granted_order:
-            assert name not in cancelled_set, \
-                f"Cancelled agent {name} was incorrectly granted"
+            assert name not in cancelled_set, f"Cancelled agent {name} was incorrectly granted"
 
-        # All non-cancelled agents should be granted
         expected_grantees = {f"W{i}" for i in range(n_waiters)} - cancelled_set
         actual_grantees = set(granted_order)
         assert actual_grantees == expected_grantees, \
             f"Grant set mismatch:\n  Expected: {sorted(expected_grantees)}\n  Got:      {sorted(actual_grantees)}"
 
-        # No duplicates
         assert len(granted_order) == len(set(granted_order)), "Duplicate grants detected"
 
-        # FIFO order among granted agents (based on enqueue sequence W0, W1, ...)
         expected_fifo = sorted(expected_grantees, key=lambda x: int(x[1:]))
-        assert granted_order == expected_fifo, \
-            f"FIFO order violated among non-cancelled:\n  Expected: {expected_fifo}\n  Got:      {granted_order}"
+        assert_fifo_order(granted_order, expected_fifo)
 
 
 # ============================================================================
@@ -1346,55 +1213,24 @@ class TestEndpointSchedulerIntegration:
     """Higher-level integration tests using the real EndpointScheduler."""
 
     def test_scheduler_fifo_via_api_router(self):
-        """Test FIFO ordering through the full EndpointScheduler API.
-        
-        Uses sequential enqueue gates to ensure deterministic ordering on Windows.
-        """
+        """Test FIFO ordering through the full EndpointScheduler API."""
         router = _make_test_router({'http://seq': 0})
         scheduler = _get_scheduler(router)
 
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        enqueue_gates = [threading.Event() for _ in range(10)]
+        names = [f"A{i}" for i in range(10)]
+        setup = SchedulerFIFOWaiterSetup(scheduler, api_base='http://seq', names=names, work_duration=0.03)
 
-        def agent(name: str, idx: int):
-            enqueue_gates[idx].wait()
-            release_cb = scheduler.acquire(
-                api_base='http://seq',
-                concurrency_limit=0,
-                instance_name=name,
-                agent_class="test",
-            )
-            with lock:
-                granted_order.append(name)
-            time.sleep(0.02)
-            release_cb()
+        setup.start_threads()
+        setup.open_gates_sequentially()
+        setup.join_all(timeout=15)
 
-        threads = []
-        for i in range(10):
-            t = threading.Thread(target=agent, args=(f"A{i}", i))
-            t.start()
-            threads.append(t)
-
-        # Sequentially open gates to guarantee enqueue order
-        for i in range(10):
-            time.sleep(0.01)  # Small gap to ensure previous waiter has enqueued
-            enqueue_gates[i].set()
-
-        for t in threads:
-            t.join(timeout=15)
-
-        # Should be strictly FIFO (matches enqueue order from sequential gates)
-        expected = [f"A{i}" for i in range(10)]
-        assert granted_order == expected, \
-            f"EndpointScheduler FIFO violated: {granted_order}"
+        assert_fifo_order(setup.granted_order, names)
 
     def test_scheduler_reservation_via_api_router(self):
         """Test reservation blocking through the full EndpointScheduler API."""
         router = _make_test_router({'http://seq': 0})
         scheduler = _get_scheduler(router)
 
-        # Agent A acquires slot
         release_a = scheduler.acquire(
             api_base='http://seq',
             concurrency_limit=0,
@@ -1402,15 +1238,15 @@ class TestEndpointSchedulerIntegration:
             agent_class="test",
         )
 
-        # A reserves (sleeping pattern)
         token = scheduler.reserve("A", ancestor_chain=("A",), reason="sleeping")
         assert token is not None, "Reservation should succeed"
-
-        release_a()  # A releases slot while sleeping
+        release_a()
 
         b_granted_event = threading.Event()
+        b_ready = threading.Event()
 
         def agent_b():
+            b_ready.set()
             release_cb = scheduler.acquire(
                 api_base='http://seq',
                 concurrency_limit=0,
@@ -1422,14 +1258,11 @@ class TestEndpointSchedulerIntegration:
 
         t_b = threading.Thread(target=agent_b)
         t_b.start()
-        time.sleep(0.2)
+        assert b_ready.wait(timeout=2), "B should have started acquiring"
 
-        # B blocked by reservation
         assert not b_granted_event.is_set(), "B should be blocked by A's reservation"
 
-        # A wakes -> unreserve
         scheduler.unreserve(token)
-
         t_b.join(timeout=5)
         assert b_granted_event.is_set(), "B should be granted after A unreserves"
 
@@ -1438,7 +1271,6 @@ class TestEndpointSchedulerIntegration:
         router = _make_test_router({'http://seq': 0})
         scheduler = _get_scheduler(router)
 
-        # Hold slot so others queue
         release_a = scheduler.acquire(
             api_base='http://seq',
             concurrency_limit=0,
@@ -1447,8 +1279,10 @@ class TestEndpointSchedulerIntegration:
         )
 
         c_cancelled = threading.Event()
+        c_ready = threading.Event()
 
         def agent_c():
+            c_ready.set()
             try:
                 scheduler.acquire(
                     api_base='http://seq',
@@ -1462,9 +1296,8 @@ class TestEndpointSchedulerIntegration:
 
         t_c = threading.Thread(target=agent_c)
         t_c.start()
-        time.sleep(0.15)
+        assert c_ready.wait(timeout=2), "C should have started acquiring"
 
-        # Cancel C via scheduler.cancel(instance_name=...)
         cancelled = scheduler.cancel(instance_name="C")
         assert cancelled, f"C should be cancelled: {cancelled}"
 
@@ -1484,7 +1317,6 @@ class TestEdgeCasesAndNegatives:
         router = _make_test_router({'http://unlim': -1})
         scheduler = _get_scheduler(router)
 
-        # Acquire should return None immediately (no scheduling)
         release_cb = scheduler.acquire(
             api_base='http://unlim',
             concurrency_limit=-1,
@@ -1498,34 +1330,29 @@ class TestEdgeCasesAndNegatives:
         """Pool capacity change under contention — no crash, existing holders unaffected."""
         pool = SlotPool(key="resize_test", capacity=2)
 
-        # Fill both slots
-        holder_a = _acquire_immediate(pool, "A")
-        holder_b = _acquire_immediate(pool, "B")
+        holder_a = pool.create_held_slot("A")
+        holder_b = pool.create_held_slot("B")
 
-        # Waiter queues up
         c_granted_event = threading.Event()
+        c_ready = threading.Event()
 
         def waiter_c():
+            c_ready.set()
             release_cb = pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",))
             c_granted_event.set()
             release_cb()
 
         t_c = threading.Thread(target=waiter_c)
         t_c.start()
-        time.sleep(0.15)
+        assert c_ready.wait(timeout=2), "C should have started acquiring"
 
-        # C blocked (capacity full)
         assert not c_granted_event.is_set(), "C should be blocked"
 
-        # Resize capacity down — no new grants until space opens
         pool.capacity = 1
-
-        # Release B — now at capacity with A, still no grant for C
         pool.release(holder_b)
-        time.sleep(0.1)
+        # No sleep needed — release doesn't wake C because capacity is still full (A holding, cap=1)
         assert not c_granted_event.is_set(), "C should still be blocked (cap=1, A holding)"
 
-        # Release A — C can proceed
         pool.release(holder_a)
         t_c.join(timeout=5)
         assert c_granted_event.is_set(), "C should be granted after resize + release"
@@ -1533,9 +1360,8 @@ class TestEdgeCasesAndNegatives:
     def test_double_release_idempotent(self):
         """Double release should be idempotent, not crash."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
-        # Create release callback manually
         with pool._cond:
             def release():
                 pool.release(holder_a)
@@ -1549,7 +1375,7 @@ class TestEdgeCasesAndNegatives:
     def test_timeout_raises_proper_exception(self):
         """Timeout should raise SlotQueueTimeout, ticket removed from queue."""
         pool = SlotPool(key="test", capacity=1)
-        holder_a = _acquire_immediate(pool, "A")
+        holder_a = pool.create_held_slot("A")
 
         with pytest.raises(SlotQueueTimeout):
             pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",), timeout=0.5)
