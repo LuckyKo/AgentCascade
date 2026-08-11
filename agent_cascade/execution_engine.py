@@ -1629,7 +1629,6 @@ class ExecutionEngine:
         from agent_cascade.state_ops import restore_instance_state
         restore_instance_state(instance)
 
-        # Load conversation from pool (single source of truth)
         with instance._compression_lock:
             conv = list(instance.conversation)
 

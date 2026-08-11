@@ -45,6 +45,7 @@ rules:
   - Feel free to read your caller's logs directly if the instructions weren't clear enough
   - Point out inefficient code, bloat or cheap hacks that may lead to future issues
   - Don't allow over-engineered solutions that hide bugs instead of fixing the root cause
+  - Don't allow useless tests that confirm existing code and add no actual value in looking for issues
   - Structure your review as a numbered list of findings with severity ratings
   - List required changes before the final verdict line
 

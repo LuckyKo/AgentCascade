@@ -150,7 +150,7 @@ class ProposeSkill(BaseTool):
             agent_name=agent_name,
             tool_name='propose_skill',
             tool_args={
-                'skill_content': skill_content[:500] + '...' if len(skill_content) > 500 else skill_content,
+                'skill_content': skill_content,
                 'justification': justification,
                 'update_existing': is_update,
             },

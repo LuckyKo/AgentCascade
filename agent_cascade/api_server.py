@@ -343,14 +343,20 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
         Returns True on success, False on failure. The pool already has the data
         after load_session_from_log(), so returning the tuples is redundant.
         """
+        # Skip loading if fresh session requested (e.g., via --fresh CLI flag)
+        if config.get("fresh_session"):
+            return False
+
         try:
             if not agent_pool:
                 return False
 
+            from agent_cascade.instance_id import make_instance_dir
+            
             if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                log_dir = agent_pool.operation_manager.base_dir / 'logs'
+                log_dir = Path(make_instance_dir(str(agent_pool.operation_manager.base_dir / 'logs')))
             else:
-                log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
+                log_dir = Path(make_instance_dir(str(Path(DEFAULT_WORKSPACE) / 'logs')))
 
             # Orchestrator logs might be named session_NAME.jsonl or follow the agent instance pattern
             path = log_dir / f"session_{name}.jsonl"
@@ -846,7 +852,30 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
             if agent_pool:
                 parsed_content = _parse_multimodal_content(text)
                 agent_pool.enqueue_message(target, parsed_content)
-                logger.info(f"REST API: Injected message into {target}: {text[:50]}...")
+
+                # Start generation thread (same as WebSocket 'message' handler).
+                # Only start if not already generating to avoid overlapping runs.
+                with session_lock:
+                    should_start = not session.get('generating', False)
+                    if should_start:
+                        session['stop_requested'] = False
+                        session['generation_id'] += 1
+                        gen_id = session['generation_id']
+                        session['generating'] = True
+
+                if should_start:
+                    try:
+                        agent_runner = agents[0] if agents else None
+                        loop = asyncio.get_running_loop()
+                        thread = threading.Thread(
+                            target=run_agent_thread,
+                            args=(None, agent_runner, gen_id, loop, target),
+                            daemon=True,
+                        )
+                        thread.start()
+                    except Exception as e:
+                        logger.error(f"Failed to start generation thread for {target}: {e}")
+
                 return {"status": "success", "queued": True, "target": target}
             else:
                 return JSONResponse(status_code=503, content={"message": "Agent pool not initialized"})
@@ -1284,6 +1313,8 @@ if __name__ == "__main__":
     parser.add_argument("--idle-check-interval", type=float, default=None,
                         help="Seconds between idle-check sweeps (default: 60). "
                              "Also settable via QWEN_AGENT_IDLE_CHECK_INTERVAL env var.")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Start with a fresh session — do not load conversation history from log files.")
     args = parser.parse_args()
 
     # Initialize the global agent_pool
@@ -1381,7 +1412,7 @@ if __name__ == "__main__":
         all_agents = [orch] + [a for a in all_agents if a != orch]
 
     try:
-        app = create_app(agents=all_agents, agent_pool=agent_pool)
+        app = create_app(agents=all_agents, agent_pool=agent_pool, config={"fresh_session": args.fresh})
         logger.debug("FastAPI app created successfully")
     except Exception as e:
         logger.error("[FATAL] Failed to create API server app: %s", e)

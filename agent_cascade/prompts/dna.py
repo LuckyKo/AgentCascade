@@ -94,7 +94,7 @@ COMPRESSION_PROMPT = (
     "3. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
     "4. Retain initial request and progress of the task in the summary.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
-    "Summary:"
+    "Present summary below and always terminate it with last line `--- END SUMMARY ---` to indicate the end of the summary."
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
