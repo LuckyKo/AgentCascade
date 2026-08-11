@@ -4708,10 +4708,6 @@ class ExecutionEngine:
         Helper method to reduce code duplication in _post_turn_checks.
         Sets the appropriate timestamps and transitions state atomically.
         Also releases the concurrency slot so children can proceed.
-        
-        Phase 3 (Gap A fix): Before releasing the slot, reserves it with the
-        agent's ancestor chain so that unrelated agents cannot grab the slot
-        while this agent sleeps waiting for async results.
 
         Args:
             instance: The agent instance to transition.
@@ -4719,30 +4715,10 @@ class ExecutionEngine:
         # Note: This is safe even when _skip_slot_acquire=True because
         # _release_slot checks for None before releasing. No need to guard with skip_slot_acquire check.
         
-        # Phase 3: Build ancestor chain and reserve BEFORE releasing the slot.
-        # This prevents unrelated agents from grabbing the slot while we sleep.
-        reservation_token = None
-        try:
-            if self.pool and hasattr(self.pool, 'api_router') and self.pool.api_router:
-                ancestor_chain = self._build_ancestor_chain(instance)
-                reservation_token = self.pool.api_router.scheduler.reserve(
-                    instance_name=instance.instance_name,
-                    ancestor_chain=ancestor_chain,
-                    reason="sleeping",
-                    agent_class=instance.agent_class,
-                )
-        except Exception as e:
-            # Reservation failure is non-critical — proceed without reservation.
-            logger.warning(f"[RESERVATION] Failed to reserve for {instance.instance_name} during sleep: {e}")
-        
-        # BUG FIX: Acquire state lock BEFORE releasing slot to prevent race
+        # Acquire state lock BEFORE releasing slot to prevent race
         # where another thread steals the slot between release and state transition.
         with instance._state_lock:
             if instance.state == AgentState.RUNNING:
-                # Store reservation token on instance for cleanup on wake.
-                if reservation_token is not None:
-                    instance._sleep_reservation_token = reservation_token
-                
                 # Inline slot release under lock — avoids nested lock acquisition
                 # (matching agent_pool.py pattern at lines ~1118-1125)
                 if instance._slot_release is not None:
@@ -4832,18 +4808,6 @@ class ExecutionEngine:
                 factory=self._make_user_message,
             )
 
-            # Phase 3: Unreserve BEFORE re-acquiring slot (order matters per plan).
-            # Clearing the reservation first is defensive — self-exemption would allow
-            # grant anyway, but belt-and-braces prevents issues if exemption logic changes.
-            try:
-                token = getattr(instance, '_sleep_reservation_token', None)
-                if token and self.pool and hasattr(self.pool, 'api_router') and self.pool.api_router:
-                    self.pool.api_router.scheduler.unreserve(token)
-            except Exception as e:
-                logger.warning(f"[RESERVATION] Failed to unreserve {inst_name} on wake: {e}")
-            finally:
-                instance._sleep_reservation_token = None  # Always clear, even if unreserve fails.
-
             # Re-acquire concurrency slot after waking from SLEEPING
             if not skip_slot_acquire:
                 self._acquire_slot_with_logging(instance, "after_message_wakeup")
@@ -4908,16 +4872,6 @@ class ExecutionEngine:
                     instance._transition(AgentState.RUNNING)
                     instance.sleeping_since = None
                     instance._last_wakeup_log = time.monotonic()
-
-                # Phase 3: Unreserve BEFORE re-acquiring slot (order matters per plan).
-                try:
-                    token = getattr(instance, '_sleep_reservation_token', None)
-                    if token and self.pool and hasattr(self.pool, 'api_router') and self.pool.api_router:
-                        self.pool.api_router.scheduler.unreserve(token)
-                except Exception as e:
-                    logger.warning(f"[RESERVATION] Failed to unreserve {inst_name} on wake (stable drain): {e}")
-                finally:
-                    instance._sleep_reservation_token = None  # Always clear, even if unreserve fails.
 
                 # Re-acquire concurrency slot after waking from SLEEPING
                 if not skip_slot_acquire:

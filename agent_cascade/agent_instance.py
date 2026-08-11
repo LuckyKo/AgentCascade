@@ -279,7 +279,6 @@ class AgentInstance:
 
     # ── Concurrency Slot Management (Parent Slot Acquisition Fix) ───────────
     _pool_ref: Optional['AgentPool'] = None  # Reference back to parent pool for queue cleanup on terminate()
-    _sleep_reservation_token: Optional[str] = None  # Reservation token held while in SLEEPING state awaiting async child
     _slot_release: Optional[Callable[[], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
     _skip_slot_acquire: bool = False  # When True, engine.run() skips slot acquisition (used for nested agents like Security/Compressor)
 
