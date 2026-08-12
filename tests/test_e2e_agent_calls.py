@@ -17,8 +17,10 @@ All tests use concurrency_limit=0 (sequential pool) for real slot contention.
 """
 
 # CRITICAL: Set BEFORE any agent_cascade imports to isolate test runs from real sessions.
-# This creates separate log/settings directories so AC won't load stale conversation history.
+# INSTANCE_ID isolates logs; TEST_CONFIG_DIR prevents tests from overwriting production api_endpoints.json.
 import os as _os
+from pathlib import Path
+
 _os.environ.setdefault("AGENT_CASCADE_INSTANCE_ID", "test_e2e")
 
 import json
@@ -37,6 +39,22 @@ from tests.conftest_e2e import derive_shared_secret, encrypt_payload, generate_c
 # ── Module-level timeout override for contention tests ─────────────────────────
 
 pytestmark = pytest.mark.timeout(90)
+
+
+# ── Config Isolation Fixture ──────────────────────────────────────────────────
+
+@pytest.fixture(scope="module", autouse=True)
+def e2e_config_isolation(tmp_path_factory):
+    """Sets AGENT_CASCADE_TEST_CONFIG_DIR before agent_cascade server initialization,
+    ensuring isolation from production config.
+
+    Uses tmp_path_factory for parallel-safe unique directories per test module run.
+    Must be autouse + module scope so it runs before ac_server fixture.
+    """
+    test_config = tmp_path_factory.mktemp("e2e_test_config")
+    _os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = str(test_config)
+    yield test_config
+    # pytest auto-cleans tmp_path_factory dirs
 
 
 # ── Programmable Mock LLM Server ───────────────────────────────────────────────
@@ -299,7 +317,6 @@ def ac_server(mock_llm_server):
     """
     import sys
     import time
-    from pathlib import Path
 
     project_root = Path(__file__).parent.parent.absolute()
     if str(project_root) not in sys.path:
