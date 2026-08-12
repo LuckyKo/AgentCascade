@@ -4721,6 +4721,11 @@ class ExecutionEngine:
                 # Inline slot release under lock — avoids nested lock acquisition
                 # (matching agent_pool.py pattern at lines ~1118-1125)
                 if instance._slot_release is not None:
+                    # Save KV cache BEFORE releasing slot so context persists while
+                    # other agents may use the same conc=0 pool during sleep.
+                    from agent_cascade.state_ops import save_instance_state
+                    save_instance_state(instance)
+
                     release_cb = instance._slot_release
                     instance._slot_release = None
                     try:
@@ -4812,6 +4817,11 @@ class ExecutionEngine:
                 self._acquire_slot_with_logging(instance, "after_message_wakeup")
                 if self._is_terminal_stop(inst_name):
                     return SleepAction.BREAK_LOOP, None
+
+                # Restore KV cache after slot acquired, before resuming execution
+                from agent_cascade.state_ops import restore_instance_state
+                restore_instance_state(instance)
+
                 # Compression-halt after wakeup: proceed to main loop (Site 3 will wait if needed)
 
             return SleepAction.CONTINUE_LOOP, None
@@ -4875,6 +4885,10 @@ class ExecutionEngine:
                 # Re-acquire concurrency slot after waking from SLEEPING
                 if not skip_slot_acquire:
                     self._acquire_slot_with_logging(instance, "after_stable_drain")
+
+                    # Restore KV cache after slot acquired, before resuming execution
+                    from agent_cascade.state_ops import restore_instance_state
+                    restore_instance_state(instance)
 
                     # Exit if stopped after re-acquiring slot in sleep loop
                     if self._is_terminal_stop(inst_name):
