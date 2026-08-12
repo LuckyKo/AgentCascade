@@ -415,7 +415,8 @@ class AgentPool:
                 # Persist llm_cfg tool char limits and grep_spillover to pool_settings.json
                 if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
                     for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                                'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
+                                'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
+                                'max_images_for_llm'):
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 

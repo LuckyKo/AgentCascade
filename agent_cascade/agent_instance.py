@@ -753,13 +753,14 @@ class PoolSettings:
         """Serialize settings to a JSON-safe dictionary.
         
         Excludes deprecated loop detection fields that were removed in Phase 3.
+        Also excludes sleeping_timeout (deprecated since 2026-08, agents stay SLEEPING until woken).
         """
         from dataclasses import asdict
         result = asdict(self)
         # Remove deprecated fields no longer used by InnerLoopDetector (Phase 3 cleanup)
         for field in ('loop_score_threshold', 'loop_sentence_rep_enabled', 
                       'loop_ngram_rep_enabled', 'loop_block_rep_enabled', 
-                      'loop_entropy_enabled'):
+                      'loop_entropy_enabled', 'sleeping_timeout'):
             result.pop(field, None)
         return result
 

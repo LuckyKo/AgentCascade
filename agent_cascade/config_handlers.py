@@ -28,7 +28,7 @@ LLM_CONFIG_KEYS = frozenset({
 # Includes ALL non-cosmetic settings that should persist to pool_settings.json.
 POOL_SETTINGS_KEYS = frozenset({
     # Core pool/agent settings
-    'idle_timeout_seconds', 'system_agent_idle_timeout_seconds', 'max_parallel_agents',
+    'idle_timeout_seconds', 'system_agent_idle_timeout_seconds', 'max_parallel_agents', 'max_workers',
     'auto_continue', 'enable_agent_budgeting', 'max_turns', 'max_auto_rollbacks',
     'auto_rollback_on_loop',
     # Inner-loop detection
@@ -62,6 +62,7 @@ POOL_SETTINGS_KEYS = frozenset({
     # Compression settings
     'compression_force_threshold', 'compression_warning_threshold',
     'compression_timeout', 'compression_force_cooldown', 'compression_max_attempts',
+    'compression_proactive_threshold', 'compression_context_reserve_tokens',
     # Security
     'security_check_timeout',
     # Nesting/sleeping limits
@@ -78,8 +79,6 @@ POOL_SETTINGS_KEYS = frozenset({
 EXTRA_PERSIST_KEYS = frozenset({
     'disabled_tools',  # Per-agent-class tool assignments from UI settings panel
     'auto_security',   # Auto-Ask security mode toggle state
-    'compression_proactive_threshold',   # Proactive compression threshold (PoolSettings field, persisted here for restart survival)
-    'compression_context_reserve_tokens',  # Context reserve tokens (PoolSettings field, persisted here for restart survival)
     'compression_fraction',  # Compression ratio as percentage (maps to COMPRESSION_DEFAULT_FRACTION)
 })
 
@@ -260,6 +259,19 @@ def _handle_max_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agents:
     from agent_cascade.log import logger as _logger
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = int(ui_cfg['max_parallel_agents'])
+        agent_pool.settings.max_workers = max(1, val)
+        if hasattr(agent_pool._execution, 'executor') and agent_pool._execution.executor is not None:
+            agent_pool._execution.resize_executor(agent_pool.settings.max_workers)
+        else:
+            _logger.warning("[THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)")
+
+
+@register_config_handler('max_workers')
+def _handle_max_workers(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Alias for max_parallel_agents — update max workers directly (for import compatibility)."""
+    from agent_cascade.log import logger as _logger
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg['max_workers'])
         agent_pool.settings.max_workers = max(1, val)
         if hasattr(agent_pool._execution, 'executor') and agent_pool._execution.executor is not None:
             agent_pool._execution.resize_executor(agent_pool.settings.max_workers)
