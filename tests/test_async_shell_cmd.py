@@ -565,3 +565,112 @@ class TestEdgeCases:
         assert state['elapsed'] >= 29.0, f"__wait waited {state['elapsed']:.1f}s, expected ~30s"
         assert state['elapsed'] <= 31.0, f"__wait waited {state['elapsed']:.1f}s, expected ~30s"
         assert 'No new output' in result
+
+
+# ============================================================================
+# Real execution tests (minimal set — verify actual command output and exit codes)
+# ============================================================================
+
+class TestRealExecution:
+    """Tests that execute real commands via the async shell tracker.
+
+    These verify end-to-end behavior: actual process launch, output capture,
+    and exit code recording. Kept small to avoid slow tests.
+    """
+
+    def test_real_echo_output_captured(self):
+        """A simple echo command's stdout is captured correctly."""
+        import os as _os
+
+        pool = MagicMock()
+        pool.messages = []
+        pool.enqueue_message = lambda agent, msg: pool.messages.append((agent, msg))
+        pool.llm_cfg = {}
+
+        tracker = AsyncShellTracker(pool=pool)
+
+        expected = 'hello-from-real-process'
+        if _os.name == 'nt':
+            cmd = f'cmd /c echo {expected}'
+        else:
+            cmd = f'sh -c "echo {expected}"'
+
+        tool_id, _, early_output, completed_early, return_code = tracker.launch(
+            agent_name='test_agent',
+            command=cmd,
+            heartbeat_interval=-1,
+            timeout=5,
+        )
+
+        # Handle both early completion and normal completion paths
+        if completed_early:
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
+            assert early_output is not None and len(early_output) > 0
+            assert any(expected in line for line in early_output), \
+                f"Output '{expected}' not found in: {early_output}"
+        else:
+            time.sleep(1.0)
+            task = tracker._get_task('test_agent', tool_id)
+            with task._lock:
+                assert task.completed is True, "Task should be completed"
+                assert task.return_code == 0, f"Expected exit code 0, got {task.return_code}"
+                all_output = task.stdout_lines + (task.stderr_lines if hasattr(task, 'stderr_lines') else [])
+                assert any(expected in line for line in all_output), \
+                    f"Output '{expected}' not found in: {all_output}"
+
+    def test_real_python_exit_code_zero(self):
+        """A Python one-liner that exits 0 is recorded correctly."""
+        pool = MagicMock()
+        pool.messages = []
+        pool.enqueue_message = lambda agent, msg: pool.messages.append((agent, msg))
+        pool.llm_cfg = {}
+
+        tracker = AsyncShellTracker(pool=pool)
+
+        tool_id, _, early_output, completed_early, return_code = tracker.launch(
+            agent_name='test_agent',
+            command='python -c "print(\'ok\')"',
+            heartbeat_interval=-1,
+            timeout=5,
+        )
+
+        if completed_early:
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
+        else:
+            time.sleep(1.0)
+            task = tracker._get_task('test_agent', tool_id)
+            with task._lock:
+                assert task.completed is True
+                assert task.return_code == 0, f"Expected exit code 0, got {task.return_code}"
+
+    def test_real_command_nonzero_exit(self):
+        """A command that exits non-zero has its exit code recorded."""
+        import os as _os
+
+        pool = MagicMock()
+        pool.messages = []
+        pool.enqueue_message = lambda agent, msg: pool.messages.append((agent, msg))
+        pool.llm_cfg = {}
+
+        tracker = AsyncShellTracker(pool=pool)
+
+        if _os.name == 'nt':
+            cmd = 'cmd /c exit /b 7'
+        else:
+            cmd = 'sh -c "exit 7"'
+
+        tool_id, _, early_output, completed_early, return_code = tracker.launch(
+            agent_name='test_agent',
+            command=cmd,
+            heartbeat_interval=-1,
+            timeout=5,
+        )
+
+        if completed_early:
+            assert return_code == 7, f"Expected exit code 7, got {return_code}"
+        else:
+            time.sleep(1.0)
+            task = tracker._get_task('test_agent', tool_id)
+            with task._lock:
+                assert task.completed is True
+                assert task.return_code == 7, f"Expected exit code 7, got {task.return_code}"
