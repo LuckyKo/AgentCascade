@@ -2777,6 +2777,52 @@ class AgentPool:
         return -1
 
     @staticmethod
+    def count_markers(history: List[Message]) -> int:
+        """Count valid compression markers in conversation.
+
+        A message is counted as a marker only if it has role=USER, starts with COMPRESSION_MARKER,
+        AND contains <context_summary> tags (prevents false positives from arbitrary user messages).
+
+        Args:
+            history: Conversation history (list of Message objects or dicts).
+
+        Returns:
+            Number of valid compression markers found.
+        """
+        count = 0
+        for msg in history:
+            role = AgentPool._msg_field(msg, 'role')
+            content = AgentPool._msg_field(msg, 'content')
+            if (role == USER and isinstance(content, str)
+                    and content.startswith(COMPRESSION_MARKER)
+                    and '<context_summary>' in content):
+                count += 1
+        return count
+
+    @staticmethod
+    def find_all_marker_indices(history: List[Message]) -> List[int]:
+        """Return indices of all valid compression markers in chronological order.
+
+        A message is considered a marker only if it has role=USER, starts with COMPRESSION_MARKER,
+        AND contains <context_summary> tags (prevents false positives from arbitrary user messages).
+
+        Args:
+            history: Conversation history (list of Message objects or dicts).
+
+        Returns:
+            List of indices where valid compression markers appear, from earliest to latest.
+        """
+        indices = []
+        for i, msg in enumerate(history):
+            role = AgentPool._msg_field(msg, 'role')
+            content = AgentPool._msg_field(msg, 'content')
+            if (role == USER and isinstance(content, str)
+                    and content.startswith(COMPRESSION_MARKER)
+                    and '<context_summary>' in content):
+                indices.append(i)
+        return indices
+
+    @staticmethod
     def _msg_field(msg, field, default=''):
         """Extract a field from a message (dict or Message object)."""
         return msg.get(field, default) if isinstance(msg, dict) else getattr(msg, field, default)

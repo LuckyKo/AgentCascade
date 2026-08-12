@@ -105,6 +105,24 @@ COMPRESSION_BASELINE_TEMPLATE = (
     "</context_summary>"
 )
 
+CONSOLIDATION_PROMPT = (
+    "You are consolidating multiple existing conversation summaries into a single higher-level summary.\n\n"
+    "The input below contains several sequential summaries from earlier compression cycles. "
+    "Each represents a compressed window of past conversation.\n\n"
+    "Your task: merge them into ONE cohesive, chronological narrative that:\n"
+    "1. Preserves the overall story arc and major milestones.\n"
+    "2. Keeps key decisions, architectural choices, important facts, and task outcomes.\n"
+    "3. Drops redundant details, minor steps, and intermediate reasoning that is no longer actionable.\n"
+    "4. Is significantly shorter than the total input — you are going one level higher in abstraction.\n\n"
+    "CRITICAL RULES:\n"
+    "- Output ONLY the consolidated summary. No intro/outro remarks like 'Here is the summary'.\n"
+    "- Do not include meta-commentary or thinking process.\n"
+    "- Maintain chronological order implicitly (earliest events first).\n"
+    "- If conflicting information appears across summaries, prefer the most recent version.\n\n"
+    "--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n"
+    f"Present your consolidated summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end."
+)
+
 COMPRESSION_NOTICE_TEMPLATE = ""  # Unused — header is now minimal
 
 # --- Security Advisor ---

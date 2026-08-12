@@ -115,6 +115,13 @@ COMPRESSION_SECURITY_CHECK_TIMEOUT: float = float(os.getenv(
 COMPRESSION_MAX_RETRIES: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_MAX_RETRIES', 3))  # Max retry attempts for compression agent invocation on marker validation failure
 COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
+
+# Hierarchical memory consolidation settings
+COMPRESSION_CONSOLIDATION_THRESHOLD: int = int(os.getenv(
+    'QWEN_AGENT_COMPRESSION_CONSOLIDATION_THRESHOLD', 8))  # Markers at which to trigger consolidation
+COMPRESSION_MAX_CONSOLIDATION_TOKENS: int = int(os.getenv(
+    'QWEN_AGENT_COMPRESSION_MAX_CONSOLIDATION_TOKENS', 32000))  # Max tokens for consolidation input before aborting
+
 # Settings for agent pool
 AGENT_IDLE_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_IDLE_TIMEOUT', 1600.0))  # Auto-dismiss regular agents after X seconds inactivity

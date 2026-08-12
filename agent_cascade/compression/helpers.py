@@ -267,6 +267,28 @@ def build_marker_message(summary_text, fraction):
     return Message(role=USER, content=str(content))
 
 
+def build_consolidation_marker_message(summary_text, num_summaries_consolidated):
+    """Build a L2 consolidation marker message.
+
+    Wraps the consolidated summary in COMPRESSION_BASELINE_TEMPLATE with an L2 header
+    indicating how many summaries were merged into this higher-level marker.
+
+    Args:
+        summary_text: The raw consolidated summary text (before template wrapping).
+        num_summaries_consolidated: Number of lower-level summaries merged into this one.
+
+    Returns:
+        A Message object (USER role) with the formatted consolidation marker.
+    """
+    header = f"L2, {num_summaries_consolidated} summaries consolidated"
+
+    content = COMPRESSION_BASELINE_TEMPLATE.format(
+        header=header,
+        summary=summary_text,
+    )
+    return Message(role=USER, content=str(content))
+
+
 def rebuild_working_set(
     messages_list: list[Any],
     agent_pool: Any,

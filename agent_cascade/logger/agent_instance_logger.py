@@ -95,6 +95,7 @@ class AgentInstanceLogger:
         self._file_handle = None  # Cached file handle to avoid open/write/close per message (Fix #1)
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
         self._file_history_synced = False  # One-shot file sync guard for update_history() — prevents duplicate file loads
+        self._write_lock = threading.Lock()  # Lock for read-modify-write operations on JSONL file
         self._initial_save()
 
     @classmethod
@@ -601,6 +602,134 @@ class AgentInstanceLogger:
         except Exception as e:
             logger.error(f"Failed to sync compression marker for {self.log_path}: {e}")
             return False
+
+    def _consolidate_markers_in_jsonl(
+        self,
+        new_pool_state: List[Any],
+    ) -> bool:
+        """Surgically update JSONL for hierarchical consolidation.
+
+        Reads existing JSONL, removes intermediate marker lines (M1..M6),
+        and replaces the first consolidated marker with the new L2 marker.
+        Preserves all raw message segments (including previously discarded ones).
+
+        Design doc §5.2 rule: JSONL retains FULL history. Consolidation only removes
+        redundant marker messages, not raw content between them.
+
+        Thread-safety: Uses self._write_lock for atomic read-modify-write.
+
+        Args:
+            new_pool_state: New pool working set after consolidation.
+
+        Returns:
+            True on success, False on error.
+        """
+        with self._write_lock:
+            # Close cached handle before writing
+            if self._file_handle and not self._file_handle.closed:
+                self._file_handle.flush()
+                self._file_handle.close()
+                self._file_handle = None
+
+            from agent_cascade.llm.schema import USER as USER_ROLE
+
+            try:
+                # Read existing log messages from disk (full history)
+                if not self.log_path or not os.path.exists(self.log_path):
+                    logger.debug(f"Log file missing for {self.instance_name} — writing pool state directly.")
+                    existing_msgs = []
+                else:
+                    existing_msgs = []
+                    with open(self.log_path, 'r', encoding='utf-8') as f:
+                        for line_num, line in enumerate(f, 1):
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                item = json.loads(line)
+                                if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                                    existing_msgs.append(item)
+                            except json.JSONDecodeError:
+                                logger.debug(f"Skipping corrupted JSONL line {line_num} in {self.log_path}")
+
+                # Find the new L2 marker in pool state (it's at position 0 among markers in new state)
+                new_marker_msg = None
+                for msg in new_pool_state:
+                    role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                    if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                        new_marker_msg = self._format_message(msg)
+                        break
+
+                if not new_marker_msg:
+                    logger.warning(
+                        f"No compression marker found in pool state for consolidation sync — "
+                        f"skipping JSONL update. Pool is authoritative; JSONL will be corrected on next compression."
+                    )
+                    return False
+
+                # Identify the LAST marker in JSONL — this should correspond to M7 (newest kept).
+                # All markers before it are candidates for consolidation.
+                last_jsonl_marker_idx = -1
+                for i in range(len(existing_msgs) - 1, -1, -1):
+                    content = existing_msgs[i].get('content', '')
+                    if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                        last_jsonl_marker_idx = i
+                        break
+
+                # Filter JSONL: keep all messages except intermediate markers.
+                # Strategy: remove all markers that appear BEFORE the last marker in JSONL,
+                # then insert the new L2 marker at the position of the first removed marker.
+                result_msgs = []
+                new_marker_inserted = False
+                first_removed_marker_idx = None
+
+                for i, msg in enumerate(existing_msgs):
+                    content = msg.get('content', '')
+
+                    if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                        # This is the last marker in JSONL (M7 equivalent) — always keep it
+                        if i == last_jsonl_marker_idx:
+                            result_msgs.append(msg)
+                        elif not new_marker_inserted:
+                            # First marker before last — replace with new L2 marker
+                            if first_removed_marker_idx is None:
+                                first_removed_marker_idx = i
+                            result_msgs.append(new_marker_msg)
+                            new_marker_inserted = True
+                        # else: skip intermediate redundant markers (M1..M6)
+                    else:
+                        # Not a marker — always keep raw messages
+                        result_msgs.append(msg)
+
+                # If no old markers were found in JSONL, insert L2 at beginning of message area
+                if not new_marker_inserted and new_marker_msg:
+                    result_msgs.insert(0, new_marker_msg)
+
+                # Single write to disk
+                lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+                for msg in result_msgs:
+                    lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
+
+                with open(self.log_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+
+                self._file_handle = None
+                removed_count = len(existing_msgs) - len(result_msgs) + (1 if new_marker_inserted else 0)
+                logger.info(
+                    f"Consolidation JSONL sync for {self.instance_name}: "
+                    f"{len(existing_msgs)} → {len(result_msgs)} messages in file"
+                )
+
+                # Update internal tracking — pool state for in-memory history
+                self.data["history"] = [self._format_message(msg) for msg in new_pool_state]
+                self._file_history_synced = True
+
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to consolidate markers in JSONL for {self.instance_name}: {e}")
+                return False
 
     def reset_history(self, new_history: List[Any], rewrite: bool = False):
         """Update internal tracking after a compression event or manual edit.
