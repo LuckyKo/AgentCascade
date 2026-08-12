@@ -20,7 +20,7 @@ def is_compression_marker(msg: Any) -> bool:
     Returns:
         True if the message is a valid compression marker.
     """
-    from agent_cascade.settings import COMPRESSION_MARKER
+    from agent_cascade.prompts.dna import COMPRESSION_MARKER
     role = get_message_role(msg)
     content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
     return (role == USER and isinstance(content, str)

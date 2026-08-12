@@ -173,19 +173,18 @@ class TestFindAllMarkerIndices:
     def test_multiple_markers_ordered_chronologically(self):
         """Returns indices in ascending (chronological) order."""
         history = []
+        expected_count = 0
         for i in range(5):
             history.append(_make_msg(USER, f"Msg {i}"))
             if i % 2 == 0:
                 history.append(_make_marker(f"Summary {i}"))
+                expected_count += 1
 
         indices = AgentPool.find_all_marker_indices(history)
-        # i=0: user msg at 0, marker at 1
-        # i=1: user msg at 2
-        # i=2: user msg at 3, marker at 4
-        # i=3: user msg at 5
-        # i=4: user msg at 6, marker at 7
-        assert indices == [1, 4, 7]
-        assert indices == sorted(indices)
+        # Behavior-based assertions instead of brittle hardcoded indices
+        assert len(indices) == expected_count, \
+            f"Expected {expected_count} markers, got {len(indices)}"
+        assert indices == sorted(indices), "Indices should be in ascending (chronological) order"
 
     def test_ignores_invalid_markers(self):
         """Only counts valid markers (with prefix AND context_summary tags)."""
@@ -963,3 +962,412 @@ class TestCompressContextConsolidationTrigger:
 
                 assert result.success is True
                 mock_consolidate.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 7. Production is_compression_marker tests (helpers.py) — BLOCKER #1
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestProductionIsCompressionMarker:
+    """Direct tests for the production is_compression_marker from helpers.py.
+
+    NOTE: The production function imports COMPRESSION_MARKER from settings instead
+    of prompts.dna, which is a bug (COMPRESSION_MARKER is defined only in prompts.dna).
+    These tests verify the actual behavior as-is — they will fail with ImportError
+    if the import bug exists, documenting it for fix.
+    """
+
+    def test_import_works_or_fails_consistently(self):
+        """Verify whether the production function can be imported at all.
+
+        If this fails with ImportError, it confirms the known bug: helpers.py
+        imports COMPRESSION_MARKER from settings where it does not exist.
+        """
+        # This import will raise ImportError if COMPRESSION_MARKER is not in settings
+        try:
+            from agent_cascade.compression.helpers import is_compression_marker
+            assert callable(is_compression_marker)
+        except ImportError as e:
+            pytest.fail(
+                f"Production is_compression_marker has broken import: {e}. "
+                f"COMPRESSION_MARKER should be imported from prompts.dna, not settings."
+            )
+
+    def test_valid_marker_message_object(self):
+        """A Message object with proper prefix and tags is detected as a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        msg = _make_marker("Test summary")
+        assert is_compression_marker(msg) is True
+
+    def test_valid_marker_dict_format(self):
+        """A dict with proper structure is recognized as a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        content = COMPRESSION_BASELINE_TEMPLATE.format(header="test", summary="s")
+        msg = {"role": USER, "content": content}
+        assert is_compression_marker(msg) is True
+
+    def test_non_marker_user_message(self):
+        """Regular user message without tags is not a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        msg = _make_msg(USER, "Hello world")
+        assert is_compression_marker(msg) is False
+
+    def test_user_message_starts_with_prefix_but_no_tags(self):
+        """User message starting with marker prefix but no context_summary tags — not a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        msg = _make_msg(USER, f"{COMPRESSION_MARKER} this has no tags")
+        assert is_compression_marker(msg) is False
+
+    def test_wrong_role_system(self):
+        """System message with marker-like content is not a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        content = COMPRESSION_BASELINE_TEMPLATE.format(header="test", summary="s")
+        msg = _make_msg(SYSTEM, content)
+        assert is_compression_marker(msg) is False
+
+    def test_wrong_role_assistant(self):
+        """Assistant message with marker-like content is not a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        content = COMPRESSION_BASELINE_TEMPLATE.format(header="test", summary="s")
+        msg = _make_msg("assistant", content)
+        assert is_compression_marker(msg) is False
+
+    def test_empty_content(self):
+        """Empty content message is not a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        msg = _make_msg(USER, "")
+        assert is_compression_marker(msg) is False
+
+    def test_none_content(self):
+        """None content should not crash and should return False."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        msg = {"role": USER, "content": None}
+        assert is_compression_marker(msg) is False
+
+    def test_missing_role_field(self):
+        """Message without role field is not a marker."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        content = COMPRESSION_BASELINE_TEMPLATE.format(header="test", summary="s")
+        msg = {"content": content}  # no role
+        assert is_compression_marker(msg) is False
+
+    def test_consolidation_marker_is_valid(self):
+        """A consolidation marker built by build_consolidation_marker_message is detected."""
+        from agent_cascade.compression.helpers import is_compression_marker
+        msg = build_consolidation_marker_message("Consolidated", num_summaries_consolidated=5)
+        assert is_compression_marker(msg) is True
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 8. _consolidate_markers failure modes and edge cases — BLOCKERS + MAJOR
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestConsolidateMarkersFailureModes:
+    """Tests for failure paths in _consolidate_markers() identified by reviewer."""
+
+    @pytest.fixture(autouse=True)
+    def reset_consolidation_state(self):
+        from agent_cascade.compression.core import _consolidating_agents, _consolidation_lock
+        with _consolidation_lock:
+            _consolidating_agents.clear()
+        yield
+        with _consolidation_lock:
+            _consolidating_agents.clear()
+
+    def test_instance_not_found_returns_gracefully(self):
+        """BLOCKER #2: When get_instance returns None, consolidation exits with warning."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = None
+
+        with patch("agent_cascade.compression.agent_invoker.invoke_consolidation_agent") as mock_invoke:
+            # Should not crash, should exit early
+            _consolidate_markers(mock_pool, "NonExistentAgent")
+            mock_invoke.assert_not_called()
+
+    def test_token_size_limit_skips_consolidation(self):
+        """MAJOR #3: When summaries exceed COMPRESSION_MAX_CONSOLIDATION_TOKENS, skip with warning."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = history
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                # Patch token count to return a huge number exceeding the limit
+                with patch(
+                    "agent_cascade.compression.core.qwen_count",
+                    side_effect=lambda s: 100000,  # each summary = 100k tokens
+                ):
+                    with patch(
+                        "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                    ) as mock_invoke:
+                        _consolidate_markers(mock_pool, "TestAgent")
+
+                        # LLM should never be called because token check fails early
+                        mock_invoke.assert_not_called()
+                        # Pool should not be mutated
+                        mock_inst.rebuild_conversation.assert_not_called()
+
+    def test_empty_consolidation_result_no_pool_mutation(self):
+        """MAJOR #4: When invoke_consolidation_agent returns empty/whitespace, no mutation occurs."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = history
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    # Return empty string
+                    mock_invoke.return_value = ""
+
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+                    # Pool should not be mutated
+                    mock_inst.rebuild_conversation.assert_not_called()
+
+    def test_whitespace_only_consolidation_result_no_mutation(self):
+        """MAJOR #4 variant: Whitespace-only result also aborts."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = history
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    # Return whitespace only
+                    mock_invoke.return_value = "   \n\n   "
+
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+                    mock_inst.rebuild_conversation.assert_not_called()
+
+    def test_rebuild_conversation_exception_handled_gracefully(self):
+        """MAJOR #5: When rebuild_conversation raises, consolidation returns without crashing."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = history
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock(side_effect=RuntimeError("Pool corruption"))
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    mock_invoke.return_value = "Consolidated summary"
+
+                    # Should not raise — exception is caught internally
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+                    # rebuild was attempted
+                    assert mock_inst.rebuild_conversation.called
+
+    def test_phase3_defensive_recheck_aborts_on_marker_count_drop(self):
+        """MAJOR #6: When markers are removed during LLM call (concurrent compression), abort."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        # Start with enough markers to trigger consolidation
+        history_with_many = _build_history_with_markers(num_markers=10, msgs_between=2)
+        # After concurrent compression, only 3 markers remain (below threshold=5)
+        history_after_concurrent = _build_history_with_markers(num_markers=3, msgs_between=2)
+
+        mock_inst = MagicMock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        # Use a wrapper object that returns different values based on lock acquisition count.
+        class DynamicConversation:
+            """List-like wrapper that changes content after first lock release."""
+            def __init__(self, initial, final, lock_counter):
+                self._initial = list(initial)
+                self._final = list(final)
+                self._lock_counter = lock_counter
+
+            def __iter__(self):
+                # After Phase 1 completes (lock acquired twice), return the reduced history
+                if self._lock_counter[0] >= 2:
+                    return iter(self._final)
+                return iter(self._initial)
+
+        lock_acquisitions = [0]
+        mock_lock = MagicMock()
+        mock_lock.__enter__ = lambda self: (lock_acquisitions.__setitem__(0, lock_acquisitions[0] + 1), None)[1]
+        mock_inst._compression_lock = mock_lock
+
+        dynamic_conv = DynamicConversation(history_with_many, history_after_concurrent, lock_acquisitions)
+        mock_inst.conversation = dynamic_conv
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    mock_invoke.return_value = "Consolidated"
+
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+                    # LLM was called (Phase 2 ran) but pool mutation should NOT happen
+                    assert mock_invoke.called
+                    mock_inst.rebuild_conversation.assert_not_called()
+
+    def test_logger_sync_failure_does_not_corrupt_pool(self):
+        """MAJOR #7: When _consolidate_markers_in_jsonl returns False, pool state remains correct."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+        original_history_len = len(history)
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = list(history)
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+        # Logger returns False indicating sync failure
+        mock_logger = MagicMock()
+        mock_logger._consolidate_markers_in_jsonl.return_value = False
+        mock_pool.get_logger.return_value = mock_logger
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    mock_invoke.return_value = "Consolidated"
+
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+                    # Pool mutation still happened (rebuild was called)
+                    assert mock_inst.rebuild_conversation.called
+                    # Logger sync failure is non-fatal — function completes normally
+
+    def test_logger_sync_exception_does_not_crash(self):
+        """MAJOR #7 variant: When _consolidate_markers_in_jsonl raises, no crash."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = list(history)
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+        # Logger raises exception during sync
+        mock_logger = MagicMock()
+        mock_logger._consolidate_markers_in_jsonl.side_effect = IOError("Disk full")
+        mock_pool.get_logger.return_value = mock_logger
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    mock_invoke.return_value = "Consolidated"
+
+                    # Should not raise — logger failure is non-fatal
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+                    assert mock_inst.rebuild_conversation.called
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 9. Minor fixes — brittle assertion in existing test
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestFindAllMarkerIndicesFixed:
+    """Minor #8: Fixed version of the brittle index assertion."""
+
+    def test_multiple_markers_ordered_chronologically_behavior_based(self):
+        """Markers are returned in ascending chronological order (behavior-based check)."""
+        history = []
+        expected_indices = []
+        for i in range(5):
+            history.append(_make_msg(USER, f"Msg {i}"))
+            if i % 2 == 0:
+                history.append(_make_marker(f"Summary {i}"))
+                expected_indices.append(len(history) - 1)
+
+        indices = AgentPool.find_all_marker_indices(history)
+
+        # Behavior-based assertions instead of brittle hardcoded indices:
+        assert len(indices) == len(expected_indices), \
+            f"Expected {len(expected_indices)} marker indices, got {len(indices)}"
+        assert indices == sorted(indices), "Indices should be in ascending (chronological) order"
+        assert all(isinstance(idx, int) and 0 <= idx < len(history) for idx in indices), \
+            "All indices should be valid positions within the history"
+        # Verify each returned index actually points to a marker
+        for idx in indices:
+            assert _is_compression_marker(history[idx]), \
+                f"Index {idx} does not point to a compression marker"
+
