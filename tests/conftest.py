@@ -325,9 +325,18 @@ class _MockInstanceConversationMapping(Dict[str, List[Any]]):
 class MockAgentPool:
     """Mock AgentPool for compression tests.
 
-    Implements the subset of AgentPool used by compress_context and helpers.
-    Matches production logic from agent_pool.py for target-set calculation
-    and marker detection.
+    ⚠️ WARNING: This is a SIMULATION, not the real AgentPool. It implements only
+    the subset of methods used by compress_context and helpers. If production code
+    changes its target-set calculation or marker detection logic, this mock must be
+    updated in parallel — divergence will go undetected because tests validate against
+    the mock's behavior, not the real pool's.
+
+    For higher-fidelity compression testing that uses the actual AgentPool, see
+    test_compression_no_duplication.py which runs against production code.
+
+    Method correspondence with production (agent_pool.py):
+    - get_compression_target_set_from_conversation() → lines 2125-2142
+    - find_last_marker() → lines 2514-2527
     """
 
     def __init__(self, history: Optional[List[Any]] = None):
