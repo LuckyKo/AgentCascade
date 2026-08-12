@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 from agent_cascade.constants import (
     DEFAULT_SECURITY_DISABLED_TOOLS,
     DEFAULT_COMPRESSOR_DISABLED_TOOLS,
+    DEFAULT_GENERALIST_DISABLED_TOOLS,
+    DEFAULT_ORCHESTRATOR_DISABLED_TOOLS,
+    DEFAULT_REVIEWER_DISABLED_TOOLS,
+    DEFAULT_WRITER_DISABLED_TOOLS,
     DEFAULT_NEW_AGENT_DISABLED_TOOLS,
 )
 
@@ -131,15 +135,23 @@ def resolve_disabled_tools_for_agent(
         disabled |= DEFAULT_SECURITY_DISABLED_TOOLS
     elif atype_lower == 'compressor':
         disabled |= DEFAULT_COMPRESSOR_DISABLED_TOOLS
+    elif atype_lower == 'generalist':
+        disabled |= DEFAULT_GENERALIST_DISABLED_TOOLS
+    elif atype_lower == 'orchestrator':
+        disabled |= DEFAULT_ORCHESTRATOR_DISABLED_TOOLS
+    elif atype_lower == 'reviewer':
+        disabled |= DEFAULT_REVIEWER_DISABLED_TOOLS
+    elif atype_lower == 'writer':
+        disabled |= DEFAULT_WRITER_DISABLED_TOOLS
 
     # ── Layer 4: Default safe baseline for agents with no explicit config ────
     # Security rationale: dynamically discovered agents loaded from soul files
     # should start READ-ONLY until the user explicitly grants more capabilities.
     # Applied ONLY when:
     #   - No explicit disabled_tools was set by Layers 1-2 (has_explicit_config is False)
-    #   - Agent is not orchestrator/security/compressor (core system agents excluded;
-    #     orchestrator needs full coordination, security/compressor have Layer 3 defaults)
-    if not has_explicit_config and atype_lower not in ('orchestrator', 'security', 'compressor'):
+    #   - Agent is not orchestrator/security/compressor/generalist/reviewer/writer (core system agents excluded;
+    #     they have Layer 3 defaults or need full coordination)
+    if not has_explicit_config and atype_lower not in ('orchestrator', 'security', 'compressor', 'generalist', 'reviewer', 'writer'):
         disabled |= DEFAULT_NEW_AGENT_DISABLED_TOOLS
 
     return disabled

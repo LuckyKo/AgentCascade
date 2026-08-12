@@ -24,7 +24,7 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(os.getenv(
 
 # Settings for agents
 MAX_LLM_CALL_PER_RUN: int = int(os.getenv('QWEN_AGENT_MAX_LLM_CALL_PER_RUN', 250))
-DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 50))  # Default turn limit per agent execution
+DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 250))  # Default turn limit per agent execution
 MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue resets before giving up
 
 
@@ -67,7 +67,7 @@ def _resolve_default_workspace() -> str:
 
 # Settings for tools
 DEFAULT_WORKSPACE: str = _resolve_default_workspace()
-DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_CHARS', 10000))
+DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_CHARS', 25000))
 DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 150))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC_MATCH_THRESHOLD', 0.90))
 
@@ -89,13 +89,13 @@ DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(os.getenv(
 DEFAULT_COMPRESSION_MAX_ATTEMPTS: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_MAX_ATTEMPTS', 100))  # Safety net max forced compressions before terminating (true overfeeding detected in core.py)
 COMPRESSION_FORCE_THRESHOLD: float = float(os.getenv(
-    'QWEN_AGENT_COMPRESSION_FORCE_THRESHOLD', 95.0))  # Force compress at X% token usage
+    'QWEN_AGENT_COMPRESSION_FORCE_THRESHOLD', 96.0))  # Force compress at X% token usage
 COMPRESSION_WARNING_THRESHOLD: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_WARNING_THRESHOLD', 90.0))  # Warn at X% token usage
 COMPRESSION_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_TIMEOUT', 120.0))  # Max seconds for compression to complete
 DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD: float = float(os.getenv(
-    'QWEN_AGENT_DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD', 88.0))  # Proactive compress at X% usage (post-tool, async drain checks)
+    'QWEN_AGENT_DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD', 95.0))  # Proactive compress at X% usage (post-tool, async drain checks)
 DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_CONTEXT_RESERVE_TOKENS', 3000))  # Tokens reserved for LLM call overhead (system prompt, function schemas, reasoning)
 COMPRESSION_OVERFLOW_TOLERANCE_PCT: float = float(os.getenv(
@@ -117,17 +117,17 @@ COMPRESSION_MAX_RETRIES: int = int(os.getenv(
 COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
 # Settings for agent pool
 AGENT_IDLE_TIMEOUT: float = float(os.getenv(
-    'QWEN_AGENT_IDLE_TIMEOUT', 900.0))  # Auto-dismiss regular agents after X seconds inactivity
+    'QWEN_AGENT_IDLE_TIMEOUT', 1600.0))  # Auto-dismiss regular agents after X seconds inactivity
 SYSTEM_AGENT_IDLE_TIMEOUT: float = float(os.getenv(
-    'QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))  # Auto-dismiss Compressor/Security after X seconds inactivity
+    'QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 60.0))  # Auto-dismiss Compressor/Security after X seconds inactivity
 AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv(
-    'QWEN_AGENT_MAX_AUTO_ROLLBACKS', 3))  # Max loop recovery retries
+    'QWEN_AGENT_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv(
     'QWEN_AGENT_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
 AGENT_MAX_WORKERS: int = int(os.getenv(
-    'QWEN_AGENT_MAX_WORKERS', 10))  # ThreadPoolExecutor workers
+    'QWEN_AGENT_MAX_WORKERS', 3))  # ThreadPoolExecutor workers
 # DEPRECATED (2026-08): AGENT_SLEEPING_TIMEOUT is no longer used.
 # Timeout-to-IDLE transition removed; agents stay SLEEPING until woken by messages or completed.
 AGENT_SLEEPING_TIMEOUT: float = float(os.getenv(
@@ -252,9 +252,9 @@ class InnerLoopSettings:
     loop_max_chars_enabled: bool = True    # Enable max chars hard limit guard
 
     # Two-phase semantic loop detection settings
-    loop_two_phase_enabled: bool = False   # Enable two-phase semantic loop detection
+    loop_two_phase_enabled: bool = True    # Enable two-phase semantic loop detection
     loop_suspicion_threshold: int = 7      # N-gram occurrence count to trigger suspicion [5-15]
-    loop_confirm_required: int = 3         # Exact matches required for confirmation [2-6]
+    loop_confirm_required: int = 5         # Exact matches required for confirmation [2-6]
     loop_cooldown_feeds: int = 50          # Feeds to suppress after failed confirmation [10-200]
 
     # ── Deprecated settings (scoring-based modes removed in Phase 3) ────
@@ -299,8 +299,8 @@ CI_MIN_WATCHDOG_TIMEOUT: int = 30     # Minimum watchdog timeout (seconds)
 CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)
 
 # ── Cache pool settings (Feature: USE_CACHED_ENTRY_N) ────────────────────────
-CACHE_POOL_ENABLED: bool = True               # Toggle cache pool on/off (default: enabled)
-CACHE_POOL_SIZE: int = int(os.getenv('QWEN_AGENT_CACHE_POOL_SIZE', '64'))          # Rolling buffer entries per instance
+CACHE_POOL_ENABLED: bool = False              # Toggle cache pool on/off (default: disabled)
+CACHE_POOL_SIZE: int = int(os.getenv('QWEN_AGENT_CACHE_POOL_SIZE', '50'))          # Rolling buffer entries per instance
 CACHE_THRESHOLD_CHARS: int = int(os.getenv('QWEN_AGENT_CACHE_THRESHOLD_CHARS', '1000'))  # Min chars for output & granular arg caching
 
 # ── Async shell command settings (Feature: async shell_cmd) ───────────
@@ -329,7 +329,7 @@ SKILLS_DISABLED: List[str] = [
 ] if _SKILLS_DISABLED_RAW else []
 
 # ── Auto-skill generation settings (Feature: Auto-Skill Generation Phase 1) ──
-AUTO_SKILL_ENABLED: bool = True                          # Toggle auto-skill generation on/off
+AUTO_SKILL_ENABLED: bool = False                          # Toggle auto-skill generation on/off
 AUTO_SKILL_EXTRA_TURNS: int = int(os.getenv(
     'QWEN_AGENT_AUTO_SKILL_EXTRA_TURNS', 25))            # Extra turns for auto-skill execution before rollback
 AUTO_SKILL_MIN_TOOL_CALLS: int = 5                       # Minimum tool calls before triggering reflection

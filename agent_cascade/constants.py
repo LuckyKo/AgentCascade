@@ -35,19 +35,80 @@ ALL_USER_APPROVAL_TOOLS: frozenset[str] = frozenset({
 
 # Default disabled tools for Security agent.
 # Security agent performs read-only analysis, so it should not use user-approval tools.
-DEFAULT_SECURITY_DISABLED_TOOLS: frozenset[str] = ALL_USER_APPROVAL_TOOLS
+DEFAULT_SECURITY_DISABLED_TOOLS: frozenset[str] = frozenset({
+    'call_agent',       # Delegate tasks to specialized agent instances
+    'code_interpreter',  # Run Python code in a sandboxed environment
+    'compress_context',  # Summarize conversation history
+    'copy_file',        # Copy files or directories
+    'delete_file',      # Delete files
+    'dismiss_agent',    # End sub-agent sessions and clear context
+    'edit_file',        # Edit existing files
+    'forget_last',      # Forget/truncate last tool response
+    'load_skill',       # Load registered skill instructions
+    'propose_skill',    # Propose new reusable skills
+    're_indent',        # Re-indent file blocks
+    'scan_skills',      # Scan registered skills
+    'shell_cmd',        # Execute shell commands on the host system
+    'write_file',       # Create or overwrite files
+})
 
 
 # Default disabled tools for Compressor agent.
-# Compressor agent needs all approval tools disabled PLUS sub-agent management tools
-# to prevent it from spawning new agents during compression.
-DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = (
-    ALL_USER_APPROVAL_TOOLS | frozenset({
-        'call_agent',   # Delegate tasks to specialized agent instances
-        'dismiss_agent',  # End sub-agent sessions and clear context
-        'list_agents',  # List available agent classes and active instances
-    })
-)
+# Compressor agent needs all tools disabled — it only performs compression internally.
+DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = frozenset({
+    'calculate',        # Evaluate mathematical expressions
+    'call_agent',       # Delegate tasks to specialized agent instances
+    'code_interpreter',  # Run Python code in a sandboxed environment
+    'code_map',         # Map code file structure
+    'compress_context',  # Summarize conversation history
+    'copy_file',        # Copy files or directories
+    'delete_file',      # Delete files
+    'dismiss_agent',    # End sub-agent sessions and clear context
+    'edit_file',        # Edit existing files
+    'forget_last',      # Forget/truncate last tool response
+    'grep',             # Search for text patterns in files
+    'list_agents',      # List available agent classes and active instances
+    'list_dir',         # List files and subdirectories
+    'load_skill',       # Load registered skill instructions
+    'propose_skill',    # Propose new reusable skills
+    're_indent',        # Re-indent file blocks
+    'read_file',        # Read file contents
+    'read_logs',        # Read JSON/JSONL log files
+    'scan_skills',      # Scan registered skills
+    'shell_cmd',        # Execute shell commands on the host system
+    'syntax_check',     # Check file syntax without executing
+    'system_info',      # Retrieve current system information
+    'view_image',       # View image files or capture screen content
+    'web_extractor',    # Get content of a webpage
+    'web_search',       # Search for information from the internet
+    'write_file',       # Create or overwrite files
+})
+
+
+# Default disabled tools for Generalist agent.
+DEFAULT_GENERALIST_DISABLED_TOOLS: frozenset[str] = frozenset({
+    'call_agent',       # Delegate tasks to specialized agent instances
+    'dismiss_agent',    # End sub-agent sessions and clear context
+})
+
+
+# Default disabled tools for Orchestrator agent.
+DEFAULT_ORCHESTRATOR_DISABLED_TOOLS: frozenset[str] = frozenset({
+    'forget_last',      # Forget/truncate last tool response
+})
+
+
+# Default disabled tools for Reviewer agent.
+DEFAULT_REVIEWER_DISABLED_TOOLS: frozenset[str] = frozenset({
+    'call_agent',       # Delegate tasks to specialized agent instances
+    'dismiss_agent',    # End sub-agent sessions and clear context
+})
+
+
+# Default disabled tools for Writer agent.
+DEFAULT_WRITER_DISABLED_TOOLS: frozenset[str] = frozenset({
+    'shell_cmd',        # Execute shell commands on the host system
+})
 
 
 # Default disabled tools for dynamically discovered agents without explicit config.

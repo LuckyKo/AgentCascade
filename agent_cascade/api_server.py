@@ -274,7 +274,7 @@ def _is_path_allowed(path: str) -> bool:
     return False
 
 
-def create_app(agents, agent_pool, config=None, auto_security=False):
+def create_app(agents, agent_pool, config=None, auto_security=True):
     from agent_cascade.log import logger
 
     """
@@ -285,7 +285,7 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
         agent_pool:     The AgentPool instance
         config:         Optional chatbot config dict
         auto_security:  Whether to start with Auto-Ask Security mode enabled.
-                        Defaults to False (opt-in via --auto_security flag).
+                        Defaults to True (enabled by default for safety).
     """
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile, Request
     from fastapi.responses import FileResponse, JSONResponse
@@ -1305,10 +1305,10 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
     parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
     parser.add_argument("--idle-timeout", type=float, default=None,
-                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 900). "
+                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 1600). "
                              "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
     parser.add_argument("--system-agent-idle-timeout", type=float, default=None,
-                        help="Idle timeout for system agents (Compressor/Security) (default: 900). 0=off. "
+                        help="Idle timeout for system agents (Compressor/Security) (default: 60). 0=off. "
                              "Also settable via QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT env var.")
     parser.add_argument("--idle-check-interval", type=float, default=None,
                         help="Seconds between idle-check sweeps (default: 60). "
@@ -1322,11 +1322,18 @@ if __name__ == "__main__":
         'model': os.getenv('QWEN_AGENT_MODEL', 'gpt-4o'),
         'api_base': os.getenv('QWEN_AGENT_API_BASE', 'https://api.openai.com/v1'),
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
+        # Tool output char limits (defaults from user config)
+        'tool_result_max_chars': 25000,
+        'grep_char_limit': 12000,
+        'grep_spillover': True,
+        'shell_char_limit': 8000,
+        'code_char_limit': 8000,
+        'list_dir_char_limit': 8000,
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)
-    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 900.0))
-    system_idle_timeout = args.system_agent_idle_timeout if args.system_agent_idle_timeout is not None else float(os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))
+    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 1600.0))
+    system_idle_timeout = args.system_agent_idle_timeout if args.system_agent_idle_timeout is not None else float(os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 60.0))
     idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
 
     # Create OperationManager for blocking user approvals on mutating operations

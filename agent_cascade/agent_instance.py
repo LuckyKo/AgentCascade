@@ -693,10 +693,10 @@ class PoolSettings:
     max_turns: int = DEFAULT_MAX_TURNS              # Default turn limit per agent execution
     auto_rollback_on_loop: bool = True              # Auto-rollback on detected loops (loop recovery toggle)
 
-    # Inner-loop detection toggle (off by default until sensitivity is fixed)
-    inner_loop_detect_enabled: bool = False   # Enable in-message loop detection during streaming
+    # Inner-loop detection toggle (enabled by default for loop prevention)
+    inner_loop_detect_enabled: bool = True    # Enable in-message loop detection during streaming
     loop_min_chars: int = 4000                # Min chars before activating heavy checks
-    loop_max_chars: int = 40960               # Hard char limit — force-trigger detection if exceeded (~8K tokens)
+    loop_max_chars: int = 60960               # Hard char limit — force-trigger detection if exceeded (~12K tokens)
     loop_score_threshold: int = 350           # DEPRECATED — scoring-based detection removed in Phase 3
 
     # Per-mode toggles for inner-loop detector (individual detection modes)
@@ -711,9 +711,9 @@ class PoolSettings:
     loop_max_chars_enabled: bool = True               # Enable max chars hard limit guard
 
     # Two-phase semantic loop detection toggles (replaces scoring-based modes)
-    loop_two_phase_enabled: bool = False              # Enable two-phase semantic loop detection
+    loop_two_phase_enabled: bool = True               # Enable two-phase semantic loop detection
     loop_suspicion_threshold: int = 7                 # N-gram occurrence count to trigger suspicion [5-15]
-    loop_confirm_required: int = 3                    # Exact matches required for confirmation [2-6]
+    loop_confirm_required: int = 5                    # Exact matches required for confirmation [2-6]
     loop_cooldown_feeds: int = 50                     # Feeds to suppress after failed confirmation [10-200]
 
     # Retry policy settings (Phase 6 — exposed via UI/Config with validation)
@@ -731,16 +731,16 @@ class PoolSettings:
     tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes
 
     # Cache pool settings (Feature: USE_CACHED_ENTRY_N)
-    cache_pool_enabled: bool = CACHE_POOL_ENABLED      # Toggle on/off (default: enabled)
+    cache_pool_enabled: bool = CACHE_POOL_ENABLED      # Toggle on/off (default: disabled)
     cache_pool_size: int = CACHE_POOL_SIZE             # Rolling buffer entries per instance
     cache_threshold_chars: int = CACHE_THRESHOLD_CHARS  # Min chars for output & granular arg caching
 
     # Skills system settings
     default_load_skill_mode: str = DEFAULT_LOAD_SKILL_MODE  # "AUTO" (default) or "NONE" — controls whether skills auto-load on call_agent
-    auto_skill_enabled: bool = True                         # Controls whether auto-skill generation/proposal is allowed
+    auto_skill_enabled: bool = False                        # Controls whether auto-skill generation/proposal is allowed
 
     # Agent budgeting settings
-    enable_agent_budgeting: bool = True                     # Enable max_turns propagation/budgeting for agent calls
+    enable_agent_budgeting: bool = False                    # Enable max_turns propagation/budgeting for agent calls
 
     # Streaming timeout settings (layered defense against stuck streams)
     stream_max_silence_seconds: float = STREAM_MAX_SILENCE_SECONDS  # Max seconds between chunks before considering stream stalled
