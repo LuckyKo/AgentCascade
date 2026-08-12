@@ -6,7 +6,9 @@ from agent_cascade.compression.helpers import (
     _refine_tool_call_boundary,
     compute_discard_count,
     build_marker_message,
+    extract_summary_from_marker,
     get_message_role,
+    select_markers_for_consolidation,
 )
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message, strip_base64_from_images
@@ -15,6 +17,7 @@ from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.settings import (
     CHARS_PER_TOKEN_ESTIMATE,
     COMPRESSION_DEFAULT_FRACTION,
+    COMPRESSION_MAX_CONSOLIDATION_TOKENS,
     COMPRESSION_MAX_RETRIES,
 )
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
@@ -98,9 +101,8 @@ def _consolidate_markers(
                 )
                 return
 
-            # Select markers to consolidate: all except the newest (last one)
-            consolidate_indices = marker_indices[:-1]   # M0..M6 (to be consolidated)
-            keep_index = marker_indices[-1]             # M7 (newest, untouched)
+            # Use shared marker selection strategy
+            consolidate_indices, keep_index = select_markers_for_consolidation(marker_indices)
 
             num_to_consolidate = len(consolidate_indices)
             logger.info(
@@ -108,28 +110,15 @@ def _consolidate_markers(
                 f"(indices {consolidate_indices}, keeping newest at index {keep_index})"
             )
 
-            # Extract summary texts from markers being consolidated
+            # Extract summary texts from markers being consolidated using shared helper
             for idx in consolidate_indices:
-                try:
-                    msg = history[idx]
-                    content = extract_text_from_message(msg, add_upload_info=False)
-                    if not isinstance(content, str):
-                        logger.warning(f"Marker at index {idx} has non-string content — skipping")
-                        continue
-                    # Parse <context_summary>...</context_summary>
-                    if '<context_summary>' in content and '</context_summary>' in content:
-                        summary_text = content.split('<context_summary>', 1)[1].split('</context_summary>', 1)[0].strip()
-                        if summary_text:
-                            summaries_to_consolidate.append(summary_text)
-                        else:
-                            logger.warning(f"Empty summary in marker at index {idx} — skipping")
-                    else:
-                        logger.warning(
-                            f"Marker at index {idx} missing <context_summary> tags — skipping. "
-                            f"Content preview: {content[:100]}..."
-                        )
-                except Exception as e:
-                    logger.error(f"Failed to extract summary from marker at index {idx}: {e}")
+                summary_text = extract_summary_from_marker(history[idx])
+                if summary_text:
+                    summaries_to_consolidate.append(summary_text)
+                else:
+                    logger.warning(
+                        f"Could not extract valid summary from marker at index {idx} — skipping"
+                    )
 
             if not summaries_to_consolidate:
                 logger.error(
@@ -141,13 +130,10 @@ def _consolidate_markers(
             # Token size check before invoking compressor
             try:
                 total_summary_tokens = sum(qwen_count(s) for s in summaries_to_consolidate)
-                max_compressor_input = getattr(
-                    agent_pool.settings, 'compression_max_consolidation_tokens', 32000
-                )
-                if total_summary_tokens > max_compressor_input:
+                if total_summary_tokens > COMPRESSION_MAX_CONSOLIDATION_TOKENS:
                     logger.warning(
                         f"Consolidation input too large for '{target_agent_name}': "
-                        f"{total_summary_tokens} tokens > {max_compressor_input} limit. "
+                        f"{total_summary_tokens} tokens > {COMPRESSION_MAX_CONSOLIDATION_TOKENS} limit. "
                         f"Aborting to prevent compressor failure."
                     )
                     return

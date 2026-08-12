@@ -624,6 +624,8 @@ class AgentInstanceLogger:
         Returns:
             True on success, False on error.
         """
+        from agent_cascade.compression.helpers import filter_jsonl_for_consolidation
+
         with self._write_lock:
             # Close cached handle before writing
             if self._file_handle and not self._file_handle.closed:
@@ -677,34 +679,10 @@ class AgentInstanceLogger:
                         last_jsonl_marker_idx = i
                         break
 
-                # Filter JSONL: keep all messages except intermediate markers.
-                # Strategy: remove all markers that appear BEFORE the last marker in JSONL,
-                # then insert the new L2 marker at the position of the first removed marker.
-                result_msgs = []
-                new_marker_inserted = False
-                first_removed_marker_idx = None
-
-                for i, msg in enumerate(existing_msgs):
-                    content = msg.get('content', '')
-
-                    if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                        # This is the last marker in JSONL (M7 equivalent) — always keep it
-                        if i == last_jsonl_marker_idx:
-                            result_msgs.append(msg)
-                        elif not new_marker_inserted:
-                            # First marker before last — replace with new L2 marker
-                            if first_removed_marker_idx is None:
-                                first_removed_marker_idx = i
-                            result_msgs.append(new_marker_msg)
-                            new_marker_inserted = True
-                        # else: skip intermediate redundant markers (M1..M6)
-                    else:
-                        # Not a marker — always keep raw messages
-                        result_msgs.append(msg)
-
-                # If no old markers were found in JSONL, insert L2 at beginning of message area
-                if not new_marker_inserted and new_marker_msg:
-                    result_msgs.insert(0, new_marker_msg)
+                # Use shared consolidation filtering strategy
+                result_msgs, markers_removed = filter_jsonl_for_consolidation(
+                    existing_msgs, new_marker_msg, last_jsonl_marker_idx
+                )
 
                 # Single write to disk
                 lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
@@ -715,10 +693,10 @@ class AgentInstanceLogger:
                     f.writelines(lines)
 
                 self._file_handle = None
-                removed_count = len(existing_msgs) - len(result_msgs) + (1 if new_marker_inserted else 0)
                 logger.info(
                     f"Consolidation JSONL sync for {self.instance_name}: "
-                    f"{len(existing_msgs)} → {len(result_msgs)} messages in file"
+                    f"{len(existing_msgs)} → {len(result_msgs)} messages in file, "
+                    f"{markers_removed} intermediate markers removed"
                 )
 
                 # Update internal tracking — pool state for in-memory history

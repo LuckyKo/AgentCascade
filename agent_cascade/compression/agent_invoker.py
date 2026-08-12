@@ -6,9 +6,10 @@ This provides full AgentInstance lifecycle (state tracking, WebUI visibility, AP
 import logging
 import threading
 import time as _time
+from typing import Any, List
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT, CONSOLIDATION_PROMPT
-from agent_cascade.settings import COMPRESSION_END_MARKER
-from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT
+from agent_cascade.settings import COMPRESSION_END_MARKER, COMPRESSION_AGENT_TIMEOUT
+from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text, _msg_field_or_extra
 
@@ -41,7 +42,7 @@ def _is_content_empty(val):
     return not val
 
 
-def _format_messages_for_summary(target_messages):
+def _format_messages_for_summary(target_messages: List[Any]) -> str:
     """
     Format a list of messages into plain text for the compression prompt.
 
@@ -114,12 +115,248 @@ def _format_messages_for_summary(target_messages):
     return history_text
 
 
+def _configure_compressor_instance(
+    agent_pool: Any,
+    comp_instance: Any,
+    caller_name: str,
+) -> None:
+    """Configure Compressor instance settings with defense-in-depth disabled_tools.
+
+    Reads the caller's UI-disabled tools config and merges it with defaults.
+    Mutates comp_instance._generate_cfg_override in-place.
+
+    Args:
+        agent_pool: The AgentPool instance.
+        comp_instance: The Compressor AgentInstance to configure.
+        caller_name: Name of the calling agent instance.
+    """
+    from agent_cascade.constants import DEFAULT_COMPRESSOR_DISABLED_TOOLS
+    from agent_cascade.utils import merge_disabled_tools_for_auto_agent
+
+    template = agent_pool.get_template('Compressor')
+    cfg = (template.llm.generate_cfg or {}).copy() if template and hasattr(template, 'llm') else {}
+
+    caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
+    ui_disabled_tools = None
+
+    if caller_inst and hasattr(caller_inst, '_generate_cfg_override') and caller_inst._generate_cfg_override:
+        raw_dt = caller_inst._generate_cfg_override.get('disabled_tools')
+        if raw_dt:
+            # Could be a dict (per-agent format) or a flat list
+            if isinstance(raw_dt, dict):
+                # Look up Compressor-specific disabled tools from per-agent dict.
+                # Try exact match first, then case-insensitive fallback for robustness.
+                ui_disabled_tools = raw_dt.get('Compressor', []) or []
+                if not ui_disabled_tools:
+                    for key in raw_dt:
+                        if key.lower() == 'compressor':
+                            ui_disabled_tools = raw_dt[key] or []
+                            break
+            elif isinstance(raw_dt, (list, tuple)):
+                # Flat list applies to all agents
+                ui_disabled_tools = list(raw_dt)
+
+    # Merge with defense-in-depth defaults
+    if ui_disabled_tools:
+        merged = merge_disabled_tools_for_auto_agent(
+            ui_disabled_tools, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS
+        )
+    else:
+        merged = merge_disabled_tools_for_auto_agent(None, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS)
+
+    cfg['disabled_tools'] = merged
+
+    if template and hasattr(template, 'llm'):
+        comp_instance._generate_cfg_override = cfg
+    else:
+        logger.warning(
+            "[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — "
+            "template not available or missing llm attribute. Agent may have unrestricted tools."
+        )
+
+
+def _execute_compressor_and_extract_summary(
+    agent_pool: Any,
+    engine: Any,
+    comp_instance: Any,
+    comp_state_key: str,
+    caller_name: str,
+    timeout_label: str = "Compression",
+) -> str:
+    """Execute compressor via engine.run() with slot bypass and extract summary.
+
+    Shared logic for both compression and consolidation invocations.
+
+    Args:
+        agent_pool: The AgentPool instance.
+        engine: ExecutionEngine instance.
+        comp_instance: The Compressor AgentInstance to execute.
+        comp_state_key: Instance name/state key for tracking.
+        caller_name: Name of the calling agent instance.
+        timeout_label: Label for timeout error messages ("Compression" or "Consolidation").
+
+    Returns:
+        The raw summary string (with thinking blocks and marker stripped).
+
+    Raises:
+        RuntimeError: If execution fails, times out, or returns invalid output.
+    """
+    final_msgs = []
+    start_time = _time.monotonic()
+    max_poll_time = COMPRESSION_AGENT_TIMEOUT
+
+    try:
+        # Telemetry: track Compressor agent call latency (non-blocking)
+        _call_start = _time.perf_counter()
+
+        # ── SLOT BYPASS FOR COMPRESSION/CONSOLIDATION ──
+        # When forced compression triggers during an agent's turn, the Compressor runs
+        # on the SAME thread as the caller. The caller holds the shared sequential slot.
+        # This path skips acquisition entirely — the caller retains the slot.
+
+        comp_instance._skip_slot_acquire = True
+        logger.debug(
+            f"[COMPRESSION_SLOT_BYPASS] Skipping slot acquire for Compressor - caller={caller_name}"
+        )
+
+        _last_comp_send = 0.0
+        _comp_tick_num = 0
+        _comp_last_resp_len = 0
+        for resp in engine.run(comp_instance):
+            # Check for pool shutdown / generation change
+            if agent_pool.stopped:
+                break
+
+            elapsed = _time.monotonic() - start_time
+            if elapsed > max_poll_time:
+                raise RuntimeError(
+                    f"{timeout_label} agent timed out after {elapsed:.0f}s — "
+                    f"further processing may have been incomplete"
+                )
+
+            now_comp = _time.monotonic()
+
+            # Unpack (turn_output, is_streaming_tick) from engine.run() yield
+            if isinstance(resp, tuple) and len(resp) == 2:
+                comp_turn_output, comp_is_streaming_tick = resp
+            else:
+                comp_turn_output, comp_is_streaming_tick = resp, False
+
+            # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
+            _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
+                pool=agent_pool,
+                instance_name=comp_state_key,
+                turn_output=comp_turn_output,
+                is_streaming_tick=comp_is_streaming_tick,
+                tick_num=_comp_tick_num,
+                now_sec=now_comp,
+                last_send=_last_comp_send,
+                last_resp_len=_comp_last_resp_len,
+            )
+
+            _comp_tick_num += 1
+
+        # Read conversation one final time AFTER the generator completes.
+        # The assistant's response is added to instance.conversation in _process_response()
+        # (execution_engine.py:1543), which runs after the LLM call but may not trigger
+        # another yield if no tools are used. Reading here ensures we capture the complete
+        # conversation state including the assistant's final message.
+        with comp_instance._compression_lock:
+            final_msgs = list(comp_instance.conversation) if comp_instance.conversation else []
+
+    except Exception as e:
+        logger.error(f"{timeout_label} agent execution error: {e}")
+        raise
+    finally:
+        # Telemetry: record Compressor agent instance call (non-blocking, always fires even on timeout/error)
+        _call_latency_ms = (_time.perf_counter() - _call_start) * 1000
+        if (tel := engine._telemetry()) is not None:
+            try:
+                tel.record_agent_instance_call(
+                    comp_state_key, "Compressor", caller_name, latency_ms=_call_latency_ms,
+                )
+            except Exception:
+                pass
+
+    # Extract the summary from the last assistant message
+    summary = ""
+    if final_msgs:
+        for msg_obj in reversed(final_msgs):
+            role = (msg_obj.get('role', '') if isinstance(msg_obj, dict)
+                    else getattr(msg_obj, 'role', ''))
+            if role == 'assistant':
+                content = extract_text_from_message(msg_obj, add_upload_info=False)
+                summary = strip_thinking_blocks(content)
+                break
+
+        # Strip conversational filler prefixes
+        lower_summary = summary.lower()
+        for prefix in _SUMMARY_PREFIXES:
+            if lower_summary.startswith(prefix):
+                summary = summary[len(prefix):].strip()
+                summary = summary.lstrip(':\n \t')
+                lower_summary = summary.lower()
+
+    # Validate we got a usable summary
+    if not summary.strip():
+        raise RuntimeError(f"{timeout_label} Agent returned an empty summary")
+
+    # Validate compression marker — ensures compressor didn't hallucinate or continue agentic task
+    if not summary.strip().endswith(COMPRESSION_END_MARKER):
+        raise RuntimeError(
+            f"{timeout_label} output missing end marker '{COMPRESSION_END_MARKER}' — "
+            f"compressor may have hallucinated or continued the task"
+        )
+
+    # Strip the marker from the returned summary (validated above)
+    summary = summary.strip()
+    summary = summary[:-len(COMPRESSION_END_MARKER)].strip()
+
+    return summary.strip()
+
+
+def _generate_compressor_instance_name() -> str:
+    """Generate a unique instance name for a compressor invocation.
+
+    Thread-safe. Each compression/consolidation invocation gets a fresh instance name
+    so the logger cache key (instance_name, agent_class) is unique — prevents TAIL SYNC
+    DRIFT from reusing a cached logger with stale history data.
+
+    Returns:
+        A unique instance name string like "Compressor_42".
+    """
+    with _lock:
+        global _compressor_invocation_counter
+        _compressor_invocation_counter += 1
+        return f'Compressor_{_compressor_invocation_counter}'
+
+
+def _ensure_compressor_loaded(agent_pool) -> None:
+    """Ensure the Compressor agent is loaded in the pool.
+
+    Args:
+        agent_pool: The AgentPool instance.
+
+    Raises:
+        RuntimeError: If the Compressor cannot be loaded or is unavailable.
+    """
+    if not agent_pool.get_agent('Compressor'):
+        try:
+            agent_pool.load_agent('Compressor')
+        except Exception as e:
+            raise RuntimeError(f"Could not load Compressor: {e}") from e
+
+    comp_agent = agent_pool.get_agent('Compressor')
+    if not comp_agent:
+        raise RuntimeError("Compressor is None after loading")
+
+
 def invoke_compression_agent(
-    agent_pool,
-    target_messages,
-    existing_summary=None,
-    caller_name=None,       # Optional: the caller instance name for slot management
-):
+    agent_pool: Any,
+    target_messages: List[Any],
+    existing_summary: str | None = None,
+    caller_name: str | None = None,
+) -> str:
     """
     Invoke the Compression Agent to generate a summary of target messages.
 
@@ -142,24 +379,9 @@ def invoke_compression_agent(
     if not agent_pool:
         raise RuntimeError("agent_pool not connected")
 
-    # 1. Ensure the compression agent is loaded
-    # Agent type identifier: 'Compressor' (renamed from 'compression_agent')
-    if not agent_pool.get_agent('Compressor'):
-        try:
-            agent_pool.load_agent('Compressor')
-        except Exception as e:
-            raise RuntimeError(f"Could not load Compressor: {e}") from e
+    _ensure_compressor_loaded(agent_pool)
 
-    comp_agent = agent_pool.get_agent('Compressor')
-    if not comp_agent:
-        raise RuntimeError("Compressor is None after loading")
-
-    # Generate a unique instance name for each compression invocation.
-    # This prevents the logger cache from reusing stale history data (TAIL SYNC DRIFT fix).
-    with _lock:
-        global _compressor_invocation_counter
-        _compressor_invocation_counter += 1
-        comp_state_key = f'Compressor_{_compressor_invocation_counter}'
+    comp_state_key = _generate_compressor_instance_name()
 
     # Build the history text for the summary prompt
     history_text = _format_messages_for_summary(target_messages)
@@ -172,224 +394,42 @@ def invoke_compression_agent(
         )
 
     summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text)
-    comp_history = [
-        {'role': SYSTEM, 'content': (
-            'You are a context compression specialist. Your job is to summarize older '
-            'conversation history to free up context space while preserving key '
-            'information like decisions, facts, task state, and progress.'
-        )},
-        {'role': USER, 'content': summary_prompt},
-    ]
 
-    summary = ""
     try:
-        # ── Use engine-based execution via _create_system_agent() ──
-        # This provides full AgentInstance lifecycle (state tracking, WebUI visibility, API points)
-        logger.info(
-            "Compression agent invoked via engine-based execution"
-        )
+        logger.info("Compression agent invoked via engine-based execution")
 
         # Get the caller name for parent tracking and slot management
-        # Use provided caller_name if available, otherwise fallback to agent_pool (may return 'Orchestrator')
         if caller_name is None:
             caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
-        
+
         # Log warning if caller_name couldn't be resolved properly
         if caller_name == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
             logger.warning(
                 f"[COMPRESSION] Using fallback caller_name='Orchestrator' - "
                 f"slot management may not work correctly. Pass caller_name explicitly."
             )
-        
+
         # Create proper AgentInstance via _create_system_agent() — handles all state setup
-        # The system message comes from Compressor_soul.md template, task contains the summary prompt
-        from agent_cascade.execution_engine import ExecutionEngine  # Local import to break circular dependency
+        from agent_cascade.execution_engine import ExecutionEngine
         engine = ExecutionEngine(agent_pool)
-        # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
         comp_instance = engine._create_system_agent(
             agent_class='Compressor',
             instance_name=comp_state_key,
-            task=summary_prompt,  # Contains history_text and existing_summary context
+            task=summary_prompt,
             caller=caller_name,
         )
 
-        # Configure Compressor settings using centralized constants and utilities.
-        # Note: propagate_settings() already ran inside _create_system_agent(), but we intentionally replace its
-        # disabled_tools result with ui_cfg + defense-in-depth defaults to ensure auto-launched agents never get
-        # more tools than intended. If session is unavailable, defaults are still applied for safety.
-        from agent_cascade.constants import DEFAULT_COMPRESSOR_DISABLED_TOOLS
-        from agent_cascade.utils import merge_disabled_tools_for_auto_agent
-        
-        # Get user's disabled_tools config from the caller agent instance.
-        # The caller's _generate_cfg_override contains the user's UI-disabled tools,
-        # which were set by _apply_ui_config. We read it directly here to get the
-        # original UI settings before propagate_settings() merged them.
-        template = agent_pool.get_template('Compressor')
-        cfg = (template.llm.generate_cfg or {}).copy() if template and hasattr(template, 'llm') else {}
-        
-        caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
-        ui_disabled_tools = None
-        
-        if caller_inst and hasattr(caller_inst, '_generate_cfg_override') and caller_inst._generate_cfg_override:
-            raw_dt = caller_inst._generate_cfg_override.get('disabled_tools')
-            if raw_dt:
-                # Could be a dict (per-agent format) or a flat list
-                if isinstance(raw_dt, dict):
-                    # Look up Compressor-specific disabled tools from per-agent dict.
-                    # Try exact match first, then case-insensitive fallback for robustness.
-                    ui_disabled_tools = raw_dt.get('Compressor', []) or []
-                    if not ui_disabled_tools:
-                        for key in raw_dt:
-                            if key.lower() == 'compressor':
-                                ui_disabled_tools = raw_dt[key] or []
-                                break
-                elif isinstance(raw_dt, (list, tuple)):
-                    # Flat list applies to all agents
-                    ui_disabled_tools = list(raw_dt)
-        
-        # Merge with defense-in-depth defaults
-        if ui_disabled_tools:
-            merged = merge_disabled_tools_for_auto_agent(
-                ui_disabled_tools, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS
-            )
-        else:
-            merged = merge_disabled_tools_for_auto_agent(None, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS)
-        
-        cfg['disabled_tools'] = merged
-        
-        if template and hasattr(template, 'llm'):
-            comp_instance._generate_cfg_override = cfg
-        else:
-            logger.warning(
-                "[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — "
-                "template not available or missing llm attribute. Agent may have unrestricted tools."
-            )
-        
-        # Execute via engine.run() — handles LLM call, retries, streaming
-        final_msgs = []
-        start_time = _time.monotonic()
-        max_poll_time = 300  # 5-minute timeout for large compression tasks
-        
-        try:
-            # Telemetry: track Compressor agent call latency (non-blocking)
-            _call_start = _time.perf_counter()
+        _configure_compressor_instance(agent_pool, comp_instance, caller_name)
 
-            # ── SLOT BYPASS FOR COMPRESSION ──
-            # When forced compression triggers during an agent's turn, the Compressor runs 
-            # on the SAME thread as the caller. The caller holds the shared sequential slot.
-            # This path skips acquisition entirely — the caller retains the slot.
-            
-            # Get the caller instance from the pool (for slot status logging only)
-            caller_for_slot = agent_pool.get_instance(caller_name) if caller_name else None
-            
-            # Set skip flag so engine.run() bypasses slot acquisition
-            comp_instance._skip_slot_acquire = True
-            logger.debug(
-                f"[COMPRESSION_SLOT_BYPASS] Skipping slot acquire for Compressor - "
-                f"caller={caller_name}, caller_holds_slot={(getattr(caller_for_slot, '_slot_release', None) is not None) if caller_for_slot else False}"
-            )
-            
-            _last_comp_send = 0.0
-            _comp_tick_num = 0
-            _comp_last_resp_len = 0
-            for resp in engine.run(comp_instance):
-                # Check for pool shutdown / generation change
-                if agent_pool.stopped:
-                    break
+        summary = _execute_compressor_and_extract_summary(
+            agent_pool, engine, comp_instance, comp_state_key, caller_name,
+            timeout_label="Compression",
+        )
 
-                elapsed = _time.monotonic() - start_time
-                if elapsed > max_poll_time:
-                    raise RuntimeError(
-                        f"Compression agent timed out after {elapsed:.0f}s — "
-                        f"further processing may have been incomplete"
-                    )
+        return summary
 
-                now_comp = _time.monotonic()
-
-                # Unpack (turn_output, is_streaming_tick) from engine.run() yield
-                if isinstance(resp, tuple) and len(resp) == 2:
-                    comp_turn_output, comp_is_streaming_tick = resp
-                else:
-                    comp_turn_output, comp_is_streaming_tick = resp, False
-
-                # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
-                _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
-                    pool=agent_pool,
-                    instance_name=comp_state_key,
-                    turn_output=comp_turn_output,
-                    is_streaming_tick=comp_is_streaming_tick,
-                    tick_num=_comp_tick_num,
-                    now_sec=now_comp,
-                    last_send=_last_comp_send,
-                    last_resp_len=_comp_last_resp_len,
-                )
-
-                _comp_tick_num += 1
-
-            # Read conversation one final time AFTER the generator completes.
-            # The assistant's response is added to instance.conversation in _process_response()
-            # (execution_engine.py:1543), which runs after the LLM call but may not trigger
-            # another yield if no tools are used. Reading here ensures we capture the complete
-            # conversation state including the assistant's final message.
-            with comp_instance._compression_lock:
-                final_msgs = list(comp_instance.conversation) if comp_instance.conversation else []
-
-            logger.debug(f"[COMPRESSION] final_msgs has {len(final_msgs)} messages, roles: {[m.get('role') if isinstance(m, dict) else getattr(m, 'role', '') for m in final_msgs]}")
-
-        except Exception as e:
-            logger.error(f"Compression agent execution error: {e}")
-            raise
-        finally:
-            # Telemetry: record Compressor agent instance call (non-blocking, always fires even on timeout/error)
-            _call_latency_ms = (_time.perf_counter() - _call_start) * 1000
-            if (tel := engine._telemetry()) is not None:
-                try:
-                    tel.record_agent_instance_call(
-                        comp_state_key, "Compressor", caller_name, latency_ms=_call_latency_ms,
-                    )
-                except Exception:
-                    pass
-
-        # 2. Extract the summary from the last assistant message
-        if final_msgs:
-            for msg_obj in reversed(final_msgs):
-                role = (msg_obj.get('role', '') if isinstance(msg_obj, dict)
-                        else getattr(msg_obj, 'role', ''))
-                if role == 'assistant':
-                    content = extract_text_from_message(msg_obj, add_upload_info=False)
-                    summary = strip_thinking_blocks(content)
-                    break
-
-            # Strip conversational filler prefixes
-            lower_summary = summary.lower()
-            for prefix in _SUMMARY_PREFIXES:
-                if lower_summary.startswith(prefix):
-                    summary = summary[len(prefix):].strip()
-                    summary = summary.lstrip(':\n \t')
-                    lower_summary = summary.lower()
-
-        # Validate we got a usable summary
-        if not summary.strip():
-            raise RuntimeError("Compression Agent returned an empty summary")
-
-        # Validate compression marker — ensures compressor didn't hallucinate or continue agentic task
-        if not summary.strip().endswith(COMPRESSION_END_MARKER):
-            raise RuntimeError(
-                f"Compression output missing end marker '{COMPRESSION_END_MARKER}' — "
-                f"compressor may have hallucinated or continued the task"
-            )
-
-        # Strip the marker from the returned summary (validated above)
-        summary = summary.strip()
-        summary = summary[:-len(COMPRESSION_END_MARKER)].strip()
-
-        return summary.strip()
-
-    except RuntimeError:
-        # Re-raise our own errors as-is
-        raise
     except Exception as e:
-        raise RuntimeError(f"Exception occurred while generating summary: {e}") from e
+        raise RuntimeError(f"Compression failed: {e}") from e
     finally:
         # Always clean up compression agent state when done
         with agent_pool._execution._state_lock:
@@ -398,14 +438,14 @@ def invoke_compression_agent(
                 try:
                     agent_pool.active_stack_remove(comp_state_key)
                 except Exception:
-                    pass  # Already removed or never existed - non-critical
+                    pass
 
 
 def invoke_consolidation_agent(
-    agent_pool,
-    marker_summaries: list[str],
-    caller_name=None,
-):
+    agent_pool: Any,
+    marker_summaries: List[str],
+    caller_name: str | None = None,
+) -> str:
     """Invoke Compressor to consolidate multiple existing summaries into one.
 
     Same pattern as invoke_compression_agent() but uses CONSOLIDATION_PROMPT with
@@ -426,22 +466,9 @@ def invoke_consolidation_agent(
     if not agent_pool:
         raise RuntimeError("agent_pool not connected")
 
-    # 1. Ensure the compression agent is loaded
-    if not agent_pool.get_agent('Compressor'):
-        try:
-            agent_pool.load_agent('Compressor')
-        except Exception as e:
-            raise RuntimeError(f"Could not load Compressor: {e}") from e
+    _ensure_compressor_loaded(agent_pool)
 
-    comp_agent = agent_pool.get_agent('Compressor')
-    if not comp_agent:
-        raise RuntimeError("Compressor is None after loading")
-
-    # Generate a unique instance name for each consolidation invocation
-    with _lock:
-        global _compressor_invocation_counter
-        _compressor_invocation_counter += 1
-        comp_state_key = f'Compressor_{_compressor_invocation_counter}'
+    comp_state_key = _generate_compressor_instance_name()
 
     # Format input as numbered summaries
     summaries_text = ""
@@ -450,7 +477,6 @@ def invoke_consolidation_agent(
 
     consolidation_prompt = CONSOLIDATION_PROMPT.format(summaries_text=summaries_text.strip())
 
-    summary = ""
     try:
         logger.info(
             f"Consolidation agent invoked via engine-based execution "
@@ -462,7 +488,7 @@ def invoke_consolidation_agent(
             caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
 
         # Create proper AgentInstance via _create_system_agent()
-        from agent_cascade.execution_engine import ExecutionEngine  # Local import to break circular dependency
+        from agent_cascade.execution_engine import ExecutionEngine
         engine = ExecutionEngine(agent_pool)
         comp_instance = engine._create_system_agent(
             agent_class='Compressor',
@@ -471,147 +497,17 @@ def invoke_consolidation_agent(
             caller=caller_name,
         )
 
-        # Configure Compressor settings with defense-in-depth disabled_tools
-        from agent_cascade.constants import DEFAULT_COMPRESSOR_DISABLED_TOOLS
-        from agent_cascade.utils import merge_disabled_tools_for_auto_agent
+        _configure_compressor_instance(agent_pool, comp_instance, caller_name)
 
-        template = agent_pool.get_template('Compressor')
-        cfg = (template.llm.generate_cfg or {}).copy() if template and hasattr(template, 'llm') else {}
+        summary = _execute_compressor_and_extract_summary(
+            agent_pool, engine, comp_instance, comp_state_key, caller_name,
+            timeout_label="Consolidation",
+        )
 
-        caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
-        ui_disabled_tools = None
+        return summary
 
-        if caller_inst and hasattr(caller_inst, '_generate_cfg_override') and caller_inst._generate_cfg_override:
-            raw_dt = caller_inst._generate_cfg_override.get('disabled_tools')
-            if raw_dt:
-                if isinstance(raw_dt, dict):
-                    ui_disabled_tools = raw_dt.get('Compressor', []) or []
-                    if not ui_disabled_tools:
-                        for key in raw_dt:
-                            if key.lower() == 'compressor':
-                                ui_disabled_tools = raw_dt[key] or []
-                                break
-                elif isinstance(raw_dt, (list, tuple)):
-                    ui_disabled_tools = list(raw_dt)
-
-        if ui_disabled_tools:
-            merged = merge_disabled_tools_for_auto_agent(
-                ui_disabled_tools, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS
-            )
-        else:
-            merged = merge_disabled_tools_for_auto_agent(None, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS)
-
-        cfg['disabled_tools'] = merged
-
-        if template and hasattr(template, 'llm'):
-            comp_instance._generate_cfg_override = cfg
-        else:
-            logger.warning(
-                "[CONSOLIDATION] Could not apply defense-in-depth disabled_tools for Compressor — "
-                "template not available or missing llm attribute."
-            )
-
-        # Execute via engine.run() with slot bypass
-        final_msgs = []
-        start_time = _time.monotonic()
-        max_poll_time = 300  # 5-minute timeout
-
-        try:
-            _call_start = _time.perf_counter()
-
-            comp_instance._skip_slot_acquire = True
-            logger.debug(
-                f"[CONSOLIDATION_SLOT_BYPASS] Skipping slot acquire for Compressor - caller={caller_name}"
-            )
-
-            _last_comp_send = 0.0
-            _comp_tick_num = 0
-            _comp_last_resp_len = 0
-            for resp in engine.run(comp_instance):
-                if agent_pool.stopped:
-                    break
-
-                elapsed = _time.monotonic() - start_time
-                if elapsed > max_poll_time:
-                    raise RuntimeError(
-                        f"Consolidation agent timed out after {elapsed:.0f}s"
-                    )
-
-                now_comp = _time.monotonic()
-
-                if isinstance(resp, tuple) and len(resp) == 2:
-                    comp_turn_output, comp_is_streaming_tick = resp
-                else:
-                    comp_turn_output, comp_is_streaming_tick = resp, False
-
-                _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
-                    pool=agent_pool,
-                    instance_name=comp_state_key,
-                    turn_output=comp_turn_output,
-                    is_streaming_tick=comp_is_streaming_tick,
-                    tick_num=_comp_tick_num,
-                    now_sec=now_comp,
-                    last_send=_last_comp_send,
-                    last_resp_len=_comp_last_resp_len,
-                )
-
-                _comp_tick_num += 1
-
-            # Read conversation after generator completes
-            with comp_instance._compression_lock:
-                final_msgs = list(comp_instance.conversation) if comp_instance.conversation else []
-
-        except Exception as e:
-            logger.error(f"Consolidation agent execution error: {e}")
-            raise
-        finally:
-            _call_latency_ms = (_time.perf_counter() - _call_start) * 1000
-            if (tel := engine._telemetry()) is not None:
-                try:
-                    tel.record_agent_instance_call(
-                        comp_state_key, "Compressor", caller_name, latency_ms=_call_latency_ms,
-                    )
-                except Exception:
-                    pass
-
-        # Extract the consolidated summary from the last assistant message
-        if final_msgs:
-            for msg_obj in reversed(final_msgs):
-                role = (msg_obj.get('role', '') if isinstance(msg_obj, dict)
-                        else getattr(msg_obj, 'role', ''))
-                if role == 'assistant':
-                    content = extract_text_from_message(msg_obj, add_upload_info=False)
-                    summary = strip_thinking_blocks(content)
-                    break
-
-            # Strip conversational filler prefixes
-            lower_summary = summary.lower()
-            for prefix in _SUMMARY_PREFIXES:
-                if lower_summary.startswith(prefix):
-                    summary = summary[len(prefix):].strip()
-                    summary = summary.lstrip(':\n \t')
-                    lower_summary = summary.lower()
-
-        # Validate we got a usable summary
-        if not summary.strip():
-            raise RuntimeError("Consolidation Agent returned an empty summary")
-
-        # Validate consolidation marker — ensures compressor followed instructions
-        if not summary.strip().endswith(COMPRESSION_END_MARKER):
-            raise RuntimeError(
-                f"Consolidation output missing end marker '{COMPRESSION_END_MARKER}'"
-            )
-
-        # Strip the marker from the returned summary
-        summary = summary.strip()
-        summary = summary[:-len(COMPRESSION_END_MARKER)].strip()
-
-        return summary.strip()
-
-    except RuntimeError:
-        raise
     except Exception as e:
-        raise RuntimeError(f"Exception occurred during consolidation: {e}") from e
+        raise RuntimeError(f"Consolidation failed: {e}") from e
     finally:
         # Always clean up consolidation agent state when done
         with agent_pool._execution._state_lock:
@@ -620,4 +516,4 @@ def invoke_consolidation_agent(
                 try:
                     agent_pool.active_stack_remove(comp_state_key)
                 except Exception:
-                    pass  # Already removed or never existed - non-critical
+                    pass

@@ -120,7 +120,11 @@ COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append;
 COMPRESSION_CONSOLIDATION_THRESHOLD: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_CONSOLIDATION_THRESHOLD', 8))  # Markers at which to trigger consolidation
 COMPRESSION_MAX_CONSOLIDATION_TOKENS: int = int(os.getenv(
-    'QWEN_AGENT_COMPRESSION_MAX_CONSOLIDATION_TOKENS', 32000))  # Max tokens for consolidation input before aborting
+    'QWEN_AGENT_COMPRESSION_MAX_CONSOLIDATION_TOKENS', 100000))  # Max tokens for consolidation input before aborting
+
+# Compression agent invocation timeout (5 minutes for large compression/consolidation tasks)
+COMPRESSION_AGENT_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_AGENT_TIMEOUT', 300.0))
 
 # Settings for agent pool
 AGENT_IDLE_TIMEOUT: float = float(os.getenv(

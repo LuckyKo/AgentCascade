@@ -2780,8 +2780,14 @@ class AgentPool:
     def count_markers(history: List[Message]) -> int:
         """Count valid compression markers in conversation.
 
-        A message is counted as a marker only if it has role=USER, starts with COMPRESSION_MARKER,
-        AND contains <context_summary> tags (prevents false positives from arbitrary user messages).
+        Detection criteria and rationale:
+        - role=USER: Compression markers are injected as user messages to signal context
+          boundaries without interfering with assistant flow.
+        - starts with COMPRESSION_MARKER prefix: Identifies the message as a system-generated
+          marker rather than regular user input.
+        - contains <context_summary> tags: Required structural element that holds the actual
+          summary content; prevents false positives from arbitrary user messages that might
+          coincidentally start with the marker prefix string.
 
         Args:
             history: Conversation history (list of Message objects or dicts).
@@ -2803,8 +2809,16 @@ class AgentPool:
     def find_all_marker_indices(history: List[Message]) -> List[int]:
         """Return indices of all valid compression markers in chronological order.
 
-        A message is considered a marker only if it has role=USER, starts with COMPRESSION_MARKER,
-        AND contains <context_summary> tags (prevents false positives from arbitrary user messages).
+        Detection criteria and rationale:
+        - role=USER: Compression markers are injected as user messages to signal context
+          boundaries without interfering with assistant flow.
+        - starts with COMPRESSION_MARKER prefix: Identifies the message as a system-generated
+          marker rather than regular user input.
+        - contains <context_summary> tags: Required structural element that holds the actual
+          summary content; prevents false positives from arbitrary user messages that might
+          coincidentally start with the marker prefix string.
+
+        Used by consolidation logic to determine which markers to merge hierarchically.
 
         Args:
             history: Conversation history (list of Message objects or dicts).

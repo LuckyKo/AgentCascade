@@ -1,9 +1,130 @@
 """Helper functions for the compression system."""
 import copy
-from typing import Any
+from typing import Any, List, Tuple
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, Message
 from agent_cascade.utils.utils import extract_text_from_message
+
+
+def is_compression_marker(msg: Any) -> bool:
+    """Check if a message is a valid compression marker.
+
+    A message is a compression marker if it has role=USER, content starts with
+    COMPRESSION_MARKER prefix, and contains <context_summary> tags (the latter
+    prevents false positives from arbitrary user messages that might coincidentally
+    start with the marker prefix).
+
+    Args:
+        msg: A Message object or dict.
+
+    Returns:
+        True if the message is a valid compression marker.
+    """
+    from agent_cascade.settings import COMPRESSION_MARKER
+    role = get_message_role(msg)
+    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+    return (role == USER and isinstance(content, str)
+            and content.startswith(COMPRESSION_MARKER)
+            and '<context_summary>' in content)
+
+
+def select_markers_for_consolidation(marker_indices: List[int]) -> Tuple[List[int], int]:
+    """Select which markers to consolidate vs keep.
+
+    Consolidation strategy: merge all markers except the newest (last one).
+    The newest marker is preserved because it represents the most recent summary
+    boundary and may reference context that hasn't been superseded by older markers.
+
+    Args:
+        marker_indices: Sorted list of marker indices in chronological order.
+
+    Returns:
+        Tuple of (indices_to_consolidate, index_to_keep).
+        indices_to_consolidate contains all but the last marker.
+        index_to_keep is the newest (last) marker index.
+
+    Raises:
+        ValueError: If marker_indices is empty.
+    """
+    if not marker_indices:
+        raise ValueError("Cannot select markers from empty list")
+    if len(marker_indices) < 2:
+        # Not enough markers to consolidate — return all as "keep", none to consolidate
+        return [], marker_indices[-1]
+
+    return marker_indices[:-1], marker_indices[-1]
+
+
+def filter_jsonl_for_consolidation(
+    existing_msgs: List[dict],
+    new_marker_msg: dict,
+    last_marker_idx: int,
+) -> Tuple[List[dict], int]:
+    """Filter JSONL messages for hierarchical consolidation.
+
+    Strategy (aligns with pool consolidation): keep the last marker in JSONL
+    (newest, M7 equivalent), replace the first marker before it with the new
+    L2 consolidated marker, and remove all intermediate redundant markers (M1..M6).
+    All raw (non-marker) messages are preserved.
+
+    Args:
+        existing_msgs: Current messages in JSONL (as dicts).
+        new_marker_msg: The new L2 consolidated marker message dict to insert.
+        last_marker_idx: Index of the last marker in existing_msgs (always kept).
+
+    Returns:
+        Tuple of (filtered_messages, markers_removed_count).
+    """
+    result_msgs = []
+    new_marker_inserted = False
+    markers_skipped = 0
+
+    for i, msg in enumerate(existing_msgs):
+        content = msg.get('content', '')
+
+        if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+            # This is the last marker in JSONL (M7 equivalent) — always keep it
+            if i == last_marker_idx:
+                result_msgs.append(msg)
+            elif not new_marker_inserted:
+                # First marker before last — replace with new L2 marker
+                result_msgs.append(new_marker_msg)
+                new_marker_inserted = True
+            else:
+                # Intermediate redundant marker (M1..M6) — skip it
+                markers_skipped += 1
+        else:
+            # Not a marker — always keep raw messages
+            result_msgs.append(msg)
+
+    # If no old markers were found in JSONL, insert L2 at beginning of message area
+    if not new_marker_inserted and new_marker_msg:
+        result_msgs.insert(0, new_marker_msg)
+
+    return result_msgs, markers_skipped
+
+
+def extract_summary_from_marker(msg: Any) -> str | None:
+    """Extract the summary text from a compression marker message.
+
+    Parses content between <context_summary>...</context_summary> tags.
+
+    Args:
+        msg: A Message object or dict that is a compression marker.
+
+    Returns:
+        The extracted summary text, or None if parsing fails or summary is empty.
+    """
+    try:
+        content = extract_text_from_message(msg, add_upload_info=False)
+        if not isinstance(content, str):
+            return None
+        if '<context_summary>' in content and '</context_summary>' in content:
+            summary_text = content.split('<context_summary>', 1)[1].split('</context_summary>', 1)[0].strip()
+            return summary_text if summary_text else None
+    except Exception:
+        pass
+    return None
 
 
 def get_message_role(msg) -> str:
@@ -267,7 +388,7 @@ def build_marker_message(summary_text, fraction):
     return Message(role=USER, content=str(content))
 
 
-def build_consolidation_marker_message(summary_text, num_summaries_consolidated):
+def build_consolidation_marker_message(summary_text: str, num_summaries_consolidated: int) -> Message:
     """Build a L2 consolidation marker message.
 
     Wraps the consolidated summary in COMPRESSION_BASELINE_TEMPLATE with an L2 header
