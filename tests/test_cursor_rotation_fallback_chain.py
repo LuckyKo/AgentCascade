@@ -19,11 +19,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_cascade.api_router import APIRouter, APIEndpoint
+from agent_cascade.retry_policy import RetryPolicy
 
 
 # ============================================================================
 # Fixtures and helpers
 # ============================================================================
+
+# Fast retry policy for tests — minimal backoff so tests run quickly.
+FAST_RETRY_POLICY = RetryPolicy(
+    retry_max_attempts=3,
+    base_delay=0.01,      # 10ms instead of 1s
+    max_delay=0.05,       # 50ms cap
+    jitter_factor=0.0,    # No jitter for deterministic timing
+    endpoint_max_retries=1,
+)
+
 
 @pytest.fixture
 def router(tmp_path_factory):
@@ -35,7 +46,11 @@ def router(tmp_path_factory):
             'api_base': 'http://default-api',
             'model': 'default-model',
             'max_tokens': 2048,
-        })
+        }, policy=FAST_RETRY_POLICY)
+        # Initialize _pool to None so call_with_fallback termination checks work
+        # without requiring the full AgentPool wiring. Production code guards all
+        # _pool accesses with "if self._pool and ..." checks.
+        r._pool = None
         yield r
 
 
