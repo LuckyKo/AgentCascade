@@ -3,6 +3,7 @@
 # -*- coding: utf-8 -*-
 
 from typing import Dict, List, Set
+from agent_cascade.settings import COMPRESSION_END_MARKER
 
 # ── Available Tools Registry ────────────────────────────────────────────────
 # Master list of ALL tools that agents can use. Toggle True/False to enable/disable
@@ -94,7 +95,7 @@ COMPRESSION_PROMPT = (
     "3. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
     "4. Retain initial request and progress of the task in the summary.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
-    "Present summary below and always terminate it with last line `--- END SUMMARY ---` to indicate the end of the summary."
+    f"Present summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end of the summary."
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (

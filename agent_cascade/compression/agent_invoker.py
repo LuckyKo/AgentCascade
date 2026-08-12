@@ -7,6 +7,7 @@ import logging
 import threading
 import time as _time
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
+from agent_cascade.settings import COMPRESSION_END_MARKER
 from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text, _msg_field_or_extra
@@ -370,6 +371,17 @@ def invoke_compression_agent(
         # Validate we got a usable summary
         if not summary.strip():
             raise RuntimeError("Compression Agent returned an empty summary")
+
+        # Validate compression marker — ensures compressor didn't hallucinate or continue agentic task
+        if not summary.strip().endswith(COMPRESSION_END_MARKER):
+            raise RuntimeError(
+                f"Compression output missing end marker '{COMPRESSION_END_MARKER}' — "
+                f"compressor may have hallucinated or continued the task"
+            )
+
+        # Strip the marker from the returned summary (validated above)
+        summary = summary.strip()
+        summary = summary[:-len(COMPRESSION_END_MARKER)].strip()
 
         return summary.strip()
 

@@ -14,10 +14,23 @@ from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.settings import (
     CHARS_PER_TOKEN_ESTIMATE,
     COMPRESSION_DEFAULT_FRACTION,
+    COMPRESSION_MAX_RETRIES,
 )
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+def _compression_failure(error: str, mode: str) -> CompressResult:
+    return CompressResult(
+        success=False,
+        summary_text=None,
+        marker_message=None,
+        messages_discarded=0,
+        tail_count=0,
+        error=error,
+        mode=mode,
+    )
 
 
 def compress_context(
@@ -317,26 +330,37 @@ def compress_context(
     elif mode == "manual":
         generated_summary = summary_text.strip()
     else:
-        try:
-            generated_summary = invoke_compression_agent(
-                agent_pool=agent_pool,
-                target_messages=target_messages,
-                existing_summary=existing_summary,
-                caller_name=target_agent_name,  # Pass actual instance name for slot management
-            )
-        except Exception as e:
-            # Fail-safe: Compression Agent failed — pool is untouched
-            logger.error(f"Compression Agent invocation failed: {e}")
-            return CompressResult(
-                success=False,
-                summary_text=None,
-                marker_message=None,
-                messages_discarded=0,
-                tail_count=0,
-                error=f"Compression Agent failed: {e}",
-                mode=mode,
-            )
+        max_retries = COMPRESSION_MAX_RETRIES
+        for attempt in range(1, max_retries + 1):
+            try:
+                generated_summary = invoke_compression_agent(
+                    agent_pool=agent_pool,
+                    target_messages=target_messages,
+                    existing_summary=existing_summary,
+                    caller_name=target_agent_name,  # Pass actual instance name for slot management
+                )
+                break  # Success — marker validated inside invoke_compression_agent
+            except RuntimeError as e:
+                err_msg = str(e).lower()
+                # Only retry on validation failures, not infra/timeout/load errors
+                is_retryable = ('missing end marker' in err_msg or 'empty summary' in err_msg)
 
+                if not is_retryable:
+                    logger.error(f"Compression Agent hard failure: {e}")
+                    return _compression_failure(f"Compression Agent failed: {e}", mode=mode)
+
+                if attempt >= max_retries:
+                    logger.error(
+                        f"Compression Agent failed after {max_retries} attempts: {e}"
+                    )
+                    return _compression_failure(
+                        f"Compression Agent failed after {max_retries} attempts: {e}",
+                        mode=mode,
+                    )
+
+                logger.warning(
+                    f"Compression attempt {attempt}/{max_retries} failed: {e} — retrying."
+                )
     # Validate we have a usable summary
     if not generated_summary:
         return CompressResult(
