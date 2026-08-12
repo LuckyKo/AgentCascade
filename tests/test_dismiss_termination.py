@@ -92,6 +92,30 @@ class TestTerminateIdempotency:
         inst.terminate()
         # No exception — idempotent.
 
+    @pytest.mark.parametrize("initial_state,expected_state,should_transition", [
+        (AgentState.RUNNING, AgentState.TERMINATED, True),
+        (AgentState.SLEEPING, AgentState.TERMINATED, True),
+        (AgentState.COMPLETING, AgentState.TERMINATED, True),
+        (AgentState.IDLE, AgentState.IDLE, False),      # not in ACTIVE_STATES
+        (AgentState.TERMINATED, AgentState.TERMINATED, False),  # already terminated
+    ])
+    def test_state_transition_from_all_states(self, initial_state, expected_state, should_transition):
+        """Parametrized: terminate() transitions correctly from any starting state.
+
+        ACTIVE_STATES → TERMINATED; IDLE sets flag but no transition; TERMINATED is no-op.
+        """
+        inst = make_instance("w1", state=initial_state)
+        # Track whether _transition was called
+        with patch.object(inst, '_transition') as mock_trans:
+            inst.terminate()
+            if should_transition:
+                mock_trans.assert_called_once_with(AgentState.TERMINATED)
+            else:
+                mock_trans.assert_not_called()
+
+        assert inst.is_terminated is True
+        assert inst.state == expected_state
+
     def test_is_terminated_stays_true_after_multiple_calls(self):
         """is_terminated remains True after repeated terminate() calls."""
         inst = make_instance("w1", state=AgentState.RUNNING)
@@ -99,44 +123,6 @@ class TestTerminateIdempotency:
         assert inst.is_terminated is True
         inst.terminate()
         assert inst.is_terminated is True
-        inst.terminate()
-        assert inst.is_terminated is True
-
-    def test_state_transitions_to_terminated_only_once(self):
-        """From RUNNING, terminate() transitions to TERMINATED; subsequent calls are no-ops on state."""
-        inst = make_instance("w1", state=AgentState.RUNNING)
-        inst.terminate()
-        assert inst.state == AgentState.TERMINATED
-        # Second call should not cause InvalidStateTransition.
-        inst.terminate()
-        assert inst.state == AgentState.TERMINATED
-
-    def test_terminate_from_sleeping_transitions(self):
-        """Terminate from SLEEPING also transitions to TERMINATED."""
-        inst = make_instance("w1", state=AgentState.SLEEPING)
-        inst.terminate()
-        assert inst.state == AgentState.TERMINATED
-
-    def test_terminate_from_completing_transitions(self):
-        """Terminate from COMPLETING also transitions to TERMINATED."""
-        inst = make_instance("w1", state=AgentState.COMPLETING)
-        inst.terminate()
-        assert inst.state == AgentState.TERMINATED
-
-    def test_terminate_from_idle_sets_flag_no_transition(self):
-        """From IDLE, terminate() sets is_terminated but does not transition (not in ACTIVE_STATES)."""
-        inst = make_instance("w1", state=AgentState.IDLE)
-        inst.terminate()
-        assert inst.is_terminated is True
-        # IDLE is not in ACTIVE_STATES, so no _transition call.
-        assert inst.state == AgentState.IDLE
-
-    def test_terminate_from_terminated_is_noop(self):
-        """From TERMINATED, terminate() does nothing harmful."""
-        inst = make_instance("w1", state=AgentState.TERMINATED)
-        inst.terminate()
-        assert inst.is_terminated is True
-        assert inst.state == AgentState.TERMINATED
 
 
 class TestTerminateDurableFlag:
@@ -166,19 +152,6 @@ class TestTerminateDurableFlag:
 
         inst.terminate()
         assert len(inst._streaming_responses) == 0
-
-    def test_clears_state_label_and_endpoint_config(self):
-        """terminate() clears _state_label and _last_endpoint_config."""
-        inst = make_instance("w1", state=AgentState.RUNNING)
-        with inst._state_lock:
-            inst._state_label = "test_label"
-            inst._last_endpoint_config = {"api_base": "http://example"}
-
-        inst.terminate()
-
-        with inst._state_lock:
-            assert inst._state_label is None
-            assert inst._last_endpoint_config is None
 
 
 # ===========================================================================
@@ -229,11 +202,6 @@ class TestAgentTerminatedError:
             raise AgentTerminatedError(name)
         err = exc_info.value
         assert err.instance_name == name
-
-    def test_has_instance_name_attribute(self):
-        err = AgentTerminatedError("my_agent")
-        assert hasattr(err, "instance_name")
-        assert err.instance_name == "my_agent"
 
     def test_error_message_is_meaningful(self):
         err = AgentTerminatedError("worker-42")

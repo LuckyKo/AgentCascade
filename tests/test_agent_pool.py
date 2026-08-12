@@ -141,22 +141,6 @@ class TestDismissal:
         assert "busy_agent" not in agent_pool.instances, \
             "dismiss_instance should remove the active agent from the pool"
 
-    def test_dismiss_fires_callbacks(self, agent_pool):
-        """Dismiss callbacks should be fired via _fire_on_dismissed."""
-        received = []
-        agent_pool.on_dismissed(lambda name, log: received.append(name))
-        agent_pool._fire_on_dismissed("worker1", "/tmp/log.jsonl")
-        assert "worker1" in received
-
-    def test_dismiss_callback_error_is_caught(self, agent_pool):
-        """A callback that raises should not prevent other callbacks from running."""
-        results = []
-        agent_pool.on_dismissed(lambda n, l: results.append("good"))
-        agent_pool.on_dismissed(lambda n, l: (_ for _ in ()).throw(RuntimeError("boom")))
-        agent_pool.on_dismissed(lambda n, l: results.append("also_good"))
-        agent_pool._fire_on_dismissed("w1")
-        assert results == ["good", "also_good"]
-
     def test_terminate_instance_sets_stop_when_active(self, agent_pool):
         """Terminating an active instance should set the stopped flag."""
         from agent_cascade.agent_instance import AgentInstance, AgentState

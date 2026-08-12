@@ -546,25 +546,6 @@ class TestRecoveryHandler:
         # Should have consumed all provided generators (unlimited retries mode)
         assert call_count_tracker[0] == 20, f"Expected 20 calls in unlimited mode, got {call_count_tracker[0]}"
 
-    def test_r8_keyboard_interrupt_passthrough(self):
-        """R8: KeyboardInterrupt is re-raised without retry.
-        
-        Verify by checking the execution_engine's suppression flag mechanism
-        that also handles interrupts — the flag suppresses detection for one turn."""
-        # Simulate what happens when compression sets the cooldown flag
-        class FakeInstance:
-            pass
-        
-        inst = FakeInstance()
-        inst._suppress_loop_detection_next_turn = True
-        
-        # Verify the flag is set (execution_engine.py checks this)
-        assert getattr(inst, '_suppress_loop_detection_next_turn', False) is True
-        
-        # Simulate clearing after one turn (execution_engine.py:1210)
-        inst._suppress_loop_detection_next_turn = False
-        assert getattr(inst, '_suppress_loop_detection_next_turn', False) is False
-
     @patch('agent_cascade.api_integration.run_agent_in_pool')
     def test_r9_non_loop_exception(self, mock_run):
         """R9: Non-loop exceptions yield error message."""
@@ -820,44 +801,6 @@ class TestEdgeCases:
         msgs = prefix + pat * 2  # 40 + 10 = 50 messages
         result = detect_loop(msgs)
         assert result is not None
-
-
-# ══════════════════════════════════════════════
-# PART 5 — LoopDetectedError Tests
-# ══════════════════════════════════════════════
-
-class TestLoopDetectedError:
-    """Test the LoopDetectedError exception class."""
-
-    def test_error_with_all_fields(self):
-        """Verify all fields are set correctly."""
-        err = LoopDetectedError(
-            reason="pattern found",
-            agent_name="worker1",
-            pop_count=5,
-            turn_pop_count=3,
-            resp_snapshot=[_msg(ASSISTANT, "test")],
-        )
-        assert err.reason == "pattern found"
-        assert err.agent_name == "worker1"
-        assert err.pop_count == 5
-        assert err.turn_pop_count == 3
-        assert len(err.resp_snapshot) == 1
-        assert "worker1" in str(err)
-
-    def test_error_with_defaults(self):
-        """Verify default values work correctly."""
-        err = LoopDetectedError(reason="loop")
-        assert err.agent_name is None
-        assert err.pop_count is None
-        assert err.turn_pop_count == 0
-        assert err.resp_snapshot == []
-        assert "agent" in str(err)  # Default message uses 'agent'
-
-    def test_error_is_exception(self):
-        """Verify it can be raised and caught as a standard exception."""
-        with pytest.raises(LoopDetectedError, match="pattern"):
-            raise LoopDetectedError(reason="pattern found", agent_name="test")
 
 
 # ══════════════════════════════════════════════

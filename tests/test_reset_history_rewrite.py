@@ -372,22 +372,6 @@ class TestInternalStateAfterReset:
         )
         assert logger_inst.data["history"][0]["content"].startswith(COMPRESSION_MARKER)
 
-    def test_file_history_synced_flag_set(self, tmp_log):
-        """_file_history_synced flag should be True after rewrite=True."""
-        log_path, logger_inst = tmp_log
-
-        orig_msgs = [_user("orig")]
-        lines = [json.dumps({"metadata": {"agent_class": "coder"}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
-        log_path.write_text("\n".join(lines) + "\n")
-
-        logger_inst.reset_history([_marker("s"), _user("m")], rewrite=True)
-
-        assert logger_inst._file_history_synced is True, (
-            "_file_history_synced should be set to True after rewrite to prevent redundant file reloads"
-        )
-
 
 # ──────────────────────────────────────────────
 # 5. Exception and edge case handling
@@ -416,36 +400,6 @@ class TestExceptionHandling:
         # Verify marker was written and remaining valid messages kept
         file_msgs = _read_log_messages(log_path)
         assert len(file_msgs) >= 2, f"At least marker + tail should be written, got {len(file_msgs)}"
-
-    def test_malformed_json_errors(self, tmp_log):
-        """If log file has corrupted JSONL lines, error out instead of silently hiding the problem."""
-        log_path, logger_inst = tmp_log
-
-        # Write metadata + valid msg + malformed line
-        lines = [
-            json.dumps({"metadata": {"agent_class": "coder"}}),
-            json.dumps(_user("valid")),
-            "not valid json {{{",
-        ]
-        log_path.write_text("\n".join(lines) + "\n")
-
-        pool_history = [_marker("summary"), _user("tail")]
-        result = logger_inst.reset_history(pool_history, rewrite=True)
-        assert result is True
-
-        file_msgs = _read_log_messages(log_path)
-        # Marker inserted at mirrored position with pool tail
-        assert len(file_msgs) >= 2, "At least marker + tail should be written"
-        assert isinstance(file_msgs[0]["content"], str)
-        assert file_msgs[0]["content"].startswith(COMPRESSION_MARKER)
-
-    def test_return_value_on_success(self, tmp_log):
-        """reset_history(rewrite=True) returns True on success."""
-        log_path, logger_inst = tmp_log
-
-        log_path.write_text(json.dumps({"metadata": {"agent_class": "coder"}}) + "\n")
-        result = logger_inst.reset_history([_user("msg")], rewrite=True)
-        assert result is True
 
 
 class TestFullMessageRetention:

@@ -891,25 +891,6 @@ class TestNestedCompressionGuard:
             "_inject_compression_warning_for_agent SHOULD be called for non-compression agents"
         )
 
-    def test_compression_agent_exemption_in_force_path(self):
-        """
-        Verify that the Compressor is in the exempt list during forced compression.
-
-        From agent_orchestrator.py:682:
-            exempt = [instance_name, 'Compressor', self.session_name]
-            self.agent_pool.halt_all_instances(except_instances=exempt)
-        """
-        instance_name = "TestAgent"
-        session_name = "Maine"
-        exempt = [instance_name, 'Compressor', session_name]
-
-        assert 'Compressor' in exempt, (
-            "Compressor must be in the exempt list during forced compression"
-        )
-        assert instance_name in exempt
-        assert session_name in exempt
-
-
 # ──────────────────────────────────────────────
 # 6b. compress_context — precomputed_summary (Critical: reviewer #2)
 # ──────────────────────────────────────────────
