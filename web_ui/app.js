@@ -2709,10 +2709,10 @@ function appendAgentMessageToVisible(msg) {
   scrollPanelToBottom(container, 'sub-agent-messages', false);
 }
 
-// Create a single agent message element
+// Create a single agent message element — styled to match regular chat messages
 function createAgentMessageEl(msg) {
   const div = document.createElement('div');
-  div.className = 'agent-message';
+  div.className = 'message msg-assistant agent-message';
   if (!msg.read) {
     div.classList.add('unread');
   }
@@ -2723,33 +2723,34 @@ function createAgentMessageEl(msg) {
     markMessageRead(msg.id);
   };
 
+  // Header row with sender name and time (same structure as regular messages)
   const header = document.createElement('div');
-  header.style.cssText = 'display:flex;align-items:center;gap:6px;';
+  header.className = 'msg-header';
 
-  const sender = document.createElement('span');
-  sender.className = 'agent-message-sender';
-  sender.textContent = msg.sender;
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'msg-name';
+  nameSpan.textContent = msg.sender;
+  header.appendChild(nameSpan);
 
+  // Time on the right side of header (no action buttons for agent messages)
   const time = document.createElement('span');
   time.className = 'agent-message-time';
   time.textContent = formatTimestamp(msg.timestamp);
-
-  header.appendChild(sender);
   header.appendChild(time);
+
   div.appendChild(header);
 
-  // Render markdown content (reuse existing libs: marked + DOMPurify)
-  const content = document.createElement('div');
-  content.className = 'agent-message-content';
-  const rawHtml = marked.parse(msg.message || '');
-  content.innerHTML = DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
-  div.appendChild(content);
+  // Content area using same markdown rendering as regular messages
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'msg-content';
+  contentDiv.innerHTML = renderMarkdown(msg.message || '', false);
+  
+  // Apply decoding="async" to all images (same optimization as regular messages)
+  contentDiv.querySelectorAll('img').forEach(img => {
+    if (!img.decoding || img.decoding === 'sync') img.decoding = 'async';
+  });
 
-  // Hint about clicking to reply
-  const hint = document.createElement('div');
-  hint.className = 'agent-message-hint';
-  hint.textContent = `Click to reply with @${msg.sender}`;
-  div.appendChild(hint);
+  div.appendChild(contentDiv);
 
   return div;
 }

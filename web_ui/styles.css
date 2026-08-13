@@ -592,60 +592,25 @@ body {
   padding: 12px 16px;
 }
 
-/* Agent Message bubble (distinct from conversation messages) */
+/* Agent Message bubble — now uses regular message styling (.message.msg-assistant base) */
 .agent-message {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  border-left: 3px solid var(--accent);
-  cursor: pointer;
-  transition: background 0.15s ease;
+  cursor: pointer; /* Click to reply with @mention */
 }
 
 .agent-message:hover {
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
 }
 
 .agent-message.unread {
-  border-left-color: #ffc107; /* Yellow for unread */
+  border-left-color: #ffc107; /* Yellow accent for unread */
 }
 
-.agent-message-sender {
-  font-weight: 600;
-  font-size: calc(var(--font-size-base, 14px) * 0.93);
-  color: var(--accent);
-  white-space: nowrap;
-}
-
+/* Time in agent message header — shown inline after sender name */
 .agent-message-time {
-  font-size: calc(var(--font-size-base, 14px) * 0.79);
+  font-size: 11px;
   color: var(--text-muted);
-  margin-left: auto;
+  margin-left: 8px;
   white-space: nowrap;
-}
-
-.agent-message-content {
-  margin-top: 4px;
-  font-size: var(--font-size-base, 14px);
-  line-height: 1.5;
-  color: var(--text-primary);
-}
-
-.agent-message-content code {
-  background: var(--bg-code);
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-size: calc(var(--font-size-base, 14px) * 0.86);
-}
-
-.agent-message-hint {
-  font-size: calc(var(--font-size-base, 14px) * 0.71);
-  color: var(--text-muted);
-  margin-top: 2px;
-  font-style: italic;
 }
 
 /* Empty state */
