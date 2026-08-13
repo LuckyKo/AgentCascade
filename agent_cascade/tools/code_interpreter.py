@@ -30,6 +30,12 @@ import uuid
 import socket
 
 from pathlib import Path
+
+# Optional ZMQ import for explicit error handling on kernel shutdown
+try:
+    import zmq
+except ImportError:
+    zmq = None
 from typing import Dict, List, Optional, Union
 
 import json5
@@ -75,6 +81,10 @@ DOCKER_IMAGE_FILE = str(Path(__file__).absolute().parent / 'resource' / 'code_in
 
 _KERNEL_CLIENTS: dict = {}
 _DOCKER_CONTAINERS: Dict[str, str] = {}
+
+# Per-session tracking: session_name → list of kernel_ids owned by that session.
+# Enables explicit cleanup when agents are dismissed instead of relying on GC.
+_AGENT_KERNELS: Dict[str, List[str]] = {}
 
 # Track last activity per kernel for watchdog.
 # Value format: {'last_active': float, 'work_dir': str, 'watchdog_timeout': int, 'stale_ttl': int}
@@ -168,21 +178,22 @@ def _kill_kernels_and_containers(_sig_num=None, _frame=None):
         _KERNEL_ACTIVITY.clear()
         _WATCHDOG_KILLED.clear()
         _STALE_CONTAINERS.clear()
+        _AGENT_KERNELS.clear()
 
     # Kill kernel clients outside lock (shutdown can block)
     for kernel_id, kc in kernels_to_kill:
         try:
             kc.shutdown()
-        except Exception:
-            pass
+        except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
+            logger.debug(f"Kernel shutdown failed during global cleanup ({kernel_id}): {e}")
 
     # Kill containers outside lock (docker ops can be slow)
     for k, container_id in container_pairs:
         try:
             subprocess.run(['docker', 'stop', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
             subprocess.run(['docker', 'rm', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-        except Exception:
-            print(f"WARNING: Failed to stop and remove the Docker container: {container_id}")
+        except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
+            logger.warning(f"Failed to stop and remove Docker container {container_id} during global cleanup: {e}")
 
 
 # Make sure all containers are terminated even if killed abnormally:
@@ -229,8 +240,8 @@ def _kernel_watchdog():
                 if kernel_id in _KERNEL_CLIENTS:
                     try:
                         _KERNEL_CLIENTS[kernel_id].shutdown()
-                    except Exception:
-                        pass
+                    except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
+                        logger.debug(f"Watchdog kernel shutdown failed ({kernel_id}): {e}")
                     kc_to_shutdown = None  # already shut down
                     del _KERNEL_CLIENTS[kernel_id]
                 
@@ -243,6 +254,11 @@ def _kernel_watchdog():
                 work_dir_base = _KERNEL_ACTIVITY.get(kernel_id, {}).get('work_dir', '.')
                 if kernel_id in _KERNEL_ACTIVITY:
                     del _KERNEL_ACTIVITY[kernel_id]
+                
+                # Remove from agent kernel tracking
+                for session_list in _AGENT_KERNELS.values():
+                    if kernel_id in session_list:
+                        session_list.remove(kernel_id)
             
             # Kill the container outside lock (docker ops can be slow)
             if container_id_to_kill is not None:
@@ -255,7 +271,7 @@ def _kernel_watchdog():
                         ['docker', 'rm', container_id_to_kill], timeout=10,
                         capture_output=True, encoding='utf-8', errors='replace'
                     )
-                except Exception as e:
+                except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
                     logger.warning(f"Failed to clean up stale container {container_id_to_kill}: {e}")
             
             # Clean up connection files, launch script, and path mapping — use the work_dir stored at kernel start
@@ -324,6 +340,120 @@ def _cleanup_stale_containers(now: float):
             for kernel_id in removed_ids:
                 if kernel_id in _STALE_CONTAINERS:
                     del _STALE_CONTAINERS[kernel_id]
+
+
+def cleanup_kernels_for_session(session_name: str, force_timeout: float = 5.0) -> int:
+    """Explicitly clean up all kernels owned by a session (agent).
+
+    This is the primary mechanism for preventing ZMQ socket leaks when agents
+    are dismissed. It shuts down kernel clients and removes containers for all
+    kernels tracked under the given session name.
+
+    Uses cooperative shutdown first, then force-kills containers if they don't
+    respond within force_timeout seconds.
+
+    Args:
+        session_name: The session/agent name whose kernels should be cleaned up.
+        force_timeout: Max seconds to wait for docker stop before forcing removal.
+
+    Returns:
+        Number of kernels cleaned up (0 if none found).
+    """
+    # Single lock acquisition: collect ALL state atomically to avoid races with watchdog.
+    # Watchdog can kill kernels between phases, so we must own the kernel_ids and their
+    # associated state in one consistent snapshot before releasing the lock.
+    kc_list = []
+    container_pairs = []  # (kernel_id, container_id)
+    stale_cids = []
+    kernel_work_dirs = {}  # kernel_id -> work_dir for temp file cleanup
+
+    with _KERNEL_LOCK:
+        if session_name not in _AGENT_KERNELS:
+            return 0
+        kernel_ids = list(_AGENT_KERNELS.pop(session_name, []))
+
+        for kid in kernel_ids:
+            if kid in _KERNEL_CLIENTS:
+                kc_list.append(_KERNEL_CLIENTS.pop(kid, None))
+            if kid in _DOCKER_CONTAINERS:
+                container_pairs.append((kid, _DOCKER_CONTAINERS.pop(kid, None)))
+            if kid in _STALE_CONTAINERS:
+                stale_cids.append(_STALE_CONTAINERS.pop(kid, None))
+            if kid in _KERNEL_ACTIVITY:
+                kernel_work_dirs[kid] = _KERNEL_ACTIVITY[kid].get('work_dir', '.')
+                del _KERNEL_ACTIVITY[kid]
+
+    if not kernel_ids:
+        return 0
+
+    logger.info(f"Cleaning up {len(kernel_ids)} kernel(s) for session '{session_name}'")
+
+    # Shut down kernel clients cooperatively
+    for kc in kc_list:
+        if kc is not None:
+            try:
+                kc.shutdown()
+            except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
+                logger.debug(f"Kernel shutdown failed during session cleanup: {e}")
+
+    # Stop and remove containers with timeout-based force fallback
+    for kid, cid in container_pairs:
+        if cid is None:
+            continue
+        try:
+            subprocess.run(
+                ['docker', 'stop', '-t', str(int(force_timeout)), cid],
+                timeout=force_timeout + 5, capture_output=True, encoding='utf-8', errors='replace'
+            )
+            subprocess.run(
+                ['docker', 'rm', cid],
+                timeout=10, capture_output=True, encoding='utf-8', errors='replace'
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            # Force remove if graceful stop fails
+            logger.warning(f"Graceful container stop failed for {cid}, forcing removal: {e}")
+            try:
+                subprocess.run(
+                    ['docker', 'rm', '-f', cid],
+                    timeout=10, capture_output=True, encoding='utf-8', errors='replace'
+                )
+            except (subprocess.SubprocessError, OSError) as force_err:
+                logger.error(f"Force container removal failed for {cid}: {force_err}")
+
+    # Remove stale containers
+    for info in stale_cids:
+        if info is None:
+            continue
+        cid = info.get('container_id')
+        if cid:
+            try:
+                subprocess.run(
+                    ['docker', 'rm', '-f', cid],
+                    timeout=10, capture_output=True, encoding='utf-8', errors='replace'
+                )
+            except (subprocess.SubprocessError, OSError) as e:
+                logger.debug(f"Failed to remove stale container {cid}: {e}")
+
+    # Clean up temporary files: connection files and launch scripts
+    for kid, work_dir in kernel_work_dirs.items():
+        # Remove connection files
+        for suffix in ['_host.json', '_container.json']:
+            conn_file = os.path.join(work_dir, f'kernel_connection_file_{kid}{suffix}')
+            try:
+                if os.path.exists(conn_file):
+                    os.remove(conn_file)
+            except OSError as e:
+                logger.debug(f"Failed to remove connection file {conn_file}: {e}")
+
+        # Remove launch script
+        launch_script = os.path.join(work_dir, f'launch_kernel_{kid}.py')
+        try:
+            if os.path.exists(launch_script):
+                os.remove(launch_script)
+        except OSError as e:
+            logger.debug(f"Failed to remove launch script {launch_script}: {e}")
+
+    return len(kernel_ids)
 
 
 _WATCHDOG_THREAD = threading.Thread(target=_kernel_watchdog, daemon=True, name='code-interpreter-watchdog')
@@ -599,6 +729,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 _DOCKER_CONTAINERS[kernel_id] = container_id
                 if kernel_id in _STALE_CONTAINERS:
                     del _STALE_CONTAINERS[kernel_id]
+                # Track which session owns this kernel for explicit cleanup on dismissal
+                if session_name not in _AGENT_KERNELS:
+                    _AGENT_KERNELS[session_name] = []
+                if kernel_id not in _AGENT_KERNELS[session_name]:
+                    _AGENT_KERNELS[session_name].append(kernel_id)
                 _KERNEL_READY.notify_all()
 
         if needs_init:
@@ -610,14 +745,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     start_code = start_code.replace('{{M6_FONT_PATH}}', repr(container_font_path)[1:-1])
                     start_code += '\n%xmode Minimal'
                 self._execute_code(kc, start_code, timeout=exec_timeout, kernel_id=kernel_id)
-            except Exception:
+            except Exception as init_err:
                 # Init failed — clean up the broken kernel so next call recreates fresh
                 with _KERNEL_LOCK:
                     if kernel_id in _KERNEL_CLIENTS:
                         try:
                             _KERNEL_CLIENTS[kernel_id].shutdown()
-                        except Exception:
-                            pass
+                        except (RuntimeError, OSError, AttributeError) as e:
+                            logger.debug(f"Shutdown failed during init error cleanup ({kernel_id}): {e}")
                         del _KERNEL_CLIENTS[kernel_id]
                     if kernel_id in _DOCKER_CONTAINERS:
                         container_id = _DOCKER_CONTAINERS[kernel_id]
@@ -630,9 +765,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
                                 ['docker', 'rm', container_id],
                                 timeout=10, capture_output=True, encoding='utf-8', errors='replace'
                             )
-                        except Exception as cleanup_err:
+                        except (subprocess.SubprocessError, OSError) as cleanup_err:
                             logger.warning(f"Container stop/rm failed during init error cleanup: {cleanup_err}")
                         del _DOCKER_CONTAINERS[kernel_id]
+                    # Remove from agent kernel tracking
+                    for session_list in _AGENT_KERNELS.values():
+                        if kernel_id in session_list:
+                            session_list.remove(kernel_id)
+                logger.warning(f"Kernel initialization failed for {kernel_id}: {init_err}")
                 raise  # Re-raise so caller sees the failure
 
         # Auto-resolve Windows paths to Docker container paths if enabled
@@ -960,12 +1100,129 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         return interrupted, partial_output
 
+    def close(self) -> int:
+        """Explicitly shut down all kernels owned by this CodeInterpreter instance.
+
+        Call this method to ensure ZMQ sockets are properly released instead of
+        relying on non-deterministic __del__ garbage collection. This is the
+        primary defense against "No buffer space available" errors under load.
+
+        Returns:
+            Number of kernels cleaned up.
+        """
+        pid = os.getpid()
+        kernel_ids = []
+
+        # Collect all kernel IDs matching this PID
+        with _KERNEL_LOCK:
+            for k in list(_KERNEL_CLIENTS.keys()):
+                if k.endswith(f'_{pid}'):
+                    kernel_ids.append(k)
+
+        if not kernel_ids:
+            return 0
+
+        logger.info(f"CodeInterpreter.close(): shutting down {len(kernel_ids)} kernel(s)")
+
+        kc_list = []
+        container_ids = []
+        stale_cids = []
+        collected_keys = []
+
+        # Collect state under lock
+        with _KERNEL_LOCK:
+            for k in list(_KERNEL_CLIENTS.keys()):
+                if not k.endswith(f'_{pid}'):
+                    continue
+                kc_list.append(_KERNEL_CLIENTS.pop(k, None))
+                collected_keys.append(k)
+            for k in list(_DOCKER_CONTAINERS.keys()):
+                if not k.endswith(f'_{pid}'):
+                    continue
+                container_ids.append(_DOCKER_CONTAINERS.pop(k, None))
+                collected_keys.append(k)
+            for k in list(_STALE_CONTAINERS.keys()):
+                if not k.endswith(f'_{pid}'):
+                    continue
+                stale_cids.append(_STALE_CONTAINERS.pop(k, None))
+                collected_keys.append(k)
+
+            # Clean up _AGENT_KERNELS entries for these kernels
+            for kid in kernel_ids:
+                for session_list in list(_AGENT_KERNELS.values()):
+                    if kid in session_list:
+                        session_list.remove(kid)
+
+        # Shut down kernel clients cooperatively
+        for kc in kc_list:
+            if kc is not None:
+                try:
+                    kc.shutdown()
+                except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
+                    logger.debug(f"Kernel shutdown failed in close(): {e}")
+
+        # Remove containers
+        for cid in container_ids:
+            if cid is None:
+                continue
+            try:
+                subprocess.run(['docker', 'stop', '-t', '3', cid], timeout=8, capture_output=True, encoding='utf-8', errors='replace')
+                subprocess.run(['docker', 'rm', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+            except (subprocess.SubprocessError, OSError) as e:
+                logger.warning(f"Container stop failed in close(), forcing removal: {e}")
+                try:
+                    subprocess.run(['docker', 'rm', '-f', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+                except (subprocess.SubprocessError, OSError) as force_err:
+                    logger.error(f"Force container removal failed in close(): {force_err}")
+
+        # Remove stale containers
+        for info in stale_cids:
+            if info is None:
+                continue
+            cid = info.get('container_id')
+            if cid:
+                try:
+                    subprocess.run(['docker', 'rm', '-f', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+                except (subprocess.SubprocessError, OSError) as e:
+                    logger.debug(f"Failed to remove stale container {cid} in close(): {e}")
+
+        # Clean up path mapping files
+        for k in collected_keys:
+            mapping_file = os.path.join(self.work_dir, f'path_mapping_{k}.json')
+            try:
+                if os.path.exists(mapping_file):
+                    os.remove(mapping_file)
+            except OSError as e:
+                logger.debug(f"Failed to remove path mapping file {mapping_file}: {e}")
+
+        # Clean up temporary files: connection files and launch scripts
+        for k in collected_keys:
+            # Remove connection files
+            for suffix in ['_host.json', '_container.json']:
+                conn_file = os.path.join(self.work_dir, f'kernel_connection_file_{k}{suffix}')
+                try:
+                    if os.path.exists(conn_file):
+                        os.remove(conn_file)
+                except OSError as e:
+                    logger.debug(f"Failed to remove connection file {conn_file}: {e}")
+
+            # Remove launch script
+            launch_script = os.path.join(self.work_dir, f'launch_kernel_{k}.py')
+            try:
+                if os.path.exists(launch_script):
+                    os.remove(launch_script)
+            except OSError as e:
+                logger.debug(f"Failed to remove launch script {launch_script}: {e}")
+
+        return len(kernel_ids)
+
     def __del__(self):
         # Recycle all kernels matching this instance's ID prefix.
         # Session-based kernel_ids are "ci_{session_name}_{pid}" but we also match
         # legacy format "{instance_id}_{pid}" for backward compatibility.
+        # NOTE: This is a fallback — explicit cleanup via close() or cleanup_kernels_for_session()
+        # is preferred to avoid non-deterministic GC timing causing ZMQ socket leaks.
         pid = os.getpid()
-        session_prefixes = [f'ci_']  # Match all ci_ prefixed kernels owned by this PID
 
         # Collect state under lock (minimize hold time)
         kc_list = []
@@ -993,26 +1250,33 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 collected_keys.append(k)
                 del _STALE_CONTAINERS[k]
 
+            # Also remove from _AGENT_KERNELS to prevent orphaned tracking entries.
+            # Scan all session lists and remove matching kernel IDs.
+            for kid in collected_keys:
+                for session_list in list(_AGENT_KERNELS.values()):
+                    if kid in session_list:
+                        session_list.remove(kid)
+
         # Clean up kernel clients outside lock (shutdown can block)
         for kc in kc_list:
             try:
                 kc.shutdown()
-            except Exception:
-                pass
+            except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
+                logger.debug(f"Kernel shutdown failed in __del__: {e}")
 
         # Force-remove containers outside lock (docker ops can be slow)
         for cid in container_ids:
             try:
                 subprocess.run(['docker', 'rm', '-f', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError) as e:
+                logger.debug(f"Container removal failed in __del__: {e}")
 
         # Force-remove stale containers outside lock
         for cid in stale_cids:
             try:
                 subprocess.run(['docker', 'rm', '-f', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError) as e:
+                logger.debug(f"Stale container removal failed in __del__: {e}")
 
         # Clean up path mapping files for collected kernels
         for k in collected_keys:
@@ -1020,6 +1284,25 @@ class CodeInterpreter(BaseToolWithFileAccess):
             try:
                 if os.path.exists(mapping_file):
                     os.remove(mapping_file)
+            except OSError:
+                pass
+
+        # Clean up temporary files: connection files and launch scripts
+        for k in collected_keys:
+            # Remove connection files
+            for suffix in ['_host.json', '_container.json']:
+                conn_file = os.path.join(self.work_dir, f'kernel_connection_file_{k}{suffix}')
+                try:
+                    if os.path.exists(conn_file):
+                        os.remove(conn_file)
+                except OSError:
+                    pass
+
+            # Remove launch script
+            launch_script = os.path.join(self.work_dir, f'launch_kernel_{k}.py')
+            try:
+                if os.path.exists(launch_script):
+                    os.remove(launch_script)
             except OSError:
                 pass
 
@@ -1498,7 +1781,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         try:
             while True:
                 m = kc.get_iopub_msg(timeout=0.5)
-        except:
+        except (zmq.ZMQError, queue.Empty):
             pass
         
         kc.execute(code)

@@ -27,6 +27,14 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from .agent_instance import AgentInstance, PoolSettings, AgentState, ACTIVE_STATES
 from .async_tools import AsyncToolRegistry
 
+# Optional: code interpreter kernel cleanup (used in dismiss_instance)
+try:
+    from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session, _AGENT_KERNELS, _KERNEL_LOCK
+except ImportError:
+    cleanup_kernels_for_session = None
+    _AGENT_KERNELS = {}
+    _KERNEL_LOCK = threading.Lock()
+
 
 class _InstanceConversationMapping(dict):
     """Custom dict that bridges writes to instance_conversations with instances[name].conversation.
@@ -1172,6 +1180,24 @@ class AgentPool:
         with self._pool_lock:
             if thread and not thread.is_alive():
                 self.terminated_instances.discard(instance_name)
+
+        # Clean up code interpreter kernels for this session to prevent ZMQ socket leaks.
+        # Check _AGENT_KERNELS directly — if any kernels are tracked under this instance's name,
+        # clean them up regardless of parent/child relationship. This handles:
+        # - Root agents (always own their kernels)
+        # - Child agents that somehow got kernels under their own session name
+        # Avoids double-cleanup since cleanup_kernels_for_session pops the entry atomically.
+        try:
+            with _KERNEL_LOCK:
+                has_kernels = instance_name in _AGENT_KERNELS and len(_AGENT_KERNELS[instance_name]) > 0
+            
+            if has_kernels:
+                cleaned = cleanup_kernels_for_session(instance_name)
+                if cleaned > 0:
+                    logger.info(f"Cleaned up {cleaned} kernel(s) for dismissed session '{instance_name}'")
+        except Exception as e:
+            # Non-critical: __del__ fallback will eventually clean up, but we log the issue
+            logger.warning(f"Kernel cleanup failed for session '{instance_name}' (non-critical): {e}")
 
         # Always remove the instance from the pool so its tab disappears from the UI
         self.remove_instance(instance_name)
