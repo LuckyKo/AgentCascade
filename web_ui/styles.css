@@ -615,13 +615,13 @@ body {
 
 .agent-message-sender {
   font-weight: 600;
-  font-size: 13px;
+  font-size: calc(var(--font-size-base, 14px) * 0.93);
   color: var(--accent);
   white-space: nowrap;
 }
 
 .agent-message-time {
-  font-size: 11px;
+  font-size: calc(var(--font-size-base, 14px) * 0.79);
   color: var(--text-muted);
   margin-left: auto;
   white-space: nowrap;
@@ -629,7 +629,7 @@ body {
 
 .agent-message-content {
   margin-top: 4px;
-  font-size: 13px;
+  font-size: var(--font-size-base, 14px);
   line-height: 1.5;
   color: var(--text-primary);
 }
@@ -638,11 +638,11 @@ body {
   background: var(--bg-code);
   padding: 1px 4px;
   border-radius: 3px;
-  font-size: 12px;
+  font-size: calc(var(--font-size-base, 14px) * 0.86);
 }
 
 .agent-message-hint {
-  font-size: 10px;
+  font-size: calc(var(--font-size-base, 14px) * 0.71);
   color: var(--text-muted);
   margin-top: 2px;
   font-style: italic;

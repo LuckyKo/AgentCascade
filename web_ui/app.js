@@ -2671,7 +2671,7 @@ function renderAgentMessages() {
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
         </svg>
         <div>No agent messages yet</div>
-        <div style="font-size:11px;margin-top:4px;">When agents send you notifications, they'll appear here.</div>
+        <div style="font-size:calc(var(--font-size-base, 14px) * 0.79);margin-top:4px;">When agents send you notifications, they'll appear here.</div>
       </div>
     `;
     return;
