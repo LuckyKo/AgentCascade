@@ -7,6 +7,9 @@ This script starts a minimal AgentPool with two mock agents and exercises:
 Run standalone:
     python tests/integration/test_send_message_manual.py
 
+Run with pytest:
+    pytest tests/integration/test_send_message_manual.py -v
+
 No LLM or full server required — uses mocked dependencies only.
 """
 
@@ -16,6 +19,8 @@ import os
 import sys
 import threading
 from unittest.mock import MagicMock
+
+import pytest
 
 # Ensure project root and config dir are on the path
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -65,6 +70,12 @@ def setup_agent_pool():
         pool.instances['agentB'] = make_mock_agent('agentB', AgentState.RUNNING)
 
     return pool
+
+
+@pytest.fixture
+def pool():
+    """Create a minimal FakeAgentPool with two test agents for send_message testing."""
+    return setup_agent_pool()
 
 
 def test_agent_to_agent(pool):
