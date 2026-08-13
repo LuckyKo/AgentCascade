@@ -15,6 +15,7 @@ AVAILABLE_TOOLS: List[str] = [
     'call_agent',       # Delegate tasks to specialized agent instances
     'dismiss_agent',    # End sub-agent sessions and clear context
     'list_agents',      # List available agent classes and active instances
+    'send_message',     # Send async messages to running agents or user
 
     # Read-only file ops
     'read_file',        # Read file contents
@@ -481,6 +482,23 @@ TOOL_METADATA = {
             'plus any active instances currently running or previously used. Use this to find out how to call a specific agent or instance'
         ),
         'parameters': {}
+    },
+    'send_message': {
+        'description': (
+            'Sends an asynchronous message to another running agent or to the user. '
+            'The message is queued and delivered on the recipient\'s next turn without '
+            'interrupting either party\'s current workflow. Returns success only if the '
+            'destination is actively running; otherwise returns a failure reason. Use this '
+            'for coordination between agents, parent-to-child guidance, or notifying the '
+            'user of important updates.'
+        ),
+        'parameters': {
+            'destination': (
+                "Target of the message. Use 'user' to send to the human user, "
+                "or an exact agent instance name (e.g., 'worker1') to send to another agent."
+            ),
+            'message': 'The message content to send.'
+        }
     },
     'compress_context': {
         'description': (

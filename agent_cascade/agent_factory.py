@@ -52,6 +52,9 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
             tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(tool_name), False, False)
         elif tool_name == 'list_agents':
             tools_to_register[tool_name] = (ListAgents(agent_pool=agent_pool), False, False)
+        elif tool_name == 'send_message':
+            from agent_cascade.tools.custom.send_message import SendMessage
+            tools_to_register[tool_name] = (SendMessage(agent_pool=agent_pool), False, False)
         elif tool_name == 'dismiss_agent':
             tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(tool_name), False, False)
         elif tool_name == 'read_file':

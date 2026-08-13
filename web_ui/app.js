@@ -112,6 +112,7 @@ const state = {
   lastMemoryEditTime: 0, // Timestamp of last manual memory edit to prevent race condition reverts
   _lastIsGenerating: undefined, // For change detection in updateControls()
   closedTabs: new Set(JSON.parse(localStorage.getItem('agent-cascade-closed-tabs') || '[]')),
+  agentMessages: [], // Populated via loadAgentMessages() on init
 };
 
 let ws = null;
@@ -304,6 +305,89 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
       });
       subAgentScrollLocks[name].listenerAdded = true;
     }
+  }
+}
+
+// ─── Agent Messages State Management ──────────────────────────────────────
+
+const AGENT_MESSAGES_STORAGE_KEY = 'agent-cascade-agent-messages';
+const MAX_AGENT_MESSAGES = 200; // Cap to prevent unbounded growth
+
+// Load messages from localStorage
+function loadAgentMessages() {
+  try {
+    const raw = localStorage.getItem(AGENT_MESSAGES_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        state.agentMessages = parsed.slice(-MAX_AGENT_MESSAGES);
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn('[AgentMessages] Failed to load from localStorage:', e);
+  }
+  state.agentMessages = [];
+}
+
+// Save messages to localStorage
+function saveAgentMessages() {
+  try {
+    // Trim to max before saving
+    if (state.agentMessages.length > MAX_AGENT_MESSAGES) {
+      state.agentMessages = state.agentMessages.slice(-MAX_AGENT_MESSAGES);
+    }
+    localStorage.setItem(AGENT_MESSAGES_STORAGE_KEY, JSON.stringify(state.agentMessages));
+  } catch (e) {
+    console.warn('[AgentMessages] Failed to save to localStorage:', e);
+  }
+}
+
+// Get all messages (sorted by timestamp ascending)
+function getAgentMessages() {
+  return state.agentMessages || [];
+}
+
+// Add a new message — uses crypto.randomUUID() for ID
+function addAgentMessage(msg) {
+  if (!state.agentMessages) state.agentMessages = [];
+  state.agentMessages.push(msg);
+  saveAgentMessages();
+}
+
+// Mark a specific message as read
+function markMessageRead(id) {
+  const msg = state.agentMessages?.find(m => m.id === id);
+  if (msg && !msg.read) {
+    msg.read = true;
+    saveAgentMessages();
+    updateAgentMessagesBadge();
+  }
+}
+
+// Mark all messages as read
+function markAllMessagesRead() {
+  if (!state.agentMessages?.length) return;
+  const hadUnread = state.agentMessages.some(m => !m.read);
+  state.agentMessages.forEach(m => m.read = true);
+  if (hadUnread) {
+    saveAgentMessages();
+    updateAgentMessagesBadge();
+  }
+}
+
+// Update the unread badge on the Agent Messages tab
+function updateAgentMessagesBadge() {
+  const badge = document.getElementById('agentMessagesBadge');
+  if (!badge) return;
+
+  const unreadCount = (state.agentMessages || []).filter(m => !m.read).length;
+
+  if (unreadCount > 0) {
+    badge.style.display = 'inline-flex';
+    badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+  } else {
+    badge.style.display = 'none';
   }
 }
 
@@ -2176,6 +2260,33 @@ function handleServerMessage(data) {
       }
       break;
     }
+
+    case 'agent_message_to_user': {
+      const { sender, message, timestamp } = data;
+      if (!sender || !message) break;
+
+      // Add to persisted store
+      addAgentMessage({
+        id: crypto.randomUUID(),
+        sender: sender,
+        message: message,
+        timestamp: timestamp || Date.now() / 1000,
+        read: false
+      });
+
+      // If user is currently viewing the Agent Messages tab, render immediately and mark as read
+      if (state.activeSubTab === 'sub-agent-messages') {
+        renderAgentMessages();
+        markAllMessagesRead();
+      } else {
+        // Update unread badge
+        updateAgentMessagesBadge();
+      }
+
+      // Optional: subtle notification sound or browser notification
+      // playSound('notification'); // Uncomment if desired
+      break;
+    }
   }
 
   // Trigger sounds based on state changes
@@ -2308,7 +2419,7 @@ function renderAgentConversation(instanceName, messages, depth, indexMap, render
             placeholderEl.dataset.index = i;
             const content = document.createElement('div');
             content.className = 'sub-msg-content';
-            content.style = "font-style:italic;color:var(--text-dim);";
+            content.style = "font-style:italic;color:var(--text-muted);";
             content.textContent = '[... missed messages ...]';
             placeholderEl.appendChild(content);
             fragment.appendChild(placeholderEl);
@@ -2521,6 +2632,107 @@ function createImagePreserver(contentDiv) {
         // Clear remaining cache to prevent memory leaks
         imgCache.clear();
     };
+}
+
+// ─── Agent Messages Rendering ──────────────────────────────────────────────
+
+// Render agent messages into the Agent Messages panel
+function renderAgentMessages() {
+  const container = document.getElementById('agentMessagesList');
+  if (!container) return;
+
+  const messages = getAgentMessages();
+
+  if (messages.length === 0) {
+    container.innerHTML = `
+      <div class="agent-messages-empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <div>No agent messages yet</div>
+        <div style="font-size:11px;margin-top:4px;">When agents send you notifications, they'll appear here.</div>
+      </div>
+    `;
+    return;
+  }
+
+  // Use a document fragment for efficient DOM update
+  const fragment = document.createDocumentFragment();
+
+  messages.forEach((msg) => {
+    const el = createAgentMessageEl(msg);
+    fragment.appendChild(el);
+  });
+
+  container.innerHTML = '';
+  container.appendChild(fragment);
+
+  // Scroll to bottom on initial render only (not on new message arrival while viewing)
+  if (!container.dataset.initialRendered) {
+    container.dataset.initialRendered = 'true';
+    scrollPanelToBottom(container, 'sub-agent-messages', false);
+  }
+}
+
+// Create a single agent message element
+function createAgentMessageEl(msg) {
+  const div = document.createElement('div');
+  div.className = 'agent-message';
+  if (!msg.read) {
+    div.classList.add('unread');
+  }
+
+  // Click to reply: insert @sender into chat input
+  div.onclick = () => {
+    insertAgentMention(msg.sender);
+    markMessageRead(msg.id);
+  };
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;gap:6px;';
+
+  const sender = document.createElement('span');
+  sender.className = 'agent-message-sender';
+  sender.textContent = msg.sender;
+
+  const time = document.createElement('span');
+  time.className = 'agent-message-time';
+  time.textContent = formatTimestamp(msg.timestamp);
+
+  header.appendChild(sender);
+  header.appendChild(time);
+  div.appendChild(header);
+
+  // Render markdown content (reuse existing libs: marked + DOMPurify)
+  const content = document.createElement('div');
+  content.className = 'agent-message-content';
+  const rawHtml = marked.parse(msg.message || '');
+  content.innerHTML = DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
+  div.appendChild(content);
+
+  // Hint about clicking to reply
+  const hint = document.createElement('div');
+  hint.className = 'agent-message-hint';
+  hint.textContent = `Click to reply with @${msg.sender}`;
+  div.appendChild(hint);
+
+  return div;
+}
+
+function formatTimestamp(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000); // backend sends unix timestamp in seconds
+  const now = new Date();
+  const diffMs = now - d;
+  const diffMin = Math.floor(diffMs / 60000);
+
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffMin < 1440) return `${Math.floor(diffMin / 60)}h ago`;
+
+  // Full date for older messages
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /**
@@ -3351,6 +3563,52 @@ window.rejectRequest = function (requestId) {
   state.activeSecurityChecks.delete(requestId);
 };
 
+// ── Agent Messages Tab Initialization ──────────────────────────────────────
+
+// Initialize Agent Messages tab (static, always present)
+function initAgentMessagesTab() {
+  // Create tab button — use 'sub-' prefix for consistency with all other tabs
+  const tabBtn = document.createElement('button');
+  tabBtn.className = 'main-tab';
+  tabBtn.dataset.tab = 'sub-agent-messages';
+  tabBtn.onclick = () => switchMainTab('sub-agent-messages');
+
+  const iconSpan = document.createElement('span');
+  iconSpan.className = 'tab-icon-container';
+  iconSpan.innerHTML = '<span class="main-tab-icon">💬</span>';
+  tabBtn.appendChild(iconSpan);
+
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'tab-label';
+  labelSpan.textContent = ' Agent Messages';
+  tabBtn.appendChild(labelSpan);
+
+  // Unread badge (hidden by default)
+  const badge = document.createElement('span');
+  badge.className = 'agent-messages-badge';
+  badge.id = 'agentMessagesBadge';
+  badge.style.display = 'none';
+  tabBtn.appendChild(badge);
+
+  mainTabBar.appendChild(tabBtn);
+
+  // Create panel — use consistent naming pattern: panelSub-{name}
+  const panel = document.createElement('div');
+  panel.className = 'main-tab-panel agent-messages-panel';
+  panel.id = 'panelSub-agent-messages';
+
+  const messagesContainer = document.createElement('div');
+  messagesContainer.className = 'messages';
+  messagesContainer.id = 'agentMessagesList';
+  panel.appendChild(messagesContainer);
+
+  mainTabPanels.appendChild(panel);
+
+  // Load persisted messages and render
+  loadAgentMessages();
+  renderAgentMessages();
+}
+
 // ── Sub-agents ───────────────────────────────────────────────────────────────
 
 function renderSubAgents() {
@@ -3764,6 +4022,12 @@ function switchMainTab(tabId) {
   mainTabBar.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
   const activeTab = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
   if (activeTab) activeTab.classList.add('active');
+
+  // Mark agent messages as read when switching to that tab
+  if (tabId === 'sub-agent-messages') {
+    markAllMessagesRead();
+    renderAgentMessages(); // Re-render to show updated read state
+  }
 
   // Update panels — all tabs use the same dynamic panel system now
   mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => p.classList.remove('active'));
@@ -4891,6 +5155,52 @@ function getGenerateCfg() {
   return cfg;
 }
 
+// ─── @Mention System ────────────────────────────────────────────────────────
+
+// Insert @mention of an agent into the chat input and focus it
+function insertAgentMention(agentName) {
+  const input = chatInput;
+  const mention = '@' + agentName + ' ';
+
+  // If input is empty, just set the value
+  if (!input.value.trim()) {
+    input.value = mention;
+  } else {
+    // Append to existing content with a space
+    input.value += mention;
+  }
+
+  input.focus();
+  autoResize(input);
+
+  // Move cursor after the inserted mention
+  const pos = input.value.length;
+  input.setSelectionRange(pos, pos);
+}
+
+// Parse @mentions from message text and return { targetAgent, cleanedText }
+function parseMentionRouting(text) {
+  if (!text) return { targetAgent: null, cleanedText: text };
+
+  // Match @mention at start of message (after optional whitespace)
+  const mentionMatch = text.match(/^\s*@(\S+)\s+(.*)$/s);
+  if (!mentionMatch) {
+    return { targetAgent: null, cleanedText: text.trim() };
+  }
+
+  const mentionedName = mentionMatch[1];
+  const cleanedText = mentionMatch[2].trim();
+
+  // Validate: mentioned name must match an existing agent instance
+  if (state.subAgents && state.subAgents[mentionedName]) {
+    return { targetAgent: mentionedName, cleanedText: cleanedText || text.trim() };
+  }
+
+  // Unknown agent: treat as normal message (don't strip the @)
+  console.log('[AgentMessages] @mention for unknown agent:', mentionedName);
+  return { targetAgent: null, cleanedText: text.trim() };
+}
+
 function sendMessage(inputEl) {
   const targetInput = inputEl instanceof HTMLElement ? inputEl : chatInput;
   const rawText = targetInput.value.trim();
@@ -4901,18 +5211,35 @@ function sendMessage(inputEl) {
   autoResize(targetInput);
   imagePreviewContainer.innerHTML = ''; // Clear image previews after sending
 
+  // Determine routing based on active tab and @mentions
+  let targetAgent = null;
+  let messageText = text;
+
+  if (state.activeSubTab === 'sub-agent-messages') {
+    // In Agent Messages tab: parse @mentions for routing
+    const parsed = parseMentionRouting(text);
+    if (parsed.targetAgent) {
+      targetAgent = parsed.targetAgent;
+      messageText = parsed.cleanedText || text;
+    } else {
+      // No valid @mention: route to session primary agent (orchestrator)
+      targetAgent = state.sessionName;
+    }
+  } else {
+    // Normal behavior: route to the active tab's agent
+    targetAgent = getActiveAgentName();
+  }
+
   if (state.generating) {
-    // Async injection: route to the active agent (session primary or selected sub-tab)
-    const targetAgent = getActiveAgentName();
-    send({ type: 'message', text, target_agent: targetAgent });
+    // Async injection during generation
+    send({ type: 'message', text: messageText, target_agent: targetAgent });
     return;
   }
 
   resetGenStats();
-  const targetAgent = getActiveAgentName();
   send({
     type: 'message',
-    text,
+    text: messageText,
     target_agent: targetAgent,
     agent_index: state.agentIndex,
     session_name: state.sessionName,
@@ -4952,6 +5279,7 @@ function retryGeneration() {
 // ── Init ─────────────────────────────────────────────────────────────────────
 ActivityBar.init();
 connect();
+initAgentMessagesTab(); // NEW: initialize Agent Messages tab
 if ($('#apply-mcp-btn')) {
   $('#apply-mcp-btn').addEventListener('click', () => {
     saveSettings();
