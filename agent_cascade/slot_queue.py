@@ -19,12 +19,15 @@ Plan reference: plans/api_scheduler_queue_refactor_plan.md
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_cascade.agent_instance import AgentInstance
@@ -228,6 +231,12 @@ class SlotPool:
            - Only head waiter proceeds; non-head re-waits immediately.
         3. Returns a release callback bound to the granted SlotHolder.
         
+        DEADLOCK FIX: Stale reservations (older than RESERVATION_TIMEOUT) are treated as
+        expired — they no longer block waiting agents. cleanup_stale_reservations() is
+        called periodically during acquire() to forcibly remove them. This prevents
+        indefinite hangs when a reservation is created but never unreserved due to
+        exception paths or race conditions.
+        
         Args:
             instance_name: The requesting agent's instance name.
             agent_class: The requesting agent's class type.
@@ -250,6 +259,10 @@ class SlotPool:
             timeout = QUEUE_WAIT_TIMEOUT
         
         with self._cond:
+            # DEADLOCK FIX: Clean up any stale reservations before attempting acquire.
+            # This prevents indefinite blocking from abandoned reservations.
+            _cleanup_stale_reservations(self)
+            
             # Fast path: capacity available AND no blocking reservation
             if (len(self._running) < self.capacity 
                 and not _blocked_by_reservation(self, ancestor_chain)):
@@ -278,7 +291,13 @@ class SlotPool:
                 if remaining <= 0:
                     # Timeout: remove ticket from queue (O(1) via OrderedDict.pop)
                     _remove_ticket(self, ticket)
+                    # DEADLOCK FIX: Log diagnostic info to help identify root cause.
+                    _log_acquire_timeout(self, ticket)
                     raise SlotQueueTimeout(ticket)
+                
+                # DEADLOCK FIX: Periodically clean stale reservations during wait loop.
+                # This ensures abandoned reservations don't block us indefinitely.
+                _cleanup_stale_reservations(self)
                 
                 # Wait until predicate is true: capacity free + no blocking reservation + we are head.
                 # Use wait_for with 1s tick for interruptibility (termination checks).
@@ -579,6 +598,38 @@ class SlotPool:
                 if (now - r.created_at) > threshold
             ]
 
+    def cleanup_stale_reservations(self, threshold: float = RESERVATION_TIMEOUT) -> int:
+        """Remove all reservations older than the given threshold.
+        
+        DEADLOCK FIX: This is the watchdog cleanup that prevents stale reservations
+        from blocking all waiters indefinitely. Called automatically during acquire()
+        checks and can also be called externally for proactive cleanup.
+        
+        Args:
+            threshold: Age in seconds above which a reservation is considered stale.
+                Defaults to RESERVATION_TIMEOUT (configurable via QWEN_AGENT_RESERVATION_TIMEOUT).
+        
+        Returns:
+            Number of stale reservations removed.
+        """
+        now = time.monotonic()
+        with self._cond:
+            tokens_to_remove = [
+                tok for tok, res in self._reservations.items()
+                if (now - res.created_at) > threshold
+            ]
+            for tok in tokens_to_remove:
+                res = self._reservations.pop(tok)
+                logger.warning(
+                    f"[SLOTPOOL] Cleaned up stale reservation (age={now - res.created_at:.1f}s, "
+                    f"token={res.token}, agent={res.agent_name}, reason={res.reason})"
+                )
+            
+            if tokens_to_remove:
+                self._cond.notify_all()  # Wake waiters that may have been blocked by stale reservations
+            
+            return len(tokens_to_remove)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal helpers (called only under pool._cond)
@@ -676,6 +727,12 @@ def _blocked_by_reservation(pool: SlotPool, ancestor_chain: Tuple[str, ...]) -> 
     (i.e., at least one name in the grantee's ancestor_chain appears in the
     reservation's ancestor_chain).
 
+    DEADLOCK FIX: Reservations older than RESERVATION_TIMEOUT are treated as expired
+    — they do NOT block grants. This prevents stale reservations from causing
+    indefinite hangs when unreserve() was never called (e.g., due to exception paths).
+    Expired reservations are logged as warnings and cleaned up by
+    cleanup_stale_reservations().
+
     Self-exemption: if A reserves and then A re-acquires, A's instance_name IS in
     A's own ancestor_chain → not blocked. This is mathematically guaranteed.
 
@@ -686,10 +743,75 @@ def _blocked_by_reservation(pool: SlotPool, ancestor_chain: Tuple[str, ...]) -> 
 
     Must be called under pool._cond.
     """
+    now = time.monotonic()
     for res in pool._reservations.values():
+        # DEADLOCK FIX: Skip expired reservations — they no longer block grants.
+        if (now - res.created_at) > RESERVATION_TIMEOUT:
+            logger.warning(
+                f"[SLOTPOOL] Expired reservation encountered (age={now - res.created_at:.1f}s, "
+                f"token={res.token}, agent={res.agent_name}, reason={res.reason}) — "
+                f"ignoring. Will be cleaned up by stale reservation sweeper."
+            )
+            continue
+        
         # Grantee is allowed if any of its chain names appear in the reservation's chain.
         # Includes self-exemption: A's instance_name is always in its own chain.
         if any(name in res.ancestor_chain for name in ancestor_chain):
             continue  # This reservation does NOT block us; check next one.
         return True  # Blocked by this reservation until it clears.
     return False  # No active reservations block us.
+
+
+def _cleanup_stale_reservations(pool: SlotPool) -> int:
+    """Remove stale reservations from the pool. Must be called under pool._cond.
+    
+    DEADLOCK FIX: Called during acquire() to prevent abandoned reservations from
+    blocking all waiters indefinitely. Reservations older than RESERVATION_TIMEOUT
+    are forcibly removed with a warning log.
+    
+    Returns:
+        Number of stale reservations removed.
+    """
+    now = time.monotonic()
+    tokens_to_remove = [
+        tok for tok, res in pool._reservations.items()
+        if (now - res.created_at) > RESERVATION_TIMEOUT
+    ]
+    for tok in tokens_to_remove:
+        res = pool._reservations.pop(tok)
+        logger.warning(
+            f"[SLOTPOOL] Cleaned up stale reservation on pool '{pool.key}' "
+            f"(age={now - res.created_at:.1f}s, token={res.token}, agent={res.agent_name}, reason={res.reason})"
+        )
+    
+    if tokens_to_remove:
+        pool._cond.notify_all()  # Wake waiters blocked by the stale reservations
+    
+    return len(tokens_to_remove)
+
+
+def _log_acquire_timeout(pool: SlotPool, ticket: QueueTicket) -> None:
+    """Log diagnostic information when acquire() times out. Must be called under pool._cond.
+    
+    DEADLOCK FIX: Provides visibility into pool state at timeout to help identify
+    root causes like stale reservations or capacity exhaustion.
+    """
+    now = time.monotonic()
+    wait_time = now - ticket.created_at
+    
+    # Gather reservation info for diagnostics
+    reservation_info = []
+    for res in pool._reservations.values():
+        age = now - res.created_at
+        stale_marker = " [STALE]" if age > RESERVATION_TIMEOUT else ""
+        reservation_info.append(
+            f"{{token={res.token}, agent={res.agent_name}, age={age:.1f}s{stale_marker}}}"
+        )
+    
+    logger.warning(
+        f"[SLOTPOOL] Acquire timeout on pool '{pool.key}' for ticket {ticket.ticket_id} "
+        f"(agent={ticket.instance_name}, wait_time={wait_time:.1f}s): "
+        f"running={len(pool._running)}/{pool.capacity}, "
+        f"waiters={len(pool._waiters)}, "
+        f"reservations={[', '.join(reservation_info)] if reservation_info else 'none'}"
+    )

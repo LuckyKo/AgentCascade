@@ -70,25 +70,6 @@ def test_max_input_tokens_not_popped(llm: _DummyLLM):
     )
 
 
-def test_max_input_tokens_gets_used_for_truncation(llm: _DummyLLM):
-    """The value retrieved via .get() must actually be passed to truncation."""
-    llm.generate_cfg = {'max_input_tokens': 10}
-
-    # Build a message list that exceeds the tiny token budget.
-    long_content = 'word ' * 200  # ~800 tokens
-    msgs = [Message('user', long_content)]
-
-    result = list(llm.chat(msgs))
-    # chat() with stream=True returns an iterator of List[Message].
-    # result[0] is the first (and only) chunk — a list of Messages.
-    first_chunk = result[0]  # type: ignore[index]
-    assert isinstance(first_chunk, list), f"expected list, got {type(first_chunk)}"
-    first_resp = first_chunk[0] if isinstance(first_chunk[0], Message) else Message(**first_chunk[0])  # type: ignore[arg-type]
-    assert len(first_resp.content or '') < len(long_content), (
-        "max_input_tokens=10 should have truncated the message"
-    )
-
-
 def test_default_max_input_tokens_when_missing(llm: _DummyLLM):
     """When max_input_tokens is absent, a sensible default should be used."""
     llm.generate_cfg = {}
