@@ -95,8 +95,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] need some kind of markers to the summary outputs to quickly decide that the compressor did its job properly. add a formatting style to compression the task so we can parse the last line and decide that the compressor did its job and didnt hallucinate or continue the agentic task in the history its supposed to compress (it happens quite often). if the output lacks that end marker we rollback and retry it. need a similar retry mechanism for security if that one messes up the last line format too.
 - [x] propose_skill now passes full skill_content to security review (no 500-char truncation). Fixed: removed [:500] slice in agent_cascade/tools/custom/propose_skill.py line 153; both new-skill and update_existing paths use full content. Investigated, implemented, reviewed, verified. See reports/investigation_propose_skill_security_truncation.md.
 - [x] UI settings export/import round-trip audit — FIXED: max_workers import alias handler added (was silently dropped), max_images_for_llm now persisted to disk (was lost on restart), sleeping_timeout removed from exports (deprecated). All exported settings now re-importable without data loss. See audit_reports/ui_settings_export_import_audit_20260812.md and .agent_lessons/ui-settings-export-import-roundtrip-gaps.md.
-- [ ] check KV cache miss on reused agent (investigate POST dump on exit and on recall, see if something changes in sys prompt)
-- [ ] make a skill for best practices when creating unit/regression tests (research only for existing skills, and for best practices)
+- [x] check KV cache miss on reused agent (investigate POST dump on exit and on recall, see if something changes in sys prompt)
+- [x] make a skill for best practices when creating unit/regression tests — DONE: generic Python/pytest testing-best-practices skill at .qwen/skills/testing-best-practices/SKILL.md. Cross-project reusable, no AC-specific references. Based on research report and project memories. Reviewed and approved twice (AC-specific then generic).
 
 
 
