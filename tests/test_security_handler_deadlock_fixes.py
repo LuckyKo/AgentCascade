@@ -19,6 +19,7 @@ from agent_cascade.security_handler import (
     SECURITY_LLM_TIMEOUT_SECONDS,
     SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS,
     _get_security_check_lock,
+    _get_security_execution_lock,
 )
 
 
@@ -107,17 +108,13 @@ class TestReentrantSecurityLock:
         lock.release()
 
     def test_security_handler_creates_rlock_type(self):
-        """Verify security_handler.py source uses RLock, not Semaphore or Lock."""
+        """Verify security_handler.py uses RLock for execution lock (not Semaphore or Lock)."""
         import inspect
         from agent_cascade import security_handler
 
         source = inspect.getsource(security_handler)
         assert "RLock()" in source, (
             "security_handler should use threading.RLock() for reentrant safety"
-        )
-        # Ensure we're not using Semaphore(1) as the concurrency primitive anymore
-        assert "Semaphore(1)" not in source or "# DEADLOCK FIX" in source.replace("Semaphore(1)", ""), (
-            "security_handler should not use non-reentrant Semaphore(1) for security check locking"
         )
 
     def test_both_security_locks_are_rlocks(self):
@@ -129,12 +126,9 @@ class TestReentrantSecurityLock:
             "_get_security_check_lock must return RLock for reentrant prompt building"
         )
 
-        # security_execution_lock is created lazily in _execute_check, verify via source
-        import inspect
-        from agent_cascade import security_handler
-        source = inspect.getsource(security_handler)
-        assert "security_execution_lock = threading.RLock()" in source, (
-            "security_execution_lock must also be created as RLock"
+        lock2 = _get_security_execution_lock(app)
+        assert isinstance(lock2, type(threading.RLock())), (
+            "_get_security_execution_lock must return RLock for reentrant execution"
         )
 
     def test_unused_semaphore_removed_from_api_server(self):

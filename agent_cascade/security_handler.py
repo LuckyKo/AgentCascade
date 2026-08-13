@@ -64,6 +64,17 @@ def _get_security_check_lock(app):
     return app.security_check_lock
 
 
+def _get_security_execution_lock(app):
+    """Get (creating if needed) the app-level security execution lock.
+
+    DEADLOCK FIX: Uses RLock to allow reentrant acquisition during engine.run().
+    Protects the execution loop with acquire timeout semantics.
+    """
+    if not hasattr(app, 'security_execution_lock'):
+        app.security_execution_lock = threading.RLock()
+    return app.security_execution_lock
+
+
 def _get_active_checks_state(app):
     """Get (creating if needed) active checks tracking set + its lock.
 
@@ -149,12 +160,12 @@ class SecurityAdvisorHandler:
         if not rid:
             ap_list = pending
         else:
-            ap_list = [a for a in pending if a['request_id'] == rid]
+            ap_list = next((a for a in pending if a.get('request_id') == rid), None)
 
         if not ap_list:
             return
 
-        ap = ap_list[0]  # Check the first matching approval
+        ap = ap_list  # Check the first matching approval
         rid = ap['request_id']
 
         # Resolve the true caller from the approval (the agent that requested the tool).
@@ -354,12 +365,11 @@ class SecurityAdvisorHandler:
             # sec_prompt_lock protects the prompt-building phase (short hold, released before execution).
             # security_execution_lock protects the execution loop (longer hold with its own timeout semantics).
             # Both are RLocks to handle nested security checks safely.
-            if not getattr(self.app_state, 'security_execution_lock', None):
-                self.app_state.security_execution_lock = threading.RLock()
+            exec_lock = _get_security_execution_lock(self.app_state)
 
             # DEADLOCK FIX #3: Acquire with timeout instead of blocking forever.
             # If a previous check crashed without releasing, we don't want to hang indefinitely.
-            acquired = self.app_state.security_execution_lock.acquire(
+            acquired = exec_lock.acquire(
                 timeout=SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS
             )
             if not acquired:
@@ -463,7 +473,7 @@ class SecurityAdvisorHandler:
                         pass
 
                 # Release concurrency lock for Security checks
-                self.app_state.security_execution_lock.release()
+                exec_lock.release()
 
                 # Safe timer cleanup — cancel if timer exists and hasn't been garbage collected
                 if _llm_timeout_timer is not None:
@@ -772,6 +782,6 @@ class SecurityAdvisorHandler:
         active_checks, checks_lock = _get_active_checks_state(self.app_state)
         if sec_state_key:
             with checks_lock:
-                rid = sec_state_key.replace('Security_', '', 1)
-                active_checks.discard(rid)
-            logger.debug(f"[SECURITY] Released active check for {rid}")
+                released_rid = sec_state_key.replace('Security_', '', 1)
+                active_checks.discard(released_rid)
+            logger.debug(f"[SECURITY] Released active check for {released_rid}")
