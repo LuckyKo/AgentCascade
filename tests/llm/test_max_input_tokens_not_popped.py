@@ -1,6 +1,5 @@
 """Test that max_input_tokens is not consumed by .pop() in BaseChatModel.chat()."""
 
-import copy
 from typing import Iterator, List, Union
 
 import pytest
