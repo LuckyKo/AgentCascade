@@ -41,19 +41,13 @@ class SendMessage(BaseTool):
             return "Error: No agent pool available."
 
         parsed = self._verify_json_format_args(params)
-        destination = parsed.get('destination', '')
-        message = parsed.get('message', '')
+        destination = str(parsed.get('destination', '')).strip()
+        message = str(parsed.get('message', '')).strip()
 
-        # Validate inputs
-        if not destination or not str(destination).strip():
+        if not destination:
             return "Failed: Destination cannot be empty."
-
-        destination = str(destination).strip()
-
-        if not message or not str(message).strip():
+        if not message:
             return "Failed: Message content cannot be empty."
-
-        message = str(message).strip()
 
         # Handle user destination
         if destination == 'user':
@@ -93,10 +87,10 @@ class SendMessage(BaseTool):
             )
             return "Message sent successfully to the user. They will see it in their notifications."
         except Exception as e:
-            # Log and degrade gracefully
+            # Log full traceback, don't expose details to caller
             from agent_cascade.log import logger
-            logger.warning(f"Failed to send message to user via WebSocket: {e}")
-            return f"Warning: Message queued but notification may not be delivered immediately: {e}"
+            logger.exception("Failed to send message to user via WebSocket")
+            return "Warning: Message queued but notification may not be delivered immediately."
 
     def _send_to_agent(self, destination: str, message: str) -> str:
         """Queue message for target agent."""
@@ -119,8 +113,10 @@ class SendMessage(BaseTool):
                 state_name = current_state.name
                 return f"Failed: Agent '{destination}' is currently {state_name}. Messages are only delivered to actively running agents."
 
-        # Enqueue outside the pool lock (enqueue_message has its own queue lock)
+        # Tag message with sender for agent-to-agent context
         tagged_message = f"[MESSAGE from {sender}]: {message}"
+        
+        # Enqueue outside the pool lock (enqueue_message has its own queue lock)
         pool.enqueue_message(destination, tagged_message)
 
         return f"Message sent successfully to '{destination}'. It will be delivered on their next turn."

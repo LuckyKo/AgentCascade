@@ -312,6 +312,7 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
 
 const AGENT_MESSAGES_STORAGE_KEY = 'agent-cascade-agent-messages';
 const MAX_AGENT_MESSAGES = 200; // Cap to prevent unbounded growth
+const AGENT_MESSAGES_SEEN_IDS = new Set();
 
 // Load messages from localStorage
 function loadAgentMessages() {
@@ -321,6 +322,8 @@ function loadAgentMessages() {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         state.agentMessages = parsed.slice(-MAX_AGENT_MESSAGES);
+        // Populate seen IDs set from loaded messages
+        state.agentMessages.forEach(m => { if (m.id) AGENT_MESSAGES_SEEN_IDS.add(m.id); });
         return;
       }
     }
@@ -333,8 +336,10 @@ function loadAgentMessages() {
 // Save messages to localStorage
 function saveAgentMessages() {
   try {
-    // Trim to max before saving
+    // Trim to max before saving, sync seen IDs set when trimming
     if (state.agentMessages.length > MAX_AGENT_MESSAGES) {
+      const removed = state.agentMessages.slice(0, state.agentMessages.length - MAX_AGENT_MESSAGES);
+      removed.forEach(m => AGENT_MESSAGES_SEEN_IDS.delete(m.id));
       state.agentMessages = state.agentMessages.slice(-MAX_AGENT_MESSAGES);
     }
     localStorage.setItem(AGENT_MESSAGES_STORAGE_KEY, JSON.stringify(state.agentMessages));
@@ -351,8 +356,23 @@ function getAgentMessages() {
 // Add a new message — uses crypto.randomUUID() for ID
 function addAgentMessage(msg) {
   if (!state.agentMessages) state.agentMessages = [];
+
+  // Validate required fields
+  if (!msg.id || !msg.sender || !msg.message) {
+    console.warn('[AgentMessages] Invalid message skipped:', msg);
+    return false;
+  }
+
+  // Check for duplicate ID
+  if (AGENT_MESSAGES_SEEN_IDS.has(msg.id)) {
+    console.warn('[AgentMessages] Duplicate message skipped:', msg.id);
+    return false;
+  }
+  AGENT_MESSAGES_SEEN_IDS.add(msg.id);
+
   state.agentMessages.push(msg);
   saveAgentMessages();
+  return true;
 }
 
 // Mark a specific message as read
@@ -2266,17 +2286,18 @@ function handleServerMessage(data) {
       if (!sender || !message) break;
 
       // Add to persisted store
-      addAgentMessage({
+      const newMsg = {
         id: crypto.randomUUID(),
         sender: sender,
         message: message,
         timestamp: timestamp || Date.now() / 1000,
         read: false
-      });
+      };
+      addAgentMessage(newMsg);
 
       // If user is currently viewing the Agent Messages tab, render immediately and mark as read
       if (state.activeSubTab === 'sub-agent-messages') {
-        renderAgentMessages();
+        appendAgentMessageToVisible(newMsg);
         markAllMessagesRead();
       } else {
         // Update unread badge
@@ -2672,6 +2693,20 @@ function renderAgentMessages() {
     container.dataset.initialRendered = 'true';
     scrollPanelToBottom(container, 'sub-agent-messages', false);
   }
+}
+
+// Append a single message to the visible list (incremental update)
+function appendAgentMessageToVisible(msg) {
+  const container = document.getElementById('agentMessagesList');
+  if (!container) return;
+
+  // Remove empty state if present
+  const emptyEl = container.querySelector('.agent-messages-empty');
+  if (emptyEl) emptyEl.remove();
+
+  const el = createAgentMessageEl(msg);
+  container.appendChild(el);
+  scrollPanelToBottom(container, 'sub-agent-messages', false);
 }
 
 // Create a single agent message element
