@@ -3602,6 +3602,10 @@ window.rejectRequest = function (requestId) {
 
 // Initialize Agent Messages tab (static, always present)
 function initAgentMessagesTab() {
+  if (!mainTabBar || !mainTabPanels) {
+    console.error('[AgentMessages] DOM elements not ready: mainTabBar=', !!mainTabBar, 'mainTabPanels=', !!mainTabPanels);
+    return;
+  }
   // Create tab button — use 'sub-' prefix for consistency with all other tabs
   const tabBtn = document.createElement('button');
   tabBtn.className = 'main-tab';
@@ -3667,8 +3671,10 @@ function renderSubAgents() {
   const namesArr = Object.keys(sa).filter(name => !state.closedTabs.has('sub-' + name));
 
   // Remove stale sub-agent tabs and panels for agents that no longer exist
+  // Exclude static UI tabs like "sub-agent-messages" from cleanup
   mainTabBar.querySelectorAll('.main-tab[data-tab^="sub-"]').forEach(tab => {
     const agentName = tab.dataset.tab.substring(4);
+    if (agentName === 'agent-messages') return; // skip static UI tab
     if (!namesArr.includes(agentName)) {
       tab.remove();
       const panel = document.getElementById('panelSub-' + agentName);
