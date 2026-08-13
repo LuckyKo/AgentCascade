@@ -301,11 +301,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     except MediaStorageError as e:
         logger.warning(f"Media directory unavailable at startup (will fall back to base64): {e}")
 
-    # Initialize concurrency control for Security advisor checks
-    # Security runs on a separate daemon thread (line 2245), so we need a semaphore
-    # to limit concurrent Security agent invocations to 1, preventing unlimited parallelism
-    if not hasattr(app, 'security_check_semaphore'):
-        app.security_check_semaphore = threading.Semaphore(1)
+    # Initialize concurrency control for Security advisor checks.
+    # Security runs on a separate daemon thread, so we use RLock-based locking
+    # (created lazily in security_handler.py) to prevent unlimited parallelism
+    # and allow reentrant acquisition for nested security checks.
 
     # Initialize Auto-Ask Security mode state
     # Read by _get_auto_security_enabled() in security_handler.py via getattr(app, ...)

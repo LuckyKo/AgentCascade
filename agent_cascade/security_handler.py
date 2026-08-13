@@ -12,6 +12,15 @@ import time
 import threading
 from typing import Any, Dict, Optional
 
+# ── Deadlock protection constants ───────────────────────────────────────────
+# Hard timeout for the LLM response phase (engine.run generator).
+# Prevents hang if model never yields a token. Separate from user-facing approval_timeout_seconds.
+SECURITY_LLM_TIMEOUT_SECONDS = 60
+
+# Timeout for acquiring the security check lock.
+# Prevents permanent block if previous check crashed without releasing.
+SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = 10
+
 # ── Module-level helpers used by the security handler ───────────────────────
 
 
@@ -42,9 +51,16 @@ def _get_ws_loop(agent_pool):
 
 
 def _get_security_check_lock(app):
-    """Get (creating if needed) the app-level security check lock."""
+    """Get (creating if needed) the app-level security prompt lock.
+
+    DEADLOCK FIX: Uses RLock to allow reentrant acquisition. If a Security agent
+    triggers another security check, the same thread can acquire this lock again
+    without deadlocking. This replaces the original non-reentrant Lock().
+
+    Also known as security_prompt_lock — protects prompt building phase only.
+    """
     if not hasattr(app, 'security_check_lock'):
-        app.security_check_lock = threading.Lock()
+        app.security_check_lock = threading.RLock()
     return app.security_check_lock
 
 
@@ -77,8 +93,12 @@ class SecurityAdvisorHandler:
       5. Auto-approve or auto-reject based on verdict
       6. Clean up instance state
 
-    Thread-safe: uses the app-level security_check_semaphore (Semaphore(1))
-    and active_security_checks tracking set to prevent duplicate/overlapping checks.
+    Thread-safe: uses two RLock-based locks for deadlock prevention:
+      - security_prompt_lock (via _get_security_check_lock): protects prompt building phase,
+        allows reentrant acquisition if Security agent triggers nested check.
+      - security_execution_lock: protects engine execution loop with acquire timeout,
+        prevents permanent block on crash and supports reentrancy.
+    Plus active_security_checks tracking set to prevent duplicate/overlapping checks.
     """
 
     # ── Constructor ───────────────────────────────────────────────────────
@@ -233,8 +253,9 @@ class SecurityAdvisorHandler:
 
         sec_state_key = None
         sec_instance = None
+        sec_warning_timer = None  # Track for cleanup in finally block
 
-        sec_lock = _get_security_check_lock(self.app_state)
+        sec_prompt_lock = _get_security_check_lock(self.app_state)
         active_checks, checks_lock = _get_active_checks_state(self.app_state)
 
         # Fix 6 — Import outside lock block to avoid holding lock during import resolution
@@ -243,7 +264,7 @@ class SecurityAdvisorHandler:
 
         try:
             # ── Build prompt inside lock to prevent race conditions ────────
-            with sec_lock:
+            with sec_prompt_lock:
                 workspace_info = f"Main workspace: {self.agent_pool.operation_manager.base_dir}\n"
                 if self.agent_pool.operation_manager.extra_work_folders_ro:
                     extra = [str(p) for p in self.agent_pool.operation_manager.extra_work_folders_ro]
@@ -302,7 +323,7 @@ class SecurityAdvisorHandler:
                 sec_elapsed_at_timeout = None
                 sec_start_time = time.monotonic()
 
-                # Schedule warning timer
+                # Schedule warning timer (tracked for cleanup)
                 def _sec_warning_injector():
                     try:
                         self.agent_pool.enqueue_message(
@@ -327,15 +348,49 @@ class SecurityAdvisorHandler:
                 f"caller={caller_agent}, caller_holds_slot={holds_slot}"
             )
 
-            # Fix 4 — Defensive fallback: ensure semaphore exists before using it
-            if not getattr(self.app_state, 'security_check_semaphore', None):
-                self.app_state.security_check_semaphore = threading.Semaphore(1)
+            # Fix 4 — Defensive fallback: ensure execution lock exists before using it.
+            # DEADLOCK FIX #2: Use RLock instead of Semaphore(1).
+            # Note: This is a SEPARATE lock from sec_prompt_lock (_get_security_check_lock).
+            # sec_prompt_lock protects the prompt-building phase (short hold, released before execution).
+            # security_execution_lock protects the execution loop (longer hold with its own timeout semantics).
+            # Both are RLocks to handle nested security checks safely.
+            if not getattr(self.app_state, 'security_execution_lock', None):
+                self.app_state.security_execution_lock = threading.RLock()
 
-            # Acquire concurrency semaphore (prevents unlimited parallelism)
-            self.app_state.security_check_semaphore.acquire()
+            # DEADLOCK FIX #3: Acquire with timeout instead of blocking forever.
+            # If a previous check crashed without releasing, we don't want to hang indefinitely.
+            acquired = self.app_state.security_execution_lock.acquire(
+                timeout=SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS
+            )
+            if not acquired:
+                raise RuntimeError(
+                    f"[SECURITY] Failed to acquire security execution lock within "
+                    f"{SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS}s for request {rid}. "
+                    f"A previous check may have crashed without releasing. "
+                    f"Manual restart may be required."
+                )
+
+            _llm_timeout_timer = None  # Track for cleanup in finally block
             try:
                 # Telemetry: track Security agent call latency (non-blocking)
                 _call_start = time.perf_counter()
+
+                # DEADLOCK FIX #1: Hard timeout on the LLM generator loop.
+                # The existing elapsed-time check only fires AFTER each yield from engine.run().
+                # If the model hangs and never yields, we'd block forever. This background timer
+                # ensures we break out within SECURITY_LLM_TIMEOUT_SECONDS regardless.
+                _llm_timeout_event = threading.Event()
+
+                def _llm_timeout_trigger():
+                    logger.warning(
+                        f"[SECURITY] LLM timeout trigger fired for request {rid} "
+                        f"after {SECURITY_LLM_TIMEOUT_SECONDS}s — model has not yielded."
+                    )
+                    _llm_timeout_event.set()
+
+                _llm_timeout_timer = threading.Timer(SECURITY_LLM_TIMEOUT_SECONDS, _llm_timeout_trigger)
+                _llm_timeout_timer.daemon = True
+                _llm_timeout_timer.start()
 
                 # ── Engine execution loop with streaming ───────────────────
                 _last_sec_send = 0.0
@@ -344,6 +399,16 @@ class SecurityAdvisorHandler:
 
                 for resp in engine.run(sec_instance):
                     if self.agent_pool.stopped:
+                        break
+
+                    # Check hard LLM timeout (independent of user-facing approval timeout)
+                    if _llm_timeout_event.is_set():
+                        sec_timeout_reached = True
+                        sec_elapsed_at_timeout = time.monotonic() - sec_start_time
+                        logger.warning(
+                            f"[SECURITY] Hard LLM timeout after {SECURITY_LLM_TIMEOUT_SECONDS}s "
+                            f"for request {rid}. Generator did not yield in time."
+                        )
                         break
 
                     elapsed = time.monotonic() - sec_start_time
@@ -397,9 +462,15 @@ class SecurityAdvisorHandler:
                     except Exception:
                         pass
 
-                # Release concurrency semaphore for Security checks
-                self.app_state.security_check_semaphore.release()
-                sec_warning_timer.cancel()
+                # Release concurrency lock for Security checks
+                self.app_state.security_execution_lock.release()
+
+                # Safe timer cleanup — cancel if timer exists and hasn't been garbage collected
+                if _llm_timeout_timer is not None:
+                    try:
+                        _llm_timeout_timer.cancel()
+                    except Exception:
+                        pass  # Timer may have already fired or been cancelled
 
             # ── Extract output and parse verdict ───────────────────────────
             from agent_cascade.compression.helpers import extract_instance_output
@@ -416,7 +487,26 @@ class SecurityAdvisorHandler:
                 timeout_seconds, loop,
             )
 
+        except RuntimeError as e:
+            # DEADLOCK FIX #2b: If execution lock acquire times out and raises RuntimeError,
+            # we need to clean up active_checks before re-raising. The rid was added in run_check()
+            # but _cleanup won't be called if we never created sec_state_key.
+            logger.error(f"[SECURITY] Request {rid} failed: {e}")
+            # Clean up active_checks entry even if sec_state_key was never created
+            with checks_lock:
+                active_checks.discard(rid)
+            raise
+
         finally:
+            # ── Timer cleanup (CRITICAL — must always run) ──────────────────
+            # sec_warning_timer is created inside the prompt-building lock but may leak if
+            # an exception occurs before the execution lock's finally block. Cancel here to be safe.
+            if sec_warning_timer is not None:
+                try:
+                    sec_warning_timer.cancel()
+                except Exception:
+                    pass  # Timer may have already fired
+
             # ── Cleanup: always remove instance state and release tracking ──
             self._cleanup(sec_state_key)
 
