@@ -2712,16 +2712,19 @@ function appendAgentMessageToVisible(msg) {
 // Create a single agent message element — styled to match regular chat messages
 function createAgentMessageEl(msg) {
   const div = document.createElement('div');
-  div.className = 'message msg-assistant agent-message';
-  if (!msg.read) {
+  const isUserMsg = msg.role === 'user' || msg.sender === 'You';
+  div.className = `message ${isUserMsg ? 'msg-user' : 'msg-assistant'} agent-message`;
+  if (!msg.read && !isUserMsg) {
     div.classList.add('unread');
   }
 
-  // Click to reply: insert @sender into chat input
-  div.onclick = () => {
-    insertAgentMention(msg.sender);
-    markMessageRead(msg.id);
-  };
+  // Click to reply: insert @sender into chat input (only for agent messages, not user's own)
+  if (!isUserMsg) {
+    div.onclick = () => {
+      insertAgentMention(msg.sender);
+      markMessageRead(msg.id);
+    };
+  }
 
   // Header row with sender name and time (same structure as regular messages)
   const header = document.createElement('div');
@@ -5267,6 +5270,18 @@ function sendMessage(inputEl) {
       // No valid @mention: route to session primary agent (orchestrator)
       targetAgent = state.sessionName;
     }
+
+    // Echo user's reply into the Agent Messages list so conversation thread is visible
+    const userEchoMsg = {
+      id: crypto.randomUUID(),
+      sender: 'You',
+      message: messageText,
+      timestamp: Date.now() / 1000,
+      read: true,
+      role: 'user'
+    };
+    addAgentMessage(userEchoMsg);
+    appendAgentMessageToVisible(userEchoMsg);
   } else {
     // Normal behavior: route to the active tab's agent
     targetAgent = getActiveAgentName();

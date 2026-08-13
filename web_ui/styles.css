@@ -597,6 +597,11 @@ body {
   cursor: pointer; /* Click to reply with @mention */
 }
 
+/* User messages in Agent Messages panel are not clickable */
+.agent-messages-panel .message.msg-user.agent-message {
+  cursor: default;
+}
+
 .agent-message:hover {
   background: var(--bg-hover);
 }
