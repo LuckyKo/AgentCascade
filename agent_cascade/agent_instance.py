@@ -490,6 +490,7 @@ class AgentInstance:
             - _last_token_count_conversation_length: INVALIDATE (-1)
             - _cached_token_count: 0
             - _last_actual_token_count: 0
+            - _last_config_version: INVALIDATE (-1)
 
         IMPORTANT: This method does NOT sync the logger or UI. Callers must handle
         logger/UI sync separately (e.g., log_inst.update_history(conv)).
@@ -507,6 +508,7 @@ class AgentInstance:
             self._last_token_count_conversation_length = -1
             self._last_actual_token_count = 0
             self._pending_notifications = []
+            self._last_config_version = -1
 
     def reset_conversation(self) -> None:
         """Clear everything. Full cache invalidation.
@@ -530,6 +532,7 @@ class AgentInstance:
             self._cached_token_count = 0
             self._last_token_count_conversation_length = -1
             self._last_actual_token_count = 0
+            self._last_config_version = -1
             self._last_force_compress_time = 0.0
             self._force_compress_count = 0
             self._current_turn = 0

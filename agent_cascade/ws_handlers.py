@@ -474,14 +474,6 @@ class WsMessageHandler:
                                 sa_inst = self.agent_pool.get_instance(sa_name)
                                 if sa_inst is not None:
                                     sa_inst.rebuild_conversation(recov)
-
-                                    # Invalidate cache to force rebuild of system message with AVAILABLE AGENTS injection.
-                                    # Without this, _setup_turn() returns early from cache and skips the injection logic,
-                                    # causing truncated system prompts on resumed idle agents.
-                                    with sa_inst._compression_lock:
-                                        sa_inst._cached_messages.clear()
-                                        sa_inst._cached_llm_messages.clear()
-                                        sa_inst._last_config_version = -1  # Force rebuild on next turn
                             else:
                                 _logger.warning(
                                     f"Could not restore agent instance {sa_name} pool — "
