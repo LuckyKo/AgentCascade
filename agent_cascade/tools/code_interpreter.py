@@ -157,6 +157,92 @@ def _find_running_container(container_name: str) -> Optional[str]:
         return None
 
 
+def _shutdown_with_timeout(kc, kernel_id: str, timeout: float = 5.0) -> None:
+    """Send shutdown request to kernel with a timeout to prevent blocking."""
+    exception = [None]
+
+    def target():
+        try:
+            kc.shutdown()
+        except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
+            exception[0] = e
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+
+    if thread.is_alive():
+        logger.debug(f"[ZMQ_CLEANUP] kc.shutdown() timed out for {kernel_id}")
+    elif exception[0]:
+        logger.debug(f"[ZMQ_CLEANUP] kc.shutdown() failed for {kernel_id}: {exception[0]}")
+
+
+def _shutdown_kernel_client(kc, kernel_id: str = "") -> None:
+    """Safely and deterministically shut down a Jupyter KernelClient.
+
+    Prevents ZMQ socket & thread leaks ("ZMQError: No buffer space available"):
+    1. Sends a shutdown request to the kernel if responsive (with timeout).
+    2. Calls stop_channels() to set channel exit flags, stop loops, join threads, and close sockets.
+    3. Explicitly joins and closes any remaining channel threads (shell, iopub, stdin, hb, control).
+    4. Destroys the ZMQ context if owned by this client.
+    """
+    if kc is None:
+        return
+
+    logger.debug(f"[ZMQ_CLEANUP] Shutting down kernel client for {kernel_id}")
+
+    # 1. Attempt graceful kernel shutdown with timeout to prevent blocking on unresponsive kernel
+    _shutdown_with_timeout(kc, kernel_id)
+
+    # 2. Stop channels to signal background threads to terminate and close ZMQ sockets
+    if hasattr(kc, 'stop_channels'):
+        try:
+            kc.stop_channels()
+        except Exception as e:
+            logger.debug(f"kc.stop_channels() failed for {kernel_id}: {e}")
+
+    # 3. Explicitly join channel threads and close sockets if any remain alive
+    channels = [
+        getattr(kc, 'shell_channel', None),
+        getattr(kc, 'iopub_channel', None),
+        getattr(kc, 'stdin_channel', None),
+        getattr(kc, 'hb_channel', None),
+        getattr(kc, 'control_channel', None),
+    ]
+    for ch in channels:
+        if ch is None:
+            continue
+        try:
+            if hasattr(ch, '_running'):
+                ch._running = False
+            if hasattr(ch, '_exit') and hasattr(ch._exit, 'set'):
+                try:
+                    ch._exit.set()
+                except Exception:
+                    pass
+            if hasattr(ch, 'is_alive') and hasattr(ch, 'join'):
+                if ch.is_alive():
+                    ch.join(timeout=1.0)
+                if ch.is_alive():
+                    logger.warning(f"Channel thread {ch} still alive after cleanup for {kernel_id}")
+            if hasattr(ch, 'close'):
+                try:
+                    ch.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Channel cleanup failed for {ch} ({kernel_id}): {e}")
+
+    # 4. Destroy ZMQ context if owned and active
+    try:
+        if getattr(kc, '_created_context', False) and hasattr(kc, 'context') and kc.context and not kc.context.closed:
+            kc.context.destroy(linger=100)
+    except Exception as e:
+        logger.debug(f"kc.context.destroy() failed for {kernel_id}: {e}")
+
+    logger.debug(f"[ZMQ_CLEANUP] Kernel client {kernel_id} shutdown complete")
+
+
 def _kill_kernels_and_containers(_sig_num=None, _frame=None):
     # Stop the watchdog thread first
     if '_WATCHDOG_THREAD' in globals() and _WATCHDOG_THREAD.is_alive():
@@ -182,10 +268,7 @@ def _kill_kernels_and_containers(_sig_num=None, _frame=None):
 
     # Kill kernel clients outside lock (shutdown can block)
     for kernel_id, kc in kernels_to_kill:
-        try:
-            kc.shutdown()
-        except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
-            logger.debug(f"Kernel shutdown failed during global cleanup ({kernel_id}): {e}")
+        _shutdown_kernel_client(kc, kernel_id)
 
     # Kill containers outside lock (docker ops can be slow)
     for k, container_id in container_pairs:
@@ -236,14 +319,9 @@ def _kernel_watchdog():
             with _KERNEL_LOCK:
                 _WATCHDOG_KILLED.add(kernel_id)
                 
-                # Kill the kernel client
+                # Pop kernel client for shutdown outside lock
                 if kernel_id in _KERNEL_CLIENTS:
-                    try:
-                        _KERNEL_CLIENTS[kernel_id].shutdown()
-                    except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
-                        logger.debug(f"Watchdog kernel shutdown failed ({kernel_id}): {e}")
-                    kc_to_shutdown = None  # already shut down
-                    del _KERNEL_CLIENTS[kernel_id]
+                    kc_to_shutdown = _KERNEL_CLIENTS.pop(kernel_id, None)
                 
                 # Record container for killing (docker ops are slow, do outside lock)
                 if kernel_id in _DOCKER_CONTAINERS:
@@ -259,6 +337,10 @@ def _kernel_watchdog():
                 for session_list in _AGENT_KERNELS.values():
                     if kernel_id in session_list:
                         session_list.remove(kernel_id)
+            
+            # Shut down kernel client outside lock
+            if kc_to_shutdown is not None:
+                _shutdown_kernel_client(kc_to_shutdown, kernel_id)
             
             # Kill the container outside lock (docker ops can be slow)
             if container_id_to_kill is not None:
@@ -391,30 +473,7 @@ def cleanup_kernels_for_session(session_name: str, force_timeout: float = 5.0) -
 
     # Shut down kernel clients cooperatively
     for kernel_id, kc in kernel_clients:
-        logger.debug(f"[ZMQ_CLEANUP] Shutting down kernel client for {kernel_id} in session {session_name}")
-        try:
-            kc.shutdown()
-            # Stop channels to join background threads (prevents socket creation after cleanup)
-            if hasattr(kc, 'stop_channels'):
-                try:
-                    kc.stop_channels()
-                except Exception as e:
-                    logger.debug(f"stop_channels failed for {kernel_id}: {e}")
-            # Fallback: explicitly join channel threads with timeout
-            for ch in [getattr(kc, 'shell_channel', None), getattr(kc, 'iopub_channel', None),
-                       getattr(kc, 'stdin_channel', None), getattr(kc, 'hb_channel', None)]:
-                if ch is not None and hasattr(ch, 'is_alive') and hasattr(ch, 'join'):
-                    try:
-                        if ch.is_alive():
-                            ch.join(timeout=1.0)
-                    except Exception as e:
-                        logger.warning(f"Channel join failed for {kernel_id}: {e}")
-                    # Post-join verification: warn if thread still alive after timeout
-                    if ch.is_alive():
-                        logger.warning(f"Channel {ch} still alive after cleanup for {kernel_id}")
-            logger.debug(f"[ZMQ_CLEANUP] Kernel client {kernel_id} shutdown complete")
-        except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
-            logger.debug(f"Kernel shutdown failed during session cleanup for {kernel_id}: {e}")
+        _shutdown_kernel_client(kc, kernel_id)
 
     # Stop and remove containers with timeout-based force fallback
     for kid, cid in container_pairs:
@@ -489,30 +548,7 @@ def _cleanup_single_kernel(kernel_id: str, work_dir: str, force_timeout: float =
     # Shutdown kernel client cooperatively
     kc = _KERNEL_CLIENTS.pop(kernel_id, None)
     if kc is not None:
-        logger.debug(f"[ZMQ_CLEANUP] Shutting down kernel client for {kernel_id}")
-        try:
-            kc.shutdown()
-            # Stop channels to join background threads (prevents socket creation after cleanup)
-            if hasattr(kc, 'stop_channels'):
-                try:
-                    kc.stop_channels()
-                except Exception as e:
-                    logger.debug(f"stop_channels failed for {kernel_id}: {e}")
-            # Fallback: explicitly join channel threads with timeout
-            for ch in [getattr(kc, 'shell_channel', None), getattr(kc, 'iopub_channel', None),
-                       getattr(kc, 'stdin_channel', None), getattr(kc, 'hb_channel', None)]:
-                if ch is not None and hasattr(ch, 'is_alive') and hasattr(ch, 'join'):
-                    try:
-                        if ch.is_alive():
-                            ch.join(timeout=1.0)
-                    except Exception as e:
-                        logger.warning(f"Channel join failed for {kernel_id}: {e}")
-                    # Post-join verification: warn if thread still alive after timeout
-                    if ch.is_alive():
-                        logger.warning(f"Channel {ch} still alive after cleanup for {kernel_id}")
-            logger.debug(f"[ZMQ_CLEANUP] Kernel client {kernel_id} shutdown complete")
-        except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
-            logger.debug(f"Kernel shutdown failed for {kernel_id}: {e}")
+        _shutdown_kernel_client(kc, kernel_id)
 
     # Stop and remove container
     cid = _DOCKER_CONTAINERS.pop(kernel_id, None)
@@ -721,12 +757,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 logger.info(f"Fresh kernel requested for session {session_name}; cleaning up existing kernel.")
                 _WATCHDOG_KILLED.discard(kernel_id)
 
-                # Shutdown the kernel client
-                if kernel_id in _KERNEL_CLIENTS:
-                    try:
-                        _KERNEL_CLIENTS[kernel_id].shutdown()
-                    except Exception as e:
-                        logger.debug(f"Fresh cleanup: kernel shutdown failed: {e}")
+                # Shutdown the kernel client cooperatively
+                kc_to_clean = _KERNEL_CLIENTS.pop(kernel_id, None)
 
                 # Stop and remove the old container
                 if kernel_id in _DOCKER_CONTAINERS:
@@ -738,10 +770,18 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         logger.debug(f"Fresh cleanup: container stop/rm failed: {e}")
 
                 # Clear state so a fresh kernel is started below
-                _KERNEL_CLIENTS.pop(kernel_id, None)
                 _DOCKER_CONTAINERS.pop(kernel_id, None)
                 _KERNEL_ACTIVITY.pop(kernel_id, None)
                 _STALE_CONTAINERS.pop(kernel_id, None)
+
+                if kc_to_clean is not None:
+                    _shutdown_kernel_client(kc_to_clean, kernel_id)
+
+                # Remove from agent kernel tracking to prevent stale entries
+                # (already inside _KERNEL_READY lock, no nested acquire needed)
+                for session_list in list(_AGENT_KERNELS.values()):
+                    if kernel_id in session_list:
+                        session_list.remove(kernel_id)
 
                 # Clean up connection files and launch scripts
                 work_dir_base = self.work_dir
@@ -865,13 +905,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 self._execute_code(kc, start_code, timeout=exec_timeout, kernel_id=kernel_id)
             except Exception as init_err:
                 # Init failed — clean up the broken kernel so next call recreates fresh
+                kc_to_clean = None
                 with _KERNEL_LOCK:
                     if kernel_id in _KERNEL_CLIENTS:
-                        try:
-                            _KERNEL_CLIENTS[kernel_id].shutdown()
-                        except (RuntimeError, OSError, AttributeError) as e:
-                            logger.debug(f"Shutdown failed during init error cleanup ({kernel_id}): {e}")
-                        del _KERNEL_CLIENTS[kernel_id]
+                        kc_to_clean = _KERNEL_CLIENTS.pop(kernel_id, None)
                     if kernel_id in _DOCKER_CONTAINERS:
                         container_id = _DOCKER_CONTAINERS[kernel_id]
                         try:
@@ -890,6 +927,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     for session_list in _AGENT_KERNELS.values():
                         if kernel_id in session_list:
                             session_list.remove(kernel_id)
+                if kc_to_clean is not None:
+                    _shutdown_kernel_client(kc_to_clean, kernel_id)
                 logger.warning(f"Kernel initialization failed for {kernel_id}: {init_err}")
                 raise  # Re-raise so caller sees the failure
 
@@ -1010,13 +1049,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         logger.warning(f"Tier 3 container kill failed: {kill_err}")
 
                 # Also clean up the dead kernel client so next call starts fresh
+                kc_to_clean = None
                 with _KERNEL_LOCK:
                     if kernel_id in _KERNEL_CLIENTS:
-                        try:
-                            _KERNEL_CLIENTS[kernel_id].shutdown()
-                        except Exception:
-                            pass
-                        del _KERNEL_CLIENTS[kernel_id]
+                        kc_to_clean = _KERNEL_CLIENTS.pop(kernel_id, None)
+                if kc_to_clean is not None:
+                    _shutdown_kernel_client(kc_to_clean, kernel_id)
 
             # Update activity timestamp so watchdog doesn't double-kill
             with _KERNEL_LOCK:
