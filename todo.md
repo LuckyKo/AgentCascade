@@ -98,11 +98,19 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] UI settings export/import round-trip audit — FIXED: max_workers import alias handler added (was silently dropped), max_images_for_llm now persisted to disk (was lost on restart), sleeping_timeout removed from exports (deprecated). All exported settings now re-importable without data loss. See audit_reports/ui_settings_export_import_audit_20260812.md and .agent_lessons/ui-settings-export-import-roundtrip-gaps.md.
 - [x] check KV cache miss on reused agent (investigate POST dump on exit and on recall, see if something changes in sys prompt)
 - [x] make a skill for best practices when creating unit/regression tests — DONE: generic Python/pytest testing-best-practices skill at .qwen/skills/testing-best-practices/SKILL.md. Cross-project reusable, no AC-specific references. Based on research report and project memories. Reviewed and approved twice (AC-specific then generic).
-- [ ] expand read_logs with a display mode argument: trim_tools (default), trim_all, none. for trim_tools we apply our truncation only to `function` outputs, leaving the rest intact (assistant/reasoning/user); trim_all - truncate all messages as before, none -  no truncation
+- [x] expand read_logs with a display mode argument: trim_tools (default), trim_all, none. for trim_tools we apply our truncation only to `function` outputs, leaving the rest intact (assistant/reasoning/user); trim_all - truncate all messages as before, none -  no truncation — DONE: mode parameter added to read_logs tool with three options; handles both function_call and tool_calls formats; implementation passed two review rounds.
 - [ ] stop button does not also stop the attempt to API fallback
 
 
 # Errors to investigate:
+
+# RESOLVED (2026-08-14): ZMQ Socket & Thread Leak ("No buffer space available" / System Lockup)
+# Root Cause: Calling `kc.shutdown()` only sends a shutdown request over the shell channel; it does NOT call `kc.stop_channels()`.
+# When the watchdog killed idle containers (e.g., ci_Maine_-11502_17600 at 06:02:13), the 5 background channel threads (HBChannel, ShellChannel, etc.)
+# remained running in `_async_run()`. When the heartbeat failed, `HBChannel` entered a loop calling `_create_socket()` to reconnect, creating thousands
+# of orphaned ZMQ sockets per dead kernel until Winsock/ZMQ buffers were exhausted (ZMQError: No buffer space available at 06:13:22), freezing the system.
+# Fix: Created unified `_shutdown_kernel_client(kc, kernel_id)` helper in `code_interpreter.py` that calls `kc.stop_channels()`, joins all channel threads,
+# closes sockets, and destroys the ZMQ context. Applied across all kernel termination sites (watchdog, global cleanup, fresh cleanup, error handlers).
 
 # after failing the inner loop test it just locked the system
 2026-08-13 12:39:11,231 - agent_pool.py - 3166 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_8ec0108a
@@ -121,11 +129,13 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 2026-08-13 12:48:32,689 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
 
 # system stuck after this
-2026-08-14 01:50:49,469 - agent_pool.py - 1177 - DEBUG - No active thread to join for 'Security_op_79bc8870'
-2026-08-14 01:50:49,470 - agent_pool.py - 917 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_79bc8870'
-2026-08-14 01:51:13,532 - execution_engine.py - 1603 - DEBUG - EXIT - Maine RUNNING→IDLE
-2026-08-14 01:52:51,048 - code_interpreter.py - 228 - WARNING - Code interpreter watchdog: Kernel ci_Maine_631995_26992 inactive for 300s. Killing container.
-2026-08-14 01:52:52,473 - log.py - 198 - ERROR - Uncaught exception in thread Thread-146
+2026-08-14 06:01:37,471 - agent_pool.py - 3187 - INFO - [idle_checker] Auto-dismissed 4 idle agent(s): Security_op_75414c5e, Security_op_68a98220, Security_op_cefe8762, Security_op_119e49b2
+2026-08-14 06:02:13,455 - code_interpreter.py - 228 - WARNING - Code interpreter watchdog: Kernel ci_Maine_-11502_17600 inactive for 300s. Killing container.
+2026-08-14 06:07:37,518 - agent_pool.py - 3262 - INFO - [idle_checker] Auto-dismissing idle agent 'reviewer_readlogs_mode' (idle for 1624s, threshold=1600s)
+2026-08-14 06:07:37,518 - agent_pool.py - 1176 - DEBUG - No active thread to join for 'reviewer_readlogs_mode'
+2026-08-14 06:07:37,527 - agent_pool.py - 916 - DEBUG - Instance conversation cleanup key missing (expected): 'reviewer_readlogs_mode'
+2026-08-14 06:07:37,528 - agent_pool.py - 3187 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): reviewer_readlogs_mode
+2026-08-14 06:13:22,425 - log.py - 198 - ERROR - Uncaught exception in thread Thread-84
 Traceback (most recent call last):
   File "C:\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
     self.run()
@@ -147,34 +157,29 @@ Traceback (most recent call last):
     raise ZMQError()
     ^^^^^^^^^^^
 zmq.error.ZMQError: No buffer space available
-2026-08-14 01:53:20,307 - agent_pool.py - 791 - DEBUG - Idle checker restarted
-2026-08-14 01:53:20,308 - agent_pool.py - 807 - DEBUG - Async registry executor recreated
-2026-08-14 01:53:20,309 - agent_pool.py - 810 - DEBUG - Stopped flag cleared — ready for new execution
-2026-08-14 01:53:20,310 - ws_handlers.py - 209 - DEBUG - Starting generation gen_id=5, instances={'Maine': 'IDLE'}, active_stack=0
-2026-08-14 01:53:20,312 - agent_pool.py - 791 - DEBUG - Idle checker restarted
-2026-08-14 01:53:20,312 - agent_pool.py - 807 - DEBUG - Async registry executor recreated
-2026-08-14 01:53:20,313 - agent_pool.py - 810 - DEBUG - Stopped flag cleared — ready for new execution
-2026-08-14 01:53:20,313 - execution_engine.py - 1093 - DEBUG - engine.run() ENTRY - instance=Maine
-2026-08-14 01:53:20,314 - agent_pool.py - 2628 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-08-14 01:53:20,314 - execution_engine.py - 892 - DEBUG - [SLOT_ACQUIRE] initial - instance=Maine, class=orchestrator
-2026-08-14 01:53:20,316 - execution_engine.py - 1173 - DEBUG - [TURN_START] Calling _setup_turn for Maine
-2026-08-14 01:53:20,317 - execution_engine.py - 1680 - DEBUG - [CACHE_HIT] Reusing cached messages=123, llm_messages=123
-2026-08-14 01:53:20,317 - execution_engine.py - 1208 - DEBUG - [TURN_DONE] Got messages=123, llm_messages=123
-2026-08-14 01:53:20,349 - execution_engine.py - 1292 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
-
-# lock on shell cmd call
-2026-08-14 02:44:35,488 - tool_dispatcher.py - 636 - DEBUG - Restored caller KV state for coder_gguf_fix
-2026-08-14 02:44:35,488 - tool_dispatcher.py - 640 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'coder_gguf_fix'. Total SYNC path elapsed: 177.05s
-2026-08-14 02:44:35,490 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
-2026-08-14 02:44:40,025 - agent_pool.py - 1177 - DEBUG - No active thread to join for 'reviewer_gguf_fix'
-2026-08-14 02:44:57,170 - execution_engine.py - 1603 - DEBUG - EXIT - coder_gguf_fix RUNNING→IDLE
-2026-08-14 02:44:57,190 - execution_engine.py - 5291 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=coder_gguf_fix, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=130
-2026-08-14 02:44:59,192 - tool_dispatcher.py - 593 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'coder_gguf_fix' completed in 1180.94s
-2026-08-14 02:44:59,193 - tool_dispatcher.py - 611 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
-2026-08-14 02:44:59,195 - agent_pool.py - 2628 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-08-14 02:44:59,195 - tool_dispatcher.py - 640 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 1180.94s
-2026-08-14 02:44:59,196 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
-2026-08-14 02:44:59,640 - qwenvl_oai.py - 105 - DEBUG - Vision payload: role=user, image_url starts with data:=True, url_prefix=data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...
-2026-08-14 02:44:59,641 - qwenvl_oai.py - 105 - DEBUG - Vision payload: role=user, image_url starts with data:=True, url_prefix=data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...
-2026-08-14 02:44:59,643 - qwenvl_oai.py - 105 - DEBUG - Vision payload: role=user, image_url starts with data:=True, url_prefix=data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...
-2026-08-14 02:50:57,742 - ws_handlers.py - 313 - INFO - Stop: Transitioned Maine from RUNNING to IDLE
+2026-08-14 06:13:37,571 - agent_pool.py - 3262 - INFO - [idle_checker] Auto-dismissing idle agent 'rev_readlogs_01' (idle for 1602s, threshold=1600s)
+2026-08-14 06:13:37,571 - agent_pool.py - 1176 - DEBUG - No active thread to join for 'rev_readlogs_01'
+2026-08-14 06:13:37,578 - agent_pool.py - 916 - DEBUG - Instance conversation cleanup key missing (expected): 'rev_readlogs_01'
+2026-08-14 06:13:37,586 - agent_pool.py - 3187 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): rev_readlogs_01
+2026-08-14 06:15:57,738 - log.py - 198 - ERROR - Uncaught exception in thread Thread-180
+Traceback (most recent call last):
+  File "C:\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 151, in run
+    loop.run_until_complete(self._async_run())
+  File "C:\Python312\Lib\asyncio\base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 143, in _async_run
+    self._create_socket()
+  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 105, in _create_socket
+    self.socket = self.context.socket(zmq.REQ)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\zmq\sugar\context.py", line 352, in socket
+    socket_class(  # set PYTHONTRACEMALLOC=2 to get the calling frame
+  File "C:\Python312\Lib\site-packages\zmq\sugar\socket.py", line 162, in __init__
+    super().__init__(
+  File "zmq/backend/cython/_zmq.py", line 740, in zmq.backend.cython._zmq.Socket.__init__
+    raise ZMQError()
+    ^^^^^^^^^^^
+zmq.error.ZMQError: No buffer space available
