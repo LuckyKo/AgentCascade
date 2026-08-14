@@ -460,6 +460,15 @@ const mainTabBar = $('#mainTabBar');
 // Root tab is now created dynamically — no static reference needed
 const mainTabPanels = document.querySelector('.main-tab-panels');
 
+// Invalidate all panel caches to force full re-render (used after state-changing actions)
+function invalidateAllPanelCaches() {
+  if (!mainTabPanels) return;
+  mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => {
+    p.dataset.contentKey = '';
+    p.dataset.lastRenderedCount = '999999999';
+  });
+}
+
 // ── Active Agent Concept ──────────────────────────────────────────────────────
 // All agents are equal — "root" is just the session's primary agent.
 // The active agent is whichever agent the user is currently viewing,
@@ -1875,11 +1884,7 @@ function handleServerMessage(data) {
       }
 
       // Full state: force complete re-render (session load, reset, edit, delete, etc.)
-      // Invalidate panel caches so edits/deletes trigger re-renders
-      mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => { 
-        p.dataset.contentKey = ''; 
-        p.dataset.lastRenderedCount = '999999999';
-      });
+      invalidateAllPanelCaches();
 
       // Render all agents through the same path — no root/sub distinction
       renderSubAgents();
@@ -2034,11 +2039,8 @@ function handleServerMessage(data) {
       // Reset throttle state if generation just started (was idle before this tick).
       // Server can initiate generation via stream_update without calling resetGenStats().
       if (!state.generating) {
-        // Invalidate ALL panel caches (not just root) to force re-render on fresh generation
-        mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => {
-          p.dataset.contentKey = '';
-          p.dataset.lastRenderedCount = '999999999';
-        });
+        // Invalidate ALL panel caches to force re-render on fresh generation
+        invalidateAllPanelCaches();
         // Reset throttle timers so first render happens immediately, not delayed by 250ms+
         state.genStats.lastSubAgentRender = 0;
         state.genStats.lastSubAgentRenderDuration = 0;
@@ -5032,11 +5034,8 @@ if (terminateBtn) {
 }
 
 const onRetryClick = () => {
-  // Invalidate ALL panel caches to force full re-render (not just root)
-  mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => {
-    p.dataset.contentKey = '';
-    p.dataset.lastRenderedCount = '999999999';
-  });
+  // Invalidate ALL panel caches to force full re-render
+  invalidateAllPanelCaches();
   retryGeneration();
 };
 const refreshBtn = document.getElementById('refreshBtn');
@@ -5061,11 +5060,8 @@ resetBtn.addEventListener('click', () => {
     state.closedTabs.clear();
     localStorage.removeItem('agent-cascade-closed-tabs');
     // Invalidate all panel caches to force full re-render after reset
-      mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => {
-        p.dataset.contentKey = '';
-        p.dataset.lastRenderedCount = '999999999';
-      });
-      send({ type: 'reset' });
+    invalidateAllPanelCaches();
+    send({ type: 'reset' });
   }
 });
 
