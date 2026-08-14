@@ -330,7 +330,11 @@ class GrepMixin:
             logger.warning(f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
             return None, 0, False, False, 0
 
-        except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError) as e:
+        except subprocess.TimeoutExpired as e:
+            logger.warning(f"grep subprocess timed out after {timeout}s (pattern/scope too broad); returning error instead of falling back to Python")
+            return None, 0, True, False, 0
+
+        except (FileNotFoundError, PermissionError, OSError) as e:
             logger.debug(f"grep subprocess unavailable (falling back to Python): {e}")
 
         return None, 0, False, False, 0
@@ -472,6 +476,8 @@ class GrepMixin:
                 exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case,
                 spill_file_path=spill_file_path
             )
+            if was_timed_out:
+                return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
             if results is not None:
                 if count == 0 and not _sub_truncated:
                     logger.debug(f"grep: subprocess found no matches for '{pattern}'")
@@ -482,8 +488,6 @@ class GrepMixin:
                     summary = f"Found {count} matches for '{pattern}'"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
-                    if was_timed_out:
-                        summary += f" [TIMED OUT after {int(timeout)}s]"
 
                     result = truncate_with_spillover(
                         output_text, char_limit,
