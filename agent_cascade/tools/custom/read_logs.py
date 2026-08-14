@@ -209,7 +209,12 @@ class ReadLogs(BaseTool):
 
         # --- Helper: recursively truncate string values in nested structures (iterative) ---
         def _truncate_strings(obj, limit):
-            """Walk *obj* (dict / list / str) and truncate any long strings."""
+            """Walk *obj* (dict / list / str) and truncate any long strings.
+
+            Mutates dict/list objects in place for efficiency; returns the (possibly modified) object.
+            For strings, returns a new truncated string without mutating the original.
+            Safe here because parsed_lines entries are disposable after this pass.
+            """
             if isinstance(obj, str):
                 return _truncate_middle(obj, limit)
             stack = [obj]
@@ -229,56 +234,41 @@ class ReadLogs(BaseTool):
                             current[i] = _truncate_middle(v, limit)
             return obj
 
-        # --- Truncation pass (respects display mode) ---
-        truncated_lines = []
-        for item in parsed_lines:
+        # --- Helper: apply truncation to a single item based on display mode ---
+        def truncate_item(item, mode, max_chars):
+            """Apply mode-specific truncation to one parsed log entry."""
             if mode == 'none':
-                # No truncation at all
-                truncated_lines.append(item)
-            elif isinstance(item, dict):
-                if mode == 'trim_tools':
-                    # Only truncate tool-related fields (function_call, tool_calls arguments, extra)
-                    fc = item.get("function_call")
-                    if isinstance(fc, dict):
-                        fc["arguments"] = _truncate_middle(fc.get("arguments", ""), max_chars)
-                    elif isinstance(fc, list):
-                        for call in fc:
-                            if isinstance(call, dict) and "arguments" in call:
-                                call["arguments"] = _truncate_middle(
-                                    call["arguments"], max_chars
+                return item
+            if mode == 'trim_all':
+                # Delegate entirely to _truncate_strings for all types
+                return _truncate_strings(item, max_chars)
+            # mode == 'trim_tools' — only truncate tool-related fields
+            if isinstance(item, dict):
+                fc = item.get("function_call")
+                if isinstance(fc, dict):
+                    fc["arguments"] = _truncate_middle(fc.get("arguments", ""), max_chars)
+                elif isinstance(fc, list):
+                    for call in fc:
+                        if isinstance(call, dict) and "arguments" in call:
+                            call["arguments"] = _truncate_middle(
+                                call["arguments"], max_chars
+                            )
+                # Handle modern tool_calls format: tool_calls[].function.arguments
+                tc = item.get("tool_calls")
+                if isinstance(tc, list):
+                    for call in tc:
+                        if isinstance(call, dict):
+                            fn = call.get("function")
+                            if isinstance(fn, dict) and "arguments" in fn:
+                                fn["arguments"] = _truncate_middle(
+                                    fn["arguments"], max_chars
                                 )
-                    # Handle modern tool_calls format: tool_calls[].function.arguments
-                    tc = item.get("tool_calls")
-                    if isinstance(tc, list):
-                        for call in tc:
-                            if isinstance(call, dict):
-                                fn = call.get("function")
-                                if isinstance(fn, dict) and "arguments" in fn:
-                                    fn["arguments"] = _truncate_middle(
-                                        fn["arguments"], max_chars
-                                    )
-                    # Deep-truncate anything in the extra field (nested tool calls, etc.)
-                    if "extra" in item:
-                        item["extra"] = _truncate_strings(item["extra"], max_chars)
+                # Deep-truncate anything in the extra field (nested tool calls, etc.)
+                if "extra" in item:
+                    item["extra"] = _truncate_strings(item["extra"], max_chars)
+            return item
 
-                    truncated_lines.append(item)
-                else:
-                    # trim_all — truncate ALL strings in the entry (previous behavior)
-                    # Use _truncate_strings to ensure comprehensive truncation of any string field,
-                    # including future additions to the log entry structure.
-                    item = _truncate_strings(item, max_chars)
-                    truncated_lines.append(item)
-            elif isinstance(item, str):
-                if mode == 'trim_all':
-                    truncated_lines.append(_truncate_middle(item, max_chars))
-                else:
-                    truncated_lines.append(item)
-            else:
-                # Handle non-dict / non-string entries (arrays, numbers, etc.)
-                if mode == 'trim_all':
-                    truncated_lines.append(_truncate_strings(item, max_chars))
-                else:
-                    truncated_lines.append(item)
+        truncated_lines = [truncate_item(item, mode, max_chars) for item in parsed_lines]
 
         # Serialize back to JSON string (one line per entry) with line number prefixes.
         # Format matches read_file style: "{line_num}: {content}"
