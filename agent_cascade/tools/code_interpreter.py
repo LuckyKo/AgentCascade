@@ -158,13 +158,20 @@ def _find_running_container(container_name: str) -> Optional[str]:
 
 
 def _shutdown_with_timeout(kc, kernel_id: str, timeout: float = 5.0) -> None:
-    """Send shutdown request to kernel with a timeout to prevent blocking."""
+    """Send shutdown request to kernel with a timeout to prevent blocking.
+
+    Creates a daemon thread to call kc.shutdown(). If the shutdown does not
+    complete within timeout seconds, the thread continues running in background
+    while the caller proceeds with cleanup. Any exceptions from shutdown are
+    captured and logged at DEBUG level.
+    """
     exception = [None]
+    _shutdown_exc = (RuntimeError, OSError, AttributeError) + ((zmq.ZMQError,) if zmq else ())
 
     def target():
         try:
             kc.shutdown()
-        except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
+        except _shutdown_exc as e:
             exception[0] = e
 
     thread = threading.Thread(target=target, daemon=True)
@@ -172,9 +179,9 @@ def _shutdown_with_timeout(kc, kernel_id: str, timeout: float = 5.0) -> None:
     thread.join(timeout=timeout)
 
     if thread.is_alive():
-        logger.debug(f"[ZMQ_CLEANUP] kc.shutdown() timed out for {kernel_id}")
+        logger.debug(f"kc.shutdown() timed out for {kernel_id}")
     elif exception[0]:
-        logger.debug(f"[ZMQ_CLEANUP] kc.shutdown() failed for {kernel_id}: {exception[0]}")
+        logger.debug(f"kc.shutdown() failed for {kernel_id}: {exception[0]}")
 
 
 def _shutdown_kernel_client(kc, kernel_id: str = "") -> None:
@@ -189,7 +196,7 @@ def _shutdown_kernel_client(kc, kernel_id: str = "") -> None:
     if kc is None:
         return
 
-    logger.debug(f"[ZMQ_CLEANUP] Shutting down kernel client for {kernel_id}")
+    logger.debug(f"Shutting down kernel client for {kernel_id}")
 
     # 1. Attempt graceful kernel shutdown with timeout to prevent blocking on unresponsive kernel
     _shutdown_with_timeout(kc, kernel_id)
@@ -218,18 +225,19 @@ def _shutdown_kernel_client(kc, kernel_id: str = "") -> None:
             if hasattr(ch, '_exit') and hasattr(ch._exit, 'set'):
                 try:
                     ch._exit.set()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Channel cleanup step failed for {ch} ({kernel_id}): {e}")
             if hasattr(ch, 'is_alive') and hasattr(ch, 'join'):
                 if ch.is_alive():
                     ch.join(timeout=1.0)
+                # Second check: join with timeout may not be enough for stubborn threads; log a warning if still alive.
                 if ch.is_alive():
                     logger.warning(f"Channel thread {ch} still alive after cleanup for {kernel_id}")
             if hasattr(ch, 'close'):
                 try:
                     ch.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Channel cleanup step failed for {ch} ({kernel_id}): {e}")
         except Exception as e:
             logger.debug(f"Channel cleanup failed for {ch} ({kernel_id}): {e}")
 
@@ -240,7 +248,7 @@ def _shutdown_kernel_client(kc, kernel_id: str = "") -> None:
     except Exception as e:
         logger.debug(f"kc.context.destroy() failed for {kernel_id}: {e}")
 
-    logger.debug(f"[ZMQ_CLEANUP] Kernel client {kernel_id} shutdown complete")
+    logger.debug(f"Kernel client {kernel_id} shutdown complete")
 
 
 def _kill_kernels_and_containers(_sig_num=None, _frame=None):
@@ -275,7 +283,7 @@ def _kill_kernels_and_containers(_sig_num=None, _frame=None):
         try:
             subprocess.run(['docker', 'stop', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
             subprocess.run(['docker', 'rm', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-        except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
+        except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
             logger.warning(f"Failed to stop and remove Docker container {container_id} during global cleanup: {e}")
 
 
