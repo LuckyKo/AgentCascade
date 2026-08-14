@@ -197,25 +197,32 @@ class ReadLogs(BaseTool):
         return item
 
     @staticmethod
-    def _format_simple_entry(entry, entry_num):
+    def _format_simple_entry(entry, entry_num, mode='trim_tools', max_chars=1000):
         """Format one truncated log entry as a readable summary line.
 
         Returns (header_line, content_line_or_none).
         """
         if isinstance(entry, str):
-            # Non-JSON line or raw string
-            return f"[{entry_num}] [RAW] {entry[:200]}", None
+            # Non-JSON line or raw string — respect truncation settings
+            c = entry
+            if mode != 'none' and len(c) > max_chars:
+                c = ReadLogs._truncate_middle(c, max_chars)
+            return f"[{entry_num}] [RAW] {c}", None
 
         if not isinstance(entry, dict):
-            return f"[{entry_num}] [{type(entry).__name__}] {str(entry)[:200]}", None
+            # Non-dict type — respect truncation settings
+            c = str(entry)
+            if mode != 'none' and len(c) > max_chars:
+                c = ReadLogs._truncate_middle(c, max_chars)
+            return f"[{entry_num}] [{type(entry).__name__}] {c}", None
 
-        # Metadata lines - apply truncation to the JSON representation
-        if "metadata" in entry:
-            meta_json = json.dumps(entry, ensure_ascii=False)
-            truncated_meta = ReadLogs._truncate_middle(meta_json, 300)
-            return f"[{entry_num}] [METADATA] {truncated_meta}", None
-
+        # If it doesn't have a recognizable role, treat as raw JSON
         role = entry.get("role", "").lower()
+        if not role:
+            json_str = json.dumps(entry, ensure_ascii=False)
+            truncated = ReadLogs._truncate_middle(json_str, max_chars)
+            return f"[{entry_num}] [RAW] {truncated}", None
+
         timestamp = entry.get("timestamp", "")
         time_str = ""
         if timestamp:
@@ -241,7 +248,7 @@ class ReadLogs(BaseTool):
         elif role == "system":
             role_label = "SYSTEM"
         else:
-            role_label = f"{role.upper() if role else 'UNKNOWN'}"
+            role_label = f"{role.upper()}"
 
         # Build tool info for assistant entries with calls
         tool_info = ""
@@ -286,8 +293,11 @@ class ReadLogs(BaseTool):
 
         if content:
             c = str(content)
-            if len(c) > 200:
-                c = c[:197] + "..."
+            # Respect truncation mode for content preview:
+            # - trim_tools/trim_all: apply max_chars limit (content was already truncated by truncate_item if needed)
+            # - none: no additional truncation beyond what truncate_item did
+            if mode != 'none' and len(c) > max_chars:
+                c = ReadLogs._truncate_middle(c, max_chars)
             content_line = f"    {c}"
         else:
             content_line = None
@@ -416,9 +426,11 @@ class ReadLogs(BaseTool):
                     parsed_lines.append(line)
 
         # --- Pagination / slicing ---
-        # Split into metadata lines (always included) and regular log entries (sliced)
-        metadata_lines = [l for l in parsed_lines if ReadLogs._is_metadata(l)]
-        other_lines = [l for l in parsed_lines if not ReadLogs._is_metadata(l)]
+        # Split into metadata lines and regular log entries, tracking original positions
+        other_lines = []
+        for idx, l in enumerate(parsed_lines):
+            if not ReadLogs._is_metadata(l):
+                other_lines.append((idx + 1, l))
 
         try:
             if range_str is not None:
@@ -431,26 +443,27 @@ class ReadLogs(BaseTool):
         except (ValueError, IndexError) as e:
             return f"Error parsing range '{range_str}': {e}"
 
-        parsed_lines = metadata_lines + selected
-
-        truncated_lines = [ReadLogs.truncate_item(item, mode, max_chars) for item in parsed_lines]
+        truncated_lines = []
+        for pos, item in selected:
+            truncated_lines.append((pos, ReadLogs.truncate_item(item, mode, max_chars)))
 
         # --- Output formatting based on 'format' parameter ---
         if fmt == 'raw':
-            # Original behavior: numbered JSON lines
+            # Original behavior: numbered JSON lines (using original entry positions)
             result = []
-            for i, item in enumerate(truncated_lines):
+            for pos, item in truncated_lines:
                 if isinstance(item, str):
                     line_text = item
                 else:
                     line_text = json.dumps(item, ensure_ascii=False)
-                result.append(f"{i + 1}: {line_text}")
+                num_label = "meta" if pos == 0 else pos
+                result.append(f"{num_label}: {line_text}")
             return "\n".join(result)
 
-        # simple mode: human-readable summary
+        # simple mode: human-readable summary (using original entry positions)
         result = []
-        for i, item in enumerate(truncated_lines):
-            header_line, content_line = ReadLogs._format_simple_entry(item, i + 1)
+        for pos, item in truncated_lines:
+            header_line, content_line = ReadLogs._format_simple_entry(item, pos, mode, max_chars)
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)
