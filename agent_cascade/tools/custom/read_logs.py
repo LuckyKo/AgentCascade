@@ -33,6 +33,12 @@ class ReadLogs(BaseTool):
                 'enum': ['trim_tools', 'trim_all', 'none'],
                 'default': 'trim_tools',
                 'description': TOOL_METADATA['read_logs']['parameters']['mode']
+            },
+            'format': {
+                'type': 'string',
+                'enum': ['raw', 'simple'],
+                'default': 'simple',
+                'description': TOOL_METADATA['read_logs']['parameters']['format']
             }
         },
         'required': ['log_file'],
@@ -122,6 +128,12 @@ class ReadLogs(BaseTool):
         valid_modes = ('trim_tools', 'trim_all', 'none')
         if mode not in valid_modes:
             return f"Error: Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}."
+
+        # Parse and validate output format
+        fmt = params.get('format', 'simple')
+        valid_formats = ('raw', 'simple')
+        if fmt not in valid_formats:
+            return f"Error: Invalid format '{fmt}'. Must be one of: {', '.join(valid_formats)}."
 
         # Validate log_file input
         if not log_file or not isinstance(log_file, str) or not log_file.strip():
@@ -321,16 +333,122 @@ class ReadLogs(BaseTool):
                     item["extra"] = _truncate_strings(item["extra"], max_chars)
             return item
 
+        # --- Helper: format a single entry in simple human-readable mode ---
+        def _format_simple_entry(entry, entry_num):
+            """Format one truncated log entry as a readable summary line.
+
+            Returns (header_line, content_line_or_none).
+            """
+            if isinstance(entry, str):
+                # Non-JSON line or raw string
+                return f"[{entry_num}] [RAW] {entry[:200]}", None
+
+            if not isinstance(entry, dict):
+                return f"[{entry_num}] [{type(entry).__name__}] {str(entry)[:200]}", None
+
+            # Metadata lines
+            if "metadata" in entry:
+                meta_json = json.dumps(entry, ensure_ascii=False)
+                return f"[{entry_num}] [METADATA] {meta_json[:300]}", None
+
+            role = entry.get("role", "").lower()
+            timestamp = entry.get("timestamp", "")
+            time_str = ""
+            if timestamp:
+                # Extract HH:MM:SS portion if present
+                t = str(timestamp)
+                for sep in ("T", " "):
+                    if sep in t:
+                        time_part = t.split(sep)[1][:8]
+                        if len(time_part) == 8:
+                            time_str = time_part
+                            break
+                if not time_str and ":" in t[:9]:
+                    time_str = t[:8]
+
+            # Build role label
+            if role == "user":
+                role_label = "USER"
+            elif role == "assistant":
+                role_label = "ASSISTANT"
+            elif role == "function" or role == "tool":
+                name = entry.get("name") or entry.get("function_id", "?")
+                role_label = f"TOOL({name})"
+            elif role == "system":
+                role_label = "SYSTEM"
+            else:
+                role_label = f"{role.upper() if role else 'UNKNOWN'}"
+
+            # Build tool info for assistant entries with calls
+            tool_info = ""
+            if role == "assistant":
+                fc = entry.get("function_call")
+                tc = entry.get("tool_calls")
+                calls = []
+                if isinstance(fc, dict):
+                    fn_name = fc.get("name", "?")
+                    args = fc.get("arguments", "")
+                    if len(args) > 60:
+                        args = args[:57] + "..."
+                    calls.append(f"{fn_name}({args})")
+                if isinstance(tc, list):
+                    for call in tc:
+                        if isinstance(call, dict):
+                            fn = call.get("function", {})
+                            fn_name = fn.get("name", "?") if isinstance(fn, dict) else "?"
+                            args = fn.get("arguments", "") if isinstance(fn, dict) else ""
+                            if len(args) > 60:
+                                args = args[:57] + "..."
+                            calls.append(f"{fn_name}({args})")
+                if calls:
+                    tool_info = " → " + ", ".join(calls)
+
+            # Build header
+            header_parts = [f"[{entry_num}]"]
+            if time_str:
+                header_parts.append(time_str)
+            header_parts.append(role_label + tool_info)
+            header_line = " ".join(header_parts)
+
+            # Content preview
+            content = None
+            if role in ("user", "assistant", "system"):
+                content = entry.get("content") or entry.get("reasoning_content")
+            elif role in ("function", "tool"):
+                content = entry.get("content")
+            else:
+                # Fallback: try content field for unknown roles
+                content = entry.get("content")
+
+            if content:
+                c = str(content)
+                if len(c) > 200:
+                    c = c[:197] + "..."
+                content_line = f"    {c}"
+            else:
+                content_line = None
+
+            return header_line, content_line
+
         truncated_lines = [truncate_item(item, mode, max_chars) for item in parsed_lines]
 
-        # Serialize back to JSON string (one line per entry) with line number prefixes.
-        # Format matches read_file style: "{line_num}: {content}"
+        # --- Output formatting based on 'format' parameter ---
+        if fmt == 'raw':
+            # Original behavior: numbered JSON lines
+            result = []
+            for i, item in enumerate(truncated_lines):
+                if isinstance(item, str):
+                    line_text = item
+                else:
+                    line_text = json.dumps(item, ensure_ascii=False)
+                result.append(f"{i + 1}: {line_text}")
+            return "\n".join(result)
+
+        # simple mode: human-readable summary
         result = []
         for i, item in enumerate(truncated_lines):
-            if isinstance(item, str):
-                line_text = item
-            else:
-                line_text = json.dumps(item, ensure_ascii=False)
-            result.append(f"{i + 1}: {line_text}")
-
+            header_line, content_line = _format_simple_entry(item, i + 1)
+            result.append(header_line)
+            if content_line is not None:
+                result.append(content_line)
         return "\n".join(result)
