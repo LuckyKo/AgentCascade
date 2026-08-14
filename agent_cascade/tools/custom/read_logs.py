@@ -37,7 +37,7 @@ class ReadLogs(BaseTool):
             'format': {
                 'type': 'string',
                 'enum': ['raw', 'simple'],
-                'default': 'simple',
+                'default': 'raw',
                 'description': TOOL_METADATA['read_logs']['parameters']['format']
             }
         },
@@ -130,7 +130,7 @@ class ReadLogs(BaseTool):
             return f"Error: Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}."
 
         # Parse and validate output format
-        fmt = params.get('format', 'simple')
+        fmt = params.get('format', 'raw')
         valid_formats = ('raw', 'simple')
         if fmt not in valid_formats:
             return f"Error: Invalid format '{fmt}'. Must be one of: {', '.join(valid_formats)}."

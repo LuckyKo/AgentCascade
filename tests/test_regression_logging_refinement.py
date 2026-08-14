@@ -409,8 +409,8 @@ class TestReadLogsFormatParameter:
                     if len(parts) == 2 and parts[0].isdigit():
                         pytest.fail(f"Found raw-format line in simple output: {stripped}")
 
-    def test_format_defaults_to_simple(self):
-        """format parameter defaults to 'simple' when not specified."""
+    def test_format_defaults_to_raw(self):
+        """format parameter defaults to 'raw' when not specified (backward compatibility)."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             self._write_test_log(
@@ -431,9 +431,14 @@ class TestReadLogsFormatParameter:
 
             assert "Error" not in result, f"Unexpected error: {result}"
 
-            # Should produce simple format output (role labels, no raw JSON lines)
-            assert "USER" in result or "ASSISTANT" in result, \
-                "Default format should be 'simple' with role labels"
+            # Should produce raw JSON lines with number prefixes (backward compatible)
+            lines = [l for l in result.strip().split("\n") if l.strip()]
+            assert len(lines) >= 2, "Should have at least metadata + log entries"
+            # Check format: "{number}: {json}"
+            for line in lines:
+                parts = line.split(": ", 1)
+                assert len(parts) == 2 and parts[0].isdigit(), \
+                    f"Default format should be 'raw' with numbered JSON lines, got: {line[:60]}"
 
     def test_truncation_modes_work_with_raw_format(self):
         """Existing truncation modes (trim_tools, trim_all, none) still work with raw format."""
