@@ -57,6 +57,10 @@ const THROTTLE = Object.freeze({
 
 const AUTO_SCROLL_THRESHOLD = 50; // Distance from bottom (px) to consider user "at bottom" for auto-scroll
 
+// Notification sound cooldown to prevent rapid repeated sounds
+let lastNotificationSoundTime = 0;
+const NOTIFICATION_COOLDOWN_MS = 500;
+
 // ── Import retry configuration ──
 const IMPORT_RETRY_MAX_ATTEMPTS = 10;
 const IMPORT_RETRY_INTERVAL_MS = 100;
@@ -2314,9 +2318,13 @@ function handleServerMessage(data) {
         appendAgentMessageToVisible(newMsg);
         markAllMessagesRead();
       } else {
-        // Update unread badge and play notification sound (if not viewing the tab)
+        // Update unread badge and play notification sound (with cooldown, if not viewing the tab)
         updateAgentMessagesBadge();
-        playSound('notification');
+        const now = Date.now();
+        if (now - lastNotificationSoundTime > NOTIFICATION_COOLDOWN_MS) {
+          lastNotificationSoundTime = now;
+          playSound('notification');
+        }
       }
 
       break;

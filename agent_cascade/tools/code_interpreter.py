@@ -193,7 +193,7 @@ def _shutdown_kernel_client(kc, kernel_id: str = "") -> None:
     3. Explicitly joins and closes any remaining channel threads (shell, iopub, stdin, hb, control).
     4. Destroys the ZMQ context if owned by this client.
     """
-    if kc is None:
+    if kc is None or getattr(kc, '_closed', False):
         return
 
     logger.debug(f"Shutting down kernel client for {kernel_id}")
