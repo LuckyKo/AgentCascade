@@ -298,11 +298,9 @@ class ReadLogs(BaseTool):
         result_lines = [header_line]
 
         if reasoning:
-            r = str(reasoning)
-            if mode != 'none' and len(r) > max_chars:
-                r = ReadLogs._truncate_middle(r, max_chars)
             result_lines.append(f"    (reasoning)")
-            result_lines.append(f"    {r}")
+            result_lines.append(f"    {str(reasoning)}")
+            result_lines.append(f"    (reasoning_done)")
 
         if content:
             c = str(content)
