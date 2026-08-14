@@ -62,7 +62,7 @@ class ReadLogs(BaseTool):
             ':20'   -> first 20 entries
             '5'     -> single entry at position 5
             '-1'    -> last entry (single index)
-            '5:-1'  -> entries 5 through second-to-last (-1 as an end bound is exclusive-like)
+            '5:-1'  -> entries 5 through last
 
         Returns (start_idx, end_idx) as a half-open slice [start, end).
         """
@@ -93,7 +93,7 @@ class ReadLogs(BaseTool):
             else:
                 end = int(end_part)
                 if end < 0:
-                    end = total_entries + end  # -1 = one before last
+                    end = total_entries + 1 + end  # -1 = last entry (same convention as start)
 
             # Clamp to valid bounds [1, total_entries]
             start = max(1, min(start, total_entries))
@@ -300,7 +300,7 @@ class ReadLogs(BaseTool):
         if reasoning:
             result_lines.append(f"    (reasoning)")
             result_lines.append(f"    {str(reasoning)}")
-            result_lines.append(f"    (reasoning_done)")
+            result_lines.append(f"    (reasoning_end)")
 
         if content:
             c = str(content)
