@@ -315,7 +315,7 @@ TOOL_METADATA = {
         'description': (
             'Execute a shell command on the host system. This ALWAYS requires explicit user approval so use it as a last resort tool only! '
             'Commands run with the workspace directory as the working directory.\n\n'
-            '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. '
+            '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. NOTE: DO NOT use with file redirection (>, >>, <) as it may not work as expected. '
             'The command runs while you continue working, sending periodic heartbeat updates (if heartbeat_interval > 0) and a final result message when done. '
             'Use the tool_id parameter to manage running shells: send input, check status (__status), kill (__kill), update heartbeat (__heartbeat=N seconds), or send Ctrl+C (__ctrl_c). '
             'Max 5 concurrent async shells per agent.\n\n'
@@ -325,7 +325,7 @@ TOOL_METADATA = {
             'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
             'justification': 'Why you need to execute this command.',
             'cwd': 'Optional working directory, absolute or relative to workspace root.',
-            'timeout': 'Optional timeout in seconds (over 60s will automatically switch it to async mode). Use a higher value for long-running commands.',
+            'timeout': 'Optional timeout in seconds. Use a higher value for long-running commands. Values over 60s will automatically be treated as async_mode=true. Default: 30s.',
             'async_mode': 'Run the command in background and return immediately with tool_id + PID. The agent continues working while the command runs. Heartbeat updates are injected as user messages at intervals. Default: false (blocking/synchronous execution).',
             'heartbeat_interval': 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective when async_mode=true. Default: -1.',
             'tool_id': 'Reference an existing running shell by its tool_id to send input, update settings, or kill it. Returned in the initial response when launching with async_mode=true.'
@@ -355,7 +355,7 @@ TOOL_METADATA = {
             'max_chars_per_message': 'Maximum characters to keep for each string value in messages. Defaults to 1000.',
             'range': 'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries.',
             'mode': 'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only function_call.arguments, tool_calls arguments, and extra fields; leave content/reasoning_content intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
-            'format': 'Output format. "raw" (default) shows the original JSON lines for precise parsing; "simple" shows a human-readable summary with timestamps, role labels, and tool info.'
+            'format': 'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing.'
         }
     },
     'image_gen': {
