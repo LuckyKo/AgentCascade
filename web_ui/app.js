@@ -711,6 +711,7 @@ const settingMaxContext = $('#setting-max-context');
 const settingMaxTokens = $('#setting-max-tokens');
 const settingSoundIntervention = $('#setting-sound-intervention');
 const settingSoundCompleted = $('#setting-sound-completed');
+const settingSoundNotification = $('#setting-sound-notification');
 const settingReadFileLimit = $('#setting-read-file-limit');
 const valReadFileLimit = $('#val-read-file-limit');
 
@@ -1043,6 +1044,7 @@ function saveSettings(sendToServer) {
   if (settingLinesEnabled) s['setting-lines-enabled'] = settingLinesEnabled.checked;
   if (settingSoundIntervention) s['setting-sound-intervention'] = settingSoundIntervention.checked;
   if (settingSoundCompleted) s['setting-sound-completed'] = settingSoundCompleted.checked;
+  if (settingSoundNotification) s['setting-sound-notification'] = settingSoundNotification.checked;
   if (settingUserColor) s['setting-user-color'] = settingUserColor.value;
   if (settingAssistantColor) s['setting-assistant-color'] = settingAssistantColor.value;
   if (settingRawEditColor) s['setting-raw-edit-color'] = settingRawEditColor.value;
@@ -1174,6 +1176,10 @@ function loadSettings() {
 
     if (settingSoundCompleted && s['setting-sound-completed'] !== undefined) {
       settingSoundCompleted.checked = s['setting-sound-completed'];
+    }
+
+    if (settingSoundNotification && s['setting-sound-notification'] !== undefined) {
+      settingSoundNotification.checked = s['setting-sound-notification'];
     }
 
     if (settingTruncateTools && s['truncate-tools'] !== undefined) {
@@ -1659,6 +1665,14 @@ function playSound(type) {
       gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
       oscillator.start(audioCtx.currentTime);
       oscillator.stop(audioCtx.currentTime + 0.15);
+    } else if (type === 'notification' && settingSoundNotification && settingSoundNotification.checked) {
+      // Subtle notification: soft sine tone, lower volume than intervention
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(660, audioCtx.currentTime);
+      gainNode.gain.setValueAtTime(0.03, audioCtx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
+      oscillator.start(audioCtx.currentTime);
+      oscillator.stop(audioCtx.currentTime + 0.12);
     }
   } catch (e) {
     console.warn("Could not play sound:", e);
@@ -2300,12 +2314,11 @@ function handleServerMessage(data) {
         appendAgentMessageToVisible(newMsg);
         markAllMessagesRead();
       } else {
-        // Update unread badge
+        // Update unread badge and play notification sound (if not viewing the tab)
         updateAgentMessagesBadge();
+        playSound('notification');
       }
 
-      // Optional: subtle notification sound or browser notification
-      // playSound('notification'); // Uncomment if desired
       break;
     }
   }
