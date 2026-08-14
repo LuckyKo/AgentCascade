@@ -1876,7 +1876,7 @@ function handleServerMessage(data) {
 
       // Full state: force complete re-render (session load, reset, edit, delete, etc.)
       // Invalidate panel caches so edits/deletes trigger re-renders
-      mainTabPanels.querySelectorAll('.messages').forEach(p => { 
+      mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => { 
         p.dataset.contentKey = ''; 
         p.dataset.lastRenderedCount = '999999999';
       });
@@ -2035,7 +2035,7 @@ function handleServerMessage(data) {
       // Server can initiate generation via stream_update without calling resetGenStats().
       if (!state.generating) {
         // Invalidate ALL panel caches (not just root) to force re-render on fresh generation
-        mainTabPanels.querySelectorAll('.messages').forEach(p => {
+        mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => {
           p.dataset.contentKey = '';
           p.dataset.lastRenderedCount = '999999999';
         });
@@ -5033,7 +5033,7 @@ if (terminateBtn) {
 
 const onRetryClick = () => {
   // Invalidate ALL panel caches to force full re-render (not just root)
-  mainTabPanels.querySelectorAll('.messages').forEach(p => {
+  mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => {
     p.dataset.contentKey = '';
     p.dataset.lastRenderedCount = '999999999';
   });
@@ -5061,7 +5061,7 @@ resetBtn.addEventListener('click', () => {
     state.closedTabs.clear();
     localStorage.removeItem('agent-cascade-closed-tabs');
     // Invalidate all panel caches to force full re-render after reset
-      mainTabPanels.querySelectorAll('.messages').forEach(p => {
+      mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => {
         p.dataset.contentKey = '';
         p.dataset.lastRenderedCount = '999999999';
       });
