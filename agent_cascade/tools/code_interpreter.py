@@ -389,12 +389,30 @@ def cleanup_kernels_for_session(session_name: str, force_timeout: float = 5.0) -
     logger.info(f"Cleaning up {len(kernel_ids)} kernel(s) for session '{session_name}'")
 
     # Shut down kernel clients cooperatively
-    for kc in kc_list:
+    for idx, kc in enumerate(kc_list):
         if kc is not None:
+            kernel_id = kernel_ids[idx]
+            logger.debug(f"[ZMQ_CLEANUP] Shutting down kernel client for {kernel_id} in session {session_name}")
             try:
                 kc.shutdown()
+                # Stop channels to join background threads (prevents socket creation after cleanup)
+                if hasattr(kc, 'stop_channels'):
+                    try:
+                        kc.stop_channels()
+                    except Exception as e:
+                        logger.debug(f"stop_channels failed for {kernel_id}: {e}")
+                # Fallback: explicitly join channel threads with timeout
+                for ch in [getattr(kc, 'shell_channel', None), getattr(kc, 'iopub_channel', None),
+                           getattr(kc, 'stdin_channel', None), getattr(kc, 'hb_channel', None)]:
+                    if ch is not None and hasattr(ch, 'is_alive') and hasattr(ch, 'join'):
+                        try:
+                            if ch.is_alive():
+                                ch.join(timeout=1.0)
+                        except Exception as e:
+                            logger.debug(f"Channel join failed for {kernel_id}: {e}")
+                logger.debug(f"[ZMQ_CLEANUP] Kernel client {kernel_id} shutdown complete")
             except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
-                logger.debug(f"Kernel shutdown failed during session cleanup: {e}")
+                logger.debug(f"Kernel shutdown failed during session cleanup for {kernel_id}: {e}")
 
     # Stop and remove containers with timeout-based force fallback
     for kid, cid in container_pairs:
@@ -469,8 +487,25 @@ def _cleanup_single_kernel(kernel_id: str, work_dir: str, force_timeout: float =
     # Shutdown kernel client cooperatively
     kc = _KERNEL_CLIENTS.pop(kernel_id, None)
     if kc is not None:
+        logger.debug(f"[ZMQ_CLEANUP] Shutting down kernel client for {kernel_id}")
         try:
             kc.shutdown()
+            # Stop channels to join background threads (prevents socket creation after cleanup)
+            if hasattr(kc, 'stop_channels'):
+                try:
+                    kc.stop_channels()
+                except Exception as e:
+                    logger.debug(f"stop_channels failed for {kernel_id}: {e}")
+            # Fallback: explicitly join channel threads with timeout
+            for ch in [getattr(kc, 'shell_channel', None), getattr(kc, 'iopub_channel', None),
+                       getattr(kc, 'stdin_channel', None), getattr(kc, 'hb_channel', None)]:
+                if ch is not None and hasattr(ch, 'is_alive') and hasattr(ch, 'join'):
+                    try:
+                        if ch.is_alive():
+                            ch.join(timeout=1.0)
+                    except Exception as e:
+                        logger.debug(f"Channel join failed for {kernel_id}: {e}")
+            logger.debug(f"[ZMQ_CLEANUP] Kernel client {kernel_id} shutdown complete")
         except tuple([RuntimeError, OSError, AttributeError] + ([zmq.ZMQError] if zmq else [])) as e:
             logger.debug(f"Kernel shutdown failed for {kernel_id}: {e}")
 
