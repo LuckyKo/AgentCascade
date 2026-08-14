@@ -426,20 +426,19 @@ class ReadLogs(BaseTool):
                     parsed_lines.append(line)
 
         # --- Pagination / slicing ---
-        # Split into metadata lines and regular log entries, tracking original positions
-        other_lines = []
+        # Keep all lines including metadata, tracking original positions
+        all_lines = []
         for idx, l in enumerate(parsed_lines):
-            if not ReadLogs._is_metadata(l):
-                other_lines.append((idx + 1, l))
+            all_lines.append((idx + 1, l))
 
         try:
             if range_str is not None:
                 # Unified range parameter (1-indexed, inclusive like re_indent / edit_file)
-                start_idx, end_idx = self._parse_range(range_str, len(other_lines))
-                selected = other_lines[start_idx:end_idx]
+                start_idx, end_idx = self._parse_range(range_str, len(all_lines))
+                selected = all_lines[start_idx:end_idx]
             else:
-                # Default fallback — last 20 non-metadata entries
-                selected = other_lines[-20:]
+                # Default fallback — last 20 entries
+                selected = all_lines[-20:]
         except (ValueError, IndexError) as e:
             return f"Error parsing range '{range_str}': {e}"
 
