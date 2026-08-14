@@ -185,6 +185,7 @@ class ReadLogs(BaseTool):
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
         except Exception as e:
+            logger.exception(f"Error reading log file '{log_file}'")
             return f"Error reading file: {e}"
 
         # --- Parse the file content ---

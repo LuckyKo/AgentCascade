@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import time
 from typing import TYPE_CHECKING
 
 from agent_cascade.tools.base import BaseTool, register_tool
+
+logger = logging.getLogger(__name__)
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.operation_manager.path_security import _get_current_instance_name
@@ -70,7 +73,6 @@ class SendMessage(BaseTool):
             ws_loop = getattr(pool, '_ws_loop', None)
 
             if not (ws_queue and ws_loop and not ws_loop.is_closed()):
-                from agent_cascade.log import logger
                 logger.warning(f"WebSocket unavailable, message to user not delivered via notification: [{sender}] {message}")
                 return "Warning: User notification sent but WebSocket unavailable. Message logged."
 
@@ -88,7 +90,6 @@ class SendMessage(BaseTool):
             return "Message sent successfully to the user. They will see it in their notifications."
         except Exception as e:
             # Log full traceback, don't expose details to caller
-            from agent_cascade.log import logger
             logger.exception("Failed to send message to user via WebSocket")
             return "Warning: Message queued but notification may not be delivered immediately."
 

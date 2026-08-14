@@ -186,6 +186,7 @@ class ForgetLast(BaseTool):
                 logger_inst.update_history(history)
         
             except Exception as e:
+                logger.exception(f"Log sync failed after truncation for agent '{agent_name}'")
                 return f"Truncated {truncated_count}/{n} [-{total_chars_saved} chars]. Log sync error: {e}"
         
         # Sync caller's working set (same pattern as CompressContext)

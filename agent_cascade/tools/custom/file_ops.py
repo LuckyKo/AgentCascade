@@ -396,6 +396,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
             # Catches FileNotFoundError, IOError, etc. — merged handler (Fix #6)
             return f"ERROR: OS error reading '{path}' — {e}"
         except Exception as e:
+            logger.exception(f"Unexpected error reading file '{path}'")
             return f"ERROR: Reading file — {str(e)}"
 
 
@@ -506,9 +507,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
     def call(self, params: str, **kwargs):
         from agent_cascade.llm.schema import ContentItem
         from agent_cascade.tools.custom import screen_capture
-        import logging
 
-        logger = logging.getLogger(__name__)
         params = self._verify_json_format_args(params)
         path = params['path']
 
@@ -538,6 +537,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     return f"ERROR: {str(e)}"
                 except Exception as e:
                     msg = str(e)
+                    logger.exception("Screen capture failed for __screen_capture directive")
                     if "display" in msg.lower():
                         return "ERROR: Screen capture requires a graphical display. No display server detected."
                     return f"ERROR: Screen capture failed: {msg}"
@@ -575,6 +575,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                         return "ERROR: Screen capture requires a graphical display. No display server detected."
                     return f"ERROR: {msg}"
                 except Exception as e:
+                    logger.exception(f"Window capture failed for PID {pid}")
                     return f"ERROR: Window capture for PID {pid} failed: {e}"
 
                 # Save to temp file, then fall through to normal image handling (including captions)
@@ -635,6 +636,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
             # SVG parse errors from cairosvg come through as ValueError/TypeError
             return f"ERROR: SVG parse error in '{path}': {e}"
         except Exception as e:
+            logger.exception(f"Unexpected error viewing image '{path}'")
             return f"ERROR: Error viewing image: {str(e)}"
         finally:
             # Clean up the temp PNG file after serving (best-effort)
