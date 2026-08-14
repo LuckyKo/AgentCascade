@@ -152,7 +152,7 @@ class AsyncShellTask:
     return_code: Optional[int] = None
     last_heartbeat_sent_pos: int = 0   # Index into combined output lines
     heartbeat_count: int = 0           # Number of heartbeats sent for this task
-    console_window: bool = True        # Pop console window (TODO #21)
+    console_window: bool = False       # Pop console window (TODO #21)
     completed_at_launch: bool = False  # If True, tracking thread skips heartbeats/output/completion
 
     # Lock for thread-safe access to mutable fields during heartbeat reads
@@ -276,7 +276,7 @@ class AsyncShellTracker:
             heartbeat_interval: Seconds between heartbeat updates (-1 = only notify on completion)
             timeout: Max seconds before killing the process tree
             cwd: Working directory (resolved by caller before passing here)
-            console_window: If True (default), pop a visible console window on Windows.
+            console_window: If True, pop a visible console window on Windows. Default is False.
 
         Returns:
             Tuple of (tool_id, pid, early_output, completed_early, return_code):

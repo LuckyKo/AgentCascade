@@ -758,7 +758,7 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
         pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
 
     # Async shell console window toggle from pool if available
-    pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', True)
+    pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', False)
 
 
 def build_state_from_pool(

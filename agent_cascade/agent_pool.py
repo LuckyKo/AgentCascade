@@ -269,7 +269,7 @@ class AgentPool:
         self.settings = PoolSettings()                  # Configurable thresholds and timeouts
 
         # ── Defaults for attributes that can be overridden by persisted settings ──
-        self._enable_async_shell_console_window = True  # Default ON (overridden by _load_pool_settings if persisted)
+        self._enable_async_shell_console_window = False  # Default OFF (overridden by _load_pool_settings if persisted)
 
         # ── PoolSettings persistence ────────────────────────────────────────
         instance_id = get_instance_id()
