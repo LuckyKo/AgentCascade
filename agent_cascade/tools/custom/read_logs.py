@@ -207,21 +207,21 @@ class ReadLogs(BaseTool):
             c = entry
             if mode != 'none' and len(c) > max_chars:
                 c = ReadLogs._truncate_middle(c, max_chars)
-            return f"[{entry_num}] [RAW] {c}", None
+            return f"⟨L {entry_num}⟩ [RAW] {c}", None
 
         if not isinstance(entry, dict):
             # Non-dict type — respect truncation settings
             c = str(entry)
             if mode != 'none' and len(c) > max_chars:
                 c = ReadLogs._truncate_middle(c, max_chars)
-            return f"[{entry_num}] [{type(entry).__name__}] {c}", None
+            return f"⟨L {entry_num}⟩ [{type(entry).__name__}] {c}", None
 
         # If it doesn't have a recognizable role, treat as raw JSON
         role = entry.get("role", "").lower()
         if not role:
             json_str = json.dumps(entry, ensure_ascii=False)
             truncated = ReadLogs._truncate_middle(json_str, max_chars)
-            return f"[{entry_num}] [RAW] {truncated}", None
+            return f"⟨L {entry_num}⟩ [RAW] {truncated}", None
 
         timestamp = entry.get("timestamp", "")
         time_str = ""
@@ -275,7 +275,7 @@ class ReadLogs(BaseTool):
                 tool_info = " → " + ", ".join(calls)
 
         # Build header
-        header_parts = [f"[{entry_num}]"]
+        header_parts = [f"⟨L {entry_num}⟩"]
         if time_str:
             header_parts.append(time_str)
         header_parts.append(role_label + tool_info)
