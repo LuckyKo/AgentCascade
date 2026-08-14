@@ -281,15 +281,28 @@ class ReadLogs(BaseTool):
         header_parts.append(role_label + tool_info)
         header_line = " ".join(header_parts)
 
-        # Content preview
+        # Content preview — handle both content and reasoning_content for assistant entries
         content = None
-        if role in ("user", "assistant", "system"):
-            content = entry.get("content") or entry.get("reasoning_content")
+        reasoning = None
+        if role in ("user", "system"):
+            content = entry.get("content")
+        elif role == "assistant":
+            content = entry.get("content")
+            reasoning = entry.get("reasoning_content")
         elif role in ("function", "tool"):
             content = entry.get("content")
         else:
             # Fallback: try content field for unknown roles
             content = entry.get("content")
+
+        result_lines = [header_line]
+
+        if reasoning:
+            r = str(reasoning)
+            if mode != 'none' and len(r) > max_chars:
+                r = ReadLogs._truncate_middle(r, max_chars)
+            result_lines.append(f"    (reasoning)")
+            result_lines.append(f"    {r}")
 
         if content:
             c = str(content)
@@ -298,11 +311,9 @@ class ReadLogs(BaseTool):
             # - none: no additional truncation beyond what truncate_item did
             if mode != 'none' and len(c) > max_chars:
                 c = ReadLogs._truncate_middle(c, max_chars)
-            content_line = f"    {c}"
-        else:
-            content_line = None
+            result_lines.append(f"    {c}")
 
-        return header_line, content_line
+        return header_line, "\n".join(result_lines[1:]) if len(result_lines) > 1 else None
 
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
