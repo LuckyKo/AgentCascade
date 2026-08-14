@@ -181,6 +181,19 @@ class SkillManager:
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
+    def invalidate_cache(self) -> None:
+        """Invalidate the discovery cache so the next scan re-reads from disk.
+
+        Resets both the TTL timestamp and the scan signature under the write lock,
+        forcing ``discover()`` to bypass its early-return checks on the next call.
+        Call this whenever the registry is cleared or mutated outside of
+        ``discover()`` (e.g. when a config handler empties it) so that a later
+        rediscovery is not short-circuited by a stale cache hit.
+        """
+        with self._write_lock:
+            self._cache_signature = None
+            self._cache_timestamp = 0.0
+
     def _ensure_discovered(self) -> None:
         """Trigger discovery if cache expired or paths changed (cache-respecting).
 

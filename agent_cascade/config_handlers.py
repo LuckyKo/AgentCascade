@@ -345,6 +345,7 @@ def _handle_default_load_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], age
                     with sm._write_lock:
                         sm._skills_registry.clear()
                         sm._rebuild_index()
+                    sm.invalidate_cache()  # force rediscovery on next scan
 
 
 @register_config_handler('auto_skill_enabled')

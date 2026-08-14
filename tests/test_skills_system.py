@@ -308,6 +308,81 @@ class TestSkillManager:
         self.manager.discover([tmp])
         assert len(self.manager._skills_registry) == 0
 
+    # -- Cache invalidation (regression: stale discovery cache after NONE-mode clear) --
+
+    def test_invalidate_cache_forces_rediscovery_after_none_mode_clear(self):
+        """Regression test for the stale-discovery-cache bug.
+
+        Bug: when ``default_load_skill_mode`` is set to "NONE", the config handler
+        clears the registry but did NOT invalidate the discovery cache. A later
+        ``_ensure_discovered()`` then hit the TTL/signature early-return and left
+        the registry permanently empty — even though all SKILL.md files on disk
+        were valid.
+
+        This test reproduces the exact scenario:
+          1. Discover from the real skills dir -> >0 skills registered.
+          2. Simulate the OLD (buggy) NONE-mode handler: clear registry WITHOUT
+             invalidating the cache -> re-discovery is a cache hit -> stays empty.
+          3. Simulate the FIXED flow: clear registry + invalidate_cache() ->
+             re-discovery re-reads from disk -> skills are back.
+
+        A short TTL (0.0) makes the cache age out immediately, so the test is
+        deterministic and fast (no sleeping). The signature check still short-
+        circuits in step 2 because the on-disk files did not change, which is
+        exactly what the old code relied on to skip re-registration.
+        """
+        sm = self.manager
+        # Short TTL so any elapsed time counts as "expired" (no sleeping needed).
+        sm._cache_ttl = 0.0
+
+        # Step 1: discover from the real skills dir.
+        sm.discover([_SKILLS_DIR])
+        initial_count = len(sm._skills_registry)
+        assert initial_count > 0, "Expected at least one skill in the real skills dir"
+
+        # Step 2 (OLD/buggy behavior): clear registry + rebuild index WITHOUT
+        # invalidating the cache. The cache still holds a valid signature and a
+        # recent timestamp, so re-discovery must short-circuit (cache hit).
+        with sm._write_lock:
+            sm._skills_registry.clear()
+            sm._rebuild_index()
+        assert len(sm._skills_registry) == 0
+
+        # _ensure_discovered() is the same path scan_skills / tools use. With a
+        # stale-but-valid cache it must NOT re-register (documents the old bug).
+        sm._ensure_discovered()
+        assert len(sm._skills_registry) == 0, (
+            "Old buggy behavior: registry stayed empty because the discovery "
+            "cache was not invalidated after the NONE-mode clear"
+        )
+
+        # Step 3 (FIXED flow): clear again, then invalidate the cache. The next
+        # discovery must bypass the early-return and re-read from disk.
+        with sm._write_lock:
+            sm._skills_registry.clear()
+            sm._rebuild_index()
+        sm.invalidate_cache()
+        assert sm._cache_signature is None
+        assert sm._cache_timestamp == 0.0
+
+        sm._ensure_discovered()
+        assert len(sm._skills_registry) == initial_count, (
+            "Fixed flow: registry should be fully repopulated after invalidate_cache()"
+        )
+        assert "httpx-connection-pooling" in sm._skills_registry
+
+    def test_invalidate_cache_resets_fields_under_lock(self):
+        """invalidate_cache() must reset both cache fields (thread-safe)."""
+        sm = self.manager
+        sm.discover([_SKILLS_DIR])
+        # After a real discovery the signature is set and timestamp is recent.
+        assert sm._cache_signature is not None
+        assert sm._cache_timestamp > 0.0
+
+        sm.invalidate_cache()
+        assert sm._cache_signature is None
+        assert sm._cache_timestamp == 0.0
+
     # -- Tier 1 Metadata Queries --
 
     def test_get_skill_metadata_known_name(self):
