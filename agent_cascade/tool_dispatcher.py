@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 
 from agent_cascade.log import logger
 from agent_cascade.exceptions import AgentTerminatedError
-from agent_cascade.utils.utils import msg_field
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
