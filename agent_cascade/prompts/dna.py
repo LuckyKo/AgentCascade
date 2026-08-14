@@ -494,8 +494,8 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'destination': (
-                "Target of the message. Use 'user' to send to the human user, "
-                "or an exact agent instance name (e.g., 'worker1') to send to another agent."
+                "Target of the message. Use an exact agent instance name (e.g., 'worker1') to send to another agent"
+                "or 'user' to send to the human user."
             ),
             'message': 'The message content to send.'
         }

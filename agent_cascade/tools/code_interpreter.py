@@ -824,7 +824,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 else:
                     kc, container_id = self._start_kernel(kernel_id)
             except Exception as e:
-                # Clean up reservation on failure so next call starts fresh; notify waiters
+                # Clean up state on failure so next call starts fresh; notify waiters
                 with _KERNEL_READY:
                     _KERNEL_CLIENTS.pop(kernel_id, None)
                     _KERNEL_READY.notify_all()

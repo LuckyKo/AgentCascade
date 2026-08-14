@@ -31,7 +31,7 @@ from agent_cascade.settings import (
 )
 from agent_cascade.exceptions import ContextWindowExceeded, AgentTerminatedError
 from agent_cascade.retry_policy import calculate_backoff, RetryPolicy, POLICY_DEFAULT
-from agent_cascade.slot_queue import SlotPool, QUEUE_WAIT_TIMEOUT, RESERVATION_TIMEOUT
+from agent_cascade.slot_queue import SlotPool, QUEUE_WAIT_TIMEOUT
 
 
 # ── Termination check helpers (used by interruptible sleep patterns) ─────────
@@ -245,68 +245,12 @@ class EndpointScheduler:
     """
     
     def __init__(self):
-        self._lock = threading.RLock()  # RLock needed for reentrant calls (e.g., _start_sweeper from within _get_or_create_pool)
+        self._lock = threading.RLock()
         # Per-endpoint SlotPool for FIFO queueing + capacity control.
         # api_base -> SlotPool(key=api_base, capacity=N)
         self._pools: Dict[str, SlotPool] = {}
         # Lazy counter for acquisition IDs (for backward compat with diagnostics).
         self._next_acquisition_id = 0
-        
-        # Stale reservation sweeper thread (Phase 3 — plan lines ~294-295)
-        self._sweeper_thread: Optional[threading.Thread] = None
-        self._sweeper_stop = threading.Event()
-
-    def _start_sweeper(self):
-        """Start the stale reservation sweeper daemon thread (lazy init on first pool)."""
-        with self._lock:
-            if self._sweeper_thread is not None and self._sweeper_thread.is_alive():
-                return  # Already running
-            
-            self._sweeper_stop.clear()
-            self._sweeper_thread = threading.Thread(
-                target=self._sweeper_loop,
-                name="slot-scheduler-stale-reservation-sweeper",
-                daemon=True,
-            )
-            self._sweeper_thread.start()
-            logger.info("[EndpointScheduler] Stale reservation sweeper started (interval=60s)")
-
-    def _stop_sweeper(self):
-        """Stop the stale reservation sweeper thread gracefully."""
-        if self._sweeper_thread is not None:
-            self._sweeper_stop.set()
-            self._sweeper_thread.join(timeout=5.0)
-            self._sweeper_thread = None
-            logger.info("[EndpointScheduler] Stale reservation sweeper stopped")
-
-    def _sweeper_loop(self):
-        """Background loop: scan pools for stale reservations every 60 seconds."""
-        while not self._sweeper_stop.is_set():
-            self._sweeper_stop.wait(timeout=60.0)
-            if self._sweeper_stop.is_set():
-                break
-            
-            try:
-                total_cleaned = 0
-                with self._lock:
-                    pools_snapshot = list(self._pools.values())
-                
-                for pool in pools_snapshot:
-                    stale_tokens = pool.detect_stale_reservations(RESERVATION_TIMEOUT)
-                    for token in stale_tokens:
-                        try:
-                            pool.unreserve(token)
-                            total_cleaned += 1
-                            logger.info(f"[SCHEDULER_STALE_RESERVATION] Cleaned stale reservation "
-                                       f"token={token[:8]}... on pool '{pool.key}'")
-                        except Exception as e:
-                            logger.debug(f"[SCHEDULER_STALE_RESERVATION] Failed to unreserve {token}: {e}")
-                
-                if total_cleaned > 0:
-                    logger.info(f"[EndpointScheduler] Sweeper cleaned {total_cleaned} stale reservation(s)")
-            except Exception as e:
-                # Non-critical — sweeper should never crash the process.
-                logger.error(f"[EndpointScheduler] Sweeper loop error: {e}", exc_info=True)
 
     def _get_or_create_pool(self, api_base: str, concurrency_limit: int) -> Optional[SlotPool]:
         """Get or lazily create a SlotPool for the given endpoint.
@@ -332,8 +276,6 @@ class EndpointScheduler:
                 pool = SlotPool(key=slot_key, capacity=capacity)
                 self._pools[slot_key] = pool
                 logger.info(f"[EndpointScheduler] Created pool '{slot_key}' with capacity={capacity}")
-                # Start sweeper on first pool creation.
-                self._start_sweeper()
             return self._pools[slot_key]
     
     def acquire(
@@ -343,15 +285,15 @@ class EndpointScheduler:
         instance_name: str = "unknown",
         agent_class: str = "unknown",
         pool=None,
-        ancestor_chain: Optional[Tuple[str, ...]] = None,
         timeout: Optional[float] = None,
+        **kwargs,
     ) -> Optional[Callable[[], None]]:
         """
         Acquire a slot on the endpoint. Blocks if at capacity.
         Returns a cleanup callback to release the slot, or None if unlimited.
         
         Phase 2: Uses SlotPool.acquire() for FIFO queueing + strict capacity control.
-        Public API unchanged — same signature and return type as semaphore version.
+        Public API unchanged from semaphore-based version — all existing call sites work.
         
         Args:
             api_base: The API base URL of the endpoint
@@ -359,8 +301,7 @@ class EndpointScheduler:
             instance_name: Name of the agent instance acquiring the slot (for tracking)
             agent_class: Class of the agent instance (for tracking)
             pool: Optional AgentPool reference for termination checks during blocking acquire
-            ancestor_chain: Optional tuple of ancestor instance names for self-exemption (Phase 4)
-            timeout: Optional override for wait timeout in seconds (Phase 4 re-acquire uses 30s)
+            timeout: Optional override for wait timeout in seconds
             
         Returns:
             A callable that releases the slot when called, or None if no scheduling needed.
@@ -393,19 +334,11 @@ class EndpointScheduler:
         
         try:
             # Phase 2: Call SlotPool.acquire() — FIFO queueing, strict capacity, interruptible ticks.
-            # ancestor_chain passed as (instance_name,) for now; Phase 3 will wire up real chains.
-            effective_chain = ancestor_chain if ancestor_chain is not None else (instance_name,)
             release_from_pool = sched_pool.acquire(
                 instance_name=instance_name,
                 agent_class=agent_class,
-                ancestor_chain=effective_chain,
                 timeout=effective_timeout,
             )
-            
-            # Generate acquisition_id for backward-compat diagnostics logging.
-            with self._lock:
-                acquisition_id = self._next_acquisition_id
-                self._next_acquisition_id += 1
             
             logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) acquired slot on '{api_base}' "
                        f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
@@ -424,8 +357,6 @@ class EndpointScheduler:
                 logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) released slot on '{log_target}' "
                            f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
             
-            # TODO Phase 3: On release, check for stale reservations and unreserve if needed.
-            #   Call sched_pool.unreserve_for_agent(instance_name) when agent terminates abnormally.
             return release
             
         except TimeoutError as e:
@@ -580,12 +511,11 @@ class EndpointScheduler:
                         f"({holder.agent_name}) for {held_duration:.1f}s (threshold: {threshold_seconds}s)"
                     )
         
-        # Phase 4: Also flag waiters older than QUEUE_WAIT_TIMEOUT and stale reservations.
+        # Flag waiters older than QUEUE_WAIT_TIMEOUT.
         # Copy data under lock with short critical section, then iterate outside.
         for key, pool in self._pools.items():
             with pool._cond:
                 waiters_snapshot = list(pool._waiters.values())
-                reservations_snapshot = list(pool._reservations.values())
             
             # Flag aged waiters (outside lock)
             for ticket in waiters_snapshot:
@@ -602,23 +532,6 @@ class EndpointScheduler:
                     logger.warning(
                         f"[SLOT_STUCK_DETECTION] Waiter '{ticket.instance_name}' on '{key}' "
                         f"has waited {age:.1f}s > QUEUE_WAIT_TIMEOUT={QUEUE_WAIT_TIMEOUT}s"
-                    )
-            
-            # Flag stale reservations (outside lock)
-            for res in reservations_snapshot:
-                age = current_time - res.created_at
-                if age > RESERVATION_TIMEOUT:
-                    stuck_slots.append({
-                        'slot_key': key,
-                        'instance_name': res.agent_name,
-                        'agent_class': '',
-                        'held_duration': age,
-                        'acquired_at': res.created_at,
-                        'issue': 'stale_reservation',
-                    })
-                    logger.warning(
-                        f"[SLOT_STUCK_DETECTION] Stale reservation for '{res.agent_name}' on '{key}' "
-                        f"age={age:.1f}s > RESERVATION_TIMEOUT={RESERVATION_TIMEOUT}s"
                     )
         
         return stuck_slots
@@ -640,121 +553,8 @@ class EndpointScheduler:
             'concurrency_limit': concurrency_limit,
         }
     
-    # ── Reservation API (Phase 3 — Gap A fix) ───────────────────────────────
 
-    def _get_pool_for_agent(self, instance_name: str, agent_class: str, caller_agent_type: str = None) -> Optional[SlotPool]:
-        """Get the SlotPool that an agent would use based on its endpoint config.
-        
-        Phase 3 helper: used by reserve/unreserve to find the correct pool.
-        Resolves the same slot_key that acquire() would use for this agent class.
-        
-        Args:
-            instance_name: The agent instance name (for logging).
-            agent_class: The agent class to resolve endpoints for.
-            caller_agent_type: Optional caller type for endpoint inheritance.
-            
-        Returns:
-            SlotPool if a scheduling pool exists, None otherwise.
-        """
-        # Need APIRouter reference to resolve concurrency and api_base.
-        # This is set when EndpointScheduler is attached to APIRouter.
-        router = getattr(self, '_router_ref', None)
-        if not router:
-            logger.debug(f"[RESERVATION] No router ref for {instance_name}, cannot resolve pool")
-            return None
-        
-        concurrency_limit = router.get_effective_concurrency(agent_class, caller_agent_type=caller_agent_type)
-        if concurrency_limit == -1:
-            return None  # Unlimited — no pool.
-        
-        llm_cfg = router.get_llm_config(agent_class, caller_agent_type=caller_agent_type)
-        api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
-        
-        is_sequential = (concurrency_limit == 0)
-        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
-        
-        return self._pools.get(slot_key)
 
-    def reserve(
-        self,
-        instance_name: str,
-        ancestor_chain: Tuple[str, ...],
-        reason: str,
-        agent_class: Optional[str] = None,
-        caller_agent_type: Optional[str] = None,
-    ) -> Optional[str]:
-        """Reserve a slot for an agent (Phase 3 — Gap A fix).
-        
-        Called when an agent sleeps or spawns async children to prevent unrelated
-        agents from grabbing its slot. The reservation blocks grants to non-ancestor
-        agents while allowing the reserving agent and its descendants to proceed.
-        
-        Args:
-            instance_name: Name of the agent making the reservation.
-            ancestor_chain: Tuple of instance names in the call chain (e.g., ("A", "B")).
-                           Used for self-exemption — any name in this chain can bypass the reservation.
-            reason: Human-readable reason for the reservation (e.g., "sleeping").
-            agent_class: Agent class for pool resolution (if not stored on instance).
-            caller_agent_type: Optional caller type for endpoint inheritance.
-            
-        Returns:
-            Reservation token string, or None if no pool exists for this agent.
-        """
-        pool = self._get_pool_for_agent(instance_name, agent_class, caller_agent_type)
-        if pool is None:
-            return None
-        
-        token = pool.reserve(
-            agent_name=instance_name,
-            ancestor_chain=ancestor_chain,
-            reason=reason,
-            acquisition_id=0,  # Phase 3: not currently used for reservation matching; plan doesn't require it.
-        )
-        
-        logger.info(f"[RESERVATION] {instance_name} reserved slot (reason={reason}, chain={ancestor_chain})")
-        return token
-
-    def unreserve(self, token: str) -> bool:
-        """Unreserve a previously made reservation.
-        
-        Called when an agent wakes from sleep or completes async wait.
-        Must be called BEFORE re-acquiring the slot (order matters per plan).
-        
-        Args:
-            token: The reservation token returned by reserve().
-            
-        Returns:
-            True if a reservation was removed, False if token was not found.
-        """
-        # Find which pool holds this reservation.
-        for pool in self._pools.values():
-            if pool.unreserve(token):
-                logger.debug(f"[RESERVATION] Unreserved token={token}")
-                return True
-        
-        logger.debug(f"[RESERVATION] Token {token} not found (already cleared?)")
-        return False
-
-    def unreserve_for_agent(self, agent_name: str) -> int:
-        """Unreserve all reservations held by an agent.
-        
-        Called during termination or cleanup to clear stale reservations.
-        
-        Args:
-            agent_name: Name of the agent whose reservations to clear.
-            
-        Returns:
-            Number of reservations cleared.
-        """
-        total = 0
-        for pool in self._pools.values():
-            count = pool.unreserve_for_agent(agent_name)
-            total += count
-        
-        if total > 0:
-            logger.info(f"[RESERVATION] Cleared {total} reservation(s) for agent={agent_name}")
-        
-        return total
 
     def cancel(self, instance_name: str = None, ticket_id: str = None) -> bool:
         """Cancel a waiting ticket in the queue.
@@ -805,23 +605,8 @@ class EndpointScheduler:
         
         return total
     
-    def clear_all_reservations(self) -> int:
-        """Clear ALL reservations across all pools. Used during stop_session.
-        
-        Returns:
-            Total number of reservations cleared.
-        """
-        total_cleared = 0
-        for pool in self._pools.values():
-            with pool._cond:
-                total_cleared += len(pool._reservations)
-                pool._reservations.clear()
-        if total_cleared > 0:
-            logger.info(f"[RESERVATION] Cleared {total_cleared} reservation(s) across all pools")
-        return total_cleared
-
     def terminate_for_agent(self, agent_name: str) -> tuple:
-        """Cancel all tickets and reservations for an agent.
+        """Cancel all tickets for an agent.
         
         Called during AgentInstance.terminate() to fully clean up that agent's
         presence in all scheduling queues.
@@ -830,10 +615,9 @@ class EndpointScheduler:
             agent_name: Name of the agent to terminate from queues.
             
         Returns:
-            Tuple of (tickets_cancelled, reservations_cleared).
+            Tuple of (tickets_cancelled, 0) for backward-compat with callers.
         """
         tickets = 0
-        reservations = 0
         
         for pool in self._pools.values():
             # Cancel all waiting tickets for this agent.
@@ -844,14 +628,11 @@ class EndpointScheduler:
                     pool._waiters.pop(tid)
                     tickets += 1
                 pool._cond.notify_all()
-            
-            # Clear all reservations held by this agent.
-            reservations += pool.unreserve_for_agent(agent_name)
         
-        if tickets > 0 or reservations > 0:
-            logger.info(f"[TERMINATION] Cleaned up {agent_name}: {tickets} ticket(s), {reservations} reservation(s)")
+        if tickets > 0:
+            logger.info(f"[TERMINATION] Cleaned up {agent_name}: {tickets} ticket(s)")
         
-        return (tickets, reservations)
+        return (tickets, 0)
 
 
 # ── API Router ───────────────────────────────────────────────────────────────
@@ -1958,8 +1739,8 @@ class APIRouter:
         agent-level scheduling (Phase 2). Kept for backward compat with stop_session()
         in agent_pool.py which calls this during session cleanup.
         
-        TODO Phase 3: Replace this with SlotPool.terminate_for_agent() calls when
-        reservation hooks are wired up in execution_engine.py and tool_dispatcher.py.
+        # NOTE: This method is legacy — kept for backward compat only.
+        # The slot queue system now uses SlotPool directly; no reservation hooks exist.
         """
         with self._sem_lock:
             for base, (sem, size) in list(self._semaphores.items()):

@@ -98,8 +98,83 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] UI settings export/import round-trip audit — FIXED: max_workers import alias handler added (was silently dropped), max_images_for_llm now persisted to disk (was lost on restart), sleeping_timeout removed from exports (deprecated). All exported settings now re-importable without data loss. See audit_reports/ui_settings_export_import_audit_20260812.md and .agent_lessons/ui-settings-export-import-roundtrip-gaps.md.
 - [x] check KV cache miss on reused agent (investigate POST dump on exit and on recall, see if something changes in sys prompt)
 - [x] make a skill for best practices when creating unit/regression tests — DONE: generic Python/pytest testing-best-practices skill at .qwen/skills/testing-best-practices/SKILL.md. Cross-project reusable, no AC-specific references. Based on research report and project memories. Reviewed and approved twice (AC-specific then generic).
-
+- [ ] expand read_logs with a display mode argument: trim_tools (default), trim_all, none. for trim_tools we apply our truncation only to `function` outputs, leaving the rest intact (assistant/reasoning/user); trim_all - truncate all messages as before, none -  no truncation
+- [ ] stop button does not also stop the attempt to API fallback
 
 
 # Errors to investigate:
 
+# after failing the inner loop test it just locked the system
+2026-08-13 12:39:11,231 - agent_pool.py - 3166 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_8ec0108a
+2026-08-13 12:43:00,184 - execution_engine.py - 2923 - INFO - [STREAM_GUARD] Detected generation loop: max chars exceeded (60964/60960) (score=100) for stress_investigator_ac. Retrying…
+2026-08-13 12:43:00,184 - execution_engine.py - 3022 - DEBUG -   [LOOP_SAMPLE] Saved to N:\work\WD\AgentWorkspace\logs\loop_samples\samples_2026-08-13.jsonl
+2026-08-13 12:43:00,190 - execution_engine.py - 3054 - DEBUG - [INNER_LOOP] Detection error for stress_investigator_ac: inner_loop: max chars exceeded (60964/60960)
+2026-08-13 12:43:00,192 - execution_engine.py - 2767 - INFO - [INNER_LOOP] Detection triggered for 'stress_investigator_ac' (reason: max chars exceeded (60964/60960)), but not strong enough to advance cursor. Retrying same endpoint.
+2026-08-13 12:43:00,195 - execution_engine.py - 3482 - WARNING - [ENDPOINT_RETRY] LLM call failed for stress_investigator_ac, retry 1/3. Retrying in 1.0s... Error: inner_loop: max chars exceeded (60964/60960)
+2026-08-13 12:48:18,310 - execution_engine.py - 1603 - DEBUG - EXIT - stress_investigator_ac RUNNING→IDLE
+2026-08-13 12:48:18,323 - execution_engine.py - 5291 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=stress_investigator_ac, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=113
+2026-08-13 12:48:20,799 - tool_dispatcher.py - 593 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'stress_investigator_ac' completed in 2068.12s
+2026-08-13 12:48:20,799 - tool_dispatcher.py - 611 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
+2026-08-13 12:48:20,801 - agent_pool.py - 2602 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-08-13 12:48:32,687 - tool_dispatcher.py - 636 - DEBUG - Restored caller KV state for Maine
+2026-08-13 12:48:32,687 - tool_dispatcher.py - 640 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 2080.02s
+2026-08-13 12:48:32,689 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
+
+# system stuck after this
+2026-08-14 01:50:49,469 - agent_pool.py - 1177 - DEBUG - No active thread to join for 'Security_op_79bc8870'
+2026-08-14 01:50:49,470 - agent_pool.py - 917 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_79bc8870'
+2026-08-14 01:51:13,532 - execution_engine.py - 1603 - DEBUG - EXIT - Maine RUNNING→IDLE
+2026-08-14 01:52:51,048 - code_interpreter.py - 228 - WARNING - Code interpreter watchdog: Kernel ci_Maine_631995_26992 inactive for 300s. Killing container.
+2026-08-14 01:52:52,473 - log.py - 198 - ERROR - Uncaught exception in thread Thread-146
+Traceback (most recent call last):
+  File "C:\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 151, in run
+    loop.run_until_complete(self._async_run())
+  File "C:\Python312\Lib\asyncio\base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 143, in _async_run
+    self._create_socket()
+  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 105, in _create_socket
+    self.socket = self.context.socket(zmq.REQ)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\zmq\sugar\context.py", line 352, in socket
+    socket_class(  # set PYTHONTRACEMALLOC=2 to get the calling frame
+  File "C:\Python312\Lib\site-packages\zmq\sugar\socket.py", line 162, in __init__
+    super().__init__(
+  File "zmq/backend/cython/_zmq.py", line 740, in zmq.backend.cython._zmq.Socket.__init__
+    raise ZMQError()
+    ^^^^^^^^^^^
+zmq.error.ZMQError: No buffer space available
+2026-08-14 01:53:20,307 - agent_pool.py - 791 - DEBUG - Idle checker restarted
+2026-08-14 01:53:20,308 - agent_pool.py - 807 - DEBUG - Async registry executor recreated
+2026-08-14 01:53:20,309 - agent_pool.py - 810 - DEBUG - Stopped flag cleared — ready for new execution
+2026-08-14 01:53:20,310 - ws_handlers.py - 209 - DEBUG - Starting generation gen_id=5, instances={'Maine': 'IDLE'}, active_stack=0
+2026-08-14 01:53:20,312 - agent_pool.py - 791 - DEBUG - Idle checker restarted
+2026-08-14 01:53:20,312 - agent_pool.py - 807 - DEBUG - Async registry executor recreated
+2026-08-14 01:53:20,313 - agent_pool.py - 810 - DEBUG - Stopped flag cleared — ready for new execution
+2026-08-14 01:53:20,313 - execution_engine.py - 1093 - DEBUG - engine.run() ENTRY - instance=Maine
+2026-08-14 01:53:20,314 - agent_pool.py - 2628 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-08-14 01:53:20,314 - execution_engine.py - 892 - DEBUG - [SLOT_ACQUIRE] initial - instance=Maine, class=orchestrator
+2026-08-14 01:53:20,316 - execution_engine.py - 1173 - DEBUG - [TURN_START] Calling _setup_turn for Maine
+2026-08-14 01:53:20,317 - execution_engine.py - 1680 - DEBUG - [CACHE_HIT] Reusing cached messages=123, llm_messages=123
+2026-08-14 01:53:20,317 - execution_engine.py - 1208 - DEBUG - [TURN_DONE] Got messages=123, llm_messages=123
+2026-08-14 01:53:20,349 - execution_engine.py - 1292 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+
+# lock on shell cmd call
+2026-08-14 02:44:35,488 - tool_dispatcher.py - 636 - DEBUG - Restored caller KV state for coder_gguf_fix
+2026-08-14 02:44:35,488 - tool_dispatcher.py - 640 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'coder_gguf_fix'. Total SYNC path elapsed: 177.05s
+2026-08-14 02:44:35,490 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
+2026-08-14 02:44:40,025 - agent_pool.py - 1177 - DEBUG - No active thread to join for 'reviewer_gguf_fix'
+2026-08-14 02:44:57,170 - execution_engine.py - 1603 - DEBUG - EXIT - coder_gguf_fix RUNNING→IDLE
+2026-08-14 02:44:57,190 - execution_engine.py - 5291 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=coder_gguf_fix, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=130
+2026-08-14 02:44:59,192 - tool_dispatcher.py - 593 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'coder_gguf_fix' completed in 1180.94s
+2026-08-14 02:44:59,193 - tool_dispatcher.py - 611 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
+2026-08-14 02:44:59,195 - agent_pool.py - 2628 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-08-14 02:44:59,195 - tool_dispatcher.py - 640 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 1180.94s
+2026-08-14 02:44:59,196 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
+2026-08-14 02:44:59,640 - qwenvl_oai.py - 105 - DEBUG - Vision payload: role=user, image_url starts with data:=True, url_prefix=data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...
+2026-08-14 02:44:59,641 - qwenvl_oai.py - 105 - DEBUG - Vision payload: role=user, image_url starts with data:=True, url_prefix=data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...
+2026-08-14 02:44:59,643 - qwenvl_oai.py - 105 - DEBUG - Vision payload: role=user, image_url starts with data:=True, url_prefix=data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...
+2026-08-14 02:50:57,742 - ws_handlers.py - 313 - INFO - Stop: Transitioned Maine from RUNNING to IDLE

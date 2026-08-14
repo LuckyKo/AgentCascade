@@ -698,9 +698,9 @@ class ToolDispatcher:
         Replaces the old 2×0.1s give-up attempts that silently left callers without slots.
         
         Algorithm:
-        1. Try immediate acquire via pool._acquire_slot (slot may already be free)
-        2. If blocked, use scheduler.acquire() with ancestor_chain for self-exemption, wait up to 30s
-        3. On failure: clear _slot_release and fall back to async-only
+        1. Build ancestor chain including self for logging and debugging.
+        2. Queue-aware acquire via router.scheduler.acquire with ancestor_chain and 30s timeout.
+        3. On failure: clear _slot_release and fall back to async-only.
         
         Args:
             slot_holder: Instance holding the slot (has .agent_class attr)
@@ -717,22 +717,6 @@ class ToolDispatcher:
         
         if not slot_holder:
             return False
-        
-        # Step 1: Try immediate acquire via pool._acquire_slot (slot may already be free).
-        # This is fast and avoids the full queue path when contention has cleared.
-        try:
-            release_cb = self.pool._acquire_slot(
-                slot_holder.agent_class, slot_holder_name
-            )
-            if release_cb is not None or release_cb is None:  # Both are valid (None = unlimited)
-                slot_holder._slot_release = release_cb
-                return True
-        except Exception as e:
-            logger.debug(f"Immediate re-acquire failed for '{slot_holder_name}' after {context_label}: {e}")
-        
-        # Step 2: Queue-aware acquire with reservation exemption.
-        # Build ancestor chain including self so self-exemption applies.
-        ancestor_chain = self._build_ancestor_chain_for_reacquire(slot_holder)
         
         # Resolve the slot's api_base and concurrency_limit via router
         router = self.pool.api_router
@@ -757,14 +741,12 @@ class ToolDispatcher:
                 concurrency_limit=concurrency_limit,
                 instance_name=slot_holder_name,
                 agent_class=slot_holder.agent_class,
-                ancestor_chain=ancestor_chain,  # enables self-exemption
                 timeout=REACQUIRE_TIMEOUT,
             )
             if release_cb is not None:
                 slot_holder._slot_release = release_cb
                 logger.debug(
-                    f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{slot_holder_name}' after {context_label} "
-                    f"(ancestor_chain={ancestor_chain})"
+                    f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{slot_holder_name}' after {context_label}"
                 )
                 return True
             else:
@@ -783,14 +765,6 @@ class ToolDispatcher:
             f"after {REACQUIRE_TIMEOUT}s. Subsequent calls will use ASYNC path only."
         )
         return False
-    
-    def _build_ancestor_chain_for_reacquire(self, instance: 'AgentInstance') -> Tuple[str, ...]:
-        """Build ancestor chain from root to this instance for re-acquire self-exemption.
-
-        Delegates to shared utility in slot_queue to avoid duplication.
-        """
-        from agent_cascade.slot_queue import build_ancestor_chain
-        return build_ancestor_chain(instance, self.pool.get_instance)
 
     def _validate_call_agent_args(
         self,

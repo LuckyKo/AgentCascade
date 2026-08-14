@@ -15,6 +15,8 @@ import threading
 from typing import Callable, Optional, Dict, List, Tuple
 from concurrent.futures import Future, ThreadPoolExecutor
 
+from agent_cascade.log import logger
+
 
 @dataclass
 class BackgroundToolEntry:
@@ -130,23 +132,24 @@ class AsyncToolRegistry:
         """
         try:
             # Check if the owning instance was terminated before starting execution.
-            if self.pool and self.pool.is_instance_terminated(entry.agent_instance_name):
-                logger.debug(
-                    f"[AsyncToolRegistry] Skipping tool for '{entry.agent_instance_name}': "
-                    f"instance was dismissed before execution started"
-                )
-                from agent_cascade.exceptions import AgentTerminatedError
-                raise AgentTerminatedError(entry.agent_instance_name)
+            if self.pool and getattr(self.pool, 'is_instance_terminated', None):
+                if self.pool.is_instance_terminated(entry.agent_instance_name) is True:
+                    logger.debug(
+                        f"[AsyncToolRegistry] Skipping tool for '{entry.agent_instance_name}': "
+                        f"instance was dismissed before execution started"
+                    )
+                    from agent_cascade.exceptions import AgentTerminatedError
+                    raise AgentTerminatedError(entry.agent_instance_name)
             # Also check if this is an async child agent and that child was terminated.
             # This ensures dismissal of the child instance aborts its executor worker.
-            if (entry.child_instance_name and self.pool and
-                    self.pool.is_instance_terminated(entry.child_instance_name)):
-                logger.debug(
-                    f"[AsyncToolRegistry] Skipping async child '{entry.child_instance_name}': "
-                    f"child instance was dismissed before execution started"
-                )
-                from agent_cascade.exceptions import AgentTerminatedError
-                raise AgentTerminatedError(entry.child_instance_name)
+            if (entry.child_instance_name and self.pool and getattr(self.pool, 'is_instance_terminated', None)):
+                if self.pool.is_instance_terminated(entry.child_instance_name) is True:
+                    logger.debug(
+                        f"[AsyncToolRegistry] Skipping async child '{entry.child_instance_name}': "
+                        f"child instance was dismissed before execution started"
+                    )
+                    from agent_cascade.exceptions import AgentTerminatedError
+                    raise AgentTerminatedError(entry.child_instance_name)
             entry.result = entry.tool_call()
         except Exception as e:
             entry.error = str(e)

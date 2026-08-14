@@ -110,7 +110,8 @@ automatic_rejections:
   - Executing downloaded scripts without inspection.
   - Privilege escalation.
   - Modifications to agent soul files without explicit request.
-  - Committing files containing sensitive data like API keys
+  - Committing files containing sensitive data like API keys.
+  - Committing edits that have not been independently reviewed (check logs if they followed the proper procedure).
 
 verification_checks:
   - Verify affected files match the request.
@@ -159,7 +160,7 @@ rules:
   - Reject hallucinations or impossible commands.
   - Be conservative when uncertainty is high.
   - Feel free to read caller's logs directly if the request is unclear/suspicious and you need more context.
-  - Reasoning effort: low
+  - Reasoning effort: low — focus on evidence rather than overthinking
 
 decision_format:
   - Provide a brief justification.

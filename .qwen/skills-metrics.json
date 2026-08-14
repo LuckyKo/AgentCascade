@@ -2,21 +2,21 @@
   "schema_version": "1.0",
   "skills": {
     "self-augmentation": {
-      "total_loads": 824,
+      "total_loads": 1385,
       "by_version": {
-        "1.0.0": 824
+        "1.0.0": 1385
       }
     },
     "project-memory-writing": {
-      "total_loads": 37,
+      "total_loads": 49,
       "by_version": {
-        "1.0.0": 37
+        "1.0.0": 49
       }
     },
     "python-codebase-static-analysis": {
-      "total_loads": 11,
+      "total_loads": 33,
       "by_version": {
-        "1.0.0": 11
+        "1.0.0": 33
       }
     },
     "investigate-streaming-gaps": {
@@ -29,6 +29,24 @@
       "total_loads": 1,
       "by_version": {
         "1.0.0": 1
+      }
+    },
+    "scheduler-architecture": {
+      "total_loads": 22,
+      "by_version": {
+        "1.0.0": 22
+      }
+    },
+    "skill-creator": {
+      "total_loads": 39,
+      "by_version": {
+        "1.0.0": 39
+      }
+    },
+    "testing-best-practices": {
+      "total_loads": 8,
+      "by_version": {
+        "1.0.0": 8
       }
     }
   }

@@ -1,20 +1,17 @@
 """
 Integration and stress tests for the API scheduler queue system.
 
-Verifies FIFO queue + reservation system prevents model trashing under realistic
+Verifies the FIFO queue scheduler prevents model trashing under realistic
 agent call interleaving scenarios. Uses ThreadPoolExecutor to simulate concurrent agent
 threads with mocked LLM calls — no actual API needed.
 
 Test categories:
 1. FIFO Ordering Under Contention
-2. Reservation Blocking (Gap A Fix)
-3. Self-Exemption Verification
-4. Cancel-on-Termination
-5. Re-acquire Reliability
-6. Stress/Soak Tests
-7. Procedural Generation / Brute Force
-
-Plan reference: plans/api_scheduler_queue_refactor_plan.md Section 10
+2. Cancel-on-Termination
+3. Stress/Soak Tests
+4. Procedural Generation / Brute Force
+5. Endpoint Scheduler Integration
+6. Edge Cases and Negatives
 """
 
 import itertools
@@ -216,7 +213,7 @@ class FIFOWaiterSetup:
     def _waiter(self, name: str, idx: int):
         self.gates[idx].wait()
         self.ready[idx].set()
-        release_cb = self.pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,), timeout=5.0)
+        release_cb = self.pool.acquire(instance_name=name, agent_class="test", timeout=5.0)
         with self.lock:
             self.granted_order.append(name)
         time.sleep(self.work_duration)
@@ -396,268 +393,11 @@ class TestFIFOOrderingUnderContention:
 
 
 # ============================================================================
-# Category 2: Reservation Blocking (Gap A Fix)
-# ============================================================================
-
-class TestReservationBlocking:
-    """Test reservation blocking — the core Gap A fix from todo.md#93."""
-
-    def test_todo_md_93_scenario(self):
-        """Exact scenario: A(sync,P)->B(async,Q); A->D(sync,P); B->C(sync,P).
-
-        When A sleeps awaiting B, C's acquire blocked by A's reservation; no interleaving.
-        """
-        pool_p = SlotPool(key="_shared_sequential_slot_", capacity=1)
-        holder_a = pool_p.create_held_slot("A")
-
-        a_chain = ("A",)
-        pool_p.reserve(agent_name="A", ancestor_chain=a_chain, reason="async_child", acquisition_id=1)
-        pool_p.release(holder_a)
-
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        c_ready = threading.Event()
-        c_granted_event = threading.Event()
-
-        def waiter_c():
-            c_ready.set()
-            release_cb = pool_p.acquire(instance_name="C", agent_class="test", ancestor_chain=("B", "C"))
-            with lock:
-                granted_order.append("C")
-            c_granted_event.set()
-            release_cb()
-
-        t_c = threading.Thread(target=waiter_c)
-        t_c.start()
-        assert c_ready.wait(timeout=5), "C should have started acquiring"
-
-        assert not c_granted_event.is_set(), \
-            "VIOLATION: C was granted while A had active reservation (Gap A not fixed!)"
-
-        status = pool_p.get_status()
-        assert status["waiting_count"] == 1, f"C should be waiting in queue"
-        assert any(r["agent_name"] == "A" for r in status["reservations"]), \
-            "A's reservation should still be active"
-
-        pool_p.unreserve_for_agent("A")
-        t_c.join(timeout=5)
-
-        assert c_granted_event.is_set(), "C should be granted after A unreserves"
-        assert_fifo_order(granted_order, ["C"])
-
-    def test_parent_reserves_child_inherits_exemption(self):
-        """Parent reserves on sleep, child inherits chain exemption.
-
-        A holds slot and reserves (sleeping). U queues but blocked by reservation.
-        B (A's descendant) is exempt from A's reservation but must wait behind U in FIFO order.
-        After unreserve: U granted first, then B. Slot kept held so both can queue before grants.
-        """
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        a_chain = ("root", "A")
-        pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
-
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        u_ready = threading.Event()
-        b_ready = threading.Event()
-        grant_b_gate = threading.Event()
-
-        def waiter_b():
-            b_chain = ("root", "A", "B")
-            b_ready.set()
-            release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=b_chain)
-            with lock:
-                granted_order.append("B")
-            grant_b_gate.wait(timeout=5)
-            release_cb()
-
-        def waiter_unrelated():
-            u_chain = ("other", "U")
-            u_ready.set()
-            release_cb = pool.acquire(instance_name="U", agent_class="test", ancestor_chain=u_chain)
-            with lock:
-                granted_order.append("U")
-            grant_b_gate.wait(timeout=5)
-            release_cb()
-
-        t_u = threading.Thread(target=waiter_unrelated)
-        t_u.start()
-        assert u_ready.wait(timeout=2), "U should have started acquiring"
-
-        t_b = threading.Thread(target=waiter_b)
-        t_b.start()
-        assert b_ready.wait(timeout=2), "B should have started acquiring"
-
-        status = pool.get_status()
-        assert status["waiting_count"] == 2, f"Both should be waiting, got {status['waiting_count']}"
-        waiters = [w["instance_name"] for w in status["waiters"]]
-        assert waiters[0] == "U", f"U should be head of queue: {waiters}"
-
-        assert len(granted_order) == 0, \
-            f"No one should be granted yet. Got: {granted_order}"
-
-        pool.unreserve_for_agent("A")
-        pool.release(holder_a)
-
-        t_u.join(timeout=5)
-        grant_b_gate.set()
-        t_b.join(timeout=5)
-
-        assert_fifo_order(granted_order, ["U", "B"])
-
-    def test_multiple_reservations_same_pool_all_must_clear(self):
-        """Multiple reservations on same pool — all must clear before unrelated grants."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        pool.reserve(agent_name="B", ancestor_chain=("B",), reason="async_child", acquisition_id=2)
-        pool.release(holder_a)
-
-        c_ready = threading.Event()
-        granted_event = threading.Event()
-
-        def waiter_c():
-            c_ready.set()
-            release_cb = pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",))
-            granted_event.set()
-            release_cb()
-
-        t_c = threading.Thread(target=waiter_c)
-        t_c.start()
-        assert c_ready.wait(timeout=5), "C should have started acquiring"
-
-        assert not granted_event.is_set(), "C should be blocked by multiple reservations"
-
-        pool.unreserve_for_agent("A")
-        assert not granted_event.is_set(), \
-            "C should still be blocked after clearing only one of two reservations"
-
-        pool.unreserve_for_agent("B")
-        t_c.join(timeout=5)
-        assert granted_event.is_set(), "C should be granted after all reservations clear"
-
-    def test_reservation_blocks_unrelated_chain(self):
-        """Negative test: reservation actually blocks unrelated agents (no bypass)."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        a_chain = ("root", "A")
-        pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
-        pool.release(holder_a)
-
-        granted_event = threading.Event()
-        blocked_event = threading.Event()
-
-        def waiter_unrelated():
-            try:
-                u_chain = ("other", "U")
-                release_cb = pool.acquire(
-                    instance_name="U", agent_class="test", ancestor_chain=u_chain, timeout=1.0
-                )
-                granted_event.set()
-                release_cb()
-            except (SlotQueueTimeout, TimeoutError):
-                blocked_event.set()
-
-        t_u = threading.Thread(target=waiter_unrelated)
-        t_u.start()
-        t_u.join(timeout=5)
-
-        assert not granted_event.is_set(), \
-            "VIOLATION: Unrelated agent U was granted despite active reservation (reservation bypass!)"
-        assert blocked_event.is_set(), "U should have been blocked by reservation and timed out"
-
-
-# ============================================================================
-# Category 3: Self-Exemption Verification
-# ============================================================================
-
-class TestSelfExemption:
-    """Test that agents can always re-acquire their own reserved pool."""
-
-    def test_self_reserve_reacquire_succeeds(self):
-        """A reserves pool P -> A re-acquires succeeds immediately."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        a_chain = ("root", "A")
-        pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
-        pool.release(holder_a)
-
-        reacquired = threading.Event()
-
-        def waiter_a():
-            release_cb = pool.acquire(instance_name="A", agent_class="test", ancestor_chain=a_chain)
-            reacquired.set()
-            release_cb()
-
-        t_a = threading.Thread(target=waiter_a)
-        t_a.start()
-
-        assert reacquired.wait(timeout=2), \
-            "VIOLATION: A blocked by its own reservation (self-exemption broken!)"
-        t_a.join(timeout=3)
-
-    def test_self_reserve_descendant_granted_unrelated_blocked(self):
-        """A reserves -> A's descendant granted -> unrelated B blocked until A unreserves."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        a_chain = ("root", "A")
-        pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="sleeping", acquisition_id=1)
-        pool.release(holder_a)
-
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        child_ready = threading.Event()
-        b_ready = threading.Event()
-        b_blocked_event = threading.Event()
-
-        def waiter_child():
-            child_chain = ("root", "A", "child")
-            child_ready.set()
-            release_cb = pool.acquire(instance_name="child", agent_class="test", ancestor_chain=child_chain)
-            with lock:
-                granted_order.append("child")
-            time.sleep(0.1)  # Hold slot briefly to allow B to queue
-            release_cb()
-
-        def waiter_b():
-            b_chain = ("other", "B")
-            b_ready.set()
-            release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=b_chain)
-            with lock:
-                granted_order.append("B")
-            b_blocked_event.set()
-            release_cb()
-
-        t_child = threading.Thread(target=waiter_child)
-        t_child.start()
-        assert child_ready.wait(timeout=2), "Child should have started acquiring"
-
-        t_b = threading.Thread(target=waiter_b)
-        t_b.start()
-        assert b_ready.wait(timeout=2), "B should have started acquiring"
-
-        assert "child" in granted_order, "Child should be granted via self-exemption"
-        assert not b_blocked_event.is_set(), "B should still be blocked by A's reservation"
-
-        pool.unreserve_for_agent("A")
-        t_child.join(timeout=5)
-        t_b.join(timeout=5)
-
-        assert_fifo_order(granted_order, ["child", "B"])
-
-
-# ============================================================================
 # Category 4: Cancel-on-Termination
 # ============================================================================
 
 class TestCancelOnTermination:
-    """Test cancellation when agents terminate while waiting or holding reservations."""
+    """Test cancellation when agents terminate while waiting or holding slots."""
 
     def test_cancel_queued_agent_next_waiter_granted(self):
         """Agent queued on slot, terminated -> ticket cancelled within ≤1s, next waiter granted."""
@@ -670,7 +410,7 @@ class TestCancelOnTermination:
 
         def waiter_b():
             b_ready.set()
-            release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
+            release_cb = pool.acquire(instance_name="B", agent_class="test")
             b_granted_event.set()
             time.sleep(0.5)  # Hold slot while C waits in queue
             release_cb()
@@ -686,7 +426,7 @@ class TestCancelOnTermination:
         def waiter_c():
             c_ready.set()
             try:
-                pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",))
+                pool.acquire(instance_name="C", agent_class="test")
             except SlotCancelled:
                 c_cancelled.set()
 
@@ -708,37 +448,6 @@ class TestCancelOnTermination:
         t_c.join(timeout=3)
         t_b.join(timeout=5)
 
-    def test_cancel_holding_reservation_queue_proceeds(self):
-        """Agent holding reservation, terminated -> reservation cleared, queue proceeds."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        pool.release(holder_a)
-
-        b_granted_event = threading.Event()
-        b_ready = threading.Event()
-
-        def waiter_b():
-            b_ready.set()
-            release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
-            b_granted_event.set()
-            release_cb()
-
-        t_b = threading.Thread(target=waiter_b)
-        t_b.start()
-        assert b_ready.wait(timeout=2), "B should have started acquiring"
-
-        assert not b_granted_event.is_set(), "B should be blocked"
-
-        result = pool.terminate_for_agent("A")
-        tickets_cancelled, reservations_cleared = result
-
-        assert reservations_cleared >= 1, f"A's reservation should be cleared: {result}"
-
-        t_b.join(timeout=5)
-        assert b_granted_event.is_set(), "B should be granted after A's termination clears reservation"
-
     def test_mass_termination_active_queue_all_cleaned(self):
         """Mass termination during active queue — all tickets cleaned."""
         pool = SlotPool(key="test", capacity=1)
@@ -751,7 +460,7 @@ class TestCancelOnTermination:
         def waiter(name: str):
             ready_events[name].set()
             try:
-                pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,), timeout=10)
+                pool.acquire(instance_name=name, agent_class="test", timeout=10)
             except SlotCancelled:
                 cancelled_events[name].set()
 
@@ -787,82 +496,7 @@ class TestCancelOnTermination:
             t.join(timeout=5)
 
 
-# ============================================================================
-# Category 5: Re-acquire Reliability
-# ============================================================================
 
-class TestReacquireReliability:
-    """Test that callers reliably re-acquire slots after releasing for sync children."""
-
-    def test_reacquire_after_sync_child_release(self):
-        """Caller releases slot for sync child, re-acquires with proper self-exemption."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        a_chain = ("root", "A")
-        pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="async_child", acquisition_id=1)
-        pool.release(holder_a)
-
-        # Sync child D runs and releases back to pool
-        holder_d = pool.create_held_slot("D")
-        pool.release(holder_d)
-
-        a_reacquired_event = threading.Event()
-
-        def waiter_a():
-            release_cb = pool.acquire(instance_name="A", agent_class="test", ancestor_chain=a_chain)
-            a_reacquired_event.set()
-            release_cb()
-
-        t_a = threading.Thread(target=waiter_a)
-        t_a.start()
-
-        assert a_reacquired_event.wait(timeout=3), \
-            "VIOLATION: A failed to re-acquire after sync child (silent slotless continuation risk!)"
-        t_a.join(timeout=5)
-
-    def test_no_silent_slotless_continuation(self):
-        """Verify caller doesn't give up after brief wait — waits full timeout."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
-
-        a_chain = ("root", "A")
-        pool.reserve(agent_name="A", ancestor_chain=a_chain, reason="async_child", acquisition_id=1)
-        pool.release(holder_a)
-
-        b_granted_event = threading.Event()
-        b_cancelled = threading.Event()
-        b_ready = threading.Event()
-
-        def waiter_b():
-            b_ready.set()
-            try:
-                release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",), timeout=5)
-                b_granted_event.set()
-                release_cb()
-            except (SlotQueueTimeout, SlotCancelled):
-                b_cancelled.set()
-
-        t_b = threading.Thread(target=waiter_b)
-        t_b.start()
-        assert b_ready.wait(timeout=2), "B should have started acquiring"
-
-        a_acquired_event = threading.Event()
-
-        def waiter_a():
-            release_cb = pool.acquire(instance_name="A", agent_class="test", ancestor_chain=a_chain)
-            a_acquired_event.set()
-            release_cb()
-
-        t_a = threading.Thread(target=waiter_a)
-        t_a.start()
-
-        assert a_acquired_event.wait(timeout=3), \
-            "A should acquire immediately via self-exemption even with B waiting"
-        t_a.join(timeout=5)
-
-        pool.cancel(agent_name="B")
-        t_b.join(timeout=3)
 
 
 # ============================================================================
@@ -875,7 +509,7 @@ class TestStressAndSoak:
     def _stress_agent_task(self, name: str, pool: SlotPool, tracker: ConcurrencyTracker,
                            pool_key: str, sleep_range: Tuple[float, float]):
         """Common agent task for stress tests."""
-        release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+        release_cb = pool.acquire(instance_name=name, agent_class="test")
         tracker.enter(pool_key, name)
         try:
             time.sleep(random.uniform(*sleep_range))
@@ -944,7 +578,7 @@ class TestStressAndSoak:
         lock = threading.Lock()
 
         def sync_agent(name: str, pool: SlotPool, tracker: ConcurrencyTracker, pool_key: str):
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+            release_cb = pool.acquire(instance_name=name, agent_class="test")
             over = tracker.enter(pool_key, name)
             if over:
                 violations.record(f"{name}: over capacity on {pool_key}")
@@ -958,7 +592,7 @@ class TestStressAndSoak:
 
         def async_parent(name: str):
             parent_chain = ("root", name)
-            seq_release = seq_pool.acquire(instance_name=name, agent_class="test", ancestor_chain=parent_chain)
+            seq_release = seq_pool.acquire(instance_name=name, agent_class="test")
             tracker_seq.enter("_shared_sequential_slot_", name)
 
             child_done = threading.Event()
@@ -967,7 +601,6 @@ class TestStressAndSoak:
                 par_release = par_pool.acquire(
                     instance_name=f"{name}_child",
                     agent_class="test",
-                    ancestor_chain=("root", name, f"{name}_child"),
                 )
                 tracker_par.enter("http://parallel", f"{name}_child")
                 try:
@@ -1012,7 +645,7 @@ class TestStressAndSoak:
         violations.assert_no_violations("test_mixed_sync_async_contention")
 
     def test_soak_test_no_deadlock(self):
-        """Extended run with contention — verify no deadlocks or stuck reservations."""
+        """Extended run with contention — verify no deadlocks under FIFO scheduling."""
         pool = SlotPool(key="soak_test", capacity=2)
         tracker = ConcurrencyTracker()
         tracker.set_capacity("soak_test", 2)
@@ -1020,26 +653,15 @@ class TestStressAndSoak:
         n_iterations = 100
         completed = [0]
         lock = threading.Lock()
-        reserve_count = [0]
 
-        def agent_task(name: str, do_reserve: bool):
+        def agent_task(name: str):
             chain = ("root", name)
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=chain)
+            release_cb = pool.acquire(instance_name=name, agent_class="test")
             tracker.enter("soak_test", name)
 
-            token = None
             try:
-                if do_reserve:
-                    token = pool.reserve(agent_name=name, ancestor_chain=chain, reason="async_child", acquisition_id=_new_id())
-                    with lock:
-                        reserve_count[0] += 1
-                    release_cb()
-                    release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=chain)
-
                 time.sleep(random.uniform(0.005, 0.02))
             finally:
-                if token:
-                    pool.unreserve(token)
                 tracker.leave("soak_test", name)
                 release_cb()
             with lock:
@@ -1049,8 +671,7 @@ class TestStressAndSoak:
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = []
                 for i in range(5):
-                    do_reserve = random.random() < 0.3
-                    futures.append(executor.submit(agent_task, f"r{round_i}_a{i}", do_reserve))
+                    futures.append(executor.submit(agent_task, f"r{round_i}_a{i}"))
 
                 for f in as_completed(futures, timeout=30):
                     try:
@@ -1073,7 +694,7 @@ class TestProceduralBruteForce:
     def test_random_agent_call_graphs(self, seed: int):
         """Randomly generates agent call graphs and runs them under contention.
 
-        Monitors for violations: >capacity running, FIFO order broken, reservation bypassed.
+        Monitors for violations: >capacity running, FIFO order broken.
         """
         rng = random.Random(seed)
         pool = SlotPool(key="proc_test", capacity=2)
@@ -1096,16 +717,12 @@ class TestProceduralBruteForce:
 
         def run_agent(node: AgentNode, parent_chain: Tuple[str, ...]):
             chain = parent_chain + (node.name,)
-            release_cb = pool.acquire(instance_name=node.name, agent_class="test", ancestor_chain=chain)
+            release_cb = pool.acquire(instance_name=node.name, agent_class="test")
             over = tracker.enter("proc_test", node.name)
             if over:
                 violations.record(f"{node.name}: over capacity")
 
-            token = None
             try:
-                if rng.random() < 0.25:
-                    token = pool.reserve(agent_name=node.name, ancestor_chain=chain, reason="async_child", acquisition_id=_new_id())
-
                 time.sleep(rng.uniform(0.005, 0.015))
 
                 child_threads = []
@@ -1117,8 +734,6 @@ class TestProceduralBruteForce:
                 for t in child_threads:
                     t.join(timeout=10)
             finally:
-                if token:
-                    pool.unreserve(token)
                 tracker.leave("proc_test", node.name)
                 release_cb()
 
@@ -1160,7 +775,7 @@ class TestProceduralBruteForce:
             gates[idx].wait()
             ready[idx].set()
             try:
-                release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+                release_cb = pool.acquire(instance_name=name, agent_class="test")
                 with lock:
                     granted_order.append(name)
                 time.sleep(0.01)
@@ -1225,46 +840,6 @@ class TestEndpointSchedulerIntegration:
         setup.join_all(timeout=15)
 
         assert_fifo_order(setup.granted_order, names)
-
-    def test_scheduler_reservation_via_api_router(self):
-        """Test reservation blocking through the full EndpointScheduler API."""
-        router = _make_test_router({'http://seq': 0})
-        scheduler = _get_scheduler(router)
-
-        release_a = scheduler.acquire(
-            api_base='http://seq',
-            concurrency_limit=0,
-            instance_name="A",
-            agent_class="test",
-        )
-
-        token = scheduler.reserve("A", ancestor_chain=("A",), reason="sleeping")
-        assert token is not None, "Reservation should succeed"
-        release_a()
-
-        b_granted_event = threading.Event()
-        b_ready = threading.Event()
-
-        def agent_b():
-            b_ready.set()
-            release_cb = scheduler.acquire(
-                api_base='http://seq',
-                concurrency_limit=0,
-                instance_name="B",
-                agent_class="test",
-            )
-            b_granted_event.set()
-            release_cb()
-
-        t_b = threading.Thread(target=agent_b)
-        t_b.start()
-        assert b_ready.wait(timeout=2), "B should have started acquiring"
-
-        assert not b_granted_event.is_set(), "B should be blocked by A's reservation"
-
-        scheduler.unreserve(token)
-        t_b.join(timeout=5)
-        assert b_granted_event.is_set(), "B should be granted after A unreserves"
 
     def test_scheduler_cancel_for_agent(self):
         """Test cancel via the EndpointScheduler API."""
@@ -1338,7 +913,7 @@ class TestEdgeCasesAndNegatives:
 
         def waiter_c():
             c_ready.set()
-            release_cb = pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",))
+            release_cb = pool.acquire(instance_name="C", agent_class="test")
             c_granted_event.set()
             release_cb()
 
@@ -1378,7 +953,7 @@ class TestEdgeCasesAndNegatives:
         holder_a = pool.create_held_slot("A")
 
         with pytest.raises(SlotQueueTimeout):
-            pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",), timeout=0.5)
+            pool.acquire(instance_name="B", agent_class="test", timeout=0.5)
 
         status = pool.get_status()
         assert status["waiting_count"] == 0, "Timed-out ticket should be removed"

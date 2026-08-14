@@ -1624,18 +1624,13 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"Semaphore reset during stop_session (non-critical): {e}")
         
-        # ── Step 2.6: Cancel all queue tickets and reservations (Phase 3) ───────
-        # Clean up any pending waiters and stale reservations to prevent blocked grants on resume.
+        # ── Step 2.6: Cancel all queue tickets (FIFO scheduler cleanup) ─────────
+        # Clean up any pending waiters to prevent blocked grants on resume.
         if hasattr(self, 'api_router') and self.api_router:
             try:
                 cancelled = self.api_router.scheduler.cancel_all()
                 if cancelled > 0:
                     logger.info(f"[STOP_SESSION] Cancelled {cancelled} pending queue ticket(s)")
-                
-                # Clear all reservations for remaining instances.
-                cleared = self.api_router.scheduler.clear_all_reservations()
-                if cleared > 0:
-                    logger.info(f"[STOP_SESSION] Cleared {cleared} reservation(s)")
             except Exception as e:
                 logger.debug(f"Queue cancellation during stop_session (non-critical): {e}")
 
@@ -2600,6 +2595,7 @@ class AgentPool:
         self,
         agent_class: str,
         instance_name: str,
+        **kwargs,
     ) -> Optional[Callable[[], None]]:
         """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
 
@@ -2616,7 +2612,7 @@ class AgentPool:
             parent = self.get_instance(instance.parent_instance)
             if parent and hasattr(parent, 'agent_class') and not getattr(parent, 'is_terminated', False):
                 caller_agent_type = parent.agent_class
-        
+
         try:
             # Get the effective concurrency for this agent class (includes default fallback)
             concurrency_limit = router.get_effective_concurrency(agent_class, caller_agent_type=caller_agent_type)
@@ -2633,7 +2629,9 @@ class AgentPool:
 
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
             # SLOT_TIMEOUT FIX v2: Pass instance_name and agent_class for tracking
-            return router.scheduler.acquire(api_base, concurrency_limit, instance_name, agent_class, pool=self)
+            return router.scheduler.acquire(
+                api_base, concurrency_limit, instance_name, agent_class, pool=self
+            )
         except Exception as e:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
             raise
@@ -2706,11 +2704,9 @@ class AgentPool:
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id, child_instance_name=child_instance_name)
         
-        # NOTE: No reservation here. Reservation happens when parent actually enters
-        # SLEEPING state (execution_engine._transition_to_sleeping), not at spawn time.
-        # Reserving at spawn would block the parent's own sync children — they run inline
-        # on parent's thread and inherit its permit via Rule 4, so they don't need a slot
-        # acquisition that would be blocked by this reservation.
+        # NOTE: Slot acquisition happens later when the child agent actually runs,
+        # not at spawn time. Spawn just registers the async task. Sync children run
+        # inline on parent's thread and inherit its permit via Rule 4 (no separate slot needed).
 
     # ── Pause/Resume state management ───────────────────────────────────────
 

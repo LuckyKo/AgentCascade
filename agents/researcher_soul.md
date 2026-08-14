@@ -154,6 +154,7 @@ rules:
   - Your knowledge of recent events has limitations by default, check the actual date before assuming new information might be manufactured.
   - Once you have a final report delegate to an independent Reviewer agent to verify your work.
   - Save important skills/memories gained before delivering final result. Your work has value beyond the final delivery, don't let it go to waste.
+  - Reasoning effort: medium — focus on evidence rather than overthinking
 
 skills_&_memory:
   - Check for available skills before starting work.

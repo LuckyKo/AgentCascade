@@ -1,17 +1,15 @@
 """
-Unit tests for agent_cascade.slot_queue — FIFO slot pool with reservations.
+Unit tests for agent_cascade.slot_queue — FIFO slot pool.
 
 Tests cover:
 - FIFO order under contention
 - Release wakes next waiter
 - Cancel removes waiter from middle
 - Timeout raises SlotQueueTimeout
-- Reservation blocking (A holds → A reserves → B blocked → A's child C granted)
-- Self-exemption (A reserves → A re-acquires succeeds)
+- Self-exemption (A acquires → A re-acquires succeeds)
 - Idempotent release/cancel
 - Concurrency stress (max 1 running at any instant on cap=1 pool)
 - Mass cancellation performance (<50ms for 100 waiters)
-- Reservation timeout detection
 """
 
 import threading
@@ -24,11 +22,9 @@ from agent_cascade.slot_queue import (
     SlotPool,
     QueueTicket,
     SlotHolder,
-    Reservation,
     SlotQueueTimeout,
     SlotCancelled,
     QUEUE_WAIT_TIMEOUT,
-    RESERVATION_TIMEOUT,
 )
 
 
@@ -47,7 +43,7 @@ class TestFIFOOrder(unittest.TestCase):
         acquired_events = {n: threading.Event() for n in ["T1", "T2", "T3"]}
         
         def waiter(name: str):
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+            release_cb = pool.acquire(instance_name=name, agent_class="test")
             with lock:
                 granted_order.append(name)
             acquired_events[name].set()
@@ -72,59 +68,6 @@ class TestFIFOOrder(unittest.TestCase):
         # Verify FIFO order: T1 granted first, then T2, then T3.
         self.assertEqual(granted_order, ["T1", "T2", "T3"])
 
-    def test_fifo_no_barging(self):
-        """Non-head waiter cannot be granted even if reservation clears for it."""
-        pool = SlotPool(key="test", capacity=1)
-        
-        holder_a = _acquire_immediate(pool, "A")
-        
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        
-        def waiter(name: str, chain: Tuple[str, ...]):
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=chain)
-            with lock:
-                granted_order.append(name)
-            time.sleep(0.1)  # Hold briefly.
-            release_cb()
-        
-        # A reserves — blocks B but not C (C is in chain).
-        pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        
-        # Enqueue B first, then C.
-        t_b = threading.Thread(target=waiter, args=("B", ("B",)))
-        t_b.start()
-        time.sleep(0.05)  # Ensure B enqueues first.
-        
-        t_c = threading.Thread(target=waiter, args=("C", ("A", "C")))
-        t_c.start()
-        time.sleep(0.1)  # Let both enqueue.
-        
-        # Verify queue state.
-        with pool._cond:
-            waiter_list = list(pool._waiters.values())
-            self.assertEqual(len(waiter_list), 2)
-            self.assertEqual(waiter_list[0].instance_name, "B")
-            self.assertEqual(waiter_list[1].instance_name, "C")
-        
-        # Release A's holder — capacity free, reservation exists.
-        pool.release(holder_a)
-        
-        time.sleep(0.3)  # Let grants settle.
-        
-        # B is head but blocked by reservation. C is exempt but not head.
-        # Neither granted yet (strict FIFO).
-        self.assertEqual(len(granted_order), 0)
-        
-        # Unreserve — now B (head) should be granted first.
-        pool.unreserve_for_agent("A")
-        
-        t_b.join(timeout=3)
-        t_c.join(timeout=3)
-        
-        # FIFO: B was head, so B gets it first even though C was exempt from reservation.
-        self.assertEqual(granted_order, ["B", "C"])
-
 
 class TestReleaseWakesNext(unittest.TestCase):
     """Test that release properly wakes the next waiter."""
@@ -138,7 +81,7 @@ class TestReleaseWakesNext(unittest.TestCase):
         b_acquired = threading.Event()
         
         def waiter_b():
-            release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
+            release_cb = pool.acquire(instance_name="B", agent_class="test")
             b_acquired.set()
             release_cb()
         
@@ -168,7 +111,7 @@ class TestCancel(unittest.TestCase):
         
         def waiter(name: str):
             try:
-                release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+                release_cb = pool.acquire(instance_name=name, agent_class="test")
                 with lock:
                     granted.append(name)
                 time.sleep(0.15)  # Hold briefly for sequential verification.
@@ -210,7 +153,7 @@ class TestCancel(unittest.TestCase):
         
         def waiter(name: str):
             try:
-                release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+                release_cb = pool.acquire(instance_name=name, agent_class="test")
                 events[name].set()
                 release_cb()
             except SlotCancelled:
@@ -254,7 +197,7 @@ class TestTimeout(unittest.TestCase):
         holder_a = _acquire_immediate(pool, "A")
         
         with self.assertRaises(SlotQueueTimeout) as ctx:
-            pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",), timeout=0.5)
+            pool.acquire(instance_name="B", agent_class="test", timeout=0.5)
         
         # Verify ticket was removed from queue.
         with pool._cond:
@@ -274,7 +217,7 @@ class TestTimeout(unittest.TestCase):
         
         def waiter_b():
             try:
-                release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",), timeout=0.3)
+                release_cb = pool.acquire(instance_name="B", agent_class="test", timeout=0.3)
                 release_cb()
             except SlotQueueTimeout:
                 pass
@@ -289,7 +232,7 @@ class TestTimeout(unittest.TestCase):
         c_acquired = threading.Event()
         
         def waiter_c():
-            release_cb = pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",))
+            release_cb = pool.acquire(instance_name="C", agent_class="test")
             c_acquired.set()
             release_cb()
         
@@ -306,179 +249,6 @@ class TestTimeout(unittest.TestCase):
         
         self.assertTrue(c_acquired.wait(timeout=3), "C should have acquired after B timed out")
         t_c.join(timeout=3)
-
-
-class TestReservationBlocking(unittest.TestCase):
-    """Test reservation blocking with ancestor-chain exemption."""
-
-    def test_reservation_blocks_unrelated_grants(self):
-        """A holds → A reserves → B (unrelated) blocked → unreserve → B granted."""
-        pool = SlotPool(key="test", capacity=1)
-        
-        holder_a = _acquire_immediate(pool, "A")
-        
-        # A reserves its pool.
-        token = pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        
-        b_acquired = threading.Event()
-        
-        def waiter_b():
-            release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
-            b_acquired.set()
-            release_cb()
-        
-        t_b = threading.Thread(target=waiter_b)
-        t_b.start()
-        time.sleep(0.15)  # Let B enqueue and block on reservation.
-        
-        self.assertFalse(b_acquired.is_set())
-        
-        # Release A's holder — capacity free but reservation blocks B.
-        pool.release(holder_a)
-        time.sleep(0.2)
-        
-        self.assertFalse(b_acquired.is_set(), "B should still be blocked by reservation")
-        
-        # Unreserve → B gets granted.
-        pool.unreserve(token)
-        
-        self.assertTrue(b_acquired.wait(timeout=3), "B should acquire after unreserve")
-        t_b.join(timeout=3)
-
-    def test_reservation_ancestor_chain_exemption(self):
-        """A holds → A reserves → B waits (blocked) → C waits (exempt but not head).
-        
-        Strict FIFO: when unreserve happens, B (head) gets it first even though C was exempt.
-        This tests that reservation exemption doesn't break FIFO ordering.
-        """
-        pool = SlotPool(key="test", capacity=1)
-        
-        holder_a = _acquire_immediate(pool, "A")
-        
-        # A reserves with ancestor chain.
-        token = pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        
-        granted_order: List[str] = []
-        lock = threading.Lock()
-        
-        def waiter(name: str, chain: Tuple[str, ...]):
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=chain)
-            with lock:
-                granted_order.append(name)
-            time.sleep(0.1)  # Hold briefly.
-            release_cb()
-        
-        # Enqueue B first (not in A's chain), then C (in A's chain).
-        t_b = threading.Thread(target=waiter, args=("B", ("B",)))
-        t_b.start()
-        time.sleep(0.05)  # Ensure B enqueues first.
-        
-        t_c = threading.Thread(target=waiter, args=("C", ("A", "C")))
-        t_c.start()
-        time.sleep(0.1)  # Let both enqueue.
-        
-        # Verify queue state: B is head, C is second.
-        with pool._cond:
-            waiter_list = list(pool._waiters.values())
-            self.assertEqual(len(waiter_list), 2)
-            self.assertEqual(waiter_list[0].instance_name, "B")
-            self.assertEqual(waiter_list[1].instance_name, "C")
-        
-        # Release A — capacity free. B is head but blocked by reservation.
-        pool.release(holder_a)
-        time.sleep(0.3)
-        
-        # Strict FIFO: B is head, blocked by reservation. C is exempt but not head.
-        # Neither gets granted yet because only head can be granted.
-        self.assertEqual(len(granted_order), 0)
-        
-        # Unreserve → B (head) gets it first (FIFO wins over exemption).
-        pool.unreserve(token)
-        
-        t_b.join(timeout=3)
-        t_c.join(timeout=3)
-        
-        # FIFO order preserved: B then C.
-        self.assertEqual(granted_order, ["B", "C"])
-
-
-class TestSelfExemption(unittest.TestCase):
-    """Test that A is never blocked by its own reservation."""
-
-    def test_self_exemption(self):
-        """A reserves → A re-acquires succeeds immediately."""
-        pool = SlotPool(key="test", capacity=1)
-        
-        # No holder — just reserve.
-        token = pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        
-        # A acquires with its own chain — should succeed immediately (self-exemption).
-        release_cb = pool.acquire(instance_name="A", agent_class="test", ancestor_chain=("A",))
-        
-        with pool._cond:
-            self.assertIn("A", pool._running)
-        
-        release_cb()
-        pool.unreserve(token)
-
-    def test_self_exemption_with_other_waiter(self):
-        """B waits → A reserves → A acquires succeeds (self-exempt), B still blocked."""
-        pool = SlotPool(key="test", capacity=1)
-        
-        b_blocked = threading.Event()
-        
-        def waiter_b():
-            try:
-                release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
-                release_cb()
-            except SlotCancelled:
-                pass
-        
-        t_b = threading.Thread(target=waiter_b)
-        t_b.start()
-        time.sleep(0.1)  # B acquires immediately (pool empty).
-        
-        # B released its slot in waiter_b after acquiring... let's redo this.
-        t_b.join(timeout=2)
-        
-        # Now B is done. Let's test properly:
-        pool2 = SlotPool(key="test2", capacity=1)
-        
-        holder_x = _acquire_immediate(pool2, "X")
-        
-        b_acquired = threading.Event()
-        
-        def waiter_b2():
-            release_cb = pool2.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",))
-            b_acquired.set()
-            release_cb()
-        
-        t_b2 = threading.Thread(target=waiter_b2)
-        t_b2.start()
-        time.sleep(0.1)  # B enqueues.
-        
-        # X reserves.
-        token = pool2.reserve(agent_name="X", ancestor_chain=("X",), reason="sleeping", acquisition_id=1)
-        pool2.release(holder_x)
-        
-        time.sleep(0.2)  # B blocked by reservation.
-        self.assertFalse(b_acquired.is_set())
-        
-        # X acquires with its own chain — self-exempt, succeeds immediately.
-        release_x = pool2.acquire(instance_name="X", agent_class="test", ancestor_chain=("X",))
-        
-        with pool2._cond:
-            self.assertIn("X", pool2._running)
-        
-        # B still blocked (X holds the slot).
-        self.assertFalse(b_acquired.is_set())
-        
-        release_x()
-        pool2.unreserve(token)
-        
-        # Now B can acquire.
-        self.assertTrue(b_acquired.wait(timeout=3))
-        t_b2.join(timeout=3)
 
 
 class TestIdempotentReleaseCancel(unittest.TestCase):
@@ -540,7 +310,7 @@ class TestConcurrencyStress(unittest.TestCase):
         def worker(_iteration: int):
             for _ in range(100):
                 release_cb = pool.acquire(instance_name=f"W-{threading.current_thread().name}",
-                                          agent_class="test", ancestor_chain=("W",))
+                                          agent_class="test")
                 with lock:
                     running = len(pool._running)
                     if running > max_observed[0]:
@@ -572,7 +342,7 @@ class TestMassCancellation(unittest.TestCase):
         
         def waiter(i: int):
             try:
-                pool.acquire(instance_name=f"worker-{i}", agent_class="test", ancestor_chain=("W",), timeout=5.0)
+                pool.acquire(instance_name=f"worker-{i}", agent_class="test", timeout=5.0)
             except (SlotCancelled, SlotQueueTimeout):
                 pass
         
@@ -607,7 +377,7 @@ class TestMassCancellation(unittest.TestCase):
             t.join(timeout=3)
 
     def test_mass_cancel_via_terminate_for_agent(self):
-        """Test terminate_for_agent cancels all tickets and reservations for an agent."""
+        """Test terminate_for_agent cancels all tickets for an agent."""
         pool = SlotPool(key="test", capacity=1)
         
         holder_a = _acquire_immediate(pool, "A")
@@ -615,7 +385,7 @@ class TestMassCancellation(unittest.TestCase):
         # Create multiple waiters with same instance_name prefix pattern.
         def waiter(name: str):
             try:
-                pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,), timeout=5.0)
+                pool.acquire(instance_name=name, agent_class="test", timeout=5.0)
             except (SlotCancelled, SlotQueueTimeout):
                 pass
         
@@ -669,7 +439,7 @@ class TestCancelAfterGrantRace(unittest.TestCase):
         
         def waiter():
             try:
-                release_cb = pool.acquire(instance_name="B", agent_class="test", ancestor_chain=("B",), timeout=2.0)
+                release_cb = pool.acquire(instance_name="B", agent_class="test", timeout=2.0)
                 result_holder.append(("granted", release_cb))
             except SlotCancelled:
                 result_holder.append("cancelled")
@@ -738,7 +508,7 @@ class TestCancelAfterGrantRace(unittest.TestCase):
         
         def waiter():
             try:
-                release_cb = pool.acquire(instance_name="C", agent_class="test", ancestor_chain=("C",), timeout=0.5)
+                release_cb = pool.acquire(instance_name="C", agent_class="test", timeout=0.5)
                 result_holder.append(("granted", release_cb))
             except SlotCancelled:
                 result_holder.append("cancelled")
@@ -777,7 +547,7 @@ class TestCancelAfterGrantRace(unittest.TestCase):
         lock = threading.Lock()
         
         def waiter(name: str):
-            release_cb = pool.acquire(instance_name=name, agent_class="test", ancestor_chain=(name,))
+            release_cb = pool.acquire(instance_name=name, agent_class="test")
             with lock:
                 granted_order.append(name)
             time.sleep(0.1)  # Hold briefly.
@@ -803,28 +573,6 @@ class TestCancelAfterGrantRace(unittest.TestCase):
             self.assertEqual(granted_order, ["T1", "T2"])
 
 
-class TestReservationTimeout(unittest.TestCase):
-    """Test reservation timeout detection."""
-
-    def test_detect_stale_reservations(self):
-        """Create reservation; advance time past threshold; detect returns it."""
-        pool = SlotPool(key="test", capacity=1)
-        
-        token = pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        
-        # Immediately check — should not be stale.
-        stale = pool.detect_stale_reservations(threshold=RESERVATION_TIMEOUT)
-        self.assertEqual(len(stale), 0)
-        
-        # Manually age the reservation (for testing without waiting 300s).
-        with pool._cond:
-            pool._reservations[token].created_at = time.monotonic() - RESERVATION_TIMEOUT - 10
-        
-        stale = pool.detect_stale_reservations(threshold=RESERVATION_TIMEOUT)
-        self.assertEqual(len(stale), 1)
-        self.assertEqual(stale[0].token, token)
-
-
 class TestPoolStatus(unittest.TestCase):
     """Test diagnostic status methods."""
 
@@ -835,8 +583,6 @@ class TestPoolStatus(unittest.TestCase):
         holder_a = _acquire_immediate(pool, "A")
         holder_b = _acquire_immediate(pool, "B")
         
-        token = pool.reserve(agent_name="A", ancestor_chain=("A",), reason="sleeping", acquisition_id=1)
-        
         status = pool.get_status()
         
         self.assertEqual(status["key"], "test")
@@ -844,7 +590,6 @@ class TestPoolStatus(unittest.TestCase):
         self.assertEqual(status["running_count"], 2)
         self.assertEqual(status["waiting_count"], 0)
         self.assertEqual(len(status["holders"]), 2)
-        self.assertEqual(len(status["reservations"]), 1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -854,7 +599,7 @@ class TestPoolStatus(unittest.TestCase):
 def _acquire_immediate(pool: SlotPool, instance_name: str) -> SlotHolder:
     """Acquire a permit immediately without waiting (for test setup).
     
-    Must be called when capacity is available and no blocking reservations exist.
+    Must be called when capacity is available.
     """
     with pool._cond:
         acquisition_id = next(pool._acquisition_counter)

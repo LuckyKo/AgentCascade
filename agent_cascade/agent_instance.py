@@ -624,8 +624,8 @@ class AgentInstance:
         Pool-level operations (cascading children, killing shells, removing from
         pool) are handled by the caller (typically agent_pool.terminate_instance()).
 
-        Phase 3: Also cancels any pending queue tickets and reservations for this
-        agent via the scheduler to prevent stale entries blocking other agents.
+        Phase 3: Also cancels any pending queue tickets for this agent via the
+        scheduler to prevent stale entries blocking other agents.
 
         Safe to call multiple times (idempotent). Thread-safe: uses _state_lock
         and _compression_lock as appropriate.
@@ -652,7 +652,7 @@ class AgentInstance:
             self._state_label = None
             self._last_endpoint_config = None
         
-        # Phase 3: Cancel any pending tickets and reservations for this agent.
+        # Phase 3: Cancel any pending tickets for this agent.
         # This is best-effort — the pool reference may not be available here,
         # but if it is, clean up to prevent stale queue entries.
         try:
