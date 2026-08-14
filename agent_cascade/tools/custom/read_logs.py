@@ -1,8 +1,11 @@
 import glob as _glob
 import json
+import logging
 from pathlib import Path
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+
+logger = logging.getLogger(__name__)
 
 @register_tool('read_logs', allow_overwrite=True)
 class ReadLogs(BaseTool):
@@ -164,7 +167,6 @@ class ReadLogs(BaseTool):
             except (OSError, PermissionError):
                 pass  # fall through to resolve_tool_path
             except Exception as e:
-                from agent_cascade.log import logger
                 logger.exception(f"Unexpected error during log auto-resolution: {e}")
                 raise
 
