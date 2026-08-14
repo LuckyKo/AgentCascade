@@ -105,6 +105,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] after restart, loading another session than the old one that was reloaded causes them to merge together (UI issue only).
 - [x] make `read_logs` read from the appropriate agent logging path if the path is not fully specified (only log file name)
 - [ ] add crop_region argument to view_image tool for better detail capture on large images; also prepend image size info in the caption field (right before caption text, so the LLM would know how much to crop to get better look at some areas)
+- [ ] improve `calculate` tool
+- [x] the timeout on Security agent is too brutal, it just cuts it off, no letting it even complete the reasoning. Change to turn limit, give it 20 turns when launched by system. — DONE: replaced wall-clock cutoff (SECURITY_LLM_TIMEOUT_SECONDS + elapsed-time break) with a turn budget `sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS` (new setting, default 20). Engine's existing 50%/90%/final-turn warnings kick in and force a verdict on the last turn; ambiguous result auto-rejects (NO). Tests updated; all pass.
+- [ ] need a way to clear the messages form agents tab
 
 
 

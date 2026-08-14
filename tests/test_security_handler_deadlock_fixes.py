@@ -16,7 +16,6 @@ import pytest
 # Must import before patches take effect
 from agent_cascade.security_handler import (
     SecurityAdvisorHandler,
-    SECURITY_LLM_TIMEOUT_SECONDS,
     SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS,
     _get_security_check_lock,
     _get_security_execution_lock,
@@ -26,44 +25,34 @@ from agent_cascade.security_handler import (
 # ── Unit tests for individual mechanisms ────────────────────────────────────
 
 
-class TestSecurityLLMTimeout:
-    """Test that the hard LLM timeout prevents infinite block when generator never yields."""
+class TestSecurityTurnBudget:
+    """The system-launched Security advisor is bounded by a turn budget (not a wall-clock timeout).
 
-    def test_llm_timeout_mechanism_works(self):
-        """Verify the timeout mechanism (threading.Event + Timer) works correctly.
+    The former SECURITY_LLM_TIMEOUT_SECONDS was removed. Instead, _execute_check sets
+    sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS so the engine injects 50%/90% warnings
+    and forces a final verdict on the last turn; an ambiguous result auto-rejects (NO).
+    """
 
-        This tests the core pattern used in security_handler.py without needing
-        to mock the entire ExecutionEngine stack.
-        """
-        timeout_event = threading.Event()
-        timeout_seconds = 1
-
-        def trigger():
-            timeout_event.set()
-
-        timer = threading.Timer(timeout_seconds, trigger)
-        timer.daemon = True
-        timer.start()
-
-        # Simulate a blocking generator that never yields
-        start = time.monotonic()
-        while not timeout_event.is_set():
-            time.sleep(0.05)  # Small sleep to avoid busy-waiting
-        elapsed = time.monotonic() - start
-        timer.cancel()
-
-        assert elapsed >= timeout_seconds * 0.9, (
-            f"Timeout should fire after ~{timeout_seconds}s, got {elapsed:.2f}s"
-        )
-        assert elapsed < timeout_seconds * 1.5, (
-            f"Timeout fired too late: {elapsed:.2f}s"
+    def test_turn_budget_setting_is_reasonable(self):
+        """SECURITY_AGENT_MAX_TURNS should be a small positive integer (tight budget for a single check)."""
+        from agent_cascade.settings import SECURITY_AGENT_MAX_TURNS
+        assert isinstance(SECURITY_AGENT_MAX_TURNS, int)
+        assert 1 <= SECURITY_AGENT_MAX_TURNS <= 50, (
+            f"Security turn budget ({SECURITY_AGENT_MAX_TURNS}) should be between 1-50"
         )
 
-    def test_llm_timeout_constant_is_importable(self):
-        """SECURITY_LLM_TIMEOUT_SECONDS should be importable from security_handler."""
-        from agent_cascade.security_handler import SECURITY_LLM_TIMEOUT_SECONDS
-        assert isinstance(SECURITY_LLM_TIMEOUT_SECONDS, (int, float))
-        assert SECURITY_LLM_TIMEOUT_SECONDS > 0
+    def test_handler_bounded_by_turns_not_wallclock(self):
+        """security_handler should no longer reference the removed wall-clock LLM timeout."""
+        import inspect
+        from agent_cascade import security_handler
+
+        source = inspect.getsource(security_handler)
+        assert "SECURITY_LLM_TIMEOUT_SECONDS" not in source, (
+            "Wall-clock LLM timeout constant should be removed (replaced by turn budget)"
+        )
+        assert "max_turns = SECURITY_AGENT_MAX_TURNS" in source, (
+            "security_handler should bound the Security advisor via max_turns"
+        )
 
 
 class TestReentrantSecurityLock:
@@ -187,21 +176,6 @@ class TestSecurityLockAcquireTimeout:
         )
         assert "request" in msg.lower(), "Error message should reference the request for debugging"
         assert "test_rid" in msg, "Error message should include request_id"
-
-
-class TestSecurityLLMTimeoutConfiguration:
-    """Test that LLM timeout constant is properly configured."""
-
-    def test_llm_timeout_constant_exists_and_reasonable(self):
-        """SECURITY_LLM_TIMEOUT_SECONDS should be set to a reasonable value."""
-        assert isinstance(SECURITY_LLM_TIMEOUT_SECONDS, (int, float))
-        assert 10 <= SECURITY_LLM_TIMEOUT_SECONDS <= 300, (
-            f"LLM timeout ({SECURITY_LLM_TIMEOUT_SECONDS}s) should be between 10-300s"
-        )
-
-    def test_llm_timeout_is_separate_from_approval_timeout(self):
-        """The LLM timeout should be independent of user-facing approval timeout."""
-        assert SECURITY_LLM_TIMEOUT_SECONDS > 0
 
 
 # ── Integration tests with real threading ───────────────────────────────────
@@ -415,22 +389,21 @@ class TestTimerCleanupOnException:
 
         try:
             with patch('threading.Timer.__init__', tracked_timer_init):
-                with patch('agent_cascade.security_handler.SECURITY_LLM_TIMEOUT_SECONDS', 5):
-                    with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.3):
-                        try:
-                            handler._execute_check(
-                                ap=ap,
-                                sec_inst=None,
-                                rid="test_rid_timer",
-                                auto_apply=True,
-                                instance_name="Maine",
-                                caller_agent="Maine",
-                                prompt_template="Test {tool_name}",
-                                timeout_seconds=3600,
-                                warning_seconds=2400,
-                            )
-                        except RuntimeError:
-                            pass  # Expected — lock acquire failed
+                with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.3):
+                    try:
+                        handler._execute_check(
+                            ap=ap,
+                            sec_inst=None,
+                            rid="test_rid_timer",
+                            auto_apply=True,
+                            instance_name="Maine",
+                            caller_agent="Maine",
+                            prompt_template="Test {tool_name}",
+                            timeout_seconds=3600,
+                            warning_seconds=2400,
+                        )
+                    except RuntimeError:
+                        pass  # Expected — lock acquire failed
 
             # Give a moment for any pending cleanup to complete
             time.sleep(0.1)

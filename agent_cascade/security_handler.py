@@ -13,9 +13,11 @@ import threading
 from typing import Any, Dict, Optional
 
 # ── Deadlock protection constants ───────────────────────────────────────────
-# Hard timeout for the LLM response phase (engine.run generator).
-# Prevents hang if model never yields a token. Separate from user-facing approval_timeout_seconds.
-SECURITY_LLM_TIMEOUT_SECONDS = 60
+# NOTE: The system-launched Security advisor is no longer capped by a wall-clock LLM
+# timeout. It is instead bounded by a turn
+# budget (SECURITY_AGENT_MAX_TURNS in settings.py), which lets the model finish its
+# reasoning and forces a final verdict on its last turn. The user-facing
+# approval_timeout_seconds still governs the "taking longer than expected" warning.
 
 # Timeout for acquiring the security check lock.
 # Prevents permanent block if previous check crashed without releasing.
@@ -272,6 +274,7 @@ class SecurityAdvisorHandler:
         # Fix 6 — Import outside lock block to avoid holding lock during import resolution
         from agent_cascade.constants import NON_LLM_KEYS, DEFAULT_SECURITY_DISABLED_TOOLS
         from agent_cascade.utils import merge_disabled_tools_for_auto_agent
+        from agent_cascade.settings import SECURITY_AGENT_MAX_TURNS
 
         try:
             # ── Build prompt inside lock to prevent race conditions ────────
@@ -306,6 +309,12 @@ class SecurityAdvisorHandler:
                     caller=caller_agent,
                 )
 
+                # Bound the Security advisor by a turn budget instead of a wall-clock
+                # timeout. The engine injects 50%/90% warnings and disables all tools on
+                # the final turn to force a verdict; if it runs out without a clear
+                # [YES]/[NO], _handle_ambiguous auto-rejects (fails closed = NO).
+                sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS
+
                 # Configure with UI settings (defense-in-depth tool filtering)
                 ui_cfg = copy.deepcopy(self.session.get('generate_cfg', {}))
                 llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
@@ -329,10 +338,11 @@ class SecurityAdvisorHandler:
 
                 logger.info(f"[SECURITY] Created AgentInstance '{sec_state_key}' for request {rid}")
 
-                # Initialize timing variables
+                # Result-tracking flags. The wall-clock cutoff was removed in favor of a
+                # turn budget (sec_instance.max_turns), so these are never set True here —
+                # they remain only to keep _handle_result's signature stable.
                 sec_timeout_reached = False
                 sec_elapsed_at_timeout = None
-                sec_start_time = time.monotonic()
 
                 # Schedule warning timer (tracked for cleanup)
                 def _sec_warning_injector():
@@ -380,27 +390,14 @@ class SecurityAdvisorHandler:
                     f"Manual restart may be required."
                 )
 
-            _llm_timeout_timer = None  # Track for cleanup in finally block
             try:
                 # Telemetry: track Security agent call latency (non-blocking)
                 _call_start = time.perf_counter()
 
-                # DEADLOCK FIX #1: Hard timeout on the LLM generator loop.
-                # The existing elapsed-time check only fires AFTER each yield from engine.run().
-                # If the model hangs and never yields, we'd block forever. This background timer
-                # ensures we break out within SECURITY_LLM_TIMEOUT_SECONDS regardless.
-                _llm_timeout_event = threading.Event()
-
-                def _llm_timeout_trigger():
-                    logger.warning(
-                        f"[SECURITY] LLM timeout trigger fired for request {rid} "
-                        f"after {SECURITY_LLM_TIMEOUT_SECONDS}s — model has not yielded."
-                    )
-                    _llm_timeout_event.set()
-
-                _llm_timeout_timer = threading.Timer(SECURITY_LLM_TIMEOUT_SECONDS, _llm_timeout_trigger)
-                _llm_timeout_timer.daemon = True
-                _llm_timeout_timer.start()
+                # NOTE: The Security advisor is bounded by a turn budget
+                # (sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS), not a wall-clock
+                # timeout. The engine injects 50%/90% warnings and forces a final verdict
+                # on the last turn, so we no longer need a hard LLM-generator timer here.
 
                 # ── Engine execution loop with streaming ───────────────────
                 _last_sec_send = 0.0
@@ -411,25 +408,11 @@ class SecurityAdvisorHandler:
                     if self.agent_pool.stopped:
                         break
 
-                    # Check hard LLM timeout (independent of user-facing approval timeout)
-                    if _llm_timeout_event.is_set():
-                        sec_timeout_reached = True
-                        sec_elapsed_at_timeout = time.monotonic() - sec_start_time
-                        logger.warning(
-                            f"[SECURITY] Hard LLM timeout after {SECURITY_LLM_TIMEOUT_SECONDS}s "
-                            f"for request {rid}. Generator did not yield in time."
-                        )
-                        break
-
-                    elapsed = time.monotonic() - sec_start_time
-                    if elapsed > timeout_seconds:
-                        sec_timeout_reached = True
-                        sec_elapsed_at_timeout = elapsed
-                        logger.warning(
-                            f"[SECURITY] Timeout reached after {elapsed:.0f}s for request {rid}. "
-                            f"Terminating security advisor to prevent AFK rejection."
-                        )
-                        break
+                    # NOTE: No wall-clock cutoff here. The Security advisor is bounded by a
+                    # turn budget (SECURITY_AGENT_MAX_TURNS); the engine forces a final verdict
+                    # on its last turn, and an ambiguous result auto-rejects via _handle_ambiguous.
+                    # sec_timeout_reached/sec_elapsed_at_timeout are kept for _handle_result
+                    # compatibility but are never set True by this loop anymore.
 
                     now_sec = time.monotonic()
 
@@ -474,13 +457,6 @@ class SecurityAdvisorHandler:
 
                 # Release concurrency lock for Security checks
                 exec_lock.release()
-
-                # Safe timer cleanup — cancel if timer exists and hasn't been garbage collected
-                if _llm_timeout_timer is not None:
-                    try:
-                        _llm_timeout_timer.cancel()
-                    except Exception:
-                        pass  # Timer may have already fired or been cancelled
 
             # ── Extract output and parse verdict ───────────────────────────
             from agent_cascade.compression.helpers import extract_instance_output
