@@ -529,16 +529,12 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
                 })()
             return subprocess.run(*args, **kwargs)
 
+        # Mock _create_kernel_client to avoid slow ZMQ connection attempts (~27s retries).
+        # This test verifies path_mapping file creation, not kernel connectivity.
         with mock.patch.object(ci, '_build_docker_image', side_effect=_noop):
-            with mock.patch('subprocess.run', side_effect=mock_subprocess_run):
-                try:
+            with mock.patch.object(ci, '_create_kernel_client', return_value=mock.MagicMock()):
+                with mock.patch('subprocess.run', side_effect=mock_subprocess_run):
                     ci._start_kernel(kernel_id)
-                except RuntimeError as e:
-                    # Expected if Docker container starts but Jupyter connection fails — that's fine
-                    pass
-                except Exception as e:
-                    # Unexpected — re-raise for visibility
-                    raise AssertionError(f"Unexpected exception in _start_kernel: {e}") from e
 
         # path_mapping file SHOULD exist because Docker succeeded
         mapping_file = os.path.join(self.tmpdir, f'path_mapping_{kernel_id}.json')

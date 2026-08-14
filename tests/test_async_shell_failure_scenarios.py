@@ -81,9 +81,17 @@ class TestKilledProcessCleanup:
         result = tracker.kill_task('test_agent', tool_id)
         assert 'Shell killed' in result, f"Kill failed: {result}"
 
-        # After kill returns, task should no longer be active
-        time.sleep(0.3)
-        assert tracker.has_active_tasks('test_agent') is False
+        # After kill returns, task should no longer be active.
+        # Use a poll loop instead of a bare sleep — the tracking thread needs time
+        # to detect process death and remove the task from _tasks dict (finally block).
+        # On loaded systems this can take >0.3s, so we retry up to 2 seconds.
+        deadline = time.time() + 2.0
+        while tracker.has_active_tasks('test_agent'):
+            if time.time() >= deadline:
+                break
+            time.sleep(0.1)
+        assert not tracker.has_active_tasks('test_agent'), \
+            "Task still reported as active after kill_task returned"
 
     def test_killed_process_no_longer_sends_heartbeats(self):
         """A killed process stops sending heartbeats immediately."""
