@@ -22,6 +22,7 @@ class ReadLogs(BaseTool):
             },
             'max_chars_per_message': {
                 'type': 'integer',
+                'default': 1000,
                 'description': TOOL_METADATA['read_logs']['parameters']['max_chars_per_message']
             },
             'range': {
@@ -37,7 +38,7 @@ class ReadLogs(BaseTool):
             'format': {
                 'type': 'string',
                 'enum': ['raw', 'simple'],
-                'default': 'raw',
+                'default': 'simple',
                 'description': TOOL_METADATA['read_logs']['parameters']['format']
             }
         },
@@ -115,6 +116,184 @@ class ReadLogs(BaseTool):
             idx = max(1, min(idx, total_entries))
             return idx - 1, idx
 
+    @staticmethod
+    def _is_metadata(entry):
+        """Check if an entry is a metadata line."""
+        return isinstance(entry, dict) and "metadata" in entry
+
+    @staticmethod
+    def _truncate_middle(s, limit):
+        """Keep the first and last halves of *s*, replacing the middle. Always stays within *limit* chars."""
+        s = str(s) if not isinstance(s, str) else s
+        if len(s) > limit:
+            msg = f" ... [TRUNCATED: {len(s) - limit} chars removed] ..."
+            # Reserve space for the truncation message itself
+            remaining = limit - len(msg)
+            if remaining < 2:
+                remaining = 2  # At least 1 char each side
+            half = remaining // 2
+            return s[:half] + msg + s[-(remaining - half):]
+        return s
+
+    @staticmethod
+    def _truncate_strings(obj, limit):
+        """Walk *obj* (dict / list / str) and truncate any long strings.
+
+        Mutates dict/list objects in place for efficiency; returns the (possibly modified) object.
+        For strings, returns a new truncated string without mutating the original.
+        Safe here because parsed_lines entries are disposable after this pass.
+        """
+        if isinstance(obj, str):
+            return ReadLogs._truncate_middle(obj, limit)
+        stack = [obj]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                for k, v in current.items():
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
+                    elif isinstance(v, str) and len(v) > limit:
+                        current[k] = ReadLogs._truncate_middle(v, limit)
+            elif isinstance(current, list):
+                for i, v in enumerate(current):
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
+                    elif isinstance(v, str) and len(v) > limit:
+                        current[i] = ReadLogs._truncate_middle(v, limit)
+        return obj
+
+    @staticmethod
+    def truncate_item(item, mode, max_chars):
+        """Apply mode-specific truncation to one parsed log entry."""
+        if mode == 'none':
+            return item
+        if mode == 'trim_all':
+            # Delegate entirely to _truncate_strings for all types
+            return ReadLogs._truncate_strings(item, max_chars)
+        # mode == 'trim_tools' — only truncate tool-related fields
+        if isinstance(item, dict):
+            fc = item.get("function_call")
+            if isinstance(fc, dict):
+                fc["arguments"] = ReadLogs._truncate_middle(fc.get("arguments", ""), max_chars)
+            elif isinstance(fc, list):
+                for call in fc:
+                    if isinstance(call, dict) and "arguments" in call:
+                        call["arguments"] = ReadLogs._truncate_middle(
+                            call["arguments"], max_chars
+                        )
+            # Handle modern tool_calls format: tool_calls[].function.arguments
+            tc = item.get("tool_calls")
+            if isinstance(tc, list):
+                for call in tc:
+                    if isinstance(call, dict):
+                        fn = call.get("function")
+                        if isinstance(fn, dict) and "arguments" in fn:
+                            fn["arguments"] = ReadLogs._truncate_middle(
+                                fn["arguments"], max_chars
+                            )
+            # Deep-truncate anything in the extra field (nested tool calls, etc.)
+            if "extra" in item:
+                item["extra"] = ReadLogs._truncate_strings(item["extra"], max_chars)
+        return item
+
+    @staticmethod
+    def _format_simple_entry(entry, entry_num):
+        """Format one truncated log entry as a readable summary line.
+
+        Returns (header_line, content_line_or_none).
+        """
+        if isinstance(entry, str):
+            # Non-JSON line or raw string
+            return f"[{entry_num}] [RAW] {entry[:200]}", None
+
+        if not isinstance(entry, dict):
+            return f"[{entry_num}] [{type(entry).__name__}] {str(entry)[:200]}", None
+
+        # Metadata lines - apply truncation to the JSON representation
+        if "metadata" in entry:
+            meta_json = json.dumps(entry, ensure_ascii=False)
+            truncated_meta = ReadLogs._truncate_middle(meta_json, 300)
+            return f"[{entry_num}] [METADATA] {truncated_meta}", None
+
+        role = entry.get("role", "").lower()
+        timestamp = entry.get("timestamp", "")
+        time_str = ""
+        if timestamp:
+            # Extract HH:MM:SS portion if present
+            t = str(timestamp)
+            for sep in ("T", " "):
+                if sep in t:
+                    time_part = t.split(sep)[1][:8]
+                    if len(time_part) == 8:
+                        time_str = time_part
+                        break
+            if not time_str and ":" in t[:9]:
+                time_str = t[:8]
+
+        # Build role label
+        if role == "user":
+            role_label = "USER"
+        elif role == "assistant":
+            role_label = "ASSISTANT"
+        elif role == "function" or role == "tool":
+            name = entry.get("name") or entry.get("function_id", "?")
+            role_label = f"TOOL({name})"
+        elif role == "system":
+            role_label = "SYSTEM"
+        else:
+            role_label = f"{role.upper() if role else 'UNKNOWN'}"
+
+        # Build tool info for assistant entries with calls
+        tool_info = ""
+        if role == "assistant":
+            fc = entry.get("function_call")
+            tc = entry.get("tool_calls")
+            calls = []
+            if isinstance(fc, dict):
+                fn_name = fc.get("name", "?")
+                args = fc.get("arguments", "")
+                if len(args) > 60:
+                    args = args[:57] + "..."
+                calls.append(f"{fn_name}({args})")
+            if isinstance(tc, list):
+                for call in tc:
+                    if isinstance(call, dict):
+                        fn = call.get("function", {})
+                        fn_name = fn.get("name", "?") if isinstance(fn, dict) else "?"
+                        args = fn.get("arguments", "") if isinstance(fn, dict) else ""
+                        if len(args) > 60:
+                            args = args[:57] + "..."
+                        calls.append(f"{fn_name}({args})")
+            if calls:
+                tool_info = " → " + ", ".join(calls)
+
+        # Build header
+        header_parts = [f"[{entry_num}]"]
+        if time_str:
+            header_parts.append(time_str)
+        header_parts.append(role_label + tool_info)
+        header_line = " ".join(header_parts)
+
+        # Content preview
+        content = None
+        if role in ("user", "assistant", "system"):
+            content = entry.get("content") or entry.get("reasoning_content")
+        elif role in ("function", "tool"):
+            content = entry.get("content")
+        else:
+            # Fallback: try content field for unknown roles
+            content = entry.get("content")
+
+        if content:
+            c = str(content)
+            if len(c) > 200:
+                c = c[:197] + "..."
+            content_line = f"    {c}"
+        else:
+            content_line = None
+
+        return header_line, content_line
+
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
         log_file = params['log_file']
@@ -130,7 +309,7 @@ class ReadLogs(BaseTool):
             return f"Error: Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}."
 
         # Parse and validate output format
-        fmt = params.get('format', 'raw')
+        fmt = params.get('format', 'simple')
         valid_formats = ('raw', 'simple')
         if fmt not in valid_formats:
             return f"Error: Invalid format '{fmt}'. Must be one of: {', '.join(valid_formats)}."
@@ -180,7 +359,7 @@ class ReadLogs(BaseTool):
                 pass  # fall through to resolve_tool_path
             except Exception as e:
                 logger.exception(f"Unexpected error during log auto-resolution: {e}")
-                raise
+                return f"Error resolving log file path: {e}"
 
         # Fall back to standard resolution if not auto-resolved
         if file_path is None:
@@ -236,14 +415,10 @@ class ReadLogs(BaseTool):
                     # Non-JSON lines kept as plain strings; truncation handled in the pass below
                     parsed_lines.append(line)
 
-        # --- Helper: check if an entry is a metadata line (works on dicts and strings) ---
-        def _is_metadata(entry):
-            return isinstance(entry, dict) and "metadata" in entry
-
         # --- Pagination / slicing ---
         # Split into metadata lines (always included) and regular log entries (sliced)
-        metadata_lines = [l for l in parsed_lines if _is_metadata(l)]
-        other_lines = [l for l in parsed_lines if not _is_metadata(l)]
+        metadata_lines = [l for l in parsed_lines if ReadLogs._is_metadata(l)]
+        other_lines = [l for l in parsed_lines if not ReadLogs._is_metadata(l)]
 
         try:
             if range_str is not None:
@@ -258,179 +433,7 @@ class ReadLogs(BaseTool):
 
         parsed_lines = metadata_lines + selected
 
-        # --- Helper: truncate a string from the middle ---
-        def _truncate_middle(s, limit):
-            """Keep the first and last halves of *s*, replacing the middle. Always stays within *limit* chars."""
-            s = str(s) if not isinstance(s, str) else s
-            if len(s) > limit:
-                msg = f" ... [TRUNCATED: {len(s) - limit} chars removed] ..."
-                # Reserve space for the truncation message itself
-                remaining = limit - len(msg)
-                if remaining < 2:
-                    remaining = 2  # At least 1 char each side
-                half = remaining // 2
-                return s[:half] + msg + s[-(remaining - half):]
-            return s
-
-        # --- Helper: recursively truncate string values in nested structures (iterative) ---
-        def _truncate_strings(obj, limit):
-            """Walk *obj* (dict / list / str) and truncate any long strings.
-
-            Mutates dict/list objects in place for efficiency; returns the (possibly modified) object.
-            For strings, returns a new truncated string without mutating the original.
-            Safe here because parsed_lines entries are disposable after this pass.
-            """
-            if isinstance(obj, str):
-                return _truncate_middle(obj, limit)
-            stack = [obj]
-            while stack:
-                current = stack.pop()
-                if isinstance(current, dict):
-                    for k, v in current.items():
-                        if isinstance(v, (dict, list)):
-                            stack.append(v)
-                        elif isinstance(v, str) and len(v) > limit:
-                            current[k] = _truncate_middle(v, limit)
-                elif isinstance(current, list):
-                    for i, v in enumerate(current):
-                        if isinstance(v, (dict, list)):
-                            stack.append(v)
-                        elif isinstance(v, str) and len(v) > limit:
-                            current[i] = _truncate_middle(v, limit)
-            return obj
-
-        # --- Helper: apply truncation to a single item based on display mode ---
-        def truncate_item(item, mode, max_chars):
-            """Apply mode-specific truncation to one parsed log entry."""
-            if mode == 'none':
-                return item
-            if mode == 'trim_all':
-                # Delegate entirely to _truncate_strings for all types
-                return _truncate_strings(item, max_chars)
-            # mode == 'trim_tools' — only truncate tool-related fields
-            if isinstance(item, dict):
-                fc = item.get("function_call")
-                if isinstance(fc, dict):
-                    fc["arguments"] = _truncate_middle(fc.get("arguments", ""), max_chars)
-                elif isinstance(fc, list):
-                    for call in fc:
-                        if isinstance(call, dict) and "arguments" in call:
-                            call["arguments"] = _truncate_middle(
-                                call["arguments"], max_chars
-                            )
-                # Handle modern tool_calls format: tool_calls[].function.arguments
-                tc = item.get("tool_calls")
-                if isinstance(tc, list):
-                    for call in tc:
-                        if isinstance(call, dict):
-                            fn = call.get("function")
-                            if isinstance(fn, dict) and "arguments" in fn:
-                                fn["arguments"] = _truncate_middle(
-                                    fn["arguments"], max_chars
-                                )
-                # Deep-truncate anything in the extra field (nested tool calls, etc.)
-                if "extra" in item:
-                    item["extra"] = _truncate_strings(item["extra"], max_chars)
-            return item
-
-        # --- Helper: format a single entry in simple human-readable mode ---
-        def _format_simple_entry(entry, entry_num):
-            """Format one truncated log entry as a readable summary line.
-
-            Returns (header_line, content_line_or_none).
-            """
-            if isinstance(entry, str):
-                # Non-JSON line or raw string
-                return f"[{entry_num}] [RAW] {entry[:200]}", None
-
-            if not isinstance(entry, dict):
-                return f"[{entry_num}] [{type(entry).__name__}] {str(entry)[:200]}", None
-
-            # Metadata lines
-            if "metadata" in entry:
-                meta_json = json.dumps(entry, ensure_ascii=False)
-                return f"[{entry_num}] [METADATA] {meta_json[:300]}", None
-
-            role = entry.get("role", "").lower()
-            timestamp = entry.get("timestamp", "")
-            time_str = ""
-            if timestamp:
-                # Extract HH:MM:SS portion if present
-                t = str(timestamp)
-                for sep in ("T", " "):
-                    if sep in t:
-                        time_part = t.split(sep)[1][:8]
-                        if len(time_part) == 8:
-                            time_str = time_part
-                            break
-                if not time_str and ":" in t[:9]:
-                    time_str = t[:8]
-
-            # Build role label
-            if role == "user":
-                role_label = "USER"
-            elif role == "assistant":
-                role_label = "ASSISTANT"
-            elif role == "function" or role == "tool":
-                name = entry.get("name") or entry.get("function_id", "?")
-                role_label = f"TOOL({name})"
-            elif role == "system":
-                role_label = "SYSTEM"
-            else:
-                role_label = f"{role.upper() if role else 'UNKNOWN'}"
-
-            # Build tool info for assistant entries with calls
-            tool_info = ""
-            if role == "assistant":
-                fc = entry.get("function_call")
-                tc = entry.get("tool_calls")
-                calls = []
-                if isinstance(fc, dict):
-                    fn_name = fc.get("name", "?")
-                    args = fc.get("arguments", "")
-                    if len(args) > 60:
-                        args = args[:57] + "..."
-                    calls.append(f"{fn_name}({args})")
-                if isinstance(tc, list):
-                    for call in tc:
-                        if isinstance(call, dict):
-                            fn = call.get("function", {})
-                            fn_name = fn.get("name", "?") if isinstance(fn, dict) else "?"
-                            args = fn.get("arguments", "") if isinstance(fn, dict) else ""
-                            if len(args) > 60:
-                                args = args[:57] + "..."
-                            calls.append(f"{fn_name}({args})")
-                if calls:
-                    tool_info = " → " + ", ".join(calls)
-
-            # Build header
-            header_parts = [f"[{entry_num}]"]
-            if time_str:
-                header_parts.append(time_str)
-            header_parts.append(role_label + tool_info)
-            header_line = " ".join(header_parts)
-
-            # Content preview
-            content = None
-            if role in ("user", "assistant", "system"):
-                content = entry.get("content") or entry.get("reasoning_content")
-            elif role in ("function", "tool"):
-                content = entry.get("content")
-            else:
-                # Fallback: try content field for unknown roles
-                content = entry.get("content")
-
-            if content:
-                c = str(content)
-                if len(c) > 200:
-                    c = c[:197] + "..."
-                content_line = f"    {c}"
-            else:
-                content_line = None
-
-            return header_line, content_line
-
-        truncated_lines = [truncate_item(item, mode, max_chars) for item in parsed_lines]
+        truncated_lines = [ReadLogs.truncate_item(item, mode, max_chars) for item in parsed_lines]
 
         # --- Output formatting based on 'format' parameter ---
         if fmt == 'raw':
@@ -447,7 +450,7 @@ class ReadLogs(BaseTool):
         # simple mode: human-readable summary
         result = []
         for i, item in enumerate(truncated_lines):
-            header_line, content_line = _format_simple_entry(item, i + 1)
+            header_line, content_line = ReadLogs._format_simple_entry(item, i + 1)
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)
