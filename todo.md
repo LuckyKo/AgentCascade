@@ -99,7 +99,13 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] check KV cache miss on reused agent (investigate POST dump on exit and on recall, see if something changes in sys prompt)
 - [x] make a skill for best practices when creating unit/regression tests — DONE: generic Python/pytest testing-best-practices skill at .qwen/skills/testing-best-practices/SKILL.md. Cross-project reusable, no AC-specific references. Based on research report and project memories. Reviewed and approved twice (AC-specific then generic).
 - [x] expand read_logs with a display mode argument: trim_tools (default), trim_all, none. for trim_tools we apply our truncation only to `function` outputs, leaving the rest intact (assistant/reasoning/user); trim_all - truncate all messages as before, none -  no truncation — DONE: mode parameter added to read_logs tool with three options; handles both function_call and tool_calls formats; implementation passed two review rounds.
-- [ ] stop button does not also stop the attempt to API fallback
+- [ ] `stop` button does not also stop the attempts to do API fallback if its in that process
+- [x] some regressions are popping out cmd shell windows, stealing focus from whatever app i run. i rather they not do that
+- [x] add notification sound to new messages to user from agents (from send_message)
+- [x] after restart, loading another session than the old one that was reloaded causes them to merge together (UI issue only).
+- [x] make `read_logs` read from the appropriate agent logging path if the path is not fully specified (only log file name)
+- [ ] add crop_region argument to view_image tool for better detail capture on large images; also prepend image size info in the caption field (right before caption text, so the LLM would know how much to crop to get better look at some areas)
+
 
 
 # Errors to investigate:
@@ -128,58 +134,3 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 2026-08-13 12:48:32,687 - tool_dispatcher.py - 640 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 2080.02s
 2026-08-13 12:48:32,689 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
 
-# system stuck after this
-2026-08-14 06:01:37,471 - agent_pool.py - 3187 - INFO - [idle_checker] Auto-dismissed 4 idle agent(s): Security_op_75414c5e, Security_op_68a98220, Security_op_cefe8762, Security_op_119e49b2
-2026-08-14 06:02:13,455 - code_interpreter.py - 228 - WARNING - Code interpreter watchdog: Kernel ci_Maine_-11502_17600 inactive for 300s. Killing container.
-2026-08-14 06:07:37,518 - agent_pool.py - 3262 - INFO - [idle_checker] Auto-dismissing idle agent 'reviewer_readlogs_mode' (idle for 1624s, threshold=1600s)
-2026-08-14 06:07:37,518 - agent_pool.py - 1176 - DEBUG - No active thread to join for 'reviewer_readlogs_mode'
-2026-08-14 06:07:37,527 - agent_pool.py - 916 - DEBUG - Instance conversation cleanup key missing (expected): 'reviewer_readlogs_mode'
-2026-08-14 06:07:37,528 - agent_pool.py - 3187 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): reviewer_readlogs_mode
-2026-08-14 06:13:22,425 - log.py - 198 - ERROR - Uncaught exception in thread Thread-84
-Traceback (most recent call last):
-  File "C:\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
-    self.run()
-  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 151, in run
-    loop.run_until_complete(self._async_run())
-  File "C:\Python312\Lib\asyncio\base_events.py", line 687, in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 143, in _async_run
-    self._create_socket()
-  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 105, in _create_socket
-    self.socket = self.context.socket(zmq.REQ)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\zmq\sugar\context.py", line 352, in socket
-    socket_class(  # set PYTHONTRACEMALLOC=2 to get the calling frame
-  File "C:\Python312\Lib\site-packages\zmq\sugar\socket.py", line 162, in __init__
-    super().__init__(
-  File "zmq/backend/cython/_zmq.py", line 740, in zmq.backend.cython._zmq.Socket.__init__
-    raise ZMQError()
-    ^^^^^^^^^^^
-zmq.error.ZMQError: No buffer space available
-2026-08-14 06:13:37,571 - agent_pool.py - 3262 - INFO - [idle_checker] Auto-dismissing idle agent 'rev_readlogs_01' (idle for 1602s, threshold=1600s)
-2026-08-14 06:13:37,571 - agent_pool.py - 1176 - DEBUG - No active thread to join for 'rev_readlogs_01'
-2026-08-14 06:13:37,578 - agent_pool.py - 916 - DEBUG - Instance conversation cleanup key missing (expected): 'rev_readlogs_01'
-2026-08-14 06:13:37,586 - agent_pool.py - 3187 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): rev_readlogs_01
-2026-08-14 06:15:57,738 - log.py - 198 - ERROR - Uncaught exception in thread Thread-180
-Traceback (most recent call last):
-  File "C:\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
-    self.run()
-  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 151, in run
-    loop.run_until_complete(self._async_run())
-  File "C:\Python312\Lib\asyncio\base_events.py", line 687, in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 143, in _async_run
-    self._create_socket()
-  File "C:\Python312\Lib\site-packages\jupyter_client\channels.py", line 105, in _create_socket
-    self.socket = self.context.socket(zmq.REQ)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\zmq\sugar\context.py", line 352, in socket
-    socket_class(  # set PYTHONTRACEMALLOC=2 to get the calling frame
-  File "C:\Python312\Lib\site-packages\zmq\sugar\socket.py", line 162, in __init__
-    super().__init__(
-  File "zmq/backend/cython/_zmq.py", line 740, in zmq.backend.cython._zmq.Socket.__init__
-    raise ZMQError()
-    ^^^^^^^^^^^
-zmq.error.ZMQError: No buffer space available

@@ -1,3 +1,4 @@
+import glob as _glob
 import json
 from pathlib import Path
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -119,12 +120,61 @@ class ReadLogs(BaseTool):
         if mode not in valid_modes:
             return f"Error: Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}."
 
-        # Resolve file path via agent_pool or fallback
-        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-        try:
-            file_path = resolve_tool_path(log_file, mode="ro", agent_pool=self.agent_pool)
-        except ValueError as e:
-            return f"Error: {str(e)}"
+        # Validate log_file input
+        if not log_file or not isinstance(log_file, str) or not log_file.strip():
+            return "Error: log_file must be a non-empty string."
+
+        log_file = log_file.strip()
+
+        # Auto-resolve bare filenames in the instance-specific log directory
+        file_path = None
+        if (
+            "/" not in log_file
+            and "\\" not in log_file
+            and not log_file.startswith("./")
+            and ".." not in log_file  # prevent path traversal within log dir
+            and self.agent_pool
+            and hasattr(self.agent_pool, "_logger")
+            and hasattr(self.agent_pool._logger, "log_dir")
+        ):
+            try:
+                log_dir = Path(self.agent_pool._logger.log_dir)
+                if not log_dir.is_dir():
+                    pass  # fall through to resolve_tool_path
+                else:
+                    # Only * and ? are treated as wildcards. [ ] are kept literal — this is a deliberate
+                    # usability choice to avoid confusing filenames like file[1].log being misinterpreted.
+                    has_wildcards = "*" in log_file or "?" in log_file
+                    if has_wildcards:
+                        pattern = str(log_dir / log_file)
+                        matches = _glob.glob(pattern)
+                        if len(matches) == 1:
+                            file_path = Path(matches[0])
+                        elif len(matches) > 1:
+                            candidates = "\n".join(f"  - {m}" for m in sorted(matches))
+                            return (
+                                f"Error: Multiple log files match '{log_file}' "
+                                f"in {log_dir}. Please specify a more specific name or full path.\n\n"
+                                f"Candidates:\n{candidates}"
+                            )
+                    else:
+                        target = log_dir / log_file
+                        if target.is_file():
+                            file_path = target
+            except (OSError, PermissionError):
+                pass  # fall through to resolve_tool_path
+            except Exception as e:
+                from agent_cascade.log import logger
+                logger.exception(f"Unexpected error during log auto-resolution: {e}")
+                raise
+
+        # Fall back to standard resolution if not auto-resolved
+        if file_path is None:
+            from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+            try:
+                file_path = resolve_tool_path(log_file, mode="ro", agent_pool=self.agent_pool)
+            except ValueError as e:
+                return f"Error: {str(e)}"
 
         if not file_path.exists() or not file_path.is_file():
             return f"Error: Log file '{log_file}' not found."
