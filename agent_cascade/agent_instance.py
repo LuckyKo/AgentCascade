@@ -280,6 +280,7 @@ class AgentInstance:
     # ── Concurrency Slot Management (Parent Slot Acquisition Fix) ───────────
     _pool_ref: Optional['AgentPool'] = None  # Reference back to parent pool for queue cleanup on terminate()
     _slot_release: Optional[Callable[[], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
+    _slot_key: Optional[str] = None  # Slot key of currently held SlotPool slot (e.g., '_shared_sequential_slot_' or api_base)
     _skip_slot_acquire: bool = False  # When True, engine.run() skips slot acquisition (used for nested agents like Security/Compressor)
 
     # ── Persistent Working Set Caching (Fix LLM Reprocessing) ────────────────

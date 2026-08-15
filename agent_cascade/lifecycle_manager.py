@@ -500,6 +500,8 @@ class AgentLifecycleManager:
                 # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale
                 # callback issues
                 instance._slot_release = None
+                if hasattr(instance, '_slot_key'):
+                    instance._slot_key = None
 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always

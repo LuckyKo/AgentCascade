@@ -727,6 +727,8 @@ class ToolDispatcher:
         if not slot_info or not slot_info.get('needs_slot'):
             # Unlimited endpoints — no slot needed
             slot_holder._slot_release = None
+            if hasattr(slot_holder, '_slot_key'):
+                slot_holder._slot_key = None
             return True
         
         api_base = slot_info['api_base']
@@ -751,6 +753,8 @@ class ToolDispatcher:
             else:
                 # Unlimited — no callback needed
                 slot_holder._slot_release = None
+                if hasattr(slot_holder, '_slot_key'):
+                    slot_holder._slot_key = None
                 return True
         except (SlotQueueTimeout, SlotCancelled):
             pass
@@ -758,6 +762,8 @@ class ToolDispatcher:
         # Step 3: On failure — clean state and degrade to async-only.
         with slot_holder._state_lock:
             slot_holder._slot_release = None
+            if hasattr(slot_holder, '_slot_key'):
+                slot_holder._slot_key = None
         
         logger.warning(
             f"[SLOT_SYNC_REACQUIRE_FAILED] {context_label} for '{slot_holder_name}' "

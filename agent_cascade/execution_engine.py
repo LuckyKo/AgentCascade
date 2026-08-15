@@ -889,6 +889,20 @@ class ExecutionEngine:
             instance._slot_release = self.pool._acquire_slot(
                 instance.agent_class, instance.instance_name
             )
+            # Store slot key for fallback detection in call_with_fallback.
+            # Must pass caller_agent_type to handle Tier 2 endpoint inheritance.
+            if instance._slot_release is not None:
+                router = self.pool.api_router
+                if router:
+                    caller_agent_type = None
+                    if getattr(instance, 'parent_instance', None):
+                        parent = self.pool.get_instance(instance.parent_instance)
+                        if parent and hasattr(parent, 'agent_class') and not getattr(parent, 'is_terminated', False):
+                            caller_agent_type = parent.agent_class
+                    slot_info = router.get_agent_slot_info(
+                        instance.agent_class, caller_agent_type=caller_agent_type
+                    )
+                    instance._slot_key = slot_info.get('slot_key')
             logger.debug(
                 f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
                 f"class={instance.agent_class}"
@@ -1155,6 +1169,7 @@ class ExecutionEngine:
                 return  # Terminal stop — don't start work
             # Compression-halt at startup: just proceed (compression is transient)
             instance._slot_release = None  # Initialize for proper cleanup in finally block
+            instance._slot_key = None      # Clear stale slot key from previous run (if any)
             self._acquire_slot_with_logging(instance, "initial")
 
             # Exit if stopped after slot acquire — prevents stale slot reuse
@@ -4683,6 +4698,8 @@ class ExecutionEngine:
                 if slot_holder._slot_release is not None:
                     release_callback = slot_holder._slot_release
                     slot_holder._slot_release = None
+                    if hasattr(slot_holder, '_slot_key'):
+                        slot_holder._slot_key = None
                     try:
                         release_callback()
                     except Exception as e:
@@ -4718,6 +4735,8 @@ class ExecutionEngine:
 
                     release_cb = instance._slot_release
                     instance._slot_release = None
+                    if hasattr(instance, '_slot_key'):
+                        instance._slot_key = None
                     try:
                         release_cb()
                     except Exception as e:
