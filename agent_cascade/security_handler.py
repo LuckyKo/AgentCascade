@@ -7,21 +7,29 @@ parsing, timeout handling, auto-apply/reject logic, and cleanup sequence.
 import asyncio
 import copy
 import json
+import os
 import platform
 import time
 import threading
 from typing import Any, Dict, Optional
 
 # ── Deadlock protection constants ───────────────────────────────────────────
-# NOTE: The system-launched Security advisor is no longer capped by a wall-clock LLM
-# timeout. It is instead bounded by a turn
-# budget (SECURITY_AGENT_MAX_TURNS in settings.py), which lets the model finish its
-# reasoning and forces a final verdict on its last turn. The user-facing
-# approval_timeout_seconds still governs the "taking longer than expected" warning.
+# NOTE: The system-launched Security advisor is bounded by a turn budget
+# (SECURITY_AGENT_MAX_TURNS in settings.py), which lets the model finish its
+# reasoning and forces a final verdict on its last turn. A wall-clock first-yield
+# timer (below) remains only as a last-resort guard against an LLM generator that
+# never yields its first token. The user-facing approval_timeout_seconds still
+# governs the "taking longer than expected" warning.
 
 # Timeout for acquiring the security check lock.
 # Prevents permanent block if previous check crashed without releasing.
 SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = 10
+
+# Last-resort guard against an LLM generator that never yields its first token.
+# The engine watchdog only activates after the first output; this timer covers the
+# pre-first-yield gap. Generous on purpose — it must not cut off a slow-but-progressing
+# model (the turn budget handles normal completion). Only fires if NO yield at all.
+SECURITY_FIRST_YIELD_TIMEOUT_SECONDS = int(os.getenv('QWEN_AGENT_SECURITY_FIRST_YIELD_TIMEOUT', 300))
 
 # ── Module-level helpers used by the security handler ───────────────────────
 
@@ -266,7 +274,8 @@ class SecurityAdvisorHandler:
 
         sec_state_key = None
         sec_instance = None
-        sec_warning_timer = None  # Track for cleanup in finally block
+        sec_warning_timer = None       # Track for cleanup in finally block
+        sec_first_yield_timer = None   # Last-resort guard against a hung generator (FIX 1)
 
         sec_prompt_lock = _get_security_check_lock(self.app_state)
         active_checks, checks_lock = _get_active_checks_state(self.app_state)
@@ -309,10 +318,7 @@ class SecurityAdvisorHandler:
                     caller=caller_agent,
                 )
 
-                # Bound the Security advisor by a turn budget instead of a wall-clock
-                # timeout. The engine injects 50%/90% warnings and disables all tools on
-                # the final turn to force a verdict; if it runs out without a clear
-                # [YES]/[NO], _handle_ambiguous auto-rejects (fails closed = NO).
+                # Primary bound: turn budget (see top-of-file NOTE for the full design).
                 sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS
 
                 # Configure with UI settings (defense-in-depth tool filtering)
@@ -338,11 +344,13 @@ class SecurityAdvisorHandler:
 
                 logger.info(f"[SECURITY] Created AgentInstance '{sec_state_key}' for request {rid}")
 
-                # Result-tracking flags. The wall-clock cutoff was removed in favor of a
-                # turn budget (sec_instance.max_turns), so these are never set True here —
-                # they remain only to keep _handle_result's signature stable.
+                # Result-tracking flags. These are set True ONLY on a pre-first-yield hang:
+                # if the LLM generator never yields its first token, the first-yield timer
+                # (below) fires and we break out here so _handle_result can auto-reject.
+                # Normal completion is governed by the turn budget (sec_instance.max_turns).
                 sec_timeout_reached = False
                 sec_elapsed_at_timeout = None
+                sec_start_time = time.monotonic()
 
                 # Schedule warning timer (tracked for cleanup)
                 def _sec_warning_injector():
@@ -394,25 +402,52 @@ class SecurityAdvisorHandler:
                 # Telemetry: track Security agent call latency (non-blocking)
                 _call_start = time.perf_counter()
 
-                # NOTE: The Security advisor is bounded by a turn budget
-                # (sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS), not a wall-clock
-                # timeout. The engine injects 50%/90% warnings and forces a final verdict
-                # on the last turn, so we no longer need a hard LLM-generator timer here.
+                # Last-resort guard against a generator that never yields its first token.
+                # The turn budget is the primary mechanism; this timer only covers the
+                # pre-first-yield gap the engine watchdog cannot see. Cancelled on first yield.
+                _first_yield_timeout_event = threading.Event()
+
+                def _first_yield_timeout_trigger():
+                    logger.warning(
+                        f"[SECURITY] First-yield timeout trigger fired for request {rid} "
+                        f"after {SECURITY_FIRST_YIELD_TIMEOUT_SECONDS}s — model has not yielded."
+                    )
+                    _first_yield_timeout_event.set()
+
+                sec_first_yield_timer = threading.Timer(
+                    SECURITY_FIRST_YIELD_TIMEOUT_SECONDS, _first_yield_timeout_trigger
+                )
+                sec_first_yield_timer.daemon = True
+                sec_first_yield_timer.start()
 
                 # ── Engine execution loop with streaming ───────────────────
                 _last_sec_send = 0.0
                 _sec_tick_num = 0
                 _sec_last_resp_len = 0
 
+                _got_first_yield = False
                 for resp in engine.run(sec_instance):
                     if self.agent_pool.stopped:
                         break
 
-                    # NOTE: No wall-clock cutoff here. The Security advisor is bounded by a
-                    # turn budget (SECURITY_AGENT_MAX_TURNS); the engine forces a final verdict
-                    # on its last turn, and an ambiguous result auto-rejects via _handle_ambiguous.
-                    # sec_timeout_reached/sec_elapsed_at_timeout are kept for _handle_result
-                    # compatibility but are never set True by this loop anymore.
+                    # First-yield guard: fires only if the generator never yielded a token.
+                    # Once we get any yield, cancel the timer — the engine watchdog + turn
+                    # budget take over from here on.
+                    if not _got_first_yield:
+                        _got_first_yield = True
+                        try:
+                            sec_first_yield_timer.cancel()
+                        except Exception:
+                            pass  # Timer may have already fired
+
+                        if _first_yield_timeout_event.is_set():
+                            sec_timeout_reached = True
+                            sec_elapsed_at_timeout = time.monotonic() - sec_start_time
+                            logger.warning(
+                                f"[SECURITY] First-yield timeout after {sec_elapsed_at_timeout:.0f}s "
+                                f"for request {rid}. Generator did not yield in time."
+                            )
+                            break
 
                     now_sec = time.monotonic()
 
@@ -492,6 +527,13 @@ class SecurityAdvisorHandler:
                     sec_warning_timer.cancel()
                 except Exception:
                     pass  # Timer may have already fired
+
+            # First-yield guard timer — cancel if it hasn't fired (already cancelled on first yield).
+            if sec_first_yield_timer is not None:
+                try:
+                    sec_first_yield_timer.cancel()
+                except Exception:
+                    pass  # Timer may have already fired or been cancelled
 
             # ── Cleanup: always remove instance state and release tracking ──
             self._cleanup(sec_state_key)

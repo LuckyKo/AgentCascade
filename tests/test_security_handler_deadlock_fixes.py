@@ -42,15 +42,15 @@ class TestSecurityTurnBudget:
         )
 
     def test_handler_bounded_by_turns_not_wallclock(self):
-        """security_handler should no longer reference the removed wall-clock LLM timeout."""
+        """security_handler should no longer define the removed wall-clock LLM timeout constant."""
         import inspect
-        from agent_cascade import security_handler
+        import agent_cascade.security_handler as sh
 
-        source = inspect.getsource(security_handler)
-        assert "SECURITY_LLM_TIMEOUT_SECONDS" not in source, (
-            "Wall-clock LLM timeout constant should be removed (replaced by turn budget)"
+        # Runtime attribute check (robust to comments mentioning the old name).
+        assert not hasattr(sh, 'SECURITY_LLM_TIMEOUT_SECONDS'), (
+            "old wall-clock constant should be removed"
         )
-        assert "max_turns = SECURITY_AGENT_MAX_TURNS" in source, (
+        assert "max_turns = SECURITY_AGENT_MAX_TURNS" in inspect.getsource(sh), (
             "security_handler should bound the Security advisor via max_turns"
         )
 
