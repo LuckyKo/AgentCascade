@@ -314,6 +314,7 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
 
 // ─── Agent Messages State Management ──────────────────────────────────────
 
+const AGENT_MESSAGES_TAB_NAME = 'agent-messages'; // Static UI tab — not a real agent instance
 const AGENT_MESSAGES_STORAGE_KEY = 'agent-cascade-agent-messages';
 const MAX_AGENT_MESSAGES = 200; // Cap to prevent unbounded growth
 const AGENT_MESSAGES_SEEN_IDS = new Set();
@@ -496,7 +497,7 @@ function getActiveAgentName() {
     if (!state.activeSubTab.startsWith(prefix)) return state.sessionName;
     const name = state.activeSubTab.slice(prefix.length);
     // Guard: 'agent-messages' is a static UI tab, not an agent
-    if (name === 'agent-messages') return state.sessionName;
+    if (name === AGENT_MESSAGES_TAB_NAME) return state.sessionName;
     return name;
 }
 
@@ -515,15 +516,8 @@ function isRootAgentName(name) {
   return isSessionPrimaryAgent(name);
 }
 
-function getActiveInstanceName() {
-  if (!state.activeSubTab) return state.sessionName;
-  const prefix = 'sub-';
-  if (!state.activeSubTab.startsWith(prefix)) return state.sessionName;
-  const name = state.activeSubTab.slice(prefix.length);
-  // Guard: 'agent-messages' is a static UI tab, not an agent
-  if (name === 'agent-messages') return state.sessionName;
-  return name;
-}
+// Alias — kept for readability at call sites that refer to "instance"
+function getActiveInstanceName() { return getActiveAgentName(); }
 
 /** Remove stale sub-agent entries after merging server state.
  *  Also resets activeSubTab to null if it points to a dismissed agent, preventing blank panel rendering. */
@@ -535,9 +529,9 @@ function cleanupStaleSubAgents(data, state) {
     }
   }
   // Reset active tab if it points to a now-dismissed agent — prevents blank panel rendering
-  const activeAgentName = state.activeSubTab?.startsWith('sub-') && state.activeSubTab.slice(4) !== 'agent-messages'
-    ? state.activeSubTab.slice(4)
-    : null;
+  // Guard: skip static UI tabs (e.g., Agent Messages) that aren't real agents
+  const _tabName = state.activeSubTab?.startsWith('sub-') ? state.activeSubTab.slice(4) : null;
+  const activeAgentName = (_tabName && _tabName !== AGENT_MESSAGES_TAB_NAME) ? _tabName : null;
   if (activeAgentName && !(activeAgentName in data.agent_instances)) {
     state.activeSubTab = null;
   }
@@ -3742,7 +3736,7 @@ function renderSubAgents() {
   // Exclude static UI tabs like "sub-agent-messages" from cleanup
   mainTabBar.querySelectorAll('.main-tab[data-tab^="sub-"]').forEach(tab => {
     const agentName = tab.dataset.tab.substring(4);
-    if (agentName === 'agent-messages') return; // skip static UI tab
+    if (agentName === AGENT_MESSAGES_TAB_NAME) return; // skip static UI tab
     if (!namesArr.includes(agentName)) {
       tab.remove();
       const panel = document.getElementById('panelSub-' + agentName);
