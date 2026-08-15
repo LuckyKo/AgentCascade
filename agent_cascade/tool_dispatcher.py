@@ -97,9 +97,8 @@ class ToolDispatcher:
     def _compute_slot_key(self, agent_class: str) -> str:
         """Compute the slot key for an agent class.
         
-        Extracted from inline computations in handle_call_agent and 
-        _find_ancestor_with_slot to avoid duplication. Same logic as 
-        EndpointScheduler.acquire().
+        Extracted from inline computations in handle_call_agent to avoid
+        duplication. Same logic as EndpointScheduler.acquire().
         
         Args:
             agent_class: The agent class name
@@ -289,19 +288,21 @@ class ToolDispatcher:
         # 2. If B uses conc=0 (shared sequential pool): always SYNC
         #    - Only one agent can use the shared sequential slot at a time
         # 3. If A holds no slot: ASYNC is safe (A doesn't block anything)
-        # 4. [Phase 4] If child inherits caller's slot (no own endpoints, same pool):
-        #    - SYNC inline on parent's thread — borrows permit implicitly, NO acquire needed
-        # 5. If A holds a parallel slot (conc>0) and B uses a DIFFERENT slot pool:
+        # 4. If A holds a parallel slot (conc>0) and B uses a DIFFERENT slot pool:
         #    - ASYNC: A keeps its slot, B acquires its own in engine.run()
-        # 6. If B would need the SAME slot pool as A (same api_base with limited conc):
+        # 5. If B would need the SAME slot pool as A (same api_base with limited conc):
         #    - SYNC: A releases, B acquires that slot, runs to completion
+        #
+        # NOTE: There is no "inherit caller's slot" rule — every agent meters against its own
+        # resolved endpoint pool (single FIFO slot system). A child with no own endpoints resolves
+        # to its own (default) pool via get_agent_slot_info, and the collision check below handles
+        # same-pool→SYNC correctly.
 
         caller_slot_holder = self.pool.get_instance(caller_name)
         router = self.pool.api_router
 
-        # Get child's slot info with caller context for endpoint inheritance
-        caller_type = caller_slot_holder.agent_class if caller_slot_holder else None
-        child_slot_info = router.get_agent_slot_info(agent_class, caller_agent_type=caller_type) if router else None
+        # Get child's slot info (resolved against the child's own endpoint pool)
+        child_slot_info = router.get_agent_slot_info(agent_class) if router else None
 
         # Case 1: Child needs no slot (conc=-1) → always ASYNC, caller_holds_slot forced False
         if not child_slot_info or not child_slot_info.get('needs_slot'):
@@ -318,43 +319,26 @@ class ToolDispatcher:
                     with caller_slot_holder._state_lock:
                         if caller_slot_holder._slot_release is not None:
                             caller_holds_slot = True
-                
+
                 # Case 3: Caller holds no slot → ASYNC is safe (handled by else branch below)
-                
-                # Phase 4 Rule 4: Child inherits caller's slot (no own endpoints).
-                # Run SYNC inline on parent's thread — borrows permit implicitly, NO acquire needed.
-                # This check MUST happen BEFORE collision detection to avoid being overridden.
-                if caller_holds_slot and child_slot_info and not child_slot_info.get('has_own_endpoints'):
-                    logger.debug(
-                        f"[SLOT_RULE4_INHERIT] Child '{instance_name}' ({agent_class}) has no own endpoints, "
-                        f"inherits caller '{caller_name}' slot — SYNC inline (no acquire)"
-                    )
-                    # Rule 4 is final for this path — skip collision check below.
-                    pass  # caller_holds_slot already True from earlier check
-                elif caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
-                    # Case 5/6: Caller holds a slot. Check for collision (only if Rule 4 didn't apply).
+
+                if caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
+                    # Case 4/5: Caller holds a slot. Check for pool collision.
                     caller_slot_key = self._compute_slot_key(caller_slot_holder.agent_class)
-                    
+
                     child_slot_key = child_slot_info['slot_key']
-                    
-                    # Case 6: Same slot pool → collision → SYNC
+
+                    # Case 5: Same slot pool → collision → SYNC
                     if caller_slot_key == child_slot_key:
                         caller_holds_slot = True  # Keep sync path (collision detected)
                     else:
-                        # Case 5: Different slot pools → no collision → ASYNC is safe
+                        # Case 4: Different slot pools → no collision → ASYNC is safe
                         caller_holds_slot = False
 
-                # Deadlock prevention (A→B→C scenario): If caller doesn't hold a slot but child needs one,
-                # check if any ancestor holds a conflicting slot pool. An async child (B) might not hold
-                # its own slot, but its parent (A) could be holding the same pool that grandchild (C) needs.
-                if not caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
-                    conflict_ancestor = self._find_ancestor_with_slot(caller_name, child_slot_info['slot_key'])
-                    if conflict_ancestor:
-                        logger.debug(
-                            f"[DEADLOCK_PREVENTION] Ancestor '{conflict_ancestor}' holds slot pool "
-                            f"conflicting with child's need — forcing sync for '{instance_name}'"
-                        )
-                        caller_holds_slot = True  # Force sync — ancestor holds this slot pool
+                # Sync/async decision (Stage 3): depends ONLY on whether the DIRECT caller holds a
+                # slot and the child needs the SAME slot pool. No ancestor walk — an A→B(async)→C
+                # scenario is handled by C simply waiting in the FIFO queue (bounded wait + timeout),
+                # not by forcing sync here.
 
         if caller_holds_slot:
             return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
@@ -479,53 +463,6 @@ class ToolDispatcher:
         return "\n".join(lines)
 
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
-
-    def _find_ancestor_with_slot(self, start_instance_name: str, target_slot_key: str) -> Optional[str]:
-        """Walk up parent chain to find an active ancestor holding a conflicting slot pool.
-
-        Used for deadlock prevention in A→B(async)→C(sync needing A's slot) scenarios.
-        B doesn't hold its own slot (it's async), but A might be holding the same pool
-        that C needs. If found, caller should force sync execution.
-
-        Args:
-            start_instance_name: The instance to start walking from (the direct caller).
-            target_slot_key: The slot key the child agent would need.
-
-        Returns:
-            Ancestor instance name if one holds a conflicting slot pool, None otherwise.
-            Max depth 10 to prevent infinite loops.
-        """
-        current = self.pool.get_instance(start_instance_name)
-        for _ in range(10):
-            if current is None:
-                break
-            parent_name = getattr(current, 'parent_instance', None)
-            if not parent_name:
-                break
-
-            parent = self.pool.get_instance(parent_name)
-            if parent is None:
-                break
-
-            # Check if this ancestor holds a slot
-            if hasattr(parent, '_state_lock'):
-                try:
-                    with parent._state_lock:
-                        if parent._slot_release is not None:
-                            anc_slot_key = self._compute_slot_key(parent.agent_class)
-
-                            if anc_slot_key == target_slot_key:
-                                logger.debug(
-                                    f"[DEADLOCK_PREVENTION] Ancestor '{parent_name}' holds slot pool "
-                                    f"'{anc_slot_key}' conflicting with child's need"
-                                )
-                                return parent_name
-                except Exception as e:
-                    logger.debug(f"Ancestor slot check failed for {parent_name} (non-critical): {e}")
-
-            current = parent
-
-        return None
 
     def _run_child_sync(
         self,
@@ -745,9 +682,7 @@ class ToolDispatcher:
             )
             if release_cb is not None:
                 slot_holder._slot_release = release_cb
-                # Restore _slot_key so call_with_fallback knows we hold this slot.
-                # Without this, the next LLM call would try to per-call acquire the
-                # same slot → self-deadlock (we already hold it via _slot_release).
+                # Track which slot key this agent holds (for diagnostics).
                 slot_holder._slot_key = slot_info.get('slot_key')
                 logger.debug(
                     f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{slot_holder_name}' after {context_label}"

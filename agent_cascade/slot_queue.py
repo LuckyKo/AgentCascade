@@ -42,11 +42,12 @@ QUEUE_WAIT_TIMEOUT: int = int(os.getenv('QWEN_AGENT_SLOT_QUEUE_TIMEOUT', 300))
 # Exceptions
 # ──────────────────────────────────────────────────────────────────────────────
 
-class SlotQueueTimeout(Exception):
+class SlotQueueTimeout(TimeoutError):
     """Raised when a waiter times out waiting for a slot.
-    
+
     Carries diagnostic information about the ticket and pool state at time of timeout.
-    Distinct from generic TimeoutError so callers can handle queue-specific timeouts.
+    Subclasses TimeoutError so callers (e.g., EndpointScheduler.acquire) can catch it
+    with a plain `except TimeoutError` and wrap it in a holder-aware message.
     """
     def __init__(self, ticket: 'QueueTicket', message: Optional[str] = None):
         self.ticket = ticket

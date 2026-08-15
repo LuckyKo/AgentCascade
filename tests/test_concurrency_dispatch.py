@@ -9,7 +9,6 @@ All tests are self-contained — no LLM or API server required.
 
 import threading
 import time
-from unittest.mock import patch
 
 import pytest
 
@@ -153,14 +152,13 @@ class TestSharedSequentialSlot:
         acquired = [False]
 
         def try_acquire():
-            import agent_cascade.api_router as ar
-            with patch.object(ar, 'ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 1.0):
-                try:
-                    release2 = scheduler.acquire(api_base_2, 0, "agent_b", "researcher")
-                    acquired[0] = True
-                    release2()
-                except TimeoutError:
-                    pass
+            try:
+                # Explicit timeout (honored directly by acquire()) guards against deadlock.
+                release2 = scheduler.acquire(api_base_2, 0, "agent_b", "researcher", timeout=5.0)
+                acquired[0] = True
+                release2()
+            except TimeoutError:
+                pass
 
         t = threading.Thread(target=try_acquire)
         t.start()

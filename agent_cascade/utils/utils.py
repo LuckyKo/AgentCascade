@@ -1283,6 +1283,10 @@ def strip_base64_from_images(
     # Collect all image ContentItems with base64 data, in order
     images_with_base64 = []  # list of (msg_idx, item_idx, content_item)
     for msg_idx, msg in enumerate(result):
+        # Dict-style messages carry raw content (no ContentItem objects), so there is no
+        # base64 to strip here — skip them. Object messages expose .content normally.
+        if isinstance(msg, dict):
+            continue
         content = msg.content
         if content is None or not isinstance(content, list):
             continue

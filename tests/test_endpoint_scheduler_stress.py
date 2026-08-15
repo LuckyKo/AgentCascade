@@ -12,7 +12,6 @@ No LLM or network connections required.
 
 import threading
 import time
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -157,11 +156,10 @@ class TestConcurrentSlotAcquisition:
 
         def try_acquire():
             try:
-                import agent_cascade.api_router as ar
-                with patch.object(ar, 'ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 1.0):
-                    release2 = scheduler.acquire(api_base_2, 0, "agent_b", "researcher")
-                    acquired[0] = True
-                    release2()
+                # Explicit timeout (honored directly by acquire()) guards against deadlock.
+                release2 = scheduler.acquire(api_base_2, 0, "agent_b", "researcher", timeout=5.0)
+                acquired[0] = True
+                release2()
             except TimeoutError:
                 pass
 
@@ -178,112 +176,94 @@ class TestConcurrentSlotAcquisition:
 
 
 # ============================================================================
-# Semaphore resize during active use
+# Fixed-capacity SlotPool semantics (post-consolidation)
 # ============================================================================
+# NOTE: The old two-layer design used a per-endpoint threading.Semaphore whose
+# capacity could be resized mid-flight. That layer was removed in the slot/
+# concurrency consolidation — there is now exactly ONE FIFO queue per slot pool
+# (SlotPool), and a pool's capacity is FIXED at creation time. Passing a larger
+# concurrency_limit to acquire() does NOT grow an existing pool; it is simply
+# ignored for capacity purposes (the first value seen wins). The tests below
+# lock in that real behavior.
 
-class TestSemaphoreResizeDuringActiveUse:
-    """Test that resizing the semaphore while agents are running is safe."""
+class TestFixedCapacitySemantics:
+    """SlotPool capacity is fixed at creation; later acquires honor it strictly."""
 
-    def test_resize_upwards_no_starvation(self, scheduler):
-        """Increasing concurrency_limit allows more agents without dropping existing ones."""
+    def test_capacity_is_fixed_at_creation(self, scheduler):
+        """The pool created for an endpoint keeps the capacity of its first acquire.
+        A later acquire with a larger concurrency_limit does NOT grow the pool."""
         api_base = "http://test-api"
-        
-        # Start with 2 active agents at limit
+
+        # First acquire establishes capacity=2.
         release1 = scheduler.acquire(api_base, 2, "agent_1", "coder")
         release2 = scheduler.acquire(api_base, 2, "agent_2", "coder")
-        
         assert scheduler.count_active(api_base, 2) == 2
-        
-        # Third agent should block at limit=2
-        blocked = [True]
+
+        # A third acquire at the SAME (fixed) capacity must block — even if we pass a
+        # larger concurrency_limit, the pool does not resize. Pass an explicit short
+        # timeout (honored directly by acquire()) so the test cannot deadlock.
+        with pytest.raises(TimeoutError):
+            scheduler.acquire(api_base, 3, "agent_3", "coder", timeout=0.5)
+
+        # The pool's reported capacity is still the original 2 (not 3).
+        status = scheduler.get_status()
+        assert status[api_base]['max_active'] == 2, \
+            f"Pool should keep fixed capacity 2, got {status[api_base]['max_active']}"
+
+        release1()
+        release2()
+        assert scheduler.count_active(api_base, 2) == 0
+
+    def test_at_capacity_blocks_then_grants_on_release(self, scheduler):
+        """At a fixed capacity, a new agent blocks until a permit frees up (FIFO)."""
+        api_base = "http://test-api"
+        cap = 2
+
+        release1 = scheduler.acquire(api_base, cap, "agent_1", "coder")
+        release2 = scheduler.acquire(api_base, cap, "agent_2", "coder")
+        assert scheduler.count_active(api_base, cap) == cap
+
+        # Third agent blocks (at capacity).
+        granted = [False]
         third_release = [None]
 
         def try_acquire():
             try:
-                third_release[0] = scheduler.acquire(api_base, 3, "agent_3", "coder")
-                blocked[0] = False
-            except Exception as e:
-                blocked[0] = f"error: {e}"
+                third_release[0] = scheduler.acquire(api_base, cap, "agent_3", "coder")
+                granted[0] = True
+            except Exception:
+                pass
 
         t = threading.Thread(target=try_acquire)
         t.start()
-        # Wait for thread to complete acquire (resize allows it through immediately)
-        deadline = time.monotonic() + 5.0
-        while blocked[0] is True and time.monotonic() < deadline:
-            time.sleep(0.01)
-        
-        # Resize to 3 — agent_3 should now be able to acquire
-        assert not blocked[0], f"Agent 3 failed after resize: {blocked[0]}"
-        assert third_release[0] is not None
-        
-        # All three active
-        assert scheduler.count_active(api_base, 3) == 3
-        
-        release1()
+        time.sleep(0.15)
+        assert not granted[0], "Third agent should be blocked at capacity"
+
+        # Free one permit → the blocked agent is granted in FIFO order.
         release2()
+        t.join(timeout=5)
+        assert granted[0], "Blocked agent should be granted after a permit frees"
+        assert scheduler.count_active(api_base, cap) == cap
+
+        release1()
         third_release[0]()
+        assert scheduler.count_active(api_base, cap) == 0
 
-    def test_resize_downwards_blocks_new_agents(self, scheduler):
-        """Decreasing concurrency_limit blocks new agents but keeps existing ones.
-
-        The resize happens during acquire when a different concurrency_limit is passed.
-        Existing agents keep their slots; new acquires with the reduced limit block.
-        """
+    def test_full_cycle_no_leak(self, scheduler):
+        """Repeated acquire/release cycles at a fixed capacity never leak permits."""
         api_base = "http://test-api"
-        
-        # Start with 3 agents at limit=3
-        release1 = scheduler.acquire(api_base, 3, "agent_1", "coder")
-        release2 = scheduler.acquire(api_base, 3, "agent_2", "coder")
-        release3 = scheduler.acquire(api_base, 3, "agent_3", "coder")
-        
-        assert scheduler.count_active(api_base, 3) == 3
-        
-        # Release one agent so active_count (2) < new_limit (2).
-        # Then acquire with reduced limit=2 — the resize should succeed.
-        release3()
-        assert scheduler.count_active(api_base, 3) == 2
-        
-        # Now acquire a fourth agent with limit=2.
-        # The resize will reduce max_active from 3 to 2.
-        # Since active_count is now 2 and new_max is 2, the new semaphore has no free permits.
-        # This call should time out waiting for a slot.
-        import agent_cascade.api_router as ar
-        with patch.object(ar, 'ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 0.5):
-            with pytest.raises(TimeoutError, match="Timed out"):
-                scheduler.acquire(api_base, 2, "agent_4", "coder")
-        
-        # Existing agents' slots are still valid — releasing them works normally.
-        release1()
-        release2()
-        
-        assert scheduler.count_active(api_base, 3) == 0
-
-    def test_resize_preserves_semaphore_integrity(self, scheduler):
-        """After resize and full cycle, semaphore permits are correct."""
-        api_base = "http://test-api"
+        cap = 2
         num_cycles = 10
-        
+
         for _ in range(num_cycles):
-            # Acquire at limit 2
-            r1 = scheduler.acquire(api_base, 2, "a", "coder")
-            r2 = scheduler.acquire(api_base, 2, "b", "coder")
+            r1 = scheduler.acquire(api_base, cap, "a", "coder")
+            r2 = scheduler.acquire(api_base, cap, "b", "coder")
             r1()
             r2()
-            
-            # Resize to 4 mid-cycle
-            r3 = scheduler.acquire(api_base, 4, "c", "coder")
-            r4 = scheduler.acquire(api_base, 4, "d", "coder")
-            r5 = scheduler.acquire(api_base, 4, "e", "coder")
-            r6 = scheduler.acquire(api_base, 4, "f", "coder")
-            r3()
-            r4()
-            r5()
-            r6()
-        
-        # Verify no leak after all cycles
+
         status = scheduler.get_status()
-        active = status.get(api_base, {}).get('active_count', 0)
-        assert active == 0, f"Semaphore integrity broken: {active} leaked slots"
+        active = status[api_base]['active_count']
+        assert active == 0, f"Slot leak after {num_cycles} cycles: {active} still active"
 
 
 # ============================================================================
@@ -344,57 +324,58 @@ class TestStaleScheduleCleanup:
     """Test that stale schedules are cleaned up correctly."""
 
     def test_cleanup_removes_idle_schedules(self, scheduler):
-        """Schedules with no activity and full permits are removed."""
+        """Idle pools (no active or waiting agents) are removed by cleanup_stale."""
         api_base = "http://test-api"
-        
-        # Use the endpoint to create a schedule
+
+        # Use the endpoint to create a pool
         release = scheduler.acquire(api_base, 2, "agent_1", "coder")
         release()
-        
-        assert api_base in scheduler._schedules
-        
-        # Cleanup should remove it
+
+        assert api_base in scheduler._pools
+
+        # Cleanup should remove it (idle: no running, no waiters)
         scheduler.cleanup_stale()
-        assert api_base not in scheduler._schedules
+        assert api_base not in scheduler._pools
 
     def test_cleanup_preserves_shared_sequential_slot(self, scheduler):
         """The shared sequential slot is never cleaned up."""
         api_base = "http://seq-api"
-        
-        # Use a sequential endpoint to create the shared slot
+
+        # Use a sequential endpoint to create the shared pool
         release = scheduler.acquire(api_base, 0, "agent_1", "coder")
         release()
-        
+
         shared_key = "_shared_sequential_slot_"
-        assert shared_key in scheduler._schedules
-        
+        assert shared_key in scheduler._pools
+
         scheduler.cleanup_stale()
-        assert shared_key in scheduler._schedules, "Shared sequential slot should not be cleaned up"
+        assert shared_key in scheduler._pools, "Shared sequential slot should not be cleaned up"
 
     def test_cleanup_preserves_active_schedules(self, scheduler):
-        """Schedules with active agents are NOT cleaned up."""
+        """Pools with active agents are NOT cleaned up."""
         api_base = "http://test-api"
-        
+
         release = scheduler.acquire(api_base, 2, "agent_1", "coder")
-        
-        # Cleanup should not remove an active schedule
+
+        # Cleanup should not remove a pool that still has an active holder
         scheduler.cleanup_stale()
-        assert api_base in scheduler._schedules
-        
+        assert api_base in scheduler._pools
+
         release()
 
     def test_cleanup_removes_slot_holders_too(self, scheduler):
-        """Cleanup also removes slot holder tracking for stale endpoints."""
+        """Cleanup removes the whole pool (and thus its slot-holder tracking)."""
         api_base = "http://test-api"
-        
+
         release = scheduler.acquire(api_base, 2, "agent_1", "coder")
-        assert api_base in scheduler._slot_holders
-        
+        assert api_base in scheduler._pools
+
         release()
         scheduler.cleanup_stale()
-        
-        assert api_base not in scheduler._schedules
-        assert api_base not in scheduler._slot_holders
+
+        assert api_base not in scheduler._pools
+        # Holder tracking is gone with the pool.
+        assert api_base not in scheduler.get_slot_holders()
 
 
 # ============================================================================
@@ -413,11 +394,14 @@ class TestSlotHolderTracking:
         holders = scheduler.get_slot_holders(api_base)
         assert api_base in holders
         assert len(holders[api_base]) == 1
-        
-        name, agent_class, _, _ = holders[api_base][0]
-        assert name == "agent_1"
-        assert agent_class == "coder"
-        
+
+        # Tuple shape: (instance_name, agent_name, granted_at, acquisition_id).
+        # Note: _grant() populates SlotHolder.agent_name with the instance name, so
+        # both fields carry the instance name here.
+        instance_name, agent_name, _, _ = holders[api_base][0]
+        assert instance_name == "agent_1"
+        assert agent_name == "agent_1"
+
         release()
 
     def test_slot_holder_removed_on_release(self, scheduler):
@@ -441,13 +425,12 @@ class TestSlotHolderTracking:
         stuck = scheduler.detect_stuck_slots(threshold_seconds=60.0)
         assert len(stuck) == 0
         
-        # Manually set acquired_at to old time to simulate stuck slot
-        with scheduler._lock:
-            if api_base in scheduler._slot_holders and scheduler._slot_holders[api_base]:
-                name, agent_class, _, acq_id = scheduler._slot_holders[api_base][0]
-                old_time = time.monotonic() - 120.0
-                scheduler._slot_holders[api_base][0] = (name, agent_class, old_time, acq_id)
-        
+        # Manually backdate the holder's granted_at to simulate a stuck slot.
+        pool = scheduler._pools[api_base]
+        with pool._cond:
+            for holder in pool._running.values():
+                holder.granted_at = time.monotonic() - 120.0
+
         stuck = scheduler.detect_stuck_slots(threshold_seconds=60.0)
         assert len(stuck) == 1
         assert stuck[0]['instance_name'] == "agent_1"
@@ -485,12 +468,11 @@ class TestAcquireTimeout:
         
         # Fill the slot
         release1 = scheduler.acquire(api_base, 1, "agent_1", "coder")
-        
-        import agent_cascade.api_router as ar
-        with patch.object(ar, 'ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 0.2):
-            with pytest.raises(TimeoutError) as exc_info:
-                scheduler.acquire(api_base, 1, "agent_2", "coder")
-        
+
+        # Pass an explicit short timeout (honored directly by acquire()).
+        with pytest.raises(TimeoutError) as exc_info:
+            scheduler.acquire(api_base, 1, "agent_2", "coder", timeout=0.2)
+
         assert "Timed out" in str(exc_info.value)
         assert "held by" in str(exc_info.value).lower() or "agent_1" in str(exc_info.value)
         
@@ -501,12 +483,11 @@ class TestAcquireTimeout:
         api_base = "http://test-api"
         
         release1 = scheduler.acquire(api_base, 1, "blocking_agent", "coder")
-        
-        import agent_cascade.api_router as ar
-        with patch.object(ar, 'ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 0.2):
-            with pytest.raises(TimeoutError) as exc_info:
-                scheduler.acquire(api_base, 1, "waiting_agent", "researcher")
-        
+
+        # Pass an explicit short timeout (honored directly by acquire()).
+        with pytest.raises(TimeoutError) as exc_info:
+            scheduler.acquire(api_base, 1, "waiting_agent", "researcher", timeout=0.2)
+
         error_msg = str(exc_info.value)
         assert "blocking_agent" in error_msg
         

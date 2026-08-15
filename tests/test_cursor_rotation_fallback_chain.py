@@ -1,10 +1,10 @@
 """Cursor rotation and fallback chain tests for APIRouter.
 
 Tests cover:
-- Full 4-tier fallback chain with simulated failures at each level
+- Full fallback chain (own endpoints → last-successful → default) with simulated failures
 - Instance cursor persistence across retries/failures
 - Cursor reset after successful endpoint usage
-- Endpoint inheritance (Tier 2) behavior
+- No caller inheritance: unconfigured agents fall to their own/default pool
 - Cooldown filtering during chain construction
 
 No LLM or network connections required. Uses mocks to simulate failures.
@@ -83,11 +83,10 @@ class TestFourTierFallbackChain:
     """Test the complete 4-tier fallback chain behavior."""
 
     def test_chain_includes_all_tiers(self, router):
-        """Chain includes agent-specific (T1), caller-inherited (T2), last-successful (T3), and default (T4)."""
+        """Chain includes agent-specific (T1), last-successful (T3), and default (T4)."""
         _add_endpoint(router, "agent_ep", "http://agent-api")
-        _add_endpoint(router, "caller_ep", "http://caller-api")
         _set_agent_priorities(router, "coder", ["ep_agent_ep"])
-        
+
         # Set last successful endpoint (Tier 3)
         with router._lock:
             router._last_successful_endpoint_cfg = {
@@ -95,12 +94,12 @@ class TestFourTierFallbackChain:
                 'model': 'success-model',
             }
             router._agent_types_with_priorities.add('coder')
-        
+
         chain = router.get_endpoint_chain("coder")
-        
+
         # Should have: agent_ep (T1), last-successful (T3), default (T4)
         assert len(chain) >= 2, f"Expected at least 2 endpoints, got {len(chain)}"
-        
+
         # Default should always be last
         assert chain[-1]['api_base'] == 'http://default-api'
 
@@ -108,38 +107,30 @@ class TestFourTierFallbackChain:
         """Agent-specific endpoints (Tier 1) are tried first."""
         _add_endpoint(router, "coder_ep", "http://coder-api")
         _set_agent_priorities(router, "coder", ["ep_coder_ep"])
-        
+
         chain = router.get_endpoint_chain("coder")
-        
+
         assert chain[0]['api_base'] == 'http://coder-api', \
             f"Tier 1 endpoint should be first, got {chain[0].get('api_base')}"
 
-    def test_tier2_caller_inheritance(self, router):
-        """Agent with no priorities inherits caller's endpoints (Tier 2)."""
-        _add_endpoint(router, "caller_ep", "http://caller-api")
-        _set_agent_priorities(router, "orchestrator", ["ep_caller_ep"])
-        
-        # 'generalist' has no configured priorities — should inherit from caller
-        chain = router.get_endpoint_chain("generalist", caller_agent_type="orchestrator")
-        
-        # Should include caller's endpoint before default
-        api_bases = [cfg.get('api_base') for cfg in chain]
-        assert 'http://caller-api' in api_bases, \
-            f"Caller-inherited endpoint missing from chain: {api_bases}"
+    def test_no_caller_inheritance(self, router):
+        """An unconfigured agent does NOT inherit the caller's endpoints — it falls to default.
 
-    def test_tier2_no_inheritance_when_agent_has_priorities(self, router):
-        """Agent with own priorities does NOT inherit caller's endpoints."""
-        _add_endpoint(router, "coder_ep", "http://coder-api")
+        Regression: Tier-2 caller inheritance was removed so every agent meters against its own
+        resolved endpoint pool (single FIFO slot system). An agent with no own priorities must not
+        pick up a caller's endpoint; it resolves through its own chain (Tier 3/Tier 4) only.
+        """
         _add_endpoint(router, "caller_ep", "http://caller-api")
-        _set_agent_priorities(router, "coder", ["ep_coder_ep"])
         _set_agent_priorities(router, "orchestrator", ["ep_caller_ep"])
-        
-        chain = router.get_endpoint_chain("coder", caller_agent_type="orchestrator")
-        
+
+        # 'generalist' has no configured priorities — must NOT inherit caller's endpoint
+        chain = router.get_endpoint_chain("generalist")
+
         api_bases = [cfg.get('api_base') for cfg in chain]
-        assert 'http://coder-api' in api_bases
-        # Caller's endpoint should NOT appear since coder has its own priorities
-        assert 'http://caller-api' not in api_bases
+        assert 'http://caller-api' not in api_bases, \
+            f"Caller's endpoint should NOT be inherited: {api_bases}"
+        # Falls through to the global default
+        assert 'http://default-api' in api_bases
 
     def test_tier3_last_successful_endpoint(self, router):
         """Last successful endpoint (Tier 3) is used when agent-specific endpoints are exhausted."""
@@ -224,24 +215,6 @@ class TestSimulatedFailuresPerTier:
             router.call_with_fallback("coder", always_fail)
         
         assert "All API endpoints exhausted" in str(exc_info.value)
-
-    def test_tier2_inheritance_failure_continues_to_tier3(self, router):
-        """When inherited endpoint (Tier 2) fails, continues to Tier 3/4."""
-        _add_endpoint(router, "caller_ep", "http://caller-api", max_retries=0)
-        _set_agent_priorities(router, "orchestrator", ["ep_caller_ep"])
-        
-        call_bases = []
-        
-        def track_calls(llm_cfg, *args, **kwargs):
-            call_bases.append(llm_cfg.get('api_base'))
-            raise ConnectionError("Failed")
-        
-        with pytest.raises(RuntimeError):
-            router.call_with_fallback("generalist", track_calls, caller_agent_type="orchestrator")
-        
-        # Should have tried caller's endpoint AND default
-        assert 'http://caller-api' in call_bases
-        assert 'http://default-api' in call_bases
 
 
 # ============================================================================

@@ -29,7 +29,6 @@ from typing import List
 from agent_cascade.slot_queue import (
     SlotPool,
     SlotHolder,
-    SlotQueueTimeout,
 )
 from agent_cascade.api_router import EndpointScheduler
 
@@ -76,7 +75,9 @@ class TestFIFOOrderingOnSharedSlot(unittest.TestCase):
 
         # Agent B attempts a per-call conc=0 acquisition while A holds the slot.
         # With capacity 1 and A holding it, B must block until its (short) timeout.
-        with self.assertRaises(SlotQueueTimeout):
+        # EndpointScheduler.acquire() re-raises SlotQueueTimeout as a plain TimeoutError
+        # (the documented public contract), so assert on TimeoutError here.
+        with self.assertRaises(TimeoutError):
             sched.acquire(
                 api_base="http://shared-api",
                 concurrency_limit=0,
@@ -287,67 +288,67 @@ def _make_gen(items):
         yield item
 
 
-class TestAncestorHoldsSlot(unittest.TestCase):
-    """Test 6: per-call acquisition skipped when an ancestor holds the target slot.
+class TestChildWaitsInFIFO(unittest.TestCase):
+    """Test 6 (Stage 3 rewrite): a child whose caller holds the target slot WAITS in
+    the FIFO queue and is granted its turn in order — it is NOT skipped.
 
-    Prevents self-deadlock: parent (Maine) holds conc=0 lifecycle slot → spawns
-    child (Compressor) with _skip_slot_acquire=True → child's LLM call falls back
-    to same conc=0 endpoint → must NOT re-acquire (would block on parent's slot).
-
-    These tests mirror the ancestor-walk logic from call_with_fallback.
-    Driving the full call_with_fallback requires a configured APIRouter with
-    endpoints — the walk logic is the critical part under test here.
+    Stage 1 removed the ``_skip_slot_acquire`` bypass and Stage 3 removed the
+    ancestor-walk that used to force sync for an A→B(async)→C scenario. The child
+    now always acquires its own slot via the single FIFO queue per endpoint: if the
+    caller (or any other agent) holds the same pool, the child simply waits in FIFO
+    order and is granted when a permit frees up. These tests exercise that wait-then-
+    grant behavior through the real scheduler.
     """
 
-    def _walk_ancestors(self, inst, pool_map, slot_key):
-        """Mirror of the ancestor-walk in call_with_fallback (api_router.py)."""
-        already_holds = (inst is not None and inst._slot_key == slot_key)
-        if not already_holds and inst is not None:
-            _ancestor = inst
-            for _depth in range(10):
-                _pname = getattr(_ancestor, 'parent_instance', None)
-                if not _pname:
-                    break
-                _parent = pool_map.get(_pname)
-                if _parent is None:
-                    break
-                if _parent._slot_key == slot_key:
-                    already_holds = True
-                    break
-                _ancestor = _parent
-        return already_holds
-
-    def test_skip_when_parent_holds_shared_slot(self):
-        """Child with _slot_key=None but parent holds '_shared_sequential_slot_'."""
+    def test_child_waits_then_granted_in_fifo_order(self):
+        """Caller A holds the shared sequential slot; child B must WAIT, then be
+        granted in FIFO order once A releases."""
+        sched = EndpointScheduler()
         slot_key = '_shared_sequential_slot_'
-        parent = _FakeInstance(instance_name="Maine", slot_key=slot_key)
-        child = _FakeInstance(instance_name="Compressor_1", slot_key=None)
-        child.parent_instance = "Maine"
 
-        result = self._walk_ancestors(child, {"Maine": parent}, slot_key)
-        self.assertTrue(result, "Ancestor walk should detect parent holds the slot")
+        # Caller A holds the conc=0 lifecycle slot.
+        release_a = sched.acquire(
+            api_base="http://shared-api",
+            concurrency_limit=0,
+            instance_name="A",
+            agent_class="orchestrator",
+            timeout=5.0,
+        )
+        self.assertIsNotNone(release_a)
 
-    def test_no_skip_when_parent_holds_different_slot(self):
-        """Parent holds a different slot key → child should still acquire."""
-        slot_key = '_shared_sequential_slot_'
-        parent = _FakeInstance(instance_name="Maine", slot_key="http://other-api")
-        child = _FakeInstance(instance_name="Compressor_1", slot_key=None)
-        child.parent_instance = "Maine"
+        # Child B (no lifecycle slot of its own) needs the SAME pool. Instead of being
+        # skipped, it must wait in the FIFO queue. With a short timeout it times out
+        # while A still holds the slot. EndpointScheduler.acquire() re-raises the
+        # internal SlotQueueTimeout as a plain TimeoutError (public contract).
+        with self.assertRaises(TimeoutError):
+            sched.acquire(
+                api_base="http://shared-api",
+                concurrency_limit=0,
+                instance_name="B",
+                agent_class="compressor",
+                timeout=0.5,
+            )
 
-        result = self._walk_ancestors(child, {"Maine": parent}, slot_key)
-        self.assertFalse(result, "Parent holds different slot — child should acquire")
+        pool = sched._pools[slot_key]
+        with pool._cond:
+            self.assertIn("A", pool._running)
+            self.assertNotIn("B", pool._running)
 
-    def test_depth_limit_prevents_infinite_loop(self):
-        """Circular parent references must not cause an infinite loop."""
-        slot_key = '_shared_sequential_slot_'
-        a = _FakeInstance(instance_name="A", slot_key=None)
-        b = _FakeInstance(instance_name="B", slot_key=None)
-        a.parent_instance = "B"
-        b.parent_instance = "A"  # Circular: A→B→A
+        # A releases → B is granted in FIFO order (no other waiters).
+        release_a()
+        release_b = sched.acquire(
+            api_base="http://shared-api",
+            concurrency_limit=0,
+            instance_name="B",
+            agent_class="compressor",
+            timeout=5.0,
+        )
+        self.assertIsNotNone(release_b)
+        with pool._cond:
+            self.assertIn("B", pool._running)
+            self.assertNotIn("A", pool._running)
 
-        # Should terminate (depth limit of 10) and return False.
-        result = self._walk_ancestors(a, {"A": a, "B": b}, slot_key)
-        self.assertFalse(result, "Circular refs should not trigger already_holds")
+        release_b()
 
 
 class _FakeInstance:

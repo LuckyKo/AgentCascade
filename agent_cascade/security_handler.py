@@ -309,8 +309,9 @@ class SecurityAdvisorHandler:
 
                 # Create engine and instance INSIDE the lock (prevents lifecycle collisions)
                 engine = ExecutionEngine(self.agent_pool)
-                # caller=caller_agent makes Security inherit the true caller's endpoint chain
-                # instead of slot 0, preventing deadlock when the caller holds a slot.
+                # caller=caller_agent attributes this check to the true caller for
+                # logging/telemetry and drives the yield/reacquire slot pattern below.
+                # (Security resolves its OWN endpoint pool — no caller inheritance.)
                 sec_instance = engine._create_system_agent(
                     agent_class='Security',
                     instance_name=sec_state_key,
@@ -367,15 +368,16 @@ class SecurityAdvisorHandler:
                 sec_warning_timer.daemon = True
                 sec_warning_timer.start()
 
-            # ── Slot bypass for Security advisor ───────────────────────────
+            # ── Slot yield for Security advisor ────────────────────────────
+            # Yield the caller's slot so the Security agent can acquire its own via
+            # the normal engine.run() path (FIFO). The caller is blocked on this
+            # check, so it cannot make LLM calls while the slot is free. We re-acquire
+            # for the caller in the finally block below (reacquire_for).
+            # NOTE: the actual release happens INSIDE the try block after exec_lock is
+            # acquired — if lock acquisition fails we raise before yielding, so there's
+            # nothing to reacquire (no lost-slot window).
             caller_inst_sec = self.agent_pool.get_instance(caller_agent) if caller_agent else None
-
-            sec_instance._skip_slot_acquire = True
-            holds_slot = getattr(caller_inst_sec, "_slot_release", None) is not None if caller_inst_sec else False
-            logger.debug(
-                f"[SECURITY_SLOT_BYPASS] Skipping slot acquire for Security - "
-                f"caller={caller_agent}, caller_holds_slot={holds_slot}"
-            )
+            _yielded_slot = False
 
             # Fix 4 — Defensive fallback: ensure execution lock exists before using it.
             # DEADLOCK FIX #2: Use RLock instead of Semaphore(1).
@@ -401,6 +403,27 @@ class SecurityAdvisorHandler:
             try:
                 # Telemetry: track Security agent call latency (non-blocking)
                 _call_start = time.perf_counter()
+
+                # ── Slot yield (inside try, after exec_lock acquired) ────────
+                # Release the caller's slot now that we hold exec_lock. Doing this here
+                # (rather than before lock acquisition) guarantees the finally block's
+                # reacquire always has a matching yield — no lost-slot window if the
+                # lock acquire above timed out and raised.
+                # Atomic check-and-mark: decide to yield under the instance's state lock so
+                # we never act on a stale observation. _release_slot() re-checks under the
+                # same lock and is idempotent — if another thread (e.g. stop_session) already
+                # released the slot, it is a no-op. We still reacquire in finally to restore
+                # the caller's slot so it can continue.
+                if caller_inst_sec and hasattr(caller_inst_sec, '_state_lock'):
+                    with caller_inst_sec._state_lock:
+                        if getattr(caller_inst_sec, "_slot_release", None) is not None:
+                            _yielded_slot = True  # Mark BEFORE releasing (under lock)
+
+                if _yielded_slot:
+                    logger.debug(
+                        f"[SECURITY_SLOT_YIELD] Releasing slot for '{caller_agent}' before Security check"
+                    )
+                    engine._release_slot(caller_inst_sec, caller_agent, "before_security_check")
 
                 # Last-resort guard against a generator that never yields its first token.
                 # The turn budget is the primary mechanism; this timer only covers the
@@ -485,10 +508,20 @@ class SecurityAdvisorHandler:
                 if (tel := engine._telemetry()) is not None:
                     try:
                         tel.record_agent_instance_call(
-                            sec_state_key, "Security", caller_name_sec, latency_ms=_call_latency_ms,
+                            sec_state_key, "Security", caller_agent, latency_ms=_call_latency_ms,
                         )
                     except Exception:
                         pass
+
+                # Re-acquire the caller's slot if we yielded it before running Security.
+                # Runs inline on the caller's thread, so yield→run→reacquire is in-order.
+                if _yielded_slot and caller_inst_sec is not None:
+                    if not engine.reacquire_for(caller_inst_sec, caller_agent, "after_security_check"):
+                        # Already logged inside reacquire_for — just note the degraded state
+                        logger.warning(
+                            f"[SECURITY] Caller '{caller_agent}' is slotless after Security check. "
+                            f"Subsequent LLM calls will use async path only."
+                        )
 
                 # Release concurrency lock for Security checks
                 exec_lock.release()

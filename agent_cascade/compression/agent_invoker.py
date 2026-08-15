@@ -209,15 +209,27 @@ def _execute_compressor_and_extract_summary(
         # Telemetry: track Compressor agent call latency (non-blocking)
         _call_start = _time.perf_counter()
 
-        # ── SLOT BYPASS FOR COMPRESSION/CONSOLIDATION ──
+        # ── SLOT YIELD FOR COMPRESSION/CONSOLIDATION ──
         # When forced compression triggers during an agent's turn, the Compressor runs
         # on the SAME thread as the caller. The caller holds the shared sequential slot.
-        # This path skips acquisition entirely — the caller retains the slot.
+        # Yield the caller's slot so the Compressor can acquire its own via the normal
+        # engine.run() path (FIFO); re-acquire for the caller in the finally block below.
+        caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
+        _yielded_slot = False
+        # Atomic check-and-mark: decide to yield under the instance's state lock so we never
+        # act on a stale observation. _release_slot() re-checks under the same lock and is
+        # idempotent — if another thread (e.g. stop_session) already released the slot, it is
+        # a no-op. We still reacquire in finally to restore the caller's slot so it can continue.
+        if caller_inst and hasattr(caller_inst, '_state_lock'):
+            with caller_inst._state_lock:
+                if getattr(caller_inst, "_slot_release", None) is not None:
+                    _yielded_slot = True  # Mark BEFORE releasing (under lock)
 
-        comp_instance._skip_slot_acquire = True
-        logger.debug(
-            f"[COMPRESSION_SLOT_BYPASS] Skipping slot acquire for Compressor - caller={caller_name}"
-        )
+        if _yielded_slot:
+            logger.debug(
+                f"[COMPRESSION_SLOT_YIELD] Releasing slot for '{caller_name}' before compression"
+            )
+            engine._release_slot(caller_inst, caller_name, "before_compression")
 
         _last_comp_send = 0.0
         _comp_tick_num = 0
@@ -277,6 +289,15 @@ def _execute_compressor_and_extract_summary(
                 )
             except Exception:
                 pass
+
+        # Re-acquire the caller's slot if we yielded it before running the Compressor.
+        # Runs inline on the caller's thread, so yield→run→reacquire is in-order.
+        if _yielded_slot and caller_inst is not None:
+            if not engine.reacquire_for(caller_inst, caller_name, "after_compression"):
+                logger.warning(
+                    f"[COMPRESSION] Caller '{caller_name}' is slotless after compression. "
+                    f"Subsequent LLM calls will use async path only."
+                )
 
     # Extract the summary from the last assistant message
     summary = ""

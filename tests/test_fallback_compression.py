@@ -166,6 +166,9 @@ class TestAPIRouterFallbackBehavior:
 
         pool = MagicMock()
         pool.terminated_instances = set()
+        # _check_termination() calls this; default MagicMock return is truthy and would
+        # spuriously raise AgentTerminatedError during interruptible backoff sleeps.
+        pool.is_instance_terminated.return_value = False
 
         router = APIRouter(
             default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
@@ -275,6 +278,16 @@ class TestExecutionEngineIterativeCompression:
         instance.compression_summary = None     # Set by handler after successful compression
         instance.latest_marker_index = -1       # Set by handler after successful compression
 
+        # _is_terminal_stop() (execution_engine.py:1839) reads self.pool.stopped,
+        # self._my_generation, self.pool._run_generation and
+        # self.pool.is_instance_terminated(). A bare MagicMock pool makes the first two
+        # comparisons raise AttributeError/TypeError, which the retry loop swallows as a
+        # failed call and retries — inflating the call count. Configure them so the check
+        # returns False (no terminal stop) for this unit test:
+        pool.stopped = False
+        pool.is_instance_terminated.return_value = False
+        pool._run_generation = 1
+
         pool.get_instance.return_value = instance
         history = [Message(role=SYSTEM, content="sys")] + [Message(role=USER, content=f"msg{i}") for i in range(20)]
         pool.get_conversation.return_value = history
@@ -312,6 +325,11 @@ class TestExecutionEngineIterativeCompression:
         pool.settings = Settings()
 
         engine = ExecutionEngine(pool)
+        # _my_generation is normally captured in run() (execution_engine.py:1134); this
+        # test calls _execute_llm_call_with_retry directly, bypassing run(), so set it
+        # here to match pool._run_generation and avoid an AttributeError in
+        # _is_terminal_stop().
+        engine._my_generation = 1
         return engine, pool, instance, history
 
     def test_handler_calls_find_compression_slice(self):

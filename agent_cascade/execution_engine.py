@@ -889,19 +889,11 @@ class ExecutionEngine:
             instance._slot_release = self.pool._acquire_slot(
                 instance.agent_class, instance.instance_name
             )
-            # Store slot key for fallback detection in call_with_fallback.
-            # Must pass caller_agent_type to handle Tier 2 endpoint inheritance.
+            # Store slot key for diagnostics.
             if instance._slot_release is not None:
                 router = self.pool.api_router
                 if router:
-                    caller_agent_type = None
-                    if getattr(instance, 'parent_instance', None):
-                        parent = self.pool.get_instance(instance.parent_instance)
-                        if parent and hasattr(parent, 'agent_class') and not getattr(parent, 'is_terminated', False):
-                            caller_agent_type = parent.agent_class
-                    slot_info = router.get_agent_slot_info(
-                        instance.agent_class, caller_agent_type=caller_agent_type
-                    )
+                    slot_info = router.get_agent_slot_info(instance.agent_class)
                     instance._slot_key = slot_info.get('slot_key')
             logger.debug(
                 f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
@@ -1151,37 +1143,20 @@ class ExecutionEngine:
         # releases
         # it when transitioning to SLEEPING so children can proceed.
 
-        # SLOT_BYPASS FIX: Skip slot acquisition if _skip_slot_acquire is set.
-        # This allows nested agents (Security, Compressor) to run without
-        # acquiring
-        # their own slot when invoked within an existing turn. The caller holds
-        # the
-        # slot throughout, preventing deadlock from release→nested→reacquire
-        # cycles.
-        # Cache this once at the top since it never changes during
-        # engine.run().
-        skip_slot_acquire = getattr(instance, '_skip_slot_acquire', False)
+        # Acquire concurrency slot (single FIFO queue per endpoint — no bypass).
+        # Nested agents (Security, Compressor) now yield their caller's slot before
+        # running, so they acquire normally here instead of inheriting the parent's slot.
+        if self._is_terminal_stop(instance.instance_name):
+            return  # Terminal stop — don't start work
 
-        if not skip_slot_acquire:
-            # Check stopped flag before acquiring slot to prevent starting new
-            # work
-            if self._is_terminal_stop(instance.instance_name):
-                return  # Terminal stop — don't start work
-            # Compression-halt at startup: just proceed (compression is transient)
-            instance._slot_release = None  # Initialize for proper cleanup in finally block
-            instance._slot_key = None      # Clear stale slot key from previous run (if any)
-            self._acquire_slot_with_logging(instance, "initial")
+        instance._slot_release = None  # Initialize for proper cleanup in finally block
+        instance._slot_key = None      # Clear stale slot key from previous run (if any)
+        self._acquire_slot_with_logging(instance, "initial")
 
-            # Exit if stopped after slot acquire — prevents stale slot reuse
-            # post-stop
-            if self._is_terminal_stop(instance.instance_name):
-                self._release_slot(instance, instance.instance_name)
-                return  # Terminal stop — release slot and exit
-            # Compression-halt after slot acquire: keep the slot, proceed to run loop
-        else:
-            # SKIP SLOT ACQUIRE — nested agent (Security/Compressor) inherits
-            # parent's slot.
-            pass
+        # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
+        if self._is_terminal_stop(instance.instance_name):
+            self._release_slot(instance, instance.instance_name)
+            return  # Terminal stop — release slot and exit
 
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
@@ -1284,7 +1259,7 @@ class ExecutionEngine:
                 # Both types now use the same message_queue; unified wakeup simplifies flow.
                 if instance.state == AgentState.SLEEPING:
                     action, yield_value = self._handle_sleeping_state(
-                        instance, messages, llm_messages, response, skip_slot_acquire
+                        instance, messages, llm_messages, response
                     )
                     if yield_value is not None:
                         yield yield_value
@@ -3097,7 +3072,7 @@ class ExecutionEngine:
                             except Exception:
                                 pass  # Non-critical cleanup
                         try:
-                            gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
+                            gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
                         except RuntimeError:
                             pass  # Already closed/exhausted
                         yield None  # Signal UI that stop was detected mid-stream
@@ -3126,7 +3101,7 @@ class ExecutionEngine:
                             except Exception:
                                 pass  # Non-critical cleanup
                         try:
-                            gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
+                            gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
                         except RuntimeError:
                             pass  # Already closed/exhausted
                         yield None  # Signal UI that stop was detected mid-stream
@@ -3728,17 +3703,9 @@ class ExecutionEngine:
             # Pass _do_call directly — call_with_fallback handles generator
             # lifecycle via finally blocks. Also pass instance_name so the router
             # can apply per-instance cursor rotation (kick to next endpoint).
-            # NEW: pass caller_agent_type for endpoint inheritance when agent has no priorities.
-            _caller_type = None
-            if getattr(instance, 'parent_instance', None):
-                _parent = self.pool.get_instance(instance.parent_instance)
-                if _parent and hasattr(_parent, 'agent_class') and not getattr(_parent, 'is_terminated', False):
-                    _caller_type = _parent.agent_class
-
             return self.pool.api_router.call_with_fallback(
                 agent_type, _do_call, allocated_tokens=allocated_tokens,
                 agent_instance_name=instance.instance_name,
-                caller_agent_type=_caller_type,
             )
         else:
             # Direct call without router — same merge priority as fallback
@@ -4708,6 +4675,86 @@ class ExecutionEngine:
                             exc_info=True
                         )
 
+    def reacquire_for(self, instance: Any, holder_name: str, context: str = "reacquire") -> bool:
+        """Re-acquire a concurrency slot for an agent after yielding it to a child.
+
+        Public helper for the Security/Compressor yield/reacquire pattern (and any
+        future parent-yields-for-child flow). Mirrors the proven logic in
+        ``tool_dispatcher._reacquire_caller_slot()``: resolve the caller's endpoint
+        via the router, then FIFO-acquire the slot with a bounded timeout.
+
+        The caller is expected to have already released its slot (via
+        :meth:`_release_slot`) before running the child; this method puts it back.
+
+        Args:
+            instance: The AgentInstance that yielded its slot (has ``agent_class``,
+                ``_slot_release``, ``_slot_key`` and ``_state_lock``).
+            holder_name: Instance name, used as the SlotPool permit key + logging.
+            context: Short label for log messages (e.g. "after_security_check").
+
+        Returns:
+            True if the slot was re-acquired (or no slot is needed), False on
+            timeout/cancellation — in which case the instance is left in a clean
+            slotless state and subsequent calls degrade to the async path only.
+        """
+        # Lazy import to avoid a module-level circular dependency with api_router.
+        from agent_cascade.slot_queue import SlotQueueTimeout, SlotCancelled
+
+        if not instance:
+            return False
+
+        router = self.pool.api_router if hasattr(self.pool, 'api_router') else None
+        if not router:
+            logger.warning(f"[SLOT_REACQUIRE] No router available for '{holder_name}'")
+            return False
+
+        slot_info = router.get_agent_slot_info(instance.agent_class)
+        if not slot_info or not slot_info.get('needs_slot'):
+            # Unlimited endpoint — no slot to hold. Clear any stale state and done.
+            with instance._state_lock:
+                instance._slot_release = None
+                instance._slot_key = None
+            return True
+
+        api_base = slot_info['api_base']
+        concurrency_limit = slot_info['concurrency_limit']
+
+        REACQUIRE_TIMEOUT = 30.0  # bounded FIFO wait; fail fast on genuine deadlock
+
+        try:
+            release_cb = router.scheduler.acquire(
+                api_base=api_base,
+                concurrency_limit=concurrency_limit,
+                instance_name=holder_name,
+                agent_class=instance.agent_class,
+                timeout=REACQUIRE_TIMEOUT,
+            )
+            if release_cb is not None:
+                with instance._state_lock:
+                    instance._slot_release = release_cb
+                    # Track which slot key this agent holds (for diagnostics).
+                    instance._slot_key = slot_info.get('slot_key')
+                logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}'")
+                return True
+            else:
+                # Unlimited — acquire returned None, no callback needed.
+                with instance._state_lock:
+                    instance._slot_release = None
+                    instance._slot_key = None
+                return True
+        except (SlotQueueTimeout, SlotCancelled):
+            pass
+
+        # On failure — clean state and degrade to async-only.
+        with instance._state_lock:
+            instance._slot_release = None
+            instance._slot_key = None
+        logger.warning(
+            f"[SLOT_REACQUIRE_FAILED] {context} for '{holder_name}' after {REACQUIRE_TIMEOUT}s. "
+            f"Subsequent calls will use ASYNC path only."
+        )
+        return False
+
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.
 
@@ -4718,9 +4765,8 @@ class ExecutionEngine:
         Args:
             instance: The agent instance to transition.
         """
-        # Note: This is safe even when _skip_slot_acquire=True because
-        # _release_slot checks for None before releasing. No need to guard with skip_slot_acquire check.
-        
+        # Note: This is safe because _release_slot checks for None before releasing.
+
         # Acquire state lock BEFORE releasing slot to prevent race
         # where another thread steals the slot between release and state transition.
         with instance._state_lock:
@@ -4769,8 +4815,7 @@ class ExecutionEngine:
         instance: 'AgentInstance',
         messages: List[Message],
         llm_messages: List[Message],
-        response: List[Message],
-        skip_slot_acquire: bool
+        response: List[Message]
     ) -> Tuple[SleepAction, Optional[List[Message]]]:
         """Handle SLEEPING state wakeup logic.
 
@@ -4783,7 +4828,6 @@ class ExecutionEngine:
             messages: Working list of all messages (user + assistant).
             llm_messages: Messages formatted for LLM consumption.
             response: Response messages being built for this turn.
-            skip_slot_acquire: Whether to skip slot re-acquisition (for nested agents).
 
         Returns:
             Tuple of (action, optional_yield_value):
@@ -4821,16 +4865,15 @@ class ExecutionEngine:
             )
 
             # Re-acquire concurrency slot after waking from SLEEPING
-            if not skip_slot_acquire:
-                self._acquire_slot_with_logging(instance, "after_message_wakeup")
-                if self._is_terminal_stop(inst_name):
-                    return SleepAction.BREAK_LOOP, None
+            self._acquire_slot_with_logging(instance, "after_message_wakeup")
+            if self._is_terminal_stop(inst_name):
+                return SleepAction.BREAK_LOOP, None
 
-                # Restore KV cache after slot acquired, before resuming execution
-                from agent_cascade.state_ops import restore_instance_state
-                restore_instance_state(instance)
+            # Restore KV cache after slot acquired, before resuming execution
+            from agent_cascade.state_ops import restore_instance_state
+            restore_instance_state(instance)
 
-                # Compression-halt after wakeup: proceed to main loop (Site 3 will wait if needed)
+            # Compression-halt after wakeup: proceed to main loop (Site 3 will wait if needed)
 
             return SleepAction.CONTINUE_LOOP, None
 
@@ -4891,20 +4934,19 @@ class ExecutionEngine:
                     instance._last_wakeup_log = time.monotonic()
 
                 # Re-acquire concurrency slot after waking from SLEEPING
-                if not skip_slot_acquire:
-                    self._acquire_slot_with_logging(instance, "after_stable_drain")
+                self._acquire_slot_with_logging(instance, "after_stable_drain")
 
-                    # Restore KV cache after slot acquired, before resuming execution
-                    from agent_cascade.state_ops import restore_instance_state
-                    restore_instance_state(instance)
+                # Restore KV cache after slot acquired, before resuming execution
+                from agent_cascade.state_ops import restore_instance_state
+                restore_instance_state(instance)
 
-                    # Exit if stopped after re-acquiring slot in sleep loop
-                    if self._is_terminal_stop(inst_name):
-                        logger.debug(
-                            f"[SLOT_STOP_CHECK] Terminal stop after stable drain for {inst_name}, exiting"
-                        )
-                        return SleepAction.BREAK_LOOP, None  # Stop detected — slot released in finally
-                    # Compression-halt: proceed to main loop (Site 3 will wait if needed)
+                # Exit if stopped after re-acquiring slot in sleep loop
+                if self._is_terminal_stop(inst_name):
+                    logger.debug(
+                        f"[SLOT_STOP_CHECK] Terminal stop after stable drain for {inst_name}, exiting"
+                    )
+                    return SleepAction.BREAK_LOOP, None  # Stop detected — slot released in finally
+                # Compression-halt: proceed to main loop (Site 3 will wait if needed)
 
                 # Loop back; now in RUNNING state → LLM processes injected results
                 return SleepAction.CONTINUE_LOOP, []  # Bridge signal for UI update before LLM processing
