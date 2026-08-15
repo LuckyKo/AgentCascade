@@ -745,6 +745,10 @@ class ToolDispatcher:
             )
             if release_cb is not None:
                 slot_holder._slot_release = release_cb
+                # Restore _slot_key so call_with_fallback knows we hold this slot.
+                # Without this, the next LLM call would try to per-call acquire the
+                # same slot → self-deadlock (we already hold it via _slot_release).
+                slot_holder._slot_key = slot_info.get('slot_key')
                 logger.debug(
                     f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{slot_holder_name}' after {context_label}"
                 )

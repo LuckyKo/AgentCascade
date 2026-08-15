@@ -287,12 +287,76 @@ def _make_gen(items):
         yield item
 
 
+class TestAncestorHoldsSlot(unittest.TestCase):
+    """Test 6: per-call acquisition skipped when an ancestor holds the target slot.
+
+    Prevents self-deadlock: parent (Maine) holds conc=0 lifecycle slot → spawns
+    child (Compressor) with _skip_slot_acquire=True → child's LLM call falls back
+    to same conc=0 endpoint → must NOT re-acquire (would block on parent's slot).
+
+    These tests mirror the ancestor-walk logic from call_with_fallback.
+    Driving the full call_with_fallback requires a configured APIRouter with
+    endpoints — the walk logic is the critical part under test here.
+    """
+
+    def _walk_ancestors(self, inst, pool_map, slot_key):
+        """Mirror of the ancestor-walk in call_with_fallback (api_router.py)."""
+        already_holds = (inst is not None and inst._slot_key == slot_key)
+        if not already_holds and inst is not None:
+            _ancestor = inst
+            for _depth in range(10):
+                _pname = getattr(_ancestor, 'parent_instance', None)
+                if not _pname:
+                    break
+                _parent = pool_map.get(_pname)
+                if _parent is None:
+                    break
+                if _parent._slot_key == slot_key:
+                    already_holds = True
+                    break
+                _ancestor = _parent
+        return already_holds
+
+    def test_skip_when_parent_holds_shared_slot(self):
+        """Child with _slot_key=None but parent holds '_shared_sequential_slot_'."""
+        slot_key = '_shared_sequential_slot_'
+        parent = _FakeInstance(instance_name="Maine", slot_key=slot_key)
+        child = _FakeInstance(instance_name="Compressor_1", slot_key=None)
+        child.parent_instance = "Maine"
+
+        result = self._walk_ancestors(child, {"Maine": parent}, slot_key)
+        self.assertTrue(result, "Ancestor walk should detect parent holds the slot")
+
+    def test_no_skip_when_parent_holds_different_slot(self):
+        """Parent holds a different slot key → child should still acquire."""
+        slot_key = '_shared_sequential_slot_'
+        parent = _FakeInstance(instance_name="Maine", slot_key="http://other-api")
+        child = _FakeInstance(instance_name="Compressor_1", slot_key=None)
+        child.parent_instance = "Maine"
+
+        result = self._walk_ancestors(child, {"Maine": parent}, slot_key)
+        self.assertFalse(result, "Parent holds different slot — child should acquire")
+
+    def test_depth_limit_prevents_infinite_loop(self):
+        """Circular parent references must not cause an infinite loop."""
+        slot_key = '_shared_sequential_slot_'
+        a = _FakeInstance(instance_name="A", slot_key=None)
+        b = _FakeInstance(instance_name="B", slot_key=None)
+        a.parent_instance = "B"
+        b.parent_instance = "A"  # Circular: A→B→A
+
+        # Should terminate (depth limit of 10) and return False.
+        result = self._walk_ancestors(a, {"A": a, "B": b}, slot_key)
+        self.assertFalse(result, "Circular refs should not trigger already_holds")
+
+
 class _FakeInstance:
     """Minimal stand-in for AgentInstance exposing only what the conc=0 path reads."""
 
     def __init__(self, instance_name: str, slot_key):
         self.instance_name = instance_name
         self._slot_key = slot_key
+        self.parent_instance = None
 
 
 if __name__ == "__main__":

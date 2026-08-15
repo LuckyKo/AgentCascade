@@ -1355,14 +1355,37 @@ class APIRouter:
 
             # Two-layer concurrency: SlotPool (conc=0, FIFO) and Semaphore (conc>0, per-call).
             # SlotPool path below activates only for conc=0 endpoints where the agent
-            # doesn't already hold a slot. _slot_key read is safe without locking because
-            # agents are single-threaded per turn; worst case we do an extra acquisition.
+            # doesn't already hold a slot AND no ancestor holds it either.
+            # _slot_key read is safe without locking (agents are single-threaded per turn).
             slotpool_release_cb = None
             _router_pool = getattr(self, '_pool', None)
             if concurrency_limit == 0 and _inst_name and _router_pool:
                 slot_key = '_shared_sequential_slot_'
                 inst = _router_pool.get_instance(_inst_name)
                 already_holds = (inst is not None and inst._slot_key == slot_key)
+
+                # Deadlock prevention: if an ancestor in the call chain holds this
+                # slot, skip per-call acquisition. The parent's lifecycle slot already
+                # serializes access — re-acquiring would self-deadlock (parent waits
+                # for child to finish, child waits for parent's slot).
+                # Depth limit mirrors tool_dispatcher._find_ancestor_with_slot().
+                if not already_holds and inst is not None:
+                    _ancestor = inst
+                    for _depth in range(10):
+                        _pname = getattr(_ancestor, 'parent_instance', None)
+                        if not _pname:
+                            break
+                        _parent = _router_pool.get_instance(_pname)
+                        if _parent is None:
+                            break
+                        if _parent._slot_key == slot_key:
+                            already_holds = True
+                            logger.debug(
+                                f"[APIRouter] Skipping per-call slot for '{_inst_name}' — "
+                                f"ancestor '{_pname}' holds '{slot_key}'"
+                            )
+                            break
+                        _ancestor = _parent
 
                 if not already_holds:
                     try:
