@@ -421,6 +421,98 @@ class TestTimerCleanupOnException:
             holder.join(timeout=2)
 
 
+class TestFirstYieldSafetyNet:
+    """Integration test for the first-yield safety net (commit fb74f04).
+
+    The last-resort guard in _execute_check starts a daemon threading.Timer
+    (SECURITY_FIRST_YIELD_TIMEOUT_SECONDS) right before the engine.run() loop. If the
+    LLM generator stalls so long that the timer fires BEFORE any token is yielded, the
+    first-iteration check observes the set event, sets sec_timeout_reached=True and
+    breaks — routing to _handle_timeout → user_reject with a "SECURITY ADVISOR TIMEOUT"
+    message. This test simulates exactly that: a generator that blocks past the timeout
+    before its first yield.
+    """
+
+    def test_stalled_generator_triggers_first_yield_timeout_and_auto_rejects(self):
+        """A generator that never yields its first token within the window must auto-reject."""
+        pool = _make_minimal_pool()
+        app = _make_minimal_app()
+        session = {"session_name": "Maine", "generate_cfg": {}}
+        send_queue = MagicMock()
+
+        handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
+
+        ap = {
+            "request_id": "test_rid_firstyield",
+            "tool_name": "shell_cmd",
+            "description": "test",
+            "tool_args": {},
+            "agent_name": "Maine",
+        }
+
+        # A generator that simulates a hung model: it blocks for longer than the
+        # (patched) 0.5s first-yield timeout before producing its first yield. The
+        # loop's first-iteration check should see the timer's event set and break.
+        def _stalled_generator():
+            time.sleep(2.0)          # longer than the 0.5s timeout → timer fires first
+            yield ("", False)        # only now does it "yield"; loop detects timeout, breaks
+
+        # _create_system_agent must return an object supporting attribute assignment
+        # (sec_instance.max_turns = ...) and .conversation access downstream.
+        sec_instance_mock = MagicMock()
+        sec_instance_mock.conversation = []
+
+        # ExecutionEngine is imported locally inside _execute_check
+        # (from agent_cascade.execution_engine import ExecutionEngine), so it is NOT a
+        # module attribute of security_handler — patch it at its source module instead.
+        # It's used as a *class* (ExecutionEngine(pool)), so we patch with a factory whose
+        # return_value is the engine instance mock; that instance's .run() yields our
+        # stalled generator and ._create_system_agent() returns the sec instance mock.
+        engine_instance = MagicMock()
+        engine_instance.run.return_value = _stalled_generator()
+        engine_instance._create_system_agent.return_value = sec_instance_mock
+        # Skip telemetry bookkeeping in the execution loop's finally block.
+        engine_instance._telemetry.return_value = None
+        mock_engine_cls = MagicMock(return_value=engine_instance)
+
+        with patch('agent_cascade.security_handler.SECURITY_FIRST_YIELD_TIMEOUT_SECONDS', 0.5):
+            with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
+                start = time.monotonic()
+                handler._execute_check(
+                    ap=ap,
+                    sec_inst=None,
+                    rid="test_rid_firstyield",
+                    auto_apply=True,
+                    instance_name="Maine",
+                    caller_agent="Maine",
+                    prompt_template="Test {tool_name}",
+                    timeout_seconds=3600,
+                    warning_seconds=2400,
+                )
+                elapsed = time.monotonic() - start
+
+        # The check must have auto-rejected via the timeout path.
+        assert pool.operation_manager.user_reject.called, (
+            "user_reject should be called when the first-yield timeout fires"
+        )
+        args = pool.operation_manager.user_reject.call_args.args
+        assert args[0] == "test_rid_firstyield", (
+            f"user_reject should target the request id, got {args[0]!r}"
+        )
+        assert "SECURITY ADVISOR TIMEOUT" in args[1], (
+            f"reject message should carry the timeout marker, got {args[1]!r}"
+        )
+
+        # The Security instance should have been halted as part of _handle_timeout.
+        pool.halt_instance.assert_called_once_with("Security_test_rid_firstyield")
+
+        # Sanity: the run was gated by the 2.0s stalled-generator sleep (not instant),
+        # confirming we actually exercised the blocking path. Keep loose to avoid flakiness.
+        assert elapsed >= 1.5, (
+            f"Check should have blocked ~2s on the stalled generator, got {elapsed:.2f}s"
+        )
+
+
 class TestActiveChecksCleanupOnLockTimeout:
     """Integration test: active_checks is cleaned up when lock acquire times out."""
 
