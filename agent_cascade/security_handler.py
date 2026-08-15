@@ -74,14 +74,117 @@ def _get_security_check_lock(app):
     return app.security_check_lock
 
 
+class ResettableRLock:
+    """An RLock wrapper that can recover from a leaked lock.
+
+    The plain ``threading.RLock`` used for the security execution lock is acquired
+    by a daemon thread (``_run_check_worker``). If that thread is killed before it
+    reaches ``exec_lock.release()`` — e.g. session stop, agent dismissal, or an
+    unhandled crash that skips the ``finally`` block — the RLock is leaked forever
+    and every subsequent security check times out on ``acquire(timeout=10s)``.
+
+    Python's RLock cannot be force-released from another thread, so this wrapper
+    tracks the owning thread and, when a new acquirer detects that the previous
+    holder is DEAD (no longer alive), it replaces the internal RLock with a fresh
+    one. This is safe because:
+      - We only reset when ``acquire()`` timed out, i.e. the current thread is NOT
+        the owner, so no live thread holds the lock we are about to discard.
+      - A LIVE holder (another check genuinely running) is never reset — its thread
+        is still alive, so normal timeout semantics apply and the caller raises.
+
+    Reentrancy is preserved: the internal ``threading.RLock`` handles same-thread
+    nested acquisition exactly as before.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._owner_thread = None   # threading.Thread of the current holder (None if free)
+        self._acquired_at = 0.0     # time.monotonic() when acquired (for staleness logging)
+
+    def acquire(self, timeout=None):
+        """Acquire with optional timeout. Returns True on success, False on timeout.
+
+        ``timeout=None`` means block until acquired (no timeout), matching the
+        native RLock's no-arg behavior. We branch explicitly because passing
+        ``timeout=None`` to the underlying RLock.acquire() raises TypeError.
+        """
+        if timeout is None:
+            acquired = self._lock.acquire()
+        else:
+            acquired = self._lock.acquire(timeout=timeout)
+        if acquired:
+            self._owner_thread = threading.current_thread()
+            self._acquired_at = time.monotonic()
+        return acquired
+
+    def release(self):
+        """Release the lock (normal path — called from the finally block)."""
+        try:
+            self._lock.release()
+        finally:
+            # Clear ownership tracking even if release raised, so a later
+            # force_reset decision is not based on stale owner info.
+            self._owner_thread = None
+
+    def __enter__(self):
+        if not self.acquire():
+            raise RuntimeError("ResettableRLock: timed out acquiring lock")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+        return False
+
+    @property
+    def owner_is_alive(self) -> bool:
+        """True if the current holder thread is still running.
+
+        A live holder means another check is genuinely in progress — we must NOT
+        steal its lock. A dead holder (or none) means the lock may be leaked.
+
+        Note: reading ``_owner_thread`` and calling ``is_alive()`` is not a single
+        atomic step, but this is safe by construction — a thread that is alive when
+        read can only transition to *dead* afterwards, never the reverse. So the only
+        "wrong" outcome we could observe is treating a just-died holder as alive (we
+        then block/timeout normally and recover on the *next* attempt), which is
+        strictly safer than the opposite error of stealing a live lock.
+        """
+        owner = self._owner_thread
+        return owner is not None and owner.is_alive()
+
+    def force_reset(self, reason: str = "") -> bool:
+        """Force-release a leaked lock by swapping in a fresh RLock.
+
+        DANGEROUS — only call when the previous holder is known to be dead.
+        Returns True if the reset actually swapped the lock (i.e. it was held),
+        False if the lock was already free (nothing to reset).
+        """
+        from agent_cascade.log import logger
+        was_held = self._owner_thread is not None
+        # Swap internals: any future acquire() targets the fresh RLock. The old
+        # RLock object becomes garbage once no live thread references it — which
+        # is guaranteed because we only call this after an acquire timeout (the
+        # current thread was never granted it).
+        self._lock = threading.RLock()
+        self._owner_thread = None
+        self._acquired_at = 0.0
+        if was_held:
+            logger.warning(
+                f"[SECURITY] Execution lock force-reset (leaked by dead holder): {reason}"
+            )
+        return was_held
+
+
 def _get_security_execution_lock(app):
     """Get (creating if needed) the app-level security execution lock.
 
-    DEADLOCK FIX: Uses RLock to allow reentrant acquisition during engine.run().
-    Protects the execution loop with acquire timeout semantics.
+    DEADLOCK FIX: Uses a ResettableRLock (an RLock wrapper) to allow reentrant
+    acquisition during engine.run() while also recovering from a leaked lock left
+    behind by a killed daemon thread. Protects the execution loop with acquire
+    timeout semantics plus stale-holder detection.
     """
     if not hasattr(app, 'security_execution_lock'):
-        app.security_execution_lock = threading.RLock()
+        app.security_execution_lock = ResettableRLock()
     return app.security_execution_lock
 
 
@@ -224,6 +327,11 @@ class SecurityAdvisorHandler:
         """Background thread worker — executes the full security check lifecycle."""
         from agent_cascade.log import logger
 
+        _worker_thread = threading.current_thread()
+        logger.debug(
+            f"[SECURITY] Check worker started for request {rid}, "
+            f"thread={_worker_thread.name} (id={_worker_thread.ident})"
+        )
         logger.info(f"[SECURITY] Checking request {rid} for tool '{ap.get('tool_name', 'unknown')}'")
 
         try:
@@ -245,6 +353,11 @@ class SecurityAdvisorHandler:
                         }),
                         loop,
                     )
+        finally:
+            # Traces whether the worker thread reached its natural end. If a killed
+            # daemon thread skips this line, the execution lock it held is leaked —
+            # the stale-holder recovery in _execute_check will detect and reset it.
+            logger.debug(f"[SECURITY] Check worker finished for request {rid}")
 
     # ── Core execution (extracted from the ~400-line inline block) ────────
     def _execute_check(
@@ -393,12 +506,42 @@ class SecurityAdvisorHandler:
                 timeout=SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS
             )
             if not acquired:
-                raise RuntimeError(
-                    f"[SECURITY] Failed to acquire security execution lock within "
-                    f"{SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS}s for request {rid}. "
-                    f"A previous check may have crashed without releasing. "
-                    f"Manual restart may be required."
-                )
+                # LEAK RECOVERY: the lock timed out. Distinguish between:
+                #   (a) a LIVE holder — another check is genuinely running; we must NOT
+                #       steal its lock, so raise as before (caller cleans up + resubmits).
+                #   (b) a DEAD holder — a previous daemon thread was killed before reaching
+                #       release(), leaking the lock. Reset it so this check can proceed.
+                #
+                # Defensive: only a ResettableRLock exposes owner tracking. If a plain
+                # RLock is present (e.g. injected by tests, or legacy state), we cannot
+                # tell live from dead — treat it conservatively as LIVE and raise, which
+                # preserves the original timeout behavior without risking a spurious reset.
+                if isinstance(exec_lock, ResettableRLock) and not exec_lock.owner_is_alive:
+                    logger.warning(
+                        f"[SECURITY] Execution lock held >{SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS}s "
+                        f"by a dead holder for request {rid}. A previous check was likely killed "
+                        f"without releasing the lock — force-resetting to recover."
+                    )
+                    exec_lock.force_reset(
+                        reason=f"dead-holder leak detected on acquire timeout for request {rid}"
+                    )
+                    # Re-acquire on the fresh lock. Should succeed immediately since we
+                    # just swapped in a brand-new RLock with no other live holders.
+                    acquired = exec_lock.acquire(timeout=1.0)
+                    if not acquired:
+                        raise RuntimeError(
+                            f"[SECURITY] Failed to acquire security execution lock even after "
+                            f"reset for request {rid}. A live check is contending; manual restart "
+                            f"may be required."
+                        )
+                else:
+                    # Live holder (or untracked lock) — do not steal. Raise as before.
+                    raise RuntimeError(
+                        f"[SECURITY] Failed to acquire security execution lock within "
+                        f"{SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS}s for request {rid}. "
+                        f"A previous check is still running (live holder). "
+                        f"Manual restart may be required."
+                    )
 
             try:
                 # Telemetry: track Security agent call latency (non-blocking)
