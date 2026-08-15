@@ -23,6 +23,7 @@ Coverage:
   T1 — Single-layer FIFO ordering (N agents, conc=0 endpoint).
   T3 — Security yield/reacquire (parent yields slot → child runs → parent reacquires).
   T4 — Compressor yield/reacquire (same pattern for compression).
+  T5 — Reacquire timeout degrades to clean slotless state.
   T6 — A→B(async)→C: the KEY behavioral change. The removed ancestor-walk used to
         deadlock here; now C waits in FIFO and completes when A releases.
   T8 — conc=N capacity (up to N concurrent, (N+1)th waits, permit count ≤ N).
@@ -511,6 +512,56 @@ class TestT8ConcurrencyCapacity:
             h()
         with pool._cond:
             assert len(pool._running) == 0, "Slot leak after all releases"
+
+
+# ============================================================================
+# T5 — Reacquire timeout degrades to slotless
+# ============================================================================
+
+class TestT5ReacquireTimeout:
+    """When reacquire_for times out, the instance is left in a clean slotless state."""
+
+    def test_reacquire_timeout_degrades_to_slotless(self, scheduler):
+        from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.slot_queue import SlotQueueTimeout
+
+        api_base = "http://seq-api"
+        conc = 0
+
+        # Build engine with a fully mocked router whose scheduler.acquire raises.
+        mock_pool = MagicMock()
+        mock_router = MagicMock()
+        mock_router.get_agent_slot_info.return_value = {
+            'slot_key': '_shared_sequential_slot_',
+            'is_sequential': True,
+            'concurrency_limit': 0,
+            'api_base': api_base,
+            'needs_slot': True,
+        }
+        # scheduler.acquire raises SlotQueueTimeout to simulate a timeout.
+        mock_ticket = MagicMock()
+        mock_ticket.ticket_id = "test-ticket"
+        mock_ticket.agent_name = "caller"
+        mock_ticket.instance_name = "caller"
+        mock_router.scheduler.acquire.side_effect = SlotQueueTimeout(
+            mock_ticket, "simulated timeout for test"
+        )
+        mock_pool.api_router = mock_router
+        engine = ExecutionEngine(mock_pool)
+
+        # Instance that previously held a slot but released it (e.g., yielded to child).
+        inst = MagicMock()
+        inst.instance_name = "caller"
+        inst.agent_class = "coder"
+        inst._state_lock = threading.RLock()
+        inst._slot_release = None  # Already released before reacquire attempt.
+        inst._slot_key = None
+
+        result = engine.reacquire_for(inst, "caller", "test_timeout")
+
+        assert result is False, "reacquire_for should return False on timeout"
+        assert inst._slot_release is None, "_slot_release must be None after failed reacquire"
+        assert inst._slot_key is None, "_slot_key must be None after failed reacquire"
 
 
 if __name__ == "__main__":

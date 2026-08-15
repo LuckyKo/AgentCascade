@@ -1300,20 +1300,8 @@ class APIRouter:
                         rate_limit_rpm = ep.rate_limit_rpm
                         break
             
-            def execute_with_sem(current_agent_name=None):
-                """Execute the API call.
-
-                The agent already holds its endpoint's lifecycle slot for this turn
-                (acquired via EndpointScheduler / SlotPool at task submission time).
-                No per-call concurrency gating is needed here.
-
-                Handles both regular (non-generator) and generator results. For
-                generators the first chunk is pulled immediately so that connection,
-                auth, or model errors surface before returning to the caller.
-
-                Returns:
-                    The call result (or a wrapped generator yielding List[Message]).
-                """
+            def execute_api_call():
+                """Execute the API call. The agent already holds its endpoint's lifecycle slot for this turn."""
                 result = call_fn(llm_cfg, *args, **kwargs)
                 if not isinstance(result, (list, dict, str)) and hasattr(result, '__iter__'):
                     # Generator — pull first chunk to detect API errors early
@@ -1348,14 +1336,6 @@ class APIRouter:
                         raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
 
                 try:
-                    # Try to get the agent instance name from kwargs if available
-                    agent_obj = kwargs.get('agent_obj')
-                    current_agent_name = (
-                        kwargs.get('agent_instance_name') or 
-                        getattr(agent_obj, 'instance_name', None) or
-                        (agent_type if agent_type else 'orchestrator')
-                    )
-                    
                     # Rate limiting: check and enforce per-endpoint rate limit before each call attempt.
                     # Each retry attempt counts against the rate limit.
                     if rate_limit_rpm > 0:
@@ -1400,7 +1380,7 @@ class APIRouter:
                             logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated before API call, aborting")
                             raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
 
-                    result = execute_with_sem(current_agent_name)
+                    result = execute_api_call()
                     
                     # Track the last successful endpoint config for automatic recovery.
                     # Stored only after complete success (including all retries), not during retries.
@@ -1408,7 +1388,7 @@ class APIRouter:
                     with self._lock:
                         self._last_successful_endpoint_cfg = copy.deepcopy(llm_cfg)
                     
-                    # Generator errors are already detected inside execute_with_sem (first-chunk pull).
+                    # Generator errors are already detected inside execute_api_call (first-chunk pull).
                     # Pass the generator through directly — no double-wrapping needed.
                     return result
                     
@@ -1451,7 +1431,7 @@ class APIRouter:
                     # generator iteration inside execution_engine.py, after this method has returned.
                     # All endpoint advancement for those errors happens via
                     # _handle_inner_loop_detection → advance_instance_endpoint.
-                    # This block only handles connection/timeout/etc. errors from execute_with_sem.
+                    # This block only handles connection/timeout/etc. errors from execute_api_call.
 
                     # All errors (connection, timeout, etc.) retry within the current
                     # endpoint first, then cascade through the fallback chain on exhaustion.

@@ -4679,9 +4679,9 @@ class ExecutionEngine:
         """Re-acquire a concurrency slot for an agent after yielding it to a child.
 
         Public helper for the Security/Compressor yield/reacquire pattern (and any
-        future parent-yields-for-child flow). Mirrors the proven logic in
-        ``tool_dispatcher._reacquire_caller_slot()``: resolve the caller's endpoint
-        via the router, then FIFO-acquire the slot with a bounded timeout.
+        future parent-yields-for-child flow). Resolves the caller's endpoint via
+        the router, then FIFO-acquires the slot with a bounded timeout.
+        ``tool_dispatcher._reacquire_caller_slot()`` delegates to this method.
 
         The caller is expected to have already released its slot (via
         :meth:`_release_slot`) before running the child; this method puts it back.

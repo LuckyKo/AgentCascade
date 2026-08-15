@@ -1,7 +1,7 @@
 # Implementation Plan: Slot/Concurrency Consolidation (Single FIFO Queue Per Endpoint)
 
 **Date**: 2026-08-15
-**Status**: DRAFT v1 — PLANNING ONLY (no code changes in this document)
+**Status**: IMPLEMENTED ✅ (committed as `3d1d6f5` on 2026-08-15)
 **Author**: slot_consolidation_planner (delegated by Maine)
 **Investigation refs**:
 - `N:\work\WD\AgentCascade\reports\layer2_concurrency_control_report.md`

@@ -335,10 +335,9 @@ class ToolDispatcher:
                         # Case 4: Different slot pools → no collision → ASYNC is safe
                         caller_holds_slot = False
 
-                # Sync/async decision (Stage 3): depends ONLY on whether the DIRECT caller holds a
-                # slot and the child needs the SAME slot pool. No ancestor walk — an A→B(async)→C
-                # scenario is handled by C simply waiting in the FIFO queue (bounded wait + timeout),
-                # not by forcing sync here.
+                # Sync/async decision: depends ONLY on whether the DIRECT caller holds a
+                # slot and the child needs the SAME slot pool. An A→B(async)→C scenario is
+                # handled by C simply waiting in the FIFO queue (bounded wait + timeout).
 
         if caller_holds_slot:
             return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
@@ -630,82 +629,9 @@ class ToolDispatcher:
     ) -> bool:
         """Re-acquire caller's concurrency slot after a sync child completes.
         
-        Phase 4: Queue-aware re-acquire with ancestor-chain self-exemption and proper timeout.
-        Replaces the old 2×0.1s give-up attempts that silently left callers without slots.
-        
-        Algorithm:
-        1. Build ancestor chain including self for logging and debugging.
-        2. Queue-aware acquire via router.scheduler.acquire with ancestor_chain and 30s timeout.
-        3. On failure: clear _slot_release and fall back to async-only.
-        
-        Args:
-            slot_holder: Instance holding the slot (has .agent_class attr)
-            slot_holder_name: Name of the instance for logging
-            context_label: Description of context for warning messages
-            
-        Returns:
-            True if successfully re-acquired, False otherwise.
-            
-        Note:
-            On failure, _slot_release is cleared to None under _state_lock to prevent stale permit assumptions.
+        Delegates to ExecutionEngine.reacquire_for() for the actual FIFO acquire.
         """
-        from agent_cascade.slot_queue import SlotQueueTimeout, SlotCancelled
-        
-        if not slot_holder:
-            return False
-        
-        # Resolve the slot's api_base and concurrency_limit via router
-        router = self.pool.api_router
-        if not router:
-            logger.warning(f"[SLOT_SYNC_REACQUIRE_FAILED] No router available for '{slot_holder_name}'")
-            return False
-        
-        slot_info = router.get_agent_slot_info(slot_holder.agent_class)
-        if not slot_info or not slot_info.get('needs_slot'):
-            # Unlimited endpoints — no slot needed
-            slot_holder._slot_release = None
-            slot_holder._slot_key = None
-            return True
-        
-        api_base = slot_info['api_base']
-        concurrency_limit = slot_info['concurrency_limit']
-        
-        REACQUIRE_TIMEOUT = 30.0  # seconds — long enough for contention, short enough to fail fast on deadlock
-        
-        try:
-            release_cb = router.scheduler.acquire(
-                api_base=api_base,
-                concurrency_limit=concurrency_limit,
-                instance_name=slot_holder_name,
-                agent_class=slot_holder.agent_class,
-                timeout=REACQUIRE_TIMEOUT,
-            )
-            if release_cb is not None:
-                slot_holder._slot_release = release_cb
-                # Track which slot key this agent holds (for diagnostics).
-                slot_holder._slot_key = slot_info.get('slot_key')
-                logger.debug(
-                    f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{slot_holder_name}' after {context_label}"
-                )
-                return True
-            else:
-                # Unlimited — no callback needed
-                slot_holder._slot_release = None
-                slot_holder._slot_key = None
-                return True
-        except (SlotQueueTimeout, SlotCancelled):
-            pass
-        
-        # Step 3: On failure — clean state and degrade to async-only.
-        with slot_holder._state_lock:
-            slot_holder._slot_release = None
-            slot_holder._slot_key = None
-        
-        logger.warning(
-            f"[SLOT_SYNC_REACQUIRE_FAILED] {context_label} for '{slot_holder_name}' "
-            f"after {REACQUIRE_TIMEOUT}s. Subsequent calls will use ASYNC path only."
-        )
-        return False
+        return self.engine.reacquire_for(slot_holder, slot_holder_name, context_label)
 
     def _validate_call_agent_args(
         self,
