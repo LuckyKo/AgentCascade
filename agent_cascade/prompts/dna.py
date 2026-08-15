@@ -458,7 +458,7 @@ TOOL_METADATA = {
                         'description': 'Omit skill loading (same as "NONE").'
                     }
                 ],
-                'description': 'Controls which specialized skills are loaded for this agent call. Use scan_skills to discover available skills.'
+                'description': 'Controls which specialized skills are loaded for this agent call. Must be a real JSON array of skill names (e.g. ["skill-a", "skill-b"]), or one of the strings "AUTO" / "NONE", or omitted. Do NOT pass a string representation of an array like "[\\"skill-a\\"]". Use scan_skills to discover available skills.'
             },
         },
         'required': ['agent_class', 'instance_name', 'task'],
