@@ -105,21 +105,19 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] after restart, loading another session than the old one that was reloaded causes them to merge together (UI issue only).
 - [x] make `read_logs` read from the appropriate agent logging path if the path is not fully specified (only log file name)
 - [ ] add crop_region argument to view_image tool for better detail capture on large images; also prepend image size info in the caption field (right before caption text, so the LLM would know how much to crop to get better look at some areas)
-- [ ] improve `calculate` tool
-- [x] the timeout on Security agent is too brutal, it just cuts it off, no letting it even complete the reasoning. Change to turn limit, give it 20 turns when launched by system. — DONE: replaced wall-clock cutoff (SECURITY_LLM_TIMEOUT_SECONDS + elapsed-time break) with a turn budget `sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS` (new setting, default 20). Engine's existing 50%/90%/final-turn warnings kick in and force a verdict on the last turn; ambiguous result auto-rejects (NO). Tests updated; all pass.
-- [ ] need a way to clear the messages form agents tab
+- [ ] improve `calculate` tool (more expressions like int(), floor, ceil, etc)
+- [x] the timeout on Security agent is too brutal, it just cuts it off, no letting it even complete the reasoning. Change to turn limit, give it 20 turns when launched by system.
+- [x] need a way to clear the messages form agents tab. also, it should be reset on new session/session load — DONE: frontend-only (web_ui/app.js + styles.css). Added `clearAgentMessages()` helper (resets state + dedup set + localStorage, re-renders, clears badge) and a "Clear" button in the Agent Messages panel header; auto-cleared on reset (new session) and on loadSession. Fixed layout: `.agent-messages-panel .messages` now flex-fills + scrolls like other sub-agent panels. Passed independent review (1 MAJOR layout bug found & fixed).
+- [x] if async agent falls back to a sync slot, the models start to trash as each agent tries to call on the sync slot with different models. we still need to respect the scheduling fifo order on fallback, wait for who had it first to finish before acquiring a busy slot on fallback. issue: agent A (sync) calls B (async), B's slot fails and falls back to slot 0 that A is using, the fallback does not get queued untill A is done, each turn gets interleaved between A and B on sync slot.
+- [x] something must be confusing the agents as they try to use `"load_skill": "[\"AUTO\"]"` when using call_agent. its an invalid parameter like this.
+- [x] add `soundfile` to default list of startup docker containers — DONE: soundfile was already in code_interpreter_requirements.txt; issue was the cached Docker image (code-interpreter:latest) wasn't rebuilt after requirements change. Removed stale image so it rebuilds on next use.
+- [x] `read_logs` still truncates assistant tool calls when it should be in tool mode (only the tool outputs should be truncated, not the tool calls). Fixed: inverted truncate_item logic in trim_tools mode — assistant tool-call arguments (function_call.arguments, tool_calls[].function.arguments) now left intact; only role=function/tool content gets middle-truncated. Updated stale comment, test that encoded the bug, and dna.py param description. See .agent_lessons/read_logs_trim_tools_inverted_truncation_fix.md
+- [ ] missing the Self-Augmentation skill on idle agent recall if called with `NONE`, and the available resources part. that skill should always be loaded if `Enable skills` is ON. the `load_skill` argument matters only for new instances, not re-calls, we should not modify SYSTEM prompt in any way on recall (or return from a call for that matter).
+- [ ] supervisor of an orchestrator agent is always User? should be the agent that launched it, user is only for the root agent.
 
 
 
 # Errors to investigate:
-
-# RESOLVED (2026-08-14): ZMQ Socket & Thread Leak ("No buffer space available" / System Lockup)
-# Root Cause: Calling `kc.shutdown()` only sends a shutdown request over the shell channel; it does NOT call `kc.stop_channels()`.
-# When the watchdog killed idle containers (e.g., ci_Maine_-11502_17600 at 06:02:13), the 5 background channel threads (HBChannel, ShellChannel, etc.)
-# remained running in `_async_run()`. When the heartbeat failed, `HBChannel` entered a loop calling `_create_socket()` to reconnect, creating thousands
-# of orphaned ZMQ sockets per dead kernel until Winsock/ZMQ buffers were exhausted (ZMQError: No buffer space available at 06:13:22), freezing the system.
-# Fix: Created unified `_shutdown_kernel_client(kc, kernel_id)` helper in `code_interpreter.py` that calls `kc.stop_channels()`, joins all channel threads,
-# closes sockets, and destroys the ZMQ context. Applied across all kernel termination sites (watchdog, global cleanup, fresh cleanup, error handlers).
 
 # after failing the inner loop test it just locked the system
 2026-08-13 12:39:11,231 - agent_pool.py - 3166 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_8ec0108a
@@ -137,3 +135,33 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 2026-08-13 12:48:32,687 - tool_dispatcher.py - 640 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 2080.02s
 2026-08-13 12:48:32,689 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
 
+# still getting timeouts on security this should be impossible if we properly release the slot from the caller in time. all processes are sync, slot should be free.
+2026-08-16 00:57:00,576 - execution_engine.py - 1198 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
+2026-08-16 00:57:00,579 - execution_engine.py - 3630 - INFO - Endpoint allocation updated for coder: {'endpoint': 'LMS-27B-3.8-MTP', 'api_base': 'http://127.0.0.1:1234/v1', 'model': 'Qwen3.8-27B', 'max_input_tokens': 90000, 'rate_limit_rpm': 0, 'concurrency_limit': 0, 'prev_max_input_tokens': 0}
+2026-08-16 00:58:05,386 - security_handler.py - 331 - DEBUG - [SECURITY] Check worker started for request op_a4d704ab, thread=Thread-95 (_run_check_worker) (id=924)
+2026-08-16 00:58:05,386 - security_handler.py - 335 - INFO - [SECURITY] Checking request op_a4d704ab for tool 'edit_file'
+2026-08-16 00:58:05,389 - lifecycle_manager.py - 196 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Security_op_a4d704ab
+2026-08-16 00:58:05,411 - security_handler.py - 459 - INFO - [SECURITY] Created AgentInstance 'Security_op_a4d704ab' for request op_a4d704ab
+2026-08-16 00:58:05,419 - execution_engine.py - 1099 - DEBUG - engine.run() ENTRY - instance=Security_op_a4d704ab
+2026-08-16 00:58:05,419 - agent_pool.py - 2605 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=Security, instance_name=Security_op_a4d704ab, api_base=http://localhost:1234/v1, concurrency_limit=0
+2026-08-16 01:03:05,423 - security_handler.py - 577 - WARNING - [SECURITY] First-yield timeout trigger fired for request op_a4d704ab after 300s — model has not yielded.
+2026-08-16 01:03:05,423 - log.py - 80 - WARNING - [SLOTPOOL] Acquire timeout on pool '_shared_sequential_slot_' for ticket 0 (agent=Security_op_a4d704ab, wait_time=300.0s): running=1/1, waiters=0
+[SLOTPOOL] Acquire timeout on pool '_shared_sequential_slot_' for ticket 0 (agent=Security_op_a4d704ab, wait_time=300.0s): running=1/1, waiters=0
+2026-08-16 01:03:05,427 - agent_pool.py - 2616 - ERROR - Failed to acquire endpoint slot for Security_op_a4d704ab: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
+2026-08-16 01:03:05,428 - execution_engine.py - 906 - ERROR - [SLOT_ACQUIRE_FAILED] initial for Security_op_a4d704ab: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
+2026-08-16 01:03:05,429 - security_handler.py - 646 - ERROR - Security agent execution error: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
+2026-08-16 01:03:05,430 - security_handler.py - 981 - DEBUG - [SECURITY] Released active check for op_a4d704ab
+2026-08-16 01:03:05,430 - security_handler.py - 343 - ERROR - Security check failed: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
+2026-08-16 01:03:05,431 - security_handler.py - 360 - DEBUG - [SECURITY] Check worker finished for request op_a4d704ab
+2026-08-16 01:03:11,892 - agent_pool.py - 3243 - INFO - [idle_checker] Auto-dismissing idle system agent (Security) 'Security_op_a4d704ab' (idle for 307s, threshold=60s)
+2026-08-16 01:03:11,892 - agent_pool.py - 1176 - DEBUG - No active thread to join for 'Security_op_a4d704ab'
+2026-08-16 01:03:11,895 - agent_pool.py - 916 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_a4d704ab'
+2026-08-16 01:03:11,897 - agent_pool.py - 3168 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_a4d704ab
+2026-08-16 01:03:20,719 - security_handler.py - 331 - DEBUG - [SECURITY] Check worker started for request op_348e2979, thread=Thread-98 (_run_check_worker) (id=2592)
+2026-08-16 01:03:20,719 - security_handler.py - 335 - INFO - [SECURITY] Checking request op_348e2979 for tool 'edit_file'
+2026-08-16 01:03:20,722 - lifecycle_manager.py - 196 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Security_op_348e2979
+2026-08-16 01:03:20,744 - security_handler.py - 459 - INFO - [SECURITY] Created AgentInstance 'Security_op_348e2979' for request op_348e2979
+2026-08-16 01:03:20,751 - execution_engine.py - 1099 - DEBUG - engine.run() ENTRY - instance=Security_op_348e2979
+2026-08-16 01:03:20,751 - agent_pool.py - 2605 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=Security, instance_name=Security_op_348e2979, api_base=http://localhost:1234/v1, concurrency_limit=0
+2026-08-16 01:03:46,119 - config_handlers.py - 748 - DEBUG - [update_config] LLM config unchanged
+2026-08-16 01:03:46,120 - config_handlers.py - 748 - DEBUG - [update_config] LLM config unchanged

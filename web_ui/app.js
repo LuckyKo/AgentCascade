@@ -400,6 +400,20 @@ function markAllMessagesRead() {
   }
 }
 
+// Clear all agent messages: reset state, dedup set and persistence, then re-render.
+// Safe to call when empty or when the DOM is not ready (render guards on null container).
+function clearAgentMessages() {
+  state.agentMessages = [];
+  AGENT_MESSAGES_SEEN_IDS.clear();
+  try {
+    localStorage.removeItem(AGENT_MESSAGES_STORAGE_KEY);
+  } catch (e) {
+    console.warn('[AgentMessages] Failed to clear from localStorage:', e);
+  }
+  renderAgentMessages();
+  updateAgentMessagesBadge();
+}
+
 // Update the unread badge on the Agent Messages tab
 function updateAgentMessagesBadge() {
   const badge = document.getElementById('agentMessagesBadge');
@@ -956,6 +970,8 @@ function loadSession(path) {
     if (confirm('Load this session? Current unsaved state will be lost.')) {
       state.closedTabs.clear();
       localStorage.removeItem('agent-cascade-closed-tabs');
+      // Clear Agent Messages tab when loading a different session
+      clearAgentMessages();
       ws.send(JSON.stringify({
         type: 'load_session',
         path: path
@@ -3663,6 +3679,20 @@ function initAgentMessagesTab() {
   panel.className = 'main-tab-panel agent-messages-panel';
   panel.id = 'panelSub-agent-messages';
 
+  // Header/action row with a "Clear" button (matches queue banner header pattern)
+  const headerRow = document.createElement('div');
+  headerRow.className = 'agent-messages-header';
+
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'btn btn-small';
+  clearBtn.id = 'agentMessagesClearBtn';
+  clearBtn.title = 'Clear all agent messages';
+  clearBtn.setAttribute('aria-label', 'Clear all agent messages');
+  clearBtn.textContent = 'Clear';
+  clearBtn.onclick = () => clearAgentMessages();
+  headerRow.appendChild(clearBtn);
+  panel.appendChild(headerRow);
+
   const messagesContainer = document.createElement('div');
   messagesContainer.className = 'messages';
   messagesContainer.id = 'agentMessagesList';
@@ -5059,6 +5089,8 @@ resetBtn.addEventListener('click', () => {
     // Clear closed tabs cache so all tabs reappear after reset
     state.closedTabs.clear();
     localStorage.removeItem('agent-cascade-closed-tabs');
+    // Clear Agent Messages tab when starting a new session
+    clearAgentMessages();
     // Invalidate all panel caches to force full re-render after reset
     invalidateAllPanelCaches();
     send({ type: 'reset' });
