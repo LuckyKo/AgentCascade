@@ -522,6 +522,19 @@ class SkillManager:
         Returns:
             List of full instruction strings (one per loaded skill).
         """
+        # Coerce JSON-encoded string arrays into real lists. LLMs sometimes emit
+        # load_skill as a JSON-encoded string (e.g. "[\"AUTO\"]") instead of a
+        # native list; without this it falls through to the "Unknown string"
+        # branch and skills are silently dropped. Bare "AUTO"/"NONE" strings do
+        # not start with '[' so they are left untouched.
+        if isinstance(load_skill_value, str) and load_skill_value.strip().startswith("["):
+            try:
+                _decoded = _json.loads(load_skill_value)
+            except (ValueError, TypeError):
+                _decoded = None  # Not valid JSON — keep original value unchanged
+            if isinstance(_decoded, list):
+                load_skill_value = _decoded
+
         # Ensure skills have been discovered before resolving
         self._ensure_discovered()
 
