@@ -493,7 +493,11 @@ function invalidateAllPanelCaches() {
 function getActiveAgentName() {
     if (!state.activeSubTab) return state.sessionName;
     const prefix = 'sub-';
-    return state.activeSubTab.startsWith(prefix) ? state.activeSubTab.slice(prefix.length) : state.sessionName;
+    if (!state.activeSubTab.startsWith(prefix)) return state.sessionName;
+    const name = state.activeSubTab.slice(prefix.length);
+    // Guard: 'agent-messages' is a static UI tab, not an agent
+    if (name === 'agent-messages') return state.sessionName;
+    return name;
 }
 
 // Get the tab ID for a given agent name.
@@ -513,7 +517,12 @@ function isRootAgentName(name) {
 
 function getActiveInstanceName() {
   if (!state.activeSubTab) return state.sessionName;
-  return state.activeSubTab.substring(4);
+  const prefix = 'sub-';
+  if (!state.activeSubTab.startsWith(prefix)) return state.sessionName;
+  const name = state.activeSubTab.slice(prefix.length);
+  // Guard: 'agent-messages' is a static UI tab, not an agent
+  if (name === 'agent-messages') return state.sessionName;
+  return name;
 }
 
 /** Remove stale sub-agent entries after merging server state.
@@ -526,7 +535,9 @@ function cleanupStaleSubAgents(data, state) {
     }
   }
   // Reset active tab if it points to a now-dismissed agent — prevents blank panel rendering
-  const activeAgentName = state.activeSubTab?.startsWith('sub-') ? state.activeSubTab.slice(4) : null;
+  const activeAgentName = state.activeSubTab?.startsWith('sub-') && state.activeSubTab.slice(4) !== 'agent-messages'
+    ? state.activeSubTab.slice(4)
+    : null;
   if (activeAgentName && !(activeAgentName in data.agent_instances)) {
     state.activeSubTab = null;
   }
@@ -4130,7 +4141,7 @@ function switchMainTab(tabId) {
   // Update panels — all tabs use the same dynamic panel system now
   mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => p.classList.remove('active'));
   
-  const name = tabId.substring(4); // strip 'sub-' prefix (works for root too: sub-Maine → Maine)
+  const name = tabId.startsWith('sub-') ? tabId.slice(4) : tabId; // strip 'sub-' prefix (works for root too: sub-Maine → Maine)
   const panel = document.getElementById('panelSub-' + name);
   if (panel) {
     panel.classList.add('active');
