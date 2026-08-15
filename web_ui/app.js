@@ -3679,12 +3679,12 @@ function initAgentMessagesTab() {
   panel.className = 'main-tab-panel agent-messages-panel';
   panel.id = 'panelSub-agent-messages';
 
-  // Header/action row with a "Clear" button (matches queue banner header pattern)
+  // Header/action row with a "Clear" button (right-aligned; no title, unlike the queue banner)
   const headerRow = document.createElement('div');
   headerRow.className = 'agent-messages-header';
 
   const clearBtn = document.createElement('button');
-  clearBtn.className = 'btn btn-small';
+  clearBtn.className = 'btn btn-secondary btn-sm';
   clearBtn.id = 'agentMessagesClearBtn';
   clearBtn.title = 'Clear all agent messages';
   clearBtn.setAttribute('aria-label', 'Clear all agent messages');
