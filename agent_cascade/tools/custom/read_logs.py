@@ -170,30 +170,21 @@ class ReadLogs(BaseTool):
         if mode == 'trim_all':
             # Delegate entirely to _truncate_strings for all types
             return ReadLogs._truncate_strings(item, max_chars)
-        # mode == 'trim_tools' — only truncate tool-related fields
+        # mode == 'trim_tools' — truncate ONLY tool OUTPUTS, keep tool calls intact.
+        # Tool calls (assistant entries with function_call / tool_calls arguments) are the
+        # request and must be preserved so the agent can see exactly what was called.
+        # Only the results (content on role="function"/"tool" entries) are trimmed.
         if isinstance(item, dict):
-            fc = item.get("function_call")
-            if isinstance(fc, dict):
-                fc["arguments"] = ReadLogs._truncate_middle(fc.get("arguments", ""), max_chars)
-            elif isinstance(fc, list):
-                for call in fc:
-                    if isinstance(call, dict) and "arguments" in call:
-                        call["arguments"] = ReadLogs._truncate_middle(
-                            call["arguments"], max_chars
-                        )
-            # Handle modern tool_calls format: tool_calls[].function.arguments
-            tc = item.get("tool_calls")
-            if isinstance(tc, list):
-                for call in tc:
-                    if isinstance(call, dict):
-                        fn = call.get("function")
-                        if isinstance(fn, dict) and "arguments" in fn:
-                            fn["arguments"] = ReadLogs._truncate_middle(
-                                fn["arguments"], max_chars
-                            )
-            # Deep-truncate anything in the extra field (nested tool calls, etc.)
-            if "extra" in item:
-                item["extra"] = ReadLogs._truncate_strings(item["extra"], max_chars)
+            role = str(item.get("role", "")).lower()
+            if role in ("function", "tool"):
+                # Tool output: truncate the result content
+                if "content" in item and isinstance(item["content"], str):
+                    item["content"] = ReadLogs._truncate_middle(item["content"], max_chars)
+                # Deep-truncate extra on tool-output entries (may carry nested results)
+                if "extra" in item:
+                    item["extra"] = ReadLogs._truncate_strings(item["extra"], max_chars)
+            # NOTE: function_call.arguments / tool_calls[].function.arguments are intentionally
+            # left intact here — they are assistant tool *calls*, not outputs.
         return item
 
     @staticmethod
@@ -304,9 +295,10 @@ class ReadLogs(BaseTool):
 
         if content:
             c = str(content)
-            # Respect truncation mode for content preview:
-            # - trim_tools/trim_all: apply max_chars limit (content was already truncated by truncate_item if needed)
-            # - none: no additional truncation beyond what truncate_item did
+            # Content preview is always capped at max_chars in non-'none' modes. This is the
+            # display-time safety net for simple format. Note that data-level truncation in
+            # truncate_item only touches tool OUTPUTS (role=function/tool) under trim_tools;
+            # assistant content/reasoning are NOT pre-truncated there, so this cap matters.
             if mode != 'none' and len(c) > max_chars:
                 c = ReadLogs._truncate_middle(c, max_chars)
             result_lines.append(f"    {c}")

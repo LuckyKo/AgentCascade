@@ -409,8 +409,8 @@ class TestReadLogsFormatParameter:
                     if len(parts) == 2 and parts[0].isdigit():
                         pytest.fail(f"Found raw-format line in simple output: {stripped}")
 
-    def test_format_defaults_to_raw(self):
-        """format parameter defaults to 'raw' when not specified (backward compatibility)."""
+    def test_format_defaults_to_simple(self):
+        """format parameter defaults to 'simple' when not specified."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             self._write_test_log(
@@ -431,20 +431,16 @@ class TestReadLogsFormatParameter:
 
             assert "Error" not in result, f"Unexpected error: {result}"
 
-            # Should produce raw JSON lines with number prefixes (backward compatible)
-            lines = [l for l in result.strip().split("\n") if l.strip()]
-            assert len(lines) >= 2, "Should have at least metadata + log entries"
-            # Check format: "{number}: {json}"
-            for line in lines:
-                parts = line.split(": ", 1)
-                assert len(parts) == 2 and parts[0].isdigit(), \
-                    f"Default format should be 'raw' with numbered JSON lines, got: {line[:60]}"
+            # Should produce simple format output (role labels, no raw JSON lines)
+            assert "USER" in result or "ASSISTANT" in result, \
+                "Default format should be 'simple' with role labels"
 
     def test_truncation_modes_work_with_raw_format(self):
-        """Existing truncation modes (trim_tools, trim_all, none) still work with raw format."""
+        """trim_tools truncates tool OUTPUTS but keeps tool CALLS intact; trim_all/none behave as expected."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             long_args = "x" * 2000
+            long_output = "y" * 2000
             self._write_test_log(
                 tmp_path,
                 "test.jsonl",
@@ -454,6 +450,11 @@ class TestReadLogsFormatParameter:
                         "content": "calling tool",
                         "function_call": {"name": "big_tool", "arguments": long_args},
                     },
+                    {
+                        "role": "function",
+                        "name": "big_tool",
+                        "content": long_output,
+                    },
                 ],
             )
 
@@ -462,27 +463,32 @@ class TestReadLogsFormatParameter:
 
             tool = ReadLogs(agent_pool=pool)
 
-            # trim_tools: should truncate arguments in raw output
+            # trim_tools: assistant tool-call arguments must be INTACT; tool-output content truncated
             result_trim_tools = tool.call(
                 {"log_file": "test.jsonl", "format": "raw", "mode": "trim_tools", "max_chars_per_message": 100}
             )
             assert "Error" not in result_trim_tools, f"Unexpected error: {result_trim_tools}"
-            # Arguments should be truncated (TRUNCATED marker present)
+            # Tool call arguments are preserved (no TRUNCATED marker on them)
+            assert long_args in result_trim_tools
+            # Tool output content IS truncated (TRUNCATED marker present)
             assert "TRUNCATED" in result_trim_tools
 
-            # trim_all: should truncate all long strings
+            # trim_all: should truncate all long strings (both args and output)
             result_trim_all = tool.call(
                 {"log_file": "test.jsonl", "format": "raw", "mode": "trim_all", "max_chars_per_message": 100}
             )
             assert "Error" not in result_trim_all, f"Unexpected error: {result_trim_all}"
+            assert long_args not in result_trim_all
+            assert long_output not in result_trim_all
             assert "TRUNCATED" in result_trim_all
 
-            # none: should NOT truncate
+            # none: should NOT truncate anything
             result_none = tool.call(
                 {"log_file": "test.jsonl", "format": "raw", "mode": "none"}
             )
             assert "Error" not in result_none, f"Unexpected error: {result_none}"
             assert long_args in result_none
+            assert long_output in result_none
             assert "TRUNCATED" not in result_none
 
     def test_truncation_modes_work_with_simple_format(self):

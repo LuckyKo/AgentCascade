@@ -354,7 +354,7 @@ TOOL_METADATA = {
             'log_file': 'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
             'max_chars_per_message': 'Maximum characters to keep for each string value in messages. Defaults to 1000.',
             'range': 'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries.',
-            'mode': 'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only function_call.arguments, tool_calls arguments, and extra fields; leave content/reasoning_content intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
+            'mode': 'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only tool OUTPUTS — the content of role="function"/"tool" entries — while leaving assistant tool calls (function_call.arguments / tool_calls arguments) intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
             'format': 'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing.'
         }
     },
