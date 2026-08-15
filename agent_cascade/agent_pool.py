@@ -1603,8 +1603,7 @@ class AgentPool:
                         if instance._slot_release is not None:
                             release_cb = instance._slot_release
                             instance._slot_release = None
-                            if hasattr(instance, '_slot_key'):
-                                instance._slot_key = None
+                            instance._slot_key = None
                             try:
                                 release_cb()
                                 released_count += 1

@@ -1353,25 +1353,16 @@ class APIRouter:
                         self._semaphores[endpoint_base] = (threading.Semaphore(sem_size), sem_size)
                     sem = self._semaphores[endpoint_base][0]
 
-            # Two-layer concurrency control:
-            #   - conc=0: SlotPool (FIFO) — ensures strict ordering on shared sequential slot
-            #   - conc>0: Semaphore (per-call) — limits parallel API calls within agent's window
-            # These layers are independent and serve different purposes. The SlotPool path
-            # below only activates for conc=0 endpoints where FIFO ordering matters.
-            # For conc=0 endpoints, use SlotPool (FIFO) instead of semaphore
-            # when the agent doesn't already hold a slot for this endpoint.
-            # Note: _slot_key read is not lock-protected. This is safe because:
-            #   1. Each agent instance is single-threaded per turn (one LLM call at a time).
-            #   2. Worst case: _slot_key is cleared concurrently → we do an extra SlotPool
-            #      acquisition (safe, just slightly slower). We never MISS a needed acquisition.
-            #   3. A stale non-None _slot_key would cause us to skip acquisition, but that
-            #      means the agent already holds the slot — which is correct behavior.
+            # Two-layer concurrency: SlotPool (conc=0, FIFO) and Semaphore (conc>0, per-call).
+            # SlotPool path below activates only for conc=0 endpoints where the agent
+            # doesn't already hold a slot. _slot_key read is safe without locking because
+            # agents are single-threaded per turn; worst case we do an extra acquisition.
             slotpool_release_cb = None
             _router_pool = getattr(self, '_pool', None)
             if concurrency_limit == 0 and _inst_name and _router_pool:
                 slot_key = '_shared_sequential_slot_'
                 inst = _router_pool.get_instance(_inst_name)
-                already_holds = (inst is not None and getattr(inst, '_slot_key', None) == slot_key)
+                already_holds = (inst is not None and inst._slot_key == slot_key)
 
                 if not already_holds:
                     try:
