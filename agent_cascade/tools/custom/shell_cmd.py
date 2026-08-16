@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -118,7 +119,7 @@ class ShellCmd(BaseTool):
         if not has_tool_id and not justification:
             raise ValueError("'justification' is required for shell_cmd unless using control commands with tool_id")
 
-        agent_name = kwargs.get('agent_instance_name') or self.agent_name
+        agent_name = self._get_agent_name(kwargs)
 
         # ── Handle control commands + stdin input for existing async shells (takes priority) ──
         if has_tool_id:
@@ -253,6 +254,11 @@ class ShellCmd(BaseTool):
         console_window = True
         if self.agent_pool and hasattr(self.agent_pool, '_enable_async_shell_console_window'):
             console_window = bool(self.agent_pool._enable_async_shell_console_window)
+
+        # Opt-out override (e.g. test harnesses): force no console window regardless of pool state.
+        # Does NOT change production defaults — only takes effect when this env var is set truthy.
+        if os.getenv("QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+            console_window = False
 
         start_time = time.time()
         try:

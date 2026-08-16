@@ -11,6 +11,37 @@ import os
 from typing import Any, Dict, List, Optional
 import pytest
 
+
+# ---------------------------------------------------------------------------
+# Test isolation: unique instance ID + no console windows (set at IMPORT time)
+# ---------------------------------------------------------------------------
+# AGENT_CASCADE_INSTANCE_ID drives log/telemetry/console.log directory
+# isolation (agent_cascade/instance_id.py).  Without it, AgentPools fall back
+# to the production workspace and pollute the live zone.  We set a unique
+# value per process so parallel xdist workers never collide.  The value must
+# match ^[a-zA-Z0-9_]+$ (max 64 chars).
+#
+# Derivation: prefer the xdist worker id ("gw0", "gw1", ...) when present;
+# otherwise fall back to the PID.  pytest-xdist forks workers after collection,
+# so PYTEST_XDIST_WORKER is already set by the time this module is imported in
+# each worker — giving every worker a distinct value from import time on.
+def _derive_test_instance_id() -> str:
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker:
+        suffix = f"test_{worker}"
+    else:
+        suffix = f"test_pid{os.getpid()}"
+    return suffix[:64]
+
+
+os.environ["AGENT_CASCADE_INSTANCE_ID"] = _derive_test_instance_id()
+
+# Never pop a visible cmd window for async shell_cmd in tests.  This env var is
+# an opt-out override read by agent_cascade/tools/custom/shell_cmd.py; it does
+# NOT change production defaults (which still honor the pool toggle).
+os.environ["QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW"] = "1"
+
+
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.llm.schema import SYSTEM, USER
 
@@ -443,6 +474,23 @@ def isolated_config_dir(tmp_path_factory):
     yield test_config
     # Cleanup not strictly necessary (tmp_path handles it), but explicit is clear
     os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolated_instance_id():
+    """Set a UNIQUE AGENT_CASCADE_INSTANCE_ID per parallel worker for the test session.
+
+    WHY: agent_cascade/instance_id.py uses this env var to suffix log/telemetry/console.log
+    directories.  When empty, AgentPools fall back to the production workspace and pollute
+    the live zone; when shared across xdist workers, parallel runs collide on the same files.
+    Setting a per-worker value here (before any pool/logger is constructed) keeps each worker's
+    logs isolated in its own instance directory and leaves the production zone untouched.
+
+    The value is also set at module import time (see top of this file); this fixture re-derives
+    it so it stays correct even if the env var was unset/cleared by the time fixtures run.
+    """
+    os.environ["AGENT_CASCADE_INSTANCE_ID"] = _derive_test_instance_id()
+    yield os.environ["AGENT_CASCADE_INSTANCE_ID"]
 
 
 # ---------------------------------------------------------------------------
