@@ -5149,43 +5149,92 @@ class ExecutionEngine:
             agent_class, instance_name, caller, nest_depth, force_fresh, log_file=log_file
         )
 
-        # Phase 4.1: Delegate to lifecycle manager for system message building
-        # Use inst.agent_class (may differ from caller's agent_class if session
-        # was loaded from log file)
-        sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
-
-        # ── Skills System: Resolve load_skill and inject into sys_msg ────────
-        load_skill_value = args.get('load_skill')
-        if load_skill_value is None:
-            # Read from pool settings (set via UI toggle), fall back to env var default
-            load_skill_value = getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
-
-        task_text = args.get('task', '')
-        context_text = args.get('context', '')
-        skill_manager = getattr(self.pool, 'skill_manager', None)
-        loaded_skills = []
-        if isinstance(load_skill_value, str):
-            load_skill_value_upper = load_skill_value.strip().upper()
+        # ── System message + skills handling (todo.md:115 fix) ───────────────
+        # load_skill only applies to NEW instances. On recall/reuse of an existing
+        # idle agent we must NOT rebuild or modify the SYSTEM prompt in any way —
+        # doing so both (a) dropped Self-Augmentation when a recall passed
+        # load_skill="NONE", and (b) mutated the system prompt on every recall,
+        # breaking prefix caching. So for reuse we keep the existing conversation[0]
+        # verbatim and IGNORE the load_skill argument entirely.
+        # A "recall" is a plain reuse of an existing idle agent. It must NOT be an
+        # external load (log_file restore): when both an idle instance exists AND a
+        # log_file is provided, find_or_create_instance returns is_reuse=True AND
+        # session_was_loaded=True — that is a RESTORED session (a fresh conversation),
+        # not a recall, so it must still build + inject skills (Self-Augmentation).
+        _is_recall = is_reuse and not session_was_loaded and bool(inst.conversation) \
+            and getattr(inst.conversation[0], 'role', None) == SYSTEM
+        if _is_recall:
+            # Reuse path: preserve existing system message byte-for-byte. Pass the
+            # EXISTING conversation[0] as sys_msg so initialize_conversation's
+            # in-place edit becomes a content no-op (same object/content). No skill
+            # resolution or injection happens here — load_skill is ignored by design.
+            sys_msg = inst.conversation[0]
+            logger.debug(
+                "[SKILLS] Recall of %s: preserving existing system message; "
+                "skipping rebuild + skill injection (load_skill ignored on recall)",
+                instance_name,
+            )
+            # task_text / skill_manager are still needed downstream (auto-skill
+            # proposal), so resolve them here but WITHOUT injecting into sys_msg.
+            task_text = args.get('task', '')
+            skill_manager = getattr(self.pool, 'skill_manager', None)
         else:
-            load_skill_value_upper = "AUTO"
-        if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE:
-            try:
-                loaded_skills = skill_manager.resolve_load_skill(
-                    load_skill_value, task_text, context_text
-                )
-            except Exception as e:
-                logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
-                loaded_skills = []
+            # New instance OR external load (session restored from log_file) OR a
+            # defensive fallback when a reused instance has no valid system message.
+            # Build a fresh system message and resolve/inject skills.
+            # Use inst.agent_class (may differ from caller's agent_class if session
+            # was loaded from log file)
+            sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
-            # Always include self-augmentation skill when skills are enabled (not NONE).
-            # Self-augmentation is the meta-skill that enables runtime discovery; it must be present
-            # regardless of whether load_skill is AUTO or an explicit list.
-            self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
-            if self_augmentation_instructions and self_augmentation_instructions not in loaded_skills:
-                loaded_skills.append(self_augmentation_instructions)
+            # ── Skills System: Resolve load_skill and inject into sys_msg ─────
+            task_text = args.get('task', '')
+            context_text = args.get('context', '')
+            skill_manager = getattr(self.pool, 'skill_manager', None)
 
-        # Inject skills into system message using general-purpose helper
-        _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
+            # GLOBAL "Enable skills" setting (UI toggle → pool.settings.
+            # default_load_skill_mode: 'AUTO'=ON, 'NONE'=OFF). This is the single
+            # source of truth for whether Self-Augmentation is present.
+            global_skills_enabled = \
+                getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE) != LOAD_SKILL_NONE
+
+            # Per-call load_skill controls ONLY which MATCHED/auto skills load.
+            # It never removes Self-Augmentation while the global toggle is ON.
+            load_skill_value = args.get('load_skill')
+            if load_skill_value is None:
+                # No explicit per-call arg → fall back to the global setting.
+                load_skill_value = getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
+
+            loaded_skills = []
+            if skill_manager and global_skills_enabled:
+                # (1) Matched/auto skills — gated by the PER-CALL load_skill arg.
+                #     NONE → no matched skills; otherwise resolve as before.
+                if isinstance(load_skill_value, str):
+                    load_skill_mode_upper = load_skill_value.strip().upper()
+                else:
+                    load_skill_mode_upper = "AUTO"
+                if load_skill_mode_upper != LOAD_SKILL_NONE:
+                    try:
+                        loaded_skills = skill_manager.resolve_load_skill(
+                            load_skill_value, task_text, context_text
+                        )
+                    except Exception as e:
+                        logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
+                        loaded_skills = []
+
+                # (2) Self-Augmentation — gated by the GLOBAL "Enable skills" toggle
+                #     (global_skills_enabled), INDEPENDENT of the per-call load_skill arg.
+                #     It is the meta-skill that enables runtime discovery and must be
+                #     present whenever skills are globally ON, even if this call passed
+                #     load_skill="NONE". _inject_skills_to_system_message is idempotent
+                #     (skips when '## Active Skills' already exists).
+                self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
+                if self_augmentation_instructions and self_augmentation_instructions not in loaded_skills:
+                    loaded_skills.append(self_augmentation_instructions)
+
+            # Inject skills into system message using general-purpose helper.
+            # When the global toggle is OFF (global_skills_enabled False),
+            # loaded_skills stays empty → nothing is injected.
+            _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
 
         # Build task message using lifecycle manager
         task_msg = self.lifecycle.build_task_message(args, caller, agent_class=inst.agent_class)

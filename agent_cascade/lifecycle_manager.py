@@ -506,22 +506,33 @@ class AgentLifecycleManager:
                 # Update system message in-place (first message is always
                 # system)
                 if instance.conversation and len(instance.conversation) > 0:
-                    # Preserve old system message's timestamp so
-                    # update_history() can match it as an update
                     old_sys_msg = instance.conversation[0]
-                    if hasattr(old_sys_msg, 'timestamp') and old_sys_msg.timestamp:
-                        try:
-                            sys_msg.timestamp = old_sys_msg.timestamp
-                        except AttributeError:
-                            pass  # Fallback: generate new timestamp below
 
-                    # FIX
-                    if not getattr(sys_msg, 'timestamp', None):
-                        sys_msg.timestamp = datetime.datetime.now().isoformat()
+                    # Recall no-op (todo.md:115): on recall the caller passes the
+                    # EXISTING conversation[0] back as sys_msg. If it's the same object
+                    # or has identical content, skip edit_message_in_place entirely so
+                    # we don't invalidate the working-set / prefix caches for no reason.
+                    if (sys_msg is old_sys_msg) or \
+                            (getattr(sys_msg, 'role', None) == getattr(old_sys_msg, 'role', None)
+                             and sys_msg.content == old_sys_msg.content):
+                        # System prompt unchanged on recall — nothing to rewrite.
+                        pass
+                    else:
+                        # Preserve old system message's timestamp so
+                        # update_history() can match it as an update
+                        if hasattr(old_sys_msg, 'timestamp') and old_sys_msg.timestamp:
+                            try:
+                                sys_msg.timestamp = old_sys_msg.timestamp
+                            except AttributeError:
+                                pass  # Fallback: generate new timestamp below
 
-                    # Update the existing system message with new template
-                    # content
-                    instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
+                        # FIX
+                        if not getattr(sys_msg, 'timestamp', None):
+                            sys_msg.timestamp = datetime.datetime.now().isoformat()
+
+                        # Update the existing system message with new template
+                        # content
+                        instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
                 else:
                     # Fallback: prepend system message if conversation is empty
                     instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync

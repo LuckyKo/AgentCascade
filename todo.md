@@ -112,7 +112,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] something must be confusing the agents as they try to use `"load_skill": "[\"AUTO\"]"` when using call_agent. its an invalid parameter like this.
 - [x] add `soundfile` to default list of startup docker containers — DONE: soundfile was already in code_interpreter_requirements.txt; issue was the cached Docker image (code-interpreter:latest) wasn't rebuilt after requirements change. Removed stale image so it rebuilds on next use.
 - [x] `read_logs` still truncates assistant tool calls when it should be in tool mode (only the tool outputs should be truncated, not the tool calls). Fixed: inverted truncate_item logic in trim_tools mode — assistant tool-call arguments (function_call.arguments, tool_calls[].function.arguments) now left intact; only role=function/tool content gets middle-truncated. Updated stale comment, test that encoded the bug, and dna.py param description. See .agent_lessons/read_logs_trim_tools_inverted_truncation_fix.md
-- [ ] missing the Self-Augmentation skill on idle agent recall if called with `NONE`, and the available resources part. that skill should always be loaded if `Enable skills` is ON. the `load_skill` argument matters only for new instances, not re-calls, we should not modify SYSTEM prompt in any way on recall (or return from a call for that matter).
+- [x] missing the Self-Augmentation skill on idle agent recall if called with `NONE`, and the available resources part. that skill should always be loaded if `Enable skills` is ON. the `load_skill` argument matters only for new instances, not re-calls, we should not modify SYSTEM prompt in any way on recall (or return from a call for that matter). — DONE: execution_engine.py `_create_and_run_agent` now splits recall vs new/external-load paths. Recall (is_reuse AND NOT session_was_loaded AND conversation[0] is SYSTEM) preserves the existing system message byte-for-byte and IGNORES load_skill; lifecycle_manager reuse branch skips edit_message_in_place when content unchanged (preserves prefix cache). Self-Augmentation gated on GLOBAL "Enable skills" (`default_load_skill_mode != NONE`), NOT the per-call arg — so new instance + load_skill="NONE" still gets it; global OFF injects nothing. External loads (log_file restore) excluded from recall and still build+inject. 10 new tests in tests/test_recall_skill_preservation.py; full relevant suite green (96 passed). See .agent_lessons/recall-preserve-system-prompt.md
 - [ ] supervisor of an orchestrator agent is always User? should be the agent that launched it, user is only for the root agent.
 
 
@@ -136,32 +136,16 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 2026-08-13 12:48:32,689 - tool_dispatcher.py - 158 - DEBUG - handle_call_agent returned type=str
 
 # still getting timeouts on security this should be impossible if we properly release the slot from the caller in time. all processes are sync, slot should be free.
-2026-08-16 00:57:00,576 - execution_engine.py - 1198 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
-2026-08-16 00:57:00,579 - execution_engine.py - 3630 - INFO - Endpoint allocation updated for coder: {'endpoint': 'LMS-27B-3.8-MTP', 'api_base': 'http://127.0.0.1:1234/v1', 'model': 'Qwen3.8-27B', 'max_input_tokens': 90000, 'rate_limit_rpm': 0, 'concurrency_limit': 0, 'prev_max_input_tokens': 0}
-2026-08-16 00:58:05,386 - security_handler.py - 331 - DEBUG - [SECURITY] Check worker started for request op_a4d704ab, thread=Thread-95 (_run_check_worker) (id=924)
-2026-08-16 00:58:05,386 - security_handler.py - 335 - INFO - [SECURITY] Checking request op_a4d704ab for tool 'edit_file'
-2026-08-16 00:58:05,389 - lifecycle_manager.py - 196 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Security_op_a4d704ab
-2026-08-16 00:58:05,411 - security_handler.py - 459 - INFO - [SECURITY] Created AgentInstance 'Security_op_a4d704ab' for request op_a4d704ab
-2026-08-16 00:58:05,419 - execution_engine.py - 1099 - DEBUG - engine.run() ENTRY - instance=Security_op_a4d704ab
-2026-08-16 00:58:05,419 - agent_pool.py - 2605 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=Security, instance_name=Security_op_a4d704ab, api_base=http://localhost:1234/v1, concurrency_limit=0
-2026-08-16 01:03:05,423 - security_handler.py - 577 - WARNING - [SECURITY] First-yield timeout trigger fired for request op_a4d704ab after 300s — model has not yielded.
-2026-08-16 01:03:05,423 - log.py - 80 - WARNING - [SLOTPOOL] Acquire timeout on pool '_shared_sequential_slot_' for ticket 0 (agent=Security_op_a4d704ab, wait_time=300.0s): running=1/1, waiters=0
-[SLOTPOOL] Acquire timeout on pool '_shared_sequential_slot_' for ticket 0 (agent=Security_op_a4d704ab, wait_time=300.0s): running=1/1, waiters=0
-2026-08-16 01:03:05,427 - agent_pool.py - 2616 - ERROR - Failed to acquire endpoint slot for Security_op_a4d704ab: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
-2026-08-16 01:03:05,428 - execution_engine.py - 906 - ERROR - [SLOT_ACQUIRE_FAILED] initial for Security_op_a4d704ab: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
-2026-08-16 01:03:05,429 - security_handler.py - 646 - ERROR - Security agent execution error: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
-2026-08-16 01:03:05,430 - security_handler.py - 981 - DEBUG - [SECURITY] Released active check for op_a4d704ab
-2026-08-16 01:03:05,430 - security_handler.py - 343 - ERROR - Security check failed: Timed out after Nones waiting for endpoint slot on http://localhost:1234/v1. Current active count: 1, max allowed: 1. Currently held by: ac_agents_tab_clear (ac_agents_tab_clear)
-2026-08-16 01:03:05,431 - security_handler.py - 360 - DEBUG - [SECURITY] Check worker finished for request op_a4d704ab
-2026-08-16 01:03:11,892 - agent_pool.py - 3243 - INFO - [idle_checker] Auto-dismissing idle system agent (Security) 'Security_op_a4d704ab' (idle for 307s, threshold=60s)
-2026-08-16 01:03:11,892 - agent_pool.py - 1176 - DEBUG - No active thread to join for 'Security_op_a4d704ab'
-2026-08-16 01:03:11,895 - agent_pool.py - 916 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_a4d704ab'
-2026-08-16 01:03:11,897 - agent_pool.py - 3168 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_a4d704ab
-2026-08-16 01:03:20,719 - security_handler.py - 331 - DEBUG - [SECURITY] Check worker started for request op_348e2979, thread=Thread-98 (_run_check_worker) (id=2592)
-2026-08-16 01:03:20,719 - security_handler.py - 335 - INFO - [SECURITY] Checking request op_348e2979 for tool 'edit_file'
-2026-08-16 01:03:20,722 - lifecycle_manager.py - 196 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Security_op_348e2979
-2026-08-16 01:03:20,744 - security_handler.py - 459 - INFO - [SECURITY] Created AgentInstance 'Security_op_348e2979' for request op_348e2979
-2026-08-16 01:03:20,751 - execution_engine.py - 1099 - DEBUG - engine.run() ENTRY - instance=Security_op_348e2979
-2026-08-16 01:03:20,751 - agent_pool.py - 2605 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=Security, instance_name=Security_op_348e2979, api_base=http://localhost:1234/v1, concurrency_limit=0
-2026-08-16 01:03:46,119 - config_handlers.py - 748 - DEBUG - [update_config] LLM config unchanged
-2026-08-16 01:03:46,120 - config_handlers.py - 748 - DEBUG - [update_config] LLM config unchanged
+2026-08-16 02:20:58,657 - config_handlers.py - 748 - DEBUG - [update_config] LLM config unchanged
+2026-08-16 02:20:58,658 - config_handlers.py - 266 - WARNING - [THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)
+2026-08-16 02:20:58,658 - config_handlers.py - 160 - DEBUG - [work_folders] Extra work folders unchanged
+2026-08-16 02:20:58,659 - config_handlers.py - 160 - DEBUG - [work_folders] Extra work folders unchanged
+2026-08-16 02:20:58,659 - config_handlers.py - 188 - DEBUG - [update_config] Base workspace unchanged
+2026-08-16 02:20:58,746 - security_handler.py - 331 - DEBUG - [SECURITY] Check worker started for request op_1d15aba5, thread=Thread-82 (_run_check_worker) (id=18240)
+2026-08-16 02:20:58,747 - security_handler.py - 335 - INFO - [SECURITY] Checking request op_1d15aba5 for tool 'edit_file'
+2026-08-16 02:20:58,749 - lifecycle_manager.py - 196 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Security_op_1d15aba5
+2026-08-16 02:20:58,772 - security_handler.py - 459 - INFO - [SECURITY] Created AgentInstance 'Security_op_1d15aba5' for request op_1d15aba5
+2026-08-16 02:21:08,785 - security_handler.py - 691 - ERROR - [SECURITY] Request op_1d15aba5 failed: [SECURITY] Failed to acquire security execution lock within 10s for request op_1d15aba5. A previous check is still running (live holder). Manual restart may be required.
+2026-08-16 02:21:08,785 - security_handler.py - 981 - DEBUG - [SECURITY] Released active check for op_1d15aba5
+2026-08-16 02:21:08,788 - security_handler.py - 343 - ERROR - Security check failed: [SECURITY] Failed to acquire security execution lock within 10s for request op_1d15aba5. A previous check is still running (live holder). Manual restart may be required.
+2026-08-16 02:21:08,788 - security_handler.py - 360 - DEBUG - [SECURITY] Check worker finished for request op_1d15aba5
