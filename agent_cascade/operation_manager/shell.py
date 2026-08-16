@@ -427,6 +427,8 @@ class ShellMixin:
                 creationflags = 0
                 env = None
 
+            exec_start = time.time()  # Local elapsed timing (sync mode has no task record)
+
             proc = subprocess.Popen(
                 command,
                 cwd=str(resolved_cwd),
@@ -514,6 +516,9 @@ class ShellMixin:
                 if final_output is not output:
                     status += " [TRUNCATED]"
 
+                elapsed = time.time() - exec_start
+                status += f" (elapsed {elapsed:.1f}s)"
+
                 if is_safe:
                     final_msg = f"AUTO-APPROVED: {status}\n"
                 else:
@@ -529,8 +534,10 @@ class ShellMixin:
             if stderr:
                 output += f"STDERR (partial):\n{stderr}\n"
 
+            elapsed = time.time() - exec_start
             timeout_msg = (
-                f"ERROR: Command timed out after {effective_timeout} seconds. "
+                f"ERROR: Command timed out after {effective_timeout} seconds "
+                f"(elapsed {elapsed:.1f}s). "
                 f"All child processes have been forcibly terminated. "
                 f"Command was: `{command[:200]}`. "
                 f"If the process is expected to take a long time, consider using a background command "

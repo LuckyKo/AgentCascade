@@ -204,6 +204,7 @@ class TestWaitCommand:
         result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 2, "async_mode": true}')
         assert 'already completed' in result.lower() or 'Process already completed' in result
         assert 'Tool ID: 2' in result
+        assert 'elapsed' in result, f"__wait (already completed) missing elapsed time: {result!r}"
 
     def test_wait_returns_new_output(self, shell_cmd_tool, mock_task_running):
         tracker = AsyncShellTracker(pool=None)
@@ -224,6 +225,7 @@ class TestWaitCommand:
         assert '⟨shell_cmd wait⟩' in result
         assert 'Tool ID: 1' in result
         assert 'new output line' in result
+        assert 'elapsed' in result, f"__wait (new output) missing elapsed time: {result!r}"
 
     def test_wait_returns_completion_status(self, shell_cmd_tool, mock_task_running):
         tracker = AsyncShellTracker(pool=None)
@@ -245,6 +247,7 @@ class TestWaitCommand:
         assert '⟨shell_cmd wait⟩' in result
         assert 'Process completed' in result
         assert 'exit code 0' in result
+        assert 'elapsed' in result, f"__wait (completed) missing elapsed time: {result!r}"
 
     def test_wait_returns_timeout_when_no_output(self, shell_cmd_tool, mock_task_running):
         _, fake_time_mod, _ = self._wait_env(shell_cmd_tool, mock_task_running)
@@ -255,6 +258,7 @@ class TestWaitCommand:
         assert '⟨shell_cmd wait⟩' in result
         assert 'No new output' in result
         assert 'timeout' in result.lower()
+        assert 'elapsed' in result, f"__wait (timeout) missing elapsed time: {result!r}"
 
     def test_wait_respects_timeout_cap_at_60s(self, shell_cmd_tool):
         task = _make_running_task(heartbeat_interval=3600.0, command='sleep 1000', pid=99999)
@@ -267,6 +271,7 @@ class TestWaitCommand:
         assert state['elapsed'] >= 59.0, f"__wait waited {state['elapsed']:.1f}s, should be ~60s"
         assert 'No new output' in result
         assert '60s' in result
+        assert 'elapsed' in result, f"__wait (timeout cap) missing elapsed time: {result!r}"
 
     def test_wait_no_deadlock_on_sequential_access(self, shell_cmd_tool, mock_task_running):
         _, fake_time_mod, _ = self._wait_env(shell_cmd_tool, mock_task_running)
@@ -339,6 +344,33 @@ class TestOptionalJustification:
         assert '⟨shell_cmd status⟩' in result
         assert 'Tool ID: 5' in result
         assert 'line1' in result or 'line2' in result or 'running' in result.lower()
+
+    def test_status_completed_variant_includes_elapsed(self, shell_cmd_tool):
+        """__status for a completed task includes elapsed time in the status label."""
+        tracker = AsyncShellTracker(pool=None)
+        task = AsyncShellTask(tool_id=6, agent_name='test_agent', command='echo done',
+                              pid=66666, completed=True, return_code=0,
+                              stdout_lines=['done'])
+        _setup_task(tracker, task)
+        _make_tool_with_tracker(shell_cmd_tool, tracker)
+
+        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 6, "async_mode": true}')
+        assert '⟨shell_cmd status⟩' in result
+        assert 'completed' in result.lower()
+        assert 'elapsed' in result or 's)' in result, \
+            f"__status (completed) missing elapsed time: {result!r}"
+
+    def test_status_running_variant_includes_elapsed(self, shell_cmd_tool):
+        """__status for a running task includes elapsed time in the status label."""
+        tracker = AsyncShellTracker(pool=None)
+        task = _make_running_task(tool_id=7, command='sleep 100', pid=77777)
+        _setup_task(tracker, task)
+        _make_tool_with_tracker(shell_cmd_tool, tracker)
+
+        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 7, "async_mode": true}')
+        assert '⟨shell_cmd status⟩' in result
+        assert 'running' in result.lower()
+        assert 'elapsed' in result, f"__status (running) missing elapsed time: {result!r}"
 
     def test_regular_command_without_justification_raises(self, shell_cmd_tool, mock_tracker):
         _make_tool_with_tracker(shell_cmd_tool, mock_tracker)

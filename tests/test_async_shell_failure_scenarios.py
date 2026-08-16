@@ -33,6 +33,8 @@ def _make_pool():
     pool.messages = []
     pool.enqueue_message = lambda agent, msg: pool.messages.append((agent, msg))
     pool.llm_cfg = {}
+    # Prevent truncate_with_spillover from being triggered (base_dir=None skips it)
+    pool.operation_manager.base_dir = None
     return pool
 
 
@@ -192,7 +194,12 @@ class TestTimeoutBehavior:
                 f"Expected non-zero exit code after timeout kill, got {task.return_code}"
 
     def test_timeout_completion_message_sent(self):
-        """After timeout kills a process, a completion message is sent to the pool."""
+        """After timeout kills a process, a SINGLE merged completion message is sent.
+
+        The merged message must contain the timeout status AND elapsed time in one
+        user message (not a separate 'final output' + 'completed' pair). If there was
+        any remaining output it is folded into the same message.
+        """
         pool = _make_pool()
         tracker = AsyncShellTracker(pool=pool)
 
@@ -206,9 +213,68 @@ class TestTimeoutBehavior:
         # Wait for timeout and completion message
         time.sleep(4.0)
 
-        completion_msgs = [m for m in pool.messages if 'completed' in m[1].lower() or 'killed' in m[1].lower()]
-        assert len(completion_msgs) > 0, \
-            f"Expected completion/killed message after timeout. Messages: {pool.messages}"
+        # There must be exactly ONE completion message (merged status + elapsed).
+        completed_msgs = [m[1] for m in pool.messages if '⟨shell_cmd completed⟩' in m[1]]
+        assert len(completed_msgs) == 1, \
+            f"Expected exactly one merged completion message, got {len(completed_msgs)}: {pool.messages}"
+
+        msg = completed_msgs[0]
+        # Timeout status present
+        assert 'Timed out after' in msg, f"Timeout status missing from merged message: {msg!r}"
+        # Elapsed time present (format: "({elapsed:.1f}s total)")
+        assert 's total' in msg, f"Elapsed time missing from timeout completion message: {msg!r}"
+        # No separate legacy 'final output' message should have been enqueued.
+        final_output_msgs = [m[1] for m in pool.messages if '⟨shell_cmd final output⟩' in m[1]]
+        assert len(final_output_msgs) == 0, \
+            f"Legacy separate 'final output' message found (should be merged): {final_output_msgs}"
+
+    def test_normal_completion_produces_single_merged_message(self):
+        """A normally-completing async command delivers exactly ONE user message.
+
+        The single message contains status + elapsed time + any remaining output,
+        instead of the old two-message pair ('final output' then 'completed').
+        """
+        pool = _make_pool()
+        tracker = AsyncShellTracker(pool=pool)
+
+        # A command that delays long enough (>2s EARLY_OUTPUT_CHECK_TIMEOUT) so it
+        # completes via the tracking thread (NOT the launch-window early-completion path),
+        # producing a merged queue message. Use Python -c for cross-platform reliability.
+        cmd = 'python -c "import time; time.sleep(3); print(\'line one\'); print(\'line two\')"'
+
+        tracker.launch(
+            agent_name='test_agent',
+            command=cmd,
+            heartbeat_interval=-1,
+            timeout=30,
+        )
+
+        # Wait for completion and the merged message (3s sleep + processing margin).
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if any('⟨shell_cmd completed⟩' in m[1] for m in pool.messages):
+                break
+            time.sleep(0.1)
+
+        completed_msgs = [m[1] for m in pool.messages if '⟨shell_cmd completed⟩' in m[1]]
+        assert len(completed_msgs) == 1, \
+            f"Expected exactly one merged completion message, got {len(completed_msgs)}: {pool.messages}"
+
+        msg = completed_msgs[0]
+        # Status + elapsed present.
+        assert 'Completed in' in msg, f"Status missing from merged message: {msg!r}"
+        assert 'elapsed' in msg.lower() or ' s (' in msg, \
+            f"Elapsed time missing from merged completion message: {msg!r}"
+
+        # No separate legacy 'final output' message.
+        final_output_msgs = [m[1] for m in pool.messages if '⟨shell_cmd final output⟩' in m[1]]
+        assert len(final_output_msgs) == 0, \
+            f"Legacy separate 'final output' message found (should be merged): {final_output_msgs}"
+
+        # The command produced output after a delay; it must be folded into the same
+        # merged message (not sent as a separate 'final output' message).
+        assert 'line one' in msg and 'line two' in msg, \
+            f"Remaining output should be merged into the completion message: {msg!r}"
 
 
 # ============================================================================

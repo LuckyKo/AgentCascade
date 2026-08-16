@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from agent_cascade.async_shell import _elapsed_for_task
 from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -383,12 +384,17 @@ class ShellCmd(BaseTool):
             # All AsyncShellTask shared state must be accessed under task._lock
             # (see async_shell.py line 245 for locking discipline documentation).
             with task._lock:
-                if task.completed:
-                    return (
-                        f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
-                        f"(exit code {task.return_code})."
-                    )
+                is_completed = task.completed
+                rc = task.return_code
 
+            if is_completed:
+                elapsed = _elapsed_for_task(task)
+                return (
+                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
+                    f"(exit code {rc}, elapsed {elapsed:.0f}s)."
+                )
+
+            with task._lock:
                 # Determine wait timeout based on the task's heartbeat_interval.
                 # When heartbeats are configured, wait up to that interval (capped at 60s).
                 # When no heartbeats (-1), use a default 30s so __wait still pauses meaningfully.
@@ -413,9 +419,10 @@ class ShellCmd(BaseTool):
                 elapsed = _time.time() - start_time
                 remaining = timeout - elapsed
                 if remaining <= 0:
+                    task_elapsed = _elapsed_for_task(task)
                     return (
                         f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
-                        f"(timeout after {timeout:.0f}s)."
+                        f"(timeout after {timeout:.0f}s, elapsed {task_elapsed:.0f}s)."
                     )
 
                 # Sleep briefly before next poll (use smaller interval near timeout)
@@ -424,12 +431,17 @@ class ShellCmd(BaseTool):
 
                 # Check task state
                 with task._lock:
-                    if task.completed:
-                        return (
-                            f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed "
-                            f"(exit code {task.return_code})."
-                        )
+                    is_completed = task.completed
+                    rc = task.return_code
 
+                if is_completed:
+                    task_elapsed = _elapsed_for_task(task)
+                    return (
+                        f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed "
+                        f"(exit code {rc}, elapsed {task_elapsed:.0f}s)."
+                    )
+
+                with task._lock:
                     # Collect new output since last check
                     new_stdout = list(task.stdout_lines[last_stdout_len:])
                     new_stderr = list(task.stderr_lines[last_stderr_len:])
@@ -441,7 +453,8 @@ class ShellCmd(BaseTool):
                     lines = new_stdout + new_stderr
                     output_text = '\n'.join(line.rstrip('\r\n') for line in lines)
                     truncated = ShellCmd._truncate_shell_message(output_text, agent_name, self.agent_pool)
-                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
+                    task_elapsed = _elapsed_for_task(task)
+                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} (elapsed {task_elapsed:.0f}s)\n{truncated}"
         else:
             # Send as stdin input to the running process
             return tracker.send_input(agent_name, tool_id, command) or f"Input sent [Tool ID: {tool_id}]."

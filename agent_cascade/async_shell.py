@@ -55,6 +55,20 @@ VIEWER_EXIT_WAIT_TIMEOUT = 1.5     # Allow viewer to flush final output before f
 KILL_WAIT_TIMEOUT = 5.0            # Give tracking thread time to detect kill flag and terminate process
 
 
+def _elapsed_for_task(task: Optional['AsyncShellTask']) -> float:
+    """Return seconds elapsed since task creation, read under the task lock.
+
+    Returns 0.0 when there is no task or no start_time. Safe to call from any
+    thread; the caller does NOT need to already hold ``task._lock`` (this helper
+    acquires it internally). Used by every shell_cmd reply that has a live or
+    completed task record so elapsed time is reported consistently.
+    """
+    if task is None:
+        return 0.0
+    with task._lock:
+        return time.time() - task.start_time
+
+
 def _send_windows_ctrl_c(pid: int) -> bool:
     """Send Ctrl+C to a Windows process using GenerateConsoleCtrlEvent via ctypes.
 
@@ -440,7 +454,7 @@ class AsyncShellTracker:
     def _format_output_text(lines: List[str]) -> str:
         """Filter empty lines and join into output text.
 
-        Used by both _send_heartbeat and _send_remaining_output to avoid duplication.
+        Used by both _send_heartbeat and _get_remaining_output_text to avoid duplication.
         """
         output_lines = [line for line in lines if line.strip()]
         return '\n'.join(output_lines) if output_lines else ''
@@ -764,16 +778,21 @@ class AsyncShellTracker:
                     f"tool_id={tool_id}, skipping all messages"
                 )
             else:
-                # Send any remaining output as final message
-                self._send_remaining_output(agent_name, tool_id, timed_out)
+                # Build a SINGLE merged completion message containing status + elapsed
+                # time + any remaining output. Previously this was two separate messages
+                # (a "final output" message followed by a "completed" message); merging
+                # them avoids the useless duplicate and keeps everything in one reply.
+                task = self._get_task(agent_name, tool_id)
+                header = self._build_completion_header(tool_id, task, timed_out=timed_out)
+                remaining_text = self._get_remaining_output_text(agent_name, tool_id)
+                msg = header if not remaining_text else f"{header}\n\nOutput:\n{remaining_text}"
 
-                # Send final result BEFORE marking completed
-                # Order matters: send_completion_message enqueues to message_queue via _enqueue().
-                # If we mark completed first, has_pending() returns False and a
-                # sleeping agent might miss the completion message. By sending first,
-                # the agent either sees the message in its queue (wakes up) or
-                # has_pending() still returns True (keeps sleeping).
-                self._send_completion_message(agent_name, tool_id, original_command, timed_out)
+                # Enqueue the merged message BEFORE the finally block removes the task
+                # from _tasks. Order matters: _enqueue() puts the message on the queue;
+                # if we cleaned up first, has_pending() would return False and a sleeping
+                # agent might miss it. A single enqueue before cleanup preserves the
+                # wake-up guarantee (has_pending stays True while the message is in flight).
+                self._enqueue(agent_name, msg)
 
         except Exception as e:
             logger.warning(
@@ -788,7 +807,7 @@ class AsyncShellTracker:
                 except Exception as kill_err:
                     logger.warning(f"[AsyncShell] Kill on track error failed for {agent_name} tool_id={tool_id}: {kill_err}")
             self._send_completion_message(
-                agent_name, tool_id, original_command,
+                agent_name, tool_id,
                 timed_out=False, error=str(e),
             )
             with task._lock:
@@ -1106,11 +1125,18 @@ class AsyncShellTracker:
         self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
-    def _send_remaining_output(self, agent_name: str, tool_id: int, timed_out: bool):
-        """Send any output not yet sent as heartbeats."""
+    def _get_remaining_output_text(self, agent_name: str, tool_id: int) -> Optional[str]:
+        """Return the not-yet-sent output text (truncated), or None if there is none.
+
+        Advances ``task.last_heartbeat_sent_pos`` under ``task._lock`` exactly as the
+        old ``_send_remaining_output`` did, so the same output is never re-sent by a
+        later heartbeat/status call. The returned text is truncated to 3x
+        shell_char_limit (mid-truncation with spillover). Does NOT enqueue anything —
+        callers assemble and send the final message themselves.
+        """
         task = self._get_task(agent_name, tool_id)
         if task is None:
-            return
+            return None
 
         # Read output + update position atomically under the same lock
         with task._lock:
@@ -1119,10 +1145,9 @@ class AsyncShellTracker:
             task.last_heartbeat_sent_pos = len(combined)
 
         if not remaining:
-            return
+            return None
 
         output_text = self._format_output_text(remaining)
-        line_count = len(output_text.split('\n'))
 
         # Truncate large remaining output using mid-truncation with spillover (3x shell_char_limit for final output)
         char_limit = self._get_shell_char_limit() * 3
@@ -1140,58 +1165,68 @@ class AsyncShellTracker:
             except Exception as e:
                 logger.debug(f"[AsyncShell] truncate_with_spillover failed in remaining output for {agent_name}: {e}")
 
-        if timed_out:
-            msg = (
-                f"⟨shell_cmd final output⟩ Tool ID: {tool_id} | "
-                f"{line_count} remaining line{'s' if line_count != 1 else ''}\n"
-                f"{output_text}"
-            )
-        else:
-            msg = (
-                f"⟨shell_cmd final output⟩ Tool ID: {tool_id} | "
-                f"{line_count} line{'s' if line_count != 1 else ''}\n"
-                f"{output_text}"
-            )
-
-        # Send remaining output via message queue (wakes sleeping agents)
-        self._enqueue(agent_name, msg)
+        return output_text or None
 
     # ────────────────────────────────────────────────────────────────
-    def _send_completion_message(
-        self, agent_name: str, tool_id: int, command: str,
+    def _build_completion_header(
+        self, tool_id: int, task: Optional['AsyncShellTask'],
         timed_out: bool = False, error: Optional[str] = None,
-    ):
-        """Send the final completion message to the agent."""
-        task = self._get_task(agent_name, tool_id)
+    ) -> str:
+        """Build the two-line completion header (no output) for a finished shell.
 
-        elapsed = time.time() - task.start_time if task and task.start_time else 0
+        Pure helper shared by the merged completion message (_track_task), the
+        standalone error path (_send_completion_message), and the early-completion
+        path in shell_cmd.py so the format cannot drift between call sites.
+
+        Formats:
+          - Normal : "⟨shell_cmd completed⟩ Tool ID: {id}\\nCompleted in {elapsed:.1f} s ({status})."
+          - Timeout: "⟨shell_cmd completed⟩ Tool ID: {id}\\nTimed out after {timeout}s ({elapsed:.1f}s total). All child processes terminated."
+          - Error  : "⟨shell_cmd completed⟩ Tool ID: {id}\\nError: {error} ({elapsed:.1f}s elapsed)."
+        """
+        elapsed = _elapsed_for_task(task)
 
         if timed_out and not error:
-            msg = (
+            timeout_val = task.timeout if task else '?'
+            return (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Timed out after {task.timeout if task else '?'} seconds. "
-                f"All child processes terminated.\n"
+                f"Timed out after {timeout_val}s ({elapsed:.1f}s total). "
+                f"All child processes terminated."
             )
         elif error:
-            msg = (
+            return (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Error: {error}\n"
+                f"Error: {error} ({elapsed:.1f}s elapsed)."
             )
         else:
-            rc = task.return_code if task else 0
+            rc = task.return_code if task and task.return_code is not None else 0
             if rc == -1:
                 status = "killed externally (via __kill)"
             elif rc == 0:
                 status = "success"
             else:
                 status = f"exit code {rc}"
-            msg = (
+            return (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Completed in {elapsed:.1f} s ({status}).\n"
+                f"Completed in {elapsed:.1f} s ({status})."
             )
 
+    # ────────────────────────────────────────────────────────────────
+    def _send_completion_message(
+        self, agent_name: str, tool_id: int,
+        timed_out: bool = False, error: Optional[str] = None,
+    ):
+        """Send the final completion message to the agent.
+
+        Used by the exception path in _track_task (error=...) and any caller that
+        wants a standalone completion message without merging output. The normal/
+        timeout completion path instead uses the merged single-message build in
+        _track_task so the agent sees one message, not two.
+        """
+        task = self._get_task(agent_name, tool_id)
+        header = self._build_completion_header(tool_id, task, timed_out=timed_out, error=error)
+
         # Send completion via message queue (wakes sleeping agents)
-        self._enqueue(agent_name, msg)
+        self._enqueue(agent_name, header)
 
     # ────────────────────────────────────────────────────────────────
     def _enqueue(self, agent_name: str, text: str):
@@ -1222,15 +1257,16 @@ class AsyncShellTracker:
         if task is None:
             return f"No running shell found for agent '{agent_name}' with tool_id {tool_id}."
 
+        elapsed = _elapsed_for_task(task)
         try:
             with task._lock:
                 proc = task.process
             if proc and proc.stdin:
                 proc.stdin.write(input_text + '\n')
                 proc.stdin.flush()
-                return f"Input sent to shell [Tool ID: {tool_id}, PID: {task.pid}]."
+                return f"Input sent to shell [Tool ID: {tool_id}, PID: {task.pid}] (elapsed {elapsed:.0f}s)."
             else:
-                return f"Shell stdin not available for tool_id {tool_id} (PID: {task.pid})."
+                return f"Shell stdin not available for tool_id {tool_id} (PID: {task.pid}) (elapsed {elapsed:.0f}s)."
         except Exception as e:
             return f"Failed to send input to tool_id {tool_id}: {e}"
 
@@ -1276,15 +1312,17 @@ class AsyncShellTracker:
                 with task._lock:
                     task.kill_in_progress = False
 
+                elapsed = _elapsed_for_task(task)
                 if proc.poll() is not None:
-                    return f"Shell killed [Tool ID: {tool_id}, PID: {pid}]."
+                    return f"Shell killed [Tool ID: {tool_id}, PID: {pid}] (elapsed {elapsed:.0f}s)."
                 else:
                     logger.warning(f"[AsyncShell] kill_task timed out waiting for PID {pid} to die")
-                    return f"Shell kill requested but process PID {pid} did not terminate within {KILL_WAIT_TIMEOUT}s."
+                    return f"Shell kill requested but process PID {pid} did not terminate within {KILL_WAIT_TIMEOUT}s (elapsed {elapsed:.0f}s)."
             else:
                 with task._lock:
                     rc = task.return_code
-                return f"Shell already finished [Tool ID: {tool_id}], return code: {rc or 0}."
+                elapsed = _elapsed_for_task(task)
+                return f"Shell already finished [Tool ID: {tool_id}], return code: {rc or 0} (elapsed {elapsed:.0f}s)."
         except Exception as e:
             return f"Failed to kill tool_id {tool_id}: {e}"
 
@@ -1309,7 +1347,8 @@ class AsyncShellTracker:
                 pid = task.pid
 
             if not proc or proc.poll() is not None:
-                return f"Shell already finished [Tool ID: {tool_id}]."
+                elapsed = _elapsed_for_task(task)
+                return f"Shell already finished [Tool ID: {tool_id}] (elapsed {elapsed:.0f}s)."
 
             if ON_WINDOWS:
                 # proc.send_signal(CTRL_C_EVENT) fails for cmd.exe commands running with
@@ -1322,7 +1361,8 @@ class AsyncShellTracker:
                 import signal as sig
                 os.killpg(os.getpgid(proc.pid), sig.SIGINT)
 
-            return f"Ctrl+C sent to shell [Tool ID: {tool_id}, PID: {pid}]."
+            elapsed = _elapsed_for_task(task)
+            return f"Ctrl+C sent to shell [Tool ID: {tool_id}, PID: {pid}] (elapsed {elapsed:.0f}s)."
         except Exception as e:
             return f"Failed to send Ctrl+C to tool_id {tool_id}: {e}"
 
@@ -1345,7 +1385,8 @@ class AsyncShellTracker:
         with task._lock:
             old = task.heartbeat_interval
             task.heartbeat_interval = new_interval
-        return f"Heartbeat interval updated from {old}s to {new_interval}s [Tool ID: {tool_id}]."
+        elapsed = _elapsed_for_task(task)
+        return f"Heartbeat interval updated from {old}s to {new_interval}s [Tool ID: {tool_id}] (elapsed {elapsed:.0f}s)."
 
     # ────────────────────────────────────────────────────────────────
     def get_status(self, agent_name: str, tool_id: int) -> Optional[str]:
@@ -1381,7 +1422,7 @@ class AsyncShellTracker:
         # Format status header
         if completed:
             rc = return_code if return_code is not None else "?"
-            status_label = f"completed (exit code {rc})"
+            status_label = f"completed (exit code {rc}, {elapsed:.0f}s)"
         else:
             status_label = f"running ({elapsed:.0f}s elapsed)"
         
