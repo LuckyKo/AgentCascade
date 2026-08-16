@@ -506,14 +506,38 @@ class AgentLifecycleManager:
                 # it blindly would LEAK that permit (the exact root cause of the 2026-08-16
                 # security-advisor slot deadlock). Releasing first is idempotent-safe: we
                 # nullify _slot_release BEFORE invoking so a concurrent release cannot double-fire.
-                if instance._slot_release is not None:
+                # The check-nullify-release must be atomic under _state_lock to match
+                # execution_engine._release_slot and avoid racing with a concurrent release.
+                if hasattr(instance, '_state_lock'):
+                    with instance._state_lock:
+                        if instance._slot_release is not None:
+                            logger.warning(
+                                f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
+                                f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
+                            )
+                            release_cb = instance._slot_release
+                            instance._slot_release = None
+                            instance._slot_key = None
+                            try:
+                                release_cb()
+                            except Exception as e:
+                                logger.error(
+                                    f"[SLOT_RELEASE_ERROR] Failed to release slot for "
+                                    f"{instance.instance_name} on reuse: {e}", exc_info=True
+                                )
+                        else:
+                            # Normal case: no live permit. Clear the stale key (defensive).
+                            instance._slot_key = None
+                elif instance._slot_release is not None:
+                    # Fallback for objects without _state_lock (shouldn't happen for AgentInstance).
                     logger.warning(
                         f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
                         f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
                     )
                     release_cb = instance._slot_release
                     instance._slot_release = None
-                    instance._slot_key = None
+                    if hasattr(instance, '_slot_key'):
+                        instance._slot_key = None
                     try:
                         release_cb()
                     except Exception as e:
@@ -521,9 +545,6 @@ class AgentLifecycleManager:
                             f"[SLOT_RELEASE_ERROR] Failed to release slot for "
                             f"{instance.instance_name} on reuse: {e}", exc_info=True
                         )
-                else:
-                    # Normal case: no live permit. Clear the stale key (defensive).
-                    instance._slot_key = None
 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always

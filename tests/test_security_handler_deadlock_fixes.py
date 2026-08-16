@@ -867,6 +867,108 @@ class TestActiveChecksCleanupOnLockTimeout:
             )
 
 
+class TestSlotYieldBeforeSecurityCheck:
+    """Tests that _execute_check unconditionally releases the caller's slot before
+    running the Security agent. No re-acquire — the next turn acquires naturally."""
+
+    def _make_pool_with_fast_engine(self):
+        """Pool + engine mock that yields an immediate [YES] verdict."""
+        pool = _make_minimal_pool()
+        app = _make_minimal_app()
+
+        template = MagicMock()
+        template.llm = MagicMock()
+        template.llm.generate_cfg = {}
+        pool.get_template.return_value = template
+
+        sec_instance_mock = MagicMock()
+        sec_instance_mock.conversation = [{"role": "assistant", "content": "[YES] Safe operation"}]
+
+        engine_instance = MagicMock()
+        engine_instance.run.return_value = iter([("[YES] Safe operation", False)])
+        engine_instance._create_system_agent.return_value = sec_instance_mock
+        engine_instance._telemetry.return_value = None
+        mock_engine_cls = MagicMock(return_value=engine_instance)
+
+        # Caller instance with a real _state_lock and a live slot release callback.
+        caller_inst = MagicMock()
+        caller_inst.agent_class = "Maine"
+        caller_inst.instance_name = "Maine"
+        caller_inst._state_lock = threading.Lock()
+        caller_inst._slot_release = lambda: None  # Simulates a held slot
+        caller_inst._slot_key = "http://test:8080"
+        pool.get_instance.return_value = caller_inst
+
+        return pool, app, mock_engine_cls, caller_inst
+
+    def test_release_slot_called_before_security_runs(self):
+        """_release_slot must be called on the caller before engine.run()."""
+        pool, app, mock_engine_cls, caller_inst = self._make_pool_with_fast_engine()
+        engine_instance = mock_engine_cls.return_value
+
+        session = {"session_name": "Maine", "generate_cfg": {}}
+        send_queue = MagicMock()
+        handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
+        ap = {
+            "request_id": "test_rid_release",
+            "tool_name": "shell_cmd",
+            "description": "test",
+            "tool_args": {},
+            "agent_name": "Maine",
+        }
+
+        with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.5):
+            with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
+                handler._execute_check(
+                    ap=ap, sec_inst=None, rid="test_rid_release", auto_apply=True,
+                    instance_name="Maine", caller_agent="Maine",
+                    prompt_template="Test {tool_name}",
+                    timeout_seconds=3600, warning_seconds=2400,
+                )
+
+        # _release_slot must have been called (static method on engine class).
+        assert engine_instance._release_slot.called, (
+            "_release_slot should be called to free the caller's slot before Security runs"
+        )
+        # No reacquire_for call — the next turn acquires naturally.
+        assert not engine_instance.reacquire_for.called, (
+            "reacquire_for should NOT be called — next turn acquires its own slot"
+        )
+
+    def test_release_slot_noop_when_no_callback(self):
+        """When caller has no _slot_release (None), _release_slot is still called but
+        is a safe no-op internally (checks for None before releasing)."""
+        pool, app, mock_engine_cls, caller_inst = self._make_pool_with_fast_engine()
+        engine_instance = mock_engine_cls.return_value
+
+        # No slot held
+        caller_inst._slot_release = None
+        caller_inst._slot_key = None
+
+        session = {"session_name": "Maine", "generate_cfg": {}}
+        send_queue = MagicMock()
+        handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
+        ap = {
+            "request_id": "test_rid_noslot",
+            "tool_name": "shell_cmd",
+            "description": "test",
+            "tool_args": {},
+            "agent_name": "Maine",
+        }
+
+        with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.5):
+            with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
+                handler._execute_check(
+                    ap=ap, sec_inst=None, rid="test_rid_noslot", auto_apply=True,
+                    instance_name="Maine", caller_agent="Maine",
+                    prompt_template="Test {tool_name}",
+                    timeout_seconds=3600, warning_seconds=2400,
+                )
+
+        # _release_slot is still called (unconditional) but handles None gracefully.
+        assert engine_instance._release_slot.called
+
+
 class TestLeakedLockRecoveryEndToEnd:
     """End-to-end integration test for the leaked-lock recovery path in _execute_check.
 
