@@ -5150,19 +5150,16 @@ class ExecutionEngine:
         )
 
         # ── System message + skills handling (todo.md:115 fix) ───────────────
-        # load_skill only applies to NEW instances. On recall/reuse of an existing
-        # idle agent we must NOT rebuild or modify the SYSTEM prompt in any way —
-        # doing so both (a) dropped Self-Augmentation when a recall passed
-        # load_skill="NONE", and (b) mutated the system prompt on every recall,
-        # breaking prefix caching. So for reuse we keep the existing conversation[0]
-        # verbatim and IGNORE the load_skill argument entirely.
-        # A "recall" is a plain reuse of an existing idle agent. It must NOT be an
-        # external load (log_file restore): when both an idle instance exists AND a
-        # log_file is provided, find_or_create_instance returns is_reuse=True AND
-        # session_was_loaded=True — that is a RESTORED session (a fresh conversation),
-        # not a recall, so it must still build + inject skills (Self-Augmentation).
+        # load_skill applies only to NEW instances / external loads. On recall of an
+        # existing idle agent we keep conversation[0] verbatim and ignore load_skill,
+        # so the system prompt is never mutated on recall (preserves prefix cache).
+        # A recall must NOT be an external load (log_file restore): that returns
+        # is_reuse=True AND session_was_loaded=True and still needs build + skill injection.
         _is_recall = is_reuse and not session_was_loaded and bool(inst.conversation) \
             and getattr(inst.conversation[0], 'role', None) == SYSTEM
+        task_text = args.get('task', '')
+        skill_manager = getattr(self.pool, 'skill_manager', None)
+        context_text = args.get('context', '')   # only used in else branch for resolve_load_skill
         if _is_recall:
             # Reuse path: preserve existing system message byte-for-byte. Pass the
             # EXISTING conversation[0] as sys_msg so initialize_conversation's
@@ -5174,10 +5171,6 @@ class ExecutionEngine:
                 "skipping rebuild + skill injection (load_skill ignored on recall)",
                 instance_name,
             )
-            # task_text / skill_manager are still needed downstream (auto-skill
-            # proposal), so resolve them here but WITHOUT injecting into sys_msg.
-            task_text = args.get('task', '')
-            skill_manager = getattr(self.pool, 'skill_manager', None)
         else:
             # New instance OR external load (session restored from log_file) OR a
             # defensive fallback when a reused instance has no valid system message.
@@ -5187,9 +5180,7 @@ class ExecutionEngine:
             sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
             # ── Skills System: Resolve load_skill and inject into sys_msg ─────
-            task_text = args.get('task', '')
-            context_text = args.get('context', '')
-            skill_manager = getattr(self.pool, 'skill_manager', None)
+            # (task_text / context_text / skill_manager hoisted above the branch)
 
             # GLOBAL "Enable skills" setting (UI toggle → pool.settings.
             # default_load_skill_mode: 'AUTO'=ON, 'NONE'=OFF). This is the single

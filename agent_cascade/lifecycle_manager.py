@@ -508,10 +508,7 @@ class AgentLifecycleManager:
                 if instance.conversation and len(instance.conversation) > 0:
                     old_sys_msg = instance.conversation[0]
 
-                    # Recall no-op (todo.md:115): on recall the caller passes the
-                    # EXISTING conversation[0] back as sys_msg. If it's the same object
-                    # or has identical content, skip edit_message_in_place entirely so
-                    # we don't invalidate the working-set / prefix caches for no reason.
+                    # Recall no-op: if system message unchanged, skip edit to preserve prefix cache.
                     if (sys_msg is old_sys_msg) or \
                             (getattr(sys_msg, 'role', None) == getattr(old_sys_msg, 'role', None)
                              and sys_msg.content == old_sys_msg.content):
