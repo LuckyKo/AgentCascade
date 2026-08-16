@@ -87,6 +87,9 @@ config/pool_settings*.json
 # Agent lessons
 .agent_lessons/ 
 
+# Local todo list (personal, not shared)
+todo.md
+
 # Playback data (large JSONL files)
 playback/ 
 
