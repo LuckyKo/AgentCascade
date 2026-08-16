@@ -442,7 +442,36 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # When full, the oldest pending stream_update is dropped (put_nowait raises QueueFull).
     # Non-stream events (state, done, dismissal) still get priority via regular put().
     # Increased from 32 to 128 to reduce dropped updates during heavy multi-agent activity.
-    send_queue: asyncio.Queue = asyncio.Queue(maxsize=128)
+    #
+    # IMPORTANT: created lazily per event loop (see _get_send_queue below). asyncio.Queue
+    # binds itself to the running loop at construction time, so creating it eagerly here
+    # would bind it to whichever loop happens to be active when create_app() is called.
+    # Under FastAPI TestClient each `with` block runs a *fresh* portal event loop, so an
+    # eagerly-created queue becomes "bound to a different event loop" on the 2nd+ open and
+    # _sender_loop then busy-spins forever (see [[api-testclient-send-queue-event-loop-hang]]).
+    _send_queue: Optional[asyncio.Queue] = None
+
+    def _get_send_queue(loop=None) -> asyncio.Queue:
+        """Return the send queue bound to ``loop`` (or the running loop), creating it on demand.
+
+        Keyed by event loop so a new TestClient portal (a fresh loop) gets its own queue instead of
+        reusing one bound to a previous, now-dead loop — that stale binding made _sender_loop throw
+        "Queue is bound to a different event loop" every iteration and busy-spin forever.
+
+        ``loop`` may be passed explicitly (callers running on a worker thread have no running loop,
+        so they pass the portal loop captured at request time). When omitted it falls back to the
+        currently-running loop. A queue is created lazily against the first loop that requests one.
+        """
+        nonlocal _send_queue
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop (worker thread): reuse the most recently created queue.
+                return _send_queue
+        if _send_queue is None or getattr(_send_queue, "_loop", None) is not loop:
+            _send_queue = asyncio.Queue(maxsize=128)
+        return _send_queue
 
     def get_active_stack():
         if agent_pool and hasattr(agent_pool, 'active_stack'):
@@ -705,7 +734,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 instance_name=instance_name,
                 system_message_content=system_message_content,
                 ui_cfg=ui_cfg,
-                send_queue=send_queue,
+                send_queue=_get_send_queue(loop),
                 loop=loop,
             )
         finally:
@@ -718,6 +747,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.on_event("startup")
     async def startup():
+        # Create the send queue against THIS loop before spawning the sender task so it is
+        # bound to the correct (current) event loop, not a stale one from create_app() time.
+        _get_send_queue()
         asyncio.create_task(_sender_loop())
         asyncio.create_task(_approval_loop())
         
@@ -731,19 +763,25 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 and UI-initiated (via terminate_agent_instance handler).
                 """
                 ws_loop = getattr(agent_pool, '_ws_loop', None)
-                if ws_loop and not ws_loop.is_closed() and send_queue:
+                # Pass ws_loop explicitly: this callback runs from a worker thread with no
+                # running loop, so omitting the arg would fall back to "most recently created"
+                # queue, which may be bound to a DIFFERENT loop than ws_loop — reproducing the
+                # "Queue is bound to a different event loop" error this fix prevents.
+                _sq = _get_send_queue(ws_loop) if ws_loop else None
+                if ws_loop and not ws_loop.is_closed() and _sq:
                     try:
                         msg = {'type': 'dismissal', 'instance_name': instance_name}
-                        asyncio.run_coroutine_threadsafe(send_queue.put(msg), ws_loop)
+                        asyncio.run_coroutine_threadsafe(_sq.put(msg), ws_loop)
                     except Exception as e:
                         logger.debug(f"Dismissal callback failed (non-critical): {e}")
                 else:
-                    logger.warning(f"Dismissal broadcast skipped for {instance_name}: ws_loop={ws_loop}, closed={ws_loop.is_closed() if ws_loop else 'N/A'}, queue={'yes' if send_queue else 'no'}")
+                    logger.warning(f"Dismissal broadcast skipped for {instance_name}: ws_loop={ws_loop}, closed={ws_loop.is_closed() if ws_loop else 'N/A'}, queue={'yes' if _sq else 'no'}")
             
             agent_pool.on_dismissed(_on_dismiss_callback)
 
     async def _sender_loop():
         """Global loop: reads from send_queue → broadcasts to all clients."""
+        send_queue = _get_send_queue()
         while True:
             try:
                 data = await send_queue.get()
@@ -1179,7 +1217,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
                 # ── Dispatch to WsMessageHandler (Phase 2 wiring) ───────────
                 handler = WsMessageHandler(
-                    session=session, agent_pool=agent_pool, agents=agents, send_queue=send_queue,
+                    session=session, agent_pool=agent_pool, agents=agents, send_queue=_get_send_queue(),
                     broadcast_fn=broadcast, build_state_fn=build_state, start_gen_fn=start_gen,
                     session_lock=session_lock, app=app,
                 )

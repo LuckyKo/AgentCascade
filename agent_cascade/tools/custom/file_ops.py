@@ -711,7 +711,7 @@ class WriteFile(BaseTool, PathResolutionMixin):
                 return self.agent_pool.operation_manager.write_file(
                     path=path,
                     content=content,
-                    agent_name=self.agent_name,
+                    agent_name=self._get_agent_name(kwargs),
                     justification="",  # Non-JSON fallback: no justification available from LLM
                 )
 
@@ -727,10 +727,11 @@ class WriteFile(BaseTool, PathResolutionMixin):
         if isinstance(content, str) and content.strip().startswith('```'):
             content = extract_code(content)
 
+        agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.write_file(
             path=path,
             content=content,
-            agent_name=self.agent_name,
+            agent_name=agent_name,
             justification=justification,
         )
 
@@ -833,9 +834,10 @@ class EditFile(BaseTool, PathResolutionMixin):
             if new_content is None:
                 return "ERROR: Missing 'new_content'. Please provide the text you want to replace old_content with."
 
+        agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.edit_file(
             path=path,
-            agent_name=self.agent_name,
+            agent_name=agent_name,
             old_content=old_content,
             new_content=new_content,
             match_mode=match_mode,
@@ -932,7 +934,7 @@ class ListDir(BaseTool):
                 except (ValueError, TypeError):
                     pass
 
-        agent_name = kwargs.get('agent_instance_name', 'unknown')
+        agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.list_directory(
             path, recursive=recursive, max_depth=max_depth,
             include=include, exclude=exclude, sort_by=sort_by,
@@ -1023,7 +1025,7 @@ class Grep(BaseTool):
         elif self.cfg.get('grep_char_limit'):
             char_limit = self.cfg.get('grep_char_limit')
 
-        agent_name = kwargs.get('agent_instance_name', 'unknown')
+        agent_name = self._get_agent_name(kwargs)
         spill_file_path = kwargs.get('spill_file_path')  # Pre-computed by orchestrator
         return self.agent_pool.operation_manager.grep(
             pattern, path, include,
@@ -1071,7 +1073,8 @@ class DeleteFile(BaseTool):
         params = self._verify_json_format_args(params)
         path = params['path']
         justification = params.get('justification', '')
-        return self.agent_pool.operation_manager.delete_file(path, self.agent_name, justification=justification)
+        agent_name = self._get_agent_name(kwargs)
+        return self.agent_pool.operation_manager.delete_file(path, agent_name, justification=justification)
 
 
 @register_tool('copy_file', allow_overwrite=True)
@@ -1112,7 +1115,8 @@ class CopyFile(BaseTool):
         source = params['source']
         destination = params['destination']
         justification = params.get('justification', '')
-        return self.agent_pool.operation_manager.copy_file(source, destination, self.agent_name, justification=justification)
+        agent_name = self._get_agent_name(kwargs)
+        return self.agent_pool.operation_manager.copy_file(source, destination, agent_name, justification=justification)
 
 
 @register_tool('re_indent', allow_overwrite=True)
@@ -1188,9 +1192,10 @@ class ReIndent(BaseTool):
         if mode not in VALID_MODES:
             return f"ERROR: 'mode' must be one of {VALID_MODES}. Got '{mode}'."
 
+        agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.re_indent(
             path=path,
-            agent_name=self.agent_name,
+            agent_name=agent_name,
             lines=lines,
             indent=indent,
             indent_type=type_,  # FIX 6: Changed from type= to indent_type=

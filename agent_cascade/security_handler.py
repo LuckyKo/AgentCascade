@@ -274,14 +274,13 @@ class SecurityAdvisorHandler:
         auto_apply = data.get('auto_apply', False)
 
         if not rid:
-            ap_list = pending
+            ap = pending[0] if pending else None
         else:
-            ap_list = next((a for a in pending if a.get('request_id') == rid), None)
+            ap = next((a for a in pending if a.get('request_id') == rid), None)
 
-        if not ap_list:
+        if not ap:
             return
 
-        ap = ap_list  # Check the first matching approval
         rid = ap['request_id']
 
         # Resolve the true caller from the approval (the agent that requested the tool).

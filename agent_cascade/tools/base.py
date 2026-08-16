@@ -135,6 +135,15 @@ class BaseTool(ABC):
         """
         raise NotImplementedError
 
+    def _get_agent_name(self, kwargs: dict) -> str:
+        """Resolve runtime agent instance name from tool call kwargs or instance attribute."""
+        return (
+            kwargs.get('agent_instance_name')
+            or kwargs.get('agent_name')
+            or getattr(self, 'agent_name', None)
+            or 'unknown'
+        )
+
     def _verify_json_format_args(self, params: Union[str, dict], strict_json: bool = False) -> dict:
         """Verify the parameters of the function call.
 

@@ -2685,8 +2685,14 @@ class AgentPool:
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id, child_instance_name=child_instance_name)
         
         # NOTE: Slot acquisition happens later when the child agent actually runs,
-        # not at spawn time. Spawn just registers the async task. Sync children run
-        # inline on parent's thread and inherit its permit via Rule 4 (no separate slot needed).
+        # not at spawn time. Spawn just registers the async task.
+        #
+        # DESIGN GOAL (2026-08-16): There is NO slot borrowing/inheritance. Every agent
+        # meters against its OWN resolved endpoint pool. Sync children run inline on the
+        # parent's thread, but they do NOT inherit the parent's permit — the parent
+        # RELEASES its slot (tool_dispatcher._run_child_sync) and the child acquires its
+        # own via engine.run(). The old "Rule 4: sync children inherit parent's permit"
+        # behavior was removed in the Stage 3/4 slot consolidation.
 
     # ── Pause/Resume state management ───────────────────────────────────────
 
