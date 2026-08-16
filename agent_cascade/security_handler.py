@@ -22,8 +22,11 @@ from typing import Any, Dict, Optional
 # governs the "taking longer than expected" warning.
 
 # Timeout for acquiring the security check lock.
-# Prevents permanent block if previous check crashed without releasing.
-SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = 10
+# Security checks are FIFO-serialized via this global lock — a waiting check must
+# wait as long as the previous one legitimately runs (up to ~300s first-yield + turns).
+# Set well beyond max legitimate hold time so concurrent requests queue properly.
+# The ResettableRLock dead-holder detection still recovers from truly leaked locks.
+SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = int(os.getenv('QWEN_AGENT_SECURITY_LOCK_ACQUIRE_TIMEOUT', 600))
 
 # Last-resort guard against an LLM generator that never yields its first token.
 # The engine watchdog only activates after the first output; this timer covers the
