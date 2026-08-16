@@ -538,7 +538,22 @@ class TestWebSocket:
             assert data["generating"] is False, "After reset, generating should be False"
 
     def test_ws_send_message_queues_it(self, client_no_exceptions):
-        """Send a 'message' via WebSocket; verify it appears in queued_messages."""
+        """Send a 'message' via WebSocket; verify the server accounted for it.
+
+        Reset session state first: the shared ``test_app``/pool instance is reused
+        across this class, and a prior test can leave ``session['generating']=True``.
+        Without resetting, that stale flag changes which code path the server takes
+        (enqueue-and-return vs. enqueue+start-generation), making the outcome depend
+        on cross-test pollution instead of verifying real behavior.
+
+        After sending from a known-idle state, the message is either still sitting in
+        ``queued_messages`` or has already been drained into the instance conversation
+        by the generation thread (both are valid "server accepted the message" outcomes).
+        We assert it is accounted for in at least one of those places — this verifies the
+        specific text we sent actually reached the server, without racing the consumer.
+        """
+        client_no_exceptions.post("/api/reset")
+
         with client_no_exceptions.websocket_connect("/ws/chat", timeout=self.WS_TIMEOUT) as ws:
             ws.receive_json()  # initial state
 
@@ -546,13 +561,34 @@ class TestWebSocket:
             ws.send_json({"type": "message", "text": test_text})
 
             data = ws.receive_json()
-            assert isinstance(data, dict)
-            # Verify message was queued or processing started
-            if data.get("type") == "state":
-                queued = data.get("queued_messages", [])
-                found = any(test_text in str(m) for m in queued) if queued else False
-                assert found or not data.get("generating", True), \
-                    "Message should be queued or generation started"
+            assert isinstance(data, dict), "Server should respond with JSON after sending a message"
+            if data.get("type") != "state":
+                return  # non-state response; nothing to inspect
+
+            # 1) Still pending in the queue?
+            queued = data.get("queued_messages", []) or []
+            in_queue = any(test_text in str(m) for m in queued)
+
+            # 2) Already consumed into the instance conversation?
+            in_conversation = False
+            for inst_data in (data.get("agent_instances", {}) or {}).values():
+                msgs = inst_data.get("messages", []) or []
+                if any(test_text in str(m) for m in msgs):
+                    in_conversation = True
+                    break
+
+            # 3) Generation started (message was dequeued and handed to the engine,
+            #    but not yet visible in the instance conversation due to thread timing).
+            #    This is a valid "server accepted the message" outcome: the queue is
+            #    empty AND generating=True means the server drained our message and
+            #    began processing it. We cannot race the consumer to see it in the
+            #    conversation, so we accept the state transition as proof of receipt.
+            generation_started = (not in_queue) and data.get("generating") is True
+
+            assert in_queue or in_conversation or generation_started, \
+                f"Message {test_text!r} was neither queued nor consumed into the conversation " \
+                f"and generation did not start. queued_messages={queued}, " \
+                f"generating={data.get('generating')}"
 
     def test_ws_send_select_agent_no_crash(self, client_no_exceptions):
         """Send 'select_agent' via WebSocket; verify selected_agent_index in response."""

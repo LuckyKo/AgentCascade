@@ -51,17 +51,25 @@ class TestViewImageDirectiveRouting:
             with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
                 with patch('os.close'):
                     with patch('builtins.open', mock_open()):
-                        result = view_image_tool.call(json.dumps({'path': directive}))
+                        # This test verifies DIRECTIVE ROUTING (which capture func is called
+                        # with which args), not image decoding. The fake PNG bytes are not a
+                        # real image, so stub the media-save step to keep routing isolated
+                        # from PIL's format validation (see test_temp_file_created_for_capture).
+                        with patch(
+                            'agent_cascade.tools.custom.file_ops.save_image_to_media',
+                            return_value='C:/logs/media/images/img_20260101_120000_abcd.jpg'
+                        ):
+                            result = view_image_tool.call(json.dumps({'path': directive}))
 
-                        if expected_pid is not None:
-                            mock_capture.assert_called_once_with(expected_pid)
-                        else:
-                            mock_capture.assert_called_once()
-                        assert isinstance(result, list)
-                        # First item is ContentItem(image=...), second is ContentItem(text=...)
-                        assert len(result) == 2
-                        assert 'image' in result[0].__dict__
-                        assert text_contains in result[1].text
+                            if expected_pid is not None:
+                                mock_capture.assert_called_once_with(expected_pid)
+                            else:
+                                mock_capture.assert_called_once()
+                            assert isinstance(result, list)
+                            # First item is ContentItem(image=...), second is ContentItem(text=...)
+                            assert len(result) == 2
+                            assert 'image' in result[0].__dict__
+                            assert text_contains in result[1].text
 
     @pytest.mark.parametrize("directive,expected_monitor_index,text_contains", [
         ("__screen_capture:0", 0, "Viewing image: __screen_capture:0"),
@@ -80,13 +88,20 @@ class TestViewImageDirectiveRouting:
             with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
                 with patch('os.close'):
                     with patch('builtins.open', mock_open()):
-                        result = view_image_tool.call(json.dumps({'path': directive}))
+                        # Verify DIRECTIVE ROUTING (capture_screen called with the right
+                        # monitor_index), not image decoding. Stub the media-save step since
+                        # the fake PNG bytes are not a real image (see sibling test).
+                        with patch(
+                            'agent_cascade.tools.custom.file_ops.save_image_to_media',
+                            return_value='C:/logs/media/images/img_20260101_120000_abcd.jpg'
+                        ):
+                            result = view_image_tool.call(json.dumps({'path': directive}))
 
-                        mock_capture.assert_called_once_with(monitor_index=expected_monitor_index)
-                        assert isinstance(result, list)
-                        assert len(result) == 2
-                        assert 'image' in result[0].__dict__
-                        assert text_contains in result[1].text
+                            mock_capture.assert_called_once_with(monitor_index=expected_monitor_index)
+                            assert isinstance(result, list)
+                            assert len(result) == 2
+                            assert 'image' in result[0].__dict__
+                            assert text_contains in result[1].text
 
     def test_invalid_screen_capture_monitor_index(self, view_image_tool):
         """Paths like '__screen_capture:-1', '__screen_capture:abc', '__screen_capture:' return error messages."""
@@ -277,14 +292,14 @@ class TestScreenCaptureModule:
         with patch.dict(sys.modules, {'mss': MagicMock(mss=MagicMock(return_value=mock_mss_context))}):
             with patch.object(screen_capture.Image, 'frombytes', return_value=mock_image_frombytes):
                 with patch.object(screen_capture.io, 'BytesIO', return_value=mock_buf):
-                    # Test monitor index 1 (first physical monitor)
+                    # Test monitor index 1 (second physical monitor; 0-based, so +1 -> mss monitors[2])
                     result = screen_capture.capture_screen(monitor_index=1)
 
                     # ImageGrab should NOT be called when monitor_index is specified
                     import mss as mocked_mss
                     mocked_mss.mss.assert_called_once()
-                    # Should grab monitor[1], not monitor[0]
-                    mock_mss_instance.grab.assert_called_once_with(mock_mss_instance.monitors[1])
+                    # Physical index 1 maps to mss monitors[2] (monitors[0]=combined, [1]=first physical)
+                    mock_mss_instance.grab.assert_called_once_with(mock_mss_instance.monitors[2])
                     assert isinstance(result, bytes)
 
     def test_capture_screen_per_monitor_out_of_range(self):

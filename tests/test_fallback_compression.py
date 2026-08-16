@@ -10,6 +10,8 @@ All tests are self-contained — no LLM or API server required.
 """
 
 import os
+import shutil
+import tempfile
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -160,34 +162,46 @@ class TestAPIRouterFallbackBehavior:
         """Create a minimal mock pool and real APIRouter instance with proper setup."""
         from agent_cascade.api_router import APIRouter, APIEndpoint
 
-        # Use isolated config dir to avoid touching production files
-        test_config_dir = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR") or "/tmp/test_api_router_config"
-        os.makedirs(test_config_dir, exist_ok=True)
+        # Always use a fresh isolated dir per router instance to prevent cross-test
+        # contamination: the session-level conftest fixture shares ONE config dir across
+        # all tests in a worker, so another test can write corrupted agent_priorities to
+        # it before this test runs. CRITICAL: APIRouter.__init__ prioritizes the
+        # AGENT_CASCADE_TEST_CONFIG_DIR env var over the config_dir argument, so we must
+        # override the env var (not just pass config_dir) for router construction.
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_api_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            pool = MagicMock()
+            pool.terminated_instances = set()
+            # _check_termination() calls this; default MagicMock return is truthy and would
+            # spuriously raise AgentTerminatedError during interruptible backoff sleeps.
+            pool.is_instance_terminated.return_value = False
 
-        pool = MagicMock()
-        pool.terminated_instances = set()
-        # _check_termination() calls this; default MagicMock return is truthy and would
-        # spuriously raise AgentTerminatedError during interruptible backoff sleeps.
-        pool.is_instance_terminated.return_value = False
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
 
-        router = APIRouter(
-            default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
-            config_dir=test_config_dir,
-        )
+            # Set up the _pool back-reference (same as AgentPool does)
+            router._pool = pool
 
-        # Set up the _pool back-reference (same as AgentPool does)
-        router._pool = pool
+            # Add a test endpoint that we can use in fallback chains
+            ep = APIEndpoint(
+                name="test-endpoint",
+                api_base="http://test:8080/v1",
+                model="test-model",
+                max_retries=0,  # No retries — fail fast for tests
+            )
+            router.add_endpoint(ep)
 
-        # Add a test endpoint that we can use in fallback chains
-        ep = APIEndpoint(
-            name="test-endpoint",
-            api_base="http://test:8080/v1",
-            model="test-model",
-            max_retries=0,  # No retries — fail fast for tests
-        )
-        router.add_endpoint(ep)
-
-        return router, pool
+            return router, pool
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
 
     def test_non_compressor_raises_fallback_compression_required(self):
         """Non-Compressor agent with context-exceeded error raises FallbackCompressionRequired from real router code."""
@@ -688,33 +702,42 @@ class TestFallbackCompressionIntegration:
         """End-to-end flow using real APIRouter: context-exceeded → FallbackCompressionRequired."""
         from agent_cascade.api_router import APIRouter, APIEndpoint
 
-        test_config_dir = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR") or "/tmp/test_integration_config"
-        os.makedirs(test_config_dir, exist_ok=True)
+        # Always use a fresh isolated dir per router instance (see _make_pool_and_router note).
+        # Override the env var too — APIRouter.__init__ prioritizes it over config_dir.
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_integration_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            pool = MagicMock()
+            pool.terminated_instances = set()
 
-        pool = MagicMock()
-        pool.terminated_instances = set()
-
-        router = APIRouter(
-            default_llm_cfg={"model": "default", "api_base": "http://localhost:1234/v1"},
-            config_dir=test_config_dir,
-        )
-        router._pool = pool
-
-        ep = APIEndpoint(name="test", api_base="http://test:8080/v1", model="test-model", max_retries=0)
-        router.add_endpoint(ep)
-
-        def failing_call(llm_cfg, *args, **kwargs):
-            raise RuntimeError("prompt is too long")
-
-        with pytest.raises(FallbackCompressionRequired) as exc_info:
-            router.call_with_fallback(
-                agent_type="Coder",
-                call_fn=failing_call,
-                agent_instance_name="coder1",
+            router = APIRouter(
+                default_llm_cfg={"model": "default", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
             )
+            router._pool = pool
 
-        assert exc_info.value.instance_name == "coder1"
-        assert exc_info.value.agent_type == "Coder"
+            ep = APIEndpoint(name="test", api_base="http://test:8080/v1", model="test-model", max_retries=0)
+            router.add_endpoint(ep)
+
+            def failing_call(llm_cfg, *args, **kwargs):
+                raise RuntimeError("prompt is too long")
+
+            with pytest.raises(FallbackCompressionRequired) as exc_info:
+                router.call_with_fallback(
+                    agent_type="Coder",
+                    call_fn=failing_call,
+                    agent_instance_name="coder1",
+                )
+
+            assert exc_info.value.instance_name == "coder1"
+            assert exc_info.value.agent_type == "Coder"
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
 
     def test_compressor_window_safety_factor_applied(self):
         """Compressor window uses safety factor to reserve overhead tokens."""
@@ -743,20 +766,30 @@ class TestFallbackCompressionIntegration:
         """Verify _is_context_exceeded_error behavior using real APIRouter method."""
         from agent_cascade.api_router import APIRouter
 
-        # Create minimal router just to access the static method
-        test_config_dir = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR") or "/tmp/test_ctx_config"
-        os.makedirs(test_config_dir, exist_ok=True)
-        router = APIRouter(
-            default_llm_cfg={"model": "default", "api_base": "http://localhost:1234/v1"},
-            config_dir=test_config_dir,
-        )
+        # Create minimal router just to access the static method.
+        # Always use a fresh isolated dir per router instance (see _make_pool_and_router note).
+        # Override the env var too — APIRouter.__init__ prioritizes it over config_dir.
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_ctx_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            router = APIRouter(
+                default_llm_cfg={"model": "default", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
 
-        # Test with real ContextWindowExceeded
-        assert router._is_context_exceeded_error(ContextWindowExceeded("test"))
+            # Test with real ContextWindowExceeded
+            assert router._is_context_exceeded_error(ContextWindowExceeded("test"))
 
-        # Test with matching error strings (generic patterns)
-        assert router._is_context_exceeded_error(RuntimeError("prompt is too long"))
-        assert router._is_context_exceeded_error(RuntimeError("input tokens exceed limit"))
+            # Test with matching error strings (generic patterns)
+            assert router._is_context_exceeded_error(RuntimeError("prompt is too long"))
+            assert router._is_context_exceeded_error(RuntimeError("input tokens exceed limit"))
 
-        # Test non-matching error
-        assert not router._is_context_exceeded_error(RuntimeError("connection timeout"))
+            # Test non-matching error
+            assert not router._is_context_exceeded_error(RuntimeError("connection timeout"))
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)

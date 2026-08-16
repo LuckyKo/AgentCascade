@@ -105,8 +105,21 @@ class TestTerminateIdempotency:
         ACTIVE_STATES → TERMINATED; IDLE sets flag but no transition; TERMINATED is no-op.
         """
         inst = make_instance("w1", state=initial_state)
-        # Track whether _transition was called
-        with patch.object(inst, '_transition') as mock_trans:
+        # Track whether _transition was called. Patch the CLASS (not the instance):
+        # AgentInstance is @dataclass(slots=True), so instances have no __dict__ and
+        # patching an instance attribute raises AttributeError ('...is read-only').
+        # terminate() calls self._transition(...), which resolves to the class method,
+        # so a class-level mock observes the call with the same arguments.
+        # A MagicMock in the class dict is not a descriptor, so it is invoked as
+        # _transition(new_state) (no self). We add a side_effect that applies the REAL
+        # transition to this specific instance, so both assertions hold: the mock
+        # records the requested transition AND inst.state actually changes.
+        real_transition = AgentInstance._transition
+
+        def _spy(new_state):
+            real_transition(inst, new_state)
+
+        with patch.object(AgentInstance, '_transition', side_effect=_spy) as mock_trans:
             inst.terminate()
             if should_transition:
                 mock_trans.assert_called_once_with(AgentState.TERMINATED)

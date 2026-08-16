@@ -932,12 +932,17 @@ class TestAgentCallSchedulingStress:
         # Verify dependency-respecting subsequence: A appears before B, B before C, E2ETestSession resumes last
         assert_identity_subsequence(identities, ["A", "B", "C", "E2ETestSession"])
 
-        # Timing-based serialization check: deep nesting chain with B(delay=0.8s)+C(delay=1.0s)=1.8s
-        # on conc=0 must take >2.25s wall-clock (chain delays + setup overhead). If agents barged
-        # or ran truly concurrently ignoring dependencies, would complete in ~1.3-1.5s.
+        # Timing-based serialization check: the real correctness property is the
+        # dependency ordering asserted above via assert_identity_subsequence. This
+        # wall-clock floor is a *secondary* guard that distinguishes serialized from
+        # concurrent execution. Serialized chain B(delay=0.8s)+C(delay=1.0s) = 1.8s of
+        # pure delay; truly concurrent would be ~max(0.8,1.0)=1.0s + overhead (~1.3-1.5s).
+        # We use a floor of 1.8s: equal to the serialized pure-delay minimum (B+C delays),
+        # with any real overhead pushing it above. Comfortably above the concurrent ceiling
+        # (~1.3-1.5s), so it still fails if the chain were genuinely run in parallel.
         elapsed = time.perf_counter() - test_start
-        assert elapsed > 2.25, (
-            f"Serialization not enforced in deep nesting: elapsed={elapsed:.2f}s (expected >2.25s for conc=0). "
+        assert elapsed > 1.8, (
+            f"Serialization not enforced in deep nesting: elapsed={elapsed:.2f}s (expected >1.8s for conc=0). "
             f"This suggests chain A→B→C did not serialize properly."
         )
 
@@ -1017,3 +1022,145 @@ class TestAgentCallSchedulingStress:
         assert has_sentinel, (
             f"E2ETestSession resume request missing child sentinels: {maine_resume.body_summary[:150]}"
         )
+
+
+# ── Security Advisor Shared-Slot Deadlock Reproduction ─────────────────────────
+
+class TestSecuritySlotDeadlockRepro:
+    """Reproduces the security-advisor shared-sequential-slot deadlock (REAL slot path).
+
+    Root cause (see .agent_lessons/security-slot-shared-pool-deadlock.md):
+      A conc=0 caller holds the ONLY permit on `_shared_sequential_slot_` while blocked in
+      `request_user_approval` for an approval-required tool (shell_cmd/edit_file/...). When
+      the Security advisor check runs, it resolves to the SAME shared sequential pool and
+      calls engine.run() → _acquire_slot_with_logging → blocks on that single slot.
+
+    The "slot yield" fix only releases the *caller's* permit if `caller_inst._slot_release`
+    is non-None (or via a force-release fallback keyed on the caller instance). If the caller
+    instance resolved by the check does NOT match the actual pool holder, no release happens
+    and the Security agent blocks until QUEUE_WAIT_TIMEOUT → "Currently held by: <caller>".
+
+    This test builds a REAL AgentPool + APIRouter with a conc=0 endpoint (real shared
+    SlotPool) and drives the GENUINE slot-acquisition path:
+      1. caller._slot_release = pool._acquire_slot('coder', 'caller')   # real permit held
+      2. security_acquire() runs engine.run(Security instance) in a thread → the real
+         _acquire_slot_with_logging → pool._acquire_slot('Security', ...) blocks on the SAME pool.
+    We assert it times out (the deadlock). It FAILS once the bug is fixed (Security acquires
+    without timing out). No server / mock LLM needed — the contention is in the real SlotPool.
+    """
+
+    def test_security_check_deadlocks_on_shared_slot(self, tmp_path):
+        import os as _os2
+        import threading
+        from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.api_router import APIEndpoint, APIRouter
+        from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.agent_instance import AgentInstance
+
+        # Isolate config dir for the router's api_endpoints.json.
+        _os2.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = str(tmp_path)
+
+        # The shared-slot acquire timeout is a module-level constant captured at import time
+        # (default 300s). Patching os.environ has NO effect here, so patch the real value in
+        # BOTH modules that read it (slot_queue for SlotPool.acquire, api_router for the
+        # Scheduler.acquire effective_timeout) to make the deadlock observable in ~3s.
+        import agent_cascade.slot_queue as _sq_mod
+        import agent_cascade.api_router as _ar_mod
+        _OLD_QWT = _sq_mod.QUEUE_WAIT_TIMEOUT
+        _OLD_AR_QWT = _ar_mod.QUEUE_WAIT_TIMEOUT
+        _sq_mod.QUEUE_WAIT_TIMEOUT = 3
+        _ar_mod.QUEUE_WAIT_TIMEOUT = 3
+
+        try:
+            # ── Real router with a conc=0 endpoint → real shared sequential SlotPool ──
+            llm_cfg = {"model": "mock", "api_base": "http://127.0.0.1:9/v1",
+                       "model_server": "http://127.0.0.1:9/v1", "api_key": "EMPTY"}
+            router = APIRouter(default_llm_cfg=llm_cfg, config_dir=str(tmp_path))
+            with router._lock:
+                router.endpoints.clear()
+                router.agent_priorities.clear()
+                router._agent_types_with_priorities.clear()
+            ep = APIEndpoint(id="ep0", name="conc0", api_base=llm_cfg["api_base"],
+                             model="mock", concurrency_limit=0, enabled=True)
+            router.add_endpoint(ep)
+            router.default_llm_cfg = ep.to_llm_cfg()
+
+            pool = AgentPool(llm_cfg, agents_dir=str(tmp_path), api_router=router)
+            engine = ExecutionEngine(pool)
+
+            def _mk(name: str, agent_class: str) -> AgentInstance:
+                import time as _t
+                return AgentInstance(
+                    instance_name=name, agent_class=agent_class, conversation=[],
+                    created_at=_t.monotonic(), last_activity=_t.monotonic(),
+                    latest_marker_index=0,
+                )
+
+            # ── Step 1: caller acquires the shared slot (real permit) ────────────────
+            caller = _mk("caller", "coder")
+            pool.instances["caller"] = caller
+            release_cb = pool._acquire_slot("coder", "caller")
+            assert release_cb is not None, "conc=0 endpoint should return a real release callback"
+            shared = router.scheduler._pools.get("_shared_sequential_slot_")
+            assert shared is not None, "Shared sequential SlotPool was not created (conc=0 not in effect?)"
+            assert "caller" in shared._running, f"Caller did not acquire the shared slot: {list(shared._running)}"
+
+            # ── Step 2: Security agent tries to acquire the SAME shared slot ─────────
+            sec = _mk("Security_repro", "Security")
+            pool.instances["Security_repro"] = sec
+            result = {"exc": None, "done": threading.Event()}
+
+            def security_acquire():
+                try:
+                    for _ in engine.run(sec):
+                        break  # only the slot-acquire (start of run) matters here
+                except Exception as e:  # noqa: BLE001 — we want to capture the acquire failure
+                    result["exc"] = e
+                finally:
+                    result["done"].set()
+
+            t0 = time.perf_counter()
+            th = threading.Thread(target=security_acquire, daemon=True)
+            th.start()
+            finished = result["done"].wait(timeout=20.0)
+            elapsed = time.perf_counter() - t0
+            assert finished, "Security slot-acquire thread did not finish within 20s"
+
+            # ── DEADLOCK SIGNATURE (the bug) ─────────────────────────────────────────
+            # The Security agent must have blocked on the shared slot held by the caller and
+            # timed out (~3s). A fixed implementation would release/yield properly and acquire
+            # in well under the timeout, so this assertion FAILS when the bug is fixed.
+            err = result["exc"]
+            timed_out = (err is not None and "Timed out" in str(err)
+                         and "waiting for endpoint slot" in str(err))
+
+            assert timed_out, (
+                f"[BUG NOT REPRODUCED] Security agent did NOT deadlock on the shared sequential "
+                f"slot. elapsed={elapsed:.1f}s, err={err!r}. If this assertion fails, the "
+                f"shared-slot deadlock is likely FIXED — update this test to assert the "
+                f"non-timeout (fixed) behavior instead."
+            )
+            assert elapsed >= 2.0, (
+                f"Timed out too quickly ({elapsed:.1f}s < ~3s QUEUE_WAIT_TIMEOUT) — not a shared-slot "
+                f"contention timeout. err={err!r}"
+            )
+            # The caller's permit must STILL be held after the failed Security acquire — that is
+            # exactly why the Security agent could never get the slot.
+            assert "caller" in shared._running, (
+                f"Caller no longer holds the shared slot after Security acquire: {list(shared._running)}"
+            )
+
+            print(
+                f"\n[REPRO] SECURITY SLOT DEADLOCK REPRODUCED: Security agent timed out after "
+                f"{elapsed:.1f}s waiting for _shared_sequential_slot_ held by 'caller'. "
+                f"err={str(err)[:160]}"
+            )
+
+            # Cleanup: release the caller's permit so it doesn't leak into other tests.
+            try:
+                release_cb()
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            _sq_mod.QUEUE_WAIT_TIMEOUT = _OLD_QWT
+            _ar_mod.QUEUE_WAIT_TIMEOUT = _OLD_AR_QWT

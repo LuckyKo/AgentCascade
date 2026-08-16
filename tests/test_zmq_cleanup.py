@@ -135,7 +135,12 @@ class TestCodeInterpreterClose:
         pid = os.getpid()
         kernel_id = f"ci_test_{pid}"
         mock_kc = MagicMock()
-        
+        # A fresh (not-yet-closed) kernel client has _closed falsy. MagicMock would
+        # otherwise auto-create a truthy _closed attribute, which makes
+        # _shutdown_kernel_client's `if kc is None or getattr(kc, '_closed', False)`
+        # guard short-circuit and skip shutdown(). Model the realistic initial state.
+        mock_kc._closed = False
+
         # Set up mock kernel state
         _KERNEL_CLIENTS[kernel_id] = mock_kc
         _DOCKER_CONTAINERS[kernel_id] = "fake_container_id"
