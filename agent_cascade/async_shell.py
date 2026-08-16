@@ -59,9 +59,15 @@ def _elapsed_for_task(task: Optional['AsyncShellTask']) -> float:
     """Return seconds elapsed since task creation, read under the task lock.
 
     Returns 0.0 when there is no task or no start_time. Safe to call from any
-    thread; the caller does NOT need to already hold ``task._lock`` (this helper
-    acquires it internally). Used by every shell_cmd reply that has a live or
-    completed task record so elapsed time is reported consistently.
+    thread; this helper acquires ``task._lock`` internally.
+
+    WARNING: Do NOT call this while already holding ``task._lock`` — the lock is
+    non-reentrant, so a second acquire from the same thread will deadlock. If you
+    are already inside a ``with task._lock:`` block, compute elapsed inline as
+    ``time.time() - task.start_time`` instead (see _send_heartbeat / get_status).
+
+    Used by every shell_cmd reply that has a live or completed task record so
+    elapsed time is reported consistently.
     """
     if task is None:
         return 0.0
@@ -1075,6 +1081,8 @@ class AsyncShellTracker:
             # Increment heartbeat counter for this task
             task.heartbeat_count += 1
             beat = task.heartbeat_count
+            # NOTE: computed inline (already holding task._lock above); must NOT use
+            # _elapsed_for_task() here as it re-acquires the non-reentrant lock -> deadlock.
             elapsed = time.time() - task.start_time
 
         # Re-check killed flag after reading output to avoid sending heartbeat for killed tasks.
@@ -1412,8 +1420,10 @@ class AsyncShellTracker:
             completed = task.completed
             return_code = task.return_code
             heartbeat = task.heartbeat_interval
+            # NOTE: computed inline (already holding task._lock above); must NOT use
+            # _elapsed_for_task() here as it re-acquires the non-reentrant lock -> deadlock.
             elapsed = time.time() - task.start_time
-            
+
             # Consume all output since last consumption (same pattern as _send_heartbeat)
             combined = list(task.stdout_lines) + list(task.stderr_lines)
             consumed_lines = combined[task.last_heartbeat_sent_pos:]
