@@ -497,17 +497,10 @@ class AgentLifecycleManager:
                 # FIX #4: Clear is_terminated flag
                 instance.is_terminated = False
 
-                # SLOT_LEAK HARDENING (2026-08-16): Release any held slot permit BEFORE
-                # clearing _slot_release. In the normal flow a reused instance is IDLE or
-                # TERMINATED (see find_or_create_instance) and _setup_turn runs AFTER
-                # run() has already acquired its own fresh slot, so _slot_release should be
-                # None here — releasing is a no-op. However, if any future code path leaves a
-                # stale callback without having released the underlying pool permit, clearing
-                # it blindly would LEAK that permit (the exact root cause of the 2026-08-16
-                # security-advisor slot deadlock). Releasing first is idempotent-safe: we
-                # nullify _slot_release BEFORE invoking so a concurrent release cannot double-fire.
-                # The check-nullify-release must be atomic under _state_lock to match
-                # execution_engine._release_slot and avoid racing with a concurrent release.
+                # SLOT_LEAK HARDENING: Release any held slot permit BEFORE clearing it.
+                # Normal case is a no-op (reused instances are IDLE/TERMINATED). Guards
+                # against stale callbacks that would leak the pool permit (2026-08-16 deadlock).
+                # Atomic under _state_lock to match execution_engine._release_slot.
                 if hasattr(instance, '_state_lock'):
                     with instance._state_lock:
                         if instance._slot_release is not None:

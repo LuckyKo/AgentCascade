@@ -485,9 +485,8 @@ class SecurityAdvisorHandler:
                 sec_warning_timer.start()
 
             # ── Slot yield for Security advisor ────────────────────────────
-            # Design goal: NO slot borrowing/inheritance. Every agent meters against its OWN
-            # resolved endpoint pool. The caller's slot MUST be released before the Security
-            # agent runs (acquires via normal FIFO queue). See investigation_security_slot_deadlock.md.
+            # Design: NO slot borrowing — every agent acquires its own slot. Release the
+            # caller's slot so Security can acquire via the normal FIFO queue.
             caller_inst_sec = self.agent_pool.get_instance(caller_agent) if caller_agent else None
 
             # Fix 4 — Defensive fallback: ensure execution lock exists before using it.
