@@ -151,9 +151,17 @@ class TestSecurityLockAcquireTimeout:
     """Test that lock acquire timeout prevents permanent block."""
 
     def test_acquire_timeout_constant_is_reasonable(self):
-        """SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS should be short enough to detect problems quickly."""
-        assert 1 <= SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS <= 30, (
-            f"Lock acquire timeout ({SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS}s) should be between 1-30s"
+        """SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS must be a sane positive duration.
+
+        The default was intentionally raised to 600s (commit 5484735) so that a
+        waiting security check queues behind a legitimately long-running previous
+        check (~300s first-yield + turn budget) instead of spuriously timing out.
+        We therefore only assert it's positive and within a generous upper bound
+        (1 hour) — the ResettableRLock dead-holder detection is what recovers from
+        truly leaked locks, not this acquire timeout.
+        """
+        assert 1 <= SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS <= 3600, (
+            f"Lock acquire timeout ({SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS}s) should be between 1-3600s"
         )
 
     def test_acquire_timeout_fires_when_lock_held_by_other_thread(self):

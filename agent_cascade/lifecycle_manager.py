@@ -497,10 +497,33 @@ class AgentLifecycleManager:
                 # FIX #4: Clear is_terminated flag
                 instance.is_terminated = False
 
-                # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale
-                # callback issues
-                instance._slot_release = None
-                instance._slot_key = None
+                # SLOT_LEAK HARDENING (2026-08-16): Release any held slot permit BEFORE
+                # clearing _slot_release. In the normal flow a reused instance is IDLE or
+                # TERMINATED (see find_or_create_instance) and _setup_turn runs AFTER
+                # run() has already acquired its own fresh slot, so _slot_release should be
+                # None here — releasing is a no-op. However, if any future code path leaves a
+                # stale callback without having released the underlying pool permit, clearing
+                # it blindly would LEAK that permit (the exact root cause of the 2026-08-16
+                # security-advisor slot deadlock). Releasing first is idempotent-safe: we
+                # nullify _slot_release BEFORE invoking so a concurrent release cannot double-fire.
+                if instance._slot_release is not None:
+                    logger.warning(
+                        f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
+                        f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
+                    )
+                    release_cb = instance._slot_release
+                    instance._slot_release = None
+                    instance._slot_key = None
+                    try:
+                        release_cb()
+                    except Exception as e:
+                        logger.error(
+                            f"[SLOT_RELEASE_ERROR] Failed to release slot for "
+                            f"{instance.instance_name} on reuse: {e}", exc_info=True
+                        )
+                else:
+                    # Normal case: no live permit. Clear the stale key (defensive).
+                    instance._slot_key = None
 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always

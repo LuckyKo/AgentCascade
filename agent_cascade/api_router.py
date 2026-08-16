@@ -367,7 +367,7 @@ class EndpointScheduler:
                 holder_info = f". Currently held by: {', '.join(holder_names)}"
             
             raise TimeoutError(
-                f"Timed out after {timeout}s waiting for endpoint slot on {api_base}. "
+                f"Timed out after {effective_timeout}s waiting for endpoint slot on {api_base}. "
                 f"Current active count: {len(sched_pool._running)}, max allowed: {sched_pool.capacity}{holder_info}"
             ) from e
         
@@ -1664,6 +1664,20 @@ class APIRouter:
         Returns:
             Normalized dict with only one key per agent type (case-insensitive)
         """
+        # Validate: all values must be lists of endpoint IDs. Malformed entries (e.g., ints)
+        # from corrupted or hand-edited config files would crash _resolve_own_endpoints later
+        # (line ~839 iterates self.agent_priorities.get(...)). Drop them with a warning.
+        validated = {}
+        for key, value in priorities.items():
+            if not isinstance(value, list):
+                logger.warning(
+                    f"[APIRouter._normalize_agent_priorities] Invalid priority value for "
+                    f"{key!r}: {value!r} (expected list). Skipping."
+                )
+                continue
+            validated[key] = value
+        priorities = validated
+
         normalized = {}
         seen_lower = {}  # Maps lowercase key -> canonical key to track which we kept
         
