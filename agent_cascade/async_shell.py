@@ -283,7 +283,7 @@ class AsyncShellTracker:
         heartbeat_interval: float = -1.0,
         timeout: int = ASYNC_SHELL_DEFAULT_TIMEOUT,
         cwd: Optional[str] = None,
-        console_window: bool = True,
+        console_window: bool = False,
     ) -> Tuple[int, int, Optional[List[str]], bool, Optional[int]]:
         """Launch a shell command in the background.
 
@@ -323,6 +323,11 @@ class AsyncShellTracker:
                 f"{agent_name}, clamping to -1 (completion only)"
             )
             heartbeat_interval = -1
+
+        # Opt-out override (e.g. test harnesses): force no console window regardless of caller state.
+        # Does NOT change production defaults — only takes effect when this env var is set truthy.
+        if console_window and os.getenv("QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+            console_window = False
 
         tool_id = self._next_id(agent_name)
 
