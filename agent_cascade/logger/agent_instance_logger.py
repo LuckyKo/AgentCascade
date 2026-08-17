@@ -96,7 +96,19 @@ class AgentInstanceLogger:
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
         self._file_history_synced = False  # One-shot file sync guard for update_history() — prevents duplicate file loads
         self._write_lock = threading.Lock()  # Lock for read-modify-write operations on JSONL file
+        self._metadata_lock = threading.Lock()  # Lock for metadata dict mutations (todo.md:117)
         self._initial_save()
+
+    def update_supervisor(self, value: str) -> None:
+        """Thread-safe update of the supervisor field in logger metadata.
+
+        Updates in-memory state only. The on-disk JSONL first line retains the
+        original value (historically accurate — reflects who first spawned this
+        agent). Runtime code reading data["metadata"]["supervisor"] gets the
+        current value.
+        """
+        with self._metadata_lock:
+            self.data["metadata"]["supervisor"] = value
 
     @classmethod
     def copy_session_file(cls, source_path: str, log_dir: str, agent_class: str, instance_name: str) -> str:

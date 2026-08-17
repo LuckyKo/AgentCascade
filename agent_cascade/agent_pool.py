@@ -3081,11 +3081,12 @@ class LoggerManager:
                     logger.debug(f"Logger close during reinit failed for {instance_name} (non-critical): {e}")
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
             # New session gets fresh metadata — no inheritance from previous session's state.
+            # FIX (todo.md:117): Root agents always have "User" as supervisor.
             self._loggers[key] = AgentInstanceLogger(
                 agent_class=agent_class,
                 instance_name=instance_name,
                 log_dir=str(self.log_dir),
-                base_metadata=None,  # Fresh start, no inherited context
+                base_metadata={"supervisor": "User"},
             )
         return
 

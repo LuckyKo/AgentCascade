@@ -480,6 +480,22 @@ class AgentLifecycleManager:
         # updates (e.g., workspace changes).
         _inject_metadata_into_message(sys_msg, self.pool, instance)
 
+        # FIX (todo.md:117): Ensure logger metadata reflects actual supervisor.
+        # AgentInstanceLogger defaults to "System" — correct it to the real parent.
+        # - New loggers: base_metadata is merged before _initial_save() → correct on disk.
+        # - Existing loggers (recall/reuse): patch in-memory via update_supervisor().
+        #   The on-disk value retains the original spawner (historically accurate).
+        try:
+            expected_supervisor = instance.parent_instance or "User"
+            log_inst = self.pool.get_logger(
+                instance_name, agent_class,
+                base_metadata={"supervisor": expected_supervisor}
+            )
+            if log_inst.data["metadata"].get("supervisor") != expected_supervisor:
+                log_inst.update_supervisor(expected_supervisor)
+        except Exception as e:
+            logger.debug(f"Logger supervisor metadata update failed for {instance_name}: {e}")
+
         # FIX: Initialize before if/else so it's available for both branches
         # (was only set in else branch)
         is_restored_session = False
