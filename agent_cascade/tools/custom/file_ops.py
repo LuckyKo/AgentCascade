@@ -620,57 +620,57 @@ class ViewImage(BaseTool, PathResolutionMixin):
             # Determine the source path for image processing (temp_png takes priority)
             source_path = str(temp_png) if temp_png else str(resolved)
 
-            # Get original image dimensions for caption (best-effort, non-fatal)
+            # Open the image ONCE: get dimensions AND perform the crop in the same context.
             orig_width, orig_height = None, None
+            crop_x = crop_y = crop_w = crop_h = None  # parsed values for caption reuse
             try:
                 from PIL import Image as _PILImage
-                with _PILImage.open(source_path) as _img:
-                    orig_width, orig_height = _img.size
-            except Exception:
-                pass  # dimensions unavailable (e.g., corrupted image); caption will omit size
+                with _PILImage.open(source_path) as img:
+                    orig_width, orig_height = img.size
 
-            # Apply crop_region if provided (must happen BEFORE any resizing)
-            crop_x = crop_y = crop_w = crop_h = None  # parsed values for caption reuse
-            if crop_region_str:
-                try:
-                    parts = [p.strip() for p in crop_region_str.split(',')]
-                    if len(parts) != 4:
-                        return f"ERROR: Invalid crop_region '{crop_region_str}'. Expected format: 'x,y,w,h' (4 comma-separated integers)."
-                    x, y, w, h = (int(p) for p in parts)
-                except ValueError:
-                    return f"ERROR: Invalid crop_region '{crop_region_str}'. All values must be integers. Example: '100,200,500,300'"
+                    # Apply crop_region if provided (must happen BEFORE any resizing)
+                    if crop_region_str:
+                        try:
+                            parts = [p.strip() for p in crop_region_str.split(',')]
+                            if len(parts) != 4:
+                                return f"ERROR: Invalid crop_region '{crop_region_str}'. Expected format: 'x,y,w,h' (4 comma-separated integers)."
+                            x, y, w, h = (int(p) for p in parts)
+                        except ValueError:
+                            return f"ERROR: Invalid crop_region '{crop_region_str}'. All values must be integers. Example: '100,200,500,300'"
 
-                # Validate against actual image dimensions if known
-                if orig_width is not None and orig_height is not None:
-                    if x < 0 or y < 0:
-                        return f"ERROR: crop_region coordinates must be non-negative. Got x={x}, y={y}."
-                    if w <= 0 or h <= 0:
-                        return f"ERROR: crop_region width and height must be positive. Got w={w}, h={h}."
-                    if x + w > orig_width:
-                        return f"ERROR: crop_region out of bounds. Region (x={x}, y={y}, w={w}, h={h}) extends beyond image width {orig_width}. Right edge would be at x={x + w}."
-                    if y + h > orig_height:
-                        return f"ERROR: crop_region out of bounds. Region (x={x}, y={y}, w={w}, h={h}) extends beyond image height {orig_height}. Bottom edge would be at y={y + h}."
+                        # Validate against actual image dimensions (always available here)
+                        if x < 0 or y < 0:
+                            return f"ERROR: crop_region coordinates must be non-negative. Got x={x}, y={y}."
+                        if w <= 0 or h <= 0:
+                            return f"ERROR: crop_region width and height must be positive. Got w={w}, h={h}."
+                        if x + w > orig_width:
+                            return f"ERROR: crop_region out of bounds. Region (x={x}, y={y}, w={w}, h={h}) extends beyond image width {orig_width}. Right edge would be at x={x + w}."
+                        if y + h > orig_height:
+                            return f"ERROR: crop_region out of bounds. Region (x={x}, y={y}, w={w}, h={h}) extends beyond image height {orig_height}. Bottom edge would be at y={y + h}."
 
-                # Perform the crop using PIL and save to a temp file
-                try:
-                    from PIL import Image as _PILImage
-                    with _PILImage.open(source_path) as img:
+                        # Perform the crop and save to a temp file
                         cropped = img.crop((x, y, x + w, y + h))
                         tmp_fd, crop_tmp_str = tempfile.mkstemp(suffix='.png', prefix='crop_view_')
                         os.close(tmp_fd)
                         cropped.save(crop_tmp_str, format='PNG')
-                    crop_tmp = Path(crop_tmp_str)
-                    source_path = str(crop_tmp)
-                    crop_x, crop_y, crop_w, crop_h = x, y, w, h
-                except Exception as crop_err:
-                    return f"ERROR: Failed to crop image region '{crop_region_str}': {crop_err}. Ensure the image is valid and the region is within bounds."
+                        crop_tmp = Path(crop_tmp_str)
+                        source_path = str(crop_tmp)
+                        crop_x, crop_y, crop_w, crop_h = x, y, w, h
+
+            except Exception as e:
+                # If we can't open the image for dimensions, that's non-fatal (caption will omit size).
+                # But if crop_region was requested and we failed, it IS fatal.
+                if crop_region_str:
+                    return f"ERROR: Failed to process image for cropping '{crop_region_str}': {e}. Ensure the image is valid."
+                # Otherwise continue without dimensions
 
             # Save image to media dir (path-based) with base64 fallback
-            caption = f"Viewing image: {path}"
+            caption_parts = [f"Viewing image: {path}"]
             if orig_width is not None and orig_height is not None:
-                caption += f" ({orig_width}x{orig_height})"
+                caption_parts.append(f"({orig_width}x{orig_height})")
             if crop_x is not None:
-                caption += f" [cropped region x={crop_x},y={crop_y},w={crop_w},h={crop_h}]"
+                caption_parts.append(f"[cropped region x={crop_x},y={crop_y},w={crop_w},h={crop_h}]")
+            caption = " ".join(caption_parts)
 
             try:
                 media_path = save_image_to_media(

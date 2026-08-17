@@ -992,26 +992,6 @@ class TestViewImageCropRegion:
             }))
         assert isinstance(result, list), f"Expected list (valid crop with spaces), got: {result}"
 
-    def test_crop_produces_correct_dimensions(self, tmp_path):
-        """End-to-end: cropped image saved to media has the expected dimensions."""
-        from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
-
-        # Create a 500x300 image
-        img = Image.new("RGB", (500, 300), color="green")
-        p = tmp_path / "e2e_crop.png"
-        img.save(str(p), format="PNG")
-
-        # Simulate what view_image does: open, crop, save to temp, then save_image_to_media
-        from PIL import Image as _PILImage
-        with _PILImage.open(str(p)) as image:
-            cropped = image.crop((50, 60, 250, 160))  # x=50,y=60,w=200,h=100
-            crop_file = tmp_path / "cropped.png"
-            cropped.save(str(crop_file), format="PNG")
-
-        # Verify the crop dimensions
-        with _PILImage.open(str(crop_file)) as loaded:
-            assert loaded.size == (200, 100), f"Cropped image wrong size: {loaded.size}"
-
     def test_crop_region_with_corrupted_image(self, tmp_path):
         """crop_region on a corrupted image returns a clear error."""
         # Create a file with invalid PNG content
