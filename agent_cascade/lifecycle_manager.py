@@ -493,8 +493,8 @@ class AgentLifecycleManager:
             )
             if log_inst.data["metadata"].get("supervisor") != expected_supervisor:
                 log_inst.update_supervisor(expected_supervisor)
-        except Exception as e:
-            logger.debug(f"Logger supervisor metadata update failed for {instance_name}: {e}")
+        except (AttributeError, KeyError, OSError) as e:
+            logger.warning(f"Logger supervisor metadata update failed for {instance_name}: {e}")
 
         # FIX: Initialize before if/else so it's available for both branches
         # (was only set in else branch)
