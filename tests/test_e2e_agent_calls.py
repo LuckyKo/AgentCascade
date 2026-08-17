@@ -429,40 +429,70 @@ def ac_server(mock_llm_server):
 
 # ── Test Helpers ───────────────────────────────────────────────────────────────
 
-def handshake_and_send(base_url: str, text: str, target: str = "E2ETestSession") -> Tuple[str, str]:
-    """Perform E2E handshake and send a message. Returns (session_token, shared_secret)."""
-    resp = requests.get(f"{base_url}/api/keys", timeout=5)
-    assert resp.status_code == 200, f"Failed to get keys: {resp.text}"
-    server_public_b64 = resp.json()["public_key"]
+def _is_transient_conn_error(exc: Exception) -> bool:
+    """Check if an exception is a transient network error worth retrying.
 
-    client_private, client_public_b64 = generate_client_keypair()
-    shared_secret = derive_shared_secret(client_private, server_public_b64)
+    Under xdist with many workers, Windows can exhaust socket buffers
+    (WinError 10055) or briefly refuse connections while the uvicorn
+    server is still accepting. These are not code bugs — just OS-level
+    resource pressure that resolves after a short backoff.
+    """
+    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return True
+    # WinError 10055 (socket buffer full) surfaces as OSError in some paths
+    if isinstance(exc, OSError) and exc.errno in (10055, 10061, 10060):
+        return True
+    return False
 
-    resp = requests.post(
-        f"{base_url}/api/handshake",
-        json={"public_key": client_public_b64},
-        timeout=5,
-    )
-    assert resp.status_code == 200, f"Handshake failed: {resp.text}"
-    session_token = resp.json()["session_token"]
 
-    payload = {"target": target, "text": text}
-    encrypted_b64, nonce_b64 = encrypt_payload(shared_secret, payload)
+def handshake_and_send(base_url: str, text: str, target: str = "E2ETestSession", _retries: int = 3) -> Tuple[str, str]:
+    """Perform E2E handshake and send a message. Returns (session_token, shared_secret).
 
-    resp = requests.post(
-        f"{base_url}/api/message",
-        json={
-            "session_token": session_token,
-            "payload": encrypted_b64,
-            "nonce": nonce_b64,
-        },
-        timeout=5,
-    )
-    assert resp.status_code == 200, f"Message send failed: {resp.text}"
-    data = resp.json()
-    assert data.get("status") == "success", f"Unexpected status: {data}"
+    Retries up to `_retries` times on transient connection errors (socket buffer
+    exhaustion under xdist load) with exponential backoff.
+    """
+    last_exc = None
+    for attempt in range(_retries):
+        try:
+            resp = requests.get(f"{base_url}/api/keys", timeout=5)
+            assert resp.status_code == 200, f"Failed to get keys: {resp.text}"
+            server_public_b64 = resp.json()["public_key"]
 
-    return session_token, shared_secret
+            client_private, client_public_b64 = generate_client_keypair()
+            shared_secret = derive_shared_secret(client_private, server_public_b64)
+
+            resp = requests.post(
+                f"{base_url}/api/handshake",
+                json={"public_key": client_public_b64},
+                timeout=5,
+            )
+            assert resp.status_code == 200, f"Handshake failed: {resp.text}"
+            session_token = resp.json()["session_token"]
+
+            payload = {"target": target, "text": text}
+            encrypted_b64, nonce_b64 = encrypt_payload(shared_secret, payload)
+
+            resp = requests.post(
+                f"{base_url}/api/message",
+                json={
+                    "session_token": session_token,
+                    "payload": encrypted_b64,
+                    "nonce": nonce_b64,
+                },
+                timeout=5,
+            )
+            assert resp.status_code == 200, f"Message send failed: {resp.text}"
+            data = resp.json()
+            assert data.get("status") == "success", f"Unexpected status: {data}"
+
+            return session_token, shared_secret
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, OSError) as exc:
+            if not _is_transient_conn_error(exc) or attempt == _retries - 1:
+                raise
+            last_exc = exc
+            time.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s, 2s backoff
+
+    raise last_exc  # unreachable, but satisfies type checkers
 
 
 def wait_for_completion(base_url: str, session_token: str, timeout: float = 90.0) -> bool:
