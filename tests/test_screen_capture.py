@@ -182,7 +182,8 @@ class TestViewImageDirectiveRouting:
                             result = view_image_tool.call(json.dumps({'path': '__screen_capture'}))
 
                             # Verify temp file was created for the capture
-                            m.assert_called_with(mock_temp_path, 'wb')
+                            # (use assert_any_call because PIL may also open the file for dimension check)
+                            m.assert_any_call(mock_temp_path, 'wb')
                             handle = m.return_value
                             handle.write.assert_called_once_with(mock_png_bytes)
 

@@ -185,9 +185,10 @@ TOOL_METADATA = {
         }
     },
     'view_image': {
-        'description': 'View an image file in the workspace or capture screen/window content. Returns the image for the model to see. Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. Special paths: "__screen_capture" captures all monitors combined; "__screen_capture:N" captures physical monitor N by 0-based index (0=first monitor, 1=second, etc.); "__window_capture:PID" captures a specific window by process ID.',
+        'description': 'View an image file in the workspace or capture screen/window content. Returns the image for the model to see. Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. Special paths: "__screen_capture" captures all monitors combined; "__screen_capture:N" captures physical monitor N by 0-based index (0=first monitor, 1=second, etc.); "__window_capture:PID" captures a specific window by process ID. Use crop_region to view a specific area of large images in more detail.',
         'parameters': {
-            'path': 'Path to the image file, absolute or relative to workspace directory. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.'
+            'path': 'Path to the image file, absolute or relative to workspace directory. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.',
+            'crop_region': 'Optional. Crop region as "x,y,w,h" where x,y are the top-left pixel coordinates in the original image and w,h are the crop width/height in pixels. Use this to zoom into details of large images (e.g., "100,200,500,300" crops a 500x300 region starting at pixel (100,200)).'
         }
     },
     'write_file': {

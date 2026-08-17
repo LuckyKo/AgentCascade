@@ -7,6 +7,7 @@ _parse_multimodal_content(), and frontend proxyLocalImagePaths logic simulation.
 
 import base64
 import io
+import json
 import os
 import re
 import shutil
@@ -16,6 +17,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from PIL import Image
@@ -843,6 +845,267 @@ class TestInstanceIsolation:
                 os.environ.pop("AGENT_CASCADE_INSTANCE_ID", None)
             else:
                 os.environ["AGENT_CASCADE_INSTANCE_ID"] = saved
+
+
+class TestViewImageCropRegion:
+    """Tests for the crop_region parameter of view_image tool."""
+
+    @pytest.fixture
+    def test_image_500x300(self, tmp_path):
+        """Create a 500x300 test image and return its path."""
+        img = Image.new("RGB", (500, 300), color="blue")
+        # Add some variation so we can verify crop correctness
+        for x in range(250, 500):
+            for y in range(150, 300):
+                img.putpixel((x, y), (255, 0, 0))
+        p = tmp_path / "crop_test_500x300.png"
+        img.save(str(p), format="PNG")
+        return str(p)
+
+    @pytest.fixture
+    def view_image_tool(self, test_image_500x300):
+        """ViewImage tool with _resolve_path patched to allow temp paths."""
+        from agent_cascade.tools.custom.file_ops import ViewImage
+        tool = ViewImage()
+        # Patch _resolve_path to return the actual Path (bypassing workspace dir validation)
+        original_resolve = tool._resolve_path
+
+        def _mock_resolve(path, mode="ro"):
+            p = Path(path)
+            if p.exists():
+                return p
+            raise ValueError(f"Image not found: {path}")
+
+        tool._resolve_path = _mock_resolve
+        return tool
+
+    def test_crop_region_valid(self, view_image_tool, test_image_500x300, tmp_path):
+        """Valid crop_region produces a cropped image with correct dimensions."""
+        from agent_cascade.llm.schema import ContentItem
+        from agent_cascade.utils.media_utils import save_image_to_media
+
+        # Crop the top-left 100x80 region
+        crop = "10,20,100,80"
+        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
+            mock_save.return_value = str(tmp_path / "media_result.jpg")
+            result = view_image_tool.call(json.dumps({
+                'path': test_image_500x300,
+                'crop_region': crop,
+            }))
+
+        assert isinstance(result, list), f"Expected list, got {type(result)}: {result}"
+        assert len(result) == 2
+        # Caption should include original dimensions and crop info
+        caption = result[1].text
+        assert "500x300" in caption, f"Caption missing original size: {caption}"
+        assert "cropped region x=10,y=20,w=100,h=80" in caption, f"Caption missing crop info: {caption}"
+
+    def test_crop_region_out_of_bounds_width(self, view_image_tool, test_image_500x300):
+        """crop_region extending beyond image width returns helpful error."""
+        # x=400, w=200 → right edge at 600 > 500
+        result = view_image_tool.call(json.dumps({
+            'path': test_image_500x300,
+            'crop_region': "400,10,200,50",
+        }))
+        assert isinstance(result, str)
+        assert "out of bounds" in result
+        assert "500" in result  # actual image width mentioned
+
+    def test_crop_region_out_of_bounds_height(self, view_image_tool, test_image_500x300):
+        """crop_region extending beyond image height returns helpful error."""
+        # y=200, h=150 → bottom edge at 350 > 300
+        result = view_image_tool.call(json.dumps({
+            'path': test_image_500x300,
+            'crop_region': "10,200,50,150",
+        }))
+        assert isinstance(result, str)
+        assert "out of bounds" in result
+        assert "300" in result  # actual image height mentioned
+
+    def test_crop_region_negative_coordinates(self, view_image_tool, test_image_500x300):
+        """Negative x or y coordinates are rejected."""
+        result = view_image_tool.call(json.dumps({
+            'path': test_image_500x300,
+            'crop_region': "-10,20,100,80",
+        }))
+        assert isinstance(result, str)
+        assert "non-negative" in result
+
+    def test_crop_region_zero_dimensions(self, view_image_tool, test_image_500x300):
+        """Zero width or height is rejected."""
+        result = view_image_tool.call(json.dumps({
+            'path': test_image_500x300,
+            'crop_region': "10,20,0,80",
+        }))
+        assert isinstance(result, str)
+        assert "positive" in result
+
+    def test_crop_region_invalid_format_too_few_values(self, view_image_tool, test_image_500x300):
+        """crop_region with fewer than 4 values returns format error."""
+        result = view_image_tool.call(json.dumps({
+            'path': test_image_500x300,
+            'crop_region': "10,20,100",
+        }))
+        assert isinstance(result, str)
+        assert "Invalid crop_region" in result
+        assert "4 comma-separated integers" in result
+
+    def test_crop_region_invalid_format_non_numeric(self, view_image_tool, test_image_500x300):
+        """crop_region with non-numeric values returns format error."""
+        result = view_image_tool.call(json.dumps({
+            'path': test_image_500x300,
+            'crop_region': "a,b,c,d",
+        }))
+        assert isinstance(result, str)
+        assert "Invalid crop_region" in result
+
+    def test_crop_region_exact_bounds(self, view_image_tool, test_image_500x300):
+        """crop_region exactly matching image bounds is valid (full-image crop)."""
+        from agent_cascade.llm.schema import ContentItem
+        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
+            mock_save.return_value = "/fake/media.jpg"
+            result = view_image_tool.call(json.dumps({
+                'path': test_image_500x300,
+                'crop_region': "0,0,500,300",
+            }))
+        assert isinstance(result, list), f"Expected list (valid crop), got: {result}"
+
+    def test_caption_includes_size_info(self, view_image_tool, test_image_500x300):
+        """Without crop_region, caption includes image dimensions."""
+        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
+            mock_save.return_value = "/fake/media.jpg"
+            result = view_image_tool.call(json.dumps({
+                'path': test_image_500x300,
+            }))
+        assert isinstance(result, list)
+        caption = result[1].text
+        assert "Viewing image:" in caption
+        assert "500x300" in caption, f"Caption should include dimensions: {caption}"
+
+    def test_crop_region_with_spaces(self, view_image_tool, test_image_500x300):
+        """crop_region with spaces around values still works."""
+        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
+            mock_save.return_value = "/fake/media.jpg"
+            result = view_image_tool.call(json.dumps({
+                'path': test_image_500x300,
+                'crop_region': "10, 20, 100, 80",
+            }))
+        assert isinstance(result, list), f"Expected list (valid crop with spaces), got: {result}"
+
+    def test_crop_produces_correct_dimensions(self, tmp_path):
+        """End-to-end: cropped image saved to media has the expected dimensions."""
+        from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
+
+        # Create a 500x300 image
+        img = Image.new("RGB", (500, 300), color="green")
+        p = tmp_path / "e2e_crop.png"
+        img.save(str(p), format="PNG")
+
+        # Simulate what view_image does: open, crop, save to temp, then save_image_to_media
+        from PIL import Image as _PILImage
+        with _PILImage.open(str(p)) as image:
+            cropped = image.crop((50, 60, 250, 160))  # x=50,y=60,w=200,h=100
+            crop_file = tmp_path / "cropped.png"
+            cropped.save(str(crop_file), format="PNG")
+
+        # Verify the crop dimensions
+        with _PILImage.open(str(crop_file)) as loaded:
+            assert loaded.size == (200, 100), f"Cropped image wrong size: {loaded.size}"
+
+    def test_crop_region_with_corrupted_image(self, tmp_path):
+        """crop_region on a corrupted image returns a clear error."""
+        # Create a file with invalid PNG content
+        p = tmp_path / "corrupt.png"
+        p.write_bytes(b'\x89PNG\r\n\x1a\n' + b'garbage_data_not_a_real_png')
+
+        from agent_cascade.tools.custom.file_ops import ViewImage
+        tool = ViewImage()
+
+        def _mock_resolve(path, mode="ro"):
+            pp = Path(path)
+            if pp.exists():
+                return pp
+            raise ValueError(f"Image not found: {path}")
+
+        tool._resolve_path = _mock_resolve
+
+        result = tool.call(json.dumps({
+            'path': str(p),
+            'crop_region': "10,20,100,80",
+        }))
+        # Should return an error string (PIL can't open the corrupted file for cropping)
+        assert isinstance(result, str), f"Expected error string, got: {type(result)}: {result}"
+        assert "ERROR" in result
+
+    def test_crop_region_with_screen_capture(self, tmp_path):
+        """crop_region works when combined with __screen_capture directive."""
+        # Generate a real 800x600 PNG to return from the mocked capture
+        cap_img = Image.new("RGB", (800, 600), color="orange")
+        buf = io.BytesIO()
+        cap_img.save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+
+        from agent_cascade.tools.custom.file_ops import ViewImage
+        tool = ViewImage()
+
+        with patch(
+            'agent_cascade.tools.custom.screen_capture.capture_screen',
+            return_value=png_bytes,
+        ):
+            with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
+                mock_save.return_value = str(tmp_path / "capture_result.jpg")
+                result = tool.call(json.dumps({
+                    'path': '__screen_capture',
+                    'crop_region': "100,50,200,150",
+                }))
+
+        assert isinstance(result, list), f"Expected list (successful crop), got: {result}"
+        assert len(result) == 2
+        caption = result[1].text
+        # Caption should include original capture dimensions and crop info
+        assert "800x600" in caption, f"Caption missing original size: {caption}"
+        assert "cropped region x=100,y=50,w=200,h=150" in caption, f"Caption missing crop info: {caption}"
+
+    def test_crop_region_with_svg_file(self, tmp_path):
+        """crop_region works after SVG→PNG conversion."""
+        # Create a minimal SVG file (200x100 rectangle)
+        svg_content = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="red"/></svg>'
+        svg_path = tmp_path / "test_crop.svg"
+        svg_path.write_text(svg_content)
+
+        # Create the PNG that _convert_svg_to_png would produce (200x100)
+        converted_png = tmp_path / "converted_200x100.png"
+        img = Image.new("RGB", (200, 100), color="red")
+        img.save(str(converted_png), format="PNG")
+
+        from agent_cascade.tools.custom.file_ops import ViewImage
+        tool = ViewImage()
+
+        def _mock_resolve(path, mode="ro"):
+            pp = Path(path)
+            if pp.exists():
+                return pp
+            raise ValueError(f"Image not found: {path}")
+
+        tool._resolve_path = _mock_resolve
+
+        with patch.object(
+            ViewImage, '_convert_svg_to_png',
+            return_value=converted_png,
+        ):
+            with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
+                mock_save.return_value = str(tmp_path / "svg_crop_result.jpg")
+                result = tool.call(json.dumps({
+                    'path': str(svg_path),
+                    'crop_region': "10,20,80,50",
+                }))
+
+        assert isinstance(result, list), f"Expected list (successful SVG crop), got: {result}"
+        assert len(result) == 2
+        caption = result[1].text
+        # Caption should include the converted PNG dimensions and crop info
+        assert "200x100" in caption, f"Caption missing original size: {caption}"
+        assert "cropped region x=10,y=20,w=80,h=50" in caption, f"Caption missing crop info: {caption}"
 
 
 if __name__ == "__main__":

@@ -402,7 +402,12 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
 @register_tool('view_image', allow_overwrite=True)
 class ViewImage(BaseTool, PathResolutionMixin):
-    """View an image file from the workspace."""
+    """View an image file from the workspace or capture screen/window content.
+
+    Supports optional crop_region parameter ("x,y,w,h") for viewing a specific
+    area of large images in more detail. The caption includes original image
+    dimensions so the LLM can plan further crops.
+    """
 
     IMAGE_EXTENSIONS = {
         '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg',
@@ -417,6 +422,10 @@ class ViewImage(BaseTool, PathResolutionMixin):
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['view_image']['parameters']['path']
+            },
+            'crop_region': {
+                'type': 'string',
+                'description': TOOL_METADATA['view_image']['parameters']['crop_region']
             }
         },
         'required': ['path'],
@@ -510,12 +519,14 @@ class ViewImage(BaseTool, PathResolutionMixin):
 
         params = self._verify_json_format_args(params)
         path = params['path']
+        crop_region_str = params.get('crop_region')  # optional "x,y,w,h"
 
         # Check SCREEN_CAPTURE_ENABLED flag (Fix #1)
         if os.environ.get('SCREEN_CAPTURE_ENABLED', 'True').lower() not in ('true', '1', 'yes'):
             return "ERROR: Screen capture is disabled by operator configuration."
 
         temp_png: Path | None = None  # track temp file for cleanup
+        crop_tmp: Path | None = None  # track cropped temp file for cleanup
         try:
             # Check for screen capture directives BEFORE _resolve_path() to avoid path validation errors
             if path == "__screen_capture" or path.startswith("__screen_capture:"):
@@ -606,31 +617,84 @@ class ViewImage(BaseTool, PathResolutionMixin):
             if resolved.suffix.lower() == '.svg':
                 temp_png = self._convert_svg_to_png(resolved)
 
-            # Save image to media dir (path-based) with base64 fallback
+            # Determine the source path for image processing (temp_png takes priority)
+            source_path = str(temp_png) if temp_png else str(resolved)
+
+            # Get original image dimensions for caption (best-effort, non-fatal)
+            orig_width, orig_height = None, None
             try:
-                image_path_for_encoding = str(temp_png) if temp_png else str(resolved)
+                from PIL import Image as _PILImage
+                with _PILImage.open(source_path) as _img:
+                    orig_width, orig_height = _img.size
+            except Exception:
+                pass  # dimensions unavailable (e.g., corrupted image); caption will omit size
+
+            # Apply crop_region if provided (must happen BEFORE any resizing)
+            crop_x = crop_y = crop_w = crop_h = None  # parsed values for caption reuse
+            if crop_region_str:
+                try:
+                    parts = [p.strip() for p in crop_region_str.split(',')]
+                    if len(parts) != 4:
+                        return f"ERROR: Invalid crop_region '{crop_region_str}'. Expected format: 'x,y,w,h' (4 comma-separated integers)."
+                    x, y, w, h = (int(p) for p in parts)
+                except ValueError:
+                    return f"ERROR: Invalid crop_region '{crop_region_str}'. All values must be integers. Example: '100,200,500,300'"
+
+                # Validate against actual image dimensions if known
+                if orig_width is not None and orig_height is not None:
+                    if x < 0 or y < 0:
+                        return f"ERROR: crop_region coordinates must be non-negative. Got x={x}, y={y}."
+                    if w <= 0 or h <= 0:
+                        return f"ERROR: crop_region width and height must be positive. Got w={w}, h={h}."
+                    if x + w > orig_width:
+                        return f"ERROR: crop_region out of bounds. Region (x={x}, y={y}, w={w}, h={h}) extends beyond image width {orig_width}. Right edge would be at x={x + w}."
+                    if y + h > orig_height:
+                        return f"ERROR: crop_region out of bounds. Region (x={x}, y={y}, w={w}, h={h}) extends beyond image height {orig_height}. Bottom edge would be at y={y + h}."
+
+                # Perform the crop using PIL and save to a temp file
+                try:
+                    from PIL import Image as _PILImage
+                    with _PILImage.open(source_path) as img:
+                        cropped = img.crop((x, y, x + w, y + h))
+                        tmp_fd, crop_tmp_str = tempfile.mkstemp(suffix='.png', prefix='crop_view_')
+                        os.close(tmp_fd)
+                        cropped.save(crop_tmp_str, format='PNG')
+                    crop_tmp = Path(crop_tmp_str)
+                    source_path = str(crop_tmp)
+                    crop_x, crop_y, crop_w, crop_h = x, y, w, h
+                except Exception as crop_err:
+                    return f"ERROR: Failed to crop image region '{crop_region_str}': {crop_err}. Ensure the image is valid and the region is within bounds."
+
+            # Save image to media dir (path-based) with base64 fallback
+            caption = f"Viewing image: {path}"
+            if orig_width is not None and orig_height is not None:
+                caption += f" ({orig_width}x{orig_height})"
+            if crop_x is not None:
+                caption += f" [cropped region x={crop_x},y={crop_y},w={crop_w},h={crop_h}]"
+
+            try:
                 media_path = save_image_to_media(
-                    image_source=image_path_for_encoding,
+                    image_source=source_path,
                     max_short_side=1080,
                 )
                 return [
                     ContentItem(image=media_path),
-                    ContentItem(text=f"Viewing image: {path}")
+                    ContentItem(text=caption)
                 ]
             except MediaStorageError as e:
                 # Fallback to base64 if media storage fails (disk full, permissions, etc.)
                 logger.warning(f"Media storage failed for view_image, falling back to base64: {e}")
                 try:
-                    image_path_for_encoding = str(temp_png) if temp_png else str(resolved)
-                    base64_data_url = encode_image_as_base64(image_path_for_encoding, max_short_side_length=1080)
+                    base64_data_url = encode_image_as_base64(source_path, max_short_side_length=1080)
                 except Exception as enc_err:
                     # Fall back to file:// URL if encoding also fails
-                    logger.warning(f"Failed to encode image as base64 '{image_path_for_encoding}': {enc_err}. Using file:// URL.")
-                    base64_data_url = str(temp_png.as_uri() if temp_png else resolved.as_uri())
+                    logger.warning(f"Failed to encode image as base64 '{source_path}': {enc_err}. Using file:// URL.")
+                    fallback_path = crop_tmp if crop_tmp else (temp_png if temp_png else resolved)
+                    base64_data_url = str(fallback_path.as_uri())
 
                 return [
                     ContentItem(image=base64_data_url),
-                    ContentItem(text=f"Viewing image: {path}")
+                    ContentItem(text=caption)
                 ]
         except (ValueError, TypeError) as e:
             # SVG parse errors from cairosvg come through as ValueError/TypeError
@@ -643,6 +707,12 @@ class ViewImage(BaseTool, PathResolutionMixin):
             if temp_png and os.path.exists(temp_png):
                 try:
                     os.remove(temp_png)
+                except OSError:
+                    pass  # non-critical cleanup failure
+            # Clean up the cropped temp file
+            if crop_tmp and os.path.exists(crop_tmp):
+                try:
+                    os.remove(crop_tmp)
                 except OSError:
                     pass  # non-critical cleanup failure
 
