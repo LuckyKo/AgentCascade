@@ -768,7 +768,7 @@ class CompressionHandler:
                     # Appending to the last message's content avoids creating a separate USER message
                     # which would violate OpenAI API alternation rules (consecutive USER messages after marker).
                     notification_text = (
-                        f"[SYSTEM]: Forced compression applied, full context has been preserved in your jsonl log. Continue your work."
+                        f"[SYSTEM] Forced compression applied. Continue your work."
                     )
 
                     self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)

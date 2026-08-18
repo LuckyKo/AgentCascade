@@ -316,7 +316,7 @@ TOOL_METADATA = {
         'description': (
             'Execute a shell command on the host system. This ALWAYS requires explicit user approval so use it as a last resort tool only! '
             'Commands run with the workspace directory as the working directory.\n\n'
-            '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. NOTE: DO NOT use with file redirection (>, >>, <) as it may not work as expected. '
+            '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. NOTE: DO NOT use with file redirection (>, >>, <) or pipes as it defeats the whole purpose of async mode. '
             'The command runs while you continue working, sending periodic heartbeat updates (if heartbeat_interval > 0) and a final result message when done. '
             'Use the tool_id parameter to manage running shells: send input, check status (__status), kill (__kill), update heartbeat (__heartbeat=N seconds), or send Ctrl+C (__ctrl_c). '
             'Max 5 concurrent async shells per agent.\n\n'

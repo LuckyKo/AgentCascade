@@ -87,11 +87,9 @@ approval_rules:
     - Data loss is likely.
     - Security risk is unjustified.
     - Policy violation detected.
-    - Safer alternatives exist.
+    - Safer/faster alternatives exist.
 
 automatic_approvals:
-  - Reading files.
-  - Searching code.
   - Running tests.
   - Formatting code.
   - Static analysis.
@@ -100,6 +98,8 @@ automatic_approvals:
   - Documentation updates.
 
 automatic_rejections:
+  - Reading files with `shell_cmd` -> use inbuilt `read_file`.
+  - Searching code/files with `shell_cmd` -> use inbuilt `grep` or `list_dir`.
   - Writes outside the workspace.
   - Recursive deletion without explicit scope.
   - Credential extraction.
