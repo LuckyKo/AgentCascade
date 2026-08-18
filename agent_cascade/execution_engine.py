@@ -2183,7 +2183,7 @@ class ExecutionEngine:
                     if (tel := self._telemetry()) is not None:
                         try:
                             tel.record_loop_detected(
-                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
+                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type="outer",
                             )
                         except Exception:
                             pass
@@ -2239,7 +2239,7 @@ class ExecutionEngine:
                 if (tel := self._telemetry()) is not None:
                     try:
                         tel.record_loop_detected(
-                            inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count,
+                            inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type="outer",
                         )
                     except Exception:
                         pass
@@ -2726,6 +2726,14 @@ class ExecutionEngine:
             CharacterRunDetected: if retry budget exhausted (defense-in-depth check)
         """
         inst_name = instance.instance_name
+
+        # Record inner-loop detection in telemetry (non-blocking — must never break the LLM call path).
+        _det_reason = getattr(e, 'detection_reason', str(e)) or str(e)
+        if (tel := self._telemetry()) is not None:
+            try:
+                tel.record_loop_detected(inst_name, reason=_det_reason, auto_rolled_back=False, pop_count=0, loop_type="inner")
+            except Exception:
+                pass
 
         # Check dedicated loop retry budget — fail fast if exhausted (_max_attempts from pool.settings.retry_max_attempts)
         # Note: generator already checks this before raising, so this is defense-in-depth.
@@ -3306,7 +3314,7 @@ class ExecutionEngine:
                                             role=USER,
                                             content=(
                                                 f"[SYSTEM] Context exceeded on endpoint '{fcr.failed_endpoint}'. "
-                                                f"Compression applied ({round_num} round(s)), full context preserved in summary. Continue."
+                                                f"Compression applied ({round_num} round(s)), full context preserved in JSONL log. Continue."
                                             )
                                         )
                                         self._append_and_log(instance, notif_msg)
@@ -3871,6 +3879,11 @@ class ExecutionEngine:
                 instance._continue_fallback_append = False
                 return False
             reason = "truncation" if is_truncated else f"incomplete state ({is_incomplete})"
+            if (tel := self._telemetry()) is not None:
+                try:
+                    tel.record_auto_continue(inst_name, reason=reason)
+                except Exception:
+                    pass
             logger.info(f"Detected {reason} for {inst_name}. Auto-continuing.")
             pop_count = len(turn_output)
             if getattr(instance, '_continue_fallback_append', False):

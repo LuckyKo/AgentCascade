@@ -85,6 +85,9 @@ class TelemetryCollector:
             "total_tool_latency_ms": 0,
             "call_agent_latency_ms": 0,
             "total_loops_detected": 0,
+            "loops_outer": 0,
+            "loops_inner": 0,
+            "total_auto_continues": 0,
             "total_retries": 0,
             "total_compressions": 0,
             "write_failures": 0,  # Track write failures for diagnostics
@@ -252,6 +255,7 @@ class TelemetryCollector:
                 "total_ttft_ms": 0,
                 "total_streaming_time_ms": 0,
                 "loops_detected": 0,
+                "auto_continues": 0,
                 "retries": 0,
                 "total_compressions": 0,
                 "tool_calls_by_name": defaultdict(int),
@@ -287,6 +291,7 @@ class TelemetryCollector:
                 "input_tokens_est": 0,
                 "output_tokens_est": 0,
                 "loops_detected": 0,
+                "auto_continues": 0,
                 "retries": 0,
                 "compressions": 0,
             }
@@ -578,7 +583,7 @@ class TelemetryCollector:
 
         self._write_event(event)
 
-    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0):
+    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0, loop_type: str = "outer"):
         """Record a loop detection event."""
         with _telemetry_lock:
             event = {
@@ -587,15 +592,37 @@ class TelemetryCollector:
                 "reason": reason,
                 "auto_rolled_back": auto_rolled_back,
                 "pop_count": pop_count,
+                "loop_type": loop_type,
                 "timestamp": _now_iso(),
             }
             self._session_stats["total_loops_detected"] += 1
+            if loop_type == "inner":
+                self._session_stats["loops_inner"] += 1
+            else:
+                self._session_stats["loops_outer"] += 1
 
             turn = self._active_turns.get(instance_name)
             if turn:
                 turn["loops_detected"] += 1
                 if auto_rolled_back:
                     turn["retries"] += 1
+
+        self._write_event(event)
+
+    def record_auto_continue(self, instance_name: str, reason: str):
+        """Record an auto-continue (malformed output recovery) event."""
+        with _telemetry_lock:
+            event = {
+                "type": "auto_continue",
+                "instance": instance_name,
+                "reason": reason,
+                "timestamp": _now_iso(),
+            }
+            self._session_stats["total_auto_continues"] += 1
+
+            turn = self._active_turns.get(instance_name)
+            if turn:
+                turn["auto_continues"] += 1
 
         self._write_event(event)
 
@@ -677,6 +704,9 @@ class TelemetryCollector:
             "call_agent_count": call_agent_count,
             "call_agent_latency_ms": stats.get("call_agent_latency_ms", 0),
             "total_loops_detected": stats["total_loops_detected"],
+            "loops_outer": stats.get("loops_outer", 0),
+            "loops_inner": stats.get("loops_inner", 0),
+            "total_auto_continues": stats.get("total_auto_continues", 0),
             "total_retries": stats["total_retries"],
             "total_compressions": stats["total_compressions"],
             "write_failures": stats.get("write_failures", 0),

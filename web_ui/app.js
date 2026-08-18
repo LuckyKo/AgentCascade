@@ -5464,6 +5464,9 @@ function updateTelemetryPanel(telemetry) {
   set('telem-avg-tool-lat', formatMs(telemetry.avg_tool_latency_ms));
   set('telem-loops', formatNumber(telemetry.total_loops_detected));
   set('telem-compressions', formatNumber(telemetry.total_compressions));
+  set('telem-malformed', formatNumber(telemetry.total_auto_continues));
+  set('telem-loops-outer', formatNumber(telemetry.loops_outer));
+  set('telem-loops-inner', formatNumber(telemetry.loops_inner));
 
   // Tool effectiveness table
   const toolTbody = document.getElementById('telem-tool-tbody');
