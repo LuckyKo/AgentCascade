@@ -18,7 +18,6 @@ from agent_cascade.settings import (
     CHARS_PER_TOKEN_ESTIMATE,
     COMPRESSION_DEFAULT_FRACTION,
     COMPRESSION_MAX_CONSOLIDATION_TOKENS,
-    COMPRESSION_MAX_RETRIES,
 )
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 
@@ -528,37 +527,18 @@ def compress_context(
     elif mode == "manual":
         generated_summary = summary_text.strip()
     else:
-        max_retries = COMPRESSION_MAX_RETRIES
-        for attempt in range(1, max_retries + 1):
-            try:
-                generated_summary = invoke_compression_agent(
-                    agent_pool=agent_pool,
-                    target_messages=target_messages,
-                    existing_summary=existing_summary,
-                    caller_name=target_agent_name,  # Pass actual instance name for slot management
-                )
-                break  # Success — marker validated inside invoke_compression_agent
-            except RuntimeError as e:
-                err_msg = str(e).lower()
-                # Only retry on validation failures, not infra/timeout/load errors
-                is_retryable = ('missing end marker' in err_msg or 'empty summary' in err_msg)
-
-                if not is_retryable:
-                    logger.error(f"Compression Agent hard failure: {e}")
-                    return _compression_failure(f"Compression Agent failed: {e}", mode=mode)
-
-                if attempt >= max_retries:
-                    logger.error(
-                        f"Compression Agent failed after {max_retries} attempts: {e}"
-                    )
-                    return _compression_failure(
-                        f"Compression Agent failed after {max_retries} attempts: {e}",
-                        mode=mode,
-                    )
-
-                logger.warning(
-                    f"Compression attempt {attempt}/{max_retries} failed: {e} — retrying."
-                )
+        try:
+            # invoke_compression_agent() handles retries internally (reuses the same
+            # compressor instance and resends the prompt on retryable validation failures).
+            generated_summary = invoke_compression_agent(
+                agent_pool=agent_pool,
+                target_messages=target_messages,
+                existing_summary=existing_summary,
+                caller_name=target_agent_name,  # Pass actual instance name for slot management
+            )
+        except RuntimeError as e:
+            logger.error(f"Compression Agent failed: {e}")
+            return _compression_failure(f"Compression Agent failed: {e}", mode=mode)
     # Validate we have a usable summary
     if not generated_summary:
         return CompressResult(

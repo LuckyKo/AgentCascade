@@ -1173,6 +1173,375 @@ class TestCompressContextDryRunWithForce:
         assert len(pool.get_conversation("TestAgent")) == initial_len
 
 
+# ---------------------------------------------------------------------------
+# Tests for invoke_compression_agent retry-with-reuse behavior
+# ---------------------------------------------------------------------------
+
+class TestCompressionRetryReuse:
+    """Verify that invoke_compression_agent reuses the same instance on retryable failures.
+
+    These tests mock at the _execute_compressor_and_extract_summary level to verify
+    that the SAME AgentInstance is passed to each attempt (not a new one), and that
+    rebuild_conversation() is called with the initial conversation before each retry.
+    """
+
+    def _make_mock_pool(self):
+        """Create a minimal mock pool for invoke_compression_agent."""
+        pool = MagicMock()
+        pool.session_name = "TestCaller"
+        # _ensure_compressor_loaded needs get_agent to return truthy
+        comp_agent = MagicMock()
+        comp_agent.llm.generate_cfg = {}
+        pool.get_agent.return_value = comp_agent
+        # _configure_compressor_instance needs get_template and get_instance
+        template = MagicMock()
+        template.llm.generate_cfg = {}
+        pool.get_template.return_value = template
+        pool.get_instance.return_value = None  # no caller instance → skip UI tools merge
+        # finally block: agent_pool._execution._state_lock, instance_state, active_stack_remove
+        pool._execution = MagicMock()
+        pool.instance_state = {}
+        pool.active_stack_remove = MagicMock()
+        return pool
+
+    def test_same_instance_reused_on_missing_end_marker(self):
+        """On missing-end-marker failure, the SAME compressor instance is reused."""
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+
+        # Track which instances are passed to _execute_compressor_and_extract_summary
+        executed_instances = []
+        rebuild_calls = []
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            executed_instances.append(comp_instance)
+            # Simulate a bad response (missing end marker)
+            raise RuntimeError(
+                "Compression output missing end marker '--- END SUMMARY ---' — "
+                "compressor may have hallucinated or continued the task"
+            )
+
+        def fake_rebuild_conversation(messages):
+            rebuild_calls.append(list(messages))
+
+        # Mock the compressor instance
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = [
+            {"role": "system", "content": "You are a compressor."},
+            {"role": "user", "content": "Summarize this..."},
+        ]
+        mock_instance.rebuild_conversation = fake_rebuild_conversation
+
+        # ExecutionEngine is lazily imported inside invoke_compression_agent,
+        # so patch it at the source module.
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(RuntimeError, match="after 3 attempts"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        # Verify the SAME instance was used for all 3 attempts
+        assert len(executed_instances) == 3
+        assert executed_instances[0] is mock_instance
+        assert executed_instances[1] is mock_instance
+        assert executed_instances[2] is mock_instance
+
+        # Verify rebuild_conversation was called twice (before attempt 2 and 3)
+        assert len(rebuild_calls) == 2
+
+        # Verify _create_system_agent was called exactly ONCE (not per-retry)
+        mock_engine._create_system_agent.assert_called_once()
+
+    def test_same_instance_reused_on_empty_summary(self):
+        """On empty-summary failure, the SAME compressor instance is reused."""
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+
+        executed_instances = []
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            executed_instances.append(comp_instance)
+            raise RuntimeError("Compression Agent returned an empty summary")
+
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ]
+        mock_instance.rebuild_conversation = MagicMock()
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(RuntimeError, match="after 3 attempts"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        assert len(executed_instances) == 3
+        assert all(inst is mock_instance for inst in executed_instances)
+        # rebuild_conversation called before attempts 2 and 3
+        assert mock_instance.rebuild_conversation.call_count == 2
+        mock_engine._create_system_agent.assert_called_once()
+
+    def test_hard_failure_does_not_retry(self):
+        """Non-retryable errors (timeout, infra) should NOT trigger a retry."""
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+
+        executed_instances = []
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            executed_instances.append(comp_instance)
+            raise RuntimeError("Compression agent timed out after 120s")
+
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ]
+        mock_instance.rebuild_conversation = MagicMock()
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(RuntimeError, match="timed out"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        # Only ONE attempt — no retry on hard failure
+        assert len(executed_instances) == 1
+        mock_instance.rebuild_conversation.assert_not_called()
+
+    def test_non_runtime_error_does_not_retry(self):
+        """Non-RuntimeError exceptions (e.g., ValueError) should NOT be retried."""
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+
+        executed_instances = []
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            executed_instances.append(comp_instance)
+            raise ValueError("Unexpected infrastructure error")
+
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ]
+        mock_instance.rebuild_conversation = MagicMock()
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(ValueError, match="Unexpected infrastructure error"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        # Only ONE attempt — non-RuntimeError is never retried
+        assert len(executed_instances) == 1
+        mock_instance.rebuild_conversation.assert_not_called()
+
+    def test_success_on_first_attempt_no_retry(self):
+        """Successful first attempt should not trigger any retry or conversation reset."""
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ]
+        mock_instance.rebuild_conversation = MagicMock()
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                return_value="Valid summary text",
+            ):
+                result = invoke_compression_agent(
+                    agent_pool=pool,
+                    target_messages=[{"role": "user", "content": "hello"}],
+                    caller_name="TestCaller",
+                )
+
+        assert result == "Valid summary text"
+        mock_instance.rebuild_conversation.assert_not_called()
+        mock_engine._create_system_agent.assert_called_once()
+
+    def test_retry_then_success(self):
+        """First attempt fails with missing marker, second succeeds — same instance used."""
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+
+        executed_instances = []
+        call_count = [0]
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            executed_instances.append(comp_instance)
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError(
+                    "Compression output missing end marker '--- END SUMMARY ---' — "
+                    "compressor may have hallucinated or continued the task"
+                )
+            return "Good summary on second try"
+
+        initial_conv = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ]
+
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = initial_conv
+        mock_instance.rebuild_conversation = MagicMock()
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                result = invoke_compression_agent(
+                    agent_pool=pool,
+                    target_messages=[{"role": "user", "content": "hello"}],
+                    caller_name="TestCaller",
+                )
+
+        assert result == "Good summary on second try"
+        # Both attempts used the same instance
+        assert len(executed_instances) == 2
+        assert executed_instances[0] is mock_instance
+        assert executed_instances[1] is mock_instance
+        # Conversation was reset once (before attempt 2)
+        assert mock_instance.rebuild_conversation.call_count == 1
+        # Verify the conversation passed to rebuild_conversation equals the initial state
+        reset_conv = mock_instance.rebuild_conversation.call_args[0][0]
+        assert reset_conv == initial_conv
+        # Only one instance was ever created
+        mock_engine._create_system_agent.assert_called_once()
+
+    def test_retry_resets_conversation_to_initial_state(self):
+        """On retry, rebuild_conversation is called with a deep copy of the initial [system, task] state."""
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+
+        initial_conv = [
+            {"role": "system", "content": "You are a compressor."},
+            {"role": "user", "content": "Summarize this conversation..."},
+        ]
+
+        rebuild_args = []
+
+        def fake_rebuild_conversation(messages):
+            rebuild_args.append(messages)
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            raise RuntimeError(
+                "Compression output missing end marker '--- END SUMMARY ---' — "
+                "compressor may have hallucinated or continued the task"
+            )
+
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = initial_conv
+        mock_instance.rebuild_conversation = fake_rebuild_conversation
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(RuntimeError, match="after 3 attempts"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        # rebuild_conversation called twice (before attempts 2 and 3)
+        assert len(rebuild_args) == 2
+        # Each reset conversation equals the initial [system, task] state
+        for reset_conv in rebuild_args:
+            assert reset_conv == initial_conv
+            # Verify it's a deep copy (not the same list object as initial_conv)
+            assert reset_conv is not initial_conv
+
+
 if __name__ == '__main__':
     import pytest
     pytest.main([__file__, '-v'])

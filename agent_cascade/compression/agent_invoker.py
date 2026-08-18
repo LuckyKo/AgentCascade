@@ -3,12 +3,13 @@
 Uses engine.run() to invoke the Compression Agent via _create_system_agent().
 This provides full AgentInstance lifecycle (state tracking, WebUI visibility, API points).
 """
+import copy
 import logging
 import threading
 import time as _time
 from typing import Any, List
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT, CONSOLIDATION_PROMPT
-from agent_cascade.settings import COMPRESSION_END_MARKER, COMPRESSION_AGENT_TIMEOUT
+from agent_cascade.settings import COMPRESSION_END_MARKER, COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES
 from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text, _msg_field_or_extra
@@ -21,9 +22,12 @@ from agent_cascade.api_integration import broadcast_stream_update
 logger = logging.getLogger(__name__)
 
 # Module-level counter for generating unique Compressor instance names.
-# Each compression invocation gets a fresh instance name so the logger cache key
+# Each compression operation gets a fresh instance name so the logger cache key
 # (instance_name, agent_class) is unique — prevents TAIL SYNC DRIFT from reusing
 # a cached logger with stale history data from previous compression cycles.
+# Within a single compression operation, the same instance is reused across retries
+# (conversation reset to initial state before each retry), so no new instances are
+# spawned on retryable failures.
 _lock = threading.Lock()
 
 _compressor_invocation_counter = 0
@@ -315,11 +319,12 @@ def _execute_compressor_and_extract_summary(
 
 
 def _generate_compressor_instance_name() -> str:
-    """Generate a unique instance name for a compressor invocation.
+    """Generate a unique instance name for a compressor operation.
 
-    Thread-safe. Each compression/consolidation invocation gets a fresh instance name
+    Thread-safe. Each compression/consolidation operation gets a fresh instance name
     so the logger cache key (instance_name, agent_class) is unique — prevents TAIL SYNC
-    DRIFT from reusing a cached logger with stale history data.
+    DRIFT from reusing a cached logger with stale history data. Retries within the same
+    operation reuse this single instance (conversation is reset between attempts).
 
     Returns:
         A unique instance name string like "Compressor_42".
@@ -362,6 +367,11 @@ def invoke_compression_agent(
     Uses engine.run() via _create_system_agent() for full AgentInstance lifecycle
     (state tracking, WebUI visibility, API points).
 
+    On retryable validation failures (missing end marker / empty summary), reuses
+    the SAME compressor instance and resends the original prompt by resetting the
+    conversation back to [system_msg, task_msg]. This avoids spawning a new agent
+    instance per attempt while still giving the LLM a clean slate.
+
     Args:
         agent_pool: The AgentPool instance (provides agent loading and state management).
         target_messages: List of messages to summarize.
@@ -373,7 +383,8 @@ def invoke_compression_agent(
         The raw summary string (with thinking blocks stripped).
 
     Raises:
-        RuntimeError: If the compression agent fails or returns an empty summary.
+        RuntimeError: If the compression agent fails or returns an empty summary
+                      after exhausting all retry attempts.
     """
     if not agent_pool:
         raise RuntimeError("agent_pool not connected")
@@ -394,50 +405,97 @@ def invoke_compression_agent(
 
     summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text)
 
+    # Get the caller name for parent tracking and slot management
+    if caller_name is None:
+        caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+
+    # Log warning if caller_name couldn't be resolved properly
+    if caller_name == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
+        logger.warning(
+            f"[COMPRESSION] Using fallback caller_name='Orchestrator' - "
+            f"slot management may not work correctly. Pass caller_name explicitly."
+        )
+
+    from agent_cascade.execution_engine import ExecutionEngine
+    engine = ExecutionEngine(agent_pool)
+
+    # Create the compressor instance ONCE — reused across retries
+    comp_instance = engine._create_system_agent(
+        agent_class='Compressor',
+        instance_name=comp_state_key,
+        task=summary_prompt,
+        caller=caller_name,
+    )
+
+    _configure_compressor_instance(agent_pool, comp_instance, caller_name)
+
+    # Capture the initial conversation state ([system_msg, task_msg]) for retry resets.
+    # After engine.run() completes, the conversation will contain the assistant's
+    # (bad) response. On retry we reset back to this initial state so the LLM sees
+    # a clean [system, user_task] prompt — a true "resend the original prompt" retry.
+    # Deep copy ensures message objects are not shared with the live conversation,
+    # preventing stale/mutated state (timestamps, cache markers) from leaking into retries.
+    with comp_instance._compression_lock:
+        initial_conversation = copy.deepcopy(list(comp_instance.conversation))
+
+    max_retries = COMPRESSION_MAX_RETRIES
+    if max_retries < 1:
+        raise RuntimeError(f"COMPRESSION_MAX_RETRIES must be >= 1, got {max_retries}")
+
     try:
         logger.info("Compression agent invoked via engine-based execution")
 
-        # Get the caller name for parent tracking and slot management
-        if caller_name is None:
-            caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+        for attempt in range(1, max_retries + 1):
+            try:
+                summary = _execute_compressor_and_extract_summary(
+                    agent_pool, engine, comp_instance, comp_state_key, caller_name,
+                    timeout_label="Compression",
+                )
+                return summary
 
-        # Log warning if caller_name couldn't be resolved properly
-        if caller_name == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
-            logger.warning(
-                f"[COMPRESSION] Using fallback caller_name='Orchestrator' - "
-                f"slot management may not work correctly. Pass caller_name explicitly."
-            )
+            except RuntimeError as e:
+                # Only RuntimeError with validation-specific messages are retryable.
+                # Non-RuntimeError exceptions (infrastructure, network, etc.) propagate
+                # immediately without retry — same behavior as the previous outer loop in core.py.
+                err_msg = str(e).lower()
+                is_retryable = ('missing end marker' in err_msg or 'empty summary' in err_msg)
 
-        # Create proper AgentInstance via _create_system_agent() — handles all state setup
-        from agent_cascade.execution_engine import ExecutionEngine
-        engine = ExecutionEngine(agent_pool)
-        comp_instance = engine._create_system_agent(
-            agent_class='Compressor',
-            instance_name=comp_state_key,
-            task=summary_prompt,
-            caller=caller_name,
-        )
+                if not is_retryable:
+                    # Hard failure (timeout, infra error, etc.) — do not retry
+                    raise RuntimeError(f"Compression failed: {e}") from e
 
-        _configure_compressor_instance(agent_pool, comp_instance, caller_name)
+                if attempt >= max_retries:
+                    logger.error(
+                        f"Compression Agent failed after {max_retries} attempts "
+                        f"(instance '{comp_state_key}' reused): {e}"
+                    )
+                    raise RuntimeError(
+                        f"Compression failed after {max_retries} attempts: {e}"
+                    ) from e
 
-        summary = _execute_compressor_and_extract_summary(
-            agent_pool, engine, comp_instance, comp_state_key, caller_name,
-            timeout_label="Compression",
-        )
+                # Retryable validation failure — reset conversation and retry on same instance
+                logger.warning(
+                    f"Compression attempt {attempt}/{max_retries} failed: {e} — "
+                    f"retrying on same compressor instance '{comp_state_key}'."
+                )
+                # Reset conversation back to initial [system_msg, task_msg] state.
+                # rebuild_conversation() also invalidates message caches so _setup_turn
+                # will rebuild the working set from scratch on the next engine.run().
+                comp_instance.rebuild_conversation(initial_conversation)
 
-        return summary
-
-    except Exception as e:
-        raise RuntimeError(f"Compression failed: {e}") from e
     finally:
-        # Always clean up compression agent state when done
-        with agent_pool._execution._state_lock:
-            if comp_state_key in agent_pool.instance_state:
-                agent_pool.instance_state[comp_state_key]['active'] = False
-                try:
-                    agent_pool.active_stack_remove(comp_state_key)
-                except Exception:
-                    pass
+        # Always clean up compression agent state when done (runs exactly once).
+        # Defensive: guard against missing _execution to avoid masking the original exception.
+        try:
+            with agent_pool._execution._state_lock:
+                if comp_state_key in agent_pool.instance_state:
+                    agent_pool.instance_state[comp_state_key]['active'] = False
+                    try:
+                        agent_pool.active_stack_remove(comp_state_key)
+                    except Exception:
+                        pass
+        except Exception as cleanup_err:
+            logger.error(f"Compression cleanup failed for '{comp_state_key}': {cleanup_err}", exc_info=True)
 
 
 def invoke_consolidation_agent(
