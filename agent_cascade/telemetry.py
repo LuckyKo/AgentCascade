@@ -83,6 +83,7 @@ class TelemetryCollector:
             "total_ttft_ms": 0,
             "total_streaming_time_ms": 0,
             "total_tool_latency_ms": 0,
+            "call_agent_calls": 0,
             "call_agent_latency_ms": 0,
             "total_loops_detected": 0,
             "loops_outer": 0,
@@ -539,6 +540,10 @@ class TelemetryCollector:
             # Update session stats (call_agent excluded from avg tool latency)
             self._session_stats["total_tool_calls"] += 1
             if is_call_agent:
+                # Single source of truth for call_agent metrics — both the count
+                # and the latency are driven by the is_call_agent flag, so they
+                # can never disagree (count used to be derived from the tool name).
+                self._session_stats["call_agent_calls"] += 1
                 self._session_stats["call_agent_latency_ms"] += latency_ms
             else:
                 self._session_stats["total_tool_latency_ms"] += latency_ms
@@ -673,8 +678,10 @@ class TelemetryCollector:
 
         avg_tps = stats["total_output_tokens_est"] / total_streaming_time_sec if total_streaming_time_sec > 0 else 0
         avg_llm_latency = stats["total_llm_latency_ms"] / stats["total_llm_calls"] if stats["total_llm_calls"] > 0 else 0
-        # Exclude call_agent count from denominator to match numerator (call_agent latency routed separately)
-        call_agent_count = stats["tool_calls_by_name"].get("call_agent", 0)
+        # Exclude call_agent from the avg tool-latency denominator to match its
+        # numerator. Derived from the is_call_agent-driven counter (single source
+        # of truth) so it always agrees with call_agent_latency_ms.
+        call_agent_count = stats.get("call_agent_calls", 0)
         non_agent_tool_calls = stats["total_tool_calls"] - call_agent_count
         avg_tool_latency = stats["total_tool_latency_ms"] / non_agent_tool_calls if non_agent_tool_calls > 0 else 0
 

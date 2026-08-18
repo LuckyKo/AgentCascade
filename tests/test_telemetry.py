@@ -305,10 +305,25 @@ class TestToolCallLifecycle:
             "a", "call_agent", success=True, is_call_agent=True
         )
         s = collector.get_session_summary()
-        # call_agent_count is derived from tool_calls_by_name["call_agent"].
+        # Count is driven by the is_call_agent flag (single source of truth),
+        # so it always agrees with call_agent_latency_ms.
         assert s["call_agent_count"] == 1
         # Regular (non-agent) tool latency denominator stays clean.
         assert s["total_tool_calls"] == 1
+
+    def test_call_agent_count_ignores_name_when_flag_off(self, collector):
+        """Regression: a tool merely NAMED 'call_agent' with the flag off must NOT
+        be counted as an agent delegation — count and latency share one source."""
+        collector.record_tool_call_start("a", "call_agent")
+        collector.record_tool_call_end(
+            "a", "call_agent", success=True, is_call_agent=False
+        )
+        s = collector.get_session_summary()
+        assert s["call_agent_count"] == 0
+        # It still counts as a regular tool call and its latency goes to the
+        # regular pool (not the call_agent pool).
+        assert s["total_tool_calls"] == 1
+        assert s["call_agent_latency_ms"] == 0
 
     def test_end_without_start_is_safe_noop(self, collector):
         # Must not raise and must not count a call.
