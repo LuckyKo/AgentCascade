@@ -1143,7 +1143,7 @@ class AsyncShellTracker:
 
         Advances ``task.last_heartbeat_sent_pos`` under ``task._lock`` exactly as the
         old ``_send_remaining_output`` did, so the same output is never re-sent by a
-        later heartbeat/status call. The returned text is truncated to 3x
+        later heartbeat/status call. The returned text is truncated to
         shell_char_limit (mid-truncation with spillover). Does NOT enqueue anything —
         callers assemble and send the final message themselves.
         """
@@ -1162,8 +1162,8 @@ class AsyncShellTracker:
 
         output_text = self._format_output_text(remaining)
 
-        # Truncate large remaining output using mid-truncation with spillover (3x shell_char_limit for final output)
-        char_limit = self._get_shell_char_limit() * 3
+        # Truncate large remaining output using mid-truncation with spillover
+        char_limit = self._get_shell_char_limit()
         if char_limit > 0:
             try:
                 base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None
@@ -1453,8 +1453,8 @@ class AsyncShellTracker:
         if consumed_lines:
             output_text = self._format_output_text(consumed_lines)
 
-            # Truncate large outputs using mid-truncation with spillover (status gets 2x shell_char_limit)
-            char_limit = self._get_shell_char_limit() * 2
+            # Truncate large outputs using mid-truncation with spillover
+            char_limit = self._get_shell_char_limit()
             if char_limit > 0:
                 try:
                     base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None

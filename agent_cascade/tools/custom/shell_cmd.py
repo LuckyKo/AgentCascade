@@ -65,13 +65,29 @@ class ShellCmd(BaseTool):
 
     @staticmethod
     def _truncate_shell_message(text: str, agent_name: str, agent_pool) -> str:
-        """Return async message content as-is.
+        """Truncate __wait output using mid-truncation with spillover.
 
-        Heartbeat/completion messages are already truncated by async_shell.py before
-        being queued. __wait must not re-truncate them; the outer tool-result path
-        will apply any necessary truncation once, consistently with other shell_cmd responses.
+        The __wait path reads raw lines directly from the task (not pre-truncated
+        like heartbeats), so it needs its own truncation pass. Uses the same
+        shell_char_limit as other async shell output paths for consistency.
         """
-        return text or ""
+        if not text:
+            return ""
+        try:
+            llm_cfg = getattr(agent_pool, 'llm_cfg', {}) if agent_pool else {}
+            char_limit = llm_cfg.get('shell_char_limit', 2048) if isinstance(llm_cfg, dict) else 2048
+            base_dir = agent_pool.operation_manager.base_dir if agent_pool and hasattr(agent_pool, 'operation_manager') else None
+            if base_dir and char_limit > 0:
+                return truncate_with_spillover(
+                    text, char_limit,
+                    instance_name=agent_name,
+                    tool_name='shell_cmd_async',
+                    base_dir=base_dir,
+                    operation_mode='mid',
+                )
+        except Exception as e:
+            logger.debug(f"[shell_cmd] _truncate_shell_message failed for {agent_name}: {e}")
+        return text
 
     def call(self, params: str, **kwargs) -> str:
         from agent_cascade.utils.utils import json_loads
