@@ -255,7 +255,6 @@ class TelemetryCollector:
                 "total_ttft_ms": 0,
                 "total_streaming_time_ms": 0,
                 "loops_detected": 0,
-                "auto_continues": 0,
                 "retries": 0,
                 "total_compressions": 0,
                 "tool_calls_by_name": defaultdict(int),
@@ -291,7 +290,6 @@ class TelemetryCollector:
                 "input_tokens_est": 0,
                 "output_tokens_est": 0,
                 "loops_detected": 0,
-                "auto_continues": 0,
                 "retries": 0,
                 "compressions": 0,
             }
@@ -610,7 +608,12 @@ class TelemetryCollector:
         self._write_event(event)
 
     def record_auto_continue(self, instance_name: str, reason: str):
-        """Record an auto-continue (malformed output recovery) event."""
+        """Record an auto-continue (malformed output recovery) event.
+
+        Session-level only — intentionally not tracked per-turn, since the
+        count is surfaced via get_session_summary() and the UI card rather
+        than the turn_end/config stats payloads.
+        """
         with _telemetry_lock:
             event = {
                 "type": "auto_continue",
@@ -619,10 +622,6 @@ class TelemetryCollector:
                 "timestamp": _now_iso(),
             }
             self._session_stats["total_auto_continues"] += 1
-
-            turn = self._active_turns.get(instance_name)
-            if turn:
-                turn["auto_continues"] += 1
 
         self._write_event(event)
 
