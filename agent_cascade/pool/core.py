@@ -85,11 +85,11 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         self.templates: Dict[str, Assistant] = {}      # agent_class → template
 
         # ── Configuration ───────────────────────────────────────────────────
-        self.llm_cfg = llm_cfg                          # LLM config (used as fallback when no api_router)
-        self.settings = PoolSettings()                  # Configurable thresholds and timeouts
+        self.llm_cfg = llm_cfg                          # fallback LLM config when no api_router
+        self.settings = PoolSettings()                  # configurable thresholds and timeouts
 
         # ── Defaults for attributes that can be overridden by persisted settings ──
-        self._enable_async_shell_console_window = False  # Default OFF (overridden by _load_pool_settings if persisted)
+        self._enable_async_shell_console_window = False  # default OFF; _load_pool_settings may override
 
         # ── PoolSettings persistence ────────────────────────────────────────
         instance_id = get_instance_id()
@@ -97,30 +97,30 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
             self._pool_settings_path = self.api_router._config_dir / f"pool_settings_{instance_id}.json"
         else:
             self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
-        self._settings_save_lock = threading.Lock()     # Protect concurrent save operations
-        self._loaded_auto_security = None               # Persisted auto-security toggle loaded from pool_settings.json
-        self._load_pool_settings()                      # Load persisted values, overriding defaults
-        self._apply_pending_config()                    # Apply work folders/workspace that need operation_manager
+        self._settings_save_lock = threading.Lock()     # guards concurrent save operations
+        self._loaded_auto_security = None               # persisted auto-security toggle (None = not loaded)
+        self._load_pool_settings()                      # load persisted values, overriding defaults
+        self._apply_pending_config()                    # apply work folders/workspace that need operation_manager
 
         # ── Focused managers (delegation targets) ───────────────────────────
         # Only LoggerManager and IdleManager get their own files — they have
         # distinct lifecycles (file I/O, background thread). Halt state and
         # message routing are simple data structures that belong on the pool.
-        self._execution = ParallelAgentManager(self)       # parallel execution, active_stack
-        self._logger = LoggerManager(self, workspace_dir)  # logger lifecycle, recovery
-        self._idle = IdleManager(self)                      # idle detection and auto-dismissal
+        self._execution = ParallelAgentManager(self)       # parallel execution + active_stack
+        self._logger = LoggerManager(self, workspace_dir)  # logger lifecycle + recovery
+        self._idle = IdleManager(self)                      # idle detection + auto-dismissal
 
         # ── Simple state (owned directly by pool, no separate manager) ───────
-        self._paused = threading.Event()                   # global pause flag (thread-safe Event)
-        self._paused.set()                                  # start in resumed state (clear = paused, set = resumed)
+        self._paused = threading.Event()                   # global pause flag; set=resumed, clear=paused
+        self._paused.set()                                  # start in resumed state
         self._halted_instances: set = set()                # per-instance halt state (legacy, kept for compat)
-        self._compression_halted: set = set()              # instances halted by forced compression (not manual)
-        self.terminated_instances: set = set()             # instances marked for immediate termination
-        self._instance_threads: Dict[str, threading.Thread] = {}  # instance_name -> execution thread for join on dismissal
-        self._instance_threads_lock = threading.Lock()            # protects _instance_threads dict access
-        self._pool_lock = threading.RLock()                  # protects instances dict and terminated_instances set
+        self._compression_halted: set = set()              # halted by forced compression (not manual)
+        self.terminated_instances: set = set()             # marked for immediate termination
+        self._instance_threads: Dict[str, threading.Thread] = {}  # instance_name -> execution thread (join on dismissal)
+        self._instance_threads_lock = threading.Lock()            # guards _instance_threads access
+        self._pool_lock = threading.RLock()                  # guards instances dict + terminated_instances set
         self.children: Dict[str, List[str]] = {}           # parent_name -> [child_names] for cascade termination
-        self._children_lock = threading.RLock()            # Lock for child tracking structures (pool.children + _child_instances)
+        self._children_lock = threading.RLock()            # guards pool.children + _child_instances
 
         # Lock hierarchy (for future reference — never nest locks in reverse order):
         #   _pool_lock → _state_lock → _instance_threads_lock / _children_lock

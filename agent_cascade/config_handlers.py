@@ -747,6 +747,8 @@ def _handle_llm_config(ui_cfg: dict, agent_pool: Optional[Any], agents: list) ->
         else:
             _logger.debug("[update_config] LLM config unchanged")
 
+# Each key is bound at decoration time (register_config_handler(_llm_key)), so there is
+# no late-binding closure issue — every registered handler routes to _handle_llm_config.
 for _llm_key in LLM_CONFIG_KEYS:
     @register_config_handler(_llm_key)
     def _handler(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:

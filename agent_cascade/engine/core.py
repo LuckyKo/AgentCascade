@@ -143,8 +143,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # Phase 4.4: Initialize stream publisher with lazy engine reference
         self.stream_publisher = StreamPublisher(pool)
 
-        # Two-phase initialization: set engine references after all handlers
-        # created
+        # Second phase of two-phase init: wire engine refs now that all handlers exist.
         self.initialize()
 
     def initialize(self) -> None:
@@ -158,8 +157,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         self.lifecycle.set_engine(self)
         self.compression_handler.set_engine(self)
         self.tool_dispatcher.set_engine(self)
-        # stream_publisher doesn't need engine reference (per refactor plan
-        # line 2190)
+        # stream_publisher doesn't need an engine reference
 
     def _telemetry(self):
         """Return the telemetry collector if available, else None."""

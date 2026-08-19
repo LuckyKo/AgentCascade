@@ -84,6 +84,7 @@ class AsyncToolRegistry:
         max_workers = getattr(getattr(pool, 'settings', None), 'max_workers', None)
         if not isinstance(max_workers, int) or isinstance(max_workers, bool) or max_workers < 1:
             max_workers = AGENT_MAX_WORKERS
+        self._worker_count = max_workers
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="async_tool"
@@ -108,9 +109,9 @@ class AsyncToolRegistry:
             logger.error(f"[ASYNC_REGISTRY] resize_executor given non-numeric {max_workers!r}; keeping current pool")
             return False
         max_workers = max(1, max_workers)
+        old_max = self._worker_count
         with self._lock:
             old = self._executor
-            old_max = getattr(old, '_max_workers', None)
             try:
                 new = ThreadPoolExecutor(
                     max_workers=max_workers,
@@ -119,6 +120,7 @@ class AsyncToolRegistry:
             except Exception as e:
                 logger.error(f"[ASYNC_REGISTRY] Failed to construct executor for resize to {max_workers}: {e}")
                 return False
+            self._worker_count = max_workers
             self._executor = new
         # Shutdown the old pool OUTSIDE the lock. No cancel_futures: queued work
         # drains to completion so no async child agent is lost or hangs its parent.

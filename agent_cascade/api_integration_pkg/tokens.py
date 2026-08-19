@@ -42,11 +42,13 @@ def _resolve_max_tokens(pool, instance=None):
     Returns:
         Maximum input token count as integer.
     """
-    # Import DEFAULT_MAX_INPUT_TOKENS locally to avoid circular import issues
+    # Import DEFAULT_MAX_INPUT_TOKENS locally to avoid circular import issues.
+    # The fallback mirrors the canonical settings default (65000) so a failed
+    # import can never silently switch to a stale, smaller window.
     try:
         from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
     except ImportError:
-        DEFAULT_MAX_INPUT_TOKENS = 58000
+        DEFAULT_MAX_INPUT_TOKENS = 65000
 
     # ── Step 1: Per-instance override (from UI config via _apply_ui_config) ──
     # Absolute priority — supervisor-set overrides should never be second-guessed.

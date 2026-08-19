@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.settings import (
     DEFAULT_WORKSPACE, DEFAULT_TOOL_RESULT_MAX_CHARS, CHARS_PER_TOKEN_ESTIMATE,
-    DEFAULT_READ_FILE_MAX_LINES,
+    DEFAULT_READ_FILE_MAX_LINES, DEFAULT_MAX_INPUT_TOKENS,
 )
 import json
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -51,7 +51,7 @@ _gtk_common_paths = [
 ]
 
 # --- read_file constants ----------------------------------------------------- #
-DEFAULT_MAX_INPUT_TOKENS = 58000          # Default context window size in tokens
+# DEFAULT_MAX_INPUT_TOKENS is imported from agent_cascade.settings (canonical, default 65000).
 DEFAULT_READ_LINES = DEFAULT_READ_FILE_MAX_LINES  # From settings (default: 1000)
 MAX_LINE_LIMIT_EXPLICIT = 100000          # Max lines when user explicitly sets a limit
 HEX_DUMP_BYTES = 1024                     # Bytes to show in hex view for binary files

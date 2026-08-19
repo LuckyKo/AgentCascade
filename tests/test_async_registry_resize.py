@@ -82,13 +82,13 @@ def _make_pool_with_settings(max_workers):
 class TestResizeSwapsExecutor:
     def test_resize_swaps_and_sets_size(self, registry):
         old_exec = registry._executor
-        assert old_exec._max_workers == AGENT_MAX_WORKERS
+        assert registry._worker_count == AGENT_MAX_WORKERS
 
         result = registry.resize_executor(8)
         assert result is True
         new_exec = registry._executor
         assert new_exec is not old_exec
-        assert new_exec._max_workers == 8
+        assert registry._worker_count == 8
 
     def test_old_pool_drains_not_cancelled(self, registry):
         """A task queued on the OLD executor still completes after a resize.
@@ -129,13 +129,13 @@ class TestResizeSwapsExecutor:
 class TestClampAndNoop:
     def test_clamps_below_one(self, registry):
         assert registry.resize_executor(0) is True
-        assert registry._executor._max_workers == 1
+        assert registry._worker_count == 1
         assert registry.resize_executor(-5) is True
-        assert registry._executor._max_workers == 1
+        assert registry._worker_count == 1
 
     def test_accepts_float(self, registry):
         assert registry.resize_executor(4.9) is True
-        assert registry._executor._max_workers == 4
+        assert registry._worker_count == 4
 
     def test_non_numeric_input_returns_false_and_keeps_pool(self, registry):
         """resize_executor must return False (never raise) on non-numeric input."""
@@ -148,7 +148,7 @@ class TestClampAndNoop:
     def test_same_size_is_noop_and_leaks_no_threads(self, registry):
         # Resize to the same size must not grow the pool: worker count stays bounded.
         assert registry.resize_executor(AGENT_MAX_WORKERS) is True
-        assert registry._executor._max_workers == AGENT_MAX_WORKERS
+        assert registry._worker_count == AGENT_MAX_WORKERS
         # Let workers spin up, then confirm we never exceed the configured count.
         deadline = time.monotonic() + 5
         while _count_async_tool_threads() < AGENT_MAX_WORKERS and time.monotonic() < deadline:
@@ -199,16 +199,16 @@ class TestInitialSizing:
     def test_honors_pool_settings(self):
         pool = _make_pool_with_settings(7)
         reg = AsyncToolRegistry(pool=pool)
-        assert reg._executor._max_workers == 7
+        assert reg._worker_count == 7
 
     def test_fallback_when_no_pool(self):
         reg = AsyncToolRegistry(pool=None)
-        assert reg._executor._max_workers == AGENT_MAX_WORKERS
+        assert reg._worker_count == AGENT_MAX_WORKERS
 
     def test_fallback_when_settings_missing(self, mock_pool):
         # mock_pool.settings is None -> getattr falls back to AGENT_MAX_WORKERS
         reg = AsyncToolRegistry(pool=mock_pool)
-        assert reg._executor._max_workers == AGENT_MAX_WORKERS
+        assert reg._worker_count == AGENT_MAX_WORKERS
 
 
 # ============================================================================
@@ -220,12 +220,12 @@ class TestResetPreservesSize:
         # Simulate the lifecycle reset: shutdown then recreate with pool=self.
         pool = _make_pool_with_settings(5)
         first = AsyncToolRegistry(pool=pool)
-        assert first._executor._max_workers == 5
+        assert first._worker_count == 5
         first.shutdown()
 
         # Recreate exactly as lifecycle.py does: AsyncToolRegistry(pool=self).
         second = AsyncToolRegistry(pool=pool)
-        assert second._executor._max_workers == 5, "reset did not preserve configured size"
+        assert second._worker_count == 5, "reset did not preserve configured size"
 
 
 # ============================================================================
@@ -326,7 +326,7 @@ class TestIntegrationWithRealPoolShapedObject:
     def test_register_resize_completion(self):
         pool = _make_pool_with_settings(3)
         reg = AsyncToolRegistry(pool=pool)
-        assert reg._executor._max_workers == 3
+        assert reg._worker_count == 3
 
         # Register a couple of tools.
         e1 = reg.register("worker1", lambda: "one", function_id="c1")
@@ -334,7 +334,7 @@ class TestIntegrationWithRealPoolShapedObject:
 
         # Live-resize (as the UI slider would).
         assert reg.resize_executor(5) is True
-        assert reg._executor._max_workers == 5
+        assert reg._worker_count == 5
 
         # Register after resize; everything must complete and enqueue.
         e3 = reg.register("worker1", lambda: "three", function_id="c3")
