@@ -72,6 +72,10 @@ except ImportError:
 # Agent state management imports for Stop handler
 from agent_cascade.agent_instance import ACTIVE_STATES, AgentState, InvalidStateTransition
 
+# Re-exports for backward compatibility (Phase 4a refactor)
+from agent_cascade.content_parse import _extract_system_message, _parse_multimodal_content
+from agent_cascade.path_security import _is_path_allowed, _get_allowed_file_roots, _SENSITIVE_FILENAMES
+
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
 # Module-level lock shared by session helper functions and create_app() internals.
@@ -84,62 +88,6 @@ LLM_CONFIG_KEYS = frozenset({
     'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
     'presence_penalty', 'stop', 'timeout', 'model_type'
 })
-
-
-def _extract_system_message(agent) -> str:
-    """Extract system message content from an agent.
-    
-    Priority: base_system_message > system_message > llm.cfg['system'].
-    Returns '' (empty string) if no system message found — consistent with
-    how downstream callers check truthiness via `if sys_content:`.
-    Never returns None.
-    """
-    if hasattr(agent, 'base_system_message') and agent.base_system_message:
-        return str(agent.base_system_message)
-    if hasattr(agent, 'system_message') and agent.system_message:
-        return str(agent.system_message)
-    if hasattr(agent, 'llm') and hasattr(agent.llm, 'cfg'):
-        cfg = agent.llm.cfg
-        val = cfg.get('system', '') or cfg.get('system_message', '')
-        if val:
-            return val
-    return ''
-
-
-def _parse_multimodal_content(text):
-    """
-    Parse markdown images ![alt](data:...) and return a list of content items.
-    If no images are found, returns the original text.
-
-    Saves base64 data URIs to media storage as paths; falls back to inline
-    base64 if media storage fails.
-    """
-    from agent_cascade.log import logger
-
-    parts = []
-    last_end = 0
-    for match in _IMAGE_DATA_PATTERN.finditer(text):
-        start, end = match.span()
-        if start > last_end:
-            parts.append({'text': text[last_end:start]})
-        alt, url = match.groups()
-        try:
-            media_path = save_image_from_data_uri(url)
-            parts.append({'image': media_path})  # Path instead of base64
-        except MediaStorageError as e:
-            # Fallback to inline base64 if media storage fails
-            logger.warning(f"Media storage failed for user image, keeping inline base64: {e}")
-            parts.append({'image': url})
-        last_end = end
-    
-    if last_end < len(text):
-        parts.append({'text': text[last_end:]})
-
-    if not parts:
-        return text
-    if len(parts) == 1 and 'text' in parts[0]:
-        return parts[0]['text']
-    return parts
 
 
 def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
@@ -202,76 +150,6 @@ def _set_generating_true(session: dict) -> None:
     """Atomically mark session as generating."""
     with session_lock:
         session['generating'] = True
-
-
-# ── File serving security helpers (for /api/file endpoint) ───────────────
-
-_SENSITIVE_FILENAMES = {".env", ".gitconfig", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-
-
-def _get_allowed_file_roots() -> List[Path]:
-    """Return the list of directories that /api/file is allowed to serve from.
-
-    Includes:
-      - Media directory (<workspace>/logs/media/ or <workspace>/logs_<instance>/media/)
-      - Workspace root (DEFAULT_WORKSPACE)
-    """
-    from agent_cascade.instance_id import make_instance_dir
-    from agent_cascade.settings import DEFAULT_WORKSPACE
-
-    workspace_root = Path(DEFAULT_WORKSPACE)
-    base_logs = str(workspace_root / "logs")
-    instance_logs = make_instance_dir(base_logs)
-    media_dir = Path(instance_logs) / "media"
-    return [media_dir, workspace_root]
-
-
-def _is_path_allowed(path: str) -> bool:
-    """Check if a file path is allowed to be served via /api/file.
-
-    URL-decodes and resolves the path, then verifies it falls under an allowed root
-    using prefix matching with os.sep to avoid partial directory name matches.
-
-    Args:
-        path: The raw path string from the request (may be URL-encoded).
-
-    Returns:
-        True if the path is safe to serve, False otherwise.
-    """
-    from urllib.parse import unquote
-    from agent_cascade.log import logger
-
-    # URL-decode the path
-    decoded = unquote(path)
-
-    try:
-        resolved = Path(decoded).resolve()
-    except (OSError, ValueError) as e:
-        logger.warning(f"Failed to resolve path for /api/file: {decoded} ({e})")
-        return False
-
-    # Check filename-level restrictions
-    basename = resolved.name.lower()
-
-    # Block hidden files/dirs (starting with dot)
-    if basename.startswith("."):
-        return False
-
-    # Block known sensitive filenames
-    if basename in _SENSITIVE_FILENAMES:
-        return False
-
-    # Check that path is under an allowed root
-    allowed_roots = _get_allowed_file_roots()
-    resolved_str = str(resolved) + os.sep
-
-    for root in allowed_roots:
-        root_str = str(root.resolve()) + os.sep
-        if resolved_str.startswith(root_str):
-            return True
-
-    logger.warning(f"Path outside allowed roots for /api/file: {decoded} (resolved: {resolved})")
-    return False
 
 
 def create_app(agents, agent_pool, config=None, auto_security=True):

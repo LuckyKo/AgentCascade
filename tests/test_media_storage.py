@@ -517,12 +517,15 @@ class TestParseMultimodalContent:
 
         input_text = f"Image: ![test]({original_data_uri})"
 
-        # Import and patch save_image_from_data_uri to raise MediaStorageError
+        # Import and patch save_image_from_data_uri to raise MediaStorageError.
+        # _parse_multimodal_content now lives in agent_cascade.content_parse (Phase 4a),
+        # so the dependency must be patched at its true home for the mock to take effect.
         import agent_cascade.api_server as api_server
-        original_func = api_server.save_image_from_data_uri
+        import agent_cascade.content_parse as content_parse
+        original_func = content_parse.save_image_from_data_uri
 
         try:
-            api_server.save_image_from_data_uri = lambda uri: (_ for _ in ()).throw(
+            content_parse.save_image_from_data_uri = lambda uri: (_ for _ in ()).throw(
                 MediaStorageError("Simulated disk full")
             )
 
@@ -543,7 +546,7 @@ class TestParseMultimodalContent:
                 f"Fallback should preserve original data URI exactly"
 
         finally:
-            api_server.save_image_from_data_uri = original_func
+            content_parse.save_image_from_data_uri = original_func
 
     def test_multiple_images_in_one_message(self):
         """Input text with 2+ embedded base64 images; verify all are converted to paths."""
