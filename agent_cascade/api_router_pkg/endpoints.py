@@ -22,8 +22,14 @@ def ensure_api_endpoints_config(config_dir: Optional[str] = None) -> bool:
         if config_dir is not None:
             config_path = Path(config_dir) / 'api_endpoints.json'
         else:
-            # Project-root config dir (same logic as APIRouter.__init__)
-            project_root = Path(__file__).resolve().parent.parent
+            # Project-root config dir (same logic as APIRouter.__init__).
+            # This file lives in api_router_pkg/ — one level deeper than the original
+            # monolith (agent_cascade/api_router.py), so it needs an extra .parent to
+            # reach project root. Verified: original .parent.parent from the monolith
+            # resolved to N:\work\WD\AgentCascade (project root, where config/ with
+            # secrets.json lives); without this fix it resolves to agent_cascade/,
+            # which auto-creates a stray agent_cascade/config/ dir.
+            project_root = Path(__file__).resolve().parent.parent.parent
             config_path = project_root / 'config' / 'api_endpoints.json'
 
         if config_path.exists():

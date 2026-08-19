@@ -66,8 +66,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
             self.api_router = api_router
         else:
             from agent_cascade.api_router import APIRouter
-            # API config lives in the project root config/ dir, not workspace
-            project_root = Path(__file__).resolve().parent.parent
+            # API config lives in the project root config/ dir, not workspace.
+            # This file lives in pool/ (one level deeper than the original
+            # agent_pool.py), so it needs an extra .parent to reach project root.
+            project_root = Path(__file__).resolve().parent.parent.parent
             config_dir = str(project_root / 'config')
             self.api_router = APIRouter(
                 default_llm_cfg=llm_cfg,
@@ -176,8 +178,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         from agent_cascade.skills import SkillManager
         self.skill_manager = SkillManager()
 
-        # Discover skills from .qwen/skills/ directory (relative to project root)
-        _project_root = Path(__file__).resolve().parent.parent
+        # Discover skills from .qwen/skills/ directory (relative to project root).
+        # This file lives in pool/ (one level deeper than the original agent_pool.py),
+        # so it needs an extra .parent to reach project root.
+        _project_root = Path(__file__).resolve().parent.parent.parent
         _skills_dir = _project_root / '.qwen' / 'skills'
         if _skills_dir.exists():
             self.skill_manager.discover([_skills_dir])

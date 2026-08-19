@@ -170,3 +170,5 @@ def _calc_stream_token_stats(
     _cache_mgr.evict_if_full('stream_token_stats', _STREAM_TOKEN_STATS_CACHE_MAXSIZE)
     with _cache_mgr._lock:
         _cache_mgr.stream_token_stats[instance_name] = (h_stats, r_stats)
+
+    return h_stats, r_stats

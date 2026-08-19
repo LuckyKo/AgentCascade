@@ -94,8 +94,12 @@ class APIRouter:
         elif config_dir:
             self._config_dir = Path(config_dir)
         else:
-            # API config lives in the project root config/ dir, not workspace
-            project_root = Path(__file__).resolve().parent.parent
+            # API config lives in the project root config/ dir, not workspace.
+            # This file lives in api_router_pkg/ — one level deeper than the original
+            # monolith (agent_cascade/api_router.py), so it needs an extra .parent to
+            # reach project root (verified: original .parent.parent from the monolith
+            # resolved to N:\work\WD\AgentCascade, where config/ with secrets.json lives).
+            project_root = Path(__file__).resolve().parent.parent.parent
             self._config_dir = project_root / 'config'
         self._config_path = self._config_dir / 'api_endpoints.json'
 
