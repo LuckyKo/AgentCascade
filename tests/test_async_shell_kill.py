@@ -119,7 +119,7 @@ class TestKillTaskWithMockedProcess:
             task = _make_running_task(pid=99999, process=proc_mock)
             _setup_task(tracker, task)
 
-            with patch('agent_cascade.async_shell.KILL_WAIT_TIMEOUT', 0.3):
+            with patch('agent_cascade.async_shell_pkg.constants.KILL_WAIT_TIMEOUT', 0.3):
                 result = tracker.kill_task('test_agent', 1)
 
             assert expected_in_result in result or 'timed out' in result.lower()

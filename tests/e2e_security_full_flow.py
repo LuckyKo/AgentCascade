@@ -176,7 +176,7 @@ def full_flow_harness(tmp_path, request):
     """Real router/pool/operation_manager + short timeouts. Own config dir per test (xdist-safe)."""
     import os as _os
     import agent_cascade.slot_queue as _sq_mod
-    import agent_cascade.api_router as _ar_mod
+    import agent_cascade.api_router_pkg.scheduler as _ar_mod
 
     cfg_dir = tmp_path / request.node.name.replace("/", "_")
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -239,7 +239,7 @@ def full_flow_harness(tmp_path, request):
 def _run_full_flow(h, auto_apply):
     """Drive the REAL production flow and return (records, shared, rid, caller_result)."""
     import agent_cascade.slot_queue as _sq_mod
-    import agent_cascade.api_router as _ar_mod
+    import agent_cascade.api_router_pkg.scheduler as _ar_mod
     from agent_cascade.agent_instance import AgentInstance
 
     pool, om, shared = h["pool"], h["om"], h["shared"]

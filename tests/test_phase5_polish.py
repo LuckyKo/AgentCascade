@@ -165,7 +165,7 @@ class TestSubAgentStateMainSession:
 
     def test_create_main_agent_instance_populates_instance_state(self):
         """create_main_agent_instance should register root in instance_state."""
-        from agent_cascade.api_integration import create_main_agent_instance
+        from agent_cascade.api_integration_pkg.runner import create_main_agent_instance
         
         # Minimal pool mock with required methods/attributes
         created_instances = {}

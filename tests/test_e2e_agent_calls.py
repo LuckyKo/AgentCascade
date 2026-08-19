@@ -1095,7 +1095,7 @@ class TestSecuritySlotDeadlockRepro:
         # BOTH modules that read it (slot_queue for SlotPool.acquire, api_router for the
         # Scheduler.acquire effective_timeout) to make the deadlock observable in ~3s.
         import agent_cascade.slot_queue as _sq_mod
-        import agent_cascade.api_router as _ar_mod
+        import agent_cascade.api_router_pkg.scheduler as _ar_mod
         _OLD_QWT = _sq_mod.QUEUE_WAIT_TIMEOUT
         _OLD_AR_QWT = _ar_mod.QUEUE_WAIT_TIMEOUT
         _sq_mod.QUEUE_WAIT_TIMEOUT = 3

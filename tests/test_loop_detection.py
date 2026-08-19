@@ -362,7 +362,7 @@ class TestRecoveryHandler:
         pool.get_instance.return_value = inst
         return pool, inst
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r1_surgical_rollback_targets_specific_agent(self, mock_run):
         """R1: LoopDetectedError with agent_name set → surgical_rollback targets that agent."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
@@ -392,7 +392,7 @@ class TestRecoveryHandler:
         assert call_args[0][0] == "worker1", f"Expected rollback on 'worker1', got '{call_args[0][0]}'"
         assert call_args[0][1] == 4
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r2_fallback_to_instance_name(self, mock_run):
         """R2: LoopDetectedError without agent_name → falls back to instance_name."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
@@ -418,7 +418,7 @@ class TestRecoveryHandler:
         pool.surgical_rollback.assert_called_once()
         assert pool.surgical_rollback.call_args[0][0] == "my_agent"
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r3_retry_limit_enforcement(self, mock_run):
         """R3: After max_auto_retries failures, yields error message."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
@@ -446,7 +446,7 @@ class TestRecoveryHandler:
             "Should yield error message after exhausting retries"
         assert mock_run.call_count == 3, "Should have attempted exactly 3 calls"
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r4_hint_injection(self, mock_run):
         """R4: Verify loop avoidance hint is appended to the correct instance."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
@@ -474,7 +474,7 @@ class TestRecoveryHandler:
         assert "[SYSTEM]: You appear to be stuck in a loop" in (hint_msg.content or "")
         assert hint_msg.role == USER
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r5_auto_rollback_disabled(self, mock_run):
         """R5: auto_rollback_enabled=False → yield error without rollback."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
@@ -495,7 +495,7 @@ class TestRecoveryHandler:
         assert not pool.surgical_rollback.called, "Should NOT rollback when disabled"
         assert not inst.append_message.called, "Should NOT inject hint when disabled"
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r6_instance_not_found_after_rollback(self, mock_run):
         """R6: pool.get_instance returns None after rollback → error yield + break."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
@@ -523,7 +523,7 @@ class TestRecoveryHandler:
             for m in results[-1]
         ), "Should yield error when instance not found after rollback"
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r7_unlimited_retries(self, mock_run):
         """R7: max_auto_retries=-1 → retries exceed default limit (converted to 999_999)."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
@@ -546,7 +546,7 @@ class TestRecoveryHandler:
         # Should have consumed all provided generators (unlimited retries mode)
         assert call_count_tracker[0] == 20, f"Expected 20 calls in unlimited mode, got {call_count_tracker[0]}"
 
-    @patch('agent_cascade.api_integration.run_agent_in_pool')
+    @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r9_non_loop_exception(self, mock_run):
         """R9: Non-loop exceptions yield error message."""
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery

@@ -96,7 +96,7 @@ class TestResolveMaxTokensRouterReturnsValue:
 
     def test_router_value_returned(self):
         """Primary path: router returns a valid limit."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         pool = _PoolStub(router_limit=128000)
         inst = _InstanceStub()
@@ -110,7 +110,7 @@ class TestResolveMaxTokensTemplateFallback:
 
     def test_template_static_config_used_when_router_returns_zero(self):
         """Router returns 0, template has a static max_input_tokens."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         pool = _PoolStub(static_limit=64000)
         inst = _InstanceStub()
@@ -124,7 +124,7 @@ class TestResolveMaxTokensDefaultFallback:
 
     def test_default_returned_when_no_template(self):
         """Router returns 0 and no template exists."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         pool = _PoolStub()
         inst = _InstanceStub()
@@ -138,7 +138,7 @@ class TestResolveMaxTokensOverridePriority:
 
     def test_override_beats_router_value(self):
         """Per-instance override should be returned even when router has a value."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         pool = _PoolStub(router_limit=128000)
         inst = _InstanceStub(override={'max_input_tokens': 50000})
@@ -152,7 +152,7 @@ class TestResolveMaxTokensNullInputs:
 
     def test_pool_none_falls_through_to_defaults(self):
         """When pool is None, the function should fall through to defaults."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         inst = _InstanceStub()
 
@@ -161,7 +161,7 @@ class TestResolveMaxTokensNullInputs:
 
     def test_instance_none_uses_orchestrator_class(self):
         """When instance is None, 'orchestrator' should be used as agent_class."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         pool = _PoolStub(router_limit=80000)
 
@@ -174,7 +174,7 @@ class TestResolveMaxTokensRouterException:
 
     def test_router_exception_falls_through(self):
         """When the API Router raises an exception, fallback to template/default."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         pool = _PoolStub(static_limit=48000)
         pool.api_router = _RouterStub(80000)
@@ -192,7 +192,7 @@ class TestResolveMaxTokensGenerateCfgNone:
 
     def test_generate_cfg_none_does_not_crash(self):
         """When llm.cfg['generate_cfg'] is None, the function should not crash."""
-        from agent_cascade.api_integration import _resolve_max_tokens
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
 
         pool = _PoolStub()
         # Override: no template but make one with generate_cfg=None

@@ -193,7 +193,7 @@ def slot_harness(tmp_path, request):
     """
     import os as _os
     import agent_cascade.slot_queue as _sq_mod
-    import agent_cascade.api_router as _ar_mod
+    import agent_cascade.api_router_pkg.scheduler as _ar_mod
 
     cfg_dir = tmp_path / request.node.name.replace("/", "_")
     cfg_dir.mkdir(parents=True, exist_ok=True)
