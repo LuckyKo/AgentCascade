@@ -626,7 +626,7 @@ class TestExecutionEngineIntegration:
         
         # Patch detect_loop at the module level where execution_engine imports it.
         # During cooldown, _pre_llm_checks skips calling _canonical_detect_loop entirely.
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("loop", 2)) as mock_detect:
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("loop", 2)) as mock_detect:
             # Simulate what _pre_llm_checks does (execution_engine.py:1200)
             if not getattr(inst, '_suppress_loop_detection_next_turn', False):
                 mock_detect(msgs)
@@ -636,7 +636,7 @@ class TestExecutionEngineIntegration:
         # Clear the flag — next turn should run detection
         inst._suppress_loop_detection_next_turn = False
         
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("loop", 2)) as mock_detect:
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("loop", 2)) as mock_detect:
             if not getattr(inst, '_suppress_loop_detection_next_turn', False):
                 mock_detect(msgs)
             
@@ -1005,7 +1005,7 @@ class TestMaxAutoRollbacksEnforcement:
 
         # First loop detection: rollback_count goes to 1, within limit
         turns = [50]
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("repeat", 2)):
             result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
         assert result is True, "Should continue loop after rollback"
@@ -1016,7 +1016,7 @@ class TestMaxAutoRollbacksEnforcement:
         # Second detection: rollback_count goes to 2, still within limit
         engine.reset_mock()
         turns = [50]
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("repeat", 2)):
             result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
         assert result is True
@@ -1026,7 +1026,7 @@ class TestMaxAutoRollbacksEnforcement:
         # Third detection: rollback_count goes to 3, exceeds limit (3 > 2) → terminate
         engine.reset_mock()
         turns = [50]
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("repeat", 2)):
             result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
         assert result is True, "Should return True so caller breaks on stop_conditions"
@@ -1052,7 +1052,7 @@ class TestMaxAutoRollbacksEnforcement:
         for i in range(10):
             engine.reset_mock()
             turns = [50]
-            with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+            with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("repeat", 2)):
                 result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
             assert result is True, f"Detection {i+1}: should continue loop"
@@ -1075,7 +1075,7 @@ class TestMaxAutoRollbacksEnforcement:
         inst = self._make_fake_instance("test_agent")
 
         turns = [50]
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("repeat", 2)):
             result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
         # Rollback is performed (count becomes 1), then limit check: 1 > 0 → terminate
@@ -1098,7 +1098,7 @@ class TestMaxAutoRollbacksEnforcement:
         inst = self._make_fake_instance("test_agent")
 
         turns = [50]
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("repeat", 2)):
             result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
         # Returns False → caller proceeds to LLM call with current context
@@ -1122,7 +1122,7 @@ class TestMaxAutoRollbacksEnforcement:
         inst = self._make_fake_instance("test_agent")
 
         turns = [42]
-        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+        with patch('agent_cascade.engine.llm_call._canonical_detect_loop', return_value=("repeat", 2)):
             engine._pre_llm_checks(inst, msgs, [], [], turns)
 
         assert turns[0] == 41, "Turn should be consumed on loop rollback"

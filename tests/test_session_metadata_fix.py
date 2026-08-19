@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from agent_cascade.execution_engine import _build_session_metadata
+from agent_cascade.engine.helpers import _build_session_metadata
 
 
 def test_working_dir_from_operation_manager():

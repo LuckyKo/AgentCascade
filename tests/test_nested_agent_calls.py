@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.execution_engine import (
+from agent_cascade.engine.helpers import (
     _get_active_functions_from_template,
     _build_resources_block,
 )

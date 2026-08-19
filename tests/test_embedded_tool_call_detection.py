@@ -5,7 +5,7 @@ _detect_tool / _check_for_tool_calls_in_output methods.
 """
 
 import pytest
-from agent_cascade.execution_engine import _extract_tool_calls_from_text
+from agent_cascade.engine.helpers import _extract_tool_calls_from_text
 
 
 class TestExtractToolCallsQwenFormat:

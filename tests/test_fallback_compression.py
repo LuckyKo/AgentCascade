@@ -348,7 +348,7 @@ class TestExecutionEngineIterativeCompression:
 
     def test_handler_calls_find_compression_slice(self):
         """FallbackCompressionRequired handler calls real _find_compression_slice."""
-        from agent_cascade.execution_engine import FALLBACK_COMPRESSION_INITIAL_FRACTION
+        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
         from agent_cascade.compression.result import CompressResult
 
         engine, pool, instance, history = self._make_pool_and_engine()
@@ -434,7 +434,7 @@ class TestExecutionEngineIterativeCompression:
 
     def test_max_rounds_exceeded_raises_context_window_exceeded(self):
         """Compression loop exhausts all rounds → raises ContextWindowExceeded via real handler."""
-        from agent_cascade.execution_engine import FALLBACK_COMPRESSION_MAX_ROUNDS
+        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_MAX_ROUNDS
         from agent_cascade.compression.result import CompressResult
 
         engine, pool, instance, history = self._make_pool_and_engine()
@@ -605,7 +605,7 @@ class TestSmartSliceAlgorithm:
             fractions_used.append(fraction)
             return original_compute(active, fraction, force=force)
 
-        with patch("agent_cascade.execution_engine.compute_discard_count", side_effect=tracking_compute):
+        with patch("agent_cascade.engine.compression_exec.compute_discard_count", side_effect=tracking_compute):
             # Very small compressor window — forces multiple halvings
             result = engine._find_compression_slice(
                 active_set=active_set,
@@ -741,7 +741,7 @@ class TestFallbackCompressionIntegration:
 
     def test_compressor_window_safety_factor_applied(self):
         """Compressor window uses safety factor to reserve overhead tokens."""
-        from agent_cascade.execution_engine import _COMPRESSOR_WINDOW_SAFETY_FACTOR
+        from agent_cascade.engine.compression_exec import _COMPRESSOR_WINDOW_SAFETY_FACTOR
 
         max_tokens = 32768
         expected_available = int(max_tokens * _COMPRESSOR_WINDOW_SAFETY_FACTOR)
