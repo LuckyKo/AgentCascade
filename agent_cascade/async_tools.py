@@ -16,6 +16,7 @@ from typing import Callable, Optional, Dict, List, Tuple
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from agent_cascade.log import logger
+from agent_cascade.settings import AGENT_MAX_WORKERS
 
 
 @dataclass
@@ -76,11 +77,61 @@ class AsyncToolRegistry:
         # Reverse mapping: child_instance_name -> (parent_instance_name, function_id)
         # Used to wake up SLEEPING parent when async child is dismissed
         self._child_to_parent: Dict[str, Tuple[str, str]] = {}
-        # ThreadPoolExecutor with 4 workers for background tool execution
+        # Size the executor from settings (single source of truth) when a pool
+        # with settings is provided; fall back to AGENT_MAX_WORKERS otherwise.
+        # Validate the value is a positive int so a misconfigured/mock settings
+        # object can never be passed straight into ThreadPoolExecutor.
+        max_workers = getattr(getattr(pool, 'settings', None), 'max_workers', None)
+        if not isinstance(max_workers, int) or isinstance(max_workers, bool) or max_workers < 1:
+            max_workers = AGENT_MAX_WORKERS
         self._executor = ThreadPoolExecutor(
-            max_workers=4,
+            max_workers=max_workers,
             thread_name_prefix="async_tool"
         )
+
+    def resize_executor(self, max_workers: int) -> bool:
+        """Thread-safely replace the executor with one sized to ``max_workers``.
+
+        The old executor is shut down *without* cancel_futures so that queued
+        async child agents drain naturally (none are dropped, no parent hangs).
+
+        Args:
+            max_workers: Desired worker count (clamped to >= 1).
+
+        Returns:
+            True on success, False if the input is non-numeric or constructing
+            the new executor failed. Never raises for bad input.
+        """
+        try:
+            max_workers = int(max_workers)
+        except (TypeError, ValueError):
+            logger.error(f"[ASYNC_REGISTRY] resize_executor given non-numeric {max_workers!r}; keeping current pool")
+            return False
+        max_workers = max(1, max_workers)
+        with self._lock:
+            old = self._executor
+            old_max = getattr(old, '_max_workers', None)
+            try:
+                new = ThreadPoolExecutor(
+                    max_workers=max_workers,
+                    thread_name_prefix="async_tool"
+                )
+            except Exception as e:
+                logger.error(f"[ASYNC_REGISTRY] Failed to construct executor for resize to {max_workers}: {e}")
+                return False
+            self._executor = new
+        # Shutdown the old pool OUTSIDE the lock. No cancel_futures: queued work
+        # drains to completion so no async child agent is lost or hangs its parent.
+        if old is not None and old is not new:
+            try:
+                old.shutdown(wait=False)
+            except Exception as e:
+                logger.debug(f"[ASYNC_REGISTRY] Old executor shutdown failed (non-critical): {e}")
+        if old_max != max_workers:
+            logger.info(f"[ASYNC_REGISTRY] Resized executor to {max_workers} workers")
+        else:
+            logger.debug(f"[ASYNC_REGISTRY] Resize to same size ({max_workers} workers), no-op")
+        return True
     
     def register(self, instance_name: str, tool_call: Callable[[], str], function_id: Optional[str] = None, child_instance_name: Optional[str] = None) -> BackgroundToolEntry:
         """Register a background tool for execution.
@@ -109,7 +160,8 @@ class AsyncToolRegistry:
             # Track child->parent mapping for dismissal wakeup support
             if child_instance_name and function_id:
                 self._child_to_parent[child_instance_name] = (instance_name, function_id)
-            # Submit to executor outside lock to avoid holding lock during execution
+            # Submit to executor while holding _lock so a concurrent resize sees a
+            # consistent (fully-old or fully-new) executor — no torn read.
             future = self._executor.submit(self._execute, entry)
             # Store the future on the entry so it can be cancelled later (Fix TODO #41)
             entry.future = future

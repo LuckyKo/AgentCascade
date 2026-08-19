@@ -260,10 +260,10 @@ def _handle_max_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agents:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = int(ui_cfg['max_parallel_agents'])
         agent_pool.settings.max_workers = max(1, val)
-        if hasattr(agent_pool._execution, 'executor') and agent_pool._execution.executor is not None:
-            agent_pool._execution.resize_executor(agent_pool.settings.max_workers)
+        if hasattr(agent_pool, '_async_registry'):
+            agent_pool._async_registry.resize_executor(agent_pool.settings.max_workers)
         else:
-            _logger.warning("[THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)")
+            _logger.debug("[THREAD_POOL] resize skipped — no _async_registry on pool")
 
 
 @register_config_handler('max_workers')
@@ -273,10 +273,10 @@ def _handle_max_workers(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = int(ui_cfg['max_workers'])
         agent_pool.settings.max_workers = max(1, val)
-        if hasattr(agent_pool._execution, 'executor') and agent_pool._execution.executor is not None:
-            agent_pool._execution.resize_executor(agent_pool.settings.max_workers)
+        if hasattr(agent_pool, '_async_registry'):
+            agent_pool._async_registry.resize_executor(agent_pool.settings.max_workers)
         else:
-            _logger.warning("[THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)")
+            _logger.debug("[THREAD_POOL] resize skipped — no _async_registry on pool")
 
 
 @register_config_handler('auto_continue')

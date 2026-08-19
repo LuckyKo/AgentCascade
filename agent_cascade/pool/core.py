@@ -223,20 +223,14 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
                 logger.debug("Idle checker restarted")
             except Exception as e:
                 logger.debug(f"Idle manager restart (non-critical): {e}")
-            # Restart async registry executor
+            # Restart async registry executor via the thread-safe resize path.
+            # This recreates a fresh executor sized from settings (old one drains).
             try:
-                # Check if executor was shut down and recreate if needed
-                if self._async_registry._executor is not None:
-                    # ThreadPoolExecutor doesn't have a direct 'closed' check,
-                    # but shutdown() makes submit() return PendingResult
-                    # We recreate to be safe
-                    self._async_registry._executor.shutdown(wait=False)
-                    from concurrent.futures import ThreadPoolExecutor
-                    self._async_registry._executor = ThreadPoolExecutor(
-                        max_workers=4,
-                        thread_name_prefix="async_tool",
-                    )
-                    logger.debug("Async registry executor recreated")
+                if self._async_registry is not None and self._async_registry.resize_executor(
+                        self.settings.max_workers):
+                    logger.debug("Async registry executor resized on resume")
+                else:
+                    logger.debug("Async registry resize skipped (missing or failed, non-critical)")
             except Exception as e:
                 logger.debug(f"Async registry restart (non-critical): {e}")
             logger.debug("Stopped flag cleared — ready for new execution")
