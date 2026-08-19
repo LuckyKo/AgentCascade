@@ -5,9 +5,13 @@ IdleManager — idle detection and auto-dismissal. Moved verbatim from agent_poo
 from __future__ import annotations
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from agent_cascade.log import logger
 from ..agent_instance import AgentInstance, PoolSettings, AgentState, ACTIVE_STATES
+
+if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids circular import of core.py
+    from .core import AgentPool
+
 class IdleManager:
     """Manages idle detection and auto-dismissal of agents.
 

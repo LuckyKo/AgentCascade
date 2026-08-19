@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from agent_cascade.log import logger
 from agent_cascade.agents import Assistant
+from ..agent_instance import PoolSettings
 class ConfigPersistMixin:
     def _save_pool_settings(self):
         """Persist PoolSettings plus extra config (disabled_tools, work folders) to disk.

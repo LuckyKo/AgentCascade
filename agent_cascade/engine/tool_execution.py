@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, List
 
+from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
 from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.log import logger

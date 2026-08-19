@@ -4,6 +4,7 @@ Phase 3b pure-move refactor. ``broadcast_stream_update`` calls
 ``build_stream_update_from_pool`` (state_builder) and ``_put_stream_update`` (this module).
 """
 
+import asyncio
 from typing import List, Optional
 
 from agent_cascade.log import logger

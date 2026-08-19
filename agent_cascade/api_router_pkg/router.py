@@ -207,7 +207,7 @@ class APIRouter:
     def _resolve_own_endpoints(
         self,
         agent_type: str,
-    ) -> Tuple[List[Tuple[str, 'EndpointConfig']], bool]:
+    ) -> Tuple[List[Tuple[str, APIEndpoint]], bool]:
         """
         Resolve the agent's OWN enabled endpoints (Tier 1).
 

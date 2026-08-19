@@ -15,6 +15,7 @@ import sys
 import time
 from typing import Iterator, List, Optional
 
+from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.settings import (
     STREAM_MAX_SILENCE_SECONDS,
     STREAM_MAX_TOTAL_SECONDS,

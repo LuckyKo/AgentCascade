@@ -5,10 +5,14 @@ LoggerManager — manages per-agent loggers. Moved verbatim from agent_pool.py (
 from __future__ import annotations
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
+
+if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids circular import of core.py
+    from .core import AgentPool
+
 class LoggerManager:
     """Manages per-agent loggers. Returns real AgentInstanceLogger instances.
 

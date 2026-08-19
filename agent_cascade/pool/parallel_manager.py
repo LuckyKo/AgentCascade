@@ -4,7 +4,11 @@ ParallelAgentManager — manages parallel agent execution state (active_stack). 
 
 from __future__ import annotations
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids circular import of core.py
+    from .core import AgentPool
+
 class ParallelAgentManager:
     """Manages parallel agent execution state. Active_stack for tracking nested agent calls."""
 

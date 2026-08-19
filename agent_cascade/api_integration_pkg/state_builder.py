@@ -15,6 +15,7 @@ from agent_cascade.api_integration_pkg.cache import (
     _cache_mgr,
     _TOKEN_STATS_CACHE_MAXSIZE,
     _UI_CACHE_MAXSIZE,
+    _store_ui_cache,
 )
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
 
@@ -453,6 +454,9 @@ def build_stream_update_from_pool(
         # Conversation unchanged — reuse previously computed token stats
         h_stats, r_stats = cached_stats
     else:
+        # Lazy import to avoid a module-level circular dependency: streaming.py
+        # imports build_stream_update_from_pool from this module (state_builder).
+        from agent_cascade.api_integration_pkg.streaming import _calc_stream_token_stats
         h_stats, r_stats = _calc_stream_token_stats(
             pool, instance_name, conv_snapshot, stream_resp_snapshot, responses,
         )

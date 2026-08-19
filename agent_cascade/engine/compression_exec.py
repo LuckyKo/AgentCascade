@@ -16,6 +16,7 @@ import time
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
+from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.settings import (
     CHARS_PER_TOKEN_ESTIMATE,
     COMPRESSION_RECOUNT_THRESHOLD,
