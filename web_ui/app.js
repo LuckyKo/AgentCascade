@@ -2536,7 +2536,9 @@ function getMessageTextLength(msg) {
     // Multimodal parts: count only text parts, skip images etc.
     return content.filter(p => p && typeof p.text === 'string').reduce((n, p) => n + p.text.length, 0);
   }
-  return String(content).length;
+  // Unexpected shape (number/object/etc.): don't fabricate a plausible-but-wrong count
+  // (String(obj) would report "[object Object]" = 15). Return 0 instead.
+  return 0;
 }
 
 /** Local time HH:MM:SS from a unix-seconds timestamp (matches formatTimestamp's input unit). */
@@ -2559,10 +2561,12 @@ function applyMsgMeta(bubble, msg) {
     return;
   }
   // Main conversation messages carry no backend timestamp. Stamp client-side at first
-  // render. NOTE: for replayed/log-loaded history this equals session-open time, not the
-  // true send time — acceptable for a dev/debug aid, do NOT fake precision.
-  if (!msg._clientTs) msg._clientTs = Date.now() / 1000;
-  const text = `${getMessageTextLength(msg).toLocaleString()} chars · ${formatClockTime(msg._clientTs)}`;
+  // render (message-start time — it is NOT refreshed as the message streams, so it shows
+  // when the message began, not when it finished). NOTE: for replayed/log-loaded history
+  // this equals session-open time, not the true send time — acceptable for a dev/debug aid,
+  // do NOT fake precision. `clientTs` (no underscore) matches existing msg field naming.
+  if (!msg.clientTs) msg.clientTs = Date.now() / 1000;
+  const text = `${getMessageTextLength(msg).toLocaleString()} chars · ${formatClockTime(msg.clientTs)}`;
   if (meta) {
     if (meta.textContent !== text) meta.textContent = text;
   } else {
