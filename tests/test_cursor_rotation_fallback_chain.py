@@ -331,6 +331,124 @@ class TestCursorResetAfterSuccess:
 
 
 # ============================================================================
+# Cursor reset on endpoint config change (from_dict) — REGRESSION (compression loop bug)
+# ============================================================================
+
+class TestCursorResetOnConfigChange:
+    """Regression: a stale positional cursor must never survive an endpoint config change.
+
+    The per-instance cursor is a POSITIONAL index into the tier chain, which is rebuilt from live
+    settings on every get_endpoint_chain() call. If the user reorders/replaces endpoints via the UI
+    (from_dict), the old positional cursor points at the WRONG endpoint. from_dict must clear all
+    instance cursors so no stale rotation survives a config change.
+    """
+
+    def _ep(self, name, api_base, model="test-model"):
+        return APIEndpoint(
+            id=f"ep_{name}",
+            name=name,
+            api_base=api_base,
+            model=model,
+            enabled=True,
+        )
+
+    def test_from_dict_clears_all_instance_cursors(self, router):
+        """Advancing a cursor then calling from_dict clears it (no stale positional rotation)."""
+        _add_endpoint(router, "ep_a", "http://a-api")
+        _add_endpoint(router, "ep_b", "http://b-api")
+        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+
+        # Advance the cursor so a positional rotation would normally apply.
+        router.advance_instance_endpoint("worker1")
+        assert router._instance_endpoint_position.get("worker1", 0) == 1
+
+        # Config change via the UI entry point (from_dict).
+        router.from_dict({
+            "endpoints": [self._ep("ep_a", "http://a-api").to_dict(),
+                          self._ep("ep_b", "http://b-api").to_dict()],
+            "agent_priorities": {"coder": ["ep_ep_a", "ep_ep_b"]},
+        })
+
+        # All cursors must be cleared.
+        assert "worker1" not in router._instance_endpoint_position, \
+            f"Cursor should be cleared after from_dict, got {router._instance_endpoint_position}"
+
+    def test_from_dict_order_change_no_stale_rotation(self, router):
+        """After a config change that reorders endpoints, the next chain uses fresh (unrotated) order.
+
+        Before the fix: cursor=1 survived from_dict and rotated the NEW chain to start at ep_b.
+        After the fix: cursor is cleared, so the chain starts at the new first endpoint (ep_c).
+        """
+        _add_endpoint(router, "ep_a", "http://a-api")
+        _add_endpoint(router, "ep_b", "http://b-api")
+        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+
+        # Advance cursor (position 1 → would rotate to ep_b under the old order).
+        router.advance_instance_endpoint("worker1")
+
+        # Reorder endpoints via from_dict: new priority order is [c, a, b].
+        router.from_dict({
+            "endpoints": [self._ep("ep_a", "http://a-api").to_dict(),
+                          self._ep("ep_b", "http://b-api").to_dict(),
+                          self._ep("ep_c", "http://c-api").to_dict()],
+            "agent_priorities": {"coder": ["ep_ep_c", "ep_ep_a", "ep_ep_b"]},
+        })
+
+        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        # Cursor cleared → unrotated order → first endpoint is the new Tier-1 head (ep_c).
+        assert chain[0]["api_base"] == "http://c-api", \
+            f"Expected fresh order (ep_c) after config change, got {chain[0].get('api_base')}"
+
+    def test_from_dict_resets_concurrent_live_cursor_of_other_instance(self, router):
+        """from_dict clears ALL instance cursors — a concurrent live cursor for a DIFFERENT
+        instance does not survive the config change (the "clear all" side effect).
+
+        Regression (MINOR #5): the clear-all behaviour was previously untested. A single endpoint
+        edit via from_dict must invalidate every running agent's positional cursor, not just the one
+        that triggered the edit.
+        """
+        _add_endpoint(router, "ep_a", "http://a-api")
+        _add_endpoint(router, "ep_b", "http://b-api")
+        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+
+        # Two concurrent live cursors for DIFFERENT instances.
+        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint("worker2")
+        assert router._instance_endpoint_position.get("worker1", 0) == 1
+        assert router._instance_endpoint_position.get("worker2", 0) == 1
+
+        # Unrelated config change (same endpoints, same priorities) via the UI entry point.
+        router.from_dict({
+            "endpoints": [self._ep("ep_a", "http://a-api").to_dict(),
+                          self._ep("ep_b", "http://b-api").to_dict()],
+            "agent_priorities": {"coder": ["ep_ep_a", "ep_ep_b"]},
+        })
+
+        # The concurrent live cursor for the OTHER instance must also be reset.
+        assert router._instance_endpoint_position == {}, (
+            f"from_dict must clear ALL cursors; got {router._instance_endpoint_position}"
+        )
+
+    def test_from_dict_without_prior_cursor_is_noop(self, router):
+        """from_dict with no prior cursors leaves the cursor store empty AND re-applies the config.
+
+        Rewritten (NIT #6c) to assert a meaningful invariant: even though there is nothing to clear,
+        from_dict must still populate endpoints/priorities and leave the cursor store empty — i.e. it
+        is a safe no-op on cursors without corrupting the freshly-loaded state.
+        """
+        router.from_dict({
+            "endpoints": [self._ep("ep_a", "http://a-api").to_dict()],
+            "agent_priorities": {"coder": ["ep_ep_a"]},
+        })
+        # No cursors were present, so the store stays empty.
+        assert router._instance_endpoint_position == {}
+        # The config was still applied (not a silent no-op on state).
+        assert "ep_ep_a" in router.endpoints
+        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        assert chain[0]["api_base"] == "http://a-api"
+
+
+# ============================================================================
 # Cooldown filtering in chain construction
 # ============================================================================
 

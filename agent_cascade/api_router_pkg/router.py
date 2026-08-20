@@ -528,9 +528,16 @@ class APIRouter:
                 else:
                     effective_cursor = cursor % tier_count
                     if effective_cursor > 0:
-                         rotated_tiers = tier_configs[effective_cursor:] + tier_configs[:effective_cursor]
-                         endpoint_configs = rotated_tiers + [default_cfg]
-                         logger.debug(f"[APIRouter] Endpoint cursor for '{instance_name}' rotated by {effective_cursor}")
+                        # Simple positional rotation. Robustness against mid-flight endpoint reorders
+                        # relies on from_dict() clearing ALL instance cursors on every config change
+                        # (the FIX-2a reset is the real protection). A full identity-keyed cursor —
+                        # recording WHICH endpoint was current at advance_instance_endpoint() time so
+                        # rotation survives a mid-turn reorder that does NOT go through from_dict — is a
+                        # documented follow-up. Do not reintroduce a "defensive" head-identity check here:
+                        # rotated_tiers is a permutation of tier_configs, so any such check is a no-op.
+                        rotated_tiers = tier_configs[effective_cursor:] + tier_configs[:effective_cursor]
+                        endpoint_configs = rotated_tiers + [default_cfg]
+                        logger.debug(f"[APIRouter] Endpoint cursor for '{instance_name}' rotated by {effective_cursor}")
                          
         # Validate: no endpoint configured at all
         if not endpoint_configs:
@@ -1198,6 +1205,19 @@ class APIRouter:
             self._agent_types_with_priorities = set(self.agent_priorities.keys())
             
             ep_ids = list(self.endpoints.keys())
+
+            # FIX (trigger a): the per-instance endpoint cursor is a POSITIONAL index into the
+            # tier chain, and from_dict() rebuilds self.endpoints / agent_priorities — so any
+            # stale positional cursor now points at the WRONG endpoint. Reset ALL instance
+            # cursors under the lock so a config change never leaves a dangling rotation behind.
+            if self._instance_endpoint_position:
+                cleared = len(self._instance_endpoint_position)
+                self._instance_endpoint_position.clear()
+                logger.debug(
+                    f"[APIRouter.from_dict] Endpoint config changed — reset {cleared} instance "
+                    f"endpoint cursor(s) (stale positional cursors invalidated)."
+                )
+
             logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "
                        f"({ep_ids}) with "
                        f"{len(self.agent_priorities)} priority mappings: "

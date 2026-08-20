@@ -716,13 +716,77 @@ class LLMCallMixin:
                             f"tokens {result.tokens_before} → {result.tokens_after}"
                         )
 
+                        # ── Sync JSONL logger to match the compressed pool (root-cause fix) ──
+                        # compress_context() rewrote instance.conversation (the pool) but does NOT
+                        # touch the JSONL logger — that is the caller's responsibility. The forced
+                        # path calls _sync_logger_after_compression(); the fallback path previously
+                        # did not, so after a successful round the pool was compressed while the
+                        # log still held the OLD large history. Any path reading back from the log
+                        # (recovery at handler.py:140-149, session reload) then re-inflated the pool
+                        # → context-exceeded re-fired next turn → infinite loop.
+                        #
+                        # Order matters (see handler._sync_logger_after_compression docstring): sync
+                        # BEFORE appending the notification below — reset_history(rewrite=True) would
+                        # otherwise double-log it. A sync failure must NOT abort the retry loop.
+                        try:
+                            # Unconditional call: self.compression_handler is always set on the engine
+                            # (core.py constructor) and a None handler would be caught by this try/except.
+                            self.compression_handler._sync_logger_after_compression(
+                                inst_name,
+                                instance.agent_class,
+                                "fallback compression",
+                                instance,
+                            )
+                        except Exception as sync_err:
+                            # MINOR-#4 decision (documented): _sync_logger_after_compression() performs a
+                            # SINGLE non-atomic write via reset_history(rewrite=True). If that write fails
+                            # partway (e.g. disk error on the open(...,'w')), the JSONL can be left
+                            # half-updated and the caller cannot distinguish "sync skipped" (pool is still
+                            # authoritative) from "log half-written" (recovery reading the log could
+                            # re-inflate). We deliberately do NOT make reset_history atomic / add a return
+                            # status here — that would be a larger, higher-risk change. Instead we log at
+                            # WARNING which failure mode operators should treat as dangerous: the log may
+                            # now be out of sync with the compressed pool, so recovery/reload could
+                            # re-inflate it. The retry loop continues regardless (sync is best-effort).
+                            logger.warning(
+                                f"[FALLBACK_COMPRESSION] Logger sync after compression FAILED for "
+                                f"{inst_name}: {sync_err}. The JSONL log may now be out of sync with the "
+                                f"compressed pool (possibly half-written) — recovery/reload could "
+                                f"re-inflate it. Continuing retry."
+                            )
+
                         # Post-compression check: does compressed payload fit next endpoint?
                         try:
                             chain = self.pool.api_router.get_endpoint_chain(
                                 agent_type, instance_name=inst_name
                             )
                             if chain:
-                                next_limit = chain[0].get('max_input_tokens', 0)
+                                next_limit = chain[0].get('max_input_tokens', 0) or 0
+
+                                # FIX (trigger b): when the router chain reports no limit
+                                # (max_input_tokens == 0, e.g. no endpoint assigned / default cfg),
+                                # fall back to the context size dynamically detected on the agent's
+                                # LLM instance (llm/oai.py sets generate_cfg['max_input_tokens']).
+                                # This mirrors the compressor-window lookup above and avoids the old
+                                # "no limit → assume it fits" path that never verified against the
+                                # real server limit. Only when BOTH are unavailable do we assume fit.
+                                if next_limit <= 0:
+                                    detected_limit = None
+                                    try:
+                                        _llm = getattr(instance, 'llm', None)
+                                        if _llm is not None and hasattr(_llm, 'generate_cfg'):
+                                            detected_limit = _llm.generate_cfg.get('max_input_tokens')
+                                        elif _llm is not None and hasattr(_llm, 'cfg'):
+                                            detected_limit = _llm.cfg.get('max_input_tokens')
+                                    except Exception:
+                                        detected_limit = None
+                                    if detected_limit and detected_limit > 0:
+                                        next_limit = int(detected_limit)
+                                        logger.debug(
+                                            f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens; "
+                                            f"using LLM-instance detected limit {next_limit} for {inst_name}."
+                                        )
+
                                 if next_limit > 0:
                                     # Estimate tokens of compressed payload using actual token counting
                                     estimated = 0
@@ -766,12 +830,23 @@ class LLMCallMixin:
                                             f"Continuing to round {round_num + 1}..."
                                         )
                                 else:
-                                    # No clear limit — assume it fits and continue
-                                    logger.debug(
-                                        f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens configured. "
-                                        f"Assuming compressed payload fits."
+                                    # No limit from the router chain AND no detected limit on the LLM
+                                    # instance — we cannot verify the payload against any real server
+                                    # limit. Do NOT silently "assume it fits" here: that was exactly the
+                                    # escape hatch that caused the original infinite loop (the payload
+                                    # was accepted without ever being checked, then re-fired context-
+                                    # exceeded on the next turn). Instead log a WARNING and do NOT break —
+                                    # fall through to the outer retry loop's `continue` so the LLM call is
+                                    # retried with the now-compressed payload. If it still exceeds the real
+                                    # (unknown) limit, FallbackCompressionRequired re-fires and the existing
+                                    # context-exceeded guard drives another compression round. This path is
+                                    # therefore bounded by FALLBACK_COMPRESSION_MAX_ROUNDS — no infinite loop.
+                                    logger.warning(
+                                        f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens configured "
+                                        f"and no detected limit on the LLM instance for {inst_name}. Cannot verify "
+                                        f"compressed payload size; NOT assuming it fits. Retrying so the "
+                                        f"context-exceeded guard re-checks against the real limit."
                                     )
-                                    break
                         except Exception as chain_err:
                             # Non-fatal — continue retry anyway
                             logger.debug(
