@@ -738,16 +738,10 @@ class LLMCallMixin:
                                 instance,
                             )
                         except Exception as sync_err:
-                            # MINOR-#4 decision (documented): _sync_logger_after_compression() performs a
-                            # SINGLE non-atomic write via reset_history(rewrite=True). If that write fails
-                            # partway (e.g. disk error on the open(...,'w')), the JSONL can be left
-                            # half-updated and the caller cannot distinguish "sync skipped" (pool is still
-                            # authoritative) from "log half-written" (recovery reading the log could
-                            # re-inflate). We deliberately do NOT make reset_history atomic / add a return
-                            # status here — that would be a larger, higher-risk change. Instead we log at
-                            # WARNING which failure mode operators should treat as dangerous: the log may
-                            # now be out of sync with the compressed pool, so recovery/reload could
-                            # re-inflate it. The retry loop continues regardless (sync is best-effort).
+                            # Best-effort: reset_history(rewrite=True) is a single non-atomic write, so on
+                            # failure the JSONL may be left half-written / out of sync with the pool. We do
+                            # not make it atomic (larger, higher-risk change); log loudly instead so operators
+                            # know recovery/reload could re-inflate. The retry loop continues regardless.
                             logger.warning(
                                 f"[FALLBACK_COMPRESSION] Logger sync after compression FAILED for "
                                 f"{inst_name}: {sync_err}. The JSONL log may now be out of sync with the "
@@ -761,7 +755,8 @@ class LLMCallMixin:
                                 agent_type, instance_name=inst_name
                             )
                             if chain:
-                                next_limit = chain[0].get('max_input_tokens', 0) or 0
+                                # `or 0` tolerates a literal None (e.g. "max_input_tokens": null in config).
+                                next_limit = chain[0].get('max_input_tokens') or 0
 
                                 # FIX (trigger b): when the router chain reports no limit
                                 # (max_input_tokens == 0, e.g. no endpoint assigned / default cfg),
