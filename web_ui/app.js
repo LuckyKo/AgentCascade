@@ -2524,13 +2524,8 @@ function isMsgMetaEnabled() {
   return !!(settingMsgMeta && settingMsgMeta.checked);
 }
 
-/**
- * Extract the displayed text length from a message, mirroring what createMessageEl /
- * updateBubbleContent feed to renderMarkdown (msg.content || '').
- * msg.content may be an ARRAY (multimodal) — NEVER String() it: sum the .text parts instead.
- */
-function getMessageTextLength(msg) {
-  const content = msg.content || '';
+/** Length of the text part(s) of a message content value (string or multimodal array). */
+function contentTextLen(content) {
   if (typeof content === 'string') return content.length;
   if (Array.isArray(content)) {
     // Multimodal parts: count only text parts, skip images etc.
@@ -2539,6 +2534,26 @@ function getMessageTextLength(msg) {
   // Unexpected shape (number/object/etc.): don't fabricate a plausible-but-wrong count
   // (String(obj) would report "[object Object]" = 15). Return 0 instead.
   return 0;
+}
+
+/**
+ * Extract the displayed text length from a message, mirroring what createMessageEl /
+ * updateBubbleContent actually render:
+ *   - tool call (msg.function_call): the JSON arguments string lives in function_call.arguments,
+ *     NOT msg.content — counting content alone would wrongly report 0.
+ *   - tool result (role === 'function'): rendered from msg.content.
+ *   - reasoning/thinking blocks are rendered above the content, so include them.
+ */
+function getMessageTextLength(msg) {
+  let len = 0;
+  if (msg.function_call) {
+    // Tool call: its payload is the arguments string.
+    len += typeof msg.function_call.arguments === 'string' ? msg.function_call.arguments.length : 0;
+  } else {
+    len += contentTextLen(msg.content || '');
+  }
+  if (typeof msg.reasoning_content === 'string') len += msg.reasoning_content.length;
+  return len;
 }
 
 /** Local time HH:MM:SS from a unix-seconds timestamp (matches formatTimestamp's input unit). */
