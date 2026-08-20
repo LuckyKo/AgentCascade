@@ -739,6 +739,7 @@ const statusSave = $('#status-save');
 const settingFontSize = $('#setting-font-size');
 const valFontSize = $('#val-font-size');
 const settingLinesEnabled = $('#setting-lines-enabled');
+const settingMsgMeta = $('#setting-msg-meta');
 const settingMaxContext = $('#setting-max-context');
 const settingMaxTokens = $('#setting-max-tokens');
 const settingSoundIntervention = $('#setting-sound-intervention');
@@ -1020,6 +1021,15 @@ if (settingLinesEnabled) {
   });
 }
 
+// Per-message char count & timestamp toggle — force a full re-render so existing bubbles update immediately
+if (settingMsgMeta) {
+  settingMsgMeta.addEventListener('change', () => {
+    saveSettings();
+    invalidateAllPanelCaches();
+    renderSubAgents();
+  });
+}
+
 if (settingMaxContext) {
   settingMaxContext.addEventListener('change', () => {
     updateAllContextBars();
@@ -1076,6 +1086,7 @@ function saveSettings(sendToServer) {
   if (sendToServer === undefined) sendToServer = true;
   const s = getGenerateCfg();
   if (settingLinesEnabled) s['setting-lines-enabled'] = settingLinesEnabled.checked;
+  if (settingMsgMeta) s['setting-msg-meta'] = settingMsgMeta.checked;
   if (settingSoundIntervention) s['setting-sound-intervention'] = settingSoundIntervention.checked;
   if (settingSoundCompleted) s['setting-sound-completed'] = settingSoundCompleted.checked;
   if (settingSoundNotification) s['setting-sound-notification'] = settingSoundNotification.checked;
@@ -1202,6 +1213,11 @@ function loadSettings() {
     if (settingLinesEnabled && s['setting-lines-enabled'] !== undefined) {
       settingLinesEnabled.checked = s['setting-lines-enabled'];
       settingLinesEnabled.dispatchEvent(new Event('change'));
+    }
+
+    // Default OFF when absent — no dispatch needed, createMessageEl reads the checkbox live
+    if (settingMsgMeta && s['setting-msg-meta'] !== undefined) {
+      settingMsgMeta.checked = !!s['setting-msg-meta'];
     }
 
     if (settingSoundIntervention && s['setting-sound-intervention'] !== undefined) {
@@ -2501,6 +2517,62 @@ function renderAgentConversation(instanceName, messages, depth, indexMap, render
     return fragment;
 }
 
+// ── Per-message meta line (char count + timestamp), gated by "Show char count & timestamp" ──
+
+/** Is the per-message meta line enabled? */
+function isMsgMetaEnabled() {
+  return !!(settingMsgMeta && settingMsgMeta.checked);
+}
+
+/**
+ * Extract the displayed text length from a message, mirroring what createMessageEl /
+ * updateBubbleContent feed to renderMarkdown (msg.content || '').
+ * msg.content may be an ARRAY (multimodal) — NEVER String() it: sum the .text parts instead.
+ */
+function getMessageTextLength(msg) {
+  const content = msg.content || '';
+  if (typeof content === 'string') return content.length;
+  if (Array.isArray(content)) {
+    // Multimodal parts: count only text parts, skip images etc.
+    return content.filter(p => p && typeof p.text === 'string').reduce((n, p) => n + p.text.length, 0);
+  }
+  return String(content).length;
+}
+
+/** Local time HH:MM:SS from a unix-seconds timestamp (matches formatTimestamp's input unit). */
+function formatClockTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * Create or update the .msg-meta line on a bubble so it always reflects the current
+ * toggle state and message content. Called from createMessageEl (creation) and
+ * updateBubbleContent (streaming deltas + edits), so the char count never goes stale.
+ */
+function applyMsgMeta(bubble, msg) {
+  const meta = bubble.querySelector('.msg-meta');
+  if (!isMsgMetaEnabled()) {
+    if (meta) meta.remove();
+    return;
+  }
+  // Main conversation messages carry no backend timestamp. Stamp client-side at first
+  // render. NOTE: for replayed/log-loaded history this equals session-open time, not the
+  // true send time — acceptable for a dev/debug aid, do NOT fake precision.
+  if (!msg._clientTs) msg._clientTs = Date.now() / 1000;
+  const text = `${getMessageTextLength(msg).toLocaleString()} chars · ${formatClockTime(msg._clientTs)}`;
+  if (meta) {
+    if (meta.textContent !== text) meta.textContent = text;
+  } else {
+    const el = document.createElement('div');
+    el.className = 'msg-meta';
+    el.textContent = text;
+    bubble.appendChild(el);
+  }
+}
+
 function createMessageEl(msg, index, config) {
   // Default to session primary agent config if not provided (backward compatible)
   if (!config) config = getAgentConfig(state.sessionName);
@@ -2636,6 +2708,10 @@ function createMessageEl(msg, index, config) {
   div.dataset.prevReasoning = msg.reasoning_content || '';
   
   div.appendChild(contentDiv);
+
+  // Per-message meta line (char count + timestamp) — only created when the toggle is ON
+  applyMsgMeta(div, msg);
+
   return div;
 }
 
@@ -2885,6 +2961,8 @@ function updateBubbleContent(bubble, msg, config) {
     }
 
     if (prevContent === curContent && prevReasoning === curReasoning && bubble.dataset.wasGenerating === String(isGenerating)) {
+        // Content unchanged, but the meta line may need to appear/disappear when the toggle flips
+        applyMsgMeta(bubble, msg);
         return; // Nothing changed
     }
     
@@ -2916,6 +2994,7 @@ function updateBubbleContent(bubble, msg, config) {
                 if (incrementCount + 1 >= forceInterval) {
                     bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
                 } else {
+                    applyMsgMeta(bubble, msg); // Keep meta char count fresh on incremental appends
                     return;  // Success - skip full re-render (critical for image-bearing bubbles!)
                 }
             } catch(e) {
@@ -2977,6 +3056,9 @@ function updateBubbleContent(bubble, msg, config) {
     newCodeBlocks.forEach((cb, i) => {
         if (i < codeScrollPositions.length) cb.scrollTop = codeScrollPositions[i].scrollTop;
     });
+
+    // Full re-render path: refresh the meta line so char count matches the new content
+    applyMsgMeta(bubble, msg);
 }
 
 function renderMarkdown(text, allowThinking = true) {
