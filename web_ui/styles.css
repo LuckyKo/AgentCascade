@@ -1344,14 +1344,14 @@ body {
   overflow-wrap: break-word;
 }
 
-/* Per-message meta line (char count + timestamp) — only present when the toggle is ON */
+/* Inline header meta (char count + timestamp) — sits right after the agent name, only present when the toggle is ON */
 .msg-meta {
-  margin-top: 6px;
   font-size: 11px;
   line-height: 1.3;
   color: var(--text-secondary);
-  opacity: 0.55;
-  text-align: right;
+  opacity: 0.65;
+  white-space: nowrap;
+  margin-left: 4px;
   user-select: none;
 }
 

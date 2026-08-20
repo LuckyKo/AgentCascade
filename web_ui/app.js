@@ -2550,12 +2550,16 @@ function formatClockTime(ts) {
 }
 
 /**
- * Create or update the .msg-meta line on a bubble so it always reflects the current
- * toggle state and message content. Called from createMessageEl (creation) and
+ * Create or update the inline .msg-meta span in a message header so it always reflects the
+ * current toggle state and message content. Rendered right after the agent name as
+ * "Name (NNNN chars · HH:MM:SS)". Called from createMessageEl (creation) and
  * updateBubbleContent (streaming deltas + edits), so the char count never goes stale.
  */
 function applyMsgMeta(bubble, msg) {
-  const meta = bubble.querySelector('.msg-meta');
+  const header = bubble.querySelector('.' + headerClass());
+  if (!header) return;
+  const nameSpan = header.querySelector('.' + nameLabelClass());
+  const meta = header.querySelector('.msg-meta');
   if (!isMsgMetaEnabled()) {
     if (meta) meta.remove();
     return;
@@ -2566,14 +2570,19 @@ function applyMsgMeta(bubble, msg) {
   // this equals session-open time, not the true send time — acceptable for a dev/debug aid,
   // do NOT fake precision. `clientTs` (no underscore) matches existing msg field naming.
   if (!msg.clientTs) msg.clientTs = Date.now() / 1000;
-  const text = `${getMessageTextLength(msg).toLocaleString()} chars · ${formatClockTime(msg.clientTs)}`;
+  const text = `(${getMessageTextLength(msg).toLocaleString()} chars · ${formatClockTime(msg.clientTs)})`;
   if (meta) {
     if (meta.textContent !== text) meta.textContent = text;
   } else {
-    const el = document.createElement('div');
+    const el = document.createElement('span');
     el.className = 'msg-meta';
     el.textContent = text;
-    bubble.appendChild(el);
+    // Insert right after the name so it reads "Name (meta)", before the actions div.
+    if (nameSpan && nameSpan.nextSibling) {
+      header.insertBefore(el, nameSpan.nextSibling);
+    } else {
+      header.appendChild(el);
+    }
   }
 }
 
