@@ -1297,6 +1297,13 @@ body {
   margin-bottom: 6px;
 }
 
+/* Left group holding the name + inline meta so they stay together on the left edge */
+.msg-name-group {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .msg-name {
   font-size: 12px;
   font-weight: 600;

@@ -2558,6 +2558,8 @@ function formatClockTime(ts) {
 function applyMsgMeta(bubble, msg) {
   const header = bubble.querySelector('.' + headerClass());
   if (!header) return;
+  // Meta lives inside the left .msg-name-group so it hugs the name on the left edge.
+  const nameGroup = header.querySelector('.msg-name-group');
   const nameSpan = header.querySelector('.' + nameLabelClass());
   const meta = header.querySelector('.msg-meta');
   if (!isMsgMetaEnabled()) {
@@ -2577,10 +2579,13 @@ function applyMsgMeta(bubble, msg) {
     const el = document.createElement('span');
     el.className = 'msg-meta';
     el.textContent = text;
-    // Insert right after the name so it reads "Name (meta)", before the actions div.
-    if (nameSpan && nameSpan.nextSibling) {
-      header.insertBefore(el, nameSpan.nextSibling);
+    // Insert right after the name inside the left group so it reads "Name (meta)" and stays on the left.
+    if (nameGroup && nameSpan) {
+      nameGroup.insertBefore(el, nameSpan.nextSibling);
+    } else if (nameGroup) {
+      nameGroup.appendChild(el);
     } else {
+      // Fallback: no group present — append to header root (shouldn't happen).
       header.appendChild(el);
     }
   }
@@ -2608,10 +2613,15 @@ function createMessageEl(msg, index, config) {
   const header = document.createElement('div');
   header.className = headerClass();
   
+  // Left group: name + inline meta stay together on the left; actions are pushed right by the flex header.
+  const nameGroup = document.createElement('span');
+  nameGroup.className = 'msg-name-group';
+
   const nameSpan = document.createElement('span');
   nameSpan.className = nameLabelClass();
   nameSpan.textContent = roleName(msg.role || 'unknown', msg, instName);
-  header.appendChild(nameSpan);
+  nameGroup.appendChild(nameSpan);
+  header.appendChild(nameGroup);
 
   // Actions
   const actions = document.createElement('div');
