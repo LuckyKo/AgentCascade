@@ -2607,13 +2607,14 @@ function applyMsgMeta(bubble, msg) {
     if (meta) meta.remove();
     return;
   }
-  // Main conversation messages carry no backend timestamp. Stamp client-side at first
-  // render (message-start time — it is NOT refreshed as the message streams, so it shows
-  // when the message began, not when it finished). NOTE: for replayed/log-loaded history
-  // this equals session-open time, not the true send time — acceptable for a dev/debug aid,
-  // do NOT fake precision. `clientTs` (no underscore) matches existing msg field naming.
-  if (!msg.clientTs) msg.clientTs = Date.now() / 1000;
-  const text = `(${getMessageTextLength(msg).toLocaleString()} chars · ${formatClockTime(msg.clientTs)})`;
+  // Real per-message completion timestamp, filled by the backend at message commit and
+  // surfaced as top-level msg.ts (unix seconds). The meta ELEMENT is always created; only
+  // the time TEXT is conditional on ts. Messages without a ts (still streaming / not yet
+  // committed, or very old history) show just the char count — no fake clock.
+  const ts = msg.ts;
+  const text = ts != null
+    ? `(${getMessageTextLength(msg).toLocaleString()} chars · ${formatClockTime(ts)})`
+    : `(${getMessageTextLength(msg).toLocaleString()} chars)`;
   if (meta) {
     if (meta.textContent !== text) meta.textContent = text;
   } else {
@@ -2758,7 +2759,9 @@ function createMessageEl(msg, index, config) {
   
   div.appendChild(contentDiv);
 
-  // Per-message meta line (char count + timestamp) — only created when the toggle is ON
+  // Per-message meta line (char count + real completion timestamp). Called unconditionally
+  // so every bubble has the meta slot from birth: the element is always created, and the
+  // clock text stays blank until msg.ts exists (filled by the backend at message commit).
   applyMsgMeta(div, msg);
 
   return div;
@@ -3043,8 +3046,9 @@ function updateBubbleContent(bubble, msg, config) {
                 if (incrementCount + 1 >= forceInterval) {
                     bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
                 } else {
-                    applyMsgMeta(bubble, msg); // Keep meta char count fresh on incremental appends
                     return;  // Success - skip full re-render (critical for image-bearing bubbles!)
+                    // NOTE: meta line is intentionally NOT refreshed on incremental ticks — it is
+                    // computed at bubble end (see applyMsgMeta call below, gated on !isGenerating).
                 }
             } catch(e) {
                 // If incremental fails for any reason, fall through to full re-render below
@@ -3096,8 +3100,13 @@ function updateBubbleContent(bubble, msg, config) {
         if (i < codeScrollPositions.length) cb.scrollTop = codeScrollPositions[i].scrollTop;
     });
 
-    // Full re-render path: refresh the meta line so char count matches the new content
-    applyMsgMeta(bubble, msg);
+    // Full re-render path: refresh the meta line only when the message is complete. During
+    // streaming we skip it (the per-tick call was removed) so the meta/char-count is computed
+    // at bubble end, not every stream tick. The meta element already exists from creation
+    // (createMessageEl calls applyMsgMeta unconditionally), so a blank slot shows until then.
+    if (!isGenerating) {
+        applyMsgMeta(bubble, msg);
+    }
 }
 
 function renderMarkdown(text, allowThinking = true) {

@@ -14,7 +14,7 @@
 
 from typing import List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agent_cascade.prompts.dna import DEFAULT_SYSTEM_MESSAGE
 
@@ -150,6 +150,9 @@ class Message(BaseModelCompatibleDict):
     name: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     extra: Optional[dict] = None
+    # UI-only completion timestamp (unix seconds). exclude=True guarantees it is
+    # NEVER emitted by model_dump()/model_dump_json(), so no LLM backend can leak it.
+    ts: Optional[float] = Field(default=None, exclude=True)
 
     def __init__(self,
                  role: str,

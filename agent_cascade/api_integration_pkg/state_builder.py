@@ -738,6 +738,12 @@ def serialize_message(
     d.pop('_tokens', None)
     d.pop('_words', None)
 
+    # Surface the UI-only completion timestamp. It is a declared Message field excluded
+    # from model_dump (never leaks to LLMs), so read it from the object/dict directly.
+    ts_val = getattr(msg, 'ts', None) if not isinstance(msg, dict) else msg.get('ts')
+    if ts_val is not None:
+        d['ts'] = float(ts_val)
+
     # Extract tool_success from extra before stripping — frontend needs it for isToolFailure()
     if 'extra' in d and isinstance(d['extra'], dict):
         ts = d['extra'].get('tool_success')

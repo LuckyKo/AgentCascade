@@ -9,6 +9,7 @@ See DESIGN_REWRITE.md §2.1 for design rationale.
 """
 
 import json                           # NEW: for serializing non-string values in cache preview
+import time
 import threading
 from collections import deque         # NEW: rolling buffer for cache pool
 from dataclasses import dataclass, field
@@ -353,6 +354,13 @@ class AgentInstance:
         Thread Safety: Uses _compression_lock for atomic update
         """
         with self._compression_lock:
+            # Stamp a real completion timestamp (unix seconds) at commit time.
+            # Stored in the declared Message.ts field, which is excluded from all
+            # model dumps (exclude=True), so it can never leak into LLM payloads on
+            # any backend. Idempotent: re-appending the same object must not reset
+            # an existing ts.
+            if message.ts is None:
+                message.ts = time.time()
             self.conversation.append(message)
             self._cached_messages.append(message)
             self._cached_llm_messages.append(message)
@@ -369,6 +377,15 @@ class AgentInstance:
         if not messages:
             return
         with self._compression_lock:
+            # Stamp a real completion timestamp (unix seconds) at commit time on
+            # EVERY message in the batch. Stored in the declared Message.ts field,
+            # which is excluded from all model dumps (exclude=True), so it can never
+            # leak into LLM payloads on any backend. Idempotent per element:
+            # re-appending an object that already has a ts must not reset it.
+            now = time.time()
+            for m in messages:
+                if m.ts is None:
+                    m.ts = now
             self.conversation.extend(messages)
             self._cached_messages.extend(messages)
             self._cached_llm_messages.extend(messages)
@@ -387,6 +404,11 @@ class AgentInstance:
         Thread Safety: Uses _compression_lock for atomic update
         """
         with self._compression_lock:
+            # Stamp a completion timestamp on the replacement if it has none —
+            # an edited message must not lose its clock. Only stamp when absent so
+            # a pre-existing ts is preserved (all three lists share this object).
+            if new_message.ts is None:
+                new_message.ts = time.time()
             self.conversation[index] = new_message
             if index < len(self._cached_messages):
                 self._cached_messages[index] = new_message
