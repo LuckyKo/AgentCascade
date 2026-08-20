@@ -2537,22 +2537,48 @@ function contentTextLen(content) {
 }
 
 /**
+ * Return the displayed text for a message's main body, applying the same
+ * think-block dedup the renderers use: if msg.content starts with a thinking block
+ * that matches msg.reasoning_content, that prefix is stripped (it's rendered once as
+ * the separate thinking panel). Shared by createMessageEl / updateBubbleContent and
+ * getMessageTextLength so the char count always matches what is actually shown.
+ */
+function getDisplayedText(msg) {
+  let text = typeof msg.content === 'string' ? msg.content : (msg.content || '');
+  if (msg.reasoning_content && text) {
+    const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
+    if (thinkMatch) {
+      const embedded = thinkMatch[2].trim();
+      const reasoning = msg.reasoning_content.trim();
+      if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
+        text = text.substring(thinkMatch[0].length).trim();
+      }
+    }
+  }
+  return text;
+}
+
+/**
  * Extract the displayed text length from a message, mirroring what createMessageEl /
  * updateBubbleContent actually render:
  *   - tool call (msg.function_call): the JSON arguments string lives in function_call.arguments,
  *     NOT msg.content — counting content alone would wrongly report 0.
  *   - tool result (role === 'function'): rendered from msg.content.
- *   - reasoning/thinking blocks are rendered above the content, so include them.
+ *   - regular text: the deduplicated body (see getDisplayedText) plus any reasoning block.
  */
 function getMessageTextLength(msg) {
   let len = 0;
   if (msg.function_call) {
     // Tool call: its payload is the arguments string.
     len += typeof msg.function_call.arguments === 'string' ? msg.function_call.arguments.length : 0;
+  } else if (msg.role !== 'function') {
+    // Regular text (user/assistant): deduplicated body + reasoning block rendered above it.
+    len += contentTextLen(getDisplayedText(msg));
+    if (typeof msg.reasoning_content === 'string') len += msg.reasoning_content.length;
   } else {
+    // Tool result: rendered straight from msg.content (no reasoning block).
     len += contentTextLen(msg.content || '');
   }
-  if (typeof msg.reasoning_content === 'string') len += msg.reasoning_content.length;
   return len;
 }
 
@@ -2713,23 +2739,8 @@ function createMessageEl(msg, index, config) {
     // Tool result bubble
     html += renderToolResult(msg);
   } else {
-    // Regular text (user or assistant)
-    let text = msg.content || '';
-    
-    // Deduplicate: If content starts with a thinking block that matches reasoning_content
-    if (msg.reasoning_content) {
-        const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
-        if (thinkMatch) {
-            const embedded = thinkMatch[2].trim();
-            const reasoning = msg.reasoning_content.trim();
-            if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
-                // Remove the redundant block from content
-                text = text.substring(thinkMatch[0].length).trim();
-            }
-        }
-    }
-    
-    html += renderMarkdown(text, false); // Initial render is final
+    // Regular text (user or assistant) — getDisplayedText() applies the think-block dedup.
+    html += renderMarkdown(getDisplayedText(msg), false); // Initial render is final
   }
 
   contentDiv.innerHTML = html;
@@ -3052,20 +3063,10 @@ function updateBubbleContent(bubble, msg, config) {
     } else if (msg.role === 'function') {
         html += renderToolResult(msg);
     } else {
-        let text = msg.content || '';
-        if (msg.reasoning_content) {
-            const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
-            if (thinkMatch) {
-                const embedded = thinkMatch[2].trim();
-                const reasoning = msg.reasoning_content.trim();
-                if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
-                    text = text.substring(thinkMatch[0].length).trim();
-                }
-            }
-        }
+        // getDisplayedText() applies the same think-block dedup as createMessageEl.
         // Use lightweight markdown during streaming to skip expensive thinking-block regex parsing.
         // Full parsing (allowThinking=true) is only needed on final renders when streaming stops.
-        html += renderMarkdown(text, false);
+        html += renderMarkdown(getDisplayedText(msg), false);
     }
     
     // Preserve <details> open/close state and code block scroll positions during innerHTML replacement
