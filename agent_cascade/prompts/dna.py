@@ -96,7 +96,7 @@ COMPRESSION_PROMPT = (
     "3. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
     "4. Retain initial request and progress of the task in the summary.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
-    f"Present summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end of the summary."
+    f"Present summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end of the summary. It will NOT be validated without this marker."
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
@@ -314,12 +314,16 @@ TOOL_METADATA = {
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. This ALWAYS requires explicit user approval so use it as a last resort tool only! '
-            'Commands run with the workspace directory as the working directory.\n\n'
-            '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. NOTE: DO NOT use with file redirection (>, >>, <) or pipes as it defeats the whole purpose of async mode. '
-            'The command runs while you continue working, sending periodic heartbeat updates (if heartbeat_interval > 0) and a final result message when done. '
-            'Use the tool_id parameter to manage running shells: send input, check status (__status), kill (__kill), update heartbeat (__heartbeat=N seconds), or send Ctrl+C (__ctrl_c). '
-            'Max 5 concurrent async shells per agent.\n\n'
+            'Execute a shell command on the host system. This requires explicit security approval so it is a very expensive operation. DO NOT use if other tools can accomplish the same task.'
+            'Commands run with the workspace directory as the default working directory.\n\n'
+            '**SYNC vs ASYNC — READ THIS FIRST:**\n'
+            '- **Default is SYNC (blocking).** Use this for fast running commands. The call blocks until the command finishes and returns its full output.\n'
+            '- **WARNING — auto-backgrounding:** any `timeout > 60` is AUTOMATICALLY treated as async_mode=true, if you did not set it explicitly to false. If you want true sync behavior for a long command, set async_mode=false OR accept async mode and manage it correctly.\n'
+            '- **Async Mode** Set async_mode=true and the tool returns immediately with a tool_id and PID. DO NOT use with file redirection (>, >>, <) or pipes.\n\n'
+            '- In this mode the command will deliver a FINAL result message automatically when done (and periodic heartbeats if heartbeat_interval > 0). PREFER waiting for that final message over actively polling.\n'
+            '- To check on it, use the tool_id parameter with __status (status + recent output), __kill, __heartbeat=N, or __ctrl_c. Send any other text as stdin input (that is NOT a shell command).\n'
+            '- **Do not spin:** never issue more than ~2 status checks for the same tool_id without new information. If you have nothing else to do, wait for the automatic completion message instead of polling in a tight loop and wasting tokens. Consider increasing heartbeat interval if the updates are slow.\n'
+            '- Max 5 concurrent async shells per agent.\n\n'
             '**stdin Limitations**: Windows CMD variable expansion with stdin (e.g., `set /p VAR=input & echo %VAR%`) may not work reliably in one-liners due to how cmd /c processes variables — the input arrives but `%VAR%` won\'t expand because it was parsed before input was received. This applies to both sync and async modes.'
         ),
         'parameters': {
@@ -435,7 +439,7 @@ TOOL_METADATA = {
             },
             'log_file': {
                 'type': 'string',
-                'description': 'Path to a JSONL log file to restore the agent session from before starting. Useful for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
+                'description': 'Path to a JSONL log file to restore the agent session from before starting. Only use for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
             },
             'max_turns': {
                 'type': 'integer',

@@ -21,6 +21,7 @@ import traceback
 from concurrent.futures import TimeoutError
 from contextlib import redirect_stdout
 from functools import partial
+import json
 from typing import Any, Dict, List, Optional, Union
 
 import json5

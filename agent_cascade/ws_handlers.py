@@ -1164,6 +1164,8 @@ class WsMessageHandler:
         if not self.agent_pool:
             return
 
+        from agent_cascade.log import logger
+
         instance_name = data.get('instance_name') or self.session.get('session_name', 'Maine')
         try:
             message_index = int(data.get('message_index', 0))
