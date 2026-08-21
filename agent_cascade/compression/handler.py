@@ -159,6 +159,49 @@ class CompressionHandler:
                 logger.error(f"Recovery attempt failed for '{inst_name}': {e}")
         return False
 
+    # ── Feedback Message Builders ─────────────────────────────────────────────
+
+    @staticmethod
+    def _format_compression_feedback(
+        comp_type: str,
+        messages_discarded: int,
+        tokens_after: int,
+        max_tokens: int,
+    ) -> str:
+        """Build unified post-compression feedback message.
+
+        Args:
+            comp_type: Trigger type — "forced", "manual", or "fallback".
+            messages_discarded: Number of messages summarized (omitted when 0).
+            tokens_after: Token count after compression (utilization omitted when 0).
+            max_tokens: Context window size; enables used/total display (0 = unknown).
+        """
+        if max_tokens > 0 and tokens_after > 0:
+            pct = round(tokens_after / max_tokens * 100, 1)
+            util = f"Context: {tokens_after}/{max_tokens} tokens ({pct}% used)."
+        elif tokens_after > 0:
+            util = f"Context: ~{tokens_after} tokens."
+        else:
+            util = ""
+
+        msg_parts = [f"[COMPRESSION] {comp_type} compression complete."]
+        if messages_discarded > 0:
+            msg_parts.append(f"{messages_discarded} messages summarized.")
+        if util:
+            msg_parts.append(util)
+        msg_parts.append("Continue your work.")
+        return " ".join(msg_parts)
+
+    @staticmethod
+    def _format_compression_failure(
+        comp_type: str,
+        error: str,
+        usage_pct: float | None = None,
+    ) -> str:
+        """Build unified compression failure message."""
+        pct_str = f" Context still at ~{usage_pct:.1f}% usage." if usage_pct else ""
+        return f"[COMPRESSION] {comp_type} compression failed: {error}.{pct_str}"
+
     # ── Notification Helper with Pending Queue ────────────────────────────────
     
     def _inject_compression_notification(
@@ -767,8 +810,9 @@ class CompressionHandler:
                     # ── Inject compression feedback into last message (in-tool-response pattern) ──
                     # Appending to the last message's content avoids creating a separate USER message
                     # which would violate OpenAI API alternation rules (consecutive USER messages after marker).
-                    notification_text = (
-                        f"[SYSTEM] Context compression applied. Continue your work."
+                    max_tokens = instance._allocated_max_input_tokens or 0
+                    notification_text = self._format_compression_feedback(
+                        "forced", result.messages_discarded, result.tokens_after, max_tokens
                     )
 
                     self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)
@@ -792,7 +836,7 @@ class CompressionHandler:
             
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
-                notification_text = f"[SYSTEM] Context exceeded {usage_pct:.1f}%, but automatic compression failed."
+                notification_text = self._format_compression_failure("forced", result.error, usage_pct)
                 self._inject_compression_notification(instance, notification_text, inst_name)
 
         except Exception as e:
@@ -885,8 +929,10 @@ class CompressionHandler:
                 # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
                 self.engine.stream_publisher.push_periodic_update(instance.parent_instance or instance.instance_name)
 
-            return (f"Compression successful. Discarded {result.messages_discarded} messages. "
-                    f"Tail count: {result.tail_count}.")
+            max_tokens = instance._allocated_max_input_tokens or 0
+            return self._format_compression_feedback(
+                "manual", result.messages_discarded, result.tokens_after, max_tokens
+            )
         else:
             return f"Compression failed: {result.error}"
     
@@ -1150,7 +1196,12 @@ class CompressionHandler:
             
             _invalidate_token_cache(instance)
             
-            notification_text = f"[SYSTEM] Compression applied successfully for {inst_name}."
+            # Unified feedback: estimate post-compression tokens same as telemetry block above
+            from agent_cascade.settings import TOKEN_ESTIMATE_CHAR_DIVISOR
+            est_tokens = int(sum(len(msg.content or '') for msg in conv) // TOKEN_ESTIMATE_CHAR_DIVISOR) if conv else 0
+            notification_text = self._format_compression_feedback(
+                "manual", 0, est_tokens, instance._allocated_max_input_tokens or 0
+            )
             notif_msg = Message(role=USER, content=notification_text)
             self.engine._append_and_log(instance, notif_msg)
             if response is not None:

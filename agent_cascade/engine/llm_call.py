@@ -810,11 +810,12 @@ class LLMCallMixin:
 
                                         if estimated <= next_limit * 0.95:  # 5% safety margin
                                             # Payload fits — inject notification and resume agent
+                                            from agent_cascade.compression.handler import CompressionHandler
+                                            max_tokens = instance._allocated_max_input_tokens or next_limit or 0
                                             notif_msg = Message(
                                                 role=USER,
-                                                content=(
-                                                    f"[SYSTEM] Context exceeded on endpoint '{fcr.failed_endpoint}'. "
-                                                    f"Compression applied ({round_num} round(s)), full context preserved in JSONL log. Continue."
+                                                content=CompressionHandler._format_compression_feedback(
+                                                    "fallback", 0, estimated, max_tokens
                                                 )
                                             )
                                             self._append_and_log(instance, notif_msg)

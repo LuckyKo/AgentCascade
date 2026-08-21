@@ -147,9 +147,13 @@ class CompressContext(BaseTool):
             if dry_run:
                 return result.summary_text
             
-            return (
-                f"Context compressed ({mode} mode): "
-                f"{result.messages_discarded} messages summarized for '{agent_name}'."
+            from agent_cascade.compression.handler import CompressionHandler
+            max_tokens = 0
+            target_inst = self.agent_pool.get_instance(agent_name)
+            if target_inst is not None:
+                max_tokens = getattr(target_inst, '_allocated_max_input_tokens', 0) or 0
+            return CompressionHandler._format_compression_feedback(
+                mode, result.messages_discarded, result.tokens_after, max_tokens
             )
         else:
             return f"ERROR: {result.error}"
