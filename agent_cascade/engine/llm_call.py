@@ -591,6 +591,19 @@ class LLMCallMixin:
                             f"for {inst_name} ==="
                         )
 
+                        # Stop-check at the TOP of each round: after a user Stop
+                        # (or generation supersede), do NOT spawn another compressor.
+                        # Raise AgentTerminatedError — the outer retry loop treats it
+                        # as a clean abort signal (no retry, no error message), so the
+                        # turn ends normally instead of exhausting rounds into a
+                        # spurious ContextWindowExceeded.
+                        if self._is_terminal_stop(inst_name):
+                            logger.info(
+                                f"[FALLBACK_COMPRESSION] Fallback compression aborted by stop "
+                                f"before round {round_num} for {inst_name}."
+                            )
+                            raise AgentTerminatedError(inst_name)
+
                         # Check overfeeding before each round
                         conv = self.pool.get_conversation(inst_name)
                         if not conv:
@@ -852,6 +865,12 @@ class LLMCallMixin:
                                 break
 
                         except ContextWindowExceeded:
+                            raise
+                        except AgentTerminatedError:
+                            # Stop landed DURING the compression call (e.g. the
+                            # compressor invoker aborts on pool.stopped). Propagate
+                            # immediately — do not log as a compression failure or
+                            # burn another round after the user pressed Stop.
                             raise
                         except Exception as comp_err:
                             logger.error(
@@ -1213,6 +1232,7 @@ class LLMCallMixin:
             return self.pool.api_router.call_with_fallback(
                 agent_type, _do_call, allocated_tokens=allocated_tokens,
                 agent_instance_name=instance.instance_name,
+                messages=messages,
             )
         else:
             # Direct call without router — same merge priority as fallback

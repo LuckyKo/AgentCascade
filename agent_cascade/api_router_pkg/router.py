@@ -508,9 +508,20 @@ class APIRouter:
 
             # Tier 4: Always append the default as last resort — inside lock so cursor rotation reads atomically
             if self.default_llm_cfg is not None:
-                endpoint_configs.append(copy.deepcopy(self.default_llm_cfg))
+                default_cfg = copy.deepcopy(self.default_llm_cfg)
+                # Guarantee the cfg carries max_input_tokens (mirrors Tier 1 at ~line 457):
+                # a keyless/0 limit would otherwise reach llm/base.py's pre-check and silently
+                # cap at DEFAULT_MAX_INPUT_TOKENS, and make the router's context-exceeded gate
+                # treat every server-side 400 as "unknown limit" (never compress). Injecting the
+                # general limit or 0 keeps behavior explicit.
+                if not isinstance(default_cfg.get('max_input_tokens'), int) or default_cfg['max_input_tokens'] <= 0:
+                    default_cfg['max_input_tokens'] = general_limit if general_limit > 0 else 0
+                endpoint_configs.append(default_cfg)
             
-            # Adjust default endpoint for allocated tokens requirement (dynamic endpoint selection)
+            # Adjust default endpoint for allocated tokens requirement (dynamic endpoint selection).
+            # NOTE: _adjust_config_for_tokens only RAISES the limit when allocated_tokens exceeds it,
+            # so the max_input_tokens key injected above always survives — every cfg in the returned
+            # chain is guaranteed to carry an int max_input_tokens.
             if endpoint_configs:
                 self._adjust_config_for_tokens(endpoint_configs[-1], allocated_tokens)
 
@@ -625,14 +636,40 @@ class APIRouter:
         ):
             return True
 
-        # Generic patterns from various servers
-        if any(
+        # Generic patterns from various servers.
+        # Only trusted on HTTP 400: free-text phrases in a 5xx body (e.g. "max_tokens exceeded"
+        # inside an upstream error payload) are NOT evidence of caller overflow — treating them as
+        # context-exceeded would trigger fallback compression off a service failure.
+        if code == '400' and any(
             pattern in err_str
             for pattern in ('prompt is too long', 'input tokens exceed', 'max_tokens exceeded', 'exceeds the context limit')
         ):
             return True
 
         return False
+
+    @staticmethod
+    def _estimate_payload_tokens(messages) -> Optional[int]:
+        """Estimate total input tokens of a message list using the same estimator as the
+        client-side pre-check in llm/base.py (get_message_stats per message).
+
+        Returns None when estimation fails — callers must treat that as "unknown" and must
+        NOT make a context-exceeded decision off an unknown estimate.
+        """
+        if not messages:
+            return 0
+        try:
+            from agent_cascade.utils.utils import get_message_stats
+            total = 0
+            for m in messages:
+                # Skip values that can leak via JSON parsing/logger recovery (mirrors base.py chat())
+                if m is None or isinstance(m, (list, bool)):
+                    continue
+                total += get_message_stats(m)['tokens']
+            return total
+        except Exception as est_err:
+            logger.warning(f"[APIRouter] Payload token estimation failed: {est_err}")
+            return None
 
     def _cleanup_stale_failure_records(self, now: float) -> None:
         """Remove failure records older than ENDPOINT_FAILURE_CLEANUP_HOURS to prevent unbounded growth."""
@@ -656,6 +693,7 @@ class APIRouter:
         call_fn: Callable,
         *args,
         allocated_tokens: Optional[int] = None,
+        messages: Optional[list] = None,
         **kwargs
     ) -> Any:
         """
@@ -670,6 +708,10 @@ class APIRouter:
             call_fn: The function to execute with the selected endpoint config
             allocated_tokens: Optional - the agent's allocated context size in tokens.
                            When provided, used for endpoint selection to ensure sufficient capacity.
+            messages: Optional - the caller's message list. Enables the context-exceeded gate
+                      (A1/A2) to estimate payload size against the endpoint's configured
+                      max_input_tokens. When absent, a server-side context-exceeded error is
+                      treated as a service error (never triggers fallback compression).
             *args, **kwargs: Additional arguments passed to call_fn. If ``agent_instance_name``
                           is present it is forwarded as ``instance_name`` to rotate the chain.
         """
@@ -809,26 +851,77 @@ class APIRouter:
                     # Advance the per-instance cursor so engine-level retries skip past this endpoint.
                     _inst_name_for_cursor = _inst_name  # Use the variable extracted at call time (kwargs.pop removed it)
                     if _inst_name_for_cursor and self._is_context_exceeded_error(e):
-                        # For Compressor agents: just advance cursor (they handle their own compression)
-                        if agent_type.lower().startswith('compressor'):
-                            new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
-                            logger.warning(
-                                f"[APIRouter] Context window exceeded for Compressor '{_inst_name_for_cursor}' "
-                                f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}."
-                            )
-                        else:
-                            # Advance cursor NOW so retry uses a different (hopefully larger) endpoint after compression.
-                            new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
-                            logger.warning(
-                                f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
-                                f"on endpoint '{endpoint_name}'. Triggering iterative fallback compression. "
-                                f"Cursor advanced to {new_pos}."
-                            )
-                            # Lazy import to avoid potential circular imports
-                            from agent_cascade.exceptions import FallbackCompressionRequired
-                            raise FallbackCompressionRequired(
-                                _inst_name_for_cursor, agent_type, endpoint_name, original_error=e
-                            ) from e
+                        # ── A1/A2 gate: sanity-check a server-side context-exceeded error against the
+                        # endpoint's CONFIGURED limit before triggering fallback compression.
+                        # A 400 under model-swap/eviction conditions (server now running a smaller
+                        # window than configured) is NOT evidence of caller overflow — compressing
+                        # the caller's history off it was the 2026-08-21 incident (see
+                        # reports/fallback-compression-misclass-and-stop-cascade.md).
+                        #   - payload <= configured limit → service error: do NOT advance the cursor,
+                        #     do NOT compress — fall through to generic retry/cascade handling below.
+                        #   - payload >  configured limit → genuine overflow: keep existing behavior.
+                        #   - unknown limit (<=0) or failed estimation → never interpret as
+                        #     context-exceeded; treat as service error and fall through.
+                        #     DEFAULT_MAX_INPUT_TOKENS is NEVER used as a stand-in here (mirrors the
+                        #     `> 0` gating at llm/base.py:332).
+                        _cfg_limit = llm_cfg.get('max_input_tokens') or 0
+                        _has_known_limit = isinstance(_cfg_limit, int) and _cfg_limit > 0
+                        # TYPED ContextWindowExceeded (no HTTP status code) is raised by the client-side
+                        # pre-check in llm/base.py, which already compared against the real limit — trust it
+                        # unconditionally (preserves pre-gate behavior for genuine client-detected overflow).
+                        # SERVER errors (status-carrying ModelServiceError etc.) are only trusted when the
+                        # payload provably exceeds the configured limit.
+                        _estimated = None
+                        if _has_known_limit:
+                            _estimated = self._estimate_payload_tokens(messages)
+                        _genuine_overflow = isinstance(e, ContextWindowExceeded) or (
+                            _has_known_limit and _estimated is not None and _estimated > _cfg_limit
+                        )
+                        if not _genuine_overflow:
+                            # Service error (state drift / unknown limit / estimation failure):
+                            # fall through to generic retry-within-endpoint then cascade below.
+                            # The cursor is deliberately NOT advanced — that mechanism is reserved
+                            # for genuine context errors (reset happens at turn end anyway).
+                            if not _has_known_limit:
+                                logger.warning(
+                                    f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                    f"on endpoint '{endpoint_name}' but the endpoint has no configured "
+                                    f"max_input_tokens — treating as service error, falling through to next endpoint."
+                                )
+                            elif _estimated is None:
+                                logger.warning(
+                                    f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                    f"on endpoint '{endpoint_name}' but payload token estimation failed — "
+                                    f"treating as service error, falling through to next endpoint."
+                                )
+                            else:
+                                logger.warning(
+                                    f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                    f"on endpoint '{endpoint_name}' but payload fits configured limit "
+                                    f"{_cfg_limit} (~{_estimated} tokens) — treating as service error, "
+                                    f"falling through to next endpoint."
+                                )
+                        if _genuine_overflow:
+                            # For Compressor agents: just advance cursor (they handle their own compression)
+                            if agent_type.lower().startswith('compressor'):
+                                new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                                logger.warning(
+                                    f"[APIRouter] Context window exceeded for Compressor '{_inst_name_for_cursor}' "
+                                    f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}."
+                                )
+                            else:
+                                # Advance cursor NOW so retry uses a different (hopefully larger) endpoint after compression.
+                                new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                                logger.warning(
+                                    f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
+                                    f"on endpoint '{endpoint_name}'. Triggering iterative fallback compression. "
+                                    f"Cursor advanced to {new_pos}."
+                                )
+                                # Lazy import to avoid potential circular imports
+                                from agent_cascade.exceptions import FallbackCompressionRequired
+                                raise FallbackCompressionRequired(
+                                    _inst_name_for_cursor, agent_type, endpoint_name, original_error=e
+                                ) from e
 
                     # NOTE: CharacterRunDetected/MaxTokenExceeded exceptions are raised during
                     # generator iteration inside execution_engine.py, after this method has returned.

@@ -47,6 +47,7 @@ class ListAgents(BaseTool):
             return "Error: No agent pool available."
 
         from agent_cascade.utils.utils import get_history_stats
+        from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
         import datetime
 
         lines = ["# Agent Management Inventory\n"]
@@ -85,6 +86,16 @@ class ListAgents(BaseTool):
                 active_msgs = self.agent_pool.slice_history_for_llm(msgs) if self.agent_pool else msgs
                 stats = get_history_stats(active_msgs)
 
+                # Resolve the effective context-window limit (the "total") so usage can be
+                # shown as used/total with a percentage — an absolute token count alone is not
+                # informative (an agent at 90k could be at 40% or 100% of its window).
+                max_tokens = None
+                try:
+                    if inst_obj is not None:
+                        max_tokens = _get_max_tokens_for_instance(self.agent_pool, inst_obj)
+                except Exception:
+                    max_tokens = None
+
                 # Metadata & Traceability
                 logger_inst = self.agent_pool.instance_loggers.get(inst_name)
                 log_path = logger_inst.log_path if logger_inst and hasattr(logger_inst, 'log_path') else "N/A"
@@ -103,9 +114,17 @@ class ListAgents(BaseTool):
                 if len(summary) > 150:
                     summary = summary[:147] + "..."
 
+                # Format context usage as used/total with a percentage when the effective
+                # limit is known; fall back to the bare token count when it cannot be resolved.
+                if max_tokens and max_tokens > 0:
+                    pct = (stats['tokens'] / max_tokens) * 100
+                    ctx_display = f"{stats['tokens']} / {max_tokens} tokens ({pct:.0f}%)"
+                else:
+                    ctx_display = f"{stats['tokens']} tokens"
+
                 lines.append(f"### {status_emoji} Instance: `{inst_name}`")
                 lines.append(f"  - **Status**: {status_text} | **Class**: {cls_name}")
-                lines.append(f"  - **Context Usage**: {stats['tokens']} tokens / {stats['words']} words")
+                lines.append(f"  - **Context Usage**: {ctx_display} / {stats['words']} words")
                 lines.append(f"  - **Last Activity**: {last_active}")
                 lines.append(f"  - **Summary**: {summary}")
                 lines.append(f"  - **Log Path**: `{log_path}`")

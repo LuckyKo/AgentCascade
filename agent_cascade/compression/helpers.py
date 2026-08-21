@@ -75,6 +75,8 @@ def filter_jsonl_for_consolidation(
     Returns:
         Tuple of (filtered_messages, markers_removed_count).
     """
+    from agent_cascade.prompts.dna import COMPRESSION_MARKER
+
     result_msgs = []
     new_marker_inserted = False
     markers_skipped = 0

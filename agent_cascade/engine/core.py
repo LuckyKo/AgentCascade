@@ -438,19 +438,27 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # Acquire concurrency slot (single FIFO queue per endpoint — no bypass).
         # Nested agents (Security, Compressor) now yield their caller's slot before
         # running, so they acquire normally here instead of inheriting the parent's slot.
-        if self._is_terminal_stop(instance.instance_name):
-            return  # Terminal stop — don't start work
+        #
+        # NOTE: The terminal-stop guards below live INSIDE the try block on purpose.
+        # They run after the RUNNING transition above but must pass through this
+        # generator's exit finally (RUNNING→IDLE transition). Returning before
+        # `try:` skips that finally entirely and leaves the instance stuck in
+        # RUNNING state — the next engine.run() entry then trips the L1 race guard.
 
         instance._slot_release = None  # Initialize for proper cleanup in finally block
         instance._slot_key = None      # Clear stale slot key from previous run (if any)
-        self._acquire_slot_with_logging(instance, "initial")
-
-        # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
-        if self._is_terminal_stop(instance.instance_name):
-            self._release_slot(instance, instance.instance_name)
-            return  # Terminal stop — release slot and exit
 
         try:
+            if self._is_terminal_stop(instance.instance_name):
+                return  # Terminal stop — don't start work (exit finally → IDLE)
+
+            self._acquire_slot_with_logging(instance, "initial")
+
+            # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
+            if self._is_terminal_stop(instance.instance_name):
+                self._release_slot(instance, instance.instance_name)
+                return  # Terminal stop — release slot and exit (exit finally → IDLE)
+
             # ── Phase 1: Setup ─────────────────────────────────────────────
             logger.debug(f"[TURN_START] Calling _setup_turn for {instance.instance_name}")
 
@@ -2588,45 +2596,62 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # Track cumulative tool calls across all turns
             total_tool_calls = 0
 
-            for resp in self.run(inst):
-                # Inner run() loop handles compression-halt via cooperative wait at Site 3.
-                # Only break here on terminal stops (which cause run() to yield final state and end).
-                if self._is_terminal_stop(instance_name):
-                    break
+            # Bind the generator so we can close it deterministically on early
+            # break (same pattern as core.py:691-692). Without close(), a break
+            # on terminal stop leaves run() suspended before its exit finally,
+            # so the child stays RUNNING and any re-entry trips the L1 guard.
+            _run_gen = self.run(inst)
+            try:
+                for resp in _run_gen:
+                    # Inner run() loop handles compression-halt via cooperative wait at Site 3.
+                    # Only break here on terminal stops (which cause run() to yield final state and end).
+                    if self._is_terminal_stop(instance_name):
+                        break
 
-                # FIX BOOL_LEAK: Unpack (messages, is_streaming) tuple from
-                # engine.run()
-                # engine.run() yields tuples like (List[Message], bool), but we
-                # only need the message list
-                if isinstance(resp, tuple) and len(resp) == 2:
-                    final_resp = resp[0]  # Extract just the message list
-                else:
-                    final_resp = resp
+                    # FIX BOOL_LEAK: Unpack (messages, is_streaming) tuple from
+                    # engine.run()
+                    # engine.run() yields tuples like (List[Message], bool), but we
+                    # only need the message list
+                    if isinstance(resp, tuple) and len(resp) == 2:
+                        final_resp = resp[0]  # Extract just the message list
+                    else:
+                        final_resp = resp
 
-                # Count tool calls from FUNCTION role messages
-                total_tool_calls += sum(1 for m in final_resp if msg_field(m, 'role', '') == FUNCTION)
+                    # Count tool calls from FUNCTION role messages
+                    total_tool_calls += sum(1 for m in final_resp if msg_field(m, 'role', '') == FUNCTION)
 
-                # Item 12: Throttled sub-agent WebUI state update (every 5
-                # turns) — Fix
-                _update_counter += 1
-                if _update_counter % 5 == 0:
-                    # Issue Y2: Use shared helper method instead of duplicated
-                    # logic
-                    current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
-                    self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
+                    # Item 12: Throttled sub-agent WebUI state update (every 5
+                    # turns) — Fix
+                    _update_counter += 1
+                    if _update_counter % 5 == 0:
+                        # Issue Y2: Use shared helper method instead of duplicated
+                        # logic
+                        current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+                        self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
-                # ── Push stream_update to frontend during sub-agent execution
-                # ──
-                # This is the key fix: without this, the main agent's streaming
-                # loop
-                # is blocked and no WebSocket events reach the frontend. The
-                # frontend
-                # relies on stream_update to call renderSubAgents() every
-                # ~200ms.
-                now = time.time()  # Use time.time() for consistency with run_agent_unified.py:135
-                if now - _last_sub_send >= _sub_send_interval:
-                    self.stream_publisher.push_periodic_update(caller)
-                    _last_sub_send = now
+                    # ── Push stream_update to frontend during sub-agent execution
+                    # ──
+                    # This is the key fix: without this, the main agent's streaming
+                    # loop
+                    # is blocked and no WebSocket events reach the frontend. The
+                    # frontend
+                    # relies on stream_update to call renderSubAgents() every
+                    # ~200ms.
+                    now = time.time()  # Use time.time() for consistency with run_agent_unified.py:135
+                    if now - _last_sub_send >= _sub_send_interval:
+                        self.stream_publisher.push_periodic_update(caller)
+                        _last_sub_send = now
+            finally:
+                # Deterministic generator cleanup: close() forces the suspended
+                # run() generator to unwind its exit finally (RUNNING→IDLE), so
+                # the child instance is never left in RUNNING state. Idempotent.
+                # Guard with hasattr: engine.run() may be mocked in tests to return a
+                # plain iterator (no .close()); only real generators need closing.
+                try:
+                    if hasattr(_run_gen, 'close'):
+                        _run_gen.close()
+                except RuntimeError:
+                    pass  # Already closed/exhausted
 
             # FIX MSG_COUNT_BUG: Removed conv.extend(final_resp) to prevent
             # duplicate messages.

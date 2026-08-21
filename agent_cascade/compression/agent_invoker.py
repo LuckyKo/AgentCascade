@@ -10,6 +10,7 @@ import time as _time
 from typing import Any, List
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT, CONSOLIDATION_PROMPT
 from agent_cascade.settings import COMPRESSION_END_MARKER, COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES
+from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text, _msg_field_or_extra
@@ -225,39 +226,67 @@ def _execute_compressor_and_extract_summary(
         _last_comp_send = 0.0
         _comp_tick_num = 0
         _comp_last_resp_len = 0
-        for resp in engine.run(comp_instance):
-            # Check for pool shutdown / generation change
-            if agent_pool.stopped:
-                break
+        # Bind the generator so we can close it deterministically on early break.
+        # Without close(), the suspended run() generator never executes its exit
+        # finally block, leaving the instance stuck in RUNNING state; the next
+        # re-entry then trips the L1 race guard ([BUG] entered engine.run() in
+        # state RUNNING). Same pattern as core.py:691-692 and router.py:717-727.
+        gen = engine.run(comp_instance)
+        try:
+            for resp in gen:
+                # Check for pool shutdown / generation change.
+                # Raise instead of break: a bare break would leave this invocation's
+                # retry loop free to re-invoke the compressor after the user pressed
+                # Stop. AgentTerminatedError is a clean abort signal that propagates
+                # through compress_context and the fallback-compression handler.
+                if agent_pool.stopped:
+                    raise AgentTerminatedError(comp_state_key)
 
-            elapsed = _time.monotonic() - start_time
-            if elapsed > max_poll_time:
-                raise RuntimeError(
-                    f"{timeout_label} agent timed out after {elapsed:.0f}s — "
-                    f"further processing may have been incomplete"
+                elapsed = _time.monotonic() - start_time
+                if elapsed > max_poll_time:
+                    raise RuntimeError(
+                        f"{timeout_label} agent timed out after {elapsed:.0f}s — "
+                        f"further processing may have been incomplete"
+                    )
+
+                now_comp = _time.monotonic()
+
+                # Unpack (turn_output, is_streaming_tick) from engine.run() yield
+                if isinstance(resp, tuple) and len(resp) == 2:
+                    comp_turn_output, comp_is_streaming_tick = resp
+                else:
+                    comp_turn_output, comp_is_streaming_tick = resp, False
+
+                # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
+                _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
+                    pool=agent_pool,
+                    instance_name=comp_state_key,
+                    turn_output=comp_turn_output,
+                    is_streaming_tick=comp_is_streaming_tick,
+                    tick_num=_comp_tick_num,
+                    now_sec=now_comp,
+                    last_send=_last_comp_send,
+                    last_resp_len=_comp_last_resp_len,
                 )
 
-            now_comp = _time.monotonic()
+                _comp_tick_num += 1
 
-            # Unpack (turn_output, is_streaming_tick) from engine.run() yield
-            if isinstance(resp, tuple) and len(resp) == 2:
-                comp_turn_output, comp_is_streaming_tick = resp
-            else:
-                comp_turn_output, comp_is_streaming_tick = resp, False
-
-            # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
-            _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
-                pool=agent_pool,
-                instance_name=comp_state_key,
-                turn_output=comp_turn_output,
-                is_streaming_tick=comp_is_streaming_tick,
-                tick_num=_comp_tick_num,
-                now_sec=now_comp,
-                last_send=_last_comp_send,
-                last_resp_len=_comp_last_resp_len,
-            )
-
-            _comp_tick_num += 1
+        except AgentTerminatedError:
+            raise  # Clean abort signal — propagate to invoker (no retry after Stop)
+        except Exception as e:
+            logger.error(f"{timeout_label} agent execution error: {e}")
+            raise
+        finally:
+            # Deterministic generator cleanup: close() forces the suspended run()
+            # generator to unwind its exit finally block (RUNNING→IDLE transition),
+            # so the compressor instance is never left in RUNNING state. Idempotent.
+            # Guard with hasattr: engine.run() may be mocked to return a plain
+            # iterator (no .close()); only real generators need closing.
+            try:
+                if hasattr(gen, 'close'):
+                    gen.close()
+            except RuntimeError:
+                pass  # Already closed/exhausted
 
         # Read conversation one final time AFTER the generator completes.
         # The assistant's response is added to instance.conversation in _process_response()
@@ -446,6 +475,12 @@ def invoke_compression_agent(
         logger.info("Compression agent invoked via engine-based execution")
 
         for attempt in range(1, max_retries + 1):
+            # Stop-check before each retry: after a user Stop, do not re-invoke
+            # the compressor (each re-entry would trip the L1 race guard if the
+            # previous run's generator was abandoned mid-flight). Abort cleanly.
+            if agent_pool.stopped:
+                raise AgentTerminatedError(comp_state_key)
+
             try:
                 summary = _execute_compressor_and_extract_summary(
                     agent_pool, engine, comp_instance, comp_state_key, caller_name,

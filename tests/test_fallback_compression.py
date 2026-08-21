@@ -19,6 +19,7 @@ from agent_cascade.exceptions import (
     FallbackCompressionRequired,
     ContextWindowExceeded,
 )
+from agent_cascade.llm.base import ModelServiceError
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 
 
@@ -183,15 +184,22 @@ class TestAPIRouterFallbackBehavior:
                 config_dir=test_config_dir,
             )
 
+            # Positive general limit so the A1/A2 gate classifies a TYPED
+            # ContextWindowExceeded (no status code) as genuine overflow — the same
+            # behavior the pre-gate router had for untyped errors. The default cfg is
+            # what these tests actually hit (the test endpoint below is never assigned).
+            router.default_llm_cfg['max_input_tokens'] = 128_000
+
             # Set up the _pool back-reference (same as AgentPool does)
             router._pool = pool
 
-            # Add a test endpoint that we can use in fallback chains
+            # Add a test endpoint that we can use in fallback chains.
             ep = APIEndpoint(
                 name="test-endpoint",
                 api_base="http://test:8080/v1",
                 model="test-model",
                 max_retries=0,  # No retries — fail fast for tests
+                max_input_tokens=128_000,
             )
             router.add_endpoint(ep)
 
@@ -204,12 +212,17 @@ class TestAPIRouterFallbackBehavior:
             shutil.rmtree(test_config_dir, ignore_errors=True)
 
     def test_non_compressor_raises_fallback_compression_required(self):
-        """Non-Compressor agent with context-exceeded error raises FallbackCompressionRequired from real router code."""
+        """Non-Compressor agent with context-exceeded error raises FallbackCompressionRequired from real router code.
+
+        Uses a TYPED ContextWindowExceeded (no HTTP status code) — the A1/A2 gate in
+        call_with_fallback only applies to server-side errors carrying a status code;
+        typed errors keep their original behavior regardless of configured limit.
+        """
         router, pool = self._make_pool_and_router()
 
         # call_fn that raises a context-exceeded-like error (matches _is_context_exceeded_error patterns)
         def failing_call(llm_cfg, *args, **kwargs):
-            raise RuntimeError("prompt is too long")
+            raise ContextWindowExceeded("prompt is too long")
 
         with pytest.raises(FallbackCompressionRequired) as exc_info:
             router.call_with_fallback(
@@ -231,7 +244,7 @@ class TestAPIRouterFallbackBehavior:
         def failing_call(llm_cfg, *args, **kwargs):
             nonlocal call_invoked
             call_invoked = True
-            raise RuntimeError("prompt is too long")
+            raise ContextWindowExceeded("prompt is too long")
 
         # For Compressor: error caught, cursor advanced, no FallbackCompressionRequired raised.
         # Eventually exhausts endpoints and raises RuntimeError from router exhaustion logic.
@@ -255,7 +268,7 @@ class TestAPIRouterFallbackBehavior:
         initial_pos = router._instance_endpoint_position.get(inst_name, 0)
 
         def failing_call(llm_cfg, *args, **kwargs):
-            raise RuntimeError("prompt is too long")
+            raise ContextWindowExceeded("prompt is too long")
 
         with pytest.raises(FallbackCompressionRequired):
             router.call_with_fallback(
@@ -267,6 +280,297 @@ class TestAPIRouterFallbackBehavior:
         # Cursor must have been advanced by the real router code before raising
         final_pos = router._instance_endpoint_position.get(inst_name, 0)
         assert final_pos > initial_pos, f"Cursor not advanced: {initial_pos} -> {final_pos}"
+
+
+# ──────────────────────────────────────────────
+# 3b. A1/A2 gate — server context-exceeded errors must be sanity-checked against the
+#     endpoint's CONFIGURED limit before triggering fallback compression
+#     (2026-08-21 incident: model-swap produced a spurious exceed_context_size 400 for a
+#     payload that fit the configured window; see reports/fallback-compression-misclass-and-stop-cascade.md)
+# ──────────────────────────────────────────────
+
+def _make_payload_messages(n_words=50):
+    """Build a small deterministic Message list (system + user)."""
+    return [
+        Message(role=SYSTEM, content="You are a test assistant."),
+        Message(role=USER, content=" ".join(f"word{i}" for i in range(n_words))),
+    ]
+
+
+class TestContextExceededLimitGate:
+    """A1/A2: FallbackCompressionRequired must only fire when the payload genuinely
+    exceeds the endpoint's configured max_input_tokens."""
+
+    def _make_router_with_limit(self, max_input_tokens):
+        """Real APIRouter with one coder endpoint carrying an explicit max_input_tokens."""
+        from agent_cascade.api_router import APIRouter, APIEndpoint
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_gate_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            pool = MagicMock()
+            pool.terminated_instances = set()
+            pool.is_instance_terminated.return_value = False
+
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+            router._pool = pool
+            ep = APIEndpoint(
+                name="gate-endpoint",
+                api_base="http://gate:8080/v1",
+                model="gate-model",
+                max_retries=0,
+                max_input_tokens=max_input_tokens,
+            )
+            router.add_endpoint(ep)
+            # Assign the endpoint to Coder so it is Tier 1 in the chain (the gate under test
+            # reads llm_cfg['max_input_tokens'] of the failing endpoint).
+            router.set_agent_priorities("Coder", [ep.id])
+            return router
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+    def test_400_under_limit_does_not_raise_fallback_compression(self):
+        """(1) Server 400 exceed_context_size but payload <= configured limit →
+        NO FallbackCompressionRequired; treated as service error and falls through to
+        endpoint exhaustion (RuntimeError)."""
+        router = self._make_router_with_limit(max_input_tokens=90_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            assert llm_cfg.get('max_input_tokens') == 90_000
+            raise ModelServiceError(code='400', message="exceed_context_size: prompt is too long")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+        # Exhaustion error, NOT FallbackCompressionRequired
+        assert "All API endpoints exhausted" in str(exc_info.value)
+        assert "FallbackCompressionRequired" not in str(exc_info.value)
+
+    def test_400_over_limit_raises_fallback_compression(self):
+        """(2) Server 400 exceed_context_size and payload > configured limit →
+        FallbackCompressionRequired is raised (existing behavior preserved)."""
+        router = self._make_router_with_limit(max_input_tokens=10)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise ModelServiceError(code='400', message="exceed_context_size: prompt is too long")
+
+        with pytest.raises(FallbackCompressionRequired) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+        assert exc_info.value.instance_name == "coder1"
+
+    def test_unknown_limit_context_error_falls_through(self):
+        """(3) Context-exceeded 400 with unknown/missing configured limit →
+        never compress off an unknown limit; falls through to exhaustion."""
+        from agent_cascade.api_router import APIRouter, APIEndpoint
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_gate_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            pool = MagicMock()
+            pool.terminated_instances = set()
+            pool.is_instance_terminated.return_value = False
+
+            # Default cfg WITHOUT max_input_tokens; general limit 0 → injected value is 0 (unknown)
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+            router._pool = pool
+            ep = APIEndpoint(
+                name="gate-endpoint",
+                api_base="http://gate:8080/v1",
+                model="gate-model",
+                max_retries=0,
+                max_input_tokens=0,  # unknown limit; general limit also 0 → cfg carries explicit 0
+            )
+            router.add_endpoint(ep)
+            router.set_agent_priorities("Coder", [ep.id])
+
+            def failing_call(llm_cfg, *args, **kwargs):
+                raise ModelServiceError(code='400', message="exceed_context_size: prompt is too long")
+
+            with pytest.raises(RuntimeError) as exc_info:
+                router.call_with_fallback(
+                    agent_type="Coder",
+                    call_fn=failing_call,
+                    agent_instance_name="coder1",
+                    messages=_make_payload_messages(),
+                )
+
+            assert "All API endpoints exhausted" in str(exc_info.value)
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+    def test_cursor_not_advanced_on_service_drift_path(self):
+        """(A1 judgment call) On the service-drift path (payload fits configured limit)
+        the per-instance cursor must NOT be advanced — that mechanism is reserved for
+        genuine context errors."""
+        router = self._make_router_with_limit(max_input_tokens=90_000)
+        inst_name = "coder1"
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise ModelServiceError(code='400', message="exceed_context_size: prompt is too long")
+
+        with pytest.raises(RuntimeError):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name=inst_name,
+                messages=_make_payload_messages(),
+            )
+
+        assert router._instance_endpoint_position.get(inst_name, 0) == 0
+
+    def test_no_messages_kwarg_never_raises_fallback_compression(self):
+        """Regression (review finding): the production caller forwards no ``messages``
+        kwarg. Without a payload estimate a server-side context-exceeded error must be
+        treated as a service error — never trigger fallback compression."""
+        router = self._make_router_with_limit(max_input_tokens=10)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise ModelServiceError(code='400', message="exceed_context_size: prompt is too long")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            # NOTE: deliberately NO messages= kwarg — mirrors engine/llm_call.py
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+            )
+
+        assert "All API endpoints exhausted" in str(exc_info.value)
+        assert "FallbackCompressionRequired" not in str(exc_info.value)
+
+
+# ──────────────────────────────────────────────
+# 3c. A3 — _is_context_exceeded_error hardening: free-text patterns only trusted on 400
+# ──────────────────────────────────────────────
+
+class TestIsContextExceededErrorHardened:
+    """A3: generic free-text patterns must not fire on non-400 status codes."""
+
+    def _router(self):
+        from agent_cascade.api_router import APIRouter
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_cls_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+            return router
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+    def test_5xx_with_max_tokens_phrase_is_not_context_exceeded(self):
+        """(4) A 5xx whose message contains 'max_tokens exceeded' is NOT classified as
+        context-exceeded (would wrongly trigger compression off a service failure)."""
+        router = self._router()
+        err = ModelServiceError(code='502', message="upstream error: max_tokens exceeded")
+        assert router._is_context_exceeded_error(err) is False
+
+    def test_400_with_max_tokens_phrase_is_context_exceeded(self):
+        """The same phrase on a 400 IS still classified as context-exceeded."""
+        router = self._router()
+        err = ModelServiceError(code='400', message="max_tokens exceeded")
+        assert router._is_context_exceeded_error(err) is True
+
+    def test_typed_context_window_exceeded_still_detected(self):
+        """Typed ContextWindowExceeded detection is unchanged (any status)."""
+        router = self._router()
+        assert router._is_context_exceeded_error(ContextWindowExceeded("boom")) is True
+
+    def test_llamacpp_400_patterns_still_detected(self):
+        """llama.cpp 400 branch is unchanged."""
+        router = self._router()
+        err = ModelServiceError(code='400', message="exceed_context_size")
+        assert router._is_context_exceeded_error(err) is True
+
+
+# ──────────────────────────────────────────────
+# 3d. A4 — get_endpoint_chain must guarantee max_input_tokens on every returned cfg
+# ──────────────────────────────────────────────
+
+class TestEndpointChainMaxInputTokensGuarantee:
+    """A4: the Tier-4 default cfg (and every chain cfg) must carry an int
+    max_input_tokens so base.py's pre-check can never silently cap at
+    DEFAULT_MAX_INPUT_TOKENS."""
+
+    def test_default_cfg_gets_limit_injected(self):
+        """(5) A chain cfg lacking max_input_tokens gets one injected."""
+        from agent_cascade.api_router import APIRouter
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_a4_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            # Default cfg WITHOUT max_input_tokens, general limit 0 → injected value must be 0 (explicit)
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+            chain = router.get_endpoint_chain("Coder")
+            assert len(chain) == 1
+            cfg = chain[0]
+            assert 'max_input_tokens' in cfg
+            assert isinstance(cfg['max_input_tokens'], int)
+            assert cfg['max_input_tokens'] == 0
+
+            # General limit > 0 → injected as the explicit limit (never left keyless)
+            router2 = APIRouter(
+                default_llm_cfg={"model": "default-model",
+                                 "api_base": "http://localhost:1234/v1",
+                                 "max_input_tokens": 128_000},
+                config_dir=test_config_dir,
+            )
+            chain2 = router2.get_endpoint_chain("Coder")
+            assert chain2[0]['max_input_tokens'] == 128_000
+
+            # Existing explicit limit is never clobbered by the injection
+            router3 = APIRouter(
+                default_llm_cfg={"model": "default-model",
+                                 "api_base": "http://localhost:1234/v1",
+                                 "max_input_tokens": 90_000},
+                config_dir=test_config_dir,
+            )
+            chain3 = router3.get_endpoint_chain("Coder")
+            assert chain3[0]['max_input_tokens'] == 90_000
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
 
 
 # ──────────────────────────────────────────────
@@ -715,13 +1019,17 @@ class TestFallbackCompressionIntegration:
                 default_llm_cfg={"model": "default", "api_base": "http://localhost:1234/v1"},
                 config_dir=test_config_dir,
             )
+            # Positive general limit so the A1/A2 gate classifies the TYPED
+            # ContextWindowExceeded (no status code) as genuine overflow — pre-gate behavior preserved.
+            router.default_llm_cfg['max_input_tokens'] = 128_000
             router._pool = pool
 
-            ep = APIEndpoint(name="test", api_base="http://test:8080/v1", model="test-model", max_retries=0)
+            ep = APIEndpoint(name="test", api_base="http://test:8080/v1", model="test-model",
+                             max_retries=0, max_input_tokens=128_000)
             router.add_endpoint(ep)
 
             def failing_call(llm_cfg, *args, **kwargs):
-                raise RuntimeError("prompt is too long")
+                raise ContextWindowExceeded("prompt is too long")
 
             with pytest.raises(FallbackCompressionRequired) as exc_info:
                 router.call_with_fallback(
@@ -781,9 +1089,9 @@ class TestFallbackCompressionIntegration:
             # Test with real ContextWindowExceeded
             assert router._is_context_exceeded_error(ContextWindowExceeded("test"))
 
-            # Test with matching error strings (generic patterns)
-            assert router._is_context_exceeded_error(RuntimeError("prompt is too long"))
-            assert router._is_context_exceeded_error(RuntimeError("input tokens exceed limit"))
+            # Test with matching error strings (generic patterns — only trusted on HTTP 400, A3)
+            assert router._is_context_exceeded_error(ModelServiceError(code='400', message="prompt is too long"))
+            assert router._is_context_exceeded_error(ModelServiceError(code='400', message="input tokens exceed limit"))
 
             # Test non-matching error
             assert not router._is_context_exceeded_error(RuntimeError("connection timeout"))

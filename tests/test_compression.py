@@ -1189,6 +1189,10 @@ class TestCompressionRetryReuse:
         """Create a minimal mock pool for invoke_compression_agent."""
         pool = MagicMock()
         pool.session_name = "TestCaller"
+        # Explicitly model a non-stopped pool: the invoker's stop-check reads
+        # agent_pool.stopped, and an unconfigured MagicMock attribute would be
+        # truthy and abort every invocation.
+        pool.stopped = False
         # _ensure_compressor_loaded needs get_agent to return truthy
         comp_agent = MagicMock()
         comp_agent.llm.generate_cfg = {}
