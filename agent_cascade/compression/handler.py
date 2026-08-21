@@ -25,6 +25,7 @@ from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
     COMPRESSION_MIN_FRACTION,
     COMPRESSION_MAX_FRACTION,
+    TOKEN_ESTIMATE_CHAR_DIVISOR,
 )
 from agent_cascade.utils.pool_validation import validate_message_pool
 from agent_cascade.utils.utils import is_multimodal_content, msg_field, VISION_MODEL_TYPES
@@ -171,7 +172,7 @@ class CompressionHandler:
         """Build unified post-compression feedback message.
 
         Args:
-            comp_type: Trigger type — "forced", "manual", or "fallback".
+            comp_type: Trigger type — "forced", "auto", "manual", or "fallback".
             messages_discarded: Number of messages summarized (omitted when 0).
             tokens_after: Token count after compression (utilization omitted when 0).
             max_tokens: Context window size; enables used/total display (0 = unknown).
@@ -1168,7 +1169,6 @@ class CompressionHandler:
             # Telemetry: record /compress command compression event with actual token counts (non-blocking)
             if (tel := self.engine._telemetry()) is not None:
                 try:
-                    from agent_cascade.settings import TOKEN_ESTIMATE_CHAR_DIVISOR
                     # Estimate tokens after compression by counting chars in the compressed conversation
                     _after = sum(len(msg.content or '') for msg in conv) // TOKEN_ESTIMATE_CHAR_DIVISOR if conv else 0
                     # Estimate tokens before by dividing by (1 - fraction) since we discarded `fraction` of history
@@ -1196,8 +1196,7 @@ class CompressionHandler:
             
             _invalidate_token_cache(instance)
             
-            # Unified feedback: estimate post-compression tokens same as telemetry block above
-            from agent_cascade.settings import TOKEN_ESTIMATE_CHAR_DIVISOR
+            # Unified feedback: estimate post-compression tokens (same method as telemetry above)
             est_tokens = int(sum(len(msg.content or '') for msg in conv) // TOKEN_ESTIMATE_CHAR_DIVISOR) if conv else 0
             notification_text = self._format_compression_feedback(
                 "manual", 0, est_tokens, instance._allocated_max_input_tokens or 0
