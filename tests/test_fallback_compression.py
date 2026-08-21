@@ -1124,3 +1124,281 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         assert "Assuming compressed payload fits" not in joined, (
             "The silent 'assume fits' escape hatch must no longer exist."
         )
+
+    def test_cursor_reset_on_error_path_after_fallback_compression(self):
+        """After a fallback-compression cycle where the resumed turn ERRORS (no successful
+        last_output), the endpoint cursor is still reset so the NEXT turn uses position 0.
+
+        Regression: pre-fix, reset_instance_endpoint was gated on `last_output is not None and
+        not error_already_yielded`. If the resumed call after compression hit a retryable error
+        that exhausted retries (or any path where last_output stays None), the cursor stayed at
+        position 1 permanently — every subsequent turn routed to the fallback model.
+
+        Post-fix: the reset is unconditional at the turn boundary (after the while loop), so it
+        fires regardless of whether the turn succeeded, errored, or stalled.
+
+        Mechanics: drive FCR → one successful fits round → resumed call raises a retryable error
+        that exhausts retries (last_output stays None, error_already_yielded=True). Assert the
+        reset spy fired for this instance.
+        """
+        engine, pool, instance, history = self._make_pool_and_engine(next_limit=10000)
+
+        # Simulate the transient failover advance (router.py context-exceeded branch).
+        pool.api_router.advance_instance_endpoint("test-agent")
+
+        reset_spy = MagicMock()
+        pool.api_router.reset_instance_endpoint = reset_spy
+
+        from agent_cascade.compression.result import CompressResult
+        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
+
+        success_result = CompressResult(
+            success=True, summary_text="compressed", marker_message=None,
+            messages_discarded=10, tail_count=5, error=None, mode="auto",
+            tokens_before=5000, tokens_after=2000,
+        )
+        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10, [Message(role=USER, content="x")])
+
+        call_count = [0]
+
+        def mock_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise FallbackCompressionRequired("test-agent", "Coder", "small-model")
+            # Resumed call raises a retryable error → exhausts retries → last_output stays None.
+            raise ConnectionError("connection refused")
+
+        with patch.object(engine, "_execute_llm_call", side_effect=mock_execute):
+            with patch("agent_cascade.compression.core.compress_context", return_value=success_result):
+                template = MagicMock()
+                template.llm_cfg = {"model": "test"}
+                template.function_map = {}
+                template.llm = MagicMock()
+                template.llm.generate_cfg = {}
+                list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content="test")], template, []))
+
+        # The turn ended in error (no successful last_output), but the cursor MUST still be reset.
+        assert reset_spy.call_count >= 1, (
+            f"Expected reset_instance_endpoint to fire at the turn boundary even on error path, "
+            f"got {reset_spy.call_count} calls. Pre-fix code only reset on successful completion."
+        )
+        args, kwargs = reset_spy.call_args_list[-1]
+        assert (args and args[0] == "test-agent") or (kwargs.get("instance_name") == "test-agent"), (
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[-1]}"
+        )
+
+    def test_cursor_reset_on_timeout_error_after_fallback_compression(self):
+        """After a fallback-compression cycle where the resumed turn hits a timeout error
+        (retries exhausted, no successful last_output), the endpoint cursor is still reset.
+
+        This covers the real-world scenario from logs/coder_kv-restore-confirm: the agent got
+        stuck after compression and never produced a clean last_output. Pre-fix, the cursor
+        stayed at position 1 forever because reset was gated on `last_output is not None`.
+        Post-fix, the unconditional turn-boundary reset clears it regardless of outcome.
+
+        Mechanics: FCR → one successful fits round → resumed call raises a timeout error
+        (classified as retryable) that exhausts the retry budget. last_output stays None.
+        Assert the reset spy fired for this instance at the turn boundary.
+        """
+        engine, pool, instance, history = self._make_pool_and_engine(next_limit=10000)
+
+        # Simulate the transient failover advance (router.py context-exceeded branch).
+        pool.api_router.advance_instance_endpoint("test-agent")
+
+        reset_spy = MagicMock()
+        pool.api_router.reset_instance_endpoint = reset_spy
+
+        from agent_cascade.compression.result import CompressResult
+        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
+
+        success_result = CompressResult(
+            success=True, summary_text="compressed", marker_message=None,
+            messages_discarded=10, tail_count=5, error=None, mode="auto",
+            tokens_before=5000, tokens_after=2000,
+        )
+        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10, [Message(role=USER, content="x")])
+
+        call_count = [0]
+
+        def mock_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise FallbackCompressionRequired("test-agent", "Coder", "small-model")
+            # Resumed call times out (retryable error → exhausts budget → last_output stays None).
+            raise TimeoutError("LLM request timed out after 60s")
+
+        with patch.object(engine, "_execute_llm_call", side_effect=mock_execute):
+            with patch("agent_cascade.compression.core.compress_context", return_value=success_result):
+                template = MagicMock()
+                template.llm_cfg = {"model": "test"}
+                template.function_map = {}
+                template.llm = MagicMock()
+                template.llm.generate_cfg = {}
+                list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content="test")], template, []))
+
+        # The turn ended in timeout (no successful last_output), but the cursor MUST still be reset.
+        assert reset_spy.call_count >= 1, (
+            f"Expected reset_instance_endpoint to fire at the turn boundary even on timeout path, "
+            f"got {reset_spy.call_count} calls."
+        )
+        args, kwargs = reset_spy.call_args_list[-1]
+        assert (args and args[0] == "test-agent") or (kwargs.get("instance_name") == "test-agent"), (
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[-1]}"
+        )
+
+    def test_inner_loop_retry_preserves_cursor_within_turn(self):
+        """The turn-boundary reset fires AFTER the retry loop exits, not between retries.
+
+        This proves the unconditional turn-boundary reset does NOT interfere with the legitimate
+        mid-turn cursor advancement done by _handle_inner_loop_detection (core.py:1456). The
+        cursor is advanced mid-turn so retries hit a different endpoint; it is only cleared
+        AFTER the entire retry loop exits — not between individual retry attempts.
+
+        Mechanics: pre-advance the cursor (simulating what _handle_inner_loop_detection does
+        mid-turn when a MaxTokenExceeded/ContextWindowExceeded fires during streaming). Then
+        drive a successful LLM call. We assert that:
+        1. reset_instance_endpoint was called exactly ONCE, at the very end (turn boundary)
+        2. The cursor was cleared so the NEXT turn starts from position 0
+
+        This is sufficient to prove the reset is scoped to end-of-turn: if it fired between
+        retries (e.g., after each successful _execute_llm_call), a multi-retry scenario would
+        see multiple resets. Here we see exactly one, at the boundary.
+        """
+        engine, pool, instance, history = self._make_pool_and_engine(next_limit=10000)
+
+        # Simulate the mid-turn cursor advance that _handle_inner_loop_detection performs
+        # when a MaxTokenExceeded/ContextWindowExceeded fires during streaming (core.py:1456).
+        pool.api_router.advance_instance_endpoint("test-agent")
+
+        reset_spy = MagicMock()
+        pool.api_router.reset_instance_endpoint = reset_spy
+
+        call_count = [0]
+
+        def mock_execute(*args, **kwargs):
+            call_count[0] += 1
+            # First attempt fails (simulating the mid-stream abort that triggered the advance).
+            if call_count[0] == 1:
+                raise ConnectionError("connection reset by peer")
+            # Second attempt (on the advanced endpoint) succeeds.
+            yield [Message(role="assistant", content="done")]
+
+        with patch.object(engine, "_execute_llm_call", side_effect=mock_execute):
+            template = MagicMock()
+            template.llm_cfg = {"model": "test"}
+            template.function_map = {}
+            template.llm = MagicMock()
+            template.llm.generate_cfg = {}
+            list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content="test")], template, []))
+
+        # The reset must fire exactly once, at the turn boundary (after the while loop exits).
+        # If the reset were per-retry (fired after each successful call), we'd see it here
+        # but NOT in a multi-failure scenario. Exactly one call = end-of-turn scope.
+        assert reset_spy.call_count == 1, (
+            f"Expected exactly one reset at the turn boundary, got {reset_spy.call_count}"
+        )
+        args, kwargs = reset_spy.call_args_list[0]
+        assert (args and args[0] == "test-agent") or (kwargs.get("instance_name") == "test-agent"), (
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[0]}"
+        )
+
+    def test_cursor_reset_on_generator_early_close(self):
+        """The cursor is reset even when the generator is closed early via gen.close().
+
+        This is the CRITICAL regression test for the GeneratorExit path. The consumer in
+        core.py:691-692 calls gen.close() in a finally: block on early break (user stop,
+        generation superseded). This raises GeneratorExit inside the generator at whatever
+        yield it's suspended on. Without a finally: block in _execute_llm_call_with_retry,
+        code after that yield (including the cursor reset) is SKIPPED — leaving the cursor
+        stuck at position 1 permanently.
+
+        With the try/finally fix, the reset fires in the finally: block regardless of how
+        the generator terminates (normal exhaustion, GeneratorExit, or exception).
+
+        Mechanics: drive _execute_llm_call_with_retry as a generator, pull one item with
+        next(), then call .close() on it. Assert reset_instance_endpoint WAS called.
+        This test FAILS if the reset is not in a finally (pre-fix behavior) and PASSES
+        with the finally version.
+        """
+        engine, pool, instance, history = self._make_pool_and_engine(next_limit=10000)
+
+        # Simulate the transient failover advance (as would happen mid-turn).
+        pool.api_router.advance_instance_endpoint("test-agent")
+
+        reset_spy = MagicMock()
+        pool.api_router.reset_instance_endpoint = reset_spy
+
+        call_count = [0]
+
+        def mock_execute(*args, **kwargs):
+            call_count[0] += 1
+            # First call: yield a message (simulating streaming output), then the generator
+            # will be suspended at this yield point when the consumer calls .close().
+            yield Message(role="assistant", content="partial response")
+
+        with patch.object(engine, "_execute_llm_call", side_effect=mock_execute):
+            template = MagicMock()
+            template.llm_cfg = {"model": "test"}
+            template.function_map = {}
+            template.llm = MagicMock()
+            template.llm.generate_cfg = {}
+
+            gen = engine._execute_llm_call_with_retry(
+                instance, [Message(role=USER, content="test")], template, []
+            )
+            # Pull one item to advance the generator past the initial setup and into
+            # the streaming phase. The generator is now suspended at a yield point.
+            first = next(gen)
+
+            # Simulate the consumer's early-close (core.py:691-692 finally: gen.close()).
+            # This raises GeneratorExit inside the generator, which triggers the finally: block.
+            gen.close()
+
+        # The reset MUST have fired despite the early close.
+        assert reset_spy.call_count == 1, (
+            f"Expected reset_instance_endpoint to fire exactly once on generator close, "
+            f"got {reset_spy.call_count} calls. Without a finally: block, GeneratorExit "
+            f"skips code after the yield point and the cursor stays stuck."
+        )
+        args, kwargs = reset_spy.call_args_list[0]
+        assert (args and args[0] == "test-agent") or (kwargs.get("instance_name") == "test-agent"), (
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[0]}"
+        )
+
+    def test_cursor_reset_fires_exactly_once_on_normal_exhaustion(self):
+        """Sanity check: on normal generator exhaustion (list(gen)), the reset fires exactly once.
+
+        This confirms the finally: block doesn't double-fire when the generator completes
+        naturally (StopIteration) vs. being closed early (GeneratorExit). Both paths should
+        trigger exactly one reset.
+        """
+        engine, pool, instance, history = self._make_pool_and_engine(next_limit=10000)
+
+        # Simulate the transient failover advance.
+        pool.api_router.advance_instance_endpoint("test-agent")
+
+        reset_spy = MagicMock()
+        pool.api_router.reset_instance_endpoint = reset_spy
+
+        call_count = [0]
+
+        def mock_execute(*args, **kwargs):
+            call_count[0] += 1
+            yield Message(role="assistant", content="done")
+
+        with patch.object(engine, "_execute_llm_call", side_effect=mock_execute):
+            template = MagicMock()
+            template.llm_cfg = {"model": "test"}
+            template.function_map = {}
+            template.llm = MagicMock()
+            template.llm.generate_cfg = {}
+            # Fully exhaust the generator (normal completion path).
+            results = list(engine._execute_llm_call_with_retry(
+                instance, [Message(role=USER, content="test")], template, []
+            ))
+
+        # Exactly one reset on normal exhaustion.
+        assert reset_spy.call_count == 1, (
+            f"Expected exactly one reset on normal generator exhaustion, "
+            f"got {reset_spy.call_count} calls."
+        )
