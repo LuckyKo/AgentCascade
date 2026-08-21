@@ -268,6 +268,8 @@ class AgentInstance:
     # ── Compression Cooldown and Overfeeding Detection ───────────────────────
     _last_force_compress_time: float = field(default=0.0)        # Monotonic timestamp of last forced compression attempt
     _force_compress_count: int = field(default=0)                # Number of forced compressions in current session
+    _force_compress_fail_streak: int = field(default=0)          # Consecutive forced-compression failures (drives BUG-7 backoff gate)
+    _last_force_compress_fail_at: float = field(default=0.0)     # Monotonic timestamp of last forced-compression failure
 
     # ── Nesting Depth (Fix: prevent infinite nesting) ──────────────────────
     _nest_depth: int = field(default=0)                           # Depth in the agent call chain (0 = root)
@@ -282,6 +284,7 @@ class AgentInstance:
     _pool_ref: Optional['AgentPool'] = None  # Reference back to parent pool for queue cleanup on terminate()
     _slot_release: Optional[Callable[[], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
     _slot_key: Optional[str] = None  # Slot key of currently held SlotPool slot (e.g., '_shared_sequential_slot_' or api_base)
+    _compression_suspended_at: float = field(default=0.0)  # Monotonic timestamp of last compression-halt wait entry (0.0 = never suspended this run)
 
     # ── Persistent Working Set Caching (Fix LLM Reprocessing) ────────────────
     # These fields cache the working set to preserve LLM prefix caching across turns.

@@ -172,6 +172,16 @@ class SlotPool:
             )
             
             self._waiters[ticket.ticket_id] = ticket
+
+            # BUG-11: once-per-enqueue lifecycle trace (never per-tick — logged
+            # BEFORE the poll loop starts).
+            logger.debug(
+                f"[SLOTPOOL] Queued on '{self.key}': agent={instance_name} ({agent_class}) "
+                f"ticket={ticket.ticket_id} position={len(self._waiters)} "
+                f"waiters={len(self._waiters)} holders={[h.instance_name for h in self._running.values()]} "
+                f"timeout={timeout:.0f}s"
+            )
+
             deadline = ticket.deadline
             
             while not ticket.cancelled.is_set():
@@ -192,17 +202,28 @@ class SlotPool:
                     continue
                 
                 if ticket.cancelled.is_set():
+                    # BUG-11: lifecycle trace for the silent SlotCancelled abort.
+                    logger.debug(
+                        f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
+                        f"agent={ticket.instance_name} ticket={ticket.ticket_id}"
+                    )
                     _remove_ticket(self, ticket)
                     raise SlotCancelled(ticket)
                 
                 if _is_head(self, ticket.ticket_id):
                     self._waiters.pop(ticket.ticket_id)
-                    holder = _grant(self, instance_name, agent_class)
+                    holder = _grant(self, instance_name, agent_class, ticket=ticket)
                     ticket.granted.set()
                     return _make_release_cb(self, holder)
                 
                 continue
             
+            # BUG-11: lifecycle trace for cancellation detected outside the
+            # wait loop (ticket.cancelled set between iterations).
+            logger.debug(
+                f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
+                f"agent={ticket.instance_name} ticket={ticket.ticket_id}"
+            )
             _remove_ticket(self, ticket)
             raise SlotCancelled(ticket)
 
@@ -211,9 +232,18 @@ class SlotPool:
         with self._cond:
             existing = self._running.get(holder.instance_name)
             if existing is None or existing.acquisition_id != holder.acquisition_id:
-                return
-            
+                return  # Stale/idempotent release — stays silent (BUG-11)
+
             del self._running[holder.instance_name]
+
+            # BUG-11: once-per-release lifecycle trace with held duration
+            # (held_duration is only computable here — the scheduler layer never
+            # sees the SlotHolder).
+            held = time.monotonic() - holder.granted_at
+            logger.debug(
+                f"[SLOTPOOL] Released '{self.key}': agent={holder.instance_name} "
+                f"held={held:.1f}s running={len(self._running)}/{self.capacity}"
+            )
             self._cond.notify_all()
 
     def create_held_slot(self, agent_name: str, instance_name: Optional[str] = None) -> SlotHolder:
@@ -235,11 +265,17 @@ class SlotPool:
         """Cancel a waiter's ticket, removing it from the queue."""
         with self._cond:
             if ticket_id is not None and ticket_id in self._waiters:
-                self._waiters[ticket_id].cancelled.set()
+                ticket = self._waiters[ticket_id]
+                # BUG-11: lifecycle trace for single-ticket cancel.
+                logger.debug(
+                    f"[SLOTPOOL] Cancelled on '{self.key}': agent={ticket.instance_name} "
+                    f"ticket={ticket.ticket_id}"
+                )
+                ticket.cancelled.set()
                 self._waiters.pop(ticket_id)
                 self._cond.notify_all()
                 return True
-            
+
             elif agent_name is not None:
                 cancelled_ids = [
                     tid for tid, t in self._waiters.items()
@@ -248,11 +284,16 @@ class SlotPool:
                 for tid in cancelled_ids:
                     self._waiters[tid].cancelled.set()
                     self._waiters.pop(tid)
-                
+
                 if cancelled_ids:
+                    # BUG-11: lifecycle trace for agent-scoped cancel.
+                    logger.debug(
+                        f"[SLOTPOOL] Cancelled on '{self.key}': agent={agent_name} "
+                        f"tickets={cancelled_ids}"
+                    )
                     self._cond.notify_all()
                 return len(cancelled_ids) > 0
-            
+
             return False
 
     def terminate_for_agent(self, agent_name: str) -> Tuple[int, int]:
@@ -265,10 +306,15 @@ class SlotPool:
             for tid in cancelled_ids:
                 self._waiters[tid].cancelled.set()
                 self._waiters.pop(tid)
-            
+
             if cancelled_ids:
+                # BUG-11: lifecycle trace for termination cleanup.
+                logger.debug(
+                    f"[SLOTPOOL] Terminated on '{self.key}': agent={agent_name} "
+                    f"tickets={cancelled_ids}"
+                )
                 self._cond.notify_all()
-            
+
             return len(cancelled_ids), 0
 
     def get_status(self) -> Dict:
@@ -307,8 +353,14 @@ class SlotPool:
 # Internal helpers (called only under pool._cond)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _grant(pool: SlotPool, instance_name: str, agent_class: str) -> SlotHolder:
-    """Grant a permit to the requesting agent. Must be called under pool._cond."""
+def _grant(pool: SlotPool, instance_name: str, agent_class: str,
+           ticket: Optional[QueueTicket] = None) -> SlotHolder:
+    """Grant a permit to the requesting agent. Must be called under pool._cond.
+
+    BUG-11: single DEBUG choke point for BOTH grant paths — the uncontended
+    fast path (acquire) and the queued grant. Pass ``ticket`` when granting a
+    queued waiter so the log carries the ticket id + waited duration.
+    """
     acquisition_id = next(pool._acquisition_counter)
     holder = SlotHolder(
         agent_name=instance_name,
@@ -317,6 +369,14 @@ def _grant(pool: SlotPool, instance_name: str, agent_class: str) -> SlotHolder:
         granted_at=time.monotonic(),
     )
     pool._running[instance_name] = holder
+
+    # BUG-11: once-per-grant lifecycle trace.
+    waited = (time.monotonic() - ticket.created_at) if ticket else 0.0
+    logger.debug(
+        f"[SLOTPOOL] Granted on '{pool.key}': agent={instance_name} ({agent_class}) "
+        f"acquisition={holder.acquisition_id}"
+        + (f" ticket={ticket.ticket_id} waited={waited:.1f}s" if ticket else " (fast-path)")
+    )
     return holder
 
 

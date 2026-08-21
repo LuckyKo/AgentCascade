@@ -757,7 +757,27 @@ class CompressionHandler:
             True if compression successful (continue loop)
         """
         inst_name = instance.instance_name
-        
+
+        # ── BUG-7 FIX: failure backoff gate ─────────────────────────────────
+        # Back off after a FAILED attempt instead of re-halting the whole pool
+        # immediately. Next retry = fresh attempt at a natural checkpoint; it
+        # queues at the FIFO tail like any other agent (no reservation).
+        # Lives INSIDE execute_force_compression so the critical-threshold
+        # cooldown override in compression_exec.py cannot bypass it.
+        streak = getattr(instance, '_force_compress_fail_streak', 0)
+        if streak > 0:
+            elapsed = time.monotonic() - getattr(instance, '_last_force_compress_fail_at', 0.0)
+            backoff = min(60.0 * (2 ** (streak - 1)), 600.0)   # 60s → 600s cap
+            if elapsed < backoff:
+                logger.warning(
+                    f"[COMPRESSION_BACKOFF] {inst_name}: skipping forced compression "
+                    f"(attempt failed {elapsed:.0f}s ago, streak={streak}, backoff={backoff:.0f}s)"
+                )
+                current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
+                max_tokens = self.engine._get_max_tokens(instance)
+                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+                return False  # Explicit: not compressed, keep going
+
         # Halt other agents (exempt target, all Compressor instances, and root agent)
         exempt = [inst_name]
         if instance.parent_instance:
@@ -765,9 +785,9 @@ class CompressionHandler:
         for inst in self.pool.instances:
             if inst.startswith('Compressor_'):
                 exempt.append(inst)
-        
+
         self.pool.halt_all_instances(except_instances=exempt)
-        
+
         try:
             logger.info(
                 f"Context usage at {usage_pct:.1f}% for {inst_name} — "
@@ -839,13 +859,29 @@ class CompressionHandler:
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
                 notification_text = self._format_compression_failure("forced", result.error, usage_pct)
                 self._inject_compression_notification(instance, notification_text, inst_name)
+                # BUG-7 FIX: honest failure — record streak so the backoff gate
+                # suppresses instant re-halt at the next checkpoint.
+                with instance._compression_lock:
+                    instance._force_compress_fail_streak = getattr(instance, '_force_compress_fail_streak', 0) + 1
+                    instance._last_force_compress_fail_at = time.monotonic()
+                return False
 
         except Exception as e:
             logger.error(f"Forced compression raised exception for {inst_name}: {e}")
-            return True
+            # BUG-7 FIX: was `return True` — dishonest (callers treated the
+            # failed attempt as compressed). Record streak + report failure.
+            with instance._compression_lock:
+                instance._force_compress_fail_streak = getattr(instance, '_force_compress_fail_streak', 0) + 1
+                instance._last_force_compress_fail_at = time.monotonic()
+            return False
 
         finally:
             self.pool.resume_all_instances()
+
+        # Success path — reset the failure streak under lock.
+        with instance._compression_lock:
+            instance._force_compress_fail_streak = 0
+        return True
     
     # ── Compress Context Tool Handler ────────────────────────────────────────
     

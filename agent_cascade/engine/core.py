@@ -447,6 +447,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         instance._slot_release = None  # Initialize for proper cleanup in finally block
         instance._slot_key = None      # Clear stale slot key from previous run (if any)
+        instance._compression_suspended_at = 0.0  # Reset per-run suspension marker (BUG-4/8 exit-finally)
 
         try:
             if self._is_terminal_stop(instance.instance_name):
@@ -821,18 +822,28 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # C4 fix: Always clean up — transition to IDLE regardless of how we
             # exit
 
-            # ── Fix TODO
-            if hasattr(self.pool, '_async_registry'):
-                try:
-                    self.pool._async_registry.clear_pending(instance.instance_name)
-                except Exception:
-                    pass  # Non-critical cleanup
-            # Also drain the message queue to prevent memory leak from stale messages
-            if hasattr(self.pool, 'drain_queue'):
-                try:
-                    self.pool.drain_queue(instance.instance_name)
-                except Exception:
-                    pass  # Non-critical cleanup
+            inst_name = instance.instance_name
+            suspended_this_run = getattr(instance, '_compression_suspended_at', 0.0) > 0.0
+            terminated = self._is_terminal_stop(inst_name)
+            outstanding = self.pool.has_pending(inst_name) or self.pool.has_messages(inst_name)
+
+            # BUG-8 FIX: preserve wakeups ONLY when a suspension-driven exit left real
+            # work behind. Normal completions and terminal stops behave exactly as before.
+            preserve = suspended_this_run and not terminated and outstanding
+
+            if not preserve:
+                # ── Fix TODO
+                if hasattr(self.pool, '_async_registry'):
+                    try:
+                        self.pool._async_registry.clear_pending(instance.instance_name)
+                    except Exception:
+                        pass  # Non-critical cleanup
+                # Also drain the message queue to prevent memory leak from stale messages
+                if hasattr(self.pool, 'drain_queue'):
+                    try:
+                        self.pool.drain_queue(instance.instance_name)
+                    except Exception:
+                        pass  # Non-critical cleanup
 
             # FIX Critical
             with instance._compression_lock:
@@ -889,8 +900,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # Mark activity at task completion so idle timer starts
                     # from when agent becomes idle, not from creation
                     self.pool._mark_activity(instance.instance_name)
-                    instance._transition(AgentState.IDLE)
-                    logger.debug("EXIT - %s %s→IDLE", instance.instance_name, current_state.name)
+                    # BUG-4 FIX: exiting with preserved outstanding work → SLEEPING
+                    # (idle-checker protected; agents wake from queued messages in
+                    # either state). Everything else → IDLE as before.
+                    target = AgentState.SLEEPING if preserve else AgentState.IDLE
+                    instance._transition(target)
+                    if preserve:
+                        instance.sleeping_since = time.monotonic()
+                    logger.debug(
+                        "EXIT - %s %s→%s%s", instance.instance_name, current_state.name,
+                        target.name, " [suspension-preserved]" if preserve else ""
+                    )
                 elif current_state == AgentState.TERMINATED:
                     logger.debug("EXIT - %s already TERMINATED", instance.instance_name)
                 else:
@@ -1161,14 +1181,50 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         Compression-halt is a suspension, not termination — agents resume
         automatically once forced compression completes and clears the flag.
 
+        BUG-1 FIX: yields the endpoint slot before blocking so other agents
+        (including the Compressor required to clear this halt) can acquire it,
+        then re-acquires via the standard bounded-FIFO path after resume.
+        Without this, a slot-holding agent frozen mid-run starves the whole
+        conc=0 pool for up to QUEUE_WAIT_TIMEOUT (circular-wait deadlock).
+
         Returns:
             True if compression cleared (agent should continue normally).
             False if a terminal stop occurred during wait (agent must exit).
         """
-        while self._is_suspended_by_compression(inst_name):
-            if self._is_terminal_stop(inst_name):
-                return False  # Terminal stop — cannot resume
-            self.pool.wait_if_paused(timeout=_COMPRESSION_WAIT_TIMEOUT)
+        instance = self.pool.get_instance(inst_name)
+
+        # ── BUG-1 FIX: yield the slot before blocking on the halt flag ──────
+        # Save KV state BEFORE release (matches sleep-transition ordering) so
+        # our context survives while other agents share the conc=0 pool.
+        if instance is not None:
+            from agent_cascade.state_ops import save_instance_state
+            with instance._state_lock:
+                instance._compression_suspended_at = time.monotonic()  # BUG-4/8 marker
+                save_instance_state(instance)
+            self._release_slot(instance, inst_name, "compression_halt")
+
+        try:
+            # ── BUG-6 FIX: plain sleep tick ─────────────────────────────────
+            # The old `pool.wait_if_paused()` waits on the GLOBAL _paused event,
+            # but compression-halt is per-instance (_halted_instances) — while
+            # globally resumed every Event.wait(1.0) returned instantly, making
+            # this a 100%-CPU hot loop for the entire suspension. A per-instance
+            # halt has no event to wait on; sleep the same 1s tick instead.
+            while self._is_suspended_by_compression(inst_name):
+                if self._is_terminal_stop(inst_name):
+                    return False  # Terminal stop — cannot resume; slot stays released (exit finally re-releases idempotently)
+                time.sleep(_COMPRESSION_WAIT_TIMEOUT)
+        finally:
+            if not self._is_terminal_stop(inst_name):
+                # Same re-acquire idiom as the tool_dispatcher sync-child path:
+                # reacquire_for handles no-slot endpoints, bounded FIFO wait,
+                # timeout/cancel degradation. Restore KV ONLY AFTER successful
+                # re-acquisition to avoid evicting another agent's model.
+                ok = self.reacquire_for(instance, inst_name, context="after_compression_resume")
+                if ok and instance is not None:
+                    from agent_cascade.state_ops import restore_instance_state
+                    restore_instance_state(instance)
+                # On failure: reacquire_for already logged + cleared slot state (degrade-to-slotless)
         return True  # Compression cleared — safe to continue
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
