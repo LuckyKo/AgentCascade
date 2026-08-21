@@ -832,7 +832,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             preserve = suspended_this_run and not terminated and outstanding
 
             if not preserve:
-                # ── Fix TODO
                 if hasattr(self.pool, '_async_registry'):
                     try:
                         self.pool._async_registry.clear_pending(instance.instance_name)
