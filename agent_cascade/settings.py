@@ -175,6 +175,16 @@ ENDPOINT_COOLDOWN_SECONDS: int = _parse_endpoint_cooldown()  # Seconds to skip a
 ENDPOINT_FAILURE_CLEANUP_HOURS: int = int(os.getenv(
     'AGENT_CASCADE_ENDPOINT_FAILURE_CLEANUP_HOURS', 24))  # Remove failure records older than this many hours
 
+# Settings for API router circuit breaker
+BREAKER_BASE_WINDOW_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_BREAKER_BASE_WINDOW_SECONDS', 20.0))  # Initial open-state window for the per-server circuit breaker (seconds)
+BREAKER_MAX_WINDOW_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_BREAKER_MAX_WINDOW_SECONDS', 120.0))  # Cap for exponential window growth on repeated failed probes (seconds)
+BREAKER_WINDOW_GROWTH: float = float(os.getenv(
+    'QWEN_AGENT_BREAKER_WINDOW_GROWTH', 2.0))  # Window multiplier applied on each repeated failed probe
+SERVER_BUSY_WAIT_CAP_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_SERVER_BUSY_WAIT_CAP_SECONDS', 30.0))  # Per-call cap for the D1 fail-fast wait when the whole endpoint chain is breaker-gated (seconds)
+
 # Settings for token estimation
 # Aggressive estimate used for telemetry and output estimation.
 # Based on typical English text (~4 chars/token).

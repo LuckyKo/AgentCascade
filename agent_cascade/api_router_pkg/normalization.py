@@ -14,15 +14,8 @@ Example: ``http://localhost:1234/v1/`` → ``http://127.0.0.1:1234/v1``.
 NEVER use the result as a wire URL — only the original api_base goes over the wire.
 """
 
-# ── Circuit-breaker tuning (Change B/D of reports/router-cascade-fix-plan.md) ──
-BREAKER_BASE_WINDOW_SECONDS = 20.0   # Initial open-state window
-BREAKER_MAX_WINDOW_SECONDS = 120.0   # Cap for exponential window growth
-BREAKER_WINDOW_GROWTH = 2.0          # Window multiplier on repeated failed probes
-SERVER_BUSY_WAIT_CAP_SECONDS = 30.0  # Per-call cap for the fail-fast wait (D1)
-
-
-def _split_host_port(authority: str):
-    """Split 'host[:port]' (IPv6-safe) into (host, port_suffix)."""
+def _split_host_port(authority: str) -> tuple[str, str]:
+    """Split 'host[:port]' (IPv6-safe) into (host, port_part) where port_part is '' or ':<port>'."""
     if authority.startswith('['):
         end = authority.find(']')
         if end != -1:

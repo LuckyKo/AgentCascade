@@ -32,6 +32,8 @@ from agent_cascade.retry_policy import RetryPolicy
 from agent_cascade.exceptions import ServerBusyError, FallbackCompressionRequired
 from agent_cascade.api_router_pkg.normalization import (
     normalize_api_base,
+)
+from agent_cascade.settings import (
     BREAKER_BASE_WINDOW_SECONDS,
     SERVER_BUSY_WAIT_CAP_SECONDS,
 )
