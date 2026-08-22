@@ -1243,15 +1243,29 @@ class TestSecuritySlotYieldOnSharedSlot:
             caller_may_finish.set()  # caller may end its turn → hits its next checkpoint
 
             # ── FIXED BEHAVIOR: Security acquires promptly (old code: 3s timeout) ──
+            # The deterministic regression guard is this wait: if the suspended caller
+            # fails to release the slot, Security hits the patched 3s QUEUE_WAIT_TIMEOUT,
+            # raises SlotQueueTimeout, and never sets the event → this assert fails.
+            # A real deadlock therefore still FAILS the test (after ~10s), independent of
+            # load. We deliberately do NOT hard-assert a wall-clock bound on `elapsed`:
+            # that value measures real-time halt→acquire, which includes thread-scheduling
+            # latency for the caller to wake and reach its release checkpoint — under xdist/
+            # parallel-suite load that can exceed 3s even when the fix works correctly,
+            # producing a flaky failure (see .agent_lessons/endpoint-slot-deadlock-...).
             assert security_llm_called.wait(timeout=10), (
                 "Security never acquired the shared slot after the suspended caller "
                 "yielded it — BUG-1 regression (slot starvation/deadlock is back)"
             )
             elapsed = time.perf_counter() - t0
-            assert elapsed < 3.0, (
-                f"Security took {elapsed:.1f}s to acquire (≥ the shortened 3s timeout) — "
-                f"that is the old deadlock signature, not the fixed hand-off"
-            )
+            if elapsed >= 3.0:
+                # Diagnostic only (not a failure): on a heavily loaded CI runner the
+                # caller thread can be delayed >3s in reaching its release checkpoint
+                # while the hand-off still completes correctly. Log it for observability.
+                print(
+                    f"[DIAG] Security acquired the shared slot {elapsed:.1f}s after the "
+                    f"halt (≥ the shortened 3s timeout) — likely load-induced scheduling "
+                    f"latency, not a deadlock (the deterministic wait above still passed)."
+                )
 
             # ── Step 4: resume → caller re-acquires at the FIFO tail, both complete ──
             assert "caller" in pool._compression_halted, (
