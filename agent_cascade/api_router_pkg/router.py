@@ -1,6 +1,12 @@
 """APIRouter — multi-endpoint selection with priority-based fallback.
 
 Moved verbatim from api_router.py (Phase 3a pure-move refactor).
+
+HTTP EXIT-POINT RULE: any code that opens an HTTP connection to a configured
+endpoint MUST either go through :meth:`call_with_fallback` or explicitly consult
+the per-normalized-base circuit breaker (:meth:`_breaker_should_skip`) before
+firing. Bypass paths (context detection, image captioning) are gated in-place —
+do not add new ungated ones.
 """
 
 import collections
@@ -19,7 +25,7 @@ from agent_cascade.settings import (
     ENDPOINT_COOLDOWN_SECONDS,
     ENDPOINT_FAILURE_CLEANUP_HOURS,
 )
-from agent_cascade.exceptions import ContextWindowExceeded, AgentTerminatedError
+from agent_cascade.exceptions import ContextWindowExceeded, AgentTerminatedError, ServerBusyError
 from agent_cascade.retry_policy import calculate_backoff, RetryPolicy, POLICY_DEFAULT
 from agent_cascade.api_router_pkg.endpoints import (
     APIEndpoint,
@@ -29,6 +35,13 @@ from agent_cascade.api_router_pkg.endpoints import (
 )
 from agent_cascade.api_router_pkg.scheduler import EndpointScheduler
 from agent_cascade.api_router_pkg.helpers import _check_termination, _interruptible_sleep
+from agent_cascade.api_router_pkg.normalization import (
+    BREAKER_BASE_WINDOW_SECONDS,
+    BREAKER_MAX_WINDOW_SECONDS,
+    BREAKER_WINDOW_GROWTH,
+    SERVER_BUSY_WAIT_CAP_SECONDS,
+    normalize_api_base,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +78,12 @@ class APIRouter:
         self._lock = threading.Lock()
         self._pool = None  # Set externally by AgentPool when router is attached
 
+        # Register with the bypass-path gate so HTTP paths that skip
+        # call_with_fallback (context detection, image_gen) can consult our
+        # breakers (Change E). Weakref-based; no dispose hook needed.
+        from agent_cascade.api_router_pkg import breaker_gate
+        breaker_gate.register_router(self)
+
         # Lifecycle-aware endpoint scheduler for parallel agent management.
         # Acquires a slot at task submission time and holds it for the entire
         # agent lifecycle — prevents interleaving of LLM calls between agents.
@@ -81,9 +100,15 @@ class APIRouter:
         # api_base -> deque of timestamps (seconds since epoch) for efficient sliding window.
         self._endpoint_call_history: Dict[str, Deque[float]] = {}
 
-        # Cooldown tracking: api_base -> last failure timestamp (epoch seconds).
+        # Cooldown tracking: (normalized_base, model) → last failure timestamp (epoch seconds).
         # Failed endpoints are skipped during cooldown to prevent hammering dead servers.
-        self._endpoint_failure_times: Dict[str, float] = {}
+        # Keyed per-(base, model) so shared-base endpoints on one physical server are independent.
+        self._endpoint_failure_times: Dict[Tuple[str, str], float] = {}
+
+        # Per-physical-server circuit breaker state (normalized_base → breaker dict).
+        # Tripped by SERVER_BUSY_LOADING signatures (503 / "Failed to load model ... failed
+        # to start") — NOT by real per-model errors (404/400), which only set cooldown above.
+        self._server_breakers: Dict[str, dict] = {}
 
         # Per-instance endpoint cursor for "kick to next endpoint" behavior (thread-safe via self._lock).
         self._instance_endpoint_position: Dict[str, int] = {}
@@ -468,9 +493,10 @@ class APIRouter:
                 else:
                     last_success_cfg = self._last_successful_endpoint_cfg
                     # Validate last successful endpoint still exists and is enabled
+                    # (compare NORMALIZED bases — raw strings may differ cosmetically).
                     api_base = last_success_cfg.get('api_base') or last_success_cfg.get('model_server', '')
                     for ep in self.endpoints.values():
-                        if ep.api_base == api_base and ep.enabled:
+                        if normalize_api_base(ep.api_base) == normalize_api_base(api_base) and ep.enabled:
                             cfg = copy.deepcopy(last_success_cfg)
                             ep_limit = ep.max_input_tokens
                             if ep_limit <= 0 and general_limit > 0:
@@ -489,12 +515,13 @@ class APIRouter:
                 filtered_configs = []
                 skipped_count = 0
                 for cfg in endpoint_configs:
-                    api_base = cfg.get('api_base') or cfg.get('model_server', '')
-                    last_fail = self._endpoint_failure_times.get(api_base, 0)
-                    if api_base and (now - last_fail) < ENDPOINT_COOLDOWN_SECONDS:
+                    cfg_base = cfg.get('api_base') or cfg.get('model_server', '')
+                    cooldown_key = (normalize_api_base(cfg_base), cfg.get('model', ''))
+                    last_fail = self._endpoint_failure_times.get(cooldown_key, 0)
+                    if cfg_base and (now - last_fail) < ENDPOINT_COOLDOWN_SECONDS:
                         skipped_count += 1
                         logger.debug(
-                            f"[APIRouter] Skipping endpoint '{cfg.get('model', 'unknown')}' @ {api_base} "
+                            f"[APIRouter] Skipping endpoint '{cfg.get('model', 'unknown')}' @ {cfg_base} "
                             f"in cooldown ({ENDPOINT_COOLDOWN_SECONDS - int(now - last_fail)}s remaining)"
                         )
                     else:
@@ -676,7 +703,7 @@ class APIRouter:
         if not self._endpoint_failure_times:
             return
         cutoff = now - (ENDPOINT_FAILURE_CLEANUP_HOURS * 3600)
-        stale_keys = [api_base for api_base, ts in self._endpoint_failure_times.items() if ts < cutoff]
+        stale_keys = [key for key, ts in self._endpoint_failure_times.items() if ts < cutoff]
         if stale_keys:
             for key in stale_keys:
                 del self._endpoint_failure_times[key]
@@ -684,6 +711,171 @@ class APIRouter:
                 f"[APIRouter] Cleaned up {len(stale_keys)} stale endpoint failure record(s) "
                 f"(older than {ENDPOINT_FAILURE_CLEANUP_HOURS}h)"
             )
+
+    # ── Per-Server Circuit Breaker (Change B/D) ──────────────────────────
+
+    def _is_server_busy_loading(self, error: Exception) -> bool:
+        """True when an error carries the SERVER_BUSY_LOADING signature.
+
+        Matches ModelServiceError with HTTP code 503, or error text like
+        'Failed to load model ... failed to start' (llama.cpp loader busy).
+        Real per-model errors (404 model-not-found, 400 invalid-request) do NOT
+        match and therefore never trip the server breaker — they only earn the
+        per-(base, model) cooldown.
+        """
+        from agent_cascade.llm.base import ModelServiceError
+        if isinstance(error, ModelServiceError) and str(getattr(error, 'code', None)) == '503':
+            return True
+        err_str = str(error).lower()
+        return (
+            'failed to load model' in err_str
+            or 'failed to start' in err_str
+            or 'model load error' in err_str
+            or 'loading of model' in err_str
+        )
+
+    def _breaker_trip(self, base_key: str, reason: str) -> None:
+        """Trip or re-trip (with grown window) the breaker for a normalized base.
+
+        MUST be called under ``self._lock``.
+        """
+        now = time.monotonic()
+        br = self._server_breakers.get(base_key)
+        if br and br['state'] == 'open':
+            return  # already open — keep original opened_at/window
+        prev_window = br['window'] if br else BREAKER_BASE_WINDOW_SECONDS
+        window = min(prev_window * BREAKER_WINDOW_GROWTH, BREAKER_MAX_WINDOW_SECONDS) \
+            if br else BREAKER_BASE_WINDOW_SECONDS
+        self._server_breakers[base_key] = {
+            'state': 'open',
+            'opened_at': now,
+            'window': window,
+            'probing': False,
+        }
+        logger.warning(
+            f"[APIRouter] Server breaker OPEN for {base_key} "
+            f"(window={window:.0f}s): {reason}"
+        )
+
+    def _record_server_busy(self, base_key: str, error: Exception) -> None:
+        """Record a SERVER_BUSY_LOADING failure for a base (trip / grow breaker).
+
+        No-op for errors that do not carry the busy-loading signature — real
+        per-model errors (404/400) must never trip the server breaker.
+        """
+        if not self._is_server_busy_loading(error):
+            return
+        with self._lock:
+            self._breaker_trip(base_key, f"{type(error).__name__}: {error}")
+
+    def _breaker_should_skip(self, base: str) -> bool:
+        """Consult-before-fire check for a raw api_base.
+
+        Returns True when the caller must NOT fire an HTTP request at this base
+        right now:
+          - breaker 'open' and window not yet elapsed → skip;
+          - breaker half-open and another caller holds the single probe slot → skip.
+
+        As a side effect, transitions open→half_open once the window elapses.
+        The half-open probe claim itself is done via :meth:`_breaker_claim_probe`
+        (atomic compare-and-set under ``self._lock``; lock NOT held across HTTP).
+        """
+        key = normalize_api_base(base)
+        with self._lock:
+            br = self._server_breakers.get(key)
+            if not br:
+                return False  # closed — proceed
+            state = br['state']
+            if state == 'open':
+                if time.monotonic() - br['opened_at'] >= br['window']:
+                    br['state'] = 'half_open'
+                    logger.info(
+                        f"[APIRouter] Server breaker {key}: open → half_open "
+                        f"(allowing exactly one probe)"
+                    )
+                    return False  # allow this caller to attempt the claim
+                return True  # still inside the open window
+            # 'half_open': skip unless this caller wins the atomic probe claim.
+            # NOTE: we are ALREADY holding self._lock (a non-reentrant Lock), so we must
+            # NOT call _breaker_claim_probe here — it would re-acquire the same lock and
+            # self-deadlock. Inline the compare-and-set instead (same semantics).
+            if br.get('probing'):
+                return True  # another caller holds THE single probe slot
+            br['probing'] = True
+            br['probe_owner'] = threading.get_ident()
+            logger.info(
+                f"[APIRouter] Server breaker {key}: half_open probe claimed "
+                f"(exactly one caller may fire HTTP)"
+            )
+            return False  # this caller won the single-probe claim — proceed
+
+    def _breaker_claim_probe(self, base: str) -> bool:
+        """Atomically claim THE single half-open probe slot for a normalized base.
+
+        Compare-and-set under ``self._lock``: only one caller can win; losers get
+        False and must skip/fail fast. The winner fires its HTTP call WITHOUT the
+        lock and MUST call :meth:`_breaker_release_probe` in a ``finally`` so a
+        hung/terminated probe cannot wedge the breaker.
+        """
+        key = normalize_api_base(base)
+        with self._lock:
+            br = self._server_breakers.get(key)
+            if not br or br.get('probing'):
+                return False
+            br['probing'] = True
+            br['probe_owner'] = threading.get_ident()
+            return True
+
+    def _caller_holds_probe(self, base: str) -> bool:
+        """True when THIS thread holds the half-open probe claim for a base."""
+        key = normalize_api_base(base)
+        with self._lock:
+            br = self._server_breakers.get(key)
+            return bool(br) and br.get('probing') and br.get('probe_owner') == threading.get_ident()
+
+    def _breaker_release_probe(self, base: str) -> None:
+        """Clear the probing flag (call in a finally after the half-open probe)."""
+        key = normalize_api_base(base)
+        with self._lock:
+            br = self._server_breakers.get(key)
+            if br:
+                br['probing'] = False
+
+    def _breaker_on_success(self, base: str) -> None:
+        """Probe/real-call success on this base → close the breaker."""
+        key = normalize_api_base(base)
+        with self._lock:
+            br = self._server_breakers.pop(key, None)
+            if br:
+                logger.info(f"[APIRouter] Server breaker {key}: → closed (call succeeded)")
+
+    def _breaker_is_open(self, base: str) -> bool:
+        """Non-mutating breaker-open check for BYPASS paths (Change E).
+
+        Unlike :meth:`_breaker_should_skip` this NEVER transitions state or
+        claims the probe slot — context-detection/captioning/image-gen callers
+        must not consume the single half-open probe or delay the open→half_open
+        transition. They only need "is this server currently off-limits?".
+        """
+        key = normalize_api_base(base)
+        with self._lock:
+            br = self._server_breakers.get(key)
+            if not br:
+                return False
+            if br['state'] == 'open':
+                return time.monotonic() - br['opened_at'] < br['window']
+            return True  # half_open/probing: probe slot reserved for real traffic
+
+    def _breaker_wait_seconds_remaining(self, base: str) -> float:
+        """Seconds left until the open breaker would allow a probe (0.0 if closed)."""
+        key = normalize_api_base(base)
+        with self._lock:
+            br = self._server_breakers.get(key)
+            if not br or br['state'] != 'open':
+                return 0.0
+            remaining = br['window'] - (time.monotonic() - br['opened_at'])
+            return max(0.0, remaining)
+
 
     # ── Retry + Fallback Execution ───────────────────────────────────────
 
@@ -718,33 +910,74 @@ class APIRouter:
         # Extract instance name from kwargs (set by execution_engine) so we can
         # apply per-instance cursor rotation and skip already-failed endpoints.
         _inst_name = kwargs.pop('agent_instance_name', None)
+
+        # ── Change D (D1): bounded fail-fast wait when every remaining endpoint sits on a
+        # breaker-open physical server. Zero HTTP to busy bases; wait is capped by
+        # SERVER_BUSY_WAIT_CAP_SECONDS so this can never hot-loop. After the cap the call
+        # degrades with ServerBusyError (a plain RuntimeError subclass) — NOT
+        # FallbackCompressionRequired — so the context-compression path stays untouched.
+        #
+        # NOTE: the wait is a PRE-LOOP step (run once before the endpoint loop), NOT a
+        # wrapper around the loop. Wrapping the loop in `for _busy_cycle in range(2)` made
+        # the exhaustion `raise RuntimeError` below unreachable on the normal path (cycle 0
+        # implicit-continued to cycle 1, swallowing the raise). Running the wait once up
+        # front keeps the endpoint loop a single pass that hits its natural exhaustion raise.
         chain = self.get_endpoint_chain(
             agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
         )
+        if chain and all(
+            self._breaker_should_skip(
+                cfg.get('api_base') or cfg.get('model_server', 'unknown')
+            )
+            for cfg in chain
+        ):
+            remaining = max(
+                self._breaker_wait_seconds_remaining(
+                    cfg.get('api_base') or cfg.get('model_server', 'unknown')
+                )
+                for cfg in chain
+            )
+            wait = min(remaining, SERVER_BUSY_WAIT_CAP_SECONDS)
+            if wait > 0:
+                logger.warning(
+                    f"[APIRouter] All endpoints for '{agent_type}' are on breaker-open servers. "
+                    f"Failing fast: waiting {wait:.1f}s (cap {SERVER_BUSY_WAIT_CAP_SECONDS:.0f}s) "
+                    f"before retrying — zero HTTP requests while busy."
+                )
+                try:
+                    # Termination-aware sleep (D1 requirement).
+                    _interruptible_sleep(wait, self._pool, _inst_name)
+                except AgentTerminatedError:
+                    raise
+
         all_errors = []
 
         for cfg_idx, llm_cfg in enumerate(chain):
             # Default per-endpoint retry count from policy. Endpoint config (max_retries field)
             # overrides this — explicit endpoint max_retries always takes precedence.
             max_retries = self.policy.endpoint_max_retries
-            
+
             concurrency_limit = 0
             rate_limit_rpm = 0           # Default: unlimited
             is_default = (cfg_idx == len(chain) - 1)
-            
+
             # Resolve endpoint-specific settings — always try to read from
             # the endpoint config, even for the default fallback endpoint.
             # The default endpoint may also be in self.endpoints with its own
             # concurrency setting (Phase 1 fix).
+            # Match on (normalized_base, model): with many endpoints sharing one
+            # physical server, a raw-base first-match could return the wrong
+            # endpoint's settings (plan §7.6 / L739-746 first-match ambiguity).
             endpoint_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+            _norm_endpoint_base = normalize_api_base(endpoint_base)
             with self._lock:
                 for ep in self.endpoints.values():
-                    if ep.api_base == endpoint_base:
+                    if normalize_api_base(ep.api_base) == _norm_endpoint_base and ep.model == llm_cfg.get('model'):
                         max_retries = ep.max_retries
                         concurrency_limit = ep.concurrency_limit
                         rate_limit_rpm = ep.rate_limit_rpm
                         break
-            
+
             def execute_api_call():
                 """Execute the API call. The agent already holds its endpoint's lifecycle slot for this turn."""
                 result = call_fn(llm_cfg, *args, **kwargs)
@@ -772,197 +1005,243 @@ class APIRouter:
 
             endpoint_name = llm_cfg.get('model', 'unknown')
 
-            for attempt in range(max_retries + 1):
-                # Check if instance was terminated during a previous failed attempt or between retries.
-                # Prevents starting new API calls after termination (does not interrupt mid-stream calls).
-                if self._pool and _inst_name:
-                    if _inst_name in self._pool.terminated_instances:
-                        logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated, aborting LLM call")
-                        raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
+            # ── Consult-before-fire (Change B): never fire HTTP at a busy physical server.
+            # Applies to EVERY tier including the Tier-4 default (REVIEW M4). Endpoints sharing
+            # this normalized base all skip together; different-server failover is unaffected.
+            if self._breaker_should_skip(endpoint_base):
+                logger.info(
+                    f"[APIRouter] Server busy — skipping endpoint '{endpoint_name}' @ {endpoint_base} "
+                    f"(breaker open / another agent probing)"
+                )
+                continue
 
-                try:
-                    # Rate limiting: check and enforce per-endpoint rate limit before each call attempt.
-                    # Each retry attempt counts against the rate limit.
-                    if rate_limit_rpm > 0:
-                        with self._lock:
-                            if endpoint_base not in self._endpoint_call_history:
-                                self._endpoint_call_history[endpoint_base] = collections.deque()
-                        # Loop until we successfully record this call (handles race conditions when multiple threads sleep)
-                        while True:
-                            now = time.time()
-                            wait_time = 0.0
-                            with self._lock:
-                                history = self._endpoint_call_history[endpoint_base]
-                                # Sliding window: remove calls older than RATE_LIMIT_WINDOW_SECONDS
-                                while history and now - history[0] >= RATE_LIMIT_WINDOW_SECONDS:
-                                    history.popleft()
-                                # Check if we're over the limit — calculate wait time instead of raising
-                                if len(history) >= rate_limit_rpm:
-                                    wait_time = RATE_LIMIT_WINDOW_SECONDS - (now - history[0])
-                            # Sleep outside the lock to avoid blocking other threads
-                            if wait_time > 0:
-                                logger.debug(
-                                    f"[APIRouter] Rate limit reached for '{endpoint_name}' @ {endpoint_base}. "
-                                    f"Waiting {wait_time:.1f}s before next call ({rate_limit_rpm} rpm)"
-                                )
-                                # Interruptible sleep: check termination every 0.5s during rate-limit wait
-                                _interruptible_sleep(wait_time, self._pool, _inst_name)
-                            # After sleeping, re-check and try to record (loop handles contention)
-                            with self._lock:
-                                now = time.time()
-                                history = self._endpoint_call_history[endpoint_base]
-                                while history and now - history[0] >= RATE_LIMIT_WINDOW_SECONDS:
-                                    history.popleft()
-                                if len(history) < rate_limit_rpm:
-                                    # Track this call atomically within the same lock to prevent race conditions
-                                    history.append(now)
-                                    break  # Successfully recorded, exit loop
-                    
-                    # Check termination again just before making the actual API call,
-                    # in case instance was terminated during rate limit wait or backoff.
+            # Half-open probe custody: when THIS thread won the single-probe claim it must be
+            # released on EVERY exit path from the attempt loop (success/exception/exhaustion).
+            _holds_probe = self._caller_holds_probe(endpoint_base)
+            try:
+                for attempt in range(max_retries + 1):
+                    # Check if instance was terminated during a previous failed attempt or between retries.
+                    # Prevents starting new API calls after termination (does not interrupt mid-stream calls).
                     if self._pool and _inst_name:
                         if _inst_name in self._pool.terminated_instances:
-                            logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated before API call, aborting")
+                            logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated, aborting LLM call")
                             raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
 
-                    result = execute_api_call()
-                    
-                    # Track the last successful endpoint config for automatic recovery.
-                    # Stored only after complete success (including all retries), not during retries.
-                    # This enables Tier 3 (last-successful) fallback when agent-specific endpoints become unavailable.
-                    with self._lock:
-                        self._last_successful_endpoint_cfg = copy.deepcopy(llm_cfg)
-                    
-                    # Generator errors are already detected inside execute_api_call (first-chunk pull).
-                    # Pass the generator through directly — no double-wrapping needed.
-                    return result
-                    
-                except Exception as e:
-                    # AgentTerminatedError is a clean abort signal — re-raise immediately
-                    # without logging, retrying, or moving to next endpoint.
-                    if isinstance(e, AgentTerminatedError):
-                        raise
-                    
-                    err_msg = str(e)
+                    try:
+                        # Rate limiting: check and enforce per-endpoint rate limit before each call attempt.
+                        # Each retry attempt counts against the rate limit.
+                        if rate_limit_rpm > 0:
+                            with self._lock:
+                                if endpoint_base not in self._endpoint_call_history:
+                                    self._endpoint_call_history[endpoint_base] = collections.deque()
+                            # Loop until we successfully record this call (handles race conditions when multiple threads sleep)
+                            while True:
+                                now = time.time()
+                                wait_time = 0.0
+                                with self._lock:
+                                    history = self._endpoint_call_history[endpoint_base]
+                                    # Sliding window: remove calls older than RATE_LIMIT_WINDOW_SECONDS
+                                    while history and now - history[0] >= RATE_LIMIT_WINDOW_SECONDS:
+                                        history.popleft()
+                                    # Check if we're over the limit — calculate wait time instead of raising
+                                    if len(history) >= rate_limit_rpm:
+                                        wait_time = RATE_LIMIT_WINDOW_SECONDS - (now - history[0])
+                                # Sleep outside the lock to avoid blocking other threads
+                                if wait_time > 0:
+                                    logger.debug(
+                                        f"[APIRouter] Rate limit reached for '{endpoint_name}' @ {endpoint_base}. "
+                                        f"Waiting {wait_time:.1f}s before next call ({rate_limit_rpm} rpm)"
+                                    )
+                                    # Interruptible sleep: check termination every 0.5s during rate-limit wait
+                                    _interruptible_sleep(wait_time, self._pool, _inst_name)
+                                # After sleeping, re-check and try to record (loop handles contention)
+                                with self._lock:
+                                    now = time.time()
+                                    history = self._endpoint_call_history[endpoint_base]
+                                    while history and now - history[0] >= RATE_LIMIT_WINDOW_SECONDS:
+                                        history.popleft()
+                                    if len(history) < rate_limit_rpm:
+                                        # Track this call atomically within the same lock to prevent race conditions
+                                        history.append(now)
+                                        break  # Successfully recorded, exit loop
 
-                    # Detect context window exceeded errors and advance cursor.
-                    # Unlike CharacterRunDetected/MaxTokenExceeded (which occur during streaming
-                    # in execution_engine), context-exceeded happens here at API call time.
-                    # Advance the per-instance cursor so engine-level retries skip past this endpoint.
-                    _inst_name_for_cursor = _inst_name  # Use the variable extracted at call time (kwargs.pop removed it)
-                    if _inst_name_for_cursor and self._is_context_exceeded_error(e):
-                        # ── A1/A2 gate: sanity-check a server-side context-exceeded error against the
-                        # endpoint's CONFIGURED limit before triggering fallback compression.
-                        # A 400 under model-swap/eviction conditions (server now running a smaller
-                        # window than configured) is NOT evidence of caller overflow — compressing
-                        # the caller's history off it was the 2026-08-21 incident (see
-                        # reports/fallback-compression-misclass-and-stop-cascade.md).
-                        #   - payload <= configured limit → service error: do NOT advance the cursor,
-                        #     do NOT compress — fall through to generic retry/cascade handling below.
-                        #   - payload >  configured limit → genuine overflow: keep existing behavior.
-                        #   - unknown limit (<=0) or failed estimation → never interpret as
-                        #     context-exceeded; treat as service error and fall through.
-                        #     DEFAULT_MAX_INPUT_TOKENS is NEVER used as a stand-in here (mirrors the
-                        #     `> 0` gating at llm/base.py:332).
-                        _cfg_limit = llm_cfg.get('max_input_tokens') or 0
-                        _has_known_limit = isinstance(_cfg_limit, int) and _cfg_limit > 0
-                        # TYPED ContextWindowExceeded (no HTTP status code) is raised by the client-side
-                        # pre-check in llm/base.py, which already compared against the real limit — trust it
-                        # unconditionally (preserves pre-gate behavior for genuine client-detected overflow).
-                        # SERVER errors (status-carrying ModelServiceError etc.) are only trusted when the
-                        # payload provably exceeds the configured limit.
-                        _estimated = None
-                        if _has_known_limit:
-                            _estimated = self._estimate_payload_tokens(messages)
-                        _genuine_overflow = isinstance(e, ContextWindowExceeded) or (
-                            _has_known_limit and _estimated is not None and _estimated > _cfg_limit
+                        # Check termination again just before making the actual API call,
+                        # in case instance was terminated during rate limit wait or backoff.
+                        if self._pool and _inst_name:
+                            if _inst_name in self._pool.terminated_instances:
+                                logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated before API call, aborting")
+                                raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
+
+                        result = execute_api_call()
+
+                        # Success on this base → close any open/half-open breaker (Change B).
+                        self._breaker_on_success(endpoint_base)
+
+                        # Track the last successful endpoint config for automatic recovery.
+                        # Stored only after complete success (including all retries), not during retries.
+                        # This enables Tier 3 (last-successful) fallback when agent-specific endpoints become unavailable.
+                        with self._lock:
+                            self._last_successful_endpoint_cfg = copy.deepcopy(llm_cfg)
+
+                        # Generator errors are already detected inside execute_api_call (first-chunk pull).
+                        # Pass the generator through directly — no double-wrapping needed.
+                        return result
+
+                    except Exception as e:
+                        # AgentTerminatedError is a clean abort signal — re-raise immediately
+                        # without logging, retrying, or moving to next endpoint.
+                        if isinstance(e, AgentTerminatedError):
+                            raise
+
+                        err_msg = str(e)
+
+                        # SERVER_BUSY_LOADING signature → trip/grow the per-server breaker
+                        # (Change B). Real per-model errors (404/400) do NOT match and never
+                        # trip it — they only earn the per-(base,model) cooldown on exhaustion.
+                        if self._is_server_busy_loading(e):
+                            self._record_server_busy(endpoint_base, e)
+
+                        # Detect context window exceeded errors and advance cursor.
+                        # Unlike CharacterRunDetected/MaxTokenExceeded (which occur during streaming
+                        # in execution_engine), context-exceeded happens here at API call time.
+                        # Advance the per-instance cursor so engine-level retries skip past this endpoint.
+                        _inst_name_for_cursor = _inst_name  # Use the variable extracted at call time (kwargs.pop removed it)
+                        if _inst_name_for_cursor and self._is_context_exceeded_error(e):
+                            # ── A1/A2 gate: sanity-check a server-side context-exceeded error against the
+                            # endpoint's CONFIGURED limit before triggering fallback compression.
+                            # A 400 under model-swap/eviction conditions (server now running a smaller
+                            # window than configured) is NOT evidence of caller overflow — compressing
+                            # the caller's history off it was the 2026-08-21 incident (see
+                            # reports/fallback-compression-misclass-and-stop-cascade.md).
+                            #   - payload <= configured limit → service error: do NOT advance the cursor,
+                            #     do NOT compress — fall through to generic retry/cascade handling below.
+                            #   - payload >  configured limit → genuine overflow: keep existing behavior.
+                            #   - unknown limit (<=0) or failed estimation → never interpret as
+                            #     context-exceeded; treat as service error and fall through.
+                            #     DEFAULT_MAX_INPUT_TOKENS is NEVER used as a stand-in here (mirrors the
+                            #     `> 0` gating at llm/base.py:332).
+                            _cfg_limit = llm_cfg.get('max_input_tokens') or 0
+                            _has_known_limit = isinstance(_cfg_limit, int) and _cfg_limit > 0
+                            # TYPED ContextWindowExceeded (no HTTP status code) is raised by the client-side
+                            # pre-check in llm/base.py, which already compared against the real limit — trust it
+                            # unconditionally (preserves pre-gate behavior for genuine client-detected overflow).
+                            # SERVER errors (status-carrying ModelServiceError etc.) are only trusted when the
+                            # payload provably exceeds the configured limit.
+                            _estimated = None
+                            if _has_known_limit:
+                                _estimated = self._estimate_payload_tokens(messages)
+                            _genuine_overflow = isinstance(e, ContextWindowExceeded) or (
+                                _has_known_limit and _estimated is not None and _estimated > _cfg_limit
+                            )
+                            if not _genuine_overflow:
+                                # Service error (state drift / unknown limit / estimation failure):
+                                # fall through to generic retry-within-endpoint then cascade below.
+                                # The cursor is deliberately NOT advanced — that mechanism is reserved
+                                # for genuine context errors (reset happens at turn end anyway).
+                                if not _has_known_limit:
+                                    logger.warning(
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"on endpoint '{endpoint_name}' but the endpoint has no configured "
+                                        f"max_input_tokens — treating as service error, falling through to next endpoint."
+                                    )
+                                elif _estimated is None:
+                                    logger.warning(
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"on endpoint '{endpoint_name}' but payload token estimation failed — "
+                                        f"treating as service error, falling through to next endpoint."
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"on endpoint '{endpoint_name}' but payload fits configured limit "
+                                        f"{_cfg_limit} (~{_estimated} tokens) — treating as service error, "
+                                        f"falling through to next endpoint."
+                                    )
+                            if _genuine_overflow:
+                                # For Compressor agents: just advance cursor (they handle their own compression)
+                                if agent_type.lower().startswith('compressor'):
+                                    new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                                    logger.warning(
+                                        f"[APIRouter] Context window exceeded for Compressor '{_inst_name_for_cursor}' "
+                                        f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}."
+                                    )
+                                else:
+                                    # Advance cursor NOW so retry uses a different (hopefully larger) endpoint after compression.
+                                    new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                                    logger.warning(
+                                        f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
+                                        f"on endpoint '{endpoint_name}'. Triggering iterative fallback compression. "
+                                        f"Cursor advanced to {new_pos}."
+                                    )
+                                    # Lazy import to avoid potential circular imports
+                                    from agent_cascade.exceptions import FallbackCompressionRequired
+                                    raise FallbackCompressionRequired(
+                                        _inst_name_for_cursor, agent_type, endpoint_name, original_error=e
+                                    ) from e
+
+                        # NOTE: CharacterRunDetected/MaxTokenExceeded exceptions are raised during
+                        # generator iteration inside execution_engine.py, after this method has returned.
+                        # All endpoint advancement for those errors happens via
+                        # _handle_inner_loop_detection → advance_instance_endpoint.
+                        # This block only handles connection/timeout/etc. errors from execute_api_call.
+
+                        # All errors (connection, timeout, etc.) retry within the current
+                        # endpoint first, then cascade through the fallback chain on exhaustion.
+                        tb_str = traceback.format_exc()
+                        error_msg = (
+                            f"Endpoint '{endpoint_name}' @ {endpoint_base} "
+                            f"attempt {attempt+1}/{max_retries+1}: {e}\nTraceback: {tb_str}"
                         )
-                        if not _genuine_overflow:
-                            # Service error (state drift / unknown limit / estimation failure):
-                            # fall through to generic retry-within-endpoint then cascade below.
-                            # The cursor is deliberately NOT advanced — that mechanism is reserved
-                            # for genuine context errors (reset happens at turn end anyway).
-                            if not _has_known_limit:
-                                logger.warning(
-                                    f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
-                                    f"on endpoint '{endpoint_name}' but the endpoint has no configured "
-                                    f"max_input_tokens — treating as service error, falling through to next endpoint."
-                                )
-                            elif _estimated is None:
-                                logger.warning(
-                                    f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
-                                    f"on endpoint '{endpoint_name}' but payload token estimation failed — "
-                                    f"treating as service error, falling through to next endpoint."
-                                )
-                            else:
-                                logger.warning(
-                                    f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
-                                    f"on endpoint '{endpoint_name}' but payload fits configured limit "
-                                    f"{_cfg_limit} (~{_estimated} tokens) — treating as service error, "
-                                    f"falling through to next endpoint."
-                                )
-                        if _genuine_overflow:
-                            # For Compressor agents: just advance cursor (they handle their own compression)
-                            if agent_type.lower().startswith('compressor'):
-                                new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
-                                logger.warning(
-                                    f"[APIRouter] Context window exceeded for Compressor '{_inst_name_for_cursor}' "
-                                    f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}."
-                                )
-                            else:
-                                # Advance cursor NOW so retry uses a different (hopefully larger) endpoint after compression.
-                                new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
-                                logger.warning(
-                                    f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
-                                    f"on endpoint '{endpoint_name}'. Triggering iterative fallback compression. "
-                                    f"Cursor advanced to {new_pos}."
-                                )
-                                # Lazy import to avoid potential circular imports
-                                from agent_cascade.exceptions import FallbackCompressionRequired
-                                raise FallbackCompressionRequired(
-                                    _inst_name_for_cursor, agent_type, endpoint_name, original_error=e
-                                ) from e
+                        logger.warning(f"[APIRouter] {error_msg}")
+                        all_errors.append(error_msg)
 
-                    # NOTE: CharacterRunDetected/MaxTokenExceeded exceptions are raised during
-                    # generator iteration inside execution_engine.py, after this method has returned.
-                    # All endpoint advancement for those errors happens via
-                    # _handle_inner_loop_detection → advance_instance_endpoint.
-                    # This block only handles connection/timeout/etc. errors from execute_api_call.
-
-                    # All errors (connection, timeout, etc.) retry within the current
-                    # endpoint first, then cascade through the fallback chain on exhaustion.
-                    tb_str = traceback.format_exc()
-                    error_msg = (
-                        f"Endpoint '{endpoint_name}' @ {endpoint_base} "
-                        f"attempt {attempt+1}/{max_retries+1}: {e}\nTraceback: {tb_str}"
-                    )
-                    logger.warning(f"[APIRouter] {error_msg}")
-                    all_errors.append(error_msg)
-
-                    if attempt < max_retries:
-                        # Use centralized backoff policy (consistent with execution engine)
-                        delay = calculate_backoff(attempt + 1, self.policy)
-                        logger.info(
-                            f"[APIRouter] Backing off {delay:.1f}s before retry "
-                            f"for endpoint '{endpoint_name}' @ {endpoint_base}"
-                        )
-                        # Interruptible sleep: check termination every 0.5s during retry backoff
-                        _interruptible_sleep(delay, self._pool, _inst_name)
+                        if attempt < max_retries:
+                            # Use centralized backoff policy (consistent with execution engine)
+                            delay = calculate_backoff(attempt + 1, self.policy)
+                            logger.info(
+                                f"[APIRouter] Backing off {delay:.1f}s before retry "
+                                f"for endpoint '{endpoint_name}' @ {endpoint_base}"
+                            )
+                            # Interruptible sleep: check termination every 0.5s during retry backoff
+                            _interruptible_sleep(delay, self._pool, _inst_name)
+            finally:
+                if _holds_probe:
+                    self._breaker_release_probe(endpoint_base)
 
             logger.info(f"[APIRouter] Exhausted retries for endpoint '{endpoint_name}'. Moving to next...")
-            
+
             # Record failure time for cooldown tracking when abandoning this endpoint after all retries.
             # Rate limit waits are self-imposed throttles, not real failures — only record on actual exhaustion.
+            # Keyed per-(normalized base, model) so shared-base endpoints stay independent (Change C).
             if ENDPOINT_COOLDOWN_SECONDS > 0:
                 now = time.time()
                 with self._lock:
                     # Clean up stale records to prevent unbounded growth
                     self._cleanup_stale_failure_records(now)
-                    self._endpoint_failure_times[endpoint_base] = now
+                    self._endpoint_failure_times[(normalize_api_base(endpoint_base), endpoint_name)] = now
                 logger.debug(
-                    f"[APIRouter] Endpoint '{endpoint_name}' @ {endpoint_base} marked as failed. "
-                    f"Cooldown for {ENDPOINT_COOLDOWN_SECONDS}s."
-                )
+                        f"[APIRouter] Endpoint '{endpoint_name}' @ {endpoint_base} marked as failed. "
+                        f"Cooldown for {ENDPOINT_COOLDOWN_SECONDS}s."
+                    )
+
+        # ── D1 final degradation (Change D): if the chain is exhausted and every endpoint
+        # was on a breaker-open physical server, this is "server busy — will retry", NOT an
+        # unrecoverable failure. Raise a distinguishable ServerBusyError (a plain
+        # RuntimeError subclass) so callers can degrade cleanly; it is deliberately NOT a
+        # FallbackCompressionRequired, so the context-compression path stays untouched.
+        if chain and all(
+            self._breaker_is_open(cfg.get('api_base') or cfg.get('model_server', 'unknown'))
+            for cfg in chain
+        ):
+            logger.error(
+                f"[APIRouter] Server busy — will retry: all endpoints for '{agent_type}' are on "
+                f"breaker-open servers (wait cap {SERVER_BUSY_WAIT_CAP_SECONDS:.0f}s already used). "
+                f"No HTTP requests were sent to the busy server."
+            )
+            raise ServerBusyError(
+                f"Server busy — will retry: all endpoints for agent type '{agent_type}' are on a "
+                f"busy physical server (circuit breaker open, wait cap exhausted)."
+            )
 
         raise RuntimeError(
             f"All API endpoints exhausted for agent type '{agent_type}'.\n"
@@ -1077,6 +1356,16 @@ class APIRouter:
         # Batch: send prompt + one image at a time to get per-image captions
         for msg_idx, item_idx, img_val in uncaptioned_items:
             try:
+                # ── Change E gate: never fire a captioning call at a breaker-open base.
+                # Captioning is non-critical — skip the busy endpoint and fall through to
+                # the '[Image]' placeholder below (same as any other caption failure).
+                _vbase = vision_cfg.get('api_base') or vision_cfg.get('model_server', 'unknown')
+                if self._breaker_is_open(_vbase):
+                    logger.info(
+                        f"[APIRouter] Server busy — skipping image captioning at {_vbase} "
+                        f"(breaker open); using '[Image]' placeholder."
+                    )
+                    raise RuntimeError(f"Server busy (breaker open) at {_vbase}")
                 chat_model = get_chat_model(vision_cfg)
                 cap_msg = Message(
                     role='user',

@@ -195,6 +195,28 @@ def _extract_usage(usage_obj):
     return usage_dict
 
 
+# ── Circuit-breaker consult for bypass HTTP paths (Change E) ─────────────────
+# The router's per-server breaker gates call_with_fallback; paths that fire HTTP
+# directly (context detection) must consult it too or they hammer a busy server.
+
+def _breaker_blocks_base(api_base: Optional[str]) -> bool:
+    """True when a live router's server breaker says this base must not be contacted.
+
+    Consults the weakref registry in ``api_router_pkg.breaker_gate`` (registered by
+    APIRouter.__init__). Non-mutating: never transitions breaker state or claims the
+    half-open probe slot — those are reserved for real call_with_fallback traffic.
+    Fails open (returns False) if no router is registered or on any internal error.
+    """
+    if not api_base:
+        return False
+    try:
+        from agent_cascade.api_router_pkg.breaker_gate import should_skip
+        return should_skip(api_base)
+    except Exception:
+        pass  # never let the breaker check break normal operation
+    return False
+
+
 @register_llm('oai')
 class TextChatAtOAI(BaseFnCallModel):
 
@@ -288,6 +310,15 @@ class TextChatAtOAI(BaseFnCallModel):
             self._detect_context_window(api_base, api_key)
 
     def _detect_context_window(self, api_base: str, api_key: str):
+        # ── Change E gate: context length is non-critical. If the router's server breaker
+        # forbids contacting this base (busy loading a model), skip THIS detection cycle
+        # entirely — zero /models GETs. The next call after the window elapses will retry.
+        if _breaker_blocks_base(api_base):
+            logger.debug(
+                f"[oai] Skipping context-window detection for {api_base} "
+                f"(server breaker open — server busy loading a model)."
+            )
+            return
         try:
             models_url = f"{api_base.rstrip('/')}/models"
             headers = {"Authorization": f"Bearer {api_key}"} if api_key != 'EMPTY' else {}

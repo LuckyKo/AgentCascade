@@ -72,3 +72,15 @@ class AgentTerminatedError(Exception):
     def __init__(self, instance_name: str):
         self.instance_name = instance_name
         super().__init__(f"Instance '{instance_name}' has been terminated")
+
+
+class ServerBusyError(RuntimeError):
+    """Raised by APIRouter when every endpoint in the chain is on a breaker-open
+    physical server and the bounded fail-fast wait (D1) has already been used.
+
+    Distinguishable from plain exhaustion: the busy server will be retried after
+    its breaker window elapses — this is "server busy — will retry", not a hard
+    failure. Deliberately NOT a FallbackCompressionRequired so the context-
+    compression path is never triggered by model-load congestion.
+    """
+    pass

@@ -15,6 +15,7 @@ from agent_cascade.settings import (
     ENDPOINT_FAILURE_CLEANUP_HOURS,
 )
 from agent_cascade.slot_queue import SlotPool, QUEUE_WAIT_TIMEOUT
+from agent_cascade.api_router_pkg.normalization import normalize_api_base
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,10 @@ class EndpointScheduler:
             return None
         
         # BUG FIX: All concurrency=0 endpoints share the same slot to avoid cache trashing.
+        # conc>0 pools key on the NORMALIZED base so localhost/127.0.0.1 and trailing-slash
+        # variants of one physical server share a pool (identity key only — wire URL unchanged).
         is_sequential = (concurrency_limit == 0)
-        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
+        slot_key = '_shared_sequential_slot_' if is_sequential else normalize_api_base(api_base)
         
         capacity = concurrency_limit if concurrency_limit > 0 else 1  # 0→1 (sequential)
         
@@ -107,8 +110,9 @@ class EndpointScheduler:
             return None
         
         # BUG FIX: All concurrency=0 endpoints share the same slot to avoid cache trashing.
+        # conc>0 pools key on the NORMALIZED base (must match _get_or_create_pool).
         is_sequential = (concurrency_limit == 0)
-        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
+        slot_key = '_shared_sequential_slot_' if is_sequential else normalize_api_base(api_base)
         
         logger.debug(
             f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, "
@@ -182,7 +186,7 @@ class EndpointScheduler:
         if concurrency_limit == -1:
             return 0
         
-        slot_key = '_shared_sequential_slot_' if concurrency_limit == 0 else api_base
+        slot_key = '_shared_sequential_slot_' if concurrency_limit == 0 else normalize_api_base(api_base)
         pool = self._pools.get(slot_key)
         return len(pool._running) if pool else 0
     
@@ -341,7 +345,7 @@ class EndpointScheduler:
           - concurrency_limit: The effective limit (-1, 0, or N>0)
         """
         is_sequential = (concurrency_limit == 0)
-        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
+        slot_key = '_shared_sequential_slot_' if is_sequential else normalize_api_base(api_base)
         
         return {
             'slot_key': slot_key,

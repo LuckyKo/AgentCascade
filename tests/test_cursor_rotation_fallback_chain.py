@@ -20,6 +20,7 @@ import pytest
 
 from agent_cascade.api_router import APIRouter, APIEndpoint
 from agent_cascade.retry_policy import RetryPolicy
+from agent_cascade.api_router_pkg.normalization import normalize_api_base
 
 
 # ============================================================================
@@ -459,11 +460,12 @@ class TestCooldownFiltering:
         """Endpoint in cooldown period is excluded from the chain."""
         _add_endpoint(router, "ep_a", "http://a-api")
         _set_agent_priorities(router, "coder", ["ep_ep_a"])
-        
-        # Mark endpoint as failed (within cooldown)
+
+        # Mark endpoint as failed (within cooldown). Cooldown keys are per-(base, model)
+        # since the router-cascade fix — use the same key format get_endpoint_chain reads.
         with router._lock:
-            router._endpoint_failure_times['http://a-api'] = time.time()
-        
+            router._endpoint_failure_times[(normalize_api_base('http://a-api'), 'test-model')] = time.time()
+
         chain = router.get_endpoint_chain("coder")
         
         api_bases = [cfg.get('api_base') for cfg in chain]
@@ -474,11 +476,11 @@ class TestCooldownFiltering:
         """Endpoint becomes available after cooldown expires."""
         _add_endpoint(router, "ep_a", "http://a-api")
         _set_agent_priorities(router, "coder", ["ep_ep_a"])
-        
-        # Mark as failed long ago (beyond cooldown)
+
+        # Mark as failed long ago (beyond cooldown) — per-(base, model) key format.
         with router._lock:
-            router._endpoint_failure_times['http://a-api'] = time.time() - 3600
-        
+            router._endpoint_failure_times[(normalize_api_base('http://a-api'), 'test-model')] = time.time() - 3600
+
         chain = router.get_endpoint_chain("coder")
         
         api_bases = [cfg.get('api_base') for cfg in chain]

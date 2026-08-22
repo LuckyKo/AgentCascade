@@ -40,6 +40,14 @@ class ImageGen(BaseTool):
         llm_cfg = self.cfg.get('llm_cfg', {})
         if not llm_cfg:
             raise ValueError('llm_cfg is required!')
+        # ── Change E gate: refuse to construct a chat model for a breaker-open base.
+        # Constructing it would fire HTTP (context detection) at the busy server.
+        from agent_cascade.llm.oai import _breaker_blocks_base
+        if _breaker_blocks_base(llm_cfg.get('api_base') or llm_cfg.get('model_server')):
+            raise RuntimeError(
+                f"image_gen unavailable: server {llm_cfg.get('api_base')} is busy "
+                f"(circuit breaker open) — will retry later."
+            )
         self.llm = get_chat_model(llm_cfg)
         self.size = self.cfg.get('size', '1024*1024')
 
