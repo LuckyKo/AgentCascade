@@ -326,6 +326,9 @@ HEARTBEAT_TRUNCATE_LAST_LINES: int = 10       # Lines kept at end when truncatin
 EARLY_OUTPUT_CHECK_TIMEOUT: float = 2.0       # Max seconds to wait for early output/completion after launch
 AUTO_ASYNC_TIMEOUT_THRESHOLD: int = 60        # Seconds: timeout above this triggers auto-async mode
 DEFAULT_AUTO_ASYNC_HEARTBEAT: int = 30        # Default heartbeat interval for auto-async shells
+WAIT_CMD_MAX_TIMEOUT: float = 180.0           # Max seconds __wait will block when heartbeats are configured (3 min)
+WAIT_CMD_DEFAULT_TIMEOUT: float = 30.0        # Seconds __wait blocks when no heartbeats are configured (-1)
+WAIT_CMD_POLL_INTERVAL: float = 0.5           # Seconds between state polls inside the __wait loop
 
 # ── Skills system settings (Feature: Skills System Phase 1) ────────────
 LOAD_SKILL_AUTO: str = "AUTO"     # Auto-match relevant skills from task context

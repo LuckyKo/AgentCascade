@@ -6,7 +6,14 @@ from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tool_utils import truncate_with_spillover
-from agent_cascade.settings import AUTO_ASYNC_TIMEOUT_THRESHOLD, DEFAULT_AUTO_ASYNC_HEARTBEAT
+from agent_cascade.settings import (
+    AUTO_ASYNC_TIMEOUT_THRESHOLD,
+    DEFAULT_AUTO_ASYNC_HEARTBEAT,
+    ASYNC_SHELL_DEFAULT_TIMEOUT,
+    WAIT_CMD_MAX_TIMEOUT,
+    WAIT_CMD_DEFAULT_TIMEOUT,
+    WAIT_CMD_POLL_INTERVAL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +271,8 @@ class ShellCmd(BaseTool):
         if tracker is None:
             return "[shell_cmd] Async shell not available (tracker not initialized)."
 
-        # Default timeout for async mode is much longer (1 hour)
-        effective_timeout = timeout if timeout else 3600
+        # Default timeout for async mode is much longer (ASYNC_SHELL_DEFAULT_TIMEOUT, 1 hour)
+        effective_timeout = timeout if timeout else ASYNC_SHELL_DEFAULT_TIMEOUT
 
         # Respect user toggle for console window popup
         console_window = True
@@ -412,19 +419,19 @@ class ShellCmd(BaseTool):
 
             with task._lock:
                 # Determine wait timeout based on the task's heartbeat_interval.
-                # When heartbeats are configured, wait up to that interval (capped at 60s).
-                # When no heartbeats (-1), use a default 30s so __wait still pauses meaningfully.
+                # When heartbeats are configured, wait up to that interval (capped at WAIT_CMD_MAX_TIMEOUT).
+                # When no heartbeats (-1), use WAIT_CMD_DEFAULT_TIMEOUT so __wait still pauses meaningfully.
                 if task.heartbeat_interval > 0:
-                    timeout = min(task.heartbeat_interval, 60.0)
+                    timeout = min(task.heartbeat_interval, WAIT_CMD_MAX_TIMEOUT)
                 else:
-                    timeout = 30.0
+                    timeout = WAIT_CMD_DEFAULT_TIMEOUT
 
             # Poll the task for new output or completion status changes.
             # This directly checks task state rather than relying on message queue,
             # so it works even when no heartbeats are configured.
             import time as _time
             start_time = _time.time()
-            poll_interval = 0.5
+            poll_interval = WAIT_CMD_POLL_INTERVAL
 
             with task._lock:
                 last_stdout_len = len(task.stdout_lines)

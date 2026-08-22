@@ -260,18 +260,47 @@ class TestWaitCommand:
         assert 'timeout' in result.lower()
         assert 'elapsed' in result, f"__wait (timeout) missing elapsed time: {result!r}"
 
-    def test_wait_respects_timeout_cap_at_60s(self, shell_cmd_tool):
+    def test_wait_respects_timeout_cap_at_180s(self, shell_cmd_tool):
         task = _make_running_task(heartbeat_interval=3600.0, command='sleep 1000', pid=99999)
         _, fake_time_mod, state = self._wait_env(shell_cmd_tool, task)
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
             result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
 
-        assert state['elapsed'] <= 60.0, f"__wait waited {state['elapsed']:.1f}s, should cap at 60s"
-        assert state['elapsed'] >= 59.0, f"__wait waited {state['elapsed']:.1f}s, should be ~60s"
+        assert state['elapsed'] <= 180.0, f"__wait waited {state['elapsed']:.1f}s, should cap at 180s (3 min)"
+        assert state['elapsed'] >= 179.0, f"__wait waited {state['elapsed']:.1f}s, should be ~180s"
         assert 'No new output' in result
-        assert '60s' in result
+        assert '180s' in result
         assert 'elapsed' in result, f"__wait (timeout cap) missing elapsed time: {result!r}"
+
+    def test_wait_uses_heartbeat_interval_below_cap(self, shell_cmd_tool):
+        """When heartbeat_interval is below the 180s cap, __wait waits that interval."""
+        task = _make_running_task(heartbeat_interval=90.0, command='sleep 1000', pid=99999)
+        _, fake_time_mod, state = self._wait_env(shell_cmd_tool, task)
+
+        with patch.dict('sys.modules', {'time': fake_time_mod}):
+            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+
+        assert state['elapsed'] <= 90.0, f"__wait waited {state['elapsed']:.1f}s, should be heartbeat interval 90s (below cap)"
+        assert state['elapsed'] >= 89.0, f"__wait waited {state['elapsed']:.1f}s, should be ~90s"
+        assert 'No new output' in result
+        assert '90s' in result
+        assert 'elapsed' in result, f"__wait (heartbeat below cap) missing elapsed time: {result!r}"
+
+    def test_wait_heartbeat_at_exact_cap(self, shell_cmd_tool):
+        """When heartbeat_interval equals the 180s cap, __wait waits ~180s (boundary)."""
+        task = _make_running_task(heartbeat_interval=180.0, command='sleep 1000', pid=99999)
+        _, fake_time_mod, state = self._wait_env(shell_cmd_tool, task)
+
+        with patch.dict('sys.modules', {'time': fake_time_mod}):
+            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+
+        # min(180.0, 180.0) == 180.0; allow a small overshoot from the 0.5s poll step
+        assert state['elapsed'] <= 181.0, f"__wait waited {state['elapsed']:.1f}s, should be ~180s at exact cap"
+        assert state['elapsed'] >= 179.0, f"__wait waited {state['elapsed']:.1f}s, should be ~180s at exact cap"
+        assert 'No new output' in result
+        assert '180s' in result
+        assert 'elapsed' in result, f"__wait (exact cap) missing elapsed time: {result!r}"
 
     def test_wait_no_deadlock_on_sequential_access(self, shell_cmd_tool, mock_task_running):
         _, fake_time_mod, _ = self._wait_env(shell_cmd_tool, mock_task_running)
