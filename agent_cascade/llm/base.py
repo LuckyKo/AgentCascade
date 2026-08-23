@@ -30,7 +30,8 @@ from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS, COMPRESSION_OVERFLO
 from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.exceptions import ContextWindowExceeded
 from agent_cascade.utils.tokenization_qwen import tokenizer
-from agent_cascade.utils.utils import (extract_text_from_message, format_as_multimodal_message, format_as_text_message,
+from agent_cascade.utils.utils import (extract_text_from_message, estimate_functions_tokens,
+                                    format_as_multimodal_message, format_as_text_message,
                                     get_message_stats, has_chinese_messages, json_dumps_compact, json_loads,
                                     merge_generate_cfgs, print_traceback)
 
@@ -336,7 +337,11 @@ class BaseChatModel(ABC):
             # immediately so upstream can compress. No silent truncation — compression preserves
             # meaning; truncation just drops content.
             try:
-                estimated_tokens = sum(get_message_stats(m)['tokens'] for m in messages)
+                # Count tool schemas too — the server tokenizes the tools array as part of the
+                # prompt. This runs BEFORE _preprocess_messages, so prompt-injected tool
+                # descriptions are not yet in messages and nothing is double-counted.
+                estimated_tokens = sum(get_message_stats(m)['tokens'] for m in messages) \
+                    + estimate_functions_tokens(functions)
             except Exception:
                 # If counting fails, log warning and continue — let the API handle it.
                 logger.warning(

@@ -14,6 +14,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 import time
 import traceback
@@ -44,6 +45,14 @@ from agent_cascade.api_router_pkg.normalization import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A1/A2 gate safety factor for server-reported context windows (n_ctx). llama.cpp rejects
+# at roughly n_prompt >= n_ctx - n_predict_reserve, so a payload that provably exceeds
+# this fraction of the reported window is a genuine overflow even when it fits the
+# CONFIGURED max_input_tokens (drifted-window case — 2026-08-23 incident). Tunable;
+# 0.95 gives margin without over-compressing (see reports/gate-nprompt-tokens-fix-plan.md §7).
+_SERVER_CTX_SAFETY_FACTOR = 0.95
+
 
 class APIRouter:
     """
@@ -656,18 +665,36 @@ class APIRouter:
 
         llama.cpp returns HTTP 400 with "exceed_context_size_error" in body.
         Other servers may use different patterns — catch them too.
+
+        Checks both str(error) AND the structured .body dict (real openai SDK shape
+        where str(err) is just the message but the decoded body carries the error type).
         """
         # Already a typed ContextWindowExceeded exception
         if isinstance(error, ContextWindowExceeded):
             return True
 
         err_str = str(error).lower()
-        from agent_cascade.llm.base import ModelServiceError
         code = getattr(error, 'code', None)
+
+        # Also check the structured body for context-exceeded patterns. The real openai
+        # SDK (APIStatusError) stores the decoded JSON in .body but str(err) is just the
+        # top-level message — so pattern matching on str alone misses the error type.
+        body_str = ''
+        for obj in (error, getattr(error, 'exception', None), getattr(error, '__cause__', None)):
+            if obj is None:
+                continue
+            b = getattr(obj, 'body', None)
+            if isinstance(b, dict):
+                import json as _json
+                body_str = _json.dumps(b).lower()
+                break
+
+        # Combine both sources for pattern matching
+        combined = err_str + ' ' + body_str
 
         # llama.cpp and similar servers: HTTP 400 with context-size patterns
         if code == '400' and any(
-            pattern in err_str
+            pattern in combined
             for pattern in ('exceed_context_size', 'context length', 'maximum input context', 'context window')
         ):
             return True
@@ -677,17 +704,73 @@ class APIRouter:
         # inside an upstream error payload) are NOT evidence of caller overflow — treating them as
         # context-exceeded would trigger fallback compression off a service failure.
         if code == '400' and any(
-            pattern in err_str
+            pattern in combined
             for pattern in ('prompt is too long', 'input tokens exceed', 'max_tokens exceeded', 'exceeds the context limit')
         ):
             return True
 
         return False
 
+    # Quote-tolerant regexes for the string fallback of _extract_server_token_counts.
+    # The \b after the closing quote guards against longer keys (e.g. 'n_ctx_train'):
+    # ['"\] cannot match an underscore, so \bn_ctx\b never matches inside n_ctx_train.
+    _RE_N_PROMPT_TOKENS = re.compile(r"['\"]\bn_prompt_tokens\b['\"]\s*:\s*(\d+)")
+    _RE_N_CTX = re.compile(r"['\"]\bn_ctx\b['\"]\s*:\s*(\d+)")
+
+    @classmethod
+    def _extract_server_token_counts(cls, error: Exception) -> Tuple[Optional[int], Optional[int]]:
+        """Return (n_prompt_tokens, n_ctx) from a context-exceeded error's HTTP body.
+
+        Order:
+          1. Structured: walk the .exception / __cause__ chain; if an openai APIError-style
+             object exposes a dict .body, read body['error']['n_prompt_tokens'|'n_ctx']
+             (tolerating flat bodies without the 'error' wrapper).
+          2. Fallback: quote-tolerant regex over str(error) (word boundaries prevent
+             'n_ctx' from matching longer keys like 'n_ctx_train').
+
+        Returns (None, None) when neither field is recoverable. Never raises.
+        """
+        try:
+            # 1. Structured read of the decoded HTTP body.
+            candidates = []
+            seen = set()
+            for obj in (error, getattr(error, 'exception', None),
+                        getattr(error, '__cause__', None)):
+                if obj is not None and id(obj) not in seen:
+                    seen.add(id(obj))
+                    candidates.append(obj)
+            for obj in candidates:
+                body = getattr(obj, 'body', None)
+                if isinstance(body, dict):
+                    inner = body.get('error')
+                    if not isinstance(inner, dict):
+                        inner = body  # tolerate flat bodies without the 'error' wrapper
+                    n_prompt = inner.get('n_prompt_tokens')
+                    n_ctx = inner.get('n_ctx')
+                    n_prompt = int(n_prompt) if isinstance(n_prompt, (int, float)) and not isinstance(n_prompt, bool) else None
+                    n_ctx = int(n_ctx) if isinstance(n_ctx, (int, float)) and not isinstance(n_ctx, bool) else None
+                    if n_prompt is not None or n_ctx is not None:
+                        return (n_prompt, n_ctx)
+
+            # 2. Regex fallback over the string form (dict-repr quoting varies between the
+            # SDK message and raw-text servers; both single- and double-quoted keys match).
+            err_str = str(error)
+            m = cls._RE_N_PROMPT_TOKENS.search(err_str)
+            n_prompt = int(m.group(1)) if m else None
+            m = cls._RE_N_CTX.search(err_str)
+            n_ctx = int(m.group(1)) if m else None
+            return (n_prompt, n_ctx)
+        except Exception:
+            return (None, None)
+
     @staticmethod
-    def _estimate_payload_tokens(messages) -> Optional[int]:
+    def _estimate_payload_tokens(messages, functions=None) -> Optional[int]:
         """Estimate total input tokens of a message list using the same estimator as the
         client-side pre-check in llm/base.py (get_message_stats per message).
+
+        When ``functions`` (tool schemas) is provided, the serialized tools payload is
+        counted too — the server tokenizes it as part of the prompt. Schema-counting
+        failures are fail-soft (message-only total is still returned).
 
         Returns None when estimation fails — callers must treat that as "unknown" and must
         NOT make a context-exceeded decision off an unknown estimate.
@@ -695,13 +778,17 @@ class APIRouter:
         if not messages:
             return 0
         try:
-            from agent_cascade.utils.utils import get_message_stats
+            from agent_cascade.utils.utils import get_message_stats, estimate_functions_tokens
             total = 0
             for m in messages:
                 # Skip values that can leak via JSON parsing/logger recovery (mirrors base.py chat())
                 if m is None or isinstance(m, (list, bool)):
                     continue
                 total += get_message_stats(m)['tokens']
+            try:
+                total += estimate_functions_tokens(functions)
+            except Exception as fn_err:
+                logger.warning(f"[APIRouter] Tool-schema token estimation failed: {fn_err}")
             return total
         except Exception as est_err:
             logger.warning(f"[APIRouter] Payload token estimation failed: {est_err}")
@@ -903,6 +990,7 @@ class APIRouter:
         *args,
         allocated_tokens: Optional[int] = None,
         messages: Optional[list] = None,
+        functions: Optional[list] = None,
         **kwargs
     ) -> Any:
         """
@@ -922,6 +1010,10 @@ class APIRouter:
                       (A1/A2) to estimate payload size against the endpoint's configured
                       max_input_tokens. When absent, a server-side context-exceeded error is
                       treated as a service error (never triggers fallback compression).
+            functions: Optional - the caller's active tool schemas. Counted by the A1/A2
+                       gate's payload estimator alongside messages (the server tokenizes the
+                       tools array as part of the prompt). When absent, only messages are
+                       estimated. Never forwarded to call_fn.
             *args, **kwargs: Additional arguments passed to call_fn. If ``agent_instance_name``
                           is present it is forwarded as ``instance_name`` to rotate the chain.
         """
@@ -1158,10 +1250,10 @@ class APIRouter:
                             # window than configured) is NOT evidence of caller overflow — compressing
                             # the caller's history off it was the 2026-08-21 incident (see
                             # reports/fallback-compression-misclass-and-stop-cascade.md).
-                            #   - payload <= configured limit → service error: do NOT advance the cursor,
-                            #     do NOT compress — fall through to generic retry/cascade handling below.
-                            #   - payload >  configured limit → genuine overflow: keep existing behavior.
-                            #   - unknown limit (<=0) or failed estimation → never interpret as
+                            #   - payload <= every verified bound → service error: do NOT advance the
+                            #     cursor, do NOT compress — fall through to generic retry/cascade handling.
+                            #   - payload >  any verified bound → genuine overflow (existing behavior).
+                            #   - unknown limit (<=0) and no server-reported n_ctx → never interpret as
                             #     context-exceeded; treat as service error and fall through.
                             #     DEFAULT_MAX_INPUT_TOKENS is NEVER used as a stand-in here (mirrors the
                             #     `> 0` gating at llm/base.py:332).
@@ -1171,13 +1263,33 @@ class APIRouter:
                             # pre-check in llm/base.py, which already compared against the real limit — trust it
                             # unconditionally (preserves pre-gate behavior for genuine client-detected overflow).
                             # SERVER errors (status-carrying ModelServiceError etc.) are only trusted when the
-                            # payload provably exceeds the configured limit.
-                            _estimated = None
-                            if _has_known_limit:
-                                _estimated = self._estimate_payload_tokens(messages)
-                            _genuine_overflow = isinstance(e, ContextWindowExceeded) or (
-                                _has_known_limit and _estimated is not None and _estimated > _cfg_limit
-                            )
+                            # payload provably exceeds a VERIFIED bound: the server-reported n_prompt_tokens
+                            # vs the configured limit and/or ~0.95 × the server-reported n_ctx. Only when the
+                            # server reports no counts does the local estimator decide (vs configured limit).
+                            _genuine_overflow = isinstance(e, ContextWindowExceeded)
+                            if not _genuine_overflow:
+                                srv_n_prompt, srv_n_ctx = self._extract_server_token_counts(e)
+                                _bounds = []
+                                if _has_known_limit:
+                                    _bounds.append(_cfg_limit)
+                                if isinstance(srv_n_ctx, int) and srv_n_ctx > 0:
+                                    _bounds.append(int(srv_n_ctx * _SERVER_CTX_SAFETY_FACTOR))
+                                if isinstance(srv_n_prompt, int) and srv_n_prompt > 0 and _bounds:
+                                    # Server-reported counts are AUTHORITATIVE — the estimator never runs.
+                                    _genuine_overflow = any(srv_n_prompt > b for b in _bounds)
+                                    if _genuine_overflow:
+                                        logger.warning(
+                                            f"[APIRouter] Context-exceeded for '{_inst_name_for_cursor}' on endpoint "
+                                            f"'{endpoint_name}': server-reported n_prompt_tokens={srv_n_prompt} exceeds "
+                                            f"verified bound(s) {dict(zip(('configured_limit', 'safety_fraction_of_n_ctx'), _bounds))} "
+                                            f"(n_ctx={srv_n_ctx}) — genuine overflow."
+                                        )
+                                # srv_n_prompt present but NO verified bound (unknown limit and no n_ctx):
+                                # preserve the 2026-08-21 invariant — never interpret as context-exceeded;
+                                # fall through to estimation, which also requires a known limit.
+                            if not _genuine_overflow and _has_known_limit:
+                                _estimated = self._estimate_payload_tokens(messages, functions=functions)
+                                _genuine_overflow = _estimated is not None and _estimated > _cfg_limit
                             if not _genuine_overflow:
                                 # Service error (state drift / unknown limit / estimation failure):
                                 # fall through to generic retry-within-endpoint then cascade below.
@@ -1188,6 +1300,13 @@ class APIRouter:
                                         f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
                                         f"on endpoint '{endpoint_name}' but the endpoint has no configured "
                                         f"max_input_tokens — treating as service error, falling through to next endpoint."
+                                    )
+                                elif isinstance(srv_n_prompt, int) and srv_n_prompt > 0:
+                                    logger.warning(
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"on endpoint '{endpoint_name}': server-reported n_prompt_tokens={srv_n_prompt} "
+                                        f"(n_ctx={srv_n_ctx}) fits every verified bound — treating as service error, "
+                                        f"falling through to next endpoint."
                                     )
                                 elif _estimated is None:
                                     logger.warning(

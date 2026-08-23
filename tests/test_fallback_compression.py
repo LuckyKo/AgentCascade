@@ -19,8 +19,8 @@ from agent_cascade.exceptions import (
     FallbackCompressionRequired,
     ContextWindowExceeded,
 )
-from agent_cascade.llm.base import ModelServiceError
-from agent_cascade.llm.schema import SYSTEM, USER, Message
+from agent_cascade.llm.base import ModelServiceError, BaseChatModel
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 
 
 # ──────────────────────────────────────────────
@@ -1983,3 +1983,618 @@ class TestGetAssignedMaxTokens:
         router, ep_a, ep_b = _make_two_endpoint_router(limit_a=165_500, limit_b=90_000)
         with patch.object(router, "get_endpoint_chain", side_effect=RuntimeError("config reload")):
             assert router.get_assigned_max_tokens("Coder") is None
+
+
+# ──────────────────────────────────────────────
+# 3g. A1/A2 gate — server-reported n_prompt_tokens/n_ctx as ground truth
+#     (2026-08-23 incident: payload of 100,109 real tokens on a llama.cpp endpoint with
+#      n_ctx=100,096 but configured max_input_tokens=115,000 was misclassified as a
+#      service error because the estimator (~95.7k) fit under the configured limit;
+#      see reports/gate-nprompt-tokens-fix-plan.md)
+# ──────────────────────────────────────────────
+
+def _make_400(n_prompt=None, n_ctx=None, code='400', body_override=None):
+    """Build a ModelServiceError shaped like the real llama.cpp 400 flow:
+    ModelServiceError wraps an openai-style error whose .body is the decoded JSON dict.
+
+    str(err) embeds the full body repr (mirrors openai's err_msg construction), so the
+    regex fallback path in _extract_server_token_counts is exercised by the same object.
+    """
+    if body_override is not None:
+        inner_body = body_override
+    else:
+        inner_error = {
+            'code': int(code),
+            'message': (f"request ({n_prompt} tokens) exceeds the available context "
+                        f"size ({n_ctx} tokens)."),
+            'type': 'exceed_context_size_error',
+        }
+        if n_prompt is not None:
+            inner_error['n_prompt_tokens'] = n_prompt
+        if n_ctx is not None:
+            inner_error['n_ctx'] = n_ctx
+        inner_body = {'error': inner_error}
+    inner = Exception(f"Error code: {code} - {inner_body}")
+    inner.body = inner_body
+    return ModelServiceError(exception=inner, code=code)
+
+
+def _make_400_real_sdk(n_prompt=None, n_ctx=None):
+    """Build a ModelServiceError wrapping a REAL openai APIStatusError (BadRequestError
+    shape) built from an httpx 400 response with a JSON body — locks in the SDK-shape
+    assumption (err.body is the decoded dict)."""
+    import httpx
+    import openai
+    inner_error = {
+        'code': 400,
+        'message': f"request ({n_prompt} tokens) exceeds the available context size ({n_ctx} tokens).",
+        'type': 'exceed_context_size_error',
+    }
+    if n_prompt is not None:
+        inner_error['n_prompt_tokens'] = n_prompt
+    if n_ctx is not None:
+        inner_error['n_ctx'] = n_ctx
+    body = {'error': inner_error}
+    resp = httpx.Response(
+        400,
+        request=httpx.Request('POST', 'http://gate:8080/v1/chat/completions'),
+        json=body,
+    )
+    sdk_err = openai.APIStatusError('msg', response=resp, body=body)
+    return ModelServiceError(exception=sdk_err, code='400')
+
+
+class TestServerReportedTokenCounts:
+    """A1/A2 gate: when the server reports n_prompt_tokens/n_ctx in the 400 body, those
+    counts are AUTHORITATIVE. Genuine overflow iff the server count exceeds at least one
+    verified bound (configured limit >0, or ~0.95 × server-reported n_ctx). Estimation is
+    only a fallback when the server fields are absent."""
+
+    def _router(self, max_input_tokens):
+        from agent_cascade.api_router import APIRouter, APIEndpoint
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_np_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            pool = MagicMock()
+            pool.terminated_instances = set()
+            pool.is_instance_terminated.return_value = False
+
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+            router._pool = pool
+            ep = APIEndpoint(
+                name="np-endpoint",
+                api_base="http://np:8080/v1",
+                model="np-model",
+                max_retries=0,
+                max_input_tokens=max_input_tokens,
+            )
+            router.add_endpoint(ep)
+            router.set_agent_priorities("Coder", [ep.id])
+            return router
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+    def test_incident_replay_nprompt_below_cfg_but_above_ctx_raises(self):
+        """(1) REGRESSION — today's incident replayed: n_prompt=100,109 is BELOW the
+        configured 115,000 but ABOVE n_ctx=100,096. The estimator sees only ~5k tokens of
+        messages (the real payload is server-side), so the old gate said "fits 115000" →
+        service error. With server counts authoritative this MUST be genuine overflow."""
+        router = self._router(max_input_tokens=115_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise _make_400(n_prompt=100_109, n_ctx=100_096)
+
+        with pytest.raises(FallbackCompressionRequired) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),  # tiny — estimator would say "fits"
+            )
+
+        assert exc_info.value.instance_name == "coder1"
+        # Cursor must have been advanced before raising.
+        assert router._instance_endpoint_position.get("coder1", 0) > 0
+
+    def test_nprompt_over_configured_limit_raises(self):
+        """(2) Server count above the configured limit → genuine overflow (server-count
+        path; parity with the existing estimation-path over-limit test)."""
+        router = self._router(max_input_tokens=90_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise _make_400(n_prompt=100_109, n_ctx=200_000)
+
+        with pytest.raises(FallbackCompressionRequired):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+    def test_nprompt_below_all_bounds_is_service_error(self):
+        """(3) Server count below the configured limit AND below 0.95×n_ctx → spurious-400
+        protection preserved: NOT genuine overflow, exhausts to RuntimeError."""
+        router = self._router(max_input_tokens=120_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            # 50k < 120k and 50k < 0.95×100k=95k → fits every verified bound.
+            raise _make_400(n_prompt=50_000, n_ctx=100_000)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+        assert "All API endpoints exhausted" in str(exc_info.value)
+        # Cursor NOT advanced on the service-error path.
+        assert router._instance_endpoint_position.get("coder1", 0) == 0
+
+    def test_fields_absent_estimation_path_decides(self):
+        """(4a) No n_prompt_tokens/n_ctx in the body → estimation path runs verbatim:
+        payload under the configured limit → service error (RuntimeError)."""
+        router = self._router(max_input_tokens=90_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise _make_400(n_prompt=None, n_ctx=None)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),  # ~5k tokens < 90k
+            )
+
+        assert "All API endpoints exhausted" in str(exc_info.value)
+
+    def test_fields_absent_estimation_over_limit_raises(self):
+        """(4b) No server fields, payload over the configured limit → estimation path
+        still raises (existing behavior preserved)."""
+        router = self._router(max_input_tokens=10)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise _make_400(n_prompt=None, n_ctx=None)
+
+        with pytest.raises(FallbackCompressionRequired):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+    def test_nprompt_present_no_verified_bound_not_raised(self):
+        """(5) n_prompt present but configured limit unknown (0) and no n_ctx → NO verified
+        bound exists → never interpret as context-exceeded (2026-08-21 invariant;
+        DEFAULT_MAX_INPUT_TOKENS is never substituted)."""
+        router = self._router(max_input_tokens=0)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise _make_400(n_prompt=999_999, n_ctx=None)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+        assert "All API endpoints exhausted" in str(exc_info.value)
+
+    def test_nprompt_present_unknown_cfg_ctx_exceeded_raises(self):
+        """(6) n_prompt present, configured limit unknown, but server-reported n_ctx is
+        exceeded → the verified server bound alone proves genuine overflow."""
+        router = self._router(max_input_tokens=0)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            # 100k > 0.95×100,096 ≈ 95,091 → overflow even with no configured limit.
+            raise _make_400(n_prompt=100_000, n_ctx=100_096)
+
+        with pytest.raises(FallbackCompressionRequired):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+    def test_500_body_with_nprompt_is_not_context_exceeded(self):
+        """(7) A 5xx body containing n_prompt_tokens is NOT classified as context-exceeded
+        (extraction only runs after _is_context_exceeded_error, which requires code 400
+        for non-typed errors) → service error fall-through."""
+        router = self._router(max_input_tokens=10)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise _make_400(
+                n_prompt=None, n_ctx=None, code='500',
+                body_override={'error': {'code': 500, 'message': 'exceed_context_size_error',
+                                         'n_prompt_tokens': 999_999, 'n_ctx': 1}},
+            )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+        assert "All API endpoints exhausted" in str(exc_info.value)
+
+    def test_typed_context_window_exceeded_still_raised(self):
+        """(8) Typed ContextWindowExceeded (client-side pre-check) is trusted
+        unconditionally — unchanged."""
+        router = self._router(max_input_tokens=10)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise ContextWindowExceeded("client pre-check overflow")
+
+        with pytest.raises(FallbackCompressionRequired):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+    def test_malformed_body_regex_fallback(self):
+        """(9) Structured .body absent (string-only error) → the quote-tolerant regex over
+        str(err) recovers the counts. n_prompt=42k > cfg 30k → raised."""
+        router = self._router(max_input_tokens=30_000)
+
+        raw_text = ("Error code: 400 - {'error': {'code': 400, 'message': "
+                    "'request (42000 tokens) exceeds the available context size (40000 tokens).', "
+                    "'type': 'exceed_context_size_error', 'n_prompt_tokens': 42000, 'n_ctx': 40000}}")
+        inner = Exception(raw_text)
+        # No .body attribute → structured read fails → regex fallback must fire.
+        err = ModelServiceError(exception=inner, code='400')
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise err
+
+        with pytest.raises(FallbackCompressionRequired):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+    def test_drift_delta_documentation(self):
+        """(10) Accepted behavioral delta (plan §2.5): a drifted-window 400 where the
+        payload fits the CONFIGURED limit (90k) but exceeds the server's actual window
+        (n_ctx=16,384) now classifies as genuine overflow → cursor advance + FCR, instead
+        of silent service-error retry on a broken endpoint."""
+        router = self._router(max_input_tokens=90_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            # 40,571 < 90k (fits config) but > 0.95×16,384 ≈ 15,565 → overflow.
+            raise _make_400(n_prompt=40_571, n_ctx=16_384)
+
+        with pytest.raises(FallbackCompressionRequired):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+    def test_real_sdk_bad_request_error_shape(self):
+        """SDK-shape lock-in: a ModelServiceError wrapping a REAL openai APIStatusError
+        (built from an httpx 400 JSON response) is extracted via the structured .body
+        read and classifies as genuine overflow."""
+        router = self._router(max_input_tokens=115_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            raise _make_400_real_sdk(n_prompt=100_109, n_ctx=100_096)
+
+        with pytest.raises(FallbackCompressionRequired):
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                agent_instance_name="coder1",
+                messages=_make_payload_messages(),
+            )
+
+
+class TestExtractServerTokenCounts:
+    """Unit tests for APIRouter._extract_server_token_counts (pure extraction)."""
+
+    def _router(self):
+        from agent_cascade.api_router import APIRouter
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_extr_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            return APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+    def test_structured_body(self):
+        router = self._router()
+        err = _make_400(n_prompt=100_109, n_ctx=100_096)
+        assert router._extract_server_token_counts(err) == (100_109, 100_096)
+
+    def test_partial_body_only_nprompt(self):
+        """n_ctx absent → treated as absent (None)."""
+        router = self._router()
+        err = _make_400(n_prompt=50_000, n_ctx=None)
+        assert router._extract_server_token_counts(err) == (50_000, None)
+
+    def test_flat_body_without_error_wrapper(self):
+        """Tolerate bodies without the 'error' wrapper."""
+        router = self._router()
+        err = _make_400(body_override={'n_prompt_tokens': 123, 'n_ctx': 456})
+        assert router._extract_server_token_counts(err) == (123, 456)
+
+    def test_nctx_train_not_matched_by_regex(self):
+        """Word-boundary guard: 'n_ctx_train' must never satisfy the n_ctx regex."""
+        router = self._router()
+        raw_text = ("Error code: 400 - {'error': {'message': 'exceed_context_size_error', "
+                    "'n_prompt_tokens': 7000, 'n_ctx_train': 8192}}")
+        inner = Exception(raw_text)
+        err = ModelServiceError(exception=inner, code='400')
+        assert router._extract_server_token_counts(err) == (7000, None)
+
+    def test_no_fields_returns_nones(self):
+        router = self._router()
+        err = _make_400(n_prompt=None, n_ctx=None)
+        assert router._extract_server_token_counts(err) == (None, None)
+
+    def test_never_raises_on_garbage(self):
+        """Non-exception garbage and weird objects never raise."""
+        router = self._router()
+        assert router._extract_server_token_counts(Exception("nothing useful")) == (None, None)
+        assert router._extract_server_token_counts(RuntimeError()) == (None, None)
+
+
+# ──────────────────────────────────────────────
+# 3h. Part 2 — tool-schema token accounting in the shared estimator + client pre-check
+# ──────────────────────────────────────────────
+
+def _big_function_schema():
+    """A realistic-ish function schema dict (the shape tools/base.py `function` yields)."""
+    return {
+        'name': 'grep',
+        'description': ('Search for a text pattern in files. Supports Python regex syntax. '
+                        * 10),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'pattern': {'type': 'string', 'description': 'Text or regex pattern to search for.'},
+                'path': {'type': 'string', 'description': 'Directory to search in.'},
+                'include': {'type': 'string', 'description': 'File glob pattern to include.'},
+            },
+            'required': ['pattern'],
+        },
+    }
+
+
+class TestToolSchemaTokenAccounting:
+    """Part 2: _estimate_payload_tokens must count the serialized tool-schema payload, and
+    the client-side pre-check in llm/base.py must mirror the same accounting."""
+
+    def test_estimator_counts_functions(self):
+        """(11) Estimating with functions adds roughly the tokenizer count of the dumped
+        schema (sanity band — exact equality not required)."""
+        from agent_cascade.api_router import APIRouter
+        from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_fn_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+        messages = _make_payload_messages(n_words=200)
+        base = router._estimate_payload_tokens(messages)
+        with_fns = router._estimate_payload_tokens(messages, functions=[_big_function_schema()])
+
+        assert base is not None and with_fns is not None
+        assert with_fns > base, "tool schemas must increase the estimate"
+        # The growth should be on the order of the schema's own token count (band check).
+        import json as _json
+        wire = [{'type': 'function', 'function': _big_function_schema()}]
+        expected_growth = qwen_count(_json.dumps(wire, ensure_ascii=False))
+        growth = with_fns - base
+        assert 0 < growth <= expected_growth + 16, \
+            f"growth {growth} outside sanity band (expected ~{expected_growth})"
+
+    def test_no_functions_is_unchanged(self):
+        """(12) functions=None and functions=[] give byte-identical results to the old
+        message-only estimate."""
+        from agent_cascade.api_router import APIRouter
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_fn_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+        messages = _make_payload_messages(n_words=100)
+        base = router._estimate_payload_tokens(messages)
+        assert router._estimate_payload_tokens(messages, functions=None) == base
+        assert router._estimate_payload_tokens(messages, functions=[]) == base
+
+    def test_schema_dump_failure_is_fail_soft(self):
+        """(13) A schema that raises inside json.dumps → the message-only total is still
+        returned; never raises."""
+        from agent_cascade.api_router import APIRouter
+
+        class _Undumpable:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_fn_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            router = APIRouter(
+                default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+                config_dir=test_config_dir,
+            )
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+        messages = _make_payload_messages(n_words=100)
+        base = router._estimate_payload_tokens(messages)
+        result = router._estimate_payload_tokens(
+            messages, functions=[{'name': 'x', 'description': _Undumpable()}]
+        )
+        assert result == base
+
+    def test_client_precheck_counts_functions(self):
+        """(14) Client-side pre-check (llm/base.py): messages just under the limit plus
+        tool schemas pushing over → ContextWindowExceeded raised before any API call."""
+
+        class _StubModel(BaseChatModel):
+            @property
+            def support_multimodal_input(self):
+                return False
+
+            @property
+            def support_multimodal_output(self):
+                return False
+
+            def _chat(self, messages, stream, delta_stream, generate_cfg):
+                raise AssertionError("must not reach the API call")
+
+            def _chat_with_functions(self, messages, functions, stream, delta_stream,
+                                     generate_cfg, lang):
+                raise AssertionError("must not reach the API call")
+
+            def _chat_stream(self, messages, delta_stream, generate_cfg):
+                raise AssertionError("must not reach the API call")
+
+            def _chat_no_stream(self, messages, generate_cfg):
+                raise AssertionError("must not reach the API call")
+
+        from agent_cascade.utils.utils import get_message_stats
+
+        model = _StubModel(cfg={'model': 'stub', 'generate_cfg': {'max_input_tokens': 10_000}})
+        # Messages just under the limit.
+        n_words = 500
+        messages = [Message(role=USER, content=" ".join(f"word{i}" for i in range(n_words)))]
+        msg_tokens = get_message_stats(messages[0])['tokens']
+        assert msg_tokens < 10_000, f"test setup: messages must fit ({msg_tokens})"
+
+        # Add schemas until the combined estimate exceeds the limit.
+        schemas = []
+        while True:
+            candidate = list(schemas) + [_big_function_schema()]
+            from agent_cascade.utils.utils import estimate_functions_tokens
+            if msg_tokens + estimate_functions_tokens(candidate) > 10_000:
+                schemas = candidate
+                break
+            schemas = candidate
+            if len(schemas) > 200:
+                raise AssertionError("test setup: could not exceed limit")
+
+        with pytest.raises(ContextWindowExceeded):
+            model.chat(messages=messages, functions=schemas, stream=False)
+
+    def test_engine_passes_functions_to_router(self):
+        """(15) Engine plumbing: _execute_llm_call_with_retry forwards the template's
+        active function schemas to call_with_fallback as functions=."""
+        from agent_cascade.execution_engine import ExecutionEngine
+
+        pool = MagicMock()
+        # Settings needed by _execute_llm_call_with_retry
+        pool.settings.retry_max_attempts = 1
+        pool.settings.retry_base_delay = 0.1
+        pool.settings.retry_max_delay = 1.0
+        pool.settings.loop_min_chars = 4000
+        pool.settings.loop_max_chars = 40960
+        pool.settings.loop_char_run_enabled = True
+        pool.settings.loop_char_run_limit = 129
+        pool.settings.loop_max_chars_enabled = True
+        pool.settings.loop_two_phase_enabled = False
+        pool.settings.loop_suspicion_threshold = 7
+        pool.settings.loop_confirm_required = 3
+        pool.settings.loop_cooldown_feeds = 50
+        pool.telemetry = None
+
+        engine = ExecutionEngine(pool)
+        instance = MagicMock()
+        instance.instance_name = "coder1"
+        instance.agent_class = "Coder"
+        instance._state_lock = MagicMock()
+        instance._compression_lock = MagicMock()
+        instance._streaming_responses = []
+        instance._generate_cfg_override = None
+
+        template = MagicMock()
+        template.name = "Coder"
+        template.llm = MagicMock()
+        template.llm.model = "test-model"
+        template.llm.generate_cfg = {}
+
+        router = MagicMock()
+        router.get_effective_max_tokens.return_value = 100_000
+        router.get_agent_priorities.return_value = []
+        # call_with_fallback returns a generator (simulating streaming)
+        def _fake_gen():
+            yield [Message(role=ASSISTANT, content="ok")]
+        router.call_with_fallback.return_value = _fake_gen()
+        engine.pool.api_router = router
+
+        schemas = [{'name': 'grep', 'description': 'd'}]
+        messages = [Message(role=USER, content="hello")]
+
+        with patch.object(engine, "_build_merged_cfg", return_value={'agent_name': 'Coder', 'max_input_tokens': 100_000}), \
+             patch.object(engine, "_store_allocated_max_input_tokens"), \
+             patch.object(engine, "_record_telemetry_event"), \
+             patch.object(engine, "_update_streaming_responses"):
+            # _execute_llm_call_with_retry is a generator — consume it
+            gen = engine._execute_llm_call_with_retry(instance, messages, template, schemas)
+            for _ in gen:
+                pass
+
+        router.call_with_fallback.assert_called_once()
+        _, kwargs = router.call_with_fallback.call_args
+        assert kwargs.get('functions') == schemas, \
+            f"functions not forwarded to the router: {kwargs.keys()}"

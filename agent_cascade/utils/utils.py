@@ -1111,6 +1111,30 @@ def rm_default_system(messages: List[Message]) -> List[Message]:
         return messages
 
 
+def estimate_functions_tokens(functions) -> int:
+    """Estimate tokens of the serialized tool-schema payload sent as `tools=`.
+
+    Mirrors the wire format used by the OpenAI-compatible backends
+    (``[{'type': 'function', 'function': f} for f in functions]``, see
+    llm/function_calling.py / llm/base.py raw_chat) and counts the dumped JSON with the
+    same tokenizer as get_message_stats. Counts each schema once — the per-schema wrapper
+    envelope overhead is folded into the JSON text (noise relative to schema size; this is
+    a margin estimate, and the server-reported n_prompt_tokens remains the authority in
+    the A1/A2 gate whenever available).
+
+    Returns 0 on empty/None input or any failure (fail-soft contract: callers must never
+    crash an estimation path because of an undumpable schema).
+    """
+    if not functions:
+        return 0
+    try:
+        from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+        wire = [{'type': 'function', 'function': f} for f in functions]
+        return int(qwen_count(json.dumps(wire, ensure_ascii=False)))
+    except Exception:
+        return 0
+
+
 def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     """Return tokens and words for a message with consistency.
     Uses logic aligned with BaseChatModel._truncate_input_messages_roughly.

@@ -1248,6 +1248,7 @@ class LLMCallMixin:
                 agent_type, _do_call, allocated_tokens=allocated_tokens,
                 agent_instance_name=instance.instance_name,
                 messages=messages,
+                functions=active_functions,
             )
         else:
             # Direct call without router — same merge priority as fallback
