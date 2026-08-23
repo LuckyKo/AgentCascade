@@ -81,11 +81,8 @@ class CompressionExecMixin:
             response: Optional list to append notifications for yielding (fixes compress feedback bug)
             assigned_max_tokens: Optional — the TRUE max_input_tokens of the endpoint this
                 call is about to hit (post-cursor-rotation chain head). When provided and > 0,
-                it takes precedence over the first-priority resolution so the guard can
-                anticipate failover onto a smaller assigned endpoint. This makes pre-send
-                compression endpoint-truthful; the reactive FallbackCompressionRequired path
-                then only covers estimate drift (see reports/fallback-compression-misclass-
-                investigation.md).
+                it takes precedence over the first-priority resolution (see reports/
+                fallback-compression-misclass-investigation.md).
 
         Returns:
             True if compression was triggered (skip LLM call), False otherwise.
@@ -103,12 +100,9 @@ class CompressionExecMixin:
         except Exception:
             max_tokens_fresh = instance._allocated_max_input_tokens or DEFAULT_MAX_INPUT_TOKENS
 
-        # Endpoint-truthful sizing (Part 2): when the caller tells us the limit of the
-        # endpoint actually about to be called, trust it over the first-priority resolution.
-        # _get_max_tokens resolves against the FIRST enabled priority endpoint, which cannot
-        # anticipate failover onto a smaller assigned endpoint — using the assigned limit here
-        # lets pre-send compression fire before the send instead of only reactively via
-        # FallbackCompressionRequired after the server 400s.
+        # Endpoint-truthful sizing (Part 2): trust the caller-supplied limit of the endpoint
+        # actually about to be called over the first-priority resolution — see reports/
+        # fallback-compression-misclass-investigation.md.
         if isinstance(assigned_max_tokens, int) and assigned_max_tokens > 0:
             max_tokens_fresh = assigned_max_tokens
 

@@ -1915,8 +1915,8 @@ class TestPreSendCompressionEndpointTruthful:
         """If resolving the assigned endpoint's limit raises (e.g. config reload mid-call),
         _pre_llm_checks must NOT crash and must fall back to the prior first-priority behavior."""
         engine, pool, instance = self._make_engine()
-        # Make get_endpoint_chain raise — simulates a transient failure.
-        pool.api_router.get_endpoint_chain = MagicMock(side_effect=RuntimeError("config reload"))
+        # Make the resolution helper raise — simulates a transient failure.
+        pool.api_router.get_assigned_max_tokens = MagicMock(side_effect=RuntimeError("config reload"))
 
         # Stub the upstream pre-LLM checks so we reach step 5 (compression trigger).
         engine._check_stop_conditions = MagicMock(return_value=False)
@@ -1938,3 +1938,48 @@ class TestPreSendCompressionEndpointTruthful:
         assert kwargs.get('assigned_max_tokens') is None, (
             "On resolution failure the guard must fall back to first-priority (assigned_max_tokens=None)"
         )
+
+
+# ──────────────────────────────────────────────
+# 3f. get_assigned_max_tokens helper edge cases
+# ──────────────────────────────────────────────
+
+class TestGetAssignedMaxTokens:
+    """APIRouter.get_assigned_max_tokens returns the chain head's TRUE limit, or None
+    whenever it can't be resolved (empty chain, bad/missing limit, resolution error)."""
+
+    def test_returns_chain_head_limit(self):
+        router, ep_a, ep_b = _make_two_endpoint_router(limit_a=165_500, limit_b=90_000)
+        assert router.get_assigned_max_tokens("Coder") == 165_500
+
+    def test_returns_none_for_empty_chain(self):
+        """A chain with no resolvable endpoint (get_endpoint_chain raises ValueError) → None."""
+        from agent_cascade.api_router import APIRouter
+
+        test_config_dir = tempfile.mkdtemp(prefix="ac_test_assigned_")
+        _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+        os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+        try:
+            # No default_llm_cfg and no endpoints → get_endpoint_chain raises ValueError.
+            router = APIRouter(default_llm_cfg=None, config_dir=test_config_dir)
+            assert router.get_assigned_max_tokens("Coder") is None
+        finally:
+            if _orig_env is not None:
+                os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+            else:
+                os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            shutil.rmtree(test_config_dir, ignore_errors=True)
+
+    @pytest.mark.parametrize("bad_limit", [0, None, "90k", 12.5])
+    def test_returns_none_for_bad_limit(self, bad_limit):
+        """A chain head whose max_input_tokens is 0/None/non-int → None."""
+        router, ep_a, ep_b = _make_two_endpoint_router(limit_a=165_500, limit_b=90_000)
+        # Clobber the chain-head cfg's limit to an invalid value.
+        with patch.object(router, "get_endpoint_chain", return_value=[{"max_input_tokens": bad_limit}]):
+            assert router.get_assigned_max_tokens("Coder") is None
+
+    def test_returns_none_when_resolution_raises(self):
+        """Any exception inside get_endpoint_chain → None (never propagates)."""
+        router, ep_a, ep_b = _make_two_endpoint_router(limit_a=165_500, limit_b=90_000)
+        with patch.object(router, "get_endpoint_chain", side_effect=RuntimeError("config reload")):
+            assert router.get_assigned_max_tokens("Coder") is None

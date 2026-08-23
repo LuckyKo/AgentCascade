@@ -449,9 +449,7 @@ class APIRouter:
             agent_type: The type of agent requesting endpoints
             allocated_tokens: Optional - the agent's allocated context size in tokens.
                             Retained for API compatibility; it does NOT alter endpoint
-                            selection or inflate any cfg's max_input_tokens (that inflation
-                            blinded the A1/A2 gate — see reports/fallback-compression-
-                            misclass-investigation.md). Each cfg keeps its own true limit.
+                            selection or inflate any cfg's max_input_tokens (see Tier-1 note below).
             instance_name:  Optional - when provided, rotates chain starting from
                           this instance's tracked cursor position (per-instance memory).
         """
@@ -545,10 +543,9 @@ class APIRouter:
                     default_cfg['max_input_tokens'] = general_limit if general_limit > 0 else 0
                 endpoint_configs.append(default_cfg)
             
-            # NOTE: every cfg in the returned chain is guaranteed to carry an int
-            # max_input_tokens (injected above for Tier-4; set by to_llm_cfg() for tiers 1/3).
-            # The default's limit is intentionally NOT inflated with allocated_tokens — it is
-            # ground truth consumed by the A1/A2 gate and llm/base.py pre-check.
+            # NOTE: every cfg in the returned chain carries an int max_input_tokens
+            # (injected above for Tier-4; set by to_llm_cfg() for tiers 1/3). The default's
+            # limit is intentionally NOT inflated with allocated_tokens (see Tier-1 note above).
 
             # Per-instance cursor rotation: rotate chain from tracked position to skip previously-failed endpoints.
             # Done inside lock to atomically read cursor and return a consistent rotated view.
@@ -607,6 +604,20 @@ class APIRouter:
                 )
 
         return endpoint_configs
+
+    def get_assigned_max_tokens(self, agent_type: str, instance_name: Optional[str] = None) -> Optional[int]:
+        """Return the TRUE max_input_tokens of the endpoint actually about to be called
+        (post-cursor-rotation chain head), or None if it can't be resolved. Read-only —
+        does not advance any cursor."""
+        try:
+            chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
+            if chain:
+                limit = chain[0].get('max_input_tokens')
+                if isinstance(limit, int) and limit > 0:
+                    return limit
+        except Exception:
+            pass
+        return None
 
     # ── Per-Instance Endpoint Cursor Management ───────────────────────────
     # Manages the "kick to next endpoint" mechanism. When inner-loop detection
@@ -905,8 +916,8 @@ class APIRouter:
             agent_type: The type of agent making the call (e.g., 'coder', 'researcher')
             call_fn: The function to execute with the selected endpoint config
             allocated_tokens: Optional - the agent's allocated context size in tokens.
-            Retained for API compatibility; it does NOT inflate any cfg's
-            max_input_tokens (each endpoint keeps its own true limit).
+                           Retained for API compatibility; it does NOT inflate any cfg's
+                           max_input_tokens (see get_endpoint_chain Tier-1 note).
             messages: Optional - the caller's message list. Enables the context-exceeded gate
                       (A1/A2) to estimate payload size against the endpoint's configured
                       max_input_tokens. When absent, a server-side context-exceeded error is

@@ -112,15 +112,11 @@ class LLMCallMixin:
         # leaves assigned_max_tokens None and the guard falls back to its prior behavior.
         _assigned_max_tokens = None
         try:
-            if self.pool.api_router and hasattr(self.pool.api_router, 'get_endpoint_chain'):
+            if self.pool.api_router and hasattr(self.pool.api_router, 'get_assigned_max_tokens'):
                 _agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
-                _chain = self.pool.api_router.get_endpoint_chain(
+                _assigned_max_tokens = self.pool.api_router.get_assigned_max_tokens(
                     _agent_type, instance_name=instance.instance_name,
                 )
-                if _chain:
-                    _limit = _chain[0].get('max_input_tokens')
-                    if isinstance(_limit, int) and _limit > 0:
-                        _assigned_max_tokens = _limit
         except Exception as _e:
             logger.debug(f"[PRE_LLM] Failed to resolve assigned endpoint limit for {inst_name}: {_e}")
 
