@@ -2,39 +2,39 @@
   "schema_version": "1.0",
   "skills": {
     "self-augmentation": {
-      "total_loads": 1385,
+      "total_loads": 1577,
       "by_version": {
-        "1.0.0": 1385
+        "1.0.0": 1577
       }
     },
     "project-memory-writing": {
-      "total_loads": 49,
+      "total_loads": 80,
       "by_version": {
-        "1.0.0": 49
+        "1.0.0": 80
       }
     },
     "python-codebase-static-analysis": {
-      "total_loads": 33,
+      "total_loads": 38,
       "by_version": {
-        "1.0.0": 33
+        "1.0.0": 38
       }
     },
     "investigate-streaming-gaps": {
-      "total_loads": 3,
+      "total_loads": 4,
       "by_version": {
-        "1.0.0": 3
+        "1.0.0": 4
       }
     },
     "version-control": {
-      "total_loads": 1,
+      "total_loads": 4,
       "by_version": {
-        "1.0.0": 1
+        "1.0.0": 4
       }
     },
     "scheduler-architecture": {
-      "total_loads": 22,
+      "total_loads": 23,
       "by_version": {
-        "1.0.0": 22
+        "1.0.0": 23
       }
     },
     "skill-creator": {
@@ -44,9 +44,27 @@
       }
     },
     "testing-best-practices": {
-      "total_loads": 8,
+      "total_loads": 17,
       "by_version": {
-        "1.0.0": 8
+        "1.0.0": 17
+      }
+    },
+    "systematic-debugging": {
+      "total_loads": 12,
+      "by_version": {
+        "1.0.0": 12
+      }
+    },
+    "music-caption-rewriter": {
+      "total_loads": 7,
+      "by_version": {
+        "1.0.0": 7
+      }
+    },
+    "agent-cascade-compression-debugging": {
+      "total_loads": 2,
+      "by_version": {
+        "1.0.0": 2
       }
     }
   }
