@@ -128,6 +128,17 @@ class _LocalLLMDetector:
 _local_llm_detector = _LocalLLMDetector()
 
 
+def _local_tests_opted_in() -> bool:
+    """Return True only when the user explicitly opted in to live local-LLM tests.
+
+    Production-safety gate: the "local" server may be the production single-GPU
+    llama.cpp box.  Running real LLM calls against it (model loads/unloads) must
+    be a deliberate act, not a side-effect of mere reachability.
+    """
+    val = os.environ.get("AGENT_CASCADE_RUN_LOCAL_TESTS", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
 def _find_text_model():
     """Find the best text model from detected local models.
     
@@ -183,25 +194,34 @@ def _find_vl_model():
 
 def pytest_configure(config):
     """Auto-probe for local LLM servers when the test session starts."""
+    config.addinivalue_line(
+        "markers",
+        "skip_if_no_local: skip when no local LLM server is available or not opted in",
+    )
     if _local_llm_detector.probe():
-        config.addinivalue_line(
-            "markers",
-            "skip_if_no_local: skip when no local LLM server is available",
-        )
-        print(f"\n[conftest] Local LLM found: {_local_llm_detector.name} "
-              f"({_local_llm_detector.api_base}) — {len(_local_llm_detector.models)} models")
+        if _local_tests_opted_in():
+            print(f"\n[conftest] Local LLM found: {_local_llm_detector.name} "
+                  f"({_local_llm_detector.api_base}) — {len(_local_llm_detector.models)} models")
+        else:
+            print(f"\n[conftest] Local LLM found ({_local_llm_detector.name}) — "
+                  f"live tests SKIPPED (set AGENT_CASCADE_RUN_LOCAL_TESTS=1 to run them)")
     else:
-        config.addinivalue_line(
-            "markers",
-            "skip_if_no_local: skip when no local LLM server is available",
-        )
         print("\n[conftest] No local LLM server detected — integration tests will be skipped")
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip tests marked 'skip_if_no_local' when no local server was found."""
-    if not _local_llm_detector.available:
-        skip_marker = pytest.mark.skip(reason="No local LLM server available (LM Studio / Ollama on localhost)")
+    """Skip tests marked 'skip_if_no_local' unless a server is found AND the user opted in.
+
+    Production-safety: the local server may be the production box; live LLM calls
+    must be explicitly enabled via AGENT_CASCADE_RUN_LOCAL_TESTS.
+    """
+    if (not _local_llm_detector.available) or (not _local_tests_opted_in()):
+        if not _local_llm_detector.available:
+            reason = "No local LLM server available (LM Studio / Ollama on localhost)"
+        else:
+            reason = ("Local LLM server present but live tests not opted in "
+                      "(set AGENT_CASCADE_RUN_LOCAL_TESTS=1)")
+        skip_marker = pytest.mark.skip(reason=reason)
         for item in items:
             if "skip_if_no_local" in item.keywords:
                 item.add_marker(skip_marker)
