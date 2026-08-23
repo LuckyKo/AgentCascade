@@ -35,6 +35,8 @@ from agent_cascade.settings import (
     DEFAULT_MAX_TURNS,
     DEFAULT_TOOL_RESULT_MAX_CHARS,
     MAX_AUTO_CONTINUE_ATTEMPTS,
+    REASONING_ONLY_CONTINUE_ATTEMPTS,
+    SOFT_CONTINUE_NUDGE_ENABLED,
     LLM_MAX_RETRIES,
     LLM_RETRY_BASE_DELAY,
     LLM_RETRY_MAX_BACKOFF,
@@ -1673,9 +1675,38 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         if (is_truncated or is_incomplete) and not self._is_terminal_stop(inst_name) and self.pool.settings.auto_continue:
             instance._auto_continue_count = getattr(instance, '_auto_continue_count', 0) + 1
             if instance._auto_continue_count >= MAX_AUTO_CONTINUE_ATTEMPTS:
+                # cap-hit reset (site a): clear ALL counters, give up entirely
                 instance._auto_continue_count = 0
                 instance._continue_fallback_append = False
+                instance._reasoning_only_soft_attempts = 0
+                instance._reasoning_only_pending_nudges = 0
                 return False
+
+            # NEW: reasoning-only gets a SOFT continue first (up to N times). Guarded by the
+            # BUDGET counter, which never resets mid-episode, so once we fall through to full
+            # retry this path is permanently closed for the episode (N3).
+            if is_incomplete == "reasoning-only" and instance._reasoning_only_soft_attempts < REASONING_ONLY_CONTINUE_ATTEMPTS:
+                instance._reasoning_only_soft_attempts += 1  # budget: how many soft tries this episode
+                reason = f"incomplete state (reasoning-only, soft continue {instance._reasoning_only_soft_attempts}/{REASONING_ONLY_CONTINUE_ATTEMPTS})"
+                if (tel := self._telemetry()) is not None:
+                    try:
+                        tel.record_auto_continue(inst_name, reason=reason)
+                    except Exception:
+                        pass
+                logger.info(f"Detected incomplete state (reasoning-only) for {inst_name}. Soft continue attempt {instance._reasoning_only_soft_attempts}/{REASONING_ONLY_CONTINUE_ATTEMPTS}.")
+                # --- Default: PURE RESEND. No rollback, no new message — just re-call the LLM on
+                #     the SAME history (the reasoning message stays in context). Identical to today's
+                #     silent retry EXCEPT we do NOT pop anything. ---
+                if SOFT_CONTINUE_NUDGE_ENABLED:
+                    # (Deferred feature — OFF by default.) Inject an escalating USER nudge so the
+                    # model gets an explicit instruction instead of a bare resend. When enabled, a
+                    # nudge is now in context, so track it for rollback accounting on the later full retry.
+                    instance._reasoning_only_pending_nudges += 1
+                    self._inject_soft_continue_nudge(instance, inst_name, messages, llm_messages, response)
+                instance._auto_continue_triggered = True
+                return True
+
+            # existing full-retry path (truncation / broken-json / empty-output / reasoning-only after N soft tries)
             reason = "truncation" if is_truncated else f"incomplete state ({is_incomplete})"
             if (tel := self._telemetry()) is not None:
                 try:
@@ -1686,16 +1717,76 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             pop_count = len(turn_output)
             if getattr(instance, '_continue_fallback_append', False):
                 pop_count += 1
+            # F1 fix: for a reasoning-only full retry, also remove the soft-continue nudges injected
+            # this episode (they live in conversation/llm_messages/response, NOT in turn_output).
+            # Guarded to reasoning-only so a broken-json/empty-output/truncation retry never pops
+            # unrelated nudges (N2). With nudge OFF, _reasoning_only_pending_nudges is 0 → no change.
+            if is_incomplete == "reasoning-only":
+                pop_count += instance._reasoning_only_pending_nudges
             if pop_count > 0:
                 self.pool._rollback_instance(inst_name, pop_count=pop_count)
                 self._rebuild_working_set(messages, llm_messages, inst_name)
                 response.clear()
+            # N1 fix: the nudges were just popped above, so they no longer exist — zero ONLY the
+            # pending-nudge counter. Do NOT touch _reasoning_only_soft_attempts (it must stay at N
+            # so the soft path stays closed).
+            instance._reasoning_only_pending_nudges = 0
             instance._auto_continue_triggered = True
             return True
 
+        # normal completion -> reset both reasoning-only counters (site b)
         instance._auto_continue_count = 0
         instance._continue_fallback_append = False
+        instance._reasoning_only_soft_attempts = 0
+        instance._reasoning_only_pending_nudges = 0
         return False
+
+    @staticmethod
+    def _reasoning_only_continue_text(attempt: int) -> str:
+        """Deterministic USER nudge text for a reasoning-only soft continue (F4).
+
+        Escalates on the second+ attempt so an identical repeat doesn't just echo back
+        reasoning. Function of ``attempt`` only, keeping tests stable. Only used when
+        SOFT_CONTINUE_NUDGE_ENABLED is True.
+        """
+        if attempt >= 2:
+            return ("You have produced reasoning-only output again with no visible result. "
+                    "STOP thinking and MUST produce either a final answer or a concrete tool call "
+                    "on this turn — do not emit another reasoning-only message.")
+        return ("Your last turn contained only reasoning/thinking and no output or tool call. "
+                "Please continue — produce your response text or make the next tool call now.")
+
+    def _inject_soft_continue_nudge(
+        self, instance: AgentInstance, inst_name: str,
+        messages: List[Message], llm_messages: List[Message], response: List[Message]
+    ) -> None:
+        """Inject an escalating USER nudge for a reasoning-only soft continue (F3).
+
+        Only called when SOFT_CONTINUE_NUDGE_ENABLED is True. Mirrors the urgent-message
+        injection path (``_drain_and_inject``) so it is thread-safe and keeps all working
+        lists in sync: appends to messages + llm_messages + response, then conversation +
+        JSONL log atomically under ``instance._compression_lock``. Does NOT roll back or
+        clear the response — the reasoning message stays in place; the next LLM call sees
+        the reasoning-only assistant message followed by this USER nudge.
+        """
+        n = instance._reasoning_only_soft_attempts  # 1-based attempt number (for escalating text)
+        text = self._reasoning_only_continue_text(n)
+        msg = self._make_user_message(text)
+        with instance._compression_lock:
+            messages.append(msg)          # full working set
+            llm_messages.append(msg)      # LLM-formatted set
+            response.append(msg)          # local accumulator (UI visibility)
+            self._append_and_log(instance, msg, lock_held=True)  # conversation + JSONL log atomically
+        try:
+            self.pool._mark_activity(inst_name)
+            if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                with instance._compression_lock:
+                    conv = instance.conversation
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                _check_tail(inst_name, conv, log_inst.log_path, context="reasoning_soft_continue")
+        except Exception as e:
+            logger.debug(f"Soft-continue logging failed for {inst_name} (non-critical): {e}")
 
 
     def _process_response(

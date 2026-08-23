@@ -315,6 +315,18 @@ class AgentInstance:
     _continue_extra_appended: bool = field(default=False)  # Set when continue-saved fallback append happens, for rollback accounting
     _continue_fallback_append: bool = field(default=False)  # Set when continue fallback append occurs, for rollback accounting
 
+    # ── Reasoning-only soft-continue state (pure-resend before full retry) ────────
+    # Episode budget for the soft path: total soft continues attempted since the last
+    # normal completion / cap-hit. Guard for the soft branch (< REASONING_ONLY_CONTINUE_ATTEMPTS).
+    # NEVER reset mid-episode, so once it reaches N the soft path is permanently closed and we
+    # fall through to full retry (N3). Reset to 0 only at cap-hit and normal completion.
+    _reasoning_only_soft_attempts: int = field(default=0)
+    # Rollback accounting: number of soft-continue nudges currently sitting in context that a
+    # rollback must pop. Only non-zero when SOFT_CONTINUE_NUDGE_ENABLED is True (a nudge was
+    # actually injected); with the default pure-resend behavior it stays 0 because nothing new is
+    # added to context. Zeroed immediately after any rollback that pops them (N1).
+    _reasoning_only_pending_nudges: int = field(default=0)
+
     # ── Compression-Specific Notification Queue ───────────────────────────────
     # Used by compression/handler.py to queue notifications during forced compression.
     # These are drained and surfaced after compression completes.

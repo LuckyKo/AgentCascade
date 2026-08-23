@@ -27,6 +27,17 @@ MAX_LLM_CALL_PER_RUN: int = int(os.getenv('QWEN_AGENT_MAX_LLM_CALL_PER_RUN', 250
 DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 250))  # Default turn limit per agent execution
 SECURITY_AGENT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_SECURITY_AGENT_MAX_TURNS', 20))  # Turn limit for system-launched Security advisor (replaces brutal wall-clock timeout)
 MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue resets before giving up
+# Reasoning-only soft "continue" (pure-resend) attempts before falling back to a full retry.
+# Soft continues share the MAX_AUTO_CONTINUE_ATTEMPTS budget with full retries, so an episode is
+# bounded at exactly min(N, cap) soft + (cap - min(N, cap)) full attempts.
+REASONING_ONLY_CONTINUE_ATTEMPTS: int = int(os.getenv('QWEN_AGENT_REASONING_ONLY_CONTINUE_ATTEMPTS', 2))
+# Deferred escape hatch for the soft-continue path. When False (default), a reasoning-only soft
+# continue is a PURE RESEND: no new message is appended and nothing is rolled back — the LLM is
+# simply re-called on the same history with the reasoning message still in place. When True, an
+# escalating USER nudge ("stop thinking / produce output") is injected on each soft continue so the
+# model gets an explicit instruction instead of a bare resend. Kept behind a flag so it can be
+# enabled later without re-architecting.
+SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('QWEN_AGENT_SOFT_CONTINUE_NUDGE', '0') == '1'
 
 
 def _resolve_default_workspace() -> str:
