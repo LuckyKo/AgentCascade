@@ -131,6 +131,7 @@ class _Engine:
         self._is_terminal_stop = ExecutionEngine._is_terminal_stop.__get__(self, type(self))
         self._telemetry = lambda: None  # telemetry is optional (None → skipped) in the engine path
         self._inject_soft_continue_nudge = ExecutionEngine._inject_soft_continue_nudge.__get__(self, type(self))
+        self._sync_conversation_log = ExecutionEngine._sync_conversation_log.__get__(self, type(self))
         self._reasoning_only_continue_text = ExecutionEngine._reasoning_only_continue_text
         self._make_user_message = ExecutionEngine._make_user_message  # staticmethod: returns Message(role=USER, content=text)
         self._rebuild_working_set = _Rebuilder()
@@ -428,42 +429,48 @@ class TestNudgeOnPath:
         # The two nudges must differ (escalating text).
         assert instance.conversation[0].content != instance.conversation[1].content
 
-    def test_nudge_cleanup_on_soft_to_full_transition(self):
-        """F1: full retry pops assistant + N prior nudges, then zeros pending_nudges only.
+    def test_first_full_retry_pops_turn_output_plus_all_nudges(self):
+        """F1/N1: the FIRST full retry pops turn_output + all N nudges, then zeros pending_nudges only.
 
         With N=3 (monkeypatched above): attempts 1-3 are soft continues (3 nudges in context);
-        attempt 4 is the first full retry → pops len(turn_output) + 3 = 4 messages.
+        attempt 4 is the first full retry → pops len(turn_output) + 3 = 4 messages, and the
+        pending-nudge counter is reset to 0 so later retries can't over-pop.
         """
         engine = self._engine()
         instance = _make_instance()
         for _ in range(3):
             _run(engine, instance, [_reasoning_only_msg()])  # 3 soft continues → 3 nudges
-        result = _run(engine, instance, [_reasoning_only_msg()])  # full retry
+        result = _run(engine, instance, [_reasoning_only_msg()])  # first full retry
 
         assert result is True
-        # pop_count == len(turn_output) + pending_nudges = 1 + 3 = 4
+        # pop_count == len(turn_output) + pending_nudges = 1 + 3 = 4 (turn_output + all N nudges)
         assert engine.pool._rollback_calls == [4]
-        # After rollback+rebuild the working sets are cleared (nudges gone).
-        assert instance._reasoning_only_pending_nudges == 0  # zeroed (N1)
-        assert instance._reasoning_only_soft_attempts == 3  # N3: stays at N
+        # The nudge counter is zeroed so subsequent retries don't re-pop them (N1).
+        assert instance._reasoning_only_pending_nudges == 0
+        # Soft budget stays closed at N — this full retry did NOT reopen the soft path (N3).
+        assert instance._reasoning_only_soft_attempts == 3
 
     def test_no_over_pop_after_nudge_cleanup(self):
-        """N1 with nudge ON: the single full retry pops exactly len(turn_output)+nudges once, then
-        the cap hits. (With N=3 under cap=5 there is exactly one full retry per episode, so a second
-        consecutive full retry — the case where over-pop would matter — is exercised in
-        TestNoOverPop for the nudge-OFF default path.)"""
+        """N1 with nudge ON: once the full retry pops all N nudges, pending_nudges is 0 → no over-pop.
+
+        Distinct from the first-full-retry test above (which checks the pop *amount*): this one proves
+        the cleanup actually prevents a double-count. With N=3 under cap=5 the episode runs 3 soft +
+        exactly ONE full retry before the cap fires on attempt #5, so that single rollback must pop
+        len(turn_output)+nudges = 4 — and afterwards pending_nudges is 0, so no further nudge can ever
+        be re-popped (the over-pop guard). The two-consecutive-full-retry variant lives in TestNoOverPop.
+        """
         engine = self._engine()
         instance = _make_instance()
         results = [
             _run(engine, instance, [_reasoning_only_msg()])
             for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)
         ]
-        # 3 soft (True), full retry #1 (True, pops 1+3=4), attempt 5 hits cap → False.
+        # 3 soft (True), the single full retry (True, pops 1+3=4), attempt 5 hits cap → False.
         assert results == [True, True, True, True, False]
+        # The one full retry popped turn_output + all N nudges — and nothing more (no over-pop).
         assert engine.pool._rollback_calls == [4]
-        # Nudge cleanup zeroed the pending counter; soft budget stays closed (N3).
+        # The nudge counter is zeroed after the rollback, so a later retry could never re-pop them.
         assert instance._reasoning_only_pending_nudges == 0
-        assert instance._reasoning_only_soft_attempts == 0
 
     def test_default_n_cap_hit_leaves_pending_nudge(self):
         """Documented edge: with default N=2 < cap, the cap fires on attempt #5 (a full retry), so a

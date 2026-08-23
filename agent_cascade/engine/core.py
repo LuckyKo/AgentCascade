@@ -1694,9 +1694,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     except Exception:
                         pass
                 logger.info(f"Detected incomplete state (reasoning-only) for {inst_name}. Soft continue attempt {instance._reasoning_only_soft_attempts}/{REASONING_ONLY_CONTINUE_ATTEMPTS}.")
-                # --- Default: PURE RESEND. No rollback, no new message — just re-call the LLM on
-                #     the SAME history (the reasoning message stays in context). Identical to today's
-                #     silent retry EXCEPT we do NOT pop anything. ---
+                # Default: pure resend — re-call on the SAME history (reasoning msg stays in place); nothing is popped or appended.
                 if SOFT_CONTINUE_NUDGE_ENABLED:
                     # (Deferred feature — OFF by default.) Inject an escalating USER nudge so the
                     # model gets an explicit instruction instead of a bare resend. When enabled, a
@@ -1720,7 +1718,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # F1 fix: for a reasoning-only full retry, also remove the soft-continue nudges injected
             # this episode (they live in conversation/llm_messages/response, NOT in turn_output).
             # Guarded to reasoning-only so a broken-json/empty-output/truncation retry never pops
-            # unrelated nudges (N2). With nudge OFF, _reasoning_only_pending_nudges is 0 → no change.
+            # unrelated nudges (N2); with nudge OFF the counter is 0, so this is a no-op.
             if is_incomplete == "reasoning-only":
                 pop_count += instance._reasoning_only_pending_nudges
             if pop_count > 0:
@@ -1748,6 +1746,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         Escalates on the second+ attempt so an identical repeat doesn't just echo back
         reasoning. Function of ``attempt`` only, keeping tests stable. Only used when
         SOFT_CONTINUE_NUDGE_ENABLED is True.
+
+        # attempt=1   -> "Your last turn contained only reasoning/thinking and no output or tool call. ..."
+        # attempt>=2  -> "You have produced reasoning-only output again with no visible result. STOP thinking ..."
         """
         if attempt >= 2:
             return ("You have produced reasoning-only output again with no visible result. "
@@ -1755,6 +1756,23 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     "on this turn — do not emit another reasoning-only message.")
         return ("Your last turn contained only reasoning/thinking and no output or tool call. "
                 "Please continue — produce your response text or make the next tool call now.")
+
+    def _sync_conversation_log(self, instance: AgentInstance, inst_name: str, context: str) -> None:
+        """Mark activity + run the tail-sync JSONL check after a conversation append (house pattern).
+
+        Keeps the JSONL log in sync with ``instance.conversation`` on any path that appends to it.
+        Best-effort: failures are logged at debug level and never propagate.
+        """
+        try:
+            self.pool._mark_activity(inst_name)
+            if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                with instance._compression_lock:
+                    conv = instance.conversation
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                _check_tail(inst_name, conv, log_inst.log_path, context=context)
+        except Exception as e:
+            logger.debug(f"Conversation log sync failed for {inst_name} (non-critical): {e}")
 
     def _inject_soft_continue_nudge(
         self, instance: AgentInstance, inst_name: str,
@@ -1777,16 +1795,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             llm_messages.append(msg)      # LLM-formatted set
             response.append(msg)          # local accumulator (UI visibility)
             self._append_and_log(instance, msg, lock_held=True)  # conversation + JSONL log atomically
-        try:
-            self.pool._mark_activity(inst_name)
-            if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
-                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                with instance._compression_lock:
-                    conv = instance.conversation
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                _check_tail(inst_name, conv, log_inst.log_path, context="reasoning_soft_continue")
-        except Exception as e:
-            logger.debug(f"Soft-continue logging failed for {inst_name} (non-critical): {e}")
+        # Keep the JSONL log in sync with the appended nudge (house pattern).
+        self._sync_conversation_log(instance, inst_name, "reasoning_soft_continue")
 
 
     def _process_response(
