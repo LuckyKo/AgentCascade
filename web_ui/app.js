@@ -3620,7 +3620,7 @@ function renderApprovals() {
       const ap = pending[0];  // Process only the first pending approval
       state.activeSecurityChecks.add(ap.request_id);
       send({ type: 'ask_security', request_id: ap.request_id, auto_apply: true });
-      logger.debug(`[AUTO-ASK] Triggering security check for ${ap.request_id} (1 of ${pending.length} pending)`);
+      console.debug(`[AUTO-ASK] Triggering security check for ${ap.request_id} (1 of ${pending.length} pending)`);
     }
     
     // Don't clear approvals immediately - keep them in case user toggles Auto-Ask off.
