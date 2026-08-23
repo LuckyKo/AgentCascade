@@ -776,9 +776,11 @@ class APIRouter:
           - breaker 'open' and window not yet elapsed → skip;
           - breaker half-open and another caller holds the single probe slot → skip.
 
-        As a side effect, transitions open→half_open once the window elapses.
-        The half-open probe claim itself is done via :meth:`_breaker_claim_probe`
-        (atomic compare-and-set under ``self._lock``; lock NOT held across HTTP).
+        As a side effect, when the open→half_open transition fires it claims THE single probe
+        INLINE in this same critical section (sets ``probing``/``probe_owner``) so no other caller
+        can also fire while we are the designated prober. Production then reads
+        :meth:`_caller_holds_probe` and releases in a ``finally``; ``self._lock`` is non-reentrant,
+        so we must NOT call :meth:`_breaker_claim_probe` here (it would self-deadlock).
         """
         key = normalize_api_base(base)
         with self._lock:
@@ -789,11 +791,17 @@ class APIRouter:
             if state == 'open':
                 if time.monotonic() - br['opened_at'] >= br['window']:
                     br['state'] = 'half_open'
+                    # Claim THE single probe inline in this SAME critical section so no other caller can
+                    # also fire while we are the designated prober. (self._lock is non-reentrant, so we
+                    # cannot call _breaker_claim_probe here.) BOTH fields must be set: _caller_holds_probe
+                    # (used by call_with_fallback's finally to release) checks probe_owner == get_ident().
+                    br['probing'] = True
+                    br['probe_owner'] = threading.get_ident()
                     logger.info(
                         f"[APIRouter] Server breaker {key}: open → half_open "
-                        f"(allowing exactly one probe)"
+                        f"(claiming exactly one probe)"
                     )
-                    return False  # allow this caller to attempt the claim
+                    return False  # this caller won the single-probe claim — proceed
                 return True  # still inside the open window
             # 'half_open': skip unless this caller wins the atomic probe claim.
             # NOTE: we are ALREADY holding self._lock (a non-reentrant Lock), so we must
@@ -925,8 +933,15 @@ class APIRouter:
         chain = self.get_endpoint_chain(
             agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
         )
+        # D1 fail-fast scan: use the NON-mutating _breaker_is_open (not _breaker_should_skip).
+        # The pre-loop scan must NOT claim the single half-open probe — doing so would wedge
+        # recovery (the probe is claimed here, then the endpoint loop re-consults, sees
+        # half_open/probing, skips the busy base, and the claimed probe is never fired). Only
+        # the endpoint loop's consult may claim the probe. _breaker_is_open returns the same
+        # open/skip boolean (closed→False, open-within-window→True, open-elapsed→False,
+        # half_open/probing→True) WITHOUT that side effect.
         if chain and all(
-            self._breaker_should_skip(
+            self._breaker_is_open(
                 cfg.get('api_base') or cfg.get('model_server', 'unknown')
             )
             for cfg in chain
@@ -1100,6 +1115,26 @@ class APIRouter:
                         # trip it — they only earn the per-(base,model) cooldown on exhaustion.
                         if self._is_server_busy_loading(e):
                             self._record_server_busy(endpoint_base, e)
+                            # Stop hammering a base that just confirmed busy: if there is another
+                            # endpoint later in the chain, break out of the per-endpoint retry loop
+                            # and failover (a same-base next endpoint is caught by the breaker skip
+                            # at the top of its iteration; a different-base one is real failover).
+                            # If this is the LAST endpoint (no failover target), do NOT break — allow
+                            # the within-endpoint retry so single-endpoint recovery still works.
+                            # EXCEPTION: the designated single-probe holder (_holds_probe) must be
+                            # allowed to COMPLETE its probe attempt — success closes the breaker,
+                            # failure re-trips it — so the state machine sees a clean outcome. If the
+                            # prober broke out and failed over instead, no endpoint on that base would
+                            # ever deliver a successful probe during this pass and recovery would stall.
+                            # Only non-probers break out to failover. This preserves both no-hammering
+                            # (non-probers bail after one 503) and single-probe recovery (the prober
+                            # finishes its job).
+                            if cfg_idx < len(chain) - 1 and not _holds_probe:
+                                logger.info(
+                                    f"[APIRouter] Server busy on '{endpoint_name}' @ {endpoint_base} — "
+                                    f"stopping retries for this endpoint (failover to next)"
+                                )
+                                break
 
                         # Detect context window exceeded errors and advance cursor.
                         # Unlike CharacterRunDetected/MaxTokenExceeded (which occur during streaming

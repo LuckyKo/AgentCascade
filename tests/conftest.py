@@ -519,3 +519,154 @@ def normal_ttl_cache():
 def agent_pool():
     """Minimal fake AgentPool with instance_conversations for cache-pool tests."""
     return _FakeAgentPool()
+
+
+# ---------------------------------------------------------------------------
+# Shared router-cascade breaker fixtures + helpers
+# ---------------------------------------------------------------------------
+# These were originally defined in tests/test_router_cascade_breaker.py and reused by
+# the opt-in stress file (tests/test_router_cascade_breaker_stress.py) via
+# ``pytest_plugins``. That mechanism is FRAGILE: pointing pytest_plugins at a test
+# module does not reliably register its fixtures when both files are collected in one
+# session (combined runs → "fixture 'router' not found"). The canonical pattern for
+# cross-module fixture sharing is conftest.py — fixtures defined here are auto-available
+# to every test under tests/ regardless of collection order. Plain helper functions
+# (not fixtures) are still imported by name from this module in each test file.
+
+import threading as _threading  # noqa: E402
+import http.server as _http_server  # noqa: E402
+from unittest.mock import patch as _patch  # noqa: E402
+from agent_cascade.api_router import APIRouter as _APIRouter, APIEndpoint as _APIEndpoint  # noqa: E402
+from agent_cascade.retry_policy import RetryPolicy as _RetryPolicy  # noqa: E402
+
+# Fast retry policy — minimal backoff so breaker tests run quickly.
+FAST_RETRY_POLICY = _RetryPolicy(
+    retry_max_attempts=3,
+    base_delay=0.01,
+    max_delay=0.05,
+    jitter_factor=0.0,
+    endpoint_max_retries=1,
+)
+
+BUSY_ERR_TEXT = "503 - Failed to load model: qwen2.5 failed to start"
+
+
+def _busy_error():
+    return Exception(BUSY_ERR_TEXT)
+
+
+@pytest.fixture
+def router(tmp_path_factory):
+    """Isolated APIRouter with its own config dir (no real endpoints)."""
+    test_config_dir = str(tmp_path_factory.mktemp("cascade_breaker_test"))
+    with _patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_config_dir}):
+        r = _APIRouter(default_llm_cfg={
+            'api_base': 'http://default-api',
+            'model': 'default-model',
+            'max_tokens': 2048,
+        }, policy=FAST_RETRY_POLICY)
+        r._pool = None
+        yield r
+
+
+def _add_endpoint(router, name, api_base, model='test-model', enabled=True,
+                  concurrency_limit=-1, max_retries=3, rate_limit_rpm=0):
+    """Add an endpoint to the router. Returns the (possibly regenerated) endpoint ID."""
+    ep = _APIEndpoint(
+        id=f"ep_{name}",
+        name=name,
+        api_base=api_base,
+        model=model,
+        enabled=enabled,
+        concurrency_limit=concurrency_limit,
+        max_retries=max_retries,
+        rate_limit_rpm=rate_limit_rpm,
+    )
+    return router.add_endpoint(ep)
+
+
+def _set_max_retries(router, value):
+    """RetryPolicy is a frozen dataclass — use object.__setattr__ to mutate it.
+
+    Returns the previous value for restoration in a finally block."""
+    prev = router.policy.endpoint_max_retries
+    object.__setattr__(router.policy, 'endpoint_max_retries', value)
+    return prev
+
+
+class _MockLLMHandler(_http_server.BaseHTTPRequestHandler):
+    """Busy server: 503 'Failed to load model' for /chat/completions; /models lists models.
+
+    ``server_ref`` points at a dict shared with the test so hit counts are tracked
+    PER SERVER (two mock servers run concurrently in one process).
+    """
+    busy = True
+    server_ref = None  # set per-server: {'busy': bool, 'hits': {path: int}}
+
+    def log_message(self, *a): pass
+
+    def _count(self, path):
+        ref = self.server_ref or {}
+        hits = ref.setdefault('hits', {})
+        hits[path] = hits.get(path, 0) + 1
+
+    def do_GET(self):
+        self._count('/models')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        import json
+        body = {'data': [{'id': f'model-{i}', 'context_length': 8192} for i in range(3)]}
+        self.wfile.write(json.dumps(body).encode())
+
+    def do_POST(self):
+        path = self.path.split('?')[0]
+        self._count(path)
+        length = int(self.headers.get('Content-Length', 0))
+        self.rfile.read(length)
+        import json
+        if self.server_ref and self.server_ref.get('busy'):
+            body = {'error': 'Failed to load model: qwen2.5 failed to start'}
+            self.send_response(503)
+        else:
+            body = {'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]}
+            self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+
+@pytest.fixture
+def mock_servers():
+    """Two local mock servers: busy (port A) + healthy (port B), per-server hit counters."""
+    import socket
+    def free_port():
+        s = socket.socket()
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    busy_ref = {'busy': True, 'hits': {}}
+    healthy_ref = {'busy': False, 'hits': {}}
+
+    def make_server(port, ref):
+        class Handler(_MockLLMHandler):
+            server_ref = ref
+        srv = _http_server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
+        # Expose the per-server ref for the test to flip busy→healthy after the window.
+        srv.ref = ref
+        return srv
+
+    busy_srv = make_server(free_port(), busy_ref)
+    healthy_srv = make_server(free_port(), healthy_ref)
+    t1 = _threading.Thread(target=busy_srv.serve_forever, daemon=True)
+    t2 = _threading.Thread(target=healthy_srv.serve_forever, daemon=True)
+    t1.start(); t2.start()
+    yield {
+        'busy': f'http://127.0.0.1:{busy_srv.server_address[1]}/v1',
+        'healthy': f'http://127.0.0.1:{healthy_srv.server_address[1]}/v1',
+        'busy_ref': busy_ref,
+        'healthy_ref': healthy_ref,
+    }
+    busy_srv.shutdown(); healthy_srv.shutdown()

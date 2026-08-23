@@ -19,7 +19,6 @@ Covers the approved fix for the single-GPU model-swap storm:
 No real LLM/GPU/network required: HTTP is mocked or a local mock server is used.
 """
 
-import http.server
 import os
 import threading
 import time
@@ -39,59 +38,19 @@ from agent_cascade.settings import (
 )
 from agent_cascade.llm.oai import _breaker_blocks_base
 
-# Fast retry policy — minimal backoff so tests run quickly.
-FAST_RETRY_POLICY = RetryPolicy(
-    retry_max_attempts=3,
-    base_delay=0.01,
-    max_delay=0.05,
-    jitter_factor=0.0,
-    endpoint_max_retries=1,
+# Shared fixtures + helpers now live in tests/conftest.py so they are auto-available
+# to BOTH this file and the opt-in stress file (test_router_cascade_breaker_stress.py)
+# regardless of collection order — the canonical cross-module fixture-sharing pattern.
+# The `router` / `mock_servers` fixtures come from conftest automatically (no local
+# definition needed). Plain helper functions are re-exported below so any external
+# importer keeps working and there is a single source of truth in conftest.py.
+from tests.conftest import (  # noqa: E402,F401
+    FAST_RETRY_POLICY,
+    BUSY_ERR_TEXT,
+    _busy_error,
+    _add_endpoint,
+    _set_max_retries,
 )
-
-BUSY_ERR_TEXT = "503 - Failed to load model: qwen2.5 failed to start"
-
-
-def _busy_error():
-    return Exception(BUSY_ERR_TEXT)
-
-
-@pytest.fixture
-def router(tmp_path_factory):
-    """Isolated APIRouter with its own config dir (no real endpoints)."""
-    test_config_dir = str(tmp_path_factory.mktemp("cascade_breaker_test"))
-    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_config_dir}):
-        r = APIRouter(default_llm_cfg={
-            'api_base': 'http://default-api',
-            'model': 'default-model',
-            'max_tokens': 2048,
-        }, policy=FAST_RETRY_POLICY)
-        r._pool = None
-        yield r
-
-
-def _add_endpoint(router, name, api_base, model='test-model', enabled=True,
-                  concurrency_limit=-1, max_retries=3, rate_limit_rpm=0):
-    """Add an endpoint to the router. Returns the (possibly regenerated) endpoint ID."""
-    ep = APIEndpoint(
-        id=f"ep_{name}",
-        name=name,
-        api_base=api_base,
-        model=model,
-        enabled=enabled,
-        concurrency_limit=concurrency_limit,
-        max_retries=max_retries,
-        rate_limit_rpm=rate_limit_rpm,
-    )
-    return router.add_endpoint(ep)
-
-
-def _set_max_retries(router, value):
-    """RetryPolicy is a frozen dataclass — use object.__setattr__ to mutate it.
-
-    Returns the previous value for restoration in a finally block."""
-    prev = router.policy.endpoint_max_retries
-    object.__setattr__(router.policy, 'endpoint_max_retries', value)
-    return prev
 
 
 # ============================================================================
@@ -207,8 +166,9 @@ class TestBreakerStateMachine:
         router._record_server_busy(base, _busy_error())
         with router._lock:
             router._server_breakers[normalize_api_base(base)]['opened_at'] -= (BREAKER_BASE_WINDOW_SECONDS + 1)
+        # Real single-step protocol: a winning consult claims the probe INLINE — this thread now holds it.
         assert not router._breaker_should_skip(base)
-        assert router._breaker_claim_probe(base)
+        assert router._caller_holds_probe(base)
         router._breaker_on_success(base)
         assert normalize_api_base(base) not in router._server_breakers
 
@@ -219,7 +179,7 @@ class TestBreakerStateMachine:
             br = router._server_breakers[normalize_api_base(base)]
             br['opened_at'] -= (br['window'] + 1)
         assert not router._breaker_should_skip(base)
-        assert router._breaker_claim_probe(base)
+        assert router._caller_holds_probe(base)
         router._record_server_busy(base, _busy_error())  # probe failed
         br = router._server_breakers[normalize_api_base(base)]
         assert br['state'] == 'open'
@@ -230,11 +190,16 @@ class TestBreakerStateMachine:
         router._record_server_busy(base, _busy_error())
         with router._lock:
             router._server_breakers[normalize_api_base(base)]['opened_at'] -= (BREAKER_BASE_WINDOW_SECONDS + 1)
+        # Winning consult claims the probe inline — this thread holds it.
         assert not router._breaker_should_skip(base)
-        assert router._breaker_claim_probe(base)
+        assert router._caller_holds_probe(base)
         router._breaker_release_probe(base)
-        # After release, another caller can claim again (no wedged flag).
-        assert router._breaker_claim_probe(base)
+        # After release the slot is freed (no wedged flag).
+        assert not router._caller_holds_probe(base)
+        # A SECOND consult in the same half_open state re-claims inline (probing was cleared):
+        # it must return False AND re-hold — matching production.
+        assert not router._breaker_should_skip(base)
+        assert router._caller_holds_probe(base)
         router._breaker_release_probe(base)
 
 
@@ -533,14 +498,15 @@ class TestM5SingleProbeAcrossSlotPools:
 
         def agent(name):
             barrier.wait()
+            # Real single-step protocol: a winning consult claims the probe INLINE (this thread holds it);
+            # losers return True and skip. Mirrors production's call_with_fallback path exactly.
             if router._breaker_should_skip(base):
-                return  # skip/fail fast — no HTTP
-            if router._breaker_claim_probe(base):
-                with probe_lock:
-                    probes_fired.append(name)
-                # Probe HTTP would go here (no lock held). Simulate outcome:
-                time.sleep(0.1)
-                router._breaker_on_success(base)
+                return  # loser — skip/fail fast, no HTTP
+            with probe_lock:
+                probes_fired.append(name)   # this thread won the single-probe claim
+            # Probe HTTP would go here (no lock held). Simulate outcome:
+            time.sleep(0.1)
+            router._breaker_on_success(base)
             router._breaker_release_probe(base)
 
         threads = [threading.Thread(target=agent, args=('A',)), threading.Thread(target=agent, args=('B',))]
@@ -557,83 +523,9 @@ class TestM5SingleProbeAcrossSlotPools:
 # Integration (mock HTTP, no GPU) — busy base + healthy different-base endpoint
 # ============================================================================
 
-class _MockLLMHandler(http.server.BaseHTTPRequestHandler):
-    """Busy server: 503 'Failed to load model' for /chat/completions; /models lists models.
-
-    ``server_ref`` points at a dict shared with the test so hit counts are tracked
-    PER SERVER (two mock servers run concurrently in one process).
-    """
-    busy = True
-    server_ref = None  # set per-server: {'busy': bool, 'hits': {path: int}}
-
-    def log_message(self, *a): pass
-
-    def _count(self, path):
-        ref = self.server_ref or {}
-        hits = ref.setdefault('hits', {})
-        hits[path] = hits.get(path, 0) + 1
-
-    def do_GET(self):
-        self._count('/models')
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        import json
-        body = {'data': [{'id': f'model-{i}', 'context_length': 8192} for i in range(3)]}
-        self.wfile.write(json.dumps(body).encode())
-
-    def do_POST(self):
-        path = self.path.split('?')[0]
-        self._count(path)
-        length = int(self.headers.get('Content-Length', 0))
-        self.rfile.read(length)
-        import json
-        if self.server_ref and self.server_ref.get('busy'):
-            body = {'error': 'Failed to load model: qwen2.5 failed to start'}
-            self.send_response(503)
-        else:
-            body = {'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]}
-            self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(body).encode())
-
-
-@pytest.fixture
-def mock_servers():
-    """Two local mock servers: busy (port A) + healthy (port B), per-server hit counters."""
-    import socket
-    def free_port():
-        s = socket.socket()
-        s.bind(('127.0.0.1', 0))
-        port = s.getsockname()[1]
-        s.close()
-        return port
-
-    busy_ref = {'busy': True, 'hits': {}}
-    healthy_ref = {'busy': False, 'hits': {}}
-
-    def make_server(port, ref):
-        class Handler(_MockLLMHandler):
-            server_ref = ref
-        srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
-        # Expose the per-server ref for the test to flip busy→healthy after the window.
-        srv.ref = ref
-        return srv
-
-    busy_srv = make_server(free_port(), busy_ref)
-    healthy_srv = make_server(free_port(), healthy_ref)
-    t1 = threading.Thread(target=busy_srv.serve_forever, daemon=True)
-    t2 = threading.Thread(target=healthy_srv.serve_forever, daemon=True)
-    t1.start(); t2.start()
-    yield {
-        'busy': f'http://127.0.0.1:{busy_srv.server_address[1]}/v1',
-        'healthy': f'http://127.0.0.1:{healthy_srv.server_address[1]}/v1',
-        'busy_ref': busy_ref,
-        'healthy_ref': healthy_ref,
-    }
-    busy_srv.shutdown(); healthy_srv.shutdown()
-
+# The `mock_servers` fixture and the `_MockLLMHandler` class now live in tests/conftest.py
+# (shared with the opt-in stress file). `mock_servers` is auto-available as a conftest
+# fixture; no local definition is needed here.
 
 class TestIntegrationMockServers:
     def test_no_hammering_failover_single_probe_recovery(self, router, mock_servers):
