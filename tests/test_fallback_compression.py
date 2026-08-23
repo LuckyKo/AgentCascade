@@ -574,6 +574,112 @@ class TestEndpointChainMaxInputTokensGuarantee:
 
 
 # ──────────────────────────────────────────────
+# 3e. Fallback-compression-misclass fix (reports/fallback-compression-misclass-investigation.md)
+#     PRIMARY: chain cfgs must keep each endpoint's TRUE max_input_tokens (no inflation).
+#     SECONDARY: a genuine llama.cpp 400 on a smaller assigned endpoint must classify as
+#                overflow and raise FallbackCompressionRequired.
+# ──────────────────────────────────────────────
+
+def _make_two_endpoint_router(limit_a, limit_b):
+    """Real APIRouter with two Coder endpoints (A at priority 0 = chain head, B at 1)."""
+    from agent_cascade.api_router import APIRouter, APIEndpoint
+
+    test_config_dir = tempfile.mkdtemp(prefix="ac_test_misclass_")
+    _orig_env = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
+    os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = test_config_dir
+    try:
+        pool = MagicMock()
+        pool.terminated_instances = set()
+        pool.is_instance_terminated.return_value = False
+
+        router = APIRouter(
+            default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+            config_dir=test_config_dir,
+        )
+        router._pool = pool
+        ep_a = APIEndpoint(
+            name="ep-a", api_base="http://a:8080/v1", model="model-a",
+            max_retries=0, max_input_tokens=limit_a,
+        )
+        ep_b = APIEndpoint(
+            name="ep-b", api_base="http://b:8080/v1", model="model-b",
+            max_retries=0, max_input_tokens=limit_b,
+        )
+        router.add_endpoint(ep_a)
+        router.add_endpoint(ep_b)
+        # A first (chain head / first-priority), B second.
+        router.set_agent_priorities("Coder", [ep_a.id, ep_b.id])
+        return router, ep_a, ep_b
+    finally:
+        if _orig_env is not None:
+            os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = _orig_env
+        else:
+            os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+        shutil.rmtree(test_config_dir, ignore_errors=True)
+
+
+class TestNoMaxInputTokensInflation:
+    """PRIMARY fix: the chain-head allocation must NOT inflate a smaller endpoint's
+    max_input_tokens. Before the fix, get_endpoint_chain overwrote every cfg's limit with
+    allocated_tokens (the first-priority endpoint's limit), blinding both the A1/A2 gate
+    and the client-side pre-check."""
+
+    def test_smaller_endpoint_keeps_true_limit(self):
+        """A 90k endpoint assigned behind a 165.5k head keeps 90k, not 165.5k."""
+        router, ep_a, ep_b = _make_two_endpoint_router(limit_a=165_500, limit_b=90_000)
+
+        chain = router.get_endpoint_chain("Coder", allocated_tokens=165_500)
+
+        by_model = {cfg.get('model'): cfg for cfg in chain}
+        assert by_model['model-a']['max_input_tokens'] == 165_500, \
+            "chain head must keep its own configured limit"
+        assert by_model['model-b']['max_input_tokens'] == 90_000, \
+            f"smaller endpoint inflated: got {by_model['model-b']['max_input_tokens']}, expected 90_000"
+
+    def test_smaller_endpoint_not_inflated_even_without_alloc(self):
+        """No inflation occurs even when allocated_tokens is omitted (behavior parity)."""
+        router, ep_a, ep_b = _make_two_endpoint_router(limit_a=165_500, limit_b=90_000)
+
+        chain = router.get_endpoint_chain("Coder")
+        by_model = {cfg.get('model'): cfg for cfg in chain}
+        assert by_model['model-b']['max_input_tokens'] == 90_000
+
+
+class TestGateClassifiesGenuineOverflowOnAssignedEndpoint:
+    """SECONDARY consequence of the PRIMARY fix: with truthful per-endpoint limits, a
+    genuine llama.cpp 400 on a SMALLER assigned endpoint (payload > that endpoint's true
+    limit, even though allocated_tokens is larger) must raise FallbackCompressionRequired."""
+
+    def test_400_on_smaller_assigned_endpoint_raises_fcr(self):
+        router, ep_a, ep_b = _make_two_endpoint_router(limit_a=165_500, limit_b=90_000)
+
+        # Rotate the cursor so B (90k) becomes the endpoint actually called.
+        router.advance_instance_endpoint("coder1")
+
+        # Payload well over 90k but under 165.5k: with the inflated value the old gate said
+        # "fits 165500" → service error; with B's true 90k limit it must be genuine overflow.
+        messages = _make_payload_messages(n_words=45_000)
+
+        def failing_call(llm_cfg, *args, **kwargs):
+            # We must actually be hitting the SMALL endpoint (proves rotation + no inflation).
+            assert llm_cfg.get('model') == 'model-b', f"expected model-b, got {llm_cfg.get('model')}"
+            assert llm_cfg.get('max_input_tokens') == 90_000, \
+                f"assigned endpoint limit inflated: {llm_cfg.get('max_input_tokens')}"
+            raise ModelServiceError(code='400', message="exceed_context_size_error: prompt is too long")
+
+        with pytest.raises(FallbackCompressionRequired) as exc_info:
+            router.call_with_fallback(
+                agent_type="Coder",
+                call_fn=failing_call,
+                allocated_tokens=165_500,
+                agent_instance_name="coder1",
+                messages=messages,
+            )
+
+        assert exc_info.value.instance_name == "coder1"
+
+
+# ──────────────────────────────────────────────
 # 4. Execution engine iterative compression (execution_engine.py) — REAL CODE PATHS
 # ──────────────────────────────────────────────
 
@@ -1709,4 +1815,126 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         assert reset_spy.call_count == 1, (
             f"Expected exactly one reset on normal generator exhaustion, "
             f"got {reset_spy.call_count} calls."
+        )
+
+
+# ──────────────────────────────────────────────
+# 5b. Part 2 — pre-send forced-compression guard is endpoint-truthful
+#     (reports/fallback-compression-misclass-investigation.md §5.2)
+# ──────────────────────────────────────────────
+
+class TestPreSendCompressionEndpointTruthful:
+    """The regular forced-compression guard must size against the limit of the endpoint
+    ACTUALLY about to be called (assigned_max_tokens), not just the first-priority limit.
+    Before Part 2, a payload that fit the big first-priority endpoint but overflowed a
+    smaller assigned endpoint would NOT compress pre-send."""
+
+    def _make_engine(self):
+        """Real ExecutionEngine with a mocked pool; settings use production thresholds."""
+        from agent_cascade.execution_engine import ExecutionEngine
+
+        pool = MagicMock()
+        instance = MagicMock()
+        compression_lock = MagicMock()
+        compression_lock.__enter__ = MagicMock()
+        compression_lock.__exit__ = MagicMock()
+        instance._compression_lock = compression_lock
+        instance.instance_name = "test-agent"
+        instance.agent_class = "Coder"
+        # First-turn path: no cached ground-truth count → guard recounts messages.
+        instance._last_actual_token_count = 0
+        instance._allocated_max_input_tokens = 0
+        instance._last_token_count_conversation_length = -1
+        instance._cached_token_count = 0
+        instance._force_compress_count = 0
+        instance._last_force_compress_time = 0.0
+
+        class Settings:
+            compression_force_threshold = 96.0
+            compression_warning_threshold = 90.0
+            compression_proactive_threshold = 95.0
+            compression_context_reserve_tokens = 3000
+            compression_max_attempts = 100
+            compression_force_cooldown = 0.0
+
+        pool.settings = Settings()
+        engine = ExecutionEngine(pool)
+        return engine, pool, instance
+
+    def _run_guard(self, engine, instance, assigned_max_tokens):
+        """Drive the guard with a deterministic 105k-token payload and a stubbed first-
+        priority resolution of 165.5k. Returns (triggered, force_compression_mock)."""
+        # Deterministic token count (real qwen_count is ~6 tokens/word — not exact). Stub it
+        # so the threshold math is precise: current_tokens == 105_000 exactly.
+        with patch.object(engine, "_count_history_tokens", return_value=105_000), \
+             patch.object(engine, "_get_max_tokens", return_value=165_500):
+            messages = [Message(role=USER, content="payload")]
+            llm_messages = list(messages)
+            with patch.object(engine, "_force_compression", return_value=True) as mock_force:
+                triggered = engine._check_and_trigger_compression(
+                    instance, messages, llm_messages, None, assigned_max_tokens=assigned_max_tokens
+                )
+        return triggered, mock_force
+
+    def test_triggers_against_assigned_endpoint_limit(self):
+        """A payload that fits the first-priority limit (165.5k) but overflows the assigned
+        endpoint's true limit (90k) MUST trigger pre-send compression."""
+        engine, pool, instance = self._make_engine()
+
+        # 105k vs effective_limit(90k - 3k reserve) = 87k → ~120% usage > 96% threshold.
+        triggered, mock_force = self._run_guard(engine, instance, assigned_max_tokens=90_000)
+
+        assert triggered is True, (
+            "Guard must compress pre-send against the assigned endpoint's true limit"
+        )
+        mock_force.assert_called_once()
+
+    def test_no_trigger_when_assigned_limit_is_larger(self):
+        """Same 105k payload with a large assigned limit (165.5k) fits → no compression."""
+        engine, pool, instance = self._make_engine()
+
+        # 105k vs effective_limit(165.5k - 3k) = 162.5k → ~65% usage < 96% threshold.
+        triggered, mock_force = self._run_guard(engine, instance, assigned_max_tokens=165_500)
+
+        assert triggered is False, (
+            "Payload fits the assigned endpoint's limit — no pre-send compression"
+        )
+        mock_force.assert_not_called()
+
+    def test_falls_back_to_first_priority_when_assigned_none(self):
+        """When assigned_max_tokens is None/absent, behavior is unchanged: sized against the
+        first-priority resolution (165.5k) → no compression for a 105k payload."""
+        engine, pool, instance = self._make_engine()
+
+        triggered, mock_force = self._run_guard(engine, instance, assigned_max_tokens=None)
+
+        assert triggered is False
+        mock_force.assert_not_called()
+
+    def test_assigned_resolution_failure_falls_back_to_first_priority(self):
+        """If resolving the assigned endpoint's limit raises (e.g. config reload mid-call),
+        _pre_llm_checks must NOT crash and must fall back to the prior first-priority behavior."""
+        engine, pool, instance = self._make_engine()
+        # Make get_endpoint_chain raise — simulates a transient failure.
+        pool.api_router.get_endpoint_chain = MagicMock(side_effect=RuntimeError("config reload"))
+
+        # Stub the upstream pre-LLM checks so we reach step 5 (compression trigger).
+        engine._check_stop_conditions = MagicMock(return_value=False)
+        engine._inject_async_messages = MagicMock(return_value=False)
+        engine.compression_handler = MagicMock()
+        engine.compression_handler.handle_rollback_command = MagicMock(return_value=False)
+        engine.compression_handler.handle_compress_command = MagicMock(return_value=False)
+
+        instance.agent_class = "Coder"
+        instance.instance_name = "test-agent"
+        messages = [Message(role=USER, content="payload")]
+
+        with patch.object(engine, "_check_and_trigger_compression", return_value=False) as mock_guard:
+            engine._pre_llm_checks(instance, messages, list(messages), None, [10])
+
+        # The guard must have been called with assigned_max_tokens=None (fallback), not a value.
+        assert mock_guard.call_count == 1
+        _, kwargs = mock_guard.call_args
+        assert kwargs.get('assigned_max_tokens') is None, (
+            "On resolution failure the guard must fall back to first-priority (assigned_max_tokens=None)"
         )

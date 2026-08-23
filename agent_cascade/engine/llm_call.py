@@ -106,7 +106,25 @@ class LLMCallMixin:
             return True  # Command handled — yield and continue
 
         # 5. Compression trigger (pass response for notification feedback)
-        if self._check_and_trigger_compression(instance, messages, llm_messages, response):
+        # Size the guard against the endpoint actually about to be called (post-cursor-
+        # rotation chain head), not just the first-priority limit — so failover onto a
+        # smaller assigned endpoint still compresses pre-send. Best-effort: any failure
+        # leaves assigned_max_tokens None and the guard falls back to its prior behavior.
+        _assigned_max_tokens = None
+        try:
+            if self.pool.api_router and hasattr(self.pool.api_router, 'get_endpoint_chain'):
+                _agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
+                _chain = self.pool.api_router.get_endpoint_chain(
+                    _agent_type, instance_name=instance.instance_name,
+                )
+                if _chain:
+                    _limit = _chain[0].get('max_input_tokens')
+                    if isinstance(_limit, int) and _limit > 0:
+                        _assigned_max_tokens = _limit
+        except Exception as _e:
+            logger.debug(f"[PRE_LLM] Failed to resolve assigned endpoint limit for {inst_name}: {_e}")
+
+        if self._check_and_trigger_compression(instance, messages, llm_messages, response, assigned_max_tokens=_assigned_max_tokens):
             logger.debug(f"[PRE_LLM] Compression triggered for {inst_name}")
             turns_wrapper[0] -= 1  # R5: forced compression is a real cycle
             return True  # Compression triggered — yield and continue
