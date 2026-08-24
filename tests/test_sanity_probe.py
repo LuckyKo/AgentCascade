@@ -1,22 +1,22 @@
-"""Fix D — pre-allocation API sanity probe (subagent_timeout_fix_plan.md §5, v3).
+"""Fix D — lightweight pre-allocation API sanity probe (subagent_timeout_fix_plan.md §5, v3).
 
 Covers:
-- _sanity_probe: success path; ModelServiceError 4xx → False; non-4xx service error → False;
-  unexpected exception → False; uses max_tokens=1 + request_timeout.
+- _sanity_probe: success path (HTTP 200); 401/403 auth errors → False; 404 models not found → False;
+  connection errors / exceptions → False; checks base_url/models.
 - pre_validate_endpoint_chain: filters failing endpoints; respects cache TTL (no re-probe);
   disabled via SANITY_PROBE_ENABLED=False; blacklisted endpoints skipped WITHOUT probing;
   successful probe clears blacklist + failure count; ALL-endpoints-fail raises a clear error.
 
-No real LLM/network required: get_chat_model is mocked per test.
+Uses fast GET /models requests (no LLM chat completions or model loading).
 """
 
 import time
 from unittest.mock import MagicMock, patch
+import requests
 
 import pytest
 
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
-from agent_cascade.llm.base import ModelServiceError
 from tests.conftest import _add_endpoint  # noqa: F401 (shared helper; router fixture from conftest)
 
 # Module under test — patch settings constants at module level (imported by name, same
@@ -33,11 +33,13 @@ def _key(base, model):
     return (normalize_api_base(base), model)
 
 
-def _ok_chat():
-    """MagicMock llm whose chat() returns a single assistant message (non-streaming)."""
-    llm = MagicMock()
-    llm.chat.return_value = [MagicMock(role='assistant', content='ok')]
-    return llm
+def _ok_response():
+    """Mock requests.Response returning HTTP 200."""
+    resp = MagicMock(spec=requests.Response)
+    resp.status_code = 200
+    resp.json.return_value = {'data': [{'id': 'test-model', 'object': 'model'}]}
+    resp.text = '{"data": []}'
+    return resp
 
 
 # ============================================================================
@@ -46,43 +48,101 @@ def _ok_chat():
 
 class TestSanityProbe:
     def test_success(self, router):
-        """A successful minimal chat completion → True."""
-        with patch('agent_cascade.llm.get_chat_model', return_value=_ok_chat()) as mock_gcm:
+        """A successful GET /models (HTTP 200) → True."""
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
             assert router._sanity_probe(_cfg()) is True
-        cfg_arg = mock_gcm.call_args[0][0]
-        assert cfg_arg['model'] == 'test-model'
+        assert mock_get.called
+        url = mock_get.call_args[0][0]
+        assert url == 'http://127.0.0.1:1234/v1/models'
 
-    def test_400_failure_returns_false(self, router):
-        """ModelServiceError with a 4xx code (the incident's failure mode) → False."""
-        llm = MagicMock()
-        llm.chat.side_effect = ModelServiceError(
-            code='400', message="Function tools with reasoning_effort are not supported")
-        with patch('agent_cascade.llm.get_chat_model', return_value=llm):
+    def test_401_auth_failure_returns_false(self, router):
+        """HTTP 401 Unauthorized → False."""
+        resp = MagicMock(spec=requests.Response)
+        resp.status_code = 401
+        resp.text = '{"error": "Invalid API key"}'
+        with patch('requests.get', return_value=resp):
             assert router._sanity_probe(_cfg()) is False
 
-    def test_non_4xx_service_error_returns_false(self, router):
-        """Non-4xx ModelServiceError (e.g. 503) → conservatively False."""
-        llm = MagicMock()
-        llm.chat.side_effect = ModelServiceError(code='503', message='server busy')
-        with patch('agent_cascade.llm.get_chat_model', return_value=llm):
+    def test_503_service_error_returns_false(self, router):
+        """HTTP 503 Service Unavailable → False."""
+        resp = MagicMock(spec=requests.Response)
+        resp.status_code = 503
+        resp.text = '{"error": "Server unavailable"}'
+        with patch('requests.get', return_value=resp):
+            assert router._sanity_probe(_cfg()) is False
+
+    def test_connection_error_returns_false(self, router):
+        """Connection refused or timeout → False."""
+        with patch('requests.get', side_effect=requests.exceptions.ConnectionError('Connection refused')):
             assert router._sanity_probe(_cfg()) is False
 
     def test_unexpected_exception_returns_false(self, router):
-        """Any unexpected error (bad cfg → ValueError, SDK crash, etc.) → False."""
-        with patch('agent_cascade.llm.get_chat_model', side_effect=ValueError('Invalid model cfg')):
+        """Any unexpected error → False."""
+        with patch('requests.get', side_effect=ValueError('Unexpected error')):
             assert router._sanity_probe(_cfg()) is False
 
-    def test_uses_minimal_call_shape(self, router):
-        """Probe must be non-streaming with max_tokens=1 and the configured timeout."""
-        llm = _ok_chat()
-        with patch('agent_cascade.llm.get_chat_model', return_value=llm):
+    def test_uses_configured_timeout(self, router):
+        """Probe uses SANITY_PROBE_TIMEOUT_SECONDS."""
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
             router._sanity_probe(_cfg())
-        kwargs = llm.chat.call_args.kwargs
-        assert kwargs['stream'] is False
-        assert len(kwargs['functions']) == 1
-        extra = kwargs['extra_generate_cfg']
-        assert extra['max_tokens'] == 1
-        assert extra['request_timeout'] == router_mod.SANITY_PROBE_TIMEOUT_SECONDS
+        kwargs = mock_get.call_args.kwargs
+        assert kwargs['timeout'] == (1.5, router_mod.SANITY_PROBE_TIMEOUT_SECONDS)
+
+    def test_404_fallback_to_v1_models(self, router):
+        """When base doesn't end with /v1 and GET /models returns 404, retries with /v1/models."""
+        cfg = _cfg(base='http://127.0.0.1:1234')
+
+        resp_404 = MagicMock(spec=requests.Response)
+        resp_404.status_code = 404
+        resp_404.text = 'not found'
+        resp_200 = _ok_response()
+
+        with patch('requests.get', side_effect=[resp_404, resp_200]) as mock_get:
+            assert router._sanity_probe(cfg) is True
+        assert mock_get.call_count == 2
+        urls_called = [call[0][0] for call in mock_get.call_args_list]
+        assert urls_called[0] == 'http://127.0.0.1:1234/models'
+        assert urls_called[1] == 'http://127.0.0.1:1234/v1/models'
+
+    def test_no_fallback_when_base_ends_with_v1(self, router):
+        """When base already ends with /v1, a 404 does NOT trigger a fallback retry."""
+        cfg = _cfg(base='http://127.0.0.1:1234/v1')
+
+        resp_404 = MagicMock(spec=requests.Response)
+        resp_404.status_code = 404
+        resp_404.text = 'not found'
+
+        with patch('requests.get', return_value=resp_404) as mock_get:
+            assert router._sanity_probe(cfg) is False
+        assert mock_get.call_count == 1
+        assert mock_get.call_args[0][0] == 'http://127.0.0.1:1234/v1/models'
+
+    def test_no_auth_header_when_api_key_empty(self, router):
+        """When api_key is not set or is 'EMPTY', no Authorization header is sent."""
+        cfg = _cfg()
+        # No api_key key at all in the config dict.
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
+            assert router._sanity_probe(cfg) is True
+        headers = mock_get.call_args.kwargs['headers']
+        assert 'Authorization' not in headers
+
+    def test_no_auth_header_when_api_key_is_empty_string(self, router):
+        """api_key set to empty string → no Authorization header."""
+        cfg = _cfg()
+        cfg['api_key'] = ''
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
+            assert router._sanity_probe(cfg) is True
+        headers = mock_get.call_args.kwargs['headers']
+        assert 'Authorization' not in headers
+
+    def test_no_auth_header_when_api_key_is_empty_literal(self, router):
+        """api_key set to the literal string 'EMPTY' → no Authorization header."""
+        cfg = _cfg()
+        cfg['api_key'] = 'EMPTY'
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
+            assert router._sanity_probe(cfg) is True
+        headers = mock_get.call_args.kwargs['headers']
+        assert 'Authorization' not in headers
 
 
 # ============================================================================
@@ -90,19 +150,24 @@ class TestSanityProbe:
 # ============================================================================
 
 class TestPreValidateEndpointChain:
+    @pytest.fixture(autouse=True)
+    def enable_probe(self, monkeypatch):
+        monkeypatch.setattr(router_mod, 'SANITY_PROBE_ENABLED', True)
+
     def test_filters_failing_endpoint(self, router):
-        """A 400-probe endpoint is dropped; a healthy one stays."""
+        """A failing-probe endpoint is dropped; a healthy one stays."""
         bad = _cfg(base='http://127.0.0.1:1235/v1', model='bad-model')
         good = _cfg()
 
-        def fake_gcm(cfg):
-            if cfg['api_base'] == 'http://127.0.0.1:1235/v1':
-                m = MagicMock()
-                m.chat.side_effect = ModelServiceError(code='400', message='not supported')
-                return m
-            return _ok_chat()
+        def fake_get(url, *a, **k):
+            if '1235' in url:
+                resp = MagicMock(spec=requests.Response)
+                resp.status_code = 401
+                resp.text = 'unauthorized'
+                return resp
+            return _ok_response()
 
-        with patch('agent_cascade.llm.get_chat_model', side_effect=fake_gcm):
+        with patch('requests.get', side_effect=fake_get):
             result = router.pre_validate_endpoint_chain([bad, good])
         assert result == [good]
         # Failure is cached so subsequent calls within TTL don't re-probe.
@@ -111,15 +176,15 @@ class TestPreValidateEndpointChain:
     def test_cache_ttl_respected(self, router):
         """A successful probe is cached; a second call within TTL makes no new probe."""
         cfg = _cfg()
-        with patch('agent_cascade.llm.get_chat_model', return_value=_ok_chat()) as mock_gcm:
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
             assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
             assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
-        assert mock_gcm.call_count == 1, "second call within TTL must be served from cache"
+        assert mock_get.call_count == 1, "second call within TTL must be served from cache"
 
     def test_cache_ttl_expiry_reprobes(self, router):
         """After the TTL elapses the endpoint is probed again."""
         cfg = _cfg()
-        with patch('agent_cascade.llm.get_chat_model', return_value=_ok_chat()) as mock_gcm:
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
             assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
             # Age the cache entry past the TTL.
             key = _key(cfg['api_base'], cfg['model'])
@@ -127,15 +192,15 @@ class TestPreValidateEndpointChain:
                 success, ts = router._probe_cache[key]
                 router._probe_cache[key] = (success, ts - router_mod.SANITY_PROBE_TTL_SECONDS - 1)
             assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
-        assert mock_gcm.call_count == 2
+        assert mock_get.call_count == 2
 
     def test_disabled_via_settings(self, router):
         """SANITY_PROBE_ENABLED=False → chain returned as-is, zero probes."""
         cfg = _cfg()
         with patch.object(router_mod, 'SANITY_PROBE_ENABLED', False), \
-             patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+             patch('requests.get') as mock_get:
             assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
-            assert mock_gcm.call_count == 0
+            assert mock_get.call_count == 0
 
     def test_blacklisted_endpoint_skipped_without_probe(self, router):
         """Blacklist takes precedence over probe — no API call is fired.
@@ -149,11 +214,11 @@ class TestPreValidateEndpointChain:
         with router._lock:
             router._endpoint_blacklist = {key: time.time() + 7200}
         try:
-            with patch('agent_cascade.llm.get_chat_model', return_value=_ok_chat()) as mock_gcm:
+            with patch('requests.get', return_value=_ok_response()) as mock_get:
                 result = router.pre_validate_endpoint_chain([bad, good])
             # Blacklisted endpoint skipped (no probe), healthy one probed and kept.
             assert result == [good]
-            assert mock_gcm.call_count == 1, "blacklisted endpoint must not be probed"
+            assert mock_get.call_count == 1, "blacklisted endpoint must not be probed"
         finally:
             with router._lock:
                 del router._endpoint_blacklist
@@ -171,7 +236,7 @@ class TestPreValidateEndpointChain:
             router._endpoint_blacklist = {key: time.time() - 1}
             router._endpoint_deterministic_failures = {key: 3}
         try:
-            with patch('agent_cascade.llm.get_chat_model', return_value=_ok_chat()):
+            with patch('requests.get', return_value=_ok_response()):
                 result = router.pre_validate_endpoint_chain([cfg])
             assert result == [cfg]
             with router._lock:
@@ -187,12 +252,13 @@ class TestPreValidateEndpointChain:
         bad1 = _cfg(base='http://127.0.0.1:1235/v1', model='bad-1')
         bad2 = _cfg(base='http://127.0.0.1:1236/v1', model='bad-2')
 
-        def fake_gcm(cfg):
-            m = MagicMock()
-            m.chat.side_effect = ModelServiceError(code='400', message='not supported')
-            return m
+        def fake_get(url, *a, **k):
+            resp = MagicMock(spec=requests.Response)
+            resp.status_code = 401
+            resp.text = 'unauthorized'
+            return resp
 
-        with patch('agent_cascade.llm.get_chat_model', side_effect=fake_gcm):
+        with patch('requests.get', side_effect=fake_get):
             with pytest.raises(RuntimeError, match='sanity probe'):
                 router.pre_validate_endpoint_chain([bad1, bad2])
 
@@ -206,25 +272,30 @@ class TestPreValidateEndpointChain:
 # ============================================================================
 
 class TestCallWithFallbackIntegration:
+    @pytest.fixture(autouse=True)
+    def enable_probe(self, monkeypatch):
+        monkeypatch.setattr(router_mod, 'SANITY_PROBE_ENABLED', True)
+
     def test_probe_runs_and_skips_bad_endpoint(self, router):
-        """call_with_fallback probes the chain; a 400-probe endpoint is never called."""
+        """call_with_fallback probes the chain; a failing endpoint is never called."""
         _add_endpoint(router, 'bad', 'http://127.0.0.1:1235/v1', model='bad-model')
         router.set_agent_priorities('coder', [router.list_endpoints()[-1].id])
 
         called = []
 
-        def fake_gcm(cfg):
-            if cfg.get('model') == 'bad-model':
-                m = MagicMock()
-                m.chat.side_effect = ModelServiceError(code='400', message='not supported')
-                return m
-            return _ok_chat()
+        def fake_get(url, *a, **k):
+            if '1235' in url:
+                resp = MagicMock(spec=requests.Response)
+                resp.status_code = 401
+                resp.text = 'unauthorized'
+                return resp
+            return _ok_response()
 
         def call_fn(llm_cfg, *a, **k):
             called.append(llm_cfg.get('model'))
             return 'done'
 
-        with patch('agent_cascade.llm.get_chat_model', side_effect=fake_gcm):
+        with patch('requests.get', side_effect=fake_get):
             result = router.call_with_fallback('coder', call_fn)
         assert result == 'done'
         # The bad endpoint was filtered by the probe — only the default endpoint was called.

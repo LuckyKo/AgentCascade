@@ -23,6 +23,13 @@ import pytest
 from agent_cascade.api_router import APIRouter, APIEndpoint
 from agent_cascade.exceptions import CharacterRunDetected, MaxTokenExceeded
 from agent_cascade.llm.base import BaseChatModel, ModelServiceError
+import agent_cascade.api_router_pkg.router as router_mod
+
+
+@pytest.fixture(autouse=True)
+def disable_sanity_probe(monkeypatch):
+    """These baseline tests measure in-memory router dispatch overhead with dummy URLs."""
+    monkeypatch.setattr(router_mod, 'SANITY_PROBE_ENABLED', False)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -412,14 +419,9 @@ class TestPerformanceBaseline:
             list(result)
             return True
 
-        # Neutralize the Fix D pre-allocation sanity probe (7b4b303): it would issue a real
-        # HTTP probe to this test's dead endpoint (localhost:9984, nothing listens), hanging
-        # ~20s on SDK timeout. This test measures router overhead only, not network I/O —
-        # probe behavior is covered by tests/test_sanity_probe.py.
-        with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain: chain):
-            start = time.time()
-            router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
-            elapsed = time.time() - start
+        start = time.time()
+        router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
+        elapsed = time.time() - start
 
         assert llm.call_count == 1
         print(f"[BASELINE] Zero retries: {elapsed:.3f}s (expected <0.5s)")

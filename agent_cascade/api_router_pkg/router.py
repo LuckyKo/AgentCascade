@@ -22,6 +22,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+import requests
+
 from agent_cascade.settings import (
     ENDPOINT_COOLDOWN_SECONDS,
     ENDPOINT_FAILURE_CLEANUP_HOURS,
@@ -647,61 +649,61 @@ class APIRouter:
         return endpoint_configs
 
     # ── Pre-allocation Sanity Probe (Fix D) ───────────────────────────────
-    # Catches deterministic 400s (e.g. "Function tools with reasoning_effort are
-    # not supported") BEFORE an agent turn burns its retry budget on a
-    # misconfigured endpoint. The probe runs OUTSIDE get_endpoint_chain: that
-    # method holds self._lock for its entire body, so any network call inside it
-    # would block every other thread needing the lock (deadlock risk). Instead,
-    # call_with_fallback calls pre_validate_endpoint_chain() AFTER
-    # get_endpoint_chain returns — the lock is already released there.
+    # Lightweight reachability and auth check via GET /models. Does NOT validate
+    # model readiness or call-shape compatibility. The probe runs OUTSIDE
+    # get_endpoint_chain: that method holds self._lock for its entire body, so
+    # any network call inside it would block every other thread needing the lock
+    # (deadlock risk). Instead, call_with_fallback calls pre_validate_endpoint_chain()
+    # AFTER get_endpoint_chain returns — the lock is already released there.
 
     def _sanity_probe(self, endpoint_cfg: dict) -> bool:
-        """Lightweight probe: minimal non-streaming chat completion with 1 tool + max_tokens=1.
+        """Lightweight probe: checks endpoint reachability and auth via a fast GET /models.
 
-        Returns True if the endpoint accepts the call shape, False otherwise.
-        Catches deterministic 400s (e.g., unsupported tools+reasoning_effort combo).
+        Does NOT issue chat completion POST requests, avoiding model loading/thrashing
+        on local servers (LM Studio, llama.cpp, etc.) and saving token/inference latency.
 
+        Returns True if the server responds successfully (HTTP 200), False otherwise.
         MUST NOT be called while holding self._lock (makes a network call).
         """
-        from agent_cascade.llm import get_chat_model
-        from agent_cascade.llm.base import ModelServiceError, Message, USER
+        api_base = endpoint_cfg.get('api_base') or endpoint_cfg.get('model_server', '')
+        if not api_base:
+            return True
+
+        api_key = endpoint_cfg.get('api_key', 'EMPTY')
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key and api_key != 'EMPTY' else {}
+        timeout = (1.5, SANITY_PROBE_TIMEOUT_SECONDS)
 
         try:
-            llm = get_chat_model(endpoint_cfg)
+            base = api_base.rstrip('/')
+            url = f"{base}/models"
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            if resp.status_code == 404 and not base.endswith('/v1'):
+                # Try with /v1/models if base didn't include /v1
+                url_v1 = f"{base}/v1/models"
+                resp = requests.get(url_v1, headers=headers, timeout=timeout)
 
-            # Minimal probe: 1 message, 1 tool, max_tokens=1, non-streaming.
-            # request_timeout is in ALLOWED_LLM_PARAMS and maps to the OpenAI SDK
-            # client timeout, bounding the whole HTTP round-trip.
-            messages = [Message(role=USER, content="hi")]
-            functions = [{
-                'name': 'test',
-                'description': 'Test function',
-                'parameters': {'type': 'object', 'properties': {}}
-            }]
-
-            llm.chat(
-                messages=messages,
-                functions=functions,
-                stream=False,
-                extra_generate_cfg={
-                    'max_tokens': 1,
-                    'request_timeout': SANITY_PROBE_TIMEOUT_SECONDS,
-                }
-            )
-            return True
-        except ModelServiceError as e:
-            code = str(getattr(e, 'code', None) or '')
-            if code in ('400', '401', '403', '404', '422'):
+            if 200 <= resp.status_code < 300:
+                return True
+            elif resp.status_code in (401, 403):
                 logger.warning(
-                    f"[SanityProbe] Endpoint {endpoint_cfg.get('api_base')} "
-                    f"model={endpoint_cfg.get('model')} rejected probe (HTTP {code}): {e}"
+                    f"[SanityProbe] Endpoint {api_base} rejected probe with auth error (HTTP {resp.status_code})"
                 )
+                return False
+            elif resp.status_code == 404:
+                logger.warning(
+                    f"[SanityProbe] Endpoint {api_base} models endpoint not found (HTTP 404)"
+                )
+                return False
             else:
-                logger.warning(f"[SanityProbe] Probe failed for {endpoint_cfg.get('api_base')}: {e}")
+                logger.warning(
+                    f"[SanityProbe] Endpoint {api_base} returned HTTP {resp.status_code}"
+                )
+                return False
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[SanityProbe] Probe connection failed for {api_base}: {e}")
             return False
         except Exception as e:
-            # Conservative: any unexpected failure (bad cfg, timeout, SDK error) → False.
-            logger.warning(f"[SanityProbe] Unexpected probe error: {e}")
+            logger.warning(f"[SanityProbe] Unexpected probe error for {api_base}: {e}")
             return False
 
     def pre_validate_endpoint_chain(self, chain: List[dict]) -> List[dict]:

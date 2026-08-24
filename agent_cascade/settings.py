@@ -193,20 +193,17 @@ ENDPOINT_FAILURE_CLEANUP_HOURS: int = int(os.getenv(
 LLM_CALL_DEADLINE_SECONDS: int = int(os.getenv(
     'QWEN_AGENT_LLM_CALL_DEADLINE_SECONDS', 900))  # Wall-clock deadline (seconds) for one LLM call, all retries included
 
-# Phase 1: Fix D — pre-allocation API sanity probe.
-# Before the router allocates an endpoint to a real call, it fires a minimal
-# non-streaming chat completion (1 tool + max_tokens=1) to verify the endpoint
-# accepts the tools+reasoning_effort call shape. Catches deterministic 400s
-# (e.g. "Function tools with reasoning_effort are not supported") BEFORE any
-# agent turn burns its retry budget on them. Results are cached per
-# (normalized_base, model) for SANITY_PROBE_TTL_SECONDS to avoid probing every
-# turn. Set SANITY_PROBE_ENABLED to False to disable entirely.
+# Phase 1: Fix D — lightweight pre-allocation API sanity probe.
+# Before the router allocates an endpoint to a real call, it checks reachability
+# and auth via a fast GET /models request (no model loading or GPU thrashing).
+# Results are cached per (normalized_base, model) for SANITY_PROBE_TTL_SECONDS.
+# Set SANITY_PROBE_ENABLED to False to disable.
 SANITY_PROBE_ENABLED: bool = os.getenv(
     'QWEN_AGENT_SANITY_PROBE_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')  # Master toggle for the pre-allocation sanity probe
 SANITY_PROBE_TTL_SECONDS: int = int(os.getenv(
     'QWEN_AGENT_SANITY_PROBE_TTL_SECONDS', 600))  # Cache TTL (seconds) for probe results per (base, model)
 SANITY_PROBE_TIMEOUT_SECONDS: float = float(os.getenv(
-    'QWEN_AGENT_SANITY_PROBE_TIMEOUT_SECONDS', 20.0))  # HTTP timeout (seconds) for the probe request itself
+    'QWEN_AGENT_SANITY_PROBE_TIMEOUT_SECONDS', 5.0))  # HTTP timeout (seconds) for the lightweight probe GET request
 
 # Phase 2: Fix B1 — endpoint blacklist for deterministic failures.
 # An endpoint that fails ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD consecutive times

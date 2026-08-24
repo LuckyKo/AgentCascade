@@ -81,7 +81,7 @@ def _get_cached_client(base_url: str, api_key: str) -> openai.OpenAI:
             HTTP_POOL_TIMEOUT,
         )
         keepalive = float(os.environ.get('QWEN_AGENT_LM_STUDIO_KEEPALIVE', str(LM_STUDIO_KEEPALIVE_SECONDS)))
-        logger.debug(f"[CACHE] MISS creating new client key={key}")
+        logger.debug(f"[CACHE] MISS creating new client for {base_url}")
         _CLIENT_CACHE[key] = openai.OpenAI(
             base_url=base_url,
             api_key=api_key,
