@@ -101,3 +101,4 @@ rules:
   - Deliver production-quality code.
   - Use existing skills and lessons, improve on them if used. 
   - Save important skills/memories gained before delivering final result. Your work has value beyond the final delivery, don't let it go to waste.
+  - Reasoning effort: low — focus on action and direct evidence rather than overthinking
