@@ -42,6 +42,23 @@ from agent_cascade.async_shell_pkg.constants import (  # noqa: F401
     VIEWER_EXIT_WAIT_TIMEOUT,
 )
 
+
+def _dead_shell_message(agent_name: str, tool_id: int) -> str:
+    """Error message for control calls against a shell whose record was cleaned up.
+
+    The shell has completed or crashed and its task entry is gone. The message must
+    stay unambiguously terminal so agents do not misread it as transient and re-poll
+    in a loop (see reports/async_shell_polling_bug_status.md). The leading
+    "No running shell found" substring is asserted by tests and must be kept.
+    """
+    return (
+        f"No running shell found for agent '{agent_name}' with tool_id {tool_id} — "
+        f"TERMINAL: this shell has completed or crashed and its record was cleaned up. "
+        f"Do NOT poll again; the result is unobtainable from here (any completion message "
+        f"was already queued). Continue without it."
+    )
+
+
 class AsyncShellTracker:
     """Manages background shell processes across all agents.
 
@@ -1119,7 +1136,7 @@ class AsyncShellTracker:
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
-            return f"No running shell found for agent '{agent_name}' with tool_id {tool_id}."
+            return _dead_shell_message(agent_name, tool_id)
 
         elapsed = _elapsed_for_task(task)
         try:
@@ -1151,7 +1168,7 @@ class AsyncShellTracker:
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
-            return f"No running shell found for agent '{agent_name}' with tool_id {tool_id}."
+            return _dead_shell_message(agent_name, tool_id)
 
         try:
             with task._lock:
@@ -1203,7 +1220,7 @@ class AsyncShellTracker:
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
-            return f"No running shell found for agent '{agent_name}' with tool_id {tool_id}."
+            return _dead_shell_message(agent_name, tool_id)
 
         try:
             with task._lock:
@@ -1244,7 +1261,7 @@ class AsyncShellTracker:
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
-            return f"No running shell found for agent '{agent_name}' with tool_id {tool_id}."
+            return _dead_shell_message(agent_name, tool_id)
 
         with task._lock:
             old = task.heartbeat_interval
@@ -1268,7 +1285,7 @@ class AsyncShellTracker:
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
-            return f"No running shell found for agent '{agent_name}' with tool_id {tool_id}."
+            return _dead_shell_message(agent_name, tool_id)
 
         # Read status fields under lock
         with task._lock:
