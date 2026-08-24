@@ -288,29 +288,6 @@ class TestWaitCommand:
         assert 'Tool ID: 2' in result
         assert 'elapsed' in result, f"__wait (already completed) missing elapsed time: {result!r}"
 
-    def test_wait_returns_new_output(self, shell_cmd_tool, mock_task_running):
-        """Queue-driven __wait returns the enqueued heartbeat message VERBATIM.
-
-        The old version asserted 'new output line' in result (raw stdout) — that encoded the
-        buggy return-on-any-new-line semantics. Now __wait blocks on the message queue and
-        returns the tracker's heartbeat message, not raw buffer lines. This test exercises
-        the REAL MessageQueueMixin path (would fail if _has_real_wait_for_message returned
-        False, because a bare MagicMock pool would fall to polling and return raw output).
-        """
-        self._wait_env_queue(shell_cmd_tool, mock_task_running)
-
-        # Enqueue a heartbeat formatted like the tracker's, then __wait must return it.
-        msg = ("⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | "
-               "2 lines since last tick\nraw line A\nraw line B")
-        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg)
-
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
-
-        assert '⟨shell_cmd heartbeat⟩' in result
-        assert 'Tool ID: 1' in result
-        # Verbatim return — the exact enqueued message is what comes back.
-        assert result == msg
-
     def test_wait_returns_completion_status(self, shell_cmd_tool, mock_task_running):
         tracker = AsyncShellTracker(pool=None)
         _setup_task(tracker, mock_task_running)

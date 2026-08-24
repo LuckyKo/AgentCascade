@@ -544,7 +544,6 @@ class ShellCmd(BaseTool):
                         text = str(m)
                     except Exception as e:
                         # Non-string message whose __str__ failed — treat as "not ours".
-                        # (KeyboardInterrupt/SystemExit are BaseException and would NOT be caught here.)
                         logger.debug("[shell_cmd] _is_our_shell_msg: failed to str() message: %s", e)
                         return False
                 if not text.startswith('⟨shell_cmd'):
