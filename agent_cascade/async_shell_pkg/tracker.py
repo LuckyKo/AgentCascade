@@ -40,7 +40,36 @@ from agent_cascade.async_shell_pkg.constants import (  # noqa: F401
     DRAIN_THREAD_FLUSH_DELAY,
     LAUNCH_POLL_INTERVAL,
     VIEWER_EXIT_WAIT_TIMEOUT,
+    SPAWN_PUBLISH_TIMEOUT,
 )
+
+
+class _PendingSpawn:
+    """Placeholder Popen published to ``task.process`` before the real spawn returns.
+
+    The real ``subprocess.Popen`` can block for several seconds on some platforms.
+    To avoid stalling ``launch()`` and the tracking thread's early-completion check,
+    a lightweight placeholder is published immediately; the real Popen is swapped in
+    under ``task._lock`` once the spawn thread finishes.
+
+    ``poll()`` returns ``None`` to mean "still starting" — readers that catch this
+    placeholder simply keep polling until the swap lands. Pipe buffers hold all
+    output until the drain threads start, so nothing is lost.
+
+    Stub attributes (``pid``, ``stdin``, etc.) return safe placeholder values
+    (e.g., ``pid=0``, ``stdin=None``) so accidental access does not raise
+    ``AttributeError`` — callers that check truthiness will see "not available".
+    """
+
+    pid = 0
+    returncode = None
+    stdin = None
+    stdout = None
+    stderr = None
+
+    def poll(self):
+        """Return None to indicate the real process has not started yet."""
+        return None
 
 
 def _dead_shell_message(agent_name: str, tool_id: int) -> str:
@@ -386,22 +415,102 @@ class AsyncShellTracker:
                 # Re-apply UTF-8 config since we modified the command
                 command, creationflags = configure_windows_utf8(command, create_new_console=task.console_window)
 
-        proc = subprocess.Popen(
-            command,
-            cwd=str(cwd) if cwd else None,
-            shell=True,
-            stdin=subprocess.PIPE,      # Enable stdin for interactive input via send_input()
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            creationflags=creationflags,
-            start_new_session=True,
-            env=env,
-        )
+        # ── Publish a placeholder IMMEDIATELY, Popen happens off-thread ──
+        # subprocess.Popen with pipes can block for several seconds on this
+        # platform (observed: 3-17 s stalls while the child is already done).
+        # If that happens inside _spawn_process, launch()'s early check spins
+        # on "task.process is None" for the whole stall and misses fast
+        # completions — the root cause of the TestStderrCapture flake.
+        # Fix: publish a placeholder process object right away so launch() and
+        # _poll_loop proceed within ~50 ms; the real Popen runs in a spawn
+        # thread and is swapped in under task._lock when it returns. Readers
+        # that catch the placeholder poll() (returns None → "still running")
+        # simply keep polling until the swap lands. Pipe buffers hold all
+        # output until the drain threads start, so nothing is lost.
+        with task._lock:
+            task.pid = 0
+            task.process = _PendingSpawn()
 
-        # Set PID on the task so status queries can report it
+        spawn_result = {}
+
+        def _do_spawn():
+            try:
+                p = subprocess.Popen(
+                    command,
+                    cwd=str(cwd) if cwd else None,
+                    shell=True,
+                    stdin=subprocess.PIPE,      # Enable stdin for interactive input via send_input()
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    creationflags=creationflags,
+                    start_new_session=True,
+                    env=env,
+                )
+                spawn_result['proc'] = p
+            except Exception as e:  # noqa: BLE001 - surfaced below after cleanup
+                spawn_result['error'] = e
+
+        spawn_thread = threading.Thread(
+            target=_do_spawn, daemon=True, name=f'async_shell_spawn_{tool_id}',
+        )
+        spawn_thread.start()
+
+        # Wait for the spawn thread to finish (or fail). Bounded: a
+        # pathological Popen stall must not hang launch() forever.
+        deadline = time.time() + SPAWN_PUBLISH_TIMEOUT
+        while 'proc' not in spawn_result and 'error' not in spawn_result:
+            if time.time() >= deadline:
+                with task._lock:
+                    if isinstance(task.process, _PendingSpawn):
+                        task.process = None  # Revert placeholder
+                # The spawn thread may still be running. Join briefly; if it
+                # created a process in the meantime, kill it to avoid orphans.
+                spawn_thread.join(timeout=5)
+                orphan_proc = spawn_result.get('proc')
+                if orphan_proc is not None:
+                    try:
+                        self._kill_process_tree(orphan_proc, agent_name, tool_id)
+                    except Exception as kill_err:
+                        logger.warning(
+                            f"[AsyncShell] Failed to kill orphaned spawn process "
+                            f"for {agent_name} tool_id={tool_id}: {kill_err}"
+                        )
+                elif spawn_thread.is_alive():
+                    logger.warning(
+                        f"[AsyncShell] Spawn thread for {agent_name} tool_id={tool_id} "
+                        f"did not finish after timeout — daemon thread will be abandoned "
+                        f"(it dies at interpreter exit)"
+                    )
+                raise RuntimeError(
+                    f"Subprocess spawn did not complete within {SPAWN_PUBLISH_TIMEOUT:.0f}s "
+                    f"for {agent_name} tool_id={tool_id}"
+                )
+            time.sleep(0.05)
+
+        if 'error' in spawn_result:
+            # Spawn failed — revert placeholder so readers see no process.
+            with task._lock:
+                if isinstance(task.process, _PendingSpawn):
+                    task.process = None
+            # Join the spawn thread and clean up a process that may have been
+            # created before the error was recorded (defensive; rare).
+            spawn_thread.join(timeout=5)
+            orphan_proc = spawn_result.get('proc')
+            if orphan_proc is not None:
+                try:
+                    self._kill_process_tree(orphan_proc, agent_name, tool_id)
+                except Exception as kill_err:
+                    logger.warning(
+                        f"[AsyncShell] Failed to kill orphaned spawn process "
+                        f"for {agent_name} tool_id={tool_id}: {kill_err}"
+                    )
+            raise spawn_result['error']
+        proc = spawn_result['proc']
+
+        # Swap the real Popen in under lock (readers may be polling the placeholder).
         with task._lock:
             task.pid = proc.pid
             task.process = proc
@@ -692,10 +801,11 @@ class AsyncShellTracker:
             logger.warning(
                 f"[AsyncShell] Track error for {agent_name} tool_id={tool_id}: {e}"
             )
-            # Clean up processes if they exist to avoid orphans
+            # Clean up processes if they exist to avoid orphans.
+            # Skip the placeholder (spawn never produced a real process).
             with task._lock:
                 proc = task.process
-            if proc is not None:
+            if proc is not None and not isinstance(proc, _PendingSpawn):
                 try:
                     self._kill_process_tree(proc, agent_name, tool_id)
                 except Exception as kill_err:
@@ -1157,6 +1267,8 @@ class AsyncShellTracker:
         try:
             with task._lock:
                 proc = task.process
+            if isinstance(proc, _PendingSpawn):
+                return f"Shell process still starting for tool_id {tool_id} — retry in a moment."
             if proc and proc.stdin:
                 proc.stdin.write(input_text + '\n')
                 proc.stdin.flush()
@@ -1189,6 +1301,11 @@ class AsyncShellTracker:
             with task._lock:
                 proc = task.process
                 pid = task.pid
+                if isinstance(proc, _PendingSpawn):
+                    # Process still starting — set killed flag so the tracking
+                    # thread kills it once the real Popen is swapped in.
+                    task.killed = True
+                    return f"Shell kill requested while process was still starting [Tool ID: {tool_id}]; will terminate after launch completes."
                 if proc and proc.poll() is None:
                     # Set killed flag under same lock as poll check to prevent TOCTOU.
                     task.killed = True
@@ -1242,6 +1359,8 @@ class AsyncShellTracker:
                 proc = task.process
                 pid = task.pid
 
+            if isinstance(proc, _PendingSpawn):
+                return f"Shell process still starting for tool_id {tool_id} — retry in a moment."
             if not proc or proc.poll() is not None:
                 elapsed = _elapsed_for_task(task)
                 return f"Shell already finished [Tool ID: {tool_id}] (elapsed {elapsed:.0f}s)."
@@ -1385,6 +1504,9 @@ class AsyncShellTracker:
 
                 # Set killed flag — tracking thread will detect this and handle
                 # the actual process termination via _kill_process_tree.
+                # Note: if proc is a _PendingSpawn placeholder, poll() returns None
+                # (intentionally treated as "still running") and the killed flag is
+                # set; the tracking thread will kill the real process after the swap.
                 if proc and proc.poll() is None:
                     with task._lock:
                         task.killed = True

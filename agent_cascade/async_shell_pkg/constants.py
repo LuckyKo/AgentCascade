@@ -10,3 +10,4 @@ DRAIN_THREAD_FLUSH_DELAY = 0.2     # Allow drain threads to flush remaining outp
 LAUNCH_POLL_INTERVAL = 0.05        # Brief interval between launch completion checks
 VIEWER_EXIT_WAIT_TIMEOUT = 1.5     # Allow viewer to flush final output before force-killing on normal completion
 KILL_WAIT_TIMEOUT = 5.0            # Give tracking thread time to detect kill flag and terminate process
+SPAWN_PUBLISH_TIMEOUT = 15.0       # Max seconds to wait for the spawn thread (Popen) before giving up
