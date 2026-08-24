@@ -271,12 +271,19 @@ class AsyncShellTracker:
             return None, False, None
 
         start_wait = time.time()
-        while time.time() - start_wait < timeout:
+        while True:
             with task._lock:
                 # Wait until process has actually started
                 if task.process is None:
                     time.sleep(LAUNCH_POLL_INTERVAL)
                     continue
+
+                # Bounded wait: exit the loop when the timeout elapses. The final
+                # check below (after the lock) re-reads completion, so a process
+                # that finished right at the boundary is still detected here —
+                # mirroring _poll_loop's liveness re-check pattern.
+                if time.time() - start_wait >= timeout:
+                    break
 
                 pid = task.pid
                 combined = list(task.stdout_lines) + list(task.stderr_lines)
@@ -479,7 +486,15 @@ class AsyncShellTracker:
         timed_out = False
         last_heartbeat_time = time.time()
 
-        while proc.poll() is None:
+        while True:
+            # Re-check liveness every iteration (not just at the loop head). A
+            # process that exits right after the 0.5s poll sleep must not be
+            # allowed to fall through into timeout handling — doing so would
+            # kill an already-dead tree, mark the task as timed out, and
+            # corrupt the recorded return code (see TestStderrCapture flakiness).
+            if proc.poll() is not None:
+                break
+
             # Exit immediately if killed externally (prevents further heartbeats).
             with task._lock:
                 if task.killed:
