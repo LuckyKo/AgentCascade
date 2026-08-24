@@ -310,7 +310,6 @@ class AgentInstance:
     _continue_saved_msg: Optional[Message] = field(default=None)  # Temporary storage for Continue button merge
 
     # ── Auto-Continue State Tracking ──────────────────────────────────────────
-    _auto_continue_triggered: bool = field(default=False)  # Set when auto-continue fires this turn (informational; no longer used to reset the turn counter)
     _auto_continue_count: int = field(default=0)  # Consecutive auto-continue attempt counter (capped to prevent infinite loops)
     _continue_extra_appended: bool = field(default=False)  # Set when continue-saved fallback append happens, for rollback accounting
     _continue_fallback_append: bool = field(default=False)  # Set when continue fallback append occurs, for rollback accounting

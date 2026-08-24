@@ -218,7 +218,6 @@ class TestPureResendDefault:
         assert instance.conversation == []  # NO message appended to conversation
         assert instance._reasoning_only_soft_attempts == 1
         assert instance._reasoning_only_pending_nudges == 0
-        assert instance._auto_continue_triggered is True
 
     def test_second_reasoning_only_is_pure_resend(self):
         engine = self._engine()

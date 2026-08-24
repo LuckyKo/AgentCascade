@@ -1698,7 +1698,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # nudge is now in context, so track it for rollback accounting on the later full retry.
                     instance._reasoning_only_pending_nudges += 1
                     self._inject_soft_continue_nudge(instance, inst_name, messages, llm_messages, response)
-                instance._auto_continue_triggered = True
                 return True
 
             # existing full-retry path (truncation / broken-json / empty-output / reasoning-only after N soft tries)
@@ -1726,7 +1725,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # pending-nudge counter. Do NOT touch _reasoning_only_soft_attempts (it must stay at N
             # so the soft path stays closed).
             instance._reasoning_only_pending_nudges = 0
-            instance._auto_continue_triggered = True
             return True
 
         # normal completion -> reset both reasoning-only counters (site b)
