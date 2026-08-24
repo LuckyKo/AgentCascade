@@ -13,6 +13,10 @@ import time
 import threading
 from typing import Any, Dict, Optional
 
+# Shared slot-yield helper (three-path yield + pool-holder diagnostic), deduplicated
+# from compression/agent_invoker.py. Depends only on stdlib+logging — no circular import.
+from agent_cascade.slot_yield_utils import describe_pool_holders, yield_caller_slot
+
 # ── Deadlock protection constants ───────────────────────────────────────────
 # NOTE: The system-launched Security advisor is bounded by a turn budget
 # (SECURITY_AGENT_MAX_TURNS in settings.py), which lets the model finish its
@@ -547,66 +551,18 @@ class SecurityAdvisorHandler:
                 # ── Slot yield: release caller's slot before Security agent runs ──
                 # The Security agent acquires its OWN endpoint slot (no borrowing), so the
                 # caller must free its permit first or the check deadlocks on the shared
-                # sequential slot. Three distinct paths:
+                # sequential slot. Three distinct paths (see slot_yield_utils.yield_caller_slot):
                 #   1. Normal yield      — caller holds a live _slot_release callback.
                 #   2. Force-release     — callback was cleared but the pool still shows the
                 #                          caller holding a permit (leaked/stale state).
                 #   3. Skip              — nothing to yield (pool already free); log diagnostic.
                 # If we released anything, _yielded_slot is set so the finally block re-acquires.
-                if caller_inst_sec:
-                    if getattr(caller_inst_sec, '_slot_release', None) is not None:
-                        # Path 1 — normal yield via the live release callback.
-                        logger.debug(
-                            f"[SECURITY_SLOT_YIELD] Releasing slot for '{caller_agent}' before Security check"
-                        )
-                        engine._release_slot(caller_inst_sec, caller_agent, "before_security_check")
-                        _yielded_slot = True
-                    else:
-                        # Callback is None. Check whether the pool STILL shows the caller as a
-                        # holder — if so the permit leaked (callback cleared without releasing).
-                        _leaked_holder = None
-                        try:
-                            router = self.agent_pool.api_router
-                            slot_info = router.get_agent_slot_info(caller_inst_sec.agent_class)
-                            if slot_info and slot_info.get('needs_slot'):
-                                sched_pool = router.scheduler._get_or_create_pool(
-                                    slot_info['api_base'], slot_info['concurrency_limit']
-                                )
-                                _leaked_holder = sched_pool._running.get(caller_agent)
-                        except Exception as e:
-                            logger.debug(
-                                f"[SECURITY_SLOT_YIELD] Failed to inspect pool for '{caller_agent}': {e}"
-                            )
-
-                        if _leaked_holder is not None:
-                            # Path 2 — force-release the leaked permit directly from the pool.
-                            logger.warning(
-                                f"[SECURITY_SLOT_YIELD] LEAKED PERMIT DETECTED for '{caller_agent}' "
-                                f"— force-releasing"
-                            )
-                            try:
-                                sched_pool.release(_leaked_holder)
-                                # release() is silent on stale/no-op (returns None), so verify
-                                # the holder actually left the pool before flagging a yield —
-                                # otherwise we'd wrongly reacquire and leave the pool inconsistent.
-                                if _leaked_holder.instance_name not in sched_pool._running:
-                                    _yielded_slot = True
-                                else:
-                                    logger.error(
-                                        f"[SECURITY_SLOT_YIELD] Force-release did not remove "
-                                        f"holder for '{caller_agent}' — leaving slot as-is"
-                                    )
-                            except Exception as e:
-                                logger.error(
-                                    f"[SECURITY_SLOT_YIELD] Force-release check failed for "
-                                    f"'{caller_agent}': {e}", exc_info=True
-                                )
-                        else:
-                            # Path 3 — no slot to yield; log a diagnostic for debuggability.
-                            logger.debug(
-                                f"[SECURITY_SLOT_YIELD_SKIPPED] No slot to yield for "
-                                f"'{caller_agent}' — Pool holders: {self._describe_pool_holders(caller_agent)}"
-                            )
+                _yielded_slot = yield_caller_slot(
+                    self.agent_pool, engine, caller_inst_sec, caller_agent,
+                    log_prefix="SECURITY_SLOT_YIELD",
+                    release_reason="before_security_check",
+                    before_action="Security check",
+                )
 
                 # Last-resort guard against a generator that never yields its first token.
                 # The turn budget is the primary mechanism; this timer only covers the
@@ -764,31 +720,8 @@ class SecurityAdvisorHandler:
 
     # ── Slot diagnostics helper ────────────────────────────────────────────
     def _describe_pool_holders(self, caller_agent: str) -> str:
-        """Short string of current holders on the caller's endpoint pool for slot diagnostics.
-
-        Low-cost and non-blocking; returns a short 'n/a'/'error' marker on any failure.
-        """
-        try:
-            router = self.agent_pool.api_router
-            if not router or not caller_agent:
-                return "n/a (no router)"
-            inst = self.agent_pool.get_instance(caller_agent)
-            agent_class = inst.agent_class if inst else None
-            if not agent_class:
-                return "n/a (caller instance gone)"
-            slot_info = router.get_agent_slot_info(agent_class)
-            if not slot_info or not slot_info.get('needs_slot'):
-                return "none (unlimited endpoint — no slot needed)"
-            sched_pool = router.scheduler._get_or_create_pool(
-                slot_info['api_base'], slot_info['concurrency_limit']
-            )
-            holders = [
-                f"{h.instance_name} ({h.agent_name})"
-                for h in sched_pool._running.values()
-            ]
-            return ', '.join(holders) if holders else 'empty'
-        except Exception as e:
-            return f"error ({e})"
+        """Thin wrapper delegating to the shared slot_yield_utils.describe_pool_holders."""
+        return describe_pool_holders(self.agent_pool, caller_agent)
 
     # ── Verdict parsing (multiple fallback strategies) ────────────────────
     def _parse_verdict(self, text: str) -> tuple[bool, bool, str]:
