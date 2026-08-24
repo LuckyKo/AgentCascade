@@ -729,14 +729,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # messages from LLM")
                 # ── Phase 4: Response Processing and Tool Execution ─────────
                 if self._process_response(instance, turn_output, messages, llm_messages, response):
-                    # Reset turn counter on auto-continue to prevent agents running out of turns
-                    # when they keep getting cut off mid-reasoning/tool_call
-                    if getattr(instance, '_auto_continue_triggered', False):
-                        instance._auto_continue_triggered = False
-                        # Counter already incremented in _check_and_handle_truncation
-                        max_turns = instance.max_turns or DEFAULT_MAX_TURNS
-                        turns_available = max_turns
-                        logger.debug(f"[AUTO-CONTINUE] Turn counter reset for {inst_name}: {turns_available} turns remaining (consecutive resets: {instance._auto_continue_count}).")
+                    # NOTE: auto-continue deliberately does NOT reset turns_available — the
+                    # per-iteration decrement (turns_available -= 1) already ran before this
+                    # LLM call, so every auto-continue consumes exactly one real turn and
+                    # max_turns stays a hard budget.
                     # logger.debug("tool used - %s looping",
                     # instance.instance_name)
                     yield response

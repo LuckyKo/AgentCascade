@@ -26,7 +26,7 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(os.getenv(
 MAX_LLM_CALL_PER_RUN: int = int(os.getenv('QWEN_AGENT_MAX_LLM_CALL_PER_RUN', 250))
 DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 250))  # Default turn limit per agent execution
 SECURITY_AGENT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_SECURITY_AGENT_MAX_TURNS', 20))  # Turn limit for system-launched Security advisor (replaces brutal wall-clock timeout)
-MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue resets before giving up
+MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue attempts per episode before giving up (each attempt consumes one real turn)
 # Reasoning-only soft "continue" (pure-resend) attempts before falling back to a full retry.
 # Soft continues share the MAX_AUTO_CONTINUE_ATTEMPTS budget with full retries, so an episode is
 # bounded at exactly min(N, cap) soft + (cap - min(N, cap)) full attempts.
