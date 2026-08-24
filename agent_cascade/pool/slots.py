@@ -73,7 +73,7 @@ class SlotsMixin:
             same semaphore). The child's engine.run() handles all concurrency control.
             """
             from agent_cascade.execution_engine import ExecutionEngine
-            from agent_cascade.child_runner import run_child_core
+            from agent_cascade.child_runner import run_child_core, ChildAgentFailedError
 
             engine = ExecutionEngine(self)
             # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
@@ -100,6 +100,16 @@ class SlotsMixin:
                     logger.debug(f"Failed to save async child state for {child_instance_name}: {e}")
 
                 return result
+            except ChildAgentFailedError:
+                # The child's only output was a system error or termination notice.
+                # Re-raise so async_tools._execute sets entry.error → the parent receives
+                # [Background Tool Error] instead of [Background Tool Result].
+                # Clean up the zombie instance first.
+                try:
+                    self.dismiss_instance(child_instance_name)
+                except Exception as cleanup_err:
+                    logger.warning(f"Failed to dismiss child {child_instance_name} during failure cleanup: {cleanup_err}")
+                raise
             except Exception as e:
                 # Cleanup zombie instance on failure (e.g., slot timeout after instance creation)
                 try:

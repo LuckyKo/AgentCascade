@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
 from agent_cascade.agent_instance import ArgumentCachePool
 from agent_cascade.settings import (
+    AGENT_SLEEPING_MAX_WAIT_SECONDS,
     AUTO_SKILL_ENABLED,
     AUTO_SKILL_EXTRA_TURNS,
     CHARS_PER_TOKEN_ESTIMATE,
@@ -2355,6 +2356,35 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             sleeping_duration = 0.0
             if instance.sleeping_since is not None:
                 sleeping_duration = current_time - instance.sleeping_since
+
+            # ── SLEEPING cap (Fix A1): force completion if waiting too long ──
+            # A hung background tool must not hold the agent in SLEEPING forever.
+            # On expiry, mirror the COMPLETING-transition pattern below exactly:
+            # take the state lock, bail out if TERMINATED, transition to COMPLETING,
+            # clear sleeping_since, then break the run() loop so post-loop cleanup
+            # (state finalization, slot release) runs in run()'s finally block.
+            if AGENT_SLEEPING_MAX_WAIT_SECONDS > 0 and \
+                    sleeping_duration >= AGENT_SLEEPING_MAX_WAIT_SECONDS:
+                logger.error(
+                    f"SLEEPING timeout for {inst_name}: waited "
+                    f"{int(sleeping_duration)}s (max "
+                    f"{AGENT_SLEEPING_MAX_WAIT_SECONDS}s). Forcing COMPLETING."
+                )
+                with instance._state_lock:
+                    if instance.state == AgentState.TERMINATED:
+                        return SleepAction.BREAK_LOOP, None
+                    instance._transition(AgentState.COMPLETING)
+                    instance.sleeping_since = None
+                # Enqueue an informational message. The agent is exiting the run()
+                # loop (BREAK_LOOP), so this won't be re-processed by its own loop;
+                # it remains in the queue as a log artifact / debugging context.
+                self.pool.enqueue_message(
+                    inst_name,
+                    f"[SYSTEM] SLEEPING timeout: pending background tools did not "
+                    f"complete within {AGENT_SLEEPING_MAX_WAIT_SECONDS}s "
+                    f"(waited {int(sleeping_duration)}s). Forcing completion."
+                )
+                return SleepAction.BREAK_LOOP, None
 
             # Get settings with defaults
             wakeup_interval = getattr(self.pool.settings, 'sleeping_wakeup_interval', 5.0)

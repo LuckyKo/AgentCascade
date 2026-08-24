@@ -18,6 +18,8 @@ from agent_cascade.retry_policy import (
     RetryPolicy,
     classify_error,
     calculate_backoff,
+    is_deterministic_client_error,
+    deterministic_client_error_patterns,
     POLICY_DEFAULT,
     POLICY_AGGRESSIVE,
     POLICY_CONSERVATIVE,
@@ -197,6 +199,103 @@ class TestClassifyErrorPriority:
         """If an error message contains both fatal and retryable patterns, fatal wins."""
         # e.g., "Connection timeout with invalid_api_key" — auth issue is more important
         assert classify_error(Exception("Connection failed: invalid_api_key")) == 'fatal'
+
+
+# ── classify_error() — deterministic client errors (Fix B2) ─────────────────
+
+class TestClassifyErrorDeterministicClientErrors:
+    """Deterministic 4xx client errors are classified as fatal (do not retry).
+
+    These errors will recur on every attempt to the same endpoint, so retrying
+    is pointless. Previously they fell through to 'unknown' and consumed the
+    whole retry budget (see the gpt-5.6-luna reasoning_effort incident).
+    """
+
+    def test_classify_deterministic_400_is_fatal(self):
+        """A bare 400 client error is fatal, even with a non-specific message."""
+        from agent_cascade.llm.base import ModelServiceError
+        err = ModelServiceError(code='400', message="Bad Request")
+        assert classify_error(err) == 'fatal'
+
+    def test_classify_reasoning_effort_error_is_fatal(self):
+        """The incident's exact error message is classified as fatal."""
+        msg = "Function tools with reasoning_effort are not supported for gpt-5.6-luna"
+        assert classify_error(Exception(msg)) == 'fatal'
+
+    def test_classify_not_supported_feature_is_fatal(self):
+        assert classify_error(Exception("Feature X is not supported for this model")) == 'fatal'
+
+    def test_classify_invalid_api_key_phrase_is_fatal(self):
+        # Space-separated "invalid api key" (the deterministic pattern) vs. the
+        # underscored fatal_patterns entry — both must resolve to fatal.
+        assert classify_error(Exception("Error: invalid api key provided")) == 'fatal'
+
+    def test_classify_model_not_found_phrase_is_fatal(self):
+        assert classify_error(Exception("model not found: gpt-999")) == 'fatal'
+
+    def test_classify_does_not_exist_is_fatal(self):
+        assert classify_error(Exception("The requested model does not exist")) == 'fatal'
+
+    def test_classify_4xx_codes_are_fatal(self):
+        """ModelServiceError carrying a 4xx status code is fatal."""
+        from agent_cascade.llm.base import ModelServiceError
+        for code in ('400', '401', '403', '404', '422'):
+            err = ModelServiceError(code=code, message="opaque server error")
+            assert classify_error(err) == 'fatal', f"code {code} should be fatal"
+
+    def test_classify_deterministic_4xx_beats_retryable_pattern(self):
+        """A deterministic 4xx that also mentions a transient keyword is still fatal.
+
+        e.g., a 400 whose body happens to contain "timeout" must not be retried —
+        the client error takes priority over the retryable pattern.
+        """
+        from agent_cascade.llm.base import ModelServiceError
+        err = ModelServiceError(code='400', message="request timeout in tool schema")
+        assert classify_error(err) == 'fatal'
+
+    def test_classify_transient_errors_unchanged(self):
+        """Transient (5xx / network) errors keep their previous classification — no regression."""
+        assert classify_error(Exception("HTTP 503 Service Unavailable")) == 'retryable'
+        assert classify_error(Exception("502 Bad Gateway")) == 'retryable'
+        assert classify_error(Exception("Request timed out")) == 'retryable'
+        assert classify_error(Exception("Connection reset by peer")) == 'retryable'
+        assert classify_error(Exception("429 Too Many Requests")) == 'retryable'
+
+    def test_classify_unknown_unchanged(self):
+        """Uncategorized errors still default to 'unknown' — no regression."""
+        assert classify_error(Exception("Something weird happened")) == 'unknown'
+        assert classify_error(Exception("")) == 'unknown'
+
+
+class TestIsDeterministicClientErrorHelper:
+    """The shared helper used by both classify_error and the router blacklist (Fix B1)."""
+
+    def test_helper_detects_pattern_in_message(self):
+        assert is_deterministic_client_error(Exception("tools not supported")) is True
+        assert is_deterministic_client_error(Exception("reasoning_effort rejected")) is True
+
+    def test_helper_detects_4xx_code_on_model_service_error(self):
+        from agent_cascade.llm.base import ModelServiceError
+        for code in ('400', '401', '403', '404', '422'):
+            assert is_deterministic_client_error(ModelServiceError(code=code, message="x")) is True
+
+    def test_helper_false_for_transient(self):
+        assert is_deterministic_client_error(Exception("connection reset by peer")) is False
+        assert is_deterministic_client_error(Exception("HTTP 503 Service Unavailable")) is False
+
+    def test_helper_false_for_non_4xx_model_service_error(self):
+        """A ModelServiceError with a non-4xx code and no matching pattern is not deterministic."""
+        from agent_cascade.llm.base import ModelServiceError
+        assert is_deterministic_client_error(ModelServiceError(code='503', message="server hiccup")) is False
+
+    def test_helper_false_for_empty(self):
+        assert is_deterministic_client_error(Exception("")) is False
+
+    def test_patterns_tuple_is_nonempty_and_lowercase(self):
+        """The shared pattern tuple exists and entries are lowercase (matching lowercased input)."""
+        assert len(deterministic_client_error_patterns) > 0
+        for p in deterministic_client_error_patterns:
+            assert p == p.lower()
 
 
 # ── calculate_backoff() ─────────────────────────────────────────────────────

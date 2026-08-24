@@ -17,6 +17,7 @@ from typing import Iterator, List, Optional
 
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.settings import (
+    LLM_CALL_DEADLINE_SECONDS,
     STREAM_MAX_SILENCE_SECONDS,
     STREAM_MAX_TOTAL_SECONDS,
     TOKEN_ESTIMATE_CHAR_DIVISOR,
@@ -265,6 +266,11 @@ class LLMCallMixin:
         error_already_yielded = False
         _max_attempts = self.pool.settings.retry_max_attempts  # At least 1 retry to avoid instant failure
 
+        # Phase 1: Fix A2 — absolute wall-clock deadline for this entire call (all
+        # retries included). Captured once at entry; checked at the top of each retry
+        # iteration and used to cap the backoff sleep. 0 disables (infinite).
+        _deadline = (time.monotonic() + LLM_CALL_DEADLINE_SECONDS) if LLM_CALL_DEADLINE_SECONDS > 0 else float('inf')
+
         # Build centralized retry policy from pool settings (Phase 4a)
         _retry_policy = RetryPolicy(
             retry_max_attempts=getattr(self.pool.settings, 'retry_max_attempts', 3),
@@ -287,6 +293,21 @@ class LLMCallMixin:
 
         try:
             while retry_count < _max_attempts:
+                # Phase 1: Fix A2 — wall-clock deadline check. Placed at the TOP of the
+                # loop, OUTSIDE the inner try/except, so the yield+break below is NOT
+                # caught by the per-attempt `except Exception` (which would swallow it).
+                # On expiry we abort the retry loop; the outer finally still runs (cursor reset).
+                if time.monotonic() >= _deadline:
+                    logger.error(
+                        f"LLM call deadline exceeded for {inst_name} "
+                        f"(>{LLM_CALL_DEADLINE_SECONDS}s wall-clock). Aborting retry loop."
+                    )
+                    yield Message(role=ASSISTANT, content=(
+                        f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"
+                    ))
+                    error_already_yielded = True
+                    break
+
                 try:
                     # Telemetry: record LLM call start (non-blocking)
                     self._record_telemetry_event(
@@ -1016,7 +1037,18 @@ class LLMCallMixin:
 
                     # Signal retry to UI before blocking on sleep
                     yield self._make_retrying_message(instance, retry_count, _max_attempts, backoff)
-                    time.sleep(backoff)
+
+                    # Phase 1: Fix A2 — don't sleep past the wall-clock deadline. If there's
+                    # no time left, abort now; otherwise cap the backoff to what remains so
+                    # the next iteration's top-of-loop check fires promptly.
+                    _remaining = _deadline - time.monotonic()
+                    if _remaining <= 0:
+                        yield Message(role=ASSISTANT, content=(
+                            f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"
+                        ))
+                        error_already_yielded = True
+                        break
+                    time.sleep(min(backoff, _remaining))
                     yield None
 
             # Final update before yielding results

@@ -11,6 +11,13 @@ from agent_cascade.log import logger
 from agent_cascade.compression.helpers import extract_instance_output
 
 
+class ChildAgentFailedError(Exception):
+    """Raised when a sub-agent's only meaningful output is a system error
+    or termination notice. Propagates through slots.py to async_tools.py
+    so the parent receives [Background Tool Error] instead of [Background Tool Result]."""
+    pass
+
+
 # ── Helper functions ────────────────────────────────────────────────────────
 
 def _format_result(
@@ -114,6 +121,20 @@ def run_child_core(
 
     # Extract and format result
     result = extract_instance_output(conv, instance_name, was_terminated=was_terminated, pool=pool)
+
+    # Detect if the child's only output is a system error or termination notice.
+    # Check the RAW output BEFORE _format_result wraps it in "[Agent 'name' Completed]:".
+    # Verified: llm_call.py produces "[SYSTEM ERROR: <msg>]" for every fatal/timeout path.
+    if result and result.strip().startswith('[SYSTEM ERROR'):
+        raise ChildAgentFailedError(
+            f"Sub-agent '{instance_name}' failed: {result.strip()}"
+        )
+    # Termination is also a failure for the parent (child didn't produce useful output)
+    if was_terminated and result:
+        raise ChildAgentFailedError(
+            f"Sub-agent '{instance_name}' was terminated."
+        )
+
     return _format_result(
         instance_name=instance_name,
         result=result,

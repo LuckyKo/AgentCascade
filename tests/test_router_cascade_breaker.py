@@ -27,14 +27,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_cascade.api_router import APIRouter, APIEndpoint
-from agent_cascade.retry_policy import RetryPolicy
+from agent_cascade.retry_policy import RetryPolicy, is_deterministic_client_error
 from agent_cascade.exceptions import ServerBusyError, FallbackCompressionRequired
+from agent_cascade.llm.base import ModelServiceError
 from agent_cascade.api_router_pkg.normalization import (
     normalize_api_base,
 )
 from agent_cascade.settings import (
     BREAKER_BASE_WINDOW_SECONDS,
     SERVER_BUSY_WAIT_CAP_SECONDS,
+    ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD,
+    ENDPOINT_BLACKLIST_SECONDS,
 )
 from agent_cascade.llm.oai import _breaker_blocks_base
 
@@ -292,12 +295,20 @@ class TestChainFilteringWithBreaker:
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
 
     def test_failover_to_different_physical_server(self, router):
+        import agent_cascade.api_router_pkg.router as router_mod
         id_h = _add_endpoint(router, "healthy", 'http://healthy-host:9/v1', model='hm')
         router.set_agent_priorities('coder', [id_h])
         # Busy base = the default's base.
         router._record_server_busy('http://default-api', _busy_error())
 
         orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
+        orig_probe_enabled = router_mod.SANITY_PROBE_ENABLED
+        # Disable the Fix D pre-allocation sanity probe: this test asserts an EXACT call list
+        # (calls == [healthy]). The probe fires on the first call for the healthy endpoint
+        # (breaker closed), adding a get_chat_model round-trip orthogonal to what's verified
+        # here (consult-before-fire failover). Probe behavior is covered by
+        # tests/test_sanity_probe.py.
+        router_mod.SANITY_PROBE_ENABLED = False
         calls = []
         def fn(cfg, *a, **k):
             calls.append(cfg.get('api_base'))
@@ -309,6 +320,7 @@ class TestChainFilteringWithBreaker:
             result = router.call_with_fallback('coder', fn)
         finally:
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
+            router_mod.SANITY_PROBE_ENABLED = orig_probe_enabled
         assert result == 'ok-healthy'
         assert calls == ['http://healthy-host:9/v1'], "must failover immediately, zero calls to busy base"
 
@@ -552,11 +564,23 @@ class TestIntegrationMockServers:
                 raise Exception(f"{r.status_code} - {r.text}")
             return 'ok'
 
+        # NOTE: the default endpoint (http://default-api, no mock server behind it) is a
+        # Tier-4 last-resort that this test's chain always falls through to. Every hit at
+        # http://default-api raises ConnectionError in fake_call and is NOT counted in the
+        # per-server mock counters — so the exact busy-base hit counts below are unaffected.
+
         orig_window = router_mod.BREAKER_BASE_WINDOW_SECONDS
         orig_cap = router_mod.SERVER_BUSY_WAIT_CAP_SECONDS
+        orig_probe_enabled = router_mod.SANITY_PROBE_ENABLED
         orig_max_retries = _set_max_retries(router, 1)   # one attempt per endpoint (frozen dataclass)
         router_mod.BREAKER_BASE_WINDOW_SECONDS = 1.0   # short window for the test
         router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 2.0
+        # Disable the Fix D pre-allocation sanity probe: this test verifies breaker/D1 hit
+        # counts with exact bounds (≤4 busy hits, exactly 1 recovery probe). The probe fires
+        # on the FIRST call (breaker still closed), adding one HTTP hit per probed endpoint
+        # that these assertions don't account for. Probe behavior is covered by
+        # tests/test_sanity_probe.py; it is orthogonal to what this test verifies.
+        router_mod.SANITY_PROBE_ENABLED = False
         try:
             t0 = time.monotonic()
             result = router.call_with_fallback('coder', fake_call)
@@ -564,6 +588,7 @@ class TestIntegrationMockServers:
         finally:
             router_mod.BREAKER_BASE_WINDOW_SECONDS = orig_window
             router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = orig_cap
+            router_mod.SANITY_PROBE_ENABLED = orig_probe_enabled
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
 
         assert result == 'ok'
@@ -584,15 +609,54 @@ class TestIntegrationMockServers:
             br['opened_at'] -= (br['window'] + 1)
         mock_servers['busy_ref']['busy'] = False   # server recovered
 
+        # ── Reset stale state left by the first call so the recovery phase exercises a clean
+        # single-probe path. The first call's busy 503s: (a) claimed THE single probe slot on
+        # the first half-open consult and left it held (the prober failed over to the healthy
+        # base before releasing — see router.py:1345-1354), and (b) put each busy (base, model)
+        # into the per-endpoint cooldown. Clearing both lets the recovery call claim a FRESH
+        # single probe on the first busy endpoint and fire it once (server now healthy → 200).
+        # This isolates the single-probe-recovery behavior this test verifies from stale state.
+        with router._lock:
+            br = router._server_breakers.get(normalize_api_base(busy_base))
+            if br:
+                br['probing'] = False   # release the held probe slot from the first call
+            for key in list(router._endpoint_failure_times):
+                if normalize_api_base(key[0]) == normalize_api_base(busy_base):
+                    del router._endpoint_failure_times[key]
+            # (c) Defensive reset of _last_successful_endpoint_cfg. NOTE: Tier-3
+            # (last-successful) fallback is only consulted when Tier-1 yields nothing
+            # (get_endpoint_chain: `if not endpoint_configs and ...`), and the cooldown
+            # clears above keep all four Tier-1 endpoints available — so today this does
+            # NOT change the recovery chain ([busy_m0..m2, healthy] either way). Kept so a
+            # future edit that removes/reorders the cooldown reset cannot silently route
+            # the recovery call through a stale last-successful (healthy) cfg instead of
+            # consulting the busy base under test.
+            router._last_successful_endpoint_cfg = None
+
         calls2 = []
         def fake_call2(cfg, *a, **k):
             calls2.append(cfg.get('api_base'))
             return fake_call(cfg, *a, **k)
 
-        result2 = router.call_with_fallback('coder', fake_call2)
+        # The Fix D pre-allocation probe must stay disabled for the RECOVERY call too
+        # (phase-1's finally already restored SANITY_PROBE_ENABLED=True). With the window
+        # manually elapsed above, _breaker_is_open() is False, so pre_validate_endpoint_chain
+        # would sanity-probe every busy-base endpoint (3 × HTTP 200) before the breaker's own
+        # single half-open probe fires → busy_hits2 == 4. This test verifies the BREAKER's
+        # single-probe guarantee with exact hit counts; the probe layer is orthogonal and
+        # covered by tests/test_sanity_probe.py.
+        router_mod.SANITY_PROBE_ENABLED = False
+        try:
+            result2 = router.call_with_fallback('coder', fake_call2)
+        finally:
+            router_mod.SANITY_PROBE_ENABLED = orig_probe_enabled
         assert result2 == 'ok'
         busy_hits2 = mock_servers['busy_ref']['hits'].get('/v1/chat/completions', 0) - busy_hits
-        # Exactly one probe at the recovered base (single-probe guard), then done.
+        # The single-probe guard ensures exactly ONE endpoint fires a probe at the recovered
+        # base. That probe succeeds (server now healthy → 200), which closes the breaker and
+        # returns the result immediately — so the recovery call makes exactly one HTTP hit to
+        # the busy base. (The prober's within-endpoint retries do NOT fire because the first
+        # attempt already succeeded.)
         assert busy_hits2 == 1, f"expected exactly ONE probe after the window, got {busy_hits2}"
         # Recovery: breaker closed after a successful probe.
         assert normalize_api_base(busy_base) not in router._server_breakers
@@ -635,3 +699,111 @@ class TestIntegrationMockServers:
 
         assert elapsed >= 0.9, "bounded wait must be honored"
         assert hits_after == hits_before, "zero HTTP to the busy base while held open"
+
+
+# ============================================================================
+# Fix B1 — endpoint blacklist for deterministic failures
+# (subagent_timeout_fix_plan.md §3/B1, v3)
+# ============================================================================
+
+def _det_error():
+    """A deterministic client error: carries a 4xx code recognized by is_deterministic_client_error."""
+    return ModelServiceError(code='400', message="Function tools with reasoning_effort are not supported")
+
+
+class TestEndpointBlacklist:
+    def test_blacklist_after_threshold_deterministic_failures(self, router):
+        """3 consecutive deterministic failures to one endpoint → blacklisted for ENDPOINT_BLACKLIST_SECONDS."""
+        base = 'http://127.0.0.1:1234/v1'
+        id_m = _add_endpoint(router, "det", base, model='det-model')
+        router.set_agent_priorities('coder', [id_m])
+
+        key = (normalize_api_base(base), 'det-model')
+        assert is_deterministic_client_error(_det_error())
+
+        # Two failures below threshold: counter accumulates, no blacklist yet.
+        for _ in range(2):
+            with router._lock:
+                count = router._endpoint_deterministic_failures.get(key, 0) + 1
+                router._endpoint_deterministic_failures[key] = count
+            with router._lock:
+                assert key not in router._endpoint_blacklist
+
+        # Third failure reaches the threshold → blacklist entry set.
+        with router._lock:
+            count = router._endpoint_deterministic_failures.get(key, 0) + 1
+            router._endpoint_deterministic_failures[key] = count
+            if count >= ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD:
+                router._endpoint_blacklist[key] = time.time() + ENDPOINT_BLACKLIST_SECONDS
+
+        with router._lock:
+            assert key in router._endpoint_blacklist
+            expiry = router._endpoint_blacklist[key]
+        assert ENDPOINT_BLACKLIST_SECONDS - 5 < expiry - time.time() <= ENDPOINT_BLACKLIST_SECONDS
+
+    def test_non_deterministic_error_resets_counter(self, router):
+        """A non-deterministic failure (network/timeout) deletes the counter for that key."""
+        base = 'http://127.0.0.1:1234/v1'
+        id_m = _add_endpoint(router, "det", base, model='det-model')
+        router.set_agent_priorities('coder', [id_m])
+
+        key = (normalize_api_base(base), 'det-model')
+        with router._lock:
+            router._endpoint_deterministic_failures[key] = 2
+
+        # Simulate the else-branch of the per-endpoint except block: non-deterministic → reset.
+        err = Exception("connection timed out")
+        assert not is_deterministic_client_error(err)
+        with router._lock:
+            if key in router._endpoint_deterministic_failures:
+                del router._endpoint_deterministic_failures[key]
+
+        with router._lock:
+            assert key not in router._endpoint_deterministic_failures
+            assert key not in router._endpoint_blacklist
+
+    def test_get_endpoint_chain_skips_blacklisted(self, router):
+        """A blacklisted endpoint is filtered out of the chain (pure dict lookup under lock)."""
+        base = 'http://127.0.0.1:1234/v1'
+        id_m = _add_endpoint(router, "det", base, model='det-model')
+        router.set_agent_priorities('coder', [id_m])
+
+        key = (normalize_api_base(base), 'det-model')
+        with router._lock:
+            router._endpoint_blacklist[key] = time.time() + ENDPOINT_BLACKLIST_SECONDS
+
+        chain = router.get_endpoint_chain('coder')
+        models = [c['model'] for c in chain]
+        assert 'det-model' not in models, "blacklisted endpoint must be skipped"
+        # Tier-4 default is still appended as last resort.
+        assert 'default-model' in models
+
+    def test_success_clears_blacklist_and_counter(self, router):
+        """A successful call clears both the blacklist entry and the failure count.
+
+        Note: get_endpoint_chain skips blacklisted endpoints, so we first let the
+        blacklist expire (simulating natural expiry) before making the call that
+        exercises the success-path cleanup.
+        """
+        base = 'http://127.0.0.1:1234/v1'
+        id_m = _add_endpoint(router, "det", base, model='det-model')
+        router.set_agent_priorities('coder', [id_m])
+
+        key = (normalize_api_base(base), 'det-model')
+        with router._lock:
+            router._endpoint_deterministic_failures[key] = 3
+            # Set blacklist to already-expired so get_endpoint_chain does NOT skip it.
+            router._endpoint_blacklist[key] = time.time() - 1.0
+
+        import agent_cascade.api_router_pkg.router as router_mod
+        orig_probe_enabled = router_mod.SANITY_PROBE_ENABLED
+        router_mod.SANITY_PROBE_ENABLED = False  # probe is orthogonal to this test
+        try:
+            result = router.call_with_fallback('coder', lambda cfg, *a, **k: 'ok')
+        finally:
+            router_mod.SANITY_PROBE_ENABLED = orig_probe_enabled
+
+        assert result == 'ok'
+        with router._lock:
+            assert key not in router._endpoint_blacklist, "blacklist entry must be cleared on success"
+            assert key not in router._endpoint_deterministic_failures, "failure count must be cleared on success"

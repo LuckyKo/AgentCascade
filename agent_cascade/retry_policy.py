@@ -59,6 +59,25 @@ POLICY_CONSERVATIVE = RetryPolicy(
 
 # ── Error classification (single source of truth) ────────────────────────────
 
+# Deterministic client errors: these will recur on EVERY attempt to the same
+# endpoint. They are NOT transient — retrying is pointless. Examples:
+# - Model doesn't support a requested feature (tools, reasoning_effort)
+# - Invalid API key / auth failure
+# - Model not found on this endpoint
+# Module-level so both classify_error() and is_deterministic_client_error() share it.
+deterministic_client_error_patterns = (
+    'not supported',
+    'reasoning_effort',
+    'invalid api key',
+    'incorrect api key',
+    'model not found',
+    'does not exist',
+    'unauthorized',
+    'forbidden',
+    'bad request',
+)
+
+
 def classify_error(error: Exception) -> str:
     """Classify an error as 'fatal', 'retryable', or 'unknown'.
 
@@ -102,12 +121,36 @@ def classify_error(error: Exception) -> str:
 
     if is_fatal:
         return 'fatal'
+
+    # Check deterministic client errors → treat as fatal (don't retry).
+    # This changes classification from 'unknown' (the previous default for these
+    # errors) to 'fatal'. The incident's 400 ("Function tools with reasoning_effort
+    # are not supported...") was previously 'unknown' and consumed all retries.
+    if is_deterministic_client_error(error):
+        return 'fatal'
+
     elif has_retryable_pattern:
         return 'retryable'
     else:
         # Unknown error — default to retryable for transient issues we
         # haven't categorized yet. Better to retry once than fail permanently.
         return 'unknown'
+
+
+def is_deterministic_client_error(error: Exception) -> bool:
+    """True if the error is a non-retryable client error that will recur
+    on every attempt to the same endpoint. Used by both classify_error
+    and the API router's blacklist logic (Fix B1)."""
+    error_str = str(error).lower()
+    if any(p in error_str for p in deterministic_client_error_patterns):
+        return True
+    # Check HTTP status code directly (ModelServiceError carries .code as string)
+    from agent_cascade.llm.base import ModelServiceError
+    if isinstance(error, ModelServiceError):
+        code = str(getattr(error, 'code', None) or '')
+        if code in ('400', '401', '403', '404', '422'):
+            return True
+    return False
 
 
 # ── Backoff calculation (reusable utility) ────────────────────────────────────

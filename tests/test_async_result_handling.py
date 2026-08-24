@@ -236,3 +236,91 @@ class TestSingleQueueRegression:
         agent_name, msg = mock_pool.enqueue_message.call_args[0]
         assert isinstance(msg, str), "Message must be a plain string for unified queue"
         assert agent_name == "worker1"
+
+
+# ============================================================================
+# Fix C — child failure surfacing (subagent_timeout_fix_plan.md §4/C)
+# ============================================================================
+
+class TestChildAgentFailedError:
+    """Tests that ChildAgentFailedError is raised and propagated correctly."""
+
+    def test_system_error_output_raises_child_agent_failed(self):
+        """run_child_core raises ChildAgentFailedError when output starts with [SYSTEM ERROR."""
+        from agent_cascade.child_runner import run_child_core, ChildAgentFailedError
+
+        # Mock engine: _create_and_run_agent returns (inst, conv)
+        mock_engine = MagicMock()
+        mock_inst = MagicMock()
+        mock_inst.is_terminated = False
+        mock_conv = [{"role": "assistant", "content": "[SYSTEM ERROR: HTTP 400 - not supported]"}]
+        mock_engine._create_and_run_agent.return_value = (mock_inst, mock_conv)
+
+        # Mock pool: not stopped, not terminated
+        mock_pool = MagicMock()
+        mock_pool.stopped = False
+        mock_pool.terminated_instances = set()
+        mock_pool._halted_instances = set()
+        mock_pool._compression_halted = set()
+        mock_pool.get_instance.return_value = None
+
+        with pytest.raises(ChildAgentFailedError, match="SYSTEM ERROR"):
+            run_child_core(
+                engine=mock_engine,
+                pool=mock_pool,
+                agent_class="coder",
+                instance_name="child1",
+                args={},
+                caller_name="parent1",
+                child_depth=1,
+            )
+
+    def test_terminated_child_raises_child_agent_failed(self):
+        """run_child_core raises ChildAgentFailedError when the child was terminated."""
+        from agent_cascade.child_runner import run_child_core, ChildAgentFailedError
+
+        mock_engine = MagicMock()
+        mock_inst = MagicMock()
+        mock_inst.is_terminated = True
+        mock_conv = [{"role": "assistant", "content": "partial output before termination"}]
+        mock_engine._create_and_run_agent.return_value = (mock_inst, mock_conv)
+
+        # Mock pool: instance IS in terminated_instances
+        mock_pool = MagicMock()
+        mock_pool.stopped = False
+        mock_pool.terminated_instances = {"child1"}
+        mock_pool._halted_instances = set()
+        mock_pool._compression_halted = set()
+        mock_pool.get_instance.return_value = None
+
+        with pytest.raises(ChildAgentFailedError, match="terminated"):
+            run_child_core(
+                engine=mock_engine,
+                pool=mock_pool,
+                agent_class="coder",
+                instance_name="child1",
+                args={},
+                caller_name="parent1",
+                child_depth=1,
+            )
+
+    def test_parent_receives_background_tool_error_marker(self, mock_pool):
+        """When a tool raises ChildAgentFailedError, the parent gets [Background Tool Error]."""
+        from agent_cascade.child_runner import ChildAgentFailedError
+
+        registry = AsyncToolRegistry(pool=mock_pool)
+
+        def failing_child():
+            raise ChildAgentFailedError("Sub-agent 'child1' failed: [SYSTEM ERROR: HTTP 400]")
+
+        registry.register("parent1", failing_child, function_id="call_abc")
+
+        deadline = time.monotonic() + 5.0
+        while registry.has_pending("parent1") and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        mock_pool.enqueue_message.assert_called_once()
+        agent_name, msg = mock_pool.enqueue_message.call_args[0]
+        assert agent_name == "parent1"
+        assert "[Background Tool Error]" in msg
+        assert "child1" in msg

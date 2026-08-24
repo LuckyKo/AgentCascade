@@ -186,6 +186,50 @@ ENDPOINT_COOLDOWN_SECONDS: int = _parse_endpoint_cooldown()  # Seconds to skip a
 ENDPOINT_FAILURE_CLEANUP_HOURS: int = int(os.getenv(
     'AGENT_CASCADE_ENDPOINT_FAILURE_CLEANUP_HOURS', 24))  # Remove failure records older than this many hours
 
+# Phase 1: Fix A2 — absolute wall-clock deadline for a single LLM call.
+# Caps the total time (all retries included) that _execute_llm_call_with_retry may
+# spend before aborting with a [SYSTEM ERROR]. Prevents unbounded retry churn when
+# backoff is misconfigured or an endpoint never recovers. Set to 0 to disable.
+LLM_CALL_DEADLINE_SECONDS: int = int(os.getenv(
+    'QWEN_AGENT_LLM_CALL_DEADLINE_SECONDS', 900))  # Wall-clock deadline (seconds) for one LLM call, all retries included
+
+# Phase 1: Fix D — pre-allocation API sanity probe.
+# Before the router allocates an endpoint to a real call, it fires a minimal
+# non-streaming chat completion (1 tool + max_tokens=1) to verify the endpoint
+# accepts the tools+reasoning_effort call shape. Catches deterministic 400s
+# (e.g. "Function tools with reasoning_effort are not supported") BEFORE any
+# agent turn burns its retry budget on them. Results are cached per
+# (normalized_base, model) for SANITY_PROBE_TTL_SECONDS to avoid probing every
+# turn. Set SANITY_PROBE_ENABLED to False to disable entirely.
+SANITY_PROBE_ENABLED: bool = os.getenv(
+    'QWEN_AGENT_SANITY_PROBE_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')  # Master toggle for the pre-allocation sanity probe
+SANITY_PROBE_TTL_SECONDS: int = int(os.getenv(
+    'QWEN_AGENT_SANITY_PROBE_TTL_SECONDS', 600))  # Cache TTL (seconds) for probe results per (base, model)
+SANITY_PROBE_TIMEOUT_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_SANITY_PROBE_TIMEOUT_SECONDS', 20.0))  # HTTP timeout (seconds) for the probe request itself
+
+# Phase 2: Fix B1 — endpoint blacklist for deterministic failures.
+# An endpoint that fails ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD consecutive times
+# with a DETERMINISTIC client error (one that will recur on every attempt, e.g. an
+# HTTP 400 "not supported") is blacklisted for ENDPOINT_BLACKLIST_SECONDS — much
+# longer than the 60s cooldown because deterministic errors don't self-resolve.
+# Non-deterministic failures (network, timeout, 5xx) reset the counter instead.
+ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD: int = int(os.getenv(
+    'QWEN_AGENT_ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD', 3))  # Consecutive deterministic failures before blacklisting an endpoint
+ENDPOINT_BLACKLIST_SECONDS: int = int(os.getenv(
+    'QWEN_AGENT_ENDPOINT_BLACKLIST_SECONDS', 7200))  # Blacklist duration (seconds) for a persistently-failing endpoint
+
+# Phase 3: Fix A1 — cap on SLEEPING duration.
+# Max seconds an agent may remain in SLEEPING state waiting for background tools
+# (async agent calls / async shells). On expiry the agent is forced to COMPLETING
+# with an error message so a hung background tool can no longer hold it forever.
+# This replaces the deprecated AGENT_SLEEPING_TIMEOUT above for control flow — that
+# constant's timeout-to-IDLE transition was removed in 2026-08 and it is now unused;
+# the deprecated block is left intact for backward compatibility. Set to 0 to disable
+# the cap (legacy unbounded-wait behavior).
+AGENT_SLEEPING_MAX_WAIT_SECONDS: int = int(os.getenv(
+    'QWEN_AGENT_AGENT_SLEEPING_MAX_WAIT_SECONDS', 3600))  # Max seconds in SLEEPING before forcing COMPLETING with error
+
 # Settings for API router circuit breaker
 BREAKER_BASE_WINDOW_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_BREAKER_BASE_WINDOW_SECONDS', 20.0))  # Initial open-state window for the per-server circuit breaker (seconds)
