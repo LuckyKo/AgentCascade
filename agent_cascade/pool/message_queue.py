@@ -132,22 +132,39 @@ class MessageQueueMixin:
 
         return False
 
-    def wait_for_message(self, instance_name: str, timeout: float = 30.0) -> Optional[str]:
-        """Block until a message is available for this instance, or timeout.
+    def wait_for_message(self, instance_name: str, timeout: float = 30.0,
+                         consume_predicate=None) -> Optional[str]:
+        """Block until ANY message is available for this instance (or timeout/terminated), then
+        decide whether to consume it based on the front-of-queue message.
 
-        Used by __wait tool to pause execution until the next async message
-        (e.g., heartbeat or completion) arrives. When a message becomes available,
-        it is removed from the queue and returned so it is not duplicated by normal draining.
+        Wake-up contract (v2): wake on ANY queued message — user, system, other-tool shell,
+        etc. On wake, inspect only the FRONT of the queue (`msgs[0]`):
+          - `consume_predicate is None` → pop(0) and return it (unchanged default behavior).
+          - else if `consume_predicate(msgs[0])` is True → pop(0) and return it (consumed).
+          - else → **peek**: return `msgs[0]` WITHOUT popping, leaving the queue intact for the
+            normal drain (`engine/core.py:2320`). The caller re-checks the predicate to tell
+            "consumed" from "peeked".
 
-        Returns None if dismissed/terminated or if the timeout elapses with no new message.
+        Used by the shell_cmd `__wait` tool: it wakes on any queued message, intercepts and
+        returns its own tool_id's heartbeat/completion verbatim when that is at the front, and
+        otherwise leaves the queue untouched so the normal drain delivers everything in sequence.
+
+        Returns None if dismissed/terminated or if the timeout elapses with an EMPTY queue.
 
         Args:
             instance_name: The agent instance to wait for messages.
             timeout: Maximum seconds to wait. If None, wait indefinitely.
+            consume_predicate: Optional callable applied to the FRONT message on wake. When set
+                and it returns True, the front message is consumed (popped); when it returns
+                False, the front message is returned by reference but left queued (peek).
 
         Returns:
-            A single message string if one becomes available, or None if the
-            timeout elapses with no new message for this instance.
+            A single message string — either a consumed one or a peeked (still-queued) front
+            message — or None if the timeout elapses with an empty queue / instance terminated.
+
+            The returned value is the actual queued message object (no copy). On the peek path
+            it remains in the queue: returning it does NOT alter the queue (only the consume
+            path removes it). Strings are immutable, so holding this reference is safe.
         """
         with self._message_condition:
             deadline = None if timeout is None else time.time() + timeout
@@ -156,11 +173,18 @@ class MessageQueueMixin:
                 # Check termination before each wait iteration
                 if self.is_instance_terminated(instance_name):
                     return None  # Dismissed — wake up and let caller handle it
-                
+
                 msgs = self.message_queues.get(instance_name)
                 if msgs and len(msgs) > 0:
-                    # Take the first available message for this instance
-                    return msgs.pop(0)
+                    if consume_predicate is None:
+                        # Take the first available message for this instance
+                        return msgs.pop(0)
+                    # Consume-vs-peek on the FRONT message only. All under _message_condition
+                    # (which holds _queue_lock). The peek path must NOT mutate the list.
+                    front = msgs[0]
+                    if consume_predicate(front):
+                        return msgs.pop(0)
+                    return front  # not ours → leave queued; caller re-checks to decide
 
                 if deadline is not None:
                     remaining = deadline - time.time()

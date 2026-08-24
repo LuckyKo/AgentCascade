@@ -11,9 +11,80 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 sys.path.insert(0, r'N:\work\WD\AgentCascade_unified')
 
+import importlib.util as _util
+import os as _os
+
 import pytest
 
 from agent_cascade.async_shell import AsyncShellTracker, AsyncShellTask
+
+
+def _load_message_queue_mixin():
+    """Load MessageQueueMixin WITHOUT triggering agent_cascade/pool/__init__.py.
+
+    ⚠️ DO NOT "simplify" this away — it is load-bearing for two independent reasons:
+
+    1. A plain `from agent_cascade.pool.message_queue import MessageQueueMixin` at module
+       top FAILS collection under pytest-xdist: `agent_cascade/pool/__init__.py` eagerly
+       imports the full app chain (core → agents → tools → config.secrets_loader), which is
+       unavailable to xdist workers. The mixin module itself has no such dependencies, so we
+       load it directly from its file, registering a minimal `agent_cascade.pool` parent that
+       does NOT run the heavy __init__.
+
+    2. It must be loaded under its CANONICAL dotted name ('agent_cascade.pool.message_queue'),
+       not an ad-hoc one. An ad-hoc name creates a DISTINCT class object, so the fake pool in
+       this file would no longer pass `_has_real_wait_for_message`'s isinstance check (which
+       compares against shell_cmd.py's own import) and every queue-driven test would silently
+       fall to the polling fallback — passing for the wrong reason.
+
+    See project memory: .agent_lessons/async-shell-wait-queue-fix-impl.md (gotchas 1 & 2).
+    """
+    if 'agent_cascade.pool.message_queue' in sys.modules:
+        return sys.modules['agent_cascade.pool.message_queue'].MessageQueueMixin
+
+    _mixin_path = _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+        'agent_cascade', 'pool', 'message_queue.py',
+    )
+    # Register a lightweight parent package so the canonical submodule name resolves,
+    # WITHOUT executing agent_cascade/pool/__init__.py (which pulls in the whole app).
+    if 'agent_cascade.pool' not in sys.modules:
+        import types as _types
+        _parent = _types.ModuleType('agent_cascade.pool')
+        _parent.__path__ = [_os.path.dirname(_mixin_path)]
+        sys.modules['agent_cascade.pool'] = _parent
+
+    spec = _util.spec_from_file_location('agent_cascade.pool.message_queue', _mixin_path)
+    mod = _util.module_from_spec(spec)
+    sys.modules['agent_cascade.pool.message_queue'] = mod
+    spec.loader.exec_module(mod)
+    return mod.MessageQueueMixin
+
+
+MessageQueueMixin = _load_message_queue_mixin()
+
+
+class _FakePoolWithWait(MessageQueueMixin):
+    """Lightweight real pool for exercising the queue-driven __wait path.
+
+    MessageQueueMixin has no __init__, so we provide exactly what wait_for_message +
+    enqueue_message touch: _message_condition, message_queues, is_instance_terminated,
+    and _mark_activity (called by enqueue_message). A bare MagicMock would NOT be an
+    instance of MessageQueueMixin, so it correctly falls to the polling fallback.
+    """
+
+    def __init__(self):
+        self.message_queues = {}
+        self._queue_lock = threading.Lock()
+        self._message_condition = threading.Condition(self._queue_lock)
+        # Set True to exercise the termination branch of wait_for_message (returns None promptly).
+        self.terminated = False
+
+    def is_instance_terminated(self, instance_name):
+        return self.terminated
+
+    def _mark_activity(self, instance_name):  # called by enqueue_message (message_queue.py:67)
+        pass
 
 
 def _setup_task(tracker, task):
@@ -188,6 +259,17 @@ class TestWaitCommand:
         fake_time_mod, state = _fake_time_module()
         return tracker, fake_time_mod, state
 
+    def _wait_env_queue(self, shell_cmd_tool, task):
+        """Set up tracker + a REAL MessageQueueMixin pool for the queue-driven __wait path."""
+        tracker = AsyncShellTracker(pool=None)
+        _setup_task(tracker, task)
+        pool = _FakePoolWithWait()
+        pool._async_shell_tracker = tracker
+        pool.llm_cfg = {}  # dict so .get('shell_char_limit', default) returns default
+        shell_cmd_tool.agent_pool = pool
+        shell_cmd_tool.agent_name = 'test_agent'
+        return tracker, pool
+
     def test_wait_no_running_shell(self, shell_cmd_tool, mock_tracker):
         _make_tool_with_tracker(shell_cmd_tool, mock_tracker)
         result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 999, "async_mode": true}')
@@ -207,25 +289,27 @@ class TestWaitCommand:
         assert 'elapsed' in result, f"__wait (already completed) missing elapsed time: {result!r}"
 
     def test_wait_returns_new_output(self, shell_cmd_tool, mock_task_running):
-        tracker = AsyncShellTracker(pool=None)
-        _setup_task(tracker, mock_task_running)
-        _make_tool_with_tracker(shell_cmd_tool, tracker)
+        """Queue-driven __wait returns the enqueued heartbeat message VERBATIM.
 
-        def delayed_output():
-            time.sleep(0.1)
-            with mock_task_running._lock:
-                mock_task_running.stdout_lines.append('new output line')
+        The old version asserted 'new output line' in result (raw stdout) — that encoded the
+        buggy return-on-any-new-line semantics. Now __wait blocks on the message queue and
+        returns the tracker's heartbeat message, not raw buffer lines. This test exercises
+        the REAL MessageQueueMixin path (would fail if _has_real_wait_for_message returned
+        False, because a bare MagicMock pool would fall to polling and return raw output).
+        """
+        self._wait_env_queue(shell_cmd_tool, mock_task_running)
 
-        thread = threading.Thread(target=delayed_output, daemon=True)
-        thread.start()
+        # Enqueue a heartbeat formatted like the tracker's, then __wait must return it.
+        msg = ("⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | "
+               "2 lines since last tick\nraw line A\nraw line B")
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg)
 
         result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
-        thread.join(timeout=2)
 
-        assert '⟨shell_cmd wait⟩' in result
+        assert '⟨shell_cmd heartbeat⟩' in result
         assert 'Tool ID: 1' in result
-        assert 'new output line' in result
-        assert 'elapsed' in result, f"__wait (new output) missing elapsed time: {result!r}"
+        # Verbatim return — the exact enqueued message is what comes back.
+        assert result == msg
 
     def test_wait_returns_completion_status(self, shell_cmd_tool, mock_task_running):
         tracker = AsyncShellTracker(pool=None)
@@ -319,6 +403,212 @@ class TestWaitCommand:
 
         with task._lock:
             assert task.completed is False
+
+    # ── Queue-driven __wait tests (real MessageQueueMixin path) ──────────────
+
+    def test_wait_consumes_already_queued_heartbeat(self, shell_cmd_tool, mock_task_running):
+        """RC2 core fix: an ALREADY-queued heartbeat is consumed immediately (no timeout wait)."""
+        self._wait_env_queue(shell_cmd_tool, mock_task_running)
+        msg = "⟨shell_cmd heartbeat⟩ Beat 1 (30s), Tool ID: 1 | No new output (still running)"
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg)
+
+        start = time.time()
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        elapsed = time.time() - start
+
+        assert result == msg
+        # Must return immediately — NOT wait out the heartbeat interval (default 10s here).
+        assert elapsed < 2.0, f"__wait did not consume pre-queued heartbeat immediately ({elapsed:.1f}s)"
+
+    def test_wait_does_not_swallow_non_shell_messages(self, shell_cmd_tool, mock_task_running):
+        """v2 wake-up contract: a NON-shell (user) message at the FRONT of the queue → __wait
+        returns the DEFAULT wake-up string (NOT the shell msg) and leaves BOTH messages queued
+        in original order for the normal drain. Would FAIL if the code still consumed/skipped."""
+        self._wait_env_queue(shell_cmd_tool, mock_task_running)
+        user_msg = "hello from user"
+        shell_msg = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\nout"
+        # Enqueue the non-shell message FIRST so it sits at the FRONT of the shared queue.
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', user_msg)
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', shell_msg)
+
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+
+        # Front is the user msg (not this shell) → default wake-up string, NOT the shell msg.
+        assert 'Woken by queued message (not this shell)' in result, f"expected default wake-up: {result!r}"
+        assert result != shell_msg, "default wake-up case must not return the shell msg verbatim"
+        # BOTH messages remain queued, in original order (user first), for the normal drain.
+        remaining = shell_cmd_tool.agent_pool.get_queue_messages('test_agent')
+        assert remaining == [user_msg, shell_msg], \
+            f"queue was mutated / reordered: {remaining!r}"
+
+    def test_wait_user_and_heartbeat_drain_in_sequence(self, shell_cmd_tool, mock_task_running):
+        """v2 wake-up contract: user msg then this tool's heartbeat → __wait returns the default
+        wake-up (user is at front), and BOTH remain queued in original order so the normal drain
+        delivers them one after another as usual."""
+        self._wait_env_queue(shell_cmd_tool, mock_task_running)
+        user_msg = "supervisor note"
+        heartbeat = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\nout"
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', user_msg)
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', heartbeat)
+
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+
+        assert 'Woken by queued message (not this shell)' in result, f"expected default wake-up: {result!r}"
+        # Both still queued in original order — drain will deliver user then heartbeat.
+        remaining = shell_cmd_tool.agent_pool.get_queue_messages('test_agent')
+        assert remaining == [user_msg, heartbeat], \
+            f"queue must be left intact in order for the drain: {remaining!r}"
+
+    def test_wait_predicate_leaves_other_tool_id_queued(self, shell_cmd_tool, mock_task_running):
+        """v2 wake-up contract: a DIFFERENT tool's shell message at the FRONT → __wait(tool_id=1)
+        returns the default wake-up (not ours) and leaves BOTH queued in order; tool 2's own
+        __wait will later consume it when it reaches the front."""
+        self._wait_env_queue(shell_cmd_tool, mock_task_running)
+        msg1 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na"
+        msg2 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 2 | 1 line since last tick\nb"
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg2)  # other tool at FRONT
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg1)
+
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+
+        # Front is tool 2's msg (not ours) → default wake-up, NOT consumed.
+        assert 'Woken by queued message (not this shell)' in result, f"expected default wake-up: {result!r}"
+        remaining = shell_cmd_tool.agent_pool.get_queue_messages('test_agent')
+        # Both remain queued in original order for the normal drain.
+        assert remaining == [msg2, msg1], f"queue was mutated / reordered: {remaining!r}"
+
+    def test_wait_no_output_duplication(self, shell_cmd_tool, mock_task_running):
+        """RC3: __wait consumes the tracker's heartbeat (which advanced last_heartbeat_sent_pos);
+        a subsequent heartbeat must NOT re-send lines already delivered by __wait."""
+        # Real tracker wired to the real pool so _send_heartbeat enqueues + advances position.
+        pool = _FakePoolWithWait()
+        pool.llm_cfg = {}
+        tracker = AsyncShellTracker(pool=pool)  # tracker must see the pool or _enqueue is a no-op
+        _setup_task(tracker, mock_task_running)
+        pool._async_shell_tracker = tracker
+        shell_cmd_tool.agent_pool = pool
+        shell_cmd_tool.agent_name = 'test_agent'
+
+        # Seed output the tracker has not yet sent.
+        with mock_task_running._lock:
+            mock_task_running.stdout_lines = ['dup line A', 'dup line B']
+            mock_task_running.last_heartbeat_sent_pos = 0
+
+        # Tracker produces + enqueues a heartbeat (advances last_heartbeat_sent_pos to end).
+        tracker._send_heartbeat('test_agent', 1)
+        queued = pool.get_queue_messages('test_agent')
+        assert len(queued) == 1
+        first_msg = queued[0]
+        assert 'dup line A' in first_msg and 'dup line B' in first_msg
+
+        # __wait consumes that heartbeat verbatim.
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        assert result == first_msg
+
+        # Now the tracker sends a SECOND heartbeat with NO new output. Because
+        # last_heartbeat_sent_pos was already advanced by the first heartbeat (not by __wait),
+        # this second heartbeat must be the "no new output" variant — it must NOT re-send
+        # 'dup line A'/'dup line B'.
+        tracker._send_heartbeat('test_agent', 1)
+        queued2 = pool.get_queue_messages('test_agent')
+        assert len(queued2) == 1
+        second_msg = queued2[0]
+        assert 'No new output (still running)' in second_msg
+        assert 'dup line A' not in second_msg, "RC3 regression: lines re-sent after __wait consumed them"
+        assert 'dup line B' not in second_msg
+
+    def test_wait_fallback_uses_polling_for_mock_pool(self, shell_cmd_tool, mock_task_running):
+        """Guards the MagicMock guard: a bare MagicMock pool is NOT a MessageQueueMixin, so
+        __wait must fall to _polling_wait (proving _has_real_wait_for_message rejects mocks)."""
+        from agent_cascade.tools.custom.shell_cmd import _has_real_wait_for_message
+        tracker = AsyncShellTracker(pool=None)
+        _setup_task(tracker, mock_task_running)
+        _make_tool_with_tracker(shell_cmd_tool, tracker)  # wires a bare MagicMock pool
+
+        assert not _has_real_wait_for_message(shell_cmd_tool.agent_pool), \
+            "MagicMock pool must be rejected by _has_real_wait_for_message"
+        # And the fake real pool must be accepted (proves the new path is reachable).
+        assert _has_real_wait_for_message(_FakePoolWithWait())
+
+    def test_wait_predicate_does_not_match_longer_tool_id(self, shell_cmd_tool, mock_task_running):
+        """REGRESSION (exact-id boundary under v2 front-of-queue semantics): tool_id=1 must NOT
+        treat a Tool ID: 12 message as its own.
+
+        The old predicate `f'Tool ID: {tool_id}' in m` matched "Tool ID: 1" as a substring of
+        "Tool ID: 12". With v2 front-of-queue semantics, if the 12-message is at the FRONT and
+        we __wait(1), the boundary regex must say it is NOT ours → default wake-up, both stay
+        queued. (If the old substring predicate were used, the 12-msg would be wrongly consumed.)
+        """
+        self._wait_env_queue(shell_cmd_tool, mock_task_running)
+        msg_12 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 12 | 1 line since last tick\nb"
+        msg_1 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na"
+        # Enqueue the LONGER id first so it sits at the FRONT of the shared queue.
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_12)
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_1)
+
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+
+        # Front is the Tool ID: 12 message (NOT ours — boundary regex rejects it).
+        assert 'Woken by queued message (not this shell)' in result, \
+            f"__wait(1) wrongly consumed tool 12's front message: {result!r}"
+        # Both remain queued in original order; tool 12's __wait will consume msg_12 later.
+        remaining = shell_cmd_tool.agent_pool.get_queue_messages('test_agent')
+        assert remaining == [msg_12, msg_1], f"queue was mutated / reordered: {remaining!r}"
+
+    def test_wait_consumes_own_id_when_at_front(self, shell_cmd_tool, mock_task_running):
+        """Positive boundary check (v2 consume path): when THIS tool's exact-id message is at the
+        FRONT it IS consumed verbatim — and a longer-id message queued behind it stays put. Pairs
+        with test_wait_predicate_does_not_match_longer_tool_id to pin the 1-vs-12 boundary both ways."""
+        self._wait_env_queue(shell_cmd_tool, mock_task_running)
+        msg_1 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na"
+        msg_12 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 12 | 1 line since last tick\nb"
+        # Ours at the FRONT, longer id behind it.
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_1)
+        shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_12)
+
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+
+        assert result == msg_1, f"__wait(1) should consume its own front message verbatim: {result!r}"
+        remaining = shell_cmd_tool.agent_pool.get_queue_messages('test_agent')
+        # Only our own message was consumed; the longer-id one stays queued.
+        assert remaining == [msg_12], f"longer-id message must stay queued: {remaining!r}"
+
+    def test_wait_timeout_on_empty_new_path(self, shell_cmd_tool):
+        """Queue-driven path None-return branch: with NO messages enqueued and a short real
+        timeout, __wait returns the exact 'No new output (timeout after ...)' string promptly.
+        Covers the queue path's timeout branch (previously only exercised via the MagicMock
+        polling fallback). Uses a short heartbeat_interval to keep the real wait ~0.5s."""
+        task = _make_running_task(heartbeat_interval=0.5, command='sleep 100', pid=99999)
+        self._wait_env_queue(shell_cmd_tool, task)
+
+        start = time.time()
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        elapsed = time.time() - start
+
+        assert '⟨shell_cmd wait⟩' in result
+        assert 'No new output' in result
+        assert 'timeout after 0s' in result  # timeout = min(0.5, 180) → {0.5:.0f} == '0'
+        assert 'elapsed' in result
+        assert elapsed < 1.5, f"__wait did not return promptly on empty queue ({elapsed:.1f}s)"
+
+    def test_wait_terminated_instance_returns_promptly(self, shell_cmd_tool):
+        """Termination branch (message_queue.py ~170-171): when is_instance_terminated is True,
+        wait_for_message returns None immediately (even with a long timeout), so __wait returns
+        the existing 'No new output (timeout after ...)' string promptly without waiting it out."""
+        # Long heartbeat_interval → normally a ~3600s-capped wait; termination must short-circuit it.
+        task = _make_running_task(heartbeat_interval=3600.0, command='sleep 100', pid=99999)
+        self._wait_env_queue(shell_cmd_tool, task)
+        shell_cmd_tool.agent_pool.terminated = True  # make is_instance_terminated return True
+
+        start = time.time()
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        elapsed = time.time() - start
+
+        assert '⟨shell_cmd wait⟩' in result
+        assert 'No new output' in result
+        assert 'timeout after' in result
+        # Must NOT wait out the (capped) heartbeat interval — termination returns promptly.
+        assert elapsed < 1.5, f"__wait did not return promptly on terminated instance ({elapsed:.1f}s)"
 
 
 # ============================================================================

@@ -1,8 +1,12 @@
 import logging
 import os
+import re
 import time
 from agent_cascade.async_shell import _elapsed_for_task
 from agent_cascade.operation_manager.shell import ShellMixin
+# Imported for the isinstance guard in _has_real_wait_for_message (Change B).
+# Verified: no circular import — pool/core.py does not import shell_cmd at module load.
+from agent_cascade.pool.message_queue import MessageQueueMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tool_utils import truncate_with_spillover
@@ -16,6 +20,98 @@ from agent_cascade.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _has_real_wait_for_message(pool) -> bool:
+    """True only when pool is a real MessageQueueMixin with a working wait_for_message.
+
+    Guards the queue-driven ``__wait`` path: unit tests wire a bare ``MagicMock`` as
+    ``agent_pool``, for which ``hasattr(pool, 'wait_for_message')`` is True and calling it
+    would return a truthy MagicMock (breaking the timeout/cap tests). The isinstance check
+    forces those mock pools down the polling fallback path.
+    """
+    return isinstance(pool, MessageQueueMixin) and callable(getattr(pool, 'wait_for_message', None))
+
+
+_TOOL_ID_RE_CACHE = {}
+
+
+def _tool_id_re(tool_id):
+    """Compiled regex matching 'Tool ID: <exact id>' followed by a non-digit boundary.
+
+    Anchors BOTH sides of the number so a short id never matches a longer one that merely
+    starts with it (e.g. tool_id=1 must NOT match "Tool ID: 12"). The leading 'Tool ID: '
+    prefix anchors the start of the number; the (?=\\D|$) lookahead asserts the character
+    after the full id is a non-digit or end-of-string. This handles both real formats:
+      - heartbeat (tracker.py): "...Tool ID: {id} | ..."  → space after id
+      - completion (tracker.py): "⟨shell_cmd completed⟩ Tool ID: {id}\\n..." → newline after id
+    A trailing-space anchor would match heartbeats but break completions, so the non-digit
+    boundary is used instead.
+    """
+    pat = _TOOL_ID_RE_CACHE.get(tool_id)
+    if pat is None:
+        pat = re.compile(r'Tool ID: ' + str(int(tool_id)) + r'(?=\D|$)')
+        _TOOL_ID_RE_CACHE[tool_id] = pat
+    return pat
+
+
+def _polling_wait(task, tool_id: int, agent_name: str, timeout: float, pool) -> str:
+    """Busy-poll fallback for ``__wait`` when the pool lacks a real wait_for_message.
+
+    This is the ORIGINAL polling loop (moved verbatim into a helper so it is not duplicated
+    inline in the queue-driven path). It sleeps WAIT_CMD_POLL_INTERVAL and returns on
+    completion or ANY new stdout/stderr line, or the timeout string after `timeout` seconds.
+    """
+    import time as _time
+    start_time = _time.time()
+    poll_interval = WAIT_CMD_POLL_INTERVAL
+
+    with task._lock:
+        last_stdout_len = len(task.stdout_lines)
+        last_stderr_len = len(task.stderr_lines)
+
+    while True:
+        # Check for timeout
+        elapsed = _time.time() - start_time
+        remaining = timeout - elapsed
+        if remaining <= 0:
+            task_elapsed = _elapsed_for_task(task)
+            return (
+                f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
+                f"(timeout after {timeout:.0f}s, elapsed {task_elapsed:.0f}s)."
+            )
+
+        # Sleep briefly before next poll (use smaller interval near timeout)
+        sleep_time = min(poll_interval, remaining)
+        _time.sleep(sleep_time)
+
+        # Check task state
+        with task._lock:
+            is_completed = task.completed
+            rc = task.return_code
+
+        if is_completed:
+            task_elapsed = _elapsed_for_task(task)
+            return (
+                f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed "
+                f"(exit code {rc}, elapsed {task_elapsed:.0f}s)."
+            )
+
+        with task._lock:
+            # Collect new output since last check
+            new_stdout = list(task.stdout_lines[last_stdout_len:])
+            new_stderr = list(task.stderr_lines[last_stderr_len:])
+            last_stdout_len = len(task.stdout_lines)
+            last_stderr_len = len(task.stderr_lines)
+
+        if new_stdout or new_stderr:
+            # Format output similar to heartbeat style
+            lines = new_stdout + new_stderr
+            output_text = '\n'.join(line.rstrip('\r\n') for line in lines)
+            truncated = ShellCmd._truncate_shell_message(output_text, agent_name, pool)
+            task_elapsed = _elapsed_for_task(task)
+            return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} (elapsed {task_elapsed:.0f}s)\n{truncated}"
+
 
 @register_tool('shell_cmd', allow_overwrite=True)
 class ShellCmd(BaseTool):
@@ -401,7 +497,12 @@ class ShellCmd(BaseTool):
             task = tracker._get_task(agent_name, tool_id)
 
             if task is None:
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
+                # RC4 softening: a follow-up __wait can race task cleanup right before the
+                # completion USER message lands; keep the "No running shell found" substring.
+                return (
+                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found "
+                    f"(may have just completed — watch for the completion message)."
+                )
 
             # Read initial state under lock to avoid race with tracking thread.
             # All AsyncShellTask shared state must be accessed under task._lock
@@ -426,58 +527,52 @@ class ShellCmd(BaseTool):
                 else:
                     timeout = WAIT_CMD_DEFAULT_TIMEOUT
 
-            # Poll the task for new output or completion status changes.
-            # This directly checks task state rather than relying on message queue,
-            # so it works even when no heartbeats are configured.
-            import time as _time
-            start_time = _time.time()
-            poll_interval = WAIT_CMD_POLL_INTERVAL
+            # Queue-driven wait (v2 wake-up contract): block until ANY message is queued for
+            # this agent, then inspect the FRONT of the queue. If it is THIS tool_id's shell
+            # heartbeat/completion → consume it and return verbatim (the tracker already
+            # advanced task.last_heartbeat_sent_pos, so no duplication — RC3 preserved).
+            # Otherwise → return a default wake-up string and leave the queue untouched; the
+            # normal drain (engine/core.py:2320) delivers all remaining messages in sequence.
+            # We do NOT hold task._lock across the queue wait — all task locks above are released first.
+            pool = self.agent_pool
 
-            with task._lock:
-                last_stdout_len = len(task.stdout_lines)
-                last_stderr_len = len(task.stderr_lines)
+            def _is_our_shell_msg(m):
+                if isinstance(m, str):
+                    text = m
+                else:
+                    try:
+                        text = str(m)
+                    except Exception as e:
+                        # Non-string message whose __str__ failed — treat as "not ours".
+                        # (KeyboardInterrupt/SystemExit are BaseException and would NOT be caught here.)
+                        logger.debug("[shell_cmd] _is_our_shell_msg: failed to str() message: %s", e)
+                        return False
+                if not text.startswith('⟨shell_cmd'):
+                    return False
+                # Boundary-anchored match so tool_id=1 does NOT consume tool_id 12's message.
+                return bool(_tool_id_re(tool_id).search(text))
 
-            while True:
-                # Check for timeout
-                elapsed = _time.time() - start_time
-                remaining = timeout - elapsed
-                if remaining <= 0:
+            if _has_real_wait_for_message(pool):
+                msg = pool.wait_for_message(agent_name, timeout, consume_predicate=_is_our_shell_msg)
+                if msg is None:
+                    # Genuine timeout / terminated — empty queue. Existing string (unchanged).
                     task_elapsed = _elapsed_for_task(task)
                     return (
                         f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
                         f"(timeout after {timeout:.0f}s, elapsed {task_elapsed:.0f}s)."
                     )
+                if _is_our_shell_msg(msg):
+                    # Front message was THIS tool's shell msg → already consumed by the primitive.
+                    return str(msg)
+                # Front message is something else (user/system/other-tool) → it was only peeked,
+                # still queued. Return default wake-up; normal drain delivers it in sequence.
+                return (
+                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - "
+                    f"Woken by queued message (not this shell). Check your message queue."
+                )
 
-                # Sleep briefly before next poll (use smaller interval near timeout)
-                sleep_time = min(poll_interval, remaining)
-                _time.sleep(sleep_time)
-
-                # Check task state
-                with task._lock:
-                    is_completed = task.completed
-                    rc = task.return_code
-
-                if is_completed:
-                    task_elapsed = _elapsed_for_task(task)
-                    return (
-                        f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed "
-                        f"(exit code {rc}, elapsed {task_elapsed:.0f}s)."
-                    )
-
-                with task._lock:
-                    # Collect new output since last check
-                    new_stdout = list(task.stdout_lines[last_stdout_len:])
-                    new_stderr = list(task.stderr_lines[last_stderr_len:])
-                    last_stdout_len = len(task.stdout_lines)
-                    last_stderr_len = len(task.stderr_lines)
-
-                if new_stdout or new_stderr:
-                    # Format output similar to heartbeat style
-                    lines = new_stdout + new_stderr
-                    output_text = '\n'.join(line.rstrip('\r\n') for line in lines)
-                    truncated = ShellCmd._truncate_shell_message(output_text, agent_name, self.agent_pool)
-                    task_elapsed = _elapsed_for_task(task)
-                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} (elapsed {task_elapsed:.0f}s)\n{truncated}"
+            # Fallback: pool lacks a real wait_for_message (e.g. MagicMock in unit tests).
+            return _polling_wait(task, tool_id, agent_name, timeout, self.agent_pool)
         else:
             # Send as stdin input to the running process
             return tracker.send_input(agent_name, tool_id, command) or f"Input sent [Tool ID: {tool_id}]."
