@@ -111,6 +111,12 @@ class LifecycleMixin:
         self._instances_version += 1  # Fix #3: signal that instances changed
         with self._pool_lock:
             inst = self.instances.pop(instance_name, None)
+        # Capture agent_class from the popped instance BEFORE it's gone. The
+        # instance_classes property is derived from self.instances, which no longer
+        # contains this instance after the pop — re-deriving would yield '' and make
+        # the logger key mismatch (leaking the cached file handle). Normalize exactly
+        # as LoggerManager.get_logger does: (agent_class or '').strip().lower().
+        agent_class = ((inst.agent_class if inst else '') or '').strip().lower()
         # Don't discard from terminated_instances here — keep the signal alive until
         # the thread confirms it stopped via join in dismiss_instance(). 
         # Memory leak prevention now handled in dismiss_instance() after join.
@@ -124,8 +130,9 @@ class LifecycleMixin:
                 logger.debug(f"Instance conversation cleanup key missing (expected): {e}")
         # Clean up logger entry for the instance
         with self._logger._lock:
-            # Use composite key format (instance_name, agent_class.lower()) to match get_logger
-            agent_class = self.instance_classes.get(instance_name, '').lower()
+            # Use composite key format (instance_name, normalized agent_class) to match get_logger.
+            # agent_class was captured above from the popped instance — do NOT re-derive it
+            # from self.instance_classes here (the instance is already gone by now).
             key = (instance_name, agent_class)
             log_inst = self._logger._loggers.pop(key, None)
 

@@ -428,8 +428,8 @@ class TextChatAtOAI(BaseFnCallModel):
         if local_model is None:
             local_model = self.original_model if self.dynamic_model else self.model
         request_model = local_model
-        if self.dynamic_model:
-            logger.debug(f"LLM model selection: self.model={self.model!r}, original_model={self.original_model!r}, local_model={local_model!r}, request_model={request_model!r}")
+        # if self.dynamic_model:
+        #     logger.debug(f"LLM model selection: self.model={self.model!r}, original_model={self.original_model!r}, local_model={local_model!r}, request_model={request_model!r}")
 
         log_api_post = generate_cfg.pop('log_api_post', False)
 
