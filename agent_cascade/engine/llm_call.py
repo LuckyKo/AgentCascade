@@ -536,7 +536,7 @@ class LLMCallMixin:
                             self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                             with instance._compression_lock:
                                 instance._streaming_responses = []
-                            # ── Fix TODO
+                            # Clear pending async tool registrations so the stop is clean
                             if hasattr(self.pool, '_async_registry'):
                                 try:
                                     self.pool._async_registry.clear_pending(inst_name)
@@ -565,7 +565,7 @@ class LLMCallMixin:
                             self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                             with instance._compression_lock:
                                 instance._streaming_responses = []
-                            # ── Fix TODO
+                            # Clear pending async tool registrations so the stop is clean
                             if hasattr(self.pool, '_async_registry'):
                                 try:
                                     self.pool._async_registry.clear_pending(inst_name)
