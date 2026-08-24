@@ -181,7 +181,7 @@ class TestRecreateAfterDismiss:
         # Re-create the same instance name and obtain its logger again.
         inst2 = make_instance("w1", agent_class="coder")
         agent_pool.instances["w1"] = inst2
-        new_log = pool_get_logger(agent_pool, "w1", "coder")
+        new_log = agent_pool.get_logger("w1", "coder")
 
         # The stale (leaked) handle must have been closed so the two loggers can't
         # both be writing to the same JSONL file.
@@ -189,8 +189,3 @@ class TestRecreateAfterDismiss:
             "stale logger's file handle is still open — re-creation would double-write"
         # And it should be a distinct, fresh logger object (not the stale one).
         assert new_log is not old_log
-
-
-def pool_get_logger(pool, name: str, agent_class: str):
-    """Thin wrapper kept for readability in the recreate test."""
-    return pool.get_logger(name, agent_class)
