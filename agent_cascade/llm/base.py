@@ -350,6 +350,9 @@ class BaseChatModel(ABC):
                 )
                 estimated_tokens = None
 
+            if estimated_tokens is not None:
+                logger.info(f'Agent [{agent_name}] - ALL tokens: {estimated_tokens}, Available tokens: {max_input_tokens}')
+
             if estimated_tokens is not None and estimated_tokens > max_input_tokens:
                 # Raise immediately — no truncation. Upstream (execution engine) will compress.
                 raise ContextWindowExceeded(
