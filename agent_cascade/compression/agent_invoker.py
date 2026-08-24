@@ -22,6 +22,35 @@ from agent_cascade.api_integration import broadcast_stream_update
 # execution_engine.py → compression/handler.py → core.py → agent_invoker.py (→ ExecutionEngine would loop back)
 logger = logging.getLogger(__name__)
 
+def _describe_pool_holders(agent_pool: Any, caller_name: str) -> str:
+    """Short string of current holders on the caller's endpoint pool for slot diagnostics.
+
+    Low-cost and non-blocking; returns a short 'n/a'/'error' marker on any failure.
+    Mirrors SecurityAdvisorHandler._describe_pool_holders (security_handler.py).
+    """
+    try:
+        router = agent_pool.api_router
+        if not router or not caller_name:
+            return "n/a (no router)"
+        inst = agent_pool.get_instance(caller_name)
+        agent_class = inst.agent_class if inst else None
+        if not agent_class:
+            return "n/a (caller instance gone)"
+        slot_info = router.get_agent_slot_info(agent_class)
+        if not slot_info or not slot_info.get('needs_slot'):
+            return "none (unlimited endpoint — no slot needed)"
+        sched_pool = router.scheduler._get_or_create_pool(
+            slot_info['api_base'], slot_info['concurrency_limit']
+        )
+        holders = [
+            f"{h.instance_name} ({h.agent_name})"
+            for h in sched_pool._running.values()
+        ]
+        return ', '.join(holders) if holders else 'empty'
+    except Exception as e:
+        return f"error ({e})"
+
+
 # Module-level counter for generating unique Compressor instance names.
 # Each compression operation gets a fresh instance name so the logger cache key
 # (instance_name, agent_class) is unique — prevents TAIL SYNC DRIFT from reusing
@@ -210,18 +239,81 @@ def _execute_compressor_and_extract_summary(
     start_time = _time.monotonic()
     max_poll_time = COMPRESSION_AGENT_TIMEOUT
 
+    # Resolve the caller instance BEFORE the try block so it's in scope for the
+    # finally-block slot reacquire below. _yielded_slot tracks whether we released
+    # the caller's permit — if so, the finally block must re-acquire it (slots are
+    # acquired once at engine.run() entry, not per-turn, so without an explicit
+    # reacquire the caller stays slotless for the rest of its run()).
+    caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
+    _yielded_slot = False
+
     try:
         # Telemetry: track Compressor agent call latency (non-blocking)
         _call_start = _time.perf_counter()
 
         # ── SLOT YIELD FOR COMPRESSION/CONSOLIDATION ──
-        # If the caller holds the shared sequential slot, release it so the Compressor
-        # can acquire its own via engine.run(). _release_slot is idempotent — safe to
-        # call even if no slot is held. No re-acquire needed; the next turn acquires
-        # its own slot naturally.
-        caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
+        # The Compressor acquires its OWN endpoint slot (no borrowing), so the caller
+        # must free its permit first or the compressor deadlocks on the shared
+        # sequential slot. Three distinct paths:
+        #   1. Normal yield      — caller holds a live _slot_release callback.
+        #   2. Force-release     — callback was cleared but the pool still shows the
+        #                          caller holding a permit (leaked/stale state).
+        #   3. Skip              — nothing to yield (pool already free); log diagnostic.
+        # If we released anything, _yielded_slot is set so the finally block re-acquires.
         if caller_inst:
-            engine._release_slot(caller_inst, caller_name, "before_compression")
+            if getattr(caller_inst, '_slot_release', None) is not None:
+                # Path 1 — normal yield via the live release callback.
+                logger.debug(
+                    f"[COMPRESSION_SLOT_YIELD] Releasing slot for '{caller_name}' before compression"
+                )
+                engine._release_slot(caller_inst, caller_name, "before_compression")
+                _yielded_slot = True
+            else:
+                # Callback is None. Check whether the pool STILL shows the caller as a
+                # holder — if so the permit leaked (callback cleared without releasing).
+                _leaked_holder = None
+                try:
+                    router = agent_pool.api_router
+                    slot_info = router.get_agent_slot_info(caller_inst.agent_class)
+                    if slot_info and slot_info.get('needs_slot'):
+                        sched_pool = router.scheduler._get_or_create_pool(
+                            slot_info['api_base'], slot_info['concurrency_limit']
+                        )
+                        _leaked_holder = sched_pool._running.get(caller_name)
+                except Exception as e:
+                    logger.debug(
+                        f"[COMPRESSION_SLOT_YIELD] Failed to inspect pool for '{caller_name}': {e}"
+                    )
+
+                if _leaked_holder is not None:
+                    # Path 2 — force-release the leaked permit directly from the pool.
+                    logger.warning(
+                        f"[COMPRESSION_SLOT_YIELD] LEAKED PERMIT DETECTED for '{caller_name}' "
+                        f"— force-releasing"
+                    )
+                    try:
+                        sched_pool.release(_leaked_holder)
+                        # release() is silent on stale/no-op (returns None), so verify
+                        # the holder actually left the pool before flagging a yield —
+                        # otherwise we'd wrongly reacquire and leave the pool inconsistent.
+                        if _leaked_holder.instance_name not in sched_pool._running:
+                            _yielded_slot = True
+                        else:
+                            logger.error(
+                                f"[COMPRESSION_SLOT_YIELD] Force-release did not remove "
+                                f"holder for '{caller_name}' — leaving slot as-is"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"[COMPRESSION_SLOT_YIELD] Force-release check failed for "
+                            f"'{caller_name}': {e}", exc_info=True
+                        )
+                else:
+                    # Path 3 — no slot to yield; log a diagnostic for debuggability.
+                    logger.debug(
+                        f"[COMPRESSION_SLOT_YIELD_SKIPPED] No slot to yield for "
+                        f"'{caller_name}' — Pool holders: {_describe_pool_holders(agent_pool, caller_name)}"
+                    )
 
         _last_comp_send = 0.0
         _comp_tick_num = 0
@@ -309,6 +401,19 @@ def _execute_compressor_and_extract_summary(
                 )
             except Exception:
                 pass
+
+        # ── SLOT REACQUIRE: restore caller's slot if we yielded it ──
+        # Runs in the outer finally so it fires whether the inner block succeeded or
+        # raised. No KV save/restore here (unlike the compression-HALT path in core.py,
+        # which blocks for a long time): this inline compressor call is a single
+        # engine.run() that completes normally, and the caller's KV stays resident in
+        # RAM during it — same as the security check. Mirrors tool_dispatcher's sync-child
+        # yield/reacquire without KV save.
+        if _yielded_slot and caller_inst is not None:
+            logger.debug(
+                f"[COMPRESSION_SLOT_REACQUIRE] Restoring slot for '{caller_name}' after compression"
+            )
+            engine.reacquire_for(caller_inst, caller_name, context="after_compression")
 
     # Extract the summary from the last assistant message
     summary = ""

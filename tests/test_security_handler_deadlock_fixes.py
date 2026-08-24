@@ -868,8 +868,12 @@ class TestActiveChecksCleanupOnLockTimeout:
 
 
 class TestSlotYieldBeforeSecurityCheck:
-    """Tests that _execute_check unconditionally releases the caller's slot before
-    running the Security agent. No re-acquire — the next turn acquires naturally."""
+    """Tests that _execute_check yields the caller's slot before running the Security
+    agent, then re-acquires it in the finally block.
+
+    Slots are acquired ONCE at engine.run() entry — NOT per-turn — so without an
+    explicit reacquire the caller would remain slotless for the entire remaining run().
+    """
 
     def _make_pool_with_fast_engine(self):
         """Pool + engine mock that yields an immediate [YES] verdict."""
@@ -930,20 +934,32 @@ class TestSlotYieldBeforeSecurityCheck:
         assert engine_instance._release_slot.called, (
             "_release_slot should be called to free the caller's slot before Security runs"
         )
-        # No reacquire_for call — the next turn acquires naturally.
-        assert not engine_instance.reacquire_for.called, (
-            "reacquire_for should NOT be called — next turn acquires its own slot"
+        # Reacquire must run in the finally block to restore the caller's slot.
+        # Without reacquire, the caller remains slotless for the entire remaining run()
+        # (slots are acquired once at run() entry, not per-turn).
+        assert engine_instance.reacquire_for.called, (
+            "reacquire_for should be called in the finally block to restore the caller's slot"
+        )
+        # Verify it was called with the correct instance.
+        assert any(
+            c.args and c.args[0] is caller_inst
+            for c in engine_instance.reacquire_for.call_args_list
+        ), (
+            "reacquire_for should be called with the caller instance"
         )
 
-    def test_release_slot_noop_when_no_callback(self):
-        """When caller has no _slot_release (None), _release_slot is still called but
-        is a safe no-op internally (checks for None before releasing)."""
+    def test_skip_path_when_no_slot_held(self):
+        """When caller has no _slot_release (None) and no leaked permit, the skip path
+        should fire with diagnostic logging. No _release_slot call needed."""
         pool, app, mock_engine_cls, caller_inst = self._make_pool_with_fast_engine()
         engine_instance = mock_engine_cls.return_value
 
-        # No slot held
+        # No slot held, no leaked permit. The pool's api_router must report that the
+        # caller does NOT need a slot (no live or leaked permit), otherwise the
+        # force-release path (Path 2) would fire on the MagicMock router.
         caller_inst._slot_release = None
         caller_inst._slot_key = None
+        pool.api_router.get_agent_slot_info.return_value = {"needs_slot": False}
 
         session = {"session_name": "Maine", "generate_cfg": {}}
         send_queue = MagicMock()
@@ -965,8 +981,14 @@ class TestSlotYieldBeforeSecurityCheck:
                     timeout_seconds=3600, warning_seconds=2400,
                 )
 
-        # _release_slot is still called (unconditional) but handles None gracefully.
-        assert engine_instance._release_slot.called
+        # Skip path should fire (no _release_slot call)
+        assert not engine_instance._release_slot.called, (
+            "_release_slot should NOT be called when there's no slot to yield"
+        )
+        # No reacquire either (nothing was yielded)
+        assert not engine_instance.reacquire_for.called, (
+            "reacquire_for should NOT be called when nothing was yielded"
+        )
 
 
 class TestLeakedLockRecoveryEndToEnd:

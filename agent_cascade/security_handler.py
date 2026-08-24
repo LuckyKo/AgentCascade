@@ -391,6 +391,7 @@ class SecurityAdvisorHandler:
         sec_instance = None
         sec_warning_timer = None       # Track for cleanup in finally block
         sec_first_yield_timer = None   # Last-resort guard against a hung generator (FIX 1)
+        _yielded_slot = False          # True if we released the caller's slot → must reacquire in finally
 
         sec_prompt_lock = _get_security_check_lock(self.app_state)
         active_checks, checks_lock = _get_active_checks_state(self.app_state)
@@ -544,15 +545,68 @@ class SecurityAdvisorHandler:
                 _call_start = time.perf_counter()
 
                 # ── Slot yield: release caller's slot before Security agent runs ──
-                # If the caller holds the shared sequential slot, release it so the
-                # Security agent can acquire. _release_slot is idempotent — safe to call
-                # even if no slot is held. No re-acquire needed; the next turn acquires
-                # its own slot naturally (same as the sync-child path in tool_dispatcher).
+                # The Security agent acquires its OWN endpoint slot (no borrowing), so the
+                # caller must free its permit first or the check deadlocks on the shared
+                # sequential slot. Three distinct paths:
+                #   1. Normal yield      — caller holds a live _slot_release callback.
+                #   2. Force-release     — callback was cleared but the pool still shows the
+                #                          caller holding a permit (leaked/stale state).
+                #   3. Skip              — nothing to yield (pool already free); log diagnostic.
+                # If we released anything, _yielded_slot is set so the finally block re-acquires.
                 if caller_inst_sec:
-                    logger.debug(
-                        f"[SECURITY_SLOT_YIELD] Releasing slot for '{caller_agent}' before Security check"
-                    )
-                    engine._release_slot(caller_inst_sec, caller_agent, "before_security_check")
+                    if getattr(caller_inst_sec, '_slot_release', None) is not None:
+                        # Path 1 — normal yield via the live release callback.
+                        logger.debug(
+                            f"[SECURITY_SLOT_YIELD] Releasing slot for '{caller_agent}' before Security check"
+                        )
+                        engine._release_slot(caller_inst_sec, caller_agent, "before_security_check")
+                        _yielded_slot = True
+                    else:
+                        # Callback is None. Check whether the pool STILL shows the caller as a
+                        # holder — if so the permit leaked (callback cleared without releasing).
+                        _leaked_holder = None
+                        try:
+                            router = self.agent_pool.api_router
+                            slot_info = router.get_agent_slot_info(caller_inst_sec.agent_class)
+                            if slot_info and slot_info.get('needs_slot'):
+                                sched_pool = router.scheduler._get_or_create_pool(
+                                    slot_info['api_base'], slot_info['concurrency_limit']
+                                )
+                                _leaked_holder = sched_pool._running.get(caller_agent)
+                        except Exception as e:
+                            logger.debug(
+                                f"[SECURITY_SLOT_YIELD] Failed to inspect pool for '{caller_agent}': {e}"
+                            )
+
+                        if _leaked_holder is not None:
+                            # Path 2 — force-release the leaked permit directly from the pool.
+                            logger.warning(
+                                f"[SECURITY_SLOT_YIELD] LEAKED PERMIT DETECTED for '{caller_agent}' "
+                                f"— force-releasing"
+                            )
+                            try:
+                                sched_pool.release(_leaked_holder)
+                                # release() is silent on stale/no-op (returns None), so verify
+                                # the holder actually left the pool before flagging a yield —
+                                # otherwise we'd wrongly reacquire and leave the pool inconsistent.
+                                if _leaked_holder.instance_name not in sched_pool._running:
+                                    _yielded_slot = True
+                                else:
+                                    logger.error(
+                                        f"[SECURITY_SLOT_YIELD] Force-release did not remove "
+                                        f"holder for '{caller_agent}' — leaving slot as-is"
+                                    )
+                            except Exception as e:
+                                logger.error(
+                                    f"[SECURITY_SLOT_YIELD] Force-release check failed for "
+                                    f"'{caller_agent}': {e}", exc_info=True
+                                )
+                        else:
+                            # Path 3 — no slot to yield; log a diagnostic for debuggability.
+                            logger.debug(
+                                f"[SECURITY_SLOT_YIELD_SKIPPED] No slot to yield for "
+                                f"'{caller_agent}' — Pool holders: {self._describe_pool_holders(caller_agent)}"
+                            )
 
                 # Last-resort guard against a generator that never yields its first token.
                 # The turn budget is the primary mechanism; this timer only covers the
@@ -697,6 +751,13 @@ class SecurityAdvisorHandler:
                     sec_first_yield_timer.cancel()
                 except Exception:
                     pass  # Timer may have already fired or been cancelled
+
+            # ── Slot reacquire: restore caller's slot if we yielded it ──
+            if _yielded_slot and caller_inst_sec:
+                logger.debug(
+                    f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check"
+                )
+                engine.reacquire_for(caller_inst_sec, caller_agent, "after_security_check")
 
             # ── Cleanup: always remove instance state and release tracking ──
             self._cleanup(sec_state_key)
