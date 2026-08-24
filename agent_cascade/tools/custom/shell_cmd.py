@@ -4,9 +4,6 @@ import re
 import time
 from agent_cascade.async_shell import _elapsed_for_task
 from agent_cascade.operation_manager.shell import ShellMixin
-# Imported for the isinstance guard in _has_real_wait_for_message (Change B).
-# Verified: no circular import — pool/core.py does not import shell_cmd at module load.
-from agent_cascade.pool.message_queue import MessageQueueMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tool_utils import truncate_with_spillover
@@ -30,6 +27,11 @@ def _has_real_wait_for_message(pool) -> bool:
     would return a truthy MagicMock (breaking the timeout/cap tests). The isinstance check
     forces those mock pools down the polling fallback path.
     """
+    # Lazy import: importing agent_cascade.pool at module top closes a circular
+    # agents→tools→pool→agents cycle (pool/core.py imports agent_cascade.agents),
+    # breaking any entry point that imports `agent_cascade.agents` first
+    # (e.g. tests/agents/*). Only needed at call time here.
+    from agent_cascade.pool.message_queue import MessageQueueMixin
     return isinstance(pool, MessageQueueMixin) and callable(getattr(pool, 'wait_for_message', None))
 
 

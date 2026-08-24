@@ -618,6 +618,8 @@ def assert_completion_success(log: List[MockRequest], sentinel: str):
 
 # ── Stress Test Scenarios ─────────────────────────────────────────────────────
 
+@pytest.mark.skip(reason="obsolete: assumes async children on conc=0 pool which is always-sync; "
+                        "reservation system removed in d4db1be — see reports/preexisting_test_failures_investigation.md Group B")
 class TestAgentCallSchedulingStress:
     """Black-box stress tests for agent scheduling on conc=0 sequential pool."""
 

@@ -412,12 +412,19 @@ class TestPerformanceBaseline:
             list(result)
             return True
 
-        start = time.time()
-        router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
-        elapsed = time.time() - start
+        # Neutralize the Fix D pre-allocation sanity probe (7b4b303): it would issue a real
+        # HTTP probe to this test's dead endpoint (localhost:9984, nothing listens), hanging
+        # ~20s on SDK timeout. This test measures router overhead only, not network I/O —
+        # probe behavior is covered by tests/test_sanity_probe.py.
+        with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain: chain):
+            start = time.time()
+            router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
+            elapsed = time.time() - start
 
         assert llm.call_count == 1
         print(f"[BASELINE] Zero retries: {elapsed:.3f}s (expected <0.5s)")
+        # NOTE: budget kept at <0.5s — verified fast with probe stubbed; relax to <2s only if
+        # xdist load makes this flaky under parallel workers.
         assert elapsed < 0.5, f"Zero-retry call too slow: {elapsed:.3f}s"
 
     def test_latency_one_retry(self):
