@@ -1315,15 +1315,19 @@ class AsyncShellTracker:
 
             if proc is not None:
                 # Force-kill the process tree directly for immediate termination.
-                self._kill_process_tree(proc, agent_name, tool_id)
+                try:
+                    self._kill_process_tree(proc, agent_name, tool_id)
+                finally:
+                    # Always clear the flag — a kill failure must not leave it set,
+                    # which would otherwise mislead the tracking thread's external-kill
+                    # handling (it would skip its own kill/cleanup path).
+                    with task._lock:
+                        task.kill_in_progress = False
 
                 # Wait until the process is confirmed dead before returning.
                 deadline = time.time() + constants.KILL_WAIT_TIMEOUT
                 while proc.poll() is None and time.time() < deadline:
                     time.sleep(0.1)
-
-                with task._lock:
-                    task.kill_in_progress = False
 
                 elapsed = _elapsed_for_task(task)
                 if proc.poll() is not None:
