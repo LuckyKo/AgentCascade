@@ -590,24 +590,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     turns_available = _turns[0]  # Sync back after possible decrement
                     continue
 
-                # Turn limit warnings (50%, 90%, and final turn) - one-time only.
-                # Checked BEFORE decrement so that max_turns=1 agents still get
-                # the final turn warning.
-                # Each threshold is gated on exact integer equality and
-                # turns_available only ever decreases by 1 per loop iteration,
-                # so each warning fires at most once — no separate dedup guard
-                # is needed for the USER-message version (the old inline
-                # _append_system_notification guard_prefix check is obsolete).
-                # Emitted as SEPARATE USER-role messages (same pattern as the
-                # final-turn warning below): appended to instance.conversation via
-                # _append_and_log and to llm_messages (so the LLM sees them this turn).
-                # The local `messages` list is NOT extended here. Because _setup_turn()
-                # runs ONCE per run (before this loop, not per iteration), `messages`
-                # will not include these warning messages for the rest of this run — so
-                # loop detection / compression in later iterations operate on a view that
-                # omits them. This mirrors the already-shipped final-turn warning and is
-                # bounded (<=2 messages); it does NOT affect the LLM context, which uses
-                # llm_messages.
+                # Turn limit warnings (50%, 90%, final) — one-time only, emitted as SEPARATE USER messages.
+                # Checked BEFORE decrement so max_turns=1 agents still get the final warning.
+                # Each threshold fires at most once (exact integer equality + single-step decrement).
+                # Pattern: _make_user_message → _append_and_log → llm_messages.append.
+                # NOTE: these are NOT added to the local `messages` list because _setup_turn()
+                # runs ONCE per run (not per iteration); loop detection/compression thus see a view
+                # that omits them — same as the final-turn warning. Bounded (<=2 messages) and does
+                # not affect LLM context, which uses llm_messages.
                 if turns_available == turns_50pct:
                     warn_msg = (
                         f"[SYSTEM WARNING: Halfway through your turn budget. "

@@ -282,19 +282,26 @@ class TestTurnLimitWarningUserMessages:
 
     def test_50pct_warning_is_separate_user_message(self):
         """max_turns=6 → turns_50pct=max(3,int(3))=3. The "Halfway" warning fires when
-        turns_available==3 (4th LLM call) and must be a distinct USER-role message."""
+        turns_available==3 (4th LLM call) and must be a distinct USER-role message that is
+        also a clean standalone message (not stitched onto a prior message's content)."""
         max_turns = 6
         llm, instance = _run(max_turns)
 
-        # turns_available==3 occurs on the 4th LLM call (index 3).
-        halfway_call = llm.calls[3]
+        # Computed from the threshold math: turns_available==turns_50pct → LLM call index max_turns - turns_50pct.
+        turns_50pct = max(3, int(max_turns * 0.5))
+        halfway_call = llm.calls[max_turns - turns_50pct]
         warn = _find_warning_in_call(halfway_call, "Halfway through your turn budget")
         assert warn is not None, (
             "50% 'Halfway' warning not found as a standalone message in the LLM call "
-            f"where turns_available=={max_turns - 3 + 1}"
+            f"where turns_available=={turns_50pct}"
         )
         # It must be a USER-role message.
         assert _msg_role(warn) == USER, f"50% warning role is {_msg_role(warn)!r}, expected USER"
+        # Standalone message contains ONLY the warning text (not stitched onto a prior msg).
+        content = warn.content if isinstance(warn, Message) else warn.get('content', '')
+        assert content.strip().startswith("[SYSTEM WARNING: Halfway"), (
+            f"50% warning is not a clean standalone message; content={content[:80]!r}"
+        )
 
     def test_90pct_warning_is_separate_user_message(self):
         """max_turns=6 → turns_90pct=max(2,int(0.6))=2. The 90% warning fires when
@@ -302,33 +309,15 @@ class TestTurnLimitWarningUserMessages:
         max_turns = 6
         llm, instance = _run(max_turns)
 
-        # turns_available==2 occurs on the 5th LLM call (index 4).
-        ninety_call = llm.calls[4]
+        # Computed from the threshold math: turns_available==turns_90pct → LLM call index max_turns - turns_90pct.
+        turns_90pct = max(2, int(max_turns * 0.1))
+        ninety_call = llm.calls[max_turns - turns_90pct]
         warn = _find_warning_in_call(ninety_call, "Turn limit approaching")
         assert warn is not None, (
             "90% 'Turn limit approaching' warning not found as a standalone message in the "
-            f"LLM call where turns_available=={max_turns - 2 + 1}"
+            f"LLM call where turns_available=={turns_90pct}"
         )
         assert _msg_role(warn) == USER, f"90% warning role is {_msg_role(warn)!r}, expected USER"
-
-    def test_50pct_warning_not_stitched_into_previous_message(self):
-        """The 50% warning must be its OWN message, not appended to the prior assistant msg.
-
-        A standalone USER message contains ONLY the warning text (a fresh message),
-        proving it was not stitched onto the tail of a previous message's content.
-        """
-        max_turns = 6
-        llm, instance = _run(max_turns)
-
-        halfway_call = llm.calls[3]
-        warn = _find_warning_in_call(halfway_call, "Halfway through your turn budget")
-        assert warn is not None, "50% warning missing"
-        content = warn.content if isinstance(warn, Message) else warn.get('content', '')
-        # A standalone USER message contains ONLY the warning (no preceding
-        # assistant text glued onto it).
-        assert content.strip().startswith("[SYSTEM WARNING: Halfway"), (
-            f"50% warning is not a clean standalone message; content={content[:80]!r}"
-        )
 
     def test_no_duplication_in_conversation(self):
         """Across the whole run each warning text appears EXACTLY once in instance.conversation."""
@@ -352,11 +341,13 @@ class TestTurnLimitWarningUserMessages:
         max_turns = 4
         llm, instance = _run(max_turns)
 
-        # turns_available==3 → call index 1 ; turns_available==2 → call index 2.
-        assert _find_warning_in_call(llm.calls[1], "Halfway through your turn budget") is not None, \
-            "50% warning missing on the turns_available==3 call"
-        assert _find_warning_in_call(llm.calls[2], "Turn limit approaching") is not None, \
-            "90% warning missing on the turns_available==2 call"
+        # Computed from the threshold math: turns_available==turn → LLM call index max_turns - turn.
+        turns_50pct = max(3, int(max_turns * 0.5))
+        turns_90pct = max(2, int(max_turns * 0.1))
+        assert _find_warning_in_call(llm.calls[max_turns - turns_50pct], "Halfway through your turn budget") is not None, \
+            f"50% warning missing on the turns_available=={turns_50pct} call"
+        assert _find_warning_in_call(llm.calls[max_turns - turns_90pct], "Turn limit approaching") is not None, \
+            f"90% warning missing on the turns_available=={turns_90pct} call"
 
         assert _count_in_conversation(instance, "Halfway through your turn budget") == 1
         assert _count_in_conversation(instance, "Turn limit approaching") == 1
@@ -420,8 +411,9 @@ class TestTurnLimitWarningUserMessages:
         assert conv_warning is not None, "50% warning missing from instance.conversation"
 
         # (b) Present as a distinct USER message in the LLM call where it fired.
-        # turns_available==3 → 4th LLM call (index 3).
-        halfway_call = llm.calls[3]
+        # Computed from the threshold math: turns_available==turns_50pct → LLM call index max_turns - turns_50pct.
+        turns_50pct = max(3, int(max_turns * 0.5))
+        halfway_call = llm.calls[max_turns - turns_50pct]
         llm_warning = _find_warning_in_call(halfway_call, "Halfway through your turn budget")
         assert llm_warning is not None, "50% warning missing from the LLM messages at its injection turn"
         assert _msg_role(llm_warning) == USER
