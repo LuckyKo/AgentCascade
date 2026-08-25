@@ -121,7 +121,7 @@ CONSOLIDATION_PROMPT = (
     "- Maintain chronological order implicitly (earliest events first).\n"
     "- If conflicting information appears across summaries, prefer the most recent version.\n\n"
     "--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n"
-    f"Present your consolidated summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end."
+    f"Present your consolidated summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end. It will NOT be validated without this marker."
 )
 
 COMPRESSION_NOTICE_TEMPLATE = ""  # Unused — header is now minimal
@@ -324,7 +324,7 @@ TOOL_METADATA = {
             '- To check on it, use the tool_id parameter with __status (status + recent output), __kill, __heartbeat=N, or __ctrl_c. Send any other text as stdin input (that is NOT a shell command).\n'
             '- **Do not spin:** never issue more than ~2 status checks for the same tool_id without new information. If you have nothing else to do, wait for the automatic completion message instead of polling in a tight loop and wasting tokens. Consider increasing heartbeat interval if the updates are slow.\n'
             '- Max 5 concurrent async shells per agent.\n\n'
-            '**stdin Limitations**: Windows CMD variable expansion with stdin (e.g., `set /p VAR=input & echo %VAR%`) may not work reliably in one-liners due to how cmd /c processes variables — the input arrives but `%VAR%` won\'t expand because it was parsed before input was received. This applies to both sync and async modes.'
+            '**Limitations**: Windows CMD Shell does not support tail, but piped filters are unnecessary as the tool already produces output with mid point truncation.'
         ),
         'parameters': {
             'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',

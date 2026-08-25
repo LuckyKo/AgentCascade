@@ -21,6 +21,29 @@ from agent_cascade.exceptions import (
 )
 from agent_cascade.llm.base import ModelServiceError, BaseChatModel
 from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
+from agent_cascade.api_router import APIRouter
+
+
+@pytest.fixture(autouse=True)
+def _disable_sanity_probe():
+    """Neutralize the pre-allocation sanity probe for every test in this module.
+
+    Commit 7b4b303 wired `pre_validate_endpoint_chain` into
+    APIRouter.call_with_fallback: it issues a REAL HTTP GET /models probe to any
+    endpoint not in the probe cache, and endpoints that fail probing are REMOVED
+    from the chain. This file's routers deliberately use unreachable fake
+    endpoints (http://gate:8080/v1, http://a:8080/v1, ...), so the probe would
+    prune them and calls would fall through to the Tier-4 default endpoint,
+    where context-exceeded errors are misclassified as service errors
+    (RuntimeError instead of FallbackCompressionRequired).
+
+    The pass-through stub keeps the chain intact so tests exercise the
+    call_with_fallback logic they were written for. Probe coverage is not lost:
+    it is unit-tested separately in tests/test_sanity_probe.py (which patches
+    requests.get). See .agent_lessons/sanity-probe-breaks-latency-baseline-test.md.
+    """
+    with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain: chain):
+        yield
 
 
 # ──────────────────────────────────────────────
