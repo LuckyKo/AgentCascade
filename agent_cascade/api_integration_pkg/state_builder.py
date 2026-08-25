@@ -314,6 +314,9 @@ def build_state_from_pool(
             'max_turns': getattr(ps, 'max_turns', 50),
             'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
             'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
+            # Tool-call loop detection (staged rollout: rollback off by default)
+            'tool_loop_detection_enabled': getattr(ps, 'tool_loop_detection_enabled', True),
+            'tool_loop_rollback_enabled': getattr(ps, 'tool_loop_rollback_enabled', False),
             # Inner-loop detection
             **{'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)},
             **_serialize_loop_settings(ps),
@@ -493,6 +496,9 @@ def build_stream_update_from_pool(
             'max_turns': getattr(ps, 'max_turns', 50),
             'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
             'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
+            # Tool-call loop detection (staged rollout: rollback off by default)
+            'tool_loop_detection_enabled': getattr(ps, 'tool_loop_detection_enabled', True),
+            'tool_loop_rollback_enabled': getattr(ps, 'tool_loop_rollback_enabled', False),
             # Inner-loop detection
             **{'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)},
             **_serialize_loop_settings(ps),

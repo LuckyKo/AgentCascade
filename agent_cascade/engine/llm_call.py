@@ -37,6 +37,7 @@ from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.inner_loop_detect import InnerLoopDetector, save_loop_sample
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
 from agent_cascade.loop_detection import detect_loop as _canonical_detect_loop
+from agent_cascade.tool_loop_detect import detect_tool_loop as _detect_tool_loop
 
 from agent_cascade.engine.compression_exec import (
     FALLBACK_COMPRESSION_MAX_ROUNDS,
@@ -137,25 +138,41 @@ class LLMCallMixin:
         # boolean attributes.
         if not getattr(instance, '_suppress_loop_detection_next_turn', False):
             loop_info = _canonical_detect_loop(messages)
+            loop_type = "outer"
+            # Tool-call loop detector (parallel checker for tool-call failure
+            # loops invisible to the exact contiguous matcher). Gated by
+            # tool_loop_detection_enabled; while tool_loop_rollback_enabled is
+            # False it runs in log-only mode (telemetry recorded, no rollback).
+            if loop_info is None and getattr(self.pool.settings, 'tool_loop_detection_enabled', True):
+                loop_info = _detect_tool_loop(messages)
+                if loop_info:
+                    loop_type = "tool"
             if loop_info:
                 reason, pop_count = loop_info
                 logger.debug(
                     f"[LOOP_DETECTED] {inst_name}: pattern={reason}, "
-                    f"pop_count={pop_count}, messages={len(messages)}"
+                    f"pop_count={pop_count}, messages={len(messages)}, loop_type={loop_type}"
                 )
 
                 # ── Respect auto_rollback_on_loop toggle ──────────────────────
-                if not self.pool.settings.auto_rollback_on_loop:
+                # Tool-loop hits also respect tool_loop_rollback_enabled: while
+                # False (staged-rollout log-only mode) they behave exactly like
+                # the auto_rollback_on_loop=False branch below.
+                _tool_log_only = (
+                    loop_type == "tool"
+                    and not getattr(self.pool.settings, 'tool_loop_rollback_enabled', False)
+                )
+                if not self.pool.settings.auto_rollback_on_loop or _tool_log_only:
                     logger.info(
                         f"[LOOP_DETECTED_NO_ROLLBACK] {inst_name}: loop detected "
-                        f"(pattern={reason}) but auto_rollback_on_loop=False. "
-                        f"Continuing to LLM call."
+                        f"(pattern={reason}, loop_type={loop_type}) but auto-rollback "
+                        f"is disabled for this detector. Continuing to LLM call."
                     )
                     # Telemetry for observability
                     if (tel := self._telemetry()) is not None:
                         try:
                             tel.record_loop_detected(
-                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type="outer",
+                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type=loop_type,
                             )
                         except Exception:
                             pass
@@ -211,7 +228,7 @@ class LLMCallMixin:
                 if (tel := self._telemetry()) is not None:
                     try:
                         tel.record_loop_detected(
-                            inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type="outer",
+                            inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type=loop_type,
                         )
                     except Exception:
                         pass

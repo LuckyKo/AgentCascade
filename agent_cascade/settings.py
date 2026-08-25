@@ -147,6 +147,13 @@ AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv(
     'QWEN_AGENT_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
+# Tool-call loop detection (parallel checker, see tool_loop_detect.py).
+# Staged rollout: detection is ON by default but rollback starts OFF (log-only
+# telemetry mode); flip TOOL_LOOP_ROLLBACK_ENABLED after a zero-FP burn-in.
+TOOL_LOOP_DETECTION_ENABLED: bool = os.getenv(
+    'QWEN_AGENT_TOOL_LOOP_DETECTION', '1') == '1'  # Master switch for the tool-call loop detector
+TOOL_LOOP_ROLLBACK_ENABLED: bool = os.getenv(
+    'QWEN_AGENT_TOOL_LOOP_ROLLBACK', '0') == '1'   # False = log/telemetry only, no rollback
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv(
     'QWEN_AGENT_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
 AGENT_MAX_WORKERS: int = int(os.getenv(

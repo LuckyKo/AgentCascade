@@ -31,6 +31,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'idle_timeout_seconds', 'system_agent_idle_timeout_seconds', 'max_parallel_agents', 'max_workers',
     'auto_continue', 'enable_agent_budgeting', 'max_turns', 'max_auto_rollbacks',
     'auto_rollback_on_loop',
+    # Tool-call loop detection (staged rollout)
+    'tool_loop_detection_enabled', 'tool_loop_rollback_enabled',
     # Inner-loop detection
     'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars',
     'loop_char_run_enabled', 'loop_char_run_limit', 'loop_max_chars_enabled',
@@ -502,6 +504,20 @@ def _handle_auto_rollback_on_loop(ui_cfg: dict, agent_pool: Optional[Any], agent
     """Toggle automatic rollback on detected loops."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.auto_rollback_on_loop = bool(ui_cfg.get('auto_rollback_on_loop', True))
+
+
+@register_config_handler('tool_loop_detection_enabled')
+def _handle_tool_loop_detection_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Master switch for the tool-call loop detector (parallel checker)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.tool_loop_detection_enabled = bool(ui_cfg.get('tool_loop_detection_enabled', True))
+
+
+@register_config_handler('tool_loop_rollback_enabled')
+def _handle_tool_loop_rollback_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle auto-rollback for tool-call loops (staged rollout: False = log-only)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.tool_loop_rollback_enabled = bool(ui_cfg.get('tool_loop_rollback_enabled', False))
 
 
 @register_config_handler('tool_result_max_chars')
