@@ -590,26 +590,42 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     turns_available = _turns[0]  # Sync back after possible decrement
                     continue
 
-                # Turn limit warnings (50%, 90%, and final turn) - one-time
-                # only via guard prefix dedup
+                # Turn limit warnings (50%, 90%, and final turn) - one-time only.
                 # Checked BEFORE decrement so that max_turns=1 agents still get
-                # the final turn warning
-                # Injected into llm_messages only (same pattern as
-                # _inject_compression_warning)
+                # the final turn warning.
+                # Each threshold is gated on exact integer equality and
+                # turns_available only ever decreases by 1 per loop iteration,
+                # so each warning fires at most once — no separate dedup guard
+                # is needed for the USER-message version (the old inline
+                # _append_system_notification guard_prefix check is obsolete).
+                # Emitted as SEPARATE USER-role messages (same pattern as the
+                # final-turn warning below): appended to instance.conversation via
+                # _append_and_log and to llm_messages (so the LLM sees them this turn).
+                # The local `messages` list is NOT extended here. Because _setup_turn()
+                # runs ONCE per run (before this loop, not per iteration), `messages`
+                # will not include these warning messages for the rest of this run — so
+                # loop detection / compression in later iterations operate on a view that
+                # omits them. This mirrors the already-shipped final-turn warning and is
+                # bounded (<=2 messages); it does NOT affect the LLM context, which uses
+                # llm_messages.
                 if turns_available == turns_50pct:
                     warn_msg = (
                         f"[SYSTEM WARNING: Halfway through your turn budget. "
                         f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
                         f"Assess your progress and plan remaining steps.]"
                     )
-                    self._append_system_notification(llm_messages, "[SYSTEM WARNING: Halfway", warn_msg)
+                    warn_user = self._make_user_message(warn_msg)
+                    self._append_and_log(instance, warn_user)
+                    llm_messages.append(warn_user)
                 if turns_available == turns_90pct:
                     warn_msg = (
                         f"[SYSTEM WARNING: Turn limit approaching. "
                         f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
                         f"Plan your remaining steps carefully.]"
                     )
-                    self._append_system_notification(llm_messages, "[SYSTEM WARNING: Turn limit approaching", warn_msg)
+                    warn_user = self._make_user_message(warn_msg)
+                    self._append_and_log(instance, warn_user)
+                    llm_messages.append(warn_user)
                 if turns_available == 1:
                     # Final turn warning: insert as a separate user message
                     # (not inline)
