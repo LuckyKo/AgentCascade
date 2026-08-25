@@ -144,3 +144,39 @@ line-anchored banner regex).
 
 Zero regressions. Not committed. Protected files untouched (`loop_detection.py`,
 `inner_loop_detect.py`, `two_phase_loop_detect.py`, `compression_exec.py`).
+
+---
+
+## Refinement Fix Round (2026-08-25, post commit 995fe0d)
+
+Pure documentation/refactor pass addressing the quality/bloat review
+(`reports/tool_loop_detect_REFINEMENT_REVIEW.md` in the AgentWorkspace).
+**Zero behavior change**: `detect_tool_loop` output is byte-identical for all
+inputs — the module diff contains no executable-code changes (verified by
+inspecting `git diff`: only docstrings/comments touched), and the full test
+matrix passes with identical counts.
+
+### Per-finding disposition
+
+| # | Finding | Disposition | What was done |
+|---|---------|-------------|---------------|
+| 1 | Verbose module docstring (BLOCKER) | **FIXED** | Trimmed 35 → ~20 lines: purpose, one line per layer, compressed FUNCTION-normalization note (the key mental model), explicit `See reports/...` pointer, and the self-containment contract ("does not modify or import from loop_detection.py") preserved verbatim. |
+| 2 | Redundant comments restating code | **FIXED** | Pruned `_extract_pairs` docstring (shed parameter/return restatement + duplicate normalization narration; **kept** the CRITICAL index-semantics paragraph — it documents a previously-found critical bug) and one inline comment in its body; pruned `_normalize_output` docstring (weak-signal rationale now lives once in the module docstring). All WHY comments kept (regex `#:` blocks, pop_count warning, conservative-design notes). |
+| 3 | `_as_dict` complexity | **FIXED-DIFFERENTLY** | Verified against `llm/schema.py`: `Message.model_dump()` forces `exclude_none=True` and does NOT raise for valid messages, so the try/except fallback is not dead code — it guards non-schema duck-typed message objects that lack a working `model_dump`. Kept the fallback; added a 3-line docstring naming that case instead of removing it. |
+| 4 | Test fixture duplication | **FIXED** | Added shared factories in `tests/test_tool_loop_detect.py`: `failing_poll_pairs(count, user)`, `churned_pytest_pairs(count, user)`, `identical_pytest_pairs(count, output, user)`, `read_error_pairs(count, path, user)`, plus `POLL_OUTPUT` / `PYTEST_CMD` constants. Applied to 10 test methods + the integration `_tool_loop_msgs` helper. Every factory reproduces the old inline construction byte-for-byte (verified against pre-refactor code). |
+| 5 | Verbose test docstrings | **FIXED** | Compressed to 1-2 line purpose statements throughout (`test_sample2_tail_fires`, `test_layer2_still_fires_on_synthetic_churn`, `TestOutputNormalization` class + methods, boundary-test NOTE → 2-line comment, etc.). Assertions and intent unchanged. |
+| 6 | Overlap with `loop_detection.py` | **DECLINED-WITH-JUSTIFICATION** (code sharing) + cross-ref added | Separate algorithms (exact contiguous matching vs. normalization/trailing-run scanning), separate evolution — sharing would couple two independent detectors. Added ONE comment at the constants block noting patterns are intentionally not shared. |
+| 7 | Flag naming convention | **DECLINED-WITH-JUSTIFICATION** | SCREAMING_SNAKE_CASE module constants + lowercase snake_case `PoolSettings` attributes is standard Python; changing either side would be churn with no benefit. No change. |
+| 8 | Missing cross-module refs | **FIXED** (folded into #1) | The rewritten module docstring now carries an explicit `See reports/loop_detector_research.md ... and reports/tool_loop_detect_IMPL.md` line. |
+| 9 | Test names (NIT) | **FIXED** | Renamed the two boundary tests to `test_layer1_fires_at_threshold_of_5_pairs` / `test_layer2_fires_at_threshold_of_6_pairs`. No external references to the old names exist (grep-verified). |
+
+### Verification
+
+| Suite | Result |
+|---|---|
+| `tests/test_tool_loop_detect.py` | **43 passed, 2 skipped** (same counts as pre-refactor; skips = raw sample files absent) |
+| `tests/test_loop_detection.py` + `test_inner_loop_detect.py` + `test_two_phase_loop_detect.py` + `test_loop_regression.py` | **160 passed**, 0 failed, 0 skipped |
+
+Combined: **203 passed, 2 skipped** — identical to the pre-refactor baseline.
+Protected files untouched (`loop_detection.py`, `inner_loop_detect.py`,
+`two_phase_loop_detect.py`, `compression_exec.py`). Not committed.

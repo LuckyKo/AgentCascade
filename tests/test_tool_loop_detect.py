@@ -53,17 +53,62 @@ def _prose(text: str):
     return Message(role=ASSISTANT, content=text)
 
 
+#: Sample-1-style terminal error reply (shared by all __status poll fixtures).
+POLL_OUTPUT = "No running shell found for agent 'kv-restore-confirm' with tool_id 1."
+
+#: Canonical failing pytest command used across the FP battery.
+PYTEST_CMD = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
+
+
 def _poll_pair(justification="Check progress"):
     """Sample-1-style __status poll pair (FC + terminal-error output)."""
-    out = "No running shell found for agent 'kv-restore-confirm' with tool_id 1."
     return [
         _fc_msg("shell_cmd", {"command": "__status", "tool_id": "1", "justification": justification}),
-        _fn_msg("shell_cmd", out),
+        _fn_msg("shell_cmd", POLL_OUTPUT),
     ]
 
 
 def _pytest_pair(cmd: str, output: str):
     return [_fc_msg("shell_cmd", {"command": cmd}), _fn_msg("shell_cmd", output)]
+
+
+def failing_poll_pairs(count, user="poll"):
+    """`count` identical __status poll pairs with varying justification (Layer 1 fixture)."""
+    msgs = [Message(role=USER, content=user)]
+    for i in range(count):
+        msgs += _poll_pair(justification=f"Check {i}")
+    return msgs
+
+
+def churned_pytest_pairs(count, user="run"):
+    """`count` failing pytest pairs whose outputs differ only in GENUINE substantive
+    content (line number + prose) — isolates Layer 2; wrapper-only churn would be
+    normalized away and let Layer 1 fire at its own threshold."""
+    msgs = [Message(role=USER, content=user)]
+    for i in range(count):
+        out = (f"APPROVED: Command exited with return code 1. (elapsed {11.0 + i * 3.7}s)\n"
+               f"Security Justification: auto prose variant {i}\n\n"
+               f"{100 + i}: some substantive line that differs per run")
+        msgs += _pytest_pair(PYTEST_CMD, out)
+    return msgs
+
+
+def identical_pytest_pairs(count, output, user="run"):
+    """`count` failing pytest pairs with a byte-identical output (Layer 1 fixture)."""
+    msgs = [Message(role=USER, content=user)]
+    for _ in range(count):
+        msgs += _pytest_pair(PYTEST_CMD, output)
+    return msgs
+
+
+def read_error_pairs(count, path="missing.txt", user="read it"):
+    """`count` identical failing read_file pairs (Layer 1 generic branch fixture)."""
+    err = "FileNotFoundError: [Errno 2] No such file or directory: 'missing.txt'"
+    msgs = [Message(role=USER, content=user)]
+    for _ in range(count):
+        msgs.append(_fc_msg("read_file", {"path": path}))
+        msgs.append(_fn_msg("read_file", err))
+    return msgs
 
 
 def _load_fixture(name: str):
@@ -98,14 +143,8 @@ class TestFixtures:
         assert pop_count > 0
 
     def test_sample2_tail_fires(self):
-        """Sample-2 tail (pytest fixup churn) must be detected.
-
-        Pre-normalization this fired LAYER 2 (near-duplicate failing command,
-        EXIT:1) because the security-wrapper noise made every output unique.
-        After output normalization the wrapper-only differences vanish and the
-        trailing run of 8 pairs is byte-identical — so it now fires EARLIER,
-        via LAYER 1 (stable/terminal output). The trigger point (pop_count) is
-        unchanged; only the layer attribution shifted."""
+        """Sample-2 tail must be detected; post-normalization it fires via Layer 1
+        (byte-identical run) instead of Layer 2, with the trigger point unchanged."""
         msgs = _load_fixture("tool_loop_sample2_tail.jsonl")
         result = detect_tool_loop(msgs)
         assert result is not None, "detector should fire on sample-2 tail"
@@ -123,18 +162,9 @@ class TestFixtures:
         assert pop_count == 15, f"trigger point shifted: {pop_count} != 15"
 
     def test_layer2_still_fires_on_synthetic_churn(self):
-        """Layer 2 (fuzzy matching) must still fire when outputs differ in
-        GENUINE content (not just wrapper noise): 6 near-identical failing
-        pytest runs whose per-run output carries a varying line number and
-        elapsed marker. Normalization strips the elapsed marker but NOT the
-        genuine difference, so Layer 1 cannot chain them — only Layer 2 can."""
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
-        msgs = [Message(role=USER, content="run")]
-        for i in range(6):
-            out = (f"APPROVED: Command exited with return code 1. (elapsed {10 + i * 3}.4s)\n"
-                   f"Security Justification: Auto prose variant number {i} with different wording.\n\n"
-                   f"{100 + i}: some genuinely different substantive line {i}")
-            msgs += _pytest_pair(cmd, out)
+        """Layer 2 must fire when outputs differ in GENUINE content (varying line
+        number), which normalization cannot strip — only fuzzy matching can chain."""
+        msgs = churned_pytest_pairs(6)
         result = detect_tool_loop(msgs)
         assert result is not None, "Layer 2 should fire on near-duplicate failing churn"
         reason, pop_count = result
@@ -155,11 +185,10 @@ class TestFixtures:
 
     def test_pop_count_with_prose_between_fc_and_output(self):
         """CRITICAL regression: prose between FC and FUNCTION output must not
-        break the pop_count math. After rollback, EXACTLY one pair (FC + its
-        output + interleaved prose of that first iteration) must remain."""
+        break the pop_count math — after rollback exactly one pair remains."""
         # 5 identical __status polls; every iteration has assistant prose both
         # before the FC and between FC and output.
-        out = "No running shell found for agent 'kv-restore-confirm' with tool_id 1."
+        out = POLL_OUTPUT
         msgs = [Message(role=USER, content="poll")]
         for i in range(5):
             msgs.append(_prose(f"checking status {i}"))
@@ -205,11 +234,10 @@ class TestFalsePositiveBattery:
 
     def test_retry_until_success(self):
         """4 failing retries followed by success — no detection."""
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
         msgs = [Message(role=USER, content="run the test")]
         for i in range(4):
-            msgs += _pytest_pair(cmd, f"APPROVED: Command exited with return code 1. (elapsed {i + 10}s)")
-        msgs += _pytest_pair(cmd, "APPROVED: Command completed successfully.")
+            msgs += _pytest_pair(PYTEST_CMD, f"APPROVED: Command exited with return code 1. (elapsed {i + 10}s)")
+        msgs += _pytest_pair(PYTEST_CMD, "APPROVED: Command completed successfully.")
         assert detect_tool_loop(msgs) is None
 
     def test_live_progress_polling_changing_outputs(self):
@@ -243,11 +271,10 @@ class TestFalsePositiveBattery:
 
     def test_failing_test_interleaved_with_edit_file(self):
         """7 failing pytest runs each followed by an edit_file — run always broken."""
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
         out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
         msgs = [Message(role=USER, content="fix the test")]
         for i in range(7):
-            msgs += _pytest_pair(cmd, out)
+            msgs += _pytest_pair(PYTEST_CMD, out)
             msgs.append(_fc_msg("edit_file", {"path": "tests/test_x.py", "new_content": f"v{i}"}))
             msgs.append(_fn_msg("edit_file", f"OK: edited tests/test_x.py (version {i})"))
         assert detect_tool_loop(msgs) is None
@@ -264,10 +291,8 @@ class TestFalsePositiveBattery:
         (4, None),   # below Layer 1 threshold (5)
         (5, True),   # at Layer 1 threshold
     ])
-    def test_layer1_boundary_stable_pairs(self, n_pairs, expected):
-        msgs = [Message(role=USER, content="poll")]
-        for i in range(n_pairs):
-            msgs += _poll_pair(justification=f"Check {i}")
+    def test_layer1_fires_at_threshold_of_5_pairs(self, n_pairs, expected):
+        msgs = failing_poll_pairs(n_pairs)
         result = detect_tool_loop(msgs)
         if expected is None:
             assert result is None
@@ -278,21 +303,10 @@ class TestFalsePositiveBattery:
         (5, None),   # below Layer 2 threshold (6)
         (6, True),   # at Layer 2 threshold
     ])
-    def test_layer2_boundary_fuzzy_pairs(self, n_pairs, expected):
-        # Outputs vary per call in GENUINE substantive content (a varying line
-        # number + wrapper churn like real sample 2) so the pairs are NOT
-        # byte-identical — this isolates Layer 2 (fuzzy matching). A
-        # byte-identical failing streak is Layer 1's job. NOTE: varying ONLY in
-        # elapsed time / justification is no longer sufficient to isolate Layer
-        # 2 — output normalization strips that wrapper noise, making the pairs
-        # byte-identical and letting Layer 1 fire at its own threshold (5).
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
-        msgs = [Message(role=USER, content="run")]
-        for i in range(n_pairs):
-            out = (f"APPROVED: Command exited with return code 1. (elapsed {11.0 + i * 3.7}s)\n"
-                   f"Security Justification: auto prose variant {i}\n\n"
-                   f"{100 + i}: some substantive line that differs per run")
-            msgs += _pytest_pair(cmd, out)
+    def test_layer2_fires_at_threshold_of_6_pairs(self, n_pairs, expected):
+        # Genuinely varying outputs isolate Layer 2 — wrapper-only churn is
+        # normalized away and would let Layer 1 fire at its own threshold (5).
+        msgs = churned_pytest_pairs(n_pairs)
         result = detect_tool_loop(msgs)
         if expected is None:
             assert result is None
@@ -312,11 +326,7 @@ class TestFalsePositiveBattery:
 
     def test_similarity_at_threshold_fires(self):
         """6 pairs with identical core commands (sim 1.0 ≥ 0.85) — detection."""
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
-        out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
-        msgs = [Message(role=USER, content="run")]
-        for i in range(6):
-            msgs += _pytest_pair(cmd, out)
+        msgs = identical_pytest_pairs(6, "APPROVED: Command exited with return code 1. (elapsed 11.3s)")
         assert detect_tool_loop(msgs) is not None
 
     def test_similarity_just_above_threshold(self):
@@ -340,14 +350,9 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is not None
 
     def test_non_shell_identical_error_streak_fires_layer1(self):
-        """Review finding #2: byte-identical errors from a NON-shell tool
-        (read_file → FileNotFoundError ×5) must be caught by Layer 1's generic
-        branch, while identical SUCCESSFUL read_file streaks stay clean."""
-        err = "FileNotFoundError: [Errno 2] No such file or directory: 'missing.txt'"
-        msgs = [Message(role=USER, content="read it")]
-        for i in range(5):
-            msgs.append(_fc_msg("read_file", {"path": "missing.txt"}))
-            msgs.append(_fn_msg("read_file", err))
+        """Byte-identical errors from a NON-shell tool (read_file ×5) must be
+        caught by Layer 1's generic branch."""
+        msgs = read_error_pairs(5)
         result = detect_tool_loop(msgs)
         assert result is not None, "identical non-shell error streak should fire Layer 1"
         reason, pop_count = result
@@ -356,20 +361,12 @@ class TestFalsePositiveBattery:
 
     def test_non_shell_identical_error_below_threshold(self):
         """4 identical non-shell errors — below Layer 1 threshold, no detection."""
-        err = "FileNotFoundError: [Errno 2] No such file or directory: 'missing.txt'"
-        msgs = [Message(role=USER, content="read it")]
-        for i in range(4):
-            msgs.append(_fc_msg("read_file", {"path": "missing.txt"}))
-            msgs.append(_fn_msg("read_file", err))
-        assert detect_tool_loop(msgs) is None
+        assert detect_tool_loop(read_error_pairs(4)) is None
 
     def test_terminal_signature_connection_refused(self):
-        """Review finding #3: 'Connection refused' is a terminal signature —
-        5 polls with byte-identical connection-refused output fire Layer 1.
-
-        (Output must also carry a failure indicator for the run to form; the
-        exit-code line makes it classifiable, the terminal signature lets
-        identical failing outputs chain without being 'noisy'.)"""
+        """'Connection refused' is a terminal signature — 5 polls with that
+        byte-identical output fire Layer 1 (the exit-code line keeps the output
+        classifiable; the terminal signature lets identical outputs chain)."""
         out = "APPROVED: Command exited with return code 1.\nConnection refused (host api.internal:8080)"
         msgs = [Message(role=USER, content="poll")]
         for i in range(5):
@@ -380,23 +377,19 @@ class TestFalsePositiveBattery:
 
     def test_different_failure_class_breaks_run(self):
         """Alternating EXIT:1 and TESTFAIL outputs — run broken, no detection."""
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
         out_exit = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
         out_fail = ("APPROVED: Command completed successfully.\n"
                     "FAILED tests/test_x.py::test_y")
         msgs = [Message(role=USER, content="run")]
         for i in range(8):
-            msgs += _pytest_pair(cmd, out_exit if i % 2 == 0 else out_fail)
+            msgs += _pytest_pair(PYTEST_CMD, out_exit if i % 2 == 0 else out_fail)
         assert detect_tool_loop(msgs) is None
 
     def test_success_output_breaks_run(self):
         """5 failing + 1 success at the tail — trailing run is only 1, no detection."""
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
         out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
-        msgs = [Message(role=USER, content="run")]
-        for i in range(5):
-            msgs += _pytest_pair(cmd, out)
-        msgs += _pytest_pair(cmd, "APPROVED: Command completed successfully.")
+        msgs = identical_pytest_pairs(5, out)
+        msgs += _pytest_pair(PYTEST_CMD, "APPROVED: Command completed successfully.")
         assert detect_tool_loop(msgs) is None
 
 
@@ -435,9 +428,7 @@ class TestRobustness:
     def test_dict_messages_vs_message_objects(self):
         """Same conversation as dicts and as Message objects → same result."""
         def build(as_dicts: bool):
-            msgs = [Message(role=USER, content="poll")]
-            for i in range(6):
-                msgs += _poll_pair(justification=f"Check {i}")
+            msgs = failing_poll_pairs(6)
             if not as_dicts:
                 return msgs
             out = []
@@ -458,16 +449,15 @@ class TestRobustness:
 
     def test_multimodal_content_list(self):
         """FUNCTION content as a multimodal list must be handled without crashing."""
-        msgs = [Message(role=USER, content="poll")]
-        for i in range(6):
-            msgs += _poll_pair(justification=f"Check {i}")
+        msgs = failing_poll_pairs(6)
         # Replace last output with a multimodal list carrying the same terminal text
         from agent_cascade.llm.schema import ContentItem
         msgs[-1] = Message(role=FUNCTION, name="shell_cmd",
-                           content=[ContentItem(text="No running shell found for agent 'kv-restore-confirm' with tool_id 1.")])
+                           content=[ContentItem(text=POLL_OUTPUT)])
         assert detect_tool_loop(msgs) is not None
 
     def test_system_messages_ignored(self):
+        """System messages interleaved between poll pairs must not break detection."""
         msgs = [Message(role=USER, content="poll")]
         for i in range(6):
             msgs.append(Message(role=SYSTEM, content=f"system note {i}"))
@@ -480,18 +470,11 @@ class TestRobustness:
 # ══════════════════════════════════════════════
 
 class TestOutputNormalization:
-    """Refinement: system-injected wrapper noise must not hinder detection.
-
-    The detector's identity comes from the LLM-generated function_calls; the
-    (normalized) FUNCTION content is a weak signal used only for stability /
-    failure-class gating. These tests pin both sides of that contract: known
-    wrapper formats are stripped, genuine output differences survive."""
+    """Known wrapper formats are stripped; genuine output differences survive."""
 
     def test_polling_loop_with_wrapper_noise_fires_layer1(self):
-        """REGRESSION (user directive): a polling loop where every error reply
-        embeds a varying timestamp + elapsed marker + varying Security
-        Justification block must still fire Layer 1. Pre-normalization the
-        per-call wrapper noise made outputs non-identical and hid the loop."""
+        """REGRESSION: a polling loop whose error replies embed varying timestamps,
+        elapsed markers and justification prose must still fire Layer 1."""
         base = "Command exited with return code 1.\nConnection refused (host api.internal:8080)"
         msgs = [Message(role=USER, content="poll")]
         for i in range(6):
@@ -511,16 +494,9 @@ class TestOutputNormalization:
         assert pop_count > 0
 
     def test_genuinely_different_substantive_output_breaks_run(self):
-        """Two polls with genuinely different substantive error messages must
-        still break the run — normalization must NOT over-collapse real
-        differences (no over-normalization).
-
-        Uses 6 identical failing polls + 1 genuinely different poll: Layer 1's
-        trailing run is broken by the differing output (run length 1), and
-        Layer 2 is broken by the differing failure class. Without normalization
-        being conservative, a too-aggressive collapse would hide the difference
-        and let either layer fire."""
-        cmd = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
+        """No over-normalization: 6 identical failing polls + 1 poll with a
+        genuinely different message AND exit code → both layers' chaining broken."""
+        cmd = PYTEST_CMD
         msgs = [Message(role=USER, content="run")]
         # 6 identical failing polls ... (clean, non-noisy substantive error text)
         for i in range(6):
@@ -655,10 +631,7 @@ class TestPreLlmChecksIntegration:
 
     def _tool_loop_msgs(self):
         """Synthetic sample-1-style conversation (7 terminal-error poll pairs)."""
-        msgs = [Message(role=USER, content="launch the run")]
-        for i in range(7):
-            msgs += _poll_pair(justification=f"Check Run A progress {i}")
-        return msgs
+        return failing_poll_pairs(7, user="launch the run")
 
     def test_rollback_when_tool_rollback_enabled(self):
         """tool_loop_rollback_enabled=True → rollback path with correct pop_count."""

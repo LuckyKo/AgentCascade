@@ -2,33 +2,21 @@
 
 Complements :func:`agent_cascade.loop_detection.detect_loop` (exact contiguous
 pattern matcher) with a trailing-run scan over (function_call, function_output)
-pairs. Catches two real-world failure modes the exact matcher is blind to:
+pairs:
 
-* **Layer 1 — stable/terminal output run** (async-shell polling loop): ≥5
-  trailing pairs with the same normalized action where each output is
-  byte-identical to the previous OR matches a terminal-error signature.
-  Interleaved assistant prose / user messages are ignored when pairing, so a
-  "prose shield" between identical polls cannot break the run.
+* **Layer 1** — ≥5 trailing same-action pairs with byte-identical or
+  terminal-error outputs (async-shell polling loops).
+* **Layer 2** — ≥6 trailing same-tool failing pairs with near-duplicate core
+  commands, identical targets and failure class (pytest fixup churn).
 
-* **Layer 2 — near-duplicate failing command run** (pytest fixup churn): ≥6
-  trailing same-tool pairs with pipe-stripped core-command similarity ≥0.85
-  (difflib), an identical semantic target set (quoted filters, ``*.py`` paths,
-  ``nodeid::`` targets) and an identical failure class (EXIT:n n≠0 / no-output
-  exit / pytest FAILED banner). Any intervening pair from a different tool
-  breaks the run — this neutralizes legitimate edit→test→fail dev cycles.
+FUNCTION output normalization: raw tool replies carry per-call system-injected
+noise (verdict banners, elapsed markers, justification prose, truncation
+notices, timestamps); :func:`_normalize_output` strips it at pair-extraction
+time, so FUNCTION content is a WEAK signal — detection identity comes from the
+LLM-generated function_calls; the output only gates stability / failure class.
 
-Design reference: reports/loop_detector_research.md (§5 algorithm sketches,
-§4-D delivery shape). Both failure samples in loop_failure_samples/ were used
-to validate thresholds with ≥2× margin on real data.
-
-FUNCTION output normalization: raw tool replies are wrapped by the harness with
-per-call varying noise (security verdict banners, elapsed-time markers,
-auto-generated "Security Justification" prose, spillover/truncation notices,
-ISO timestamps). :func:`_normalize_output` strips these KNOWN system-injected
-formats at pair-extraction time, so FUNCTION content is treated as a WEAK
-signal: detection identity comes from the LLM-generated function_calls; the
-(normalized) output is used only for stability / failure-class gating. Genuine
-output differences (error messages, test results, stdout) survive normalization.
+See reports/loop_detector_research.md (algorithm design) and
+reports/tool_loop_detect_IMPL.md (implementation notes).
 
 The module is self-contained: it does not modify or import from
 ``loop_detection.py`` (aside from the shared message schema constants).
@@ -44,6 +32,10 @@ from typing import List, Optional, Tuple, Union
 from agent_cascade.llm.schema import ASSISTANT, FUNCTION, ROLE, Message
 
 # ── Tunables (validated against real failure samples) ───────────────────────
+# NOTE: the regex constants below serve a different algorithm than the patterns
+# in loop_detection.py (exact contiguous matching vs. normalization/trailing-run
+# scanning). The two modules evolve independently — patterns are intentionally
+# NOT shared between them.
 
 #: Arg keys that vary per call but carry no semantic weight for loop purposes.
 VOLATILE_ARG_KEYS = frozenset({"justification"})
@@ -119,7 +111,12 @@ _WINDOW_SIZE = 40
 # ── Message normalization helpers ────────────────────────────────────────────
 
 def _as_dict(m) -> dict:
-    """Normalize a message to dict form (handles Message objects and dicts)."""
+    """Normalize a message to dict form (handles Message objects and dicts).
+
+    ``Message.model_dump()`` defaults to exclude_none=True and does not raise
+    for valid messages, so the manual-attribute fallback below only guards
+    against non-schema duck-typed message objects.
+    """
     if isinstance(m, dict):
         return m
     if hasattr(m, "model_dump"):
@@ -213,26 +210,14 @@ _ISO_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:[
 def _normalize_output(content: str) -> str:
     """Strip KNOWN system-injected noise from a FUNCTION (tool reply) content.
 
-    Tool replies are wrapped by the harness with per-call varying noise —
-    security verdict banners, elapsed-time markers, auto-generated
-    "Security Justification" prose, spillover/truncation notices (paths and
-    char counts differ every run) and ISO timestamps. That noise makes
-    byte-identical outputs look different and hinders loop detection, while
-    carrying no signal: the detection identity comes from the LLM-generated
-    function_calls, and the output is used only as a weak signal for
-    stability / failure-class gating.
-
-    Conservative by design — only KNOWN system-injected formats are removed;
-    genuine output differences (error messages, test results, stdout) MUST
-    survive normalization. In particular:
+    Conservative by design — only KNOWN wrapper formats are removed; genuine
+    output differences (error messages, test results, stdout) MUST survive.
+    In particular:
       * "APPROVED: Command exited with return code 1." → the verdict prefix is
         dropped but "Command exited with return code 1." survives, so
         ``_fail_class`` still extracts EXIT:1;
       * a line that merely CONTAINS "(elapsed 5s)" in genuine output keeps the
         surrounding text — only the parenthesized marker itself is removed.
-
-    Whitespace runs are collapsed afterwards (a dropped banner/justification
-    block can leave blank-line gaps that would break byte-identity).
     """
     if not content:
         return ""
@@ -264,19 +249,9 @@ def _extract_pairs(
     separate an FC from its output, so both indices are stored explicitly and
     pop_count is computed from ``func_idx``.
 
-    Scans the last ``_WINDOW_SIZE`` messages. Each ASSISTANT message carrying a
-    function_call is paired with the next FUNCTION-role message; intervening
-    assistant prose / user / system messages are ignored (this defeats
-    Sample 1's "prose shield"). FCs without a following FUNCTION output before
-    the window ends are dropped.
-
-    The stored ``output_text`` is NORMALIZED via :func:`_normalize_output` —
-    system-injected wrapper noise (security verdict banners, elapsed markers,
-    auto-generated justification prose, spillover notices, ISO timestamps) is
-    stripped BEFORE any comparison or classification, so BOTH layers operate
-    on normalized content only. The output remains a weak signal: detection
-    identity comes from the LLM-generated function_calls; the (normalized)
-    output is used for stability / failure-class gating only.
+    Interleaved non-FC messages are ignored when pairing (this defeats
+    Sample 1's "prose shield"). Outputs are normalized at extraction time so
+    both layers operate on noise-stripped content only.
     """
     if not messages:
         return []
@@ -294,8 +269,6 @@ def _extract_pairs(
                 pending = (i, info[0], info[1])
         elif role == FUNCTION:
             if pending is not None:
-                # Normalize at extraction time so both layers (byte-identity,
-                # failure classification) operate on noise-stripped content only.
                 pairs.append((pending[0], i, pending[1], pending[2],
                               _normalize_output(_text_of(m.get("content", "")))))
                 pending = None
