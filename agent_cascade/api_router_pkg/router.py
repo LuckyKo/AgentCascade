@@ -1153,21 +1153,34 @@ class APIRouter:
             # next turn or engine retry must NOT re-probe an endpoint we already use. The
             # marker is cleared when the connection dies (timeout / success to a different
             # endpoint). ──
+            # Read both the committed marker and the blacklist state in one locked pass so the
+            # fast-path decision below is consistent (a marker pointing at a currently-blacklisted
+            # endpoint must NOT fast-path — see Finding #3). One lock, no I/O.
             if instance_name:
                 with self._lock:
                     is_live = self._instance_committed_endpoint.get(instance_name) == key
-                if is_live:
-                    logger.debug(
-                        f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
-                        f"(instance '{instance_name}' holds a live connection — fast path)"
-                    )
-                    validated.append(cfg)
-                    continue
+                    blacklist = getattr(self, '_endpoint_blacklist', {})
+                    blacklisted = key in blacklist and blacklist[key] > now
+            else:
+                with self._lock:
+                    blacklist = getattr(self, '_endpoint_blacklist', {})
+                    blacklisted = key in blacklist and blacklist[key] > now
+                is_live = False
+
+            # Fast path only when committed AND not currently blacklisted. A committed endpoint
+            # that was just bad enough to be blacklisted (and whose window has since expired) is no
+            # longer a trustworthy "live" connection — fall through and probe it. The blacklist
+            # expiry timeout already bounds how long this matters, and a genuinely dead endpoint is
+            # caught by the next real call's connection timeout.
+            if is_live and not blacklisted:
+                logger.debug(
+                    f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
+                    f"(instance '{instance_name}' holds a live connection — fast path)"
+                )
+                validated.append(cfg)
+                continue
 
             # ── Blacklisted (Fix B1) — drop without probing (blacklist takes precedence). ──
-            with self._lock:
-                blacklist = getattr(self, '_endpoint_blacklist', {})
-                blacklisted = key in blacklist and blacklist[key] > now
             if blacklisted:
                 logger.debug(
                     f"[APIRouter] Skipping endpoint '{model}' @ {cfg_base} "
