@@ -8,6 +8,10 @@ Models tested (from config/api_endpoints.json):
   - qwen3.6-35b-a3b:          edc8e5cc-ef1c-447d-bdf7-6d8f6882bde9
 
 Run standalone: python tests/test_state_restore_comparison.py
+
+Note: `run_model_test` is a plain worker function (not a pytest test) — it takes
+positional args supplied by main(). Do not prefix it with `test_`, or pytest will
+try to resolve its parameters as fixtures.
 """
 
 import json
@@ -78,8 +82,7 @@ def build_large_prompt(n_repeats: int = PROMPT_REPEATS) -> str:
     return (paragraph * n_repeats).strip()
 
 
-@pytest.mark.live_api
-def test_model(
+def run_model_test(
     model_display: str,
     model_id: str,
     state_file: str,
@@ -311,7 +314,7 @@ def main():
     for display, model_id in MODELS:
         state_file = f"{model_id}.slot_test.bin"
         try:
-            r = test_model(display, model_id, state_file)
+            r = run_model_test(display, model_id, state_file)
         except RuntimeError as e:
             r = {"model": model_id, "display": display, "passed": False, "error": str(e)}
         results.append(r)
