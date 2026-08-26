@@ -341,3 +341,65 @@ class TestTimeoutReleasesLive:
         # A new probe GET to head fired (re-acquisition from the top after release + cooldown expiry).
         assert stubs['head_ref']['probes'] >= 2, \
             "after a timeout releases the slot, the next acquisition must re-probe from the top"
+
+
+# ============================================================================
+# Sticky-slot RELEASE clears the committed-endpoint marker (regression)
+# ============================================================================
+
+class TestStickySlotReleaseClearsCommittedMarker:
+    """Regression: releasing a held sticky permit via the sync_sticky_slot drop path
+    (which calls _drop_held_permit) MUST clear this instance's committed-endpoint probe
+    fast-path marker. Otherwise a re-acquired instance would fast-path (skip the sanity
+    probe) against a connection that no longer exists — firing a real call on a dead
+    endpoint without probing."""
+
+    def test_drop_held_permit_clears_committed_marker_and_reprobes(self, router, stubs):
+        """Drive the REAL drop path (sync_sticky_slot → _drop_held_permit) and prove:
+          1. committing to head sets the marker;
+          2. releasing the sticky slot clears it;
+          3. a fresh acquisition re-probes head (no stale fast-path)."""
+        from agent_cascade.api_router_pkg.normalization import normalize_api_base
+
+        _wire(router, stubs)
+        head_key = (normalize_api_base(stubs['head'].base), 'head-model')
+
+        # ── Step 1: commit to head via a real successful call → marker set. ──
+        r1 = router.call_with_fallback('coder', _http_call, agent_instance_name='instR')
+        assert r1 == 'head-model'
+        with router._lock:
+            committed = router._instance_committed_endpoint.get('instR')
+        assert committed == head_key, \
+            "a successful call must commit the endpoint (probe fast-path marker set)"
+
+        # ── Step 2: release the sticky slot via the REAL path that calls _drop_held_permit. ──
+        # A lightweight instance exposing exactly the state sync_sticky_slot touches. The held
+        # key (head's normalized base) differs from the desired key (None → conc>0/-1, no slot),
+        # so sync takes the "stay-slotless" drop branch and invokes _drop_held_permit.
+        import threading
+
+        class _FakeInstance:
+            agent_class = 'coder'
+            instance_name = 'instR'
+
+        inst = _FakeInstance()
+        inst._state_lock = threading.Lock()
+        inst._slot_key = head_key[0]  # holds the per-base permit for head
+        inst._slot_release = lambda: None  # release is a no-op; only the marker matters here
+
+        router.sync_sticky_slot(inst, desired_key=None, origin='sticky')
+
+        with inst._state_lock:
+            assert inst._slot_release is None and inst._slot_key is None, \
+                "_drop_held_permit must nullify the held permit state"
+        with router._lock:
+            committed_after = router._instance_committed_endpoint.get('instR')
+        assert committed_after is None, \
+            "releasing the sticky slot (_drop_held_permit) must clear the committed-endpoint marker"
+
+        # ── Step 3: a fresh acquisition must RE-PROBE head (no stale fast-path). ──
+        probes_before = stubs['head_ref']['probes']
+        r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='instR')
+        assert r2 == 'head-model'
+        assert stubs['head_ref']['probes'] > probes_before, \
+            "after the sticky slot is released, the next acquisition must re-probe head (no fast-path)"

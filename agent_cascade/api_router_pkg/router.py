@@ -545,12 +545,11 @@ class APIRouter:
             # own pool differs (round-trip verified by N21).
 
             # ── Drop-before-acquire: release the old pool when it differs. ──
-            # Capture the callback under the lock; _drop_held_permit invokes it
-            # OUTSIDE (the pool's own condition may block on waiters) and nullifies
-            # the permit state only after a successful release — if the release
-            # raises, the instance keeps exactly what it held so the next sync can
-            # retry the same drop. Re-raising prevents the caller from proceeding
-            # ungated (plan §3.9: no slotless state).
+            # Capture the callback + key here; the actual drop happens BELOW, OUTSIDE this lock.
+            # _drop_held_permit is idempotent (it re-checks and nullifies under the state lock)
+            # and MUST be called without holding instance._state_lock — see its docstring for why
+            # (holding it across the pool release would invert the global self._lock →
+            # instance._state_lock order and deadlock).
             old_key = None
             release_cb_old = None
             if held_release is not None and held_key != desired_key:
@@ -558,19 +557,26 @@ class APIRouter:
                 release_cb_old = held_release
 
             # ── No slot needed for the desired endpoint: stay slotless. ──
-            if desired_key is None or not needs_slot:
-                if release_cb_old is not None:
-                    self._drop_held_permit(instance, inst_name, old_key, release_cb_old, origin)
-                return False
+            # (The drop happens BELOW, OUTSIDE this lock — see note before _drop_held_permit.)
 
-        # ── Cross-pool swap: release the old permit BEFORE acquiring the new one. ──
-        # When the desired key differs from the held key (and a slot IS needed), the
-        # old permit must be released first — otherwise the instance holds TWO slots
-        # (one per pool), leaking capacity and violating the single-permit invariant.
-        # This path is reached for: (a) main-call sync to a different conc>0 base, and
-        # (b) side-call cross-pool swap (e.g. caption on shared while holding per-base).
+        # ── Cross-pool swap / fallback-back: release the old permit BEFORE acquiring the new one. ──
+        # When the desired key differs from the held key, the old permit must be released first —
+        # otherwise the instance holds TWO slots (one per pool), leaking capacity and violating
+        # the single-permit invariant. Reached for: (a) main-call sync to a different conc>0 base,
+        # (b) side-call cross-pool swap (e.g. caption on shared while holding per-base), and
+        # (c) fallback-back to a slotless endpoint (desired needs no slot).
+        #
+        # IMPORTANT: this runs OUTSIDE instance._state_lock. _drop_held_permit releases the pool
+        # permit (which may block on waiters) and then nullifies the captured state under the lock;
+        # holding instance._state_lock across it would invert the global self._lock →
+        # instance._state_lock order used elsewhere (e.g. pre_validate/success paths) and deadlock.
         if release_cb_old is not None:
             self._drop_held_permit(instance, inst_name, old_key, release_cb_old, origin)
+
+        # Stay-slotless: the desired endpoint needs no slot — after dropping any held permit we
+        # hold nothing (no acquire). Reached when desired_key is None or needs_slot is False.
+        if desired_key is None or not needs_slot:
+            return False
 
         return self._acquire_and_store_sticky_slot(
             instance, inst_name, agent_class, desired_key, resolved, origin_suffix
@@ -673,18 +679,47 @@ class APIRouter:
 
     def _drop_held_permit(self, instance: 'AgentInstance', inst_name: str, old_key: str,
                           release_cb_old: Callable[[], None], origin: str) -> None:
-        """Release a permit already captured (state NOT yet nullified) by the caller.
+        """Release a held sticky permit (capture-and-nullify under the state lock).
 
         Used by both sync_sticky_slot drop paths (stay-slotless and cross-pool swap).
-        The callback was captured under instance._state_lock earlier in the call;
-        invoking it here is OUTSIDE that lock — the pool's condition may block on
-        waiters, so holding the state lock across it would deadlock.
+        The caller captured ``release_cb_old`` while reading the instance's held state, but
+        that read may be stale by the time we get here — a concurrent side-call (e.g. caption /
+        image_gen on the shared conc=0 slot) or a lifecycle release could have already dropped
+        it. So this is IDEMPOTENT and mirrors the canonical ``slot_queue.release_slot_permit``
+        pattern:
 
-        State is nullified ONLY after a successful release (matching the original
-        drop paths): if the callback raises, the instance keeps exactly what it held
-        so the next sync can retry the same drop. Re-raising prevents the caller from
-        proceeding ungated (plan §3.9: no slotless state).
+          1. Under ``instance._state_lock``: re-check that THIS exact callback is still held. If
+             so, nullify ``_slot_release``/``_slot_key`` (a concurrent release becomes a no-op)
+             AND clear the committed-endpoint probe fast-path marker — the connection this
+             permit gated is about to die, so the next acquisition must re-probe rather than
+             skip against a dead endpoint. If the callback is already gone, return without
+             releasing or clearing (nothing was held).
+          2. Invoke the captured callback OUTSIDE the state lock — the pool's condition may block
+             on waiters, so holding the state lock across it would deadlock.
+
+        ``self._lock`` is taken INSIDE ``instance._state_lock`` here (consistent with the global
+        self._lock → instance._state_lock order used by pre_validate / success paths). This method
+        MUST be called WITHOUT already holding ``instance._state_lock`` — sync_sticky_slot releases
+        it before calling here for exactly that reason.
+
+        If the release callback raises, the state was already nullified (matching the canonical
+        pattern); re-raising still prevents the caller from proceeding ungated (plan §3.9).
         """
+        with instance._state_lock:
+            if instance._slot_release is not release_cb_old:
+                # A concurrent drop/release already cleared this permit — nothing to do.
+                return False
+            instance._slot_release = None
+            instance._slot_key = None
+            # The sticky slot is being released — any committed endpoint for this instance is no
+            # longer a live connection. Clear the probe fast-path marker so the next acquisition
+            # re-probes instead of skipping against a dead connection. inst_name is always populated
+            # by sync_sticky_slot (via `or 'unknown'`), but guard anyway: the dict key must match the
+            # exact instance_name used when the marker was set.
+            if inst_name:
+                with self._lock:
+                    self._instance_committed_endpoint.pop(inst_name, None)
+
         try:
             release_cb_old()
         except Exception as e:
@@ -695,10 +730,7 @@ class APIRouter:
                 exc_info=True,
             )
             raise
-        # Nullify the captured permit state only now that the release succeeded.
-        with instance._state_lock:
-            instance._slot_release = None
-            instance._slot_key = None
+
         logger.debug(
             f"[SLOTPOOL] instance={inst_name} pool={old_key} "
             f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}"
