@@ -176,12 +176,12 @@ class TestPreValidateEndpointChain:
 
     def test_live_fast_path_skips_probe(self, router):
         """Part 2: if an instance holds a LIVE connection to an endpoint (recorded via
-        _instance_live_endpoint), pre_validate skips the probe entirely — no HTTP call."""
+        _instance_committed_endpoint), pre_validate skips the probe entirely — no HTTP call."""
         cfg = _cfg()
         key = _key(cfg['api_base'], cfg['model'])
         # Simulate that this instance already has a live connection to this endpoint.
         with router._lock:
-            router._instance_live_endpoint['inst1'] = key
+            router._instance_committed_endpoint['inst1'] = key
         try:
             with patch('requests.get') as mock_get:
                 assert router.pre_validate_endpoint_chain([cfg], instance_name='inst1') == [cfg]
@@ -189,7 +189,7 @@ class TestPreValidateEndpointChain:
                 "a live connection must NOT be re-probed (the core flood fix)"
         finally:
             with router._lock:
-                del router._instance_live_endpoint['inst1']
+                del router._instance_committed_endpoint['inst1']
 
     def test_no_live_marker_reprobes(self, router):
         """Part 2: without a live marker, the endpoint IS probed once."""

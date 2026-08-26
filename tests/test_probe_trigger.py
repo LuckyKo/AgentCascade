@@ -1,8 +1,9 @@
 """Part 2 — sanity-probe TRIGGER fix (per-connection health, NOT a global TTL).
 
-The production bug: ``pre_validate_endpoint_chain`` probed EVERY endpoint not in the
-600s ``_probe_cache`` on every ``call_with_fallback`` entry, so a healthy LIVE primary
-was re-probed on every turn AND every engine retry → llama.cpp accept-queue exhaustion.
+The production bug: ``pre_validate_endpoint_chain`` probed EVERY endpoint not already
+committed by this instance (per-connection marker, no TTL) on every
+``call_with_fallback`` entry, so a healthy LIVE primary was re-probed on every turn AND
+every engine retry → llama.cpp accept-queue exhaustion.
 
 This suite locks in the intended model using a LOCAL HTTP stub that counts requests per
 base and distinguishes the probe (GET /models) from the real call (POST /chat/completions).
@@ -320,7 +321,7 @@ class TestTimeoutReleasesLive:
         # absent — either way head is no longer marked live).
         from agent_cascade.api_router_pkg.normalization import normalize_api_base
         with router._lock:
-            committed = router._instance_live_endpoint.get('instT')
+            committed = router._instance_committed_endpoint.get('instT')
         assert committed != (normalize_api_base(stubs['head'].base), 'head-model'), \
             "a connection timeout must release the endpoint's live marker"
 

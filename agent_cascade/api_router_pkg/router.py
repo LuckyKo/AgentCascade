@@ -143,18 +143,18 @@ class APIRouter:
         # Per-instance endpoint cursor for "kick to next endpoint" behavior (thread-safe via self._lock).
         self._instance_endpoint_position: Dict[str, int] = {}
 
-        # Per-instance committed-endpoint tracking (Part 2 — sanity-probe trigger fix).
+        # Per-instance committed-endpoint marker (Part 2 — sanity-probe trigger fix).
         # instance_name → (normalized_base, model) of the endpoint this instance last
-        # ESTABLISHED a live connection to (a real call succeeded on it). This is the
-        # "live slot" signal for the probe gate: while an instance holds a live connection
-        # on endpoint X, re-entry into call_with_fallback (next turn OR engine retry) must
-        # NOT re-probe X — health is per-connection, not a global TTL. It replaces the old
-        # 600s _probe_cache as the probe gate. Guarded by self._lock. Cleared when the
+        # COMMITTED to — i.e. a real call succeeded on it and established the connection.
+        # This is the probe gate: while an instance holds a committed endpoint X, re-entry
+        # into call_with_fallback (next turn OR engine retry) must NOT re-probe X — the probe
+        # fires once per connection-establishment, not on a TTL. It replaces the old
+        # TTL-based probe cache as the probe gate. Guarded by self._lock. Cleared when the
         # connection dies: on timeout (non-deterministic failure) and on success to a
         # DIFFERENT endpoint (the old connection is no longer in use). A deterministic
         # failure does NOT clear it — the endpoint is still reachable, just wrong for this
         # request, so re-probing it would be wasted HTTP.
-        self._instance_live_endpoint: Dict[str, Tuple[str, str]] = {}
+        self._instance_committed_endpoint: Dict[str, Tuple[str, str]] = {}
 
         # Persistence path — env var takes precedence for test isolation
         if os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR"):
@@ -211,6 +211,16 @@ class APIRouter:
             self._save()
             return True
 
+    def _reset_instance_cursors(self, reason: str) -> None:
+        """Clear all per-instance endpoint cursors (stale positional indices invalidated by a config change).
+
+        Caller MUST already hold self._lock — this helper does not take it.
+        """
+        if self._instance_endpoint_position:
+            cleared = len(self._instance_endpoint_position)
+            self._instance_endpoint_position.clear()
+            logger.debug(f"[APIRouter] {reason} — reset {cleared} instance endpoint cursor(s) (stale positional cursors invalidated).")
+
     def update_endpoint(self, endpoint_id: str, updates: dict) -> bool:
         """Partially update an existing endpoint. Returns True if found."""
         with self._lock:
@@ -226,13 +236,9 @@ class APIRouter:
             # positional cursor would then point at the WRONG endpoint. Always-clear is safe and
             # idempotent: a reset cursor just means "re-try top priority," which is correct after
             # any endpoint change (mirrors the from_dict FIX-2a reset).
-            if self._instance_endpoint_position:
-                cleared = len(self._instance_endpoint_position)
-                self._instance_endpoint_position.clear()
-                logger.debug(
-                    f"[APIRouter.update_endpoint] Endpoint '{endpoint_id}' updated ({list(updates.keys())}) — "
-                    f"reset {cleared} instance endpoint cursor(s) (stale positional cursors invalidated)."
-                )
+            self._reset_instance_cursors(
+                f"[APIRouter.update_endpoint] Endpoint '{endpoint_id}' updated ({list(updates.keys())})"
+            )
 
             self._save()
             return True
@@ -288,13 +294,9 @@ class APIRouter:
             # stale positional cursor (it would point at the WRONG endpoint, or out of range if
             # the new chain is shorter). Reset ALL instance cursors under the lock so a live
             # reorder never leaves a dangling rotation behind (mirrors the from_dict FIX-2a reset).
-            if self._instance_endpoint_position:
-                cleared = len(self._instance_endpoint_position)
-                self._instance_endpoint_position.clear()
-                logger.debug(
-                    f"[APIRouter.set_agent_priorities] Priorities changed for '{canonical}' — "
-                    f"reset {cleared} instance endpoint cursor(s) (stale positional cursors invalidated)."
-                )
+            self._reset_instance_cursors(
+                f"[APIRouter.set_agent_priorities] Priorities changed for '{canonical}'"
+            )
 
             self._save()
 
@@ -1112,15 +1114,16 @@ class APIRouter:
                 validated.append(cfg)
                 continue
 
-            # ── Live-connection fast path (Part 2): this instance already holds a LIVE
-            # connection to THIS endpoint → skip the probe entirely and keep it in the chain.
-            # Health is per-connection, not a TTL: a live primary must NOT be re-probed on the
-            # next turn or on engine retries of a still-live connection. The committed endpoint
-            # is recorded when a real call succeeds (see call_with_fallback) and cleared when
-            # the connection dies (timeout / success to a different endpoint). ──
+            # ── Committed-endpoint fast path (Part 2): a real call already succeeded on THIS
+            # endpoint for this instance (it is committed, see call_with_fallback) → skip the
+            # probe entirely and keep it in the chain. The probe fires once per
+            # connection-establishment — not because of any continuous health check — so the
+            # next turn or engine retry must NOT re-probe an endpoint we already use. The
+            # marker is cleared when the connection dies (timeout / success to a different
+            # endpoint). ──
             if instance_name:
                 with self._lock:
-                    is_live = self._instance_live_endpoint.get(instance_name) == key
+                    is_live = self._instance_committed_endpoint.get(instance_name) == key
                 if is_live:
                     logger.debug(
                         f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
@@ -1886,15 +1889,16 @@ class APIRouter:
                                     f"recovered — blacklist cleared."
                                 )
 
-                        # Part 2: record the committed endpoint as LIVE for this instance. A real
-                        # call just succeeded on it, so a live connection is established. This is
-                        # what lets pre_validate_endpoint_chain fast-path (skip the probe) on the
-                        # next turn / engine retry of this same endpoint. When we succeed on a
+                        # Part 2: record the committed endpoint for this instance (last
+                        # successful call). A real call just succeeded on it, so a live
+                        # connection is established. This is what lets
+                        # pre_validate_endpoint_chain fast-path (skip the probe) on the next
+                        # turn / engine retry of this same endpoint. When we succeed on a
                         # DIFFERENT endpoint than previously committed, the old connection is no
                         # longer in use — the new key simply replaces it.
                         if _inst_name:
                             with self._lock:
-                                self._instance_live_endpoint[_inst_name] = _det_key
+                                self._instance_committed_endpoint[_inst_name] = _det_key
 
                         # Sticky slot: no per-call release on success (generator or not) —
                         # the permit lives on the instance and is released only at lifecycle
@@ -1938,15 +1942,16 @@ class APIRouter:
                             # Part 2 (timeout → slot release): a non-deterministic failure is a
                             # connection-level event — the classic case is a CONNECTION TIMEOUT,
                             # which means this endpoint's live connection has DIED. Release the
-                            # instance's committed "live" marker so the NEXT acquisition re-probes
-                            # from the top instead of fast-pathing a dead connection. This is what
-                            # makes the per-slot health model correct (user invariant). A
-                            # deterministic failure (bad request shape) does NOT reach this branch —
-                            # that endpoint is still reachable, so its live marker is left intact.
+                            # instance's committed-endpoint marker so the NEXT acquisition
+                            # re-probes from the top instead of fast-pathing a dead connection.
+                            # This is what makes the per-slot health model correct (user
+                            # invariant). A deterministic failure (bad request shape) does NOT
+                            # reach this branch — that endpoint is still reachable, so its
+                            # committed-endpoint marker is left intact.
                             if _inst_name:
                                 with self._lock:
-                                    if self._instance_live_endpoint.get(_inst_name) == _det_key:
-                                        del self._instance_live_endpoint[_inst_name]
+                                    if self._instance_committed_endpoint.get(_inst_name) == _det_key:
+                                        del self._instance_committed_endpoint[_inst_name]
 
                         # SERVER_BUSY_LOADING signature → trip/grow the per-server breaker
                         # (Change B). Real per-model errors (404/400) do NOT match and never
@@ -2588,13 +2593,7 @@ class APIRouter:
             # tier chain, and from_dict() rebuilds self.endpoints / agent_priorities — so any
             # stale positional cursor now points at the WRONG endpoint. Reset ALL instance
             # cursors under the lock so a config change never leaves a dangling rotation behind.
-            if self._instance_endpoint_position:
-                cleared = len(self._instance_endpoint_position)
-                self._instance_endpoint_position.clear()
-                logger.debug(
-                    f"[APIRouter.from_dict] Endpoint config changed — reset {cleared} instance "
-                    f"endpoint cursor(s) (stale positional cursors invalidated)."
-                )
+            self._reset_instance_cursors("[APIRouter.from_dict] Endpoint config changed")
 
             logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "
                        f"({ep_ids}) with "
