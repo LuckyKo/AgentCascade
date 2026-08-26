@@ -170,29 +170,33 @@ class TestPreValidateEndpointChain:
         with patch('requests.get', side_effect=fake_get):
             result = router.pre_validate_endpoint_chain([bad, good])
         assert result == [good]
-        # Failure is cached so subsequent calls within TTL don't re-probe.
-        assert _key(bad['api_base'], bad['model']) in router._probe_cache
+        # Part 2: probe failure records the endpoint into cooldown (_endpoint_failure_times)
+        # so it is not immediately re-probed on the next acquisition.
+        assert _key(bad['api_base'], bad['model']) in router._endpoint_failure_times
 
-    def test_cache_ttl_respected(self, router):
-        """A successful probe is cached; a second call within TTL makes no new probe."""
+    def test_live_fast_path_skips_probe(self, router):
+        """Part 2: if an instance holds a LIVE connection to an endpoint (recorded via
+        _instance_live_endpoint), pre_validate skips the probe entirely — no HTTP call."""
         cfg = _cfg()
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
-            assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
-            assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
-        assert mock_get.call_count == 1, "second call within TTL must be served from cache"
-
-    def test_cache_ttl_expiry_reprobes(self, router):
-        """After the TTL elapses the endpoint is probed again."""
-        cfg = _cfg()
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
-            assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
-            # Age the cache entry past the TTL.
-            key = _key(cfg['api_base'], cfg['model'])
+        key = _key(cfg['api_base'], cfg['model'])
+        # Simulate that this instance already has a live connection to this endpoint.
+        with router._lock:
+            router._instance_live_endpoint['inst1'] = key
+        try:
+            with patch('requests.get') as mock_get:
+                assert router.pre_validate_endpoint_chain([cfg], instance_name='inst1') == [cfg]
+            assert mock_get.call_count == 0, \
+                "a live connection must NOT be re-probed (the core flood fix)"
+        finally:
             with router._lock:
-                success, ts = router._probe_cache[key]
-                router._probe_cache[key] = (success, ts - router_mod.SANITY_PROBE_TTL_SECONDS - 1)
-            assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
-        assert mock_get.call_count == 2
+                del router._instance_live_endpoint['inst1']
+
+    def test_no_live_marker_reprobes(self, router):
+        """Part 2: without a live marker, the endpoint IS probed once."""
+        cfg = _cfg()
+        with patch('requests.get', return_value=_ok_response()) as mock_get:
+            assert router.pre_validate_endpoint_chain([cfg], instance_name='inst1') == [cfg]
+        assert mock_get.call_count == 1, "no live marker → probe once"
 
     def test_disabled_via_settings(self, router):
         """SANITY_PROBE_ENABLED=False → chain returned as-is, zero probes."""

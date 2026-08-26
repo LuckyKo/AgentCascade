@@ -34,7 +34,6 @@ from agent_cascade.settings import (
     BREAKER_WINDOW_GROWTH,
     SERVER_BUSY_WAIT_CAP_SECONDS,
     SANITY_PROBE_ENABLED,
-    SANITY_PROBE_TTL_SECONDS,
     SANITY_PROBE_TIMEOUT_SECONDS,
 )
 from agent_cascade.exceptions import ContextWindowExceeded, AgentTerminatedError, ServerBusyError
@@ -144,11 +143,18 @@ class APIRouter:
         # Per-instance endpoint cursor for "kick to next endpoint" behavior (thread-safe via self._lock).
         self._instance_endpoint_position: Dict[str, int] = {}
 
-        # Sanity probe results (Fix D): (normalized_base, model) → (success: bool, timestamp: float).
-        # Key format MUST match the Fix B1 blacklist key — both use normalize_api_base() for
-        # the base and the raw model name as the second element. Guarded by self._lock;
-        # entries older than SANITY_PROBE_TTL_SECONDS are treated as a cache miss.
-        self._probe_cache: Dict[Tuple[str, str], Tuple[bool, float]] = {}
+        # Per-instance committed-endpoint tracking (Part 2 — sanity-probe trigger fix).
+        # instance_name → (normalized_base, model) of the endpoint this instance last
+        # ESTABLISHED a live connection to (a real call succeeded on it). This is the
+        # "live slot" signal for the probe gate: while an instance holds a live connection
+        # on endpoint X, re-entry into call_with_fallback (next turn OR engine retry) must
+        # NOT re-probe X — health is per-connection, not a global TTL. It replaces the old
+        # 600s _probe_cache as the probe gate. Guarded by self._lock. Cleared when the
+        # connection dies: on timeout (non-deterministic failure) and on success to a
+        # DIFFERENT endpoint (the old connection is no longer in use). A deterministic
+        # failure does NOT clear it — the endpoint is still reachable, just wrong for this
+        # request, so re-probing it would be wasted HTTP.
+        self._instance_live_endpoint: Dict[str, Tuple[str, str]] = {}
 
         # Persistence path — env var takes precedence for test isolation
         if os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR"):
@@ -1051,17 +1057,31 @@ class APIRouter:
             logger.warning(f"[SanityProbe] Unexpected probe error for {api_base}: {e}")
             return False
 
-    def pre_validate_endpoint_chain(self, chain: List[dict]) -> List[dict]:
-        """Filter the endpoint chain by running sanity probes on unverified endpoints.
+    def pre_validate_endpoint_chain(
+        self, chain: List[dict], instance_name: Optional[str] = None
+    ) -> List[dict]:
+        """Filter the endpoint chain by running sanity probes on endpoints that need one.
 
         Called from call_with_fallback AFTER get_endpoint_chain returns (lock released).
 
-        Thread-safety (Option 1 — protect dict ops only): self._lock is held ONLY for
-        dict reads/writes (cache check, blacklist check, cache store, blacklist clear).
-        It is RELEASED before _sanity_probe() makes its network call and RE-ACQUIRED
-        after. Concurrent probes of the same endpoint are possible but benign: they cost
-        at most one duplicate API call per TTL window, and last-write-wins on the cache
-        entry is correct (both probes test the same endpoint state within milliseconds).
+        Probe trigger model (Part 2 — per-connection health, NOT a global TTL): an
+        endpoint is probed at most ONCE per fresh slot acquisition, and only when the
+        caller has no LIVE connection to it. The gate, in priority order:
+          - breaker open on this base            → keep in chain, NO probe (busy machinery owns it)
+          - instance holds a LIVE connection here → keep in chain, NO probe (fast path — kills the flood)
+          - blacklisted (Fix B1)                 → drop, NO probe
+          - else                                 → probe ONCE; pass → keep, fail → drop + cooldown
+
+        ``instance_name`` is the calling instance's name (threaded from call_with_fallback).
+        When given and this instance already holds a live connection to an endpoint in the
+        chain, that endpoint is fast-pathed: no re-probe across turns OR engine retries of
+        a still-live connection. This is what stops a healthy primary being probed every
+        turn + every retry (the accept-queue-exhaustion flood).
+
+        Thread-safety: self._lock is held ONLY for dict reads/writes (live-endpoint check,
+        blacklist check, cooldown store, blacklist clear). It is RELEASED before
+        _sanity_probe() makes its network call and RE-ACQUIRED after. Concurrent probes of
+        the same endpoint are possible but benign (both test the same state within ms).
 
         Returns the filtered chain (may be shorter than input). If ALL endpoints fail
         validation, raises a clear RuntimeError — silently returning an empty chain would
@@ -1079,13 +1099,11 @@ class APIRouter:
             model = cfg.get('model', '')
             key = (normalize_api_base(cfg_base), model)
 
-            # ── Breaker-aware skip (Change B/D): if the base's breaker is open (busy), skip
-            # WITHOUT probing and WITHOUT consulting the cache. A cached "pass" from before
-            # the server went busy must not let this endpoint into the chain — real traffic
-            # would be skipped by the endpoint loop's consult anyway, and a probe here would
-            # violate D1's "zero HTTP while busy" invariant (its 503 carries the
-            # SERVER_BUSY_LOADING signature and would trip/re-grow the breaker). The endpoint
-            # stays in the chain for the breaker machinery to handle (single-probe recovery). ──
+            # ── Breaker-aware skip (Change B/D): if the base's breaker is open (busy), keep
+            # WITHOUT probing. A probe here would violate D1's "zero HTTP while busy" invariant
+            # (its 503 carries the SERVER_BUSY_LOADING signature and would trip/re-grow the
+            # breaker). The endpoint stays in the chain for the breaker machinery to handle
+            # (single-probe recovery). ──
             if self._breaker_is_open(cfg_base):
                 logger.debug(
                     f"[APIRouter] Skipping sanity validation for '{model}' @ {cfg_base} "
@@ -1094,22 +1112,27 @@ class APIRouter:
                 validated.append(cfg)
                 continue
 
-            # ── Phase 1: Read cache + blacklist under lock (fast, no I/O) ──
-            # _endpoint_blacklist is Fix B1 state (parallel workstream); read it defensively —
-            # if B1 hasn't landed yet the attribute doesn't exist and blacklisting is a no-op.
+            # ── Live-connection fast path (Part 2): this instance already holds a LIVE
+            # connection to THIS endpoint → skip the probe entirely and keep it in the chain.
+            # Health is per-connection, not a TTL: a live primary must NOT be re-probed on the
+            # next turn or on engine retries of a still-live connection. The committed endpoint
+            # is recorded when a real call succeeds (see call_with_fallback) and cleared when
+            # the connection dies (timeout / success to a different endpoint). ──
+            if instance_name:
+                with self._lock:
+                    is_live = self._instance_live_endpoint.get(instance_name) == key
+                if is_live:
+                    logger.debug(
+                        f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
+                        f"(instance '{instance_name}' holds a live connection — fast path)"
+                    )
+                    validated.append(cfg)
+                    continue
+
+            # ── Blacklisted (Fix B1) — drop without probing (blacklist takes precedence). ──
             with self._lock:
-                cached = self._probe_cache.get(key)
                 blacklist = getattr(self, '_endpoint_blacklist', {})
                 blacklisted = key in blacklist and blacklist[key] > now
-
-            # Cache hit within TTL — use the cached result, no probe needed.
-            if cached is not None and (now - cached[1]) < SANITY_PROBE_TTL_SECONDS:
-                if cached[0]:  # Previously passed
-                    validated.append(cfg)
-                # Else: previously failed, skip
-                continue
-
-            # Blacklisted (Fix B1) — skip without probing (blacklist takes precedence).
             if blacklisted:
                 logger.debug(
                     f"[APIRouter] Skipping endpoint '{model}' @ {cfg_base} "
@@ -1117,43 +1140,48 @@ class APIRouter:
                 )
                 continue
 
-            # ── Phase 2: Network probe (NO lock held — safe for I/O) ──
+            # ── Network probe (NO lock held — safe for I/O) — at most ONE per fresh acquisition. ──
             success = self._sanity_probe(cfg)
 
             # Re-consult the breaker AFTER the probe: if the base tripped OPEN during the
             # probe (e.g. a busy 503 that carried the SERVER_BUSY_LOADING signature and was
-            # recorded by _record_server_busy), do NOT cache the result — it would mask the
-            # breaker-gated endpoint for SANITY_PROBE_TTL_SECONDS (a cached "pass" would let
-            # it into chains while the endpoint loop skips it; a cached "fail" would remove
-            # it entirely, breaking failover). The endpoint stays in the chain for the
-            # breaker machinery to handle.
+            # recorded by _record_server_busy), keep the endpoint in the chain for the breaker
+            # machinery to handle rather than dropping it — a cached/recorded "fail" would
+            # remove it entirely, breaking failover.
             if success and self._breaker_is_open(cfg_base):
                 logger.debug(
-                    f"[APIRouter] Skipping cache store for '{model}' @ {cfg_base} "
-                    f"(server breaker tripped open during probe)"
+                    f"[APIRouter] Keeping '{model}' @ {cfg_base} in chain "
+                    f"(server breaker tripped open during probe — leaving to breaker machinery)"
                 )
                 validated.append(cfg)
                 continue
 
-            # ── Phase 3: Store result under lock (fast, no I/O) ──
-            with self._lock:
-                self._probe_cache[key] = (success, time.time())
+            if success:
                 # Clear the Fix B1 blacklist entry on recovery (defensive — attribute may not
                 # exist until the parallel B1 workstream lands).
-                if success:
+                with self._lock:
                     blacklist = getattr(self, '_endpoint_blacklist', None)
                     if blacklist is not None and key in blacklist:
                         del blacklist[key]
                         failures = getattr(self, '_endpoint_deterministic_failures', None)
                         if failures is not None:
                             failures.pop(key, None)
-
-            if success:
                 validated.append(cfg)
                 logger.info(f"[APIRouter] Endpoint '{model}' @ {cfg_base} passed sanity probe.")
             else:
-                logger.info(f"[APIRouter] Endpoint '{model}' @ {cfg_base} "
-                            f"failed sanity probe. Skipping.")
+                # Probe failure = the endpoint is unreachable RIGHT NOW. Record it into the
+                # cooldown so get_endpoint_chain filters it out on the next acquisition —
+                # otherwise an engine retry of this same fresh acquisition would immediately
+                # re-probe the just-failed endpoint (a probe is a real GET to llama.cpp).
+                # This mirrors the real-call failure path at the end of call_with_fallback.
+                if ENDPOINT_COOLDOWN_SECONDS > 0:
+                    with self._lock:
+                        self._cleanup_stale_failure_records(time.time())
+                        self._endpoint_failure_times[key] = time.time()
+                logger.info(
+                    f"[APIRouter] Endpoint '{model}' @ {cfg_base} "
+                    f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s)."
+                )
 
         # If ALL endpoints failed validation, raise a clear error instead of returning
         # an empty chain (which would degrade to the generic exhaustion error in
@@ -1627,7 +1655,10 @@ class APIRouter:
             )
             if not _all_breaker_open:
                 try:
-                    chain = self.pre_validate_endpoint_chain(chain)
+                    # instance_name threads the caller's identity so pre_validate can fast-path
+                    # a LIVE connection this instance already holds (no re-probe across turns /
+                    # engine retries of a still-live endpoint — Part 2 flood fix).
+                    chain = self.pre_validate_endpoint_chain(chain, instance_name=_inst_name)
                 except RuntimeError as e:
                     # All endpoints failed validation. Log the detail, then let the endpoint
                     # loop below run so the per-endpoint breaker/consult machinery (D1 wait,
@@ -1855,6 +1886,16 @@ class APIRouter:
                                     f"recovered — blacklist cleared."
                                 )
 
+                        # Part 2: record the committed endpoint as LIVE for this instance. A real
+                        # call just succeeded on it, so a live connection is established. This is
+                        # what lets pre_validate_endpoint_chain fast-path (skip the probe) on the
+                        # next turn / engine retry of this same endpoint. When we succeed on a
+                        # DIFFERENT endpoint than previously committed, the old connection is no
+                        # longer in use — the new key simply replaces it.
+                        if _inst_name:
+                            with self._lock:
+                                self._instance_live_endpoint[_inst_name] = _det_key
+
                         # Sticky slot: no per-call release on success (generator or not) —
                         # the permit lives on the instance and is released only at lifecycle
                         # points (sleep/exit/handoff/reuse/stop/dismiss).
@@ -1893,6 +1934,19 @@ class APIRouter:
                             with self._lock:
                                 if _det_key in self._endpoint_deterministic_failures:
                                     del self._endpoint_deterministic_failures[_det_key]
+
+                            # Part 2 (timeout → slot release): a non-deterministic failure is a
+                            # connection-level event — the classic case is a CONNECTION TIMEOUT,
+                            # which means this endpoint's live connection has DIED. Release the
+                            # instance's committed "live" marker so the NEXT acquisition re-probes
+                            # from the top instead of fast-pathing a dead connection. This is what
+                            # makes the per-slot health model correct (user invariant). A
+                            # deterministic failure (bad request shape) does NOT reach this branch —
+                            # that endpoint is still reachable, so its live marker is left intact.
+                            if _inst_name:
+                                with self._lock:
+                                    if self._instance_live_endpoint.get(_inst_name) == _det_key:
+                                        del self._instance_live_endpoint[_inst_name]
 
                         # SERVER_BUSY_LOADING signature → trip/grow the per-server breaker
                         # (Change B). Real per-model errors (404/400) do NOT match and never
