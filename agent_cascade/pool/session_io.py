@@ -186,9 +186,11 @@ class SessionIOMixin:
         if release_slots:
             try:
                 for inst_name, instance in list(self.instances.items()):
+                    _stop_slot_key = None
                     with instance._state_lock:
                         # Atomic check-and-clear to prevent double-release with execution threads
                         if instance._slot_release is not None:
+                            _stop_slot_key = getattr(instance, '_slot_key', None)
                             release_cb = instance._slot_release
                             instance._slot_release = None
                             instance._slot_key = None
@@ -199,6 +201,21 @@ class SessionIOMixin:
                                 logger.warning(f"[STOP_SLOT] Failed to release slot for '{inst_name}': {e}")
                         elif instance.state.name not in ('IDLE', 'TERMINATED'):
                             held_count += 1
+                    # Structured drop-stop event (sticky slot plan change #10e).
+                    if _stop_slot_key is not None:
+                        _waiters = -1
+                        try:
+                            _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
+                            _pool = _sched._pools.get(_stop_slot_key) if (_sched and _stop_slot_key) else None
+                            if _pool is not None:
+                                with _pool._cond:
+                                    _waiters = len(_pool._waiters)
+                        except Exception:
+                            pass
+                        logger.debug(
+                            f"[SLOTPOOL] instance={inst_name} pool={_stop_slot_key} "
+                            f"action=drop-stop waiters={_waiters}"
+                        )
             except Exception as e:
                 logger.warning(f"slot_release failed during stop_session (non-critical): {e}")
 

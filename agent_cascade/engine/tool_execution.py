@@ -481,15 +481,22 @@ class ToolExecMixin:
         return False
 
 
-    def _ensure_image_captions(self, messages, agent_type=None):
+    def _ensure_image_captions(self, messages, agent_type=None, instance_name=None):
         """Generate captions for uncaptioned images using any vision-capable endpoint.
 
         Captions are stored as metadata on ContentItem so they survive when falling
         back to text-only endpoints. This is called before LLM calls that may route
         through non-vision endpoints.
+
+        Args:
+            instance_name: Owning instance name (sticky slot plan change #12): enables
+                side-call slot participation (acquire-or-keep, never drop) and the
+                autoloader KV guard inside caption_images().
         """
         router = getattr(self.pool, 'api_router', None)
         if router and hasattr(router, 'caption_images'):
-            return router.caption_images(messages, agent_type=agent_type)
+            return router.caption_images(
+                messages, agent_type=agent_type, instance_name=instance_name
+            )
         return messages
 

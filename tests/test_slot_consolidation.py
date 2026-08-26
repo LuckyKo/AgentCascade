@@ -23,7 +23,7 @@ Coverage:
   T1 — Single-layer FIFO ordering (N agents, conc=0 endpoint).
   T3 — Security yield/reacquire (parent yields slot → child runs → parent reacquires).
   T4 — Compressor yield/reacquire (same pattern for compression).
-  T5 — Reacquire timeout degrades to clean slotless state.
+  T5 — Reacquire fast-window timeout re-queues at FIFO tail (unbounded, never slotless).
   T6 — A→B(async)→C: the KEY behavioral change. The removed ancestor-walk used to
         deadlock here; now C waits in FIFO and completes when A releases.
   T8 — conc=N capacity (up to N concurrent, (N+1)th waits, permit count ≤ N).
@@ -60,6 +60,36 @@ def _acquire(sched: EndpointScheduler, api_base: str, conc: int, name: str,
         agent_class=agent_class,
         timeout=timeout,
     )
+
+
+def _make_engine(sched: EndpointScheduler, api_base: str, conc: int = 0):
+    """Build a real ExecutionEngine backed by a mock pool whose router resolves to the
+    shared sequential slot the tests occupy.
+
+    ``reacquire_for`` uses cursor-aware resolution (sticky slot plan change #5a): it
+    calls ``router.get_effective_slot_info(...)`` when present, falling back to
+    ``get_agent_slot_info``. A bare MagicMock auto-creates BOTH as returning a
+    MagicMock, so we must stub the effective one explicitly — otherwise the real
+    scheduler receives a MagicMock api_base/concurrency and crashes. Both are pointed
+    at the same conc=0 shared sequential slot the test holds.
+    """
+    from agent_cascade.execution_engine import ExecutionEngine
+
+    slot_info = {
+        'slot_key': '_shared_sequential_slot_',
+        'is_sequential': True,
+        'concurrency_limit': conc,
+        'api_base': api_base,
+        'needs_slot': True,
+    }
+    mock_pool = MagicMock()
+    mock_router = MagicMock()
+    mock_router.scheduler = sched
+    # Cursor-aware path (preferred by reacquire_for) + legacy fallback.
+    mock_router.get_effective_slot_info.return_value = slot_info
+    mock_router.get_agent_slot_info.return_value = slot_info
+    mock_pool.api_router = mock_router
+    return ExecutionEngine(mock_pool)
 
 
 # ============================================================================
@@ -149,8 +179,6 @@ class TestT3SecurityYieldReacquire:
     reacquires afterward. No deadlock."""
 
     def test_security_yield_run_reacquire_no_deadlock(self, scheduler):
-        from agent_cascade.execution_engine import ExecutionEngine
-
         api_base = "http://seq-api"
         conc = 0
 
@@ -158,21 +186,9 @@ class TestT3SecurityYieldReacquire:
         parent_release = _acquire(scheduler, api_base, conc, "parent", "orchestrator")
         assert parent_release is not None
 
-        # Build a real engine backed by a mock pool that resolves to this scheduler.
-        # Stub get_agent_slot_info so reacquire_for resolves the SAME conc=0 shared
-        # sequential slot the parent holds (mirrors EndpointScheduler.get_slot_info).
-        mock_pool = MagicMock()
-        mock_router = MagicMock()
-        mock_router.scheduler = scheduler
-        mock_router.get_agent_slot_info.return_value = {
-            'slot_key': '_shared_sequential_slot_',
-            'is_sequential': True,
-            'concurrency_limit': 0,
-            'api_base': api_base,
-            'needs_slot': True,
-        }
-        mock_pool.api_router = mock_router
-        engine = ExecutionEngine(mock_pool)
+        # Real engine whose router resolves to the SAME conc=0 shared sequential slot
+        # the parent holds (see _make_engine for why both resolution paths are stubbed).
+        engine = _make_engine(scheduler, api_base, conc)
 
         # Parent instance holds the slot via _slot_release.
         parent_inst = MagicMock()
@@ -246,8 +262,6 @@ class TestT4CompressorYieldReacquire:
     completes; the caller resumes holding its slot."""
 
     def test_compression_yield_run_reacquire_in_order(self, scheduler):
-        from agent_cascade.execution_engine import ExecutionEngine
-
         api_base = "http://seq-api"
         conc = 0
 
@@ -255,20 +269,9 @@ class TestT4CompressorYieldReacquire:
         caller_release = _acquire(scheduler, api_base, conc, "caller", "coder")
         assert caller_release is not None
 
-        # Stub get_agent_slot_info so reacquire_for resolves the SAME conc=0 shared
-        # sequential slot the caller holds (mirrors EndpointScheduler.get_slot_info).
-        mock_pool = MagicMock()
-        mock_router = MagicMock()
-        mock_router.scheduler = scheduler
-        mock_router.get_agent_slot_info.return_value = {
-            'slot_key': '_shared_sequential_slot_',
-            'is_sequential': True,
-            'concurrency_limit': 0,
-            'api_base': api_base,
-            'needs_slot': True,
-        }
-        mock_pool.api_router = mock_router
-        engine = ExecutionEngine(mock_pool)
+        # Real engine whose router resolves to the SAME conc=0 shared sequential slot
+        # the caller holds (see _make_engine for why both resolution paths are stubbed).
+        engine = _make_engine(scheduler, api_base, conc)
 
         caller_inst = MagicMock()
         caller_inst.instance_name = "caller"
@@ -515,41 +518,34 @@ class TestT8ConcurrencyCapacity:
 
 
 # ============================================================================
-# T5 — Reacquire timeout degrades to slotless
+# T5 — Reacquire timeout re-queues unbounded (no slotless state)
 # ============================================================================
 
 class TestT5ReacquireTimeout:
-    """When reacquire_for times out, the instance is left in a clean slotless state."""
+    """When the fast re-acquire window times out, the instance re-enters the FIFO at
+    the tail (unbounded) and is eventually granted when the holder releases. It is
+    NEVER left in a slotless state (sticky slot plan change #5b / §3.9 Gap A)."""
 
-    def test_reacquire_timeout_degrades_to_slotless(self, scheduler):
-        from agent_cascade.execution_engine import ExecutionEngine
-        from agent_cascade.slot_queue import SlotQueueTimeout
+    def test_reacquire_timeout_requeues_unbounded(self, scheduler, monkeypatch):
+        from agent_cascade.engine import core as core_mod
+
+        # Shrink the bounded FAST re-acquire window so the first acquire times out
+        # quickly, forcing the unbounded FIFO tail re-queue path.
+        monkeypatch.setattr(core_mod, "REACQUIRE_TIMEOUT", 0.3)
 
         api_base = "http://seq-api"
         conc = 0
 
-        # Build engine with a fully mocked router whose scheduler.acquire raises.
-        mock_pool = MagicMock()
-        mock_router = MagicMock()
-        mock_router.get_agent_slot_info.return_value = {
-            'slot_key': '_shared_sequential_slot_',
-            'is_sequential': True,
-            'concurrency_limit': 0,
-            'api_base': api_base,
-            'needs_slot': True,
-        }
-        # scheduler.acquire raises SlotQueueTimeout to simulate a timeout.
-        mock_ticket = MagicMock()
-        mock_ticket.ticket_id = "test-ticket"
-        mock_ticket.agent_name = "caller"
-        mock_ticket.instance_name = "caller"
-        mock_router.scheduler.acquire.side_effect = SlotQueueTimeout(
-            mock_ticket, "simulated timeout for test"
-        )
-        mock_pool.api_router = mock_router
-        engine = ExecutionEngine(mock_pool)
+        # A blocker holds the shared sequential slot for the whole test so the
+        # caller's fast window always times out and it must re-queue at the tail.
+        blocker_release = _acquire(scheduler, api_base, conc, "blocker", "orchestrator")
+        assert blocker_release is not None
 
-        # Instance that previously held a slot but released it (e.g., yielded to child).
+        # Real scheduler (FIFO) behind a router that resolves to this same pool
+        # (see _make_engine for why both resolution paths are stubbed).
+        engine = _make_engine(scheduler, api_base, conc)
+
+        # Instance that previously held a slot but released it (yielded to child).
         inst = MagicMock()
         inst.instance_name = "caller"
         inst.agent_class = "coder"
@@ -557,11 +553,36 @@ class TestT5ReacquireTimeout:
         inst._slot_release = None  # Already released before reacquire attempt.
         inst._slot_key = None
 
-        result = engine.reacquire_for(inst, "caller", "test_timeout")
+        # Run the (blocking) reacquire on its own thread: it times out in the fast
+        # window, then re-enters the FIFO at the tail and blocks until granted.
+        result_box: List[bool] = []
 
-        assert result is False, "reacquire_for should return False on timeout"
-        assert inst._slot_release is None, "_slot_release must be None after failed reacquire"
-        assert inst._slot_key is None, "_slot_key must be None after failed reacquire"
+        def do_reacquire():
+            result_box.append(engine.reacquire_for(inst, "caller", "test_timeout"))
+
+        t = threading.Thread(target=do_reacquire)
+        t.start()
+
+        # Give it time to blow through the fast window and re-queue at the tail.
+        time.sleep(0.7)
+        assert not result_box, \
+            "reacquire_for should still be blocked (unbounded FIFO wait), not returned"
+
+        pool = scheduler._pools['_shared_sequential_slot_']
+        with pool._cond:
+            waiter_names = [w.instance_name for w in pool._waiters.values()]
+            assert "caller" in waiter_names, \
+                f"caller should be re-queued at the FIFO tail after fast-window timeout: {waiter_names}"
+
+        # Blocker releases → caller (head of FIFO) is granted. It must NEVER be slotless.
+        blocker_release()
+        t.join(timeout=10)
+        assert not t.is_alive(), \
+            "caller was never granted after the holder released — unbounded re-queue failed"
+
+        assert result_box == [True], "reacquire_for should return True once granted at tail"
+        assert inst._slot_release is not None, \
+            "_slot_release must be re-bound (never left slotless) after unbounded grant"
 
 
 if __name__ == "__main__":

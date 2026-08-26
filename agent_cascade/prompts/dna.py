@@ -94,7 +94,8 @@ COMPRESSION_PROMPT = (
     "1. Output ONLY the summary. Do not include introductory or concluding remarks (e.g. 'Here is a summary').\n"
     "2. Do not include meta-commentary or thinking process.\n"
     "3. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
-    "4. Retain initial request and progress of the task in the summary.\n\n"
+    "4. Retain a compacted initial request and any follow ups from user in the summary.\n"
+    "5. Existing summary is just for reference, focus on summarizing the events after that.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
     f"Present summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end of the summary. It will NOT be validated without this marker."
 )

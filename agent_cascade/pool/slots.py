@@ -21,12 +21,21 @@ class SlotsMixin:
         router = self.api_router
 
         try:
-            # Get the effective concurrency for this agent class (includes default fallback)
-            concurrency_limit = router.get_effective_concurrency(agent_class)
+            # Cursor-aware resolution (sticky slot plan change #4): resolve the slot for
+            # the endpoint this instance will ACTUALLY call next (chain rotated by its
+            # cursor), not the raw chain head. Falls back to the legacy chain-head
+            # resolvers when the router lacks the helper (e.g. minimal test doubles).
+            if hasattr(router, 'get_effective_slot_info'):
+                slot_info = router.get_effective_slot_info(agent_class, instance_name=instance_name)
+                api_base = slot_info.get('api_base') or 'unknown'
+                concurrency_limit = slot_info.get('concurrency_limit', 0)
+            else:
+                # Get the effective concurrency for this agent class (includes default fallback)
+                concurrency_limit = router.get_effective_concurrency(agent_class)
 
-            # Resolve the actual api_base that will be used
-            llm_cfg = router.get_llm_config(agent_class)
-            api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+                # Resolve the actual api_base that will be used
+                llm_cfg = router.get_llm_config(agent_class)
+                api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
 
             logger.debug(
                 f"[CALL_AGENT_DEBUG] _acquire_slot — agent_class={agent_class}, "

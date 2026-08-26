@@ -135,9 +135,17 @@ class EndpointScheduler:
                 agent_class=agent_class,
                 timeout=effective_timeout,
             )
-            
+
             logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) acquired slot on '{api_base}' "
                        f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
+
+            # Structured slot event (change #10a): every acquire emits exactly one
+            # [SLOTPOOL] line — grant here; the enqueue moment is covered by SlotPool's
+            # "[SLOTPOOL] Queued ..." debug line (acquire-queued).
+            logger.debug(
+                f"[SLOTPOOL] instance={instance_name} pool={slot_key} "
+                f"action=acquire-grant waiters={len(sched_pool._waiters)}"
+            )
             
             # Wrap the pool's release callback to preserve existing logging behavior.
             def release():

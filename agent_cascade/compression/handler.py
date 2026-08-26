@@ -83,7 +83,7 @@ class CompressionHandler:
 
     # ── Image Captioning Helper (for tool results with uncaptioned images) ──
 
-    def _caption_tool_result_images(self, items: List[ContentItem]) -> None:
+    def _caption_tool_result_images(self, items: List[ContentItem], instance_name: Optional[str] = None) -> None:
         """Generate captions for uncaptioned image ContentItems in-place.
 
         Called from _assemble_tool_result before stringifying a ContentItem list
@@ -95,6 +95,9 @@ class CompressionHandler:
 
         Args:
             items: List of ContentItem objects (modified in-place).
+            instance_name: Optional compression target's instance name — threads the
+                owning instance into caption_images() for sticky-slot participation
+                (acquire-or-keep, never drop; plan change #12d).
         """
         try:
             api_router = getattr(self.pool, 'api_router', None)
@@ -111,7 +114,9 @@ class CompressionHandler:
 
             # Wrap items in a temporary Message so caption_images can process them
             temp_msg = Message(role=USER, content=list(items))
-            api_router.caption_images([temp_msg], agent_type=agent_type)
+            api_router.caption_images(
+                [temp_msg], agent_type=agent_type, instance_name=instance_name
+            )
             # caption_images modifies in-place; items are now captioned if possible
         except Exception as e:
             logger.debug(f"[CompressionHandler] Image captioning failed (non-fatal): {e}")
@@ -494,8 +499,10 @@ class CompressionHandler:
                 was_truncated = was_tool_call_truncated(instance_name, tool_name)
                 clear_truncation_state()
 
-                # Caption uncaptioned images in-place for accessibility.
-                self._caption_tool_result_images(raw_tool_result)
+                # Caption uncaptioned images in-place for accessibility. Thread the
+                # compression target's name (sticky slot plan change #12d) so the side-call
+                # participates in the shared sequential slot (acquire-or-keep, never drop).
+                self._caption_tool_result_images(raw_tool_result, instance_name=instance_name)
 
                 # Append notifications/warnings as text ContentItems instead of stringifying.
                 raw_tool_result = self._drain_cache_notifications_into_list(instance, raw_tool_result, prepend=True)

@@ -498,7 +498,9 @@ class ToolDispatcher:
             logger.debug(
                 f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'"
             )
-            self.engine._release_slot(caller_slot_holder, caller_name, "sync child")
+            # Structured drop-handoff event (sticky slot plan change #10): parent yields its
+            # slot so the sync child can acquire at FIFO tail; parent re-acquires at tail after.
+            self.engine._release_slot(caller_slot_holder, caller_name, "sync child", action="drop-handoff")
             logger.debug(
                 f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
             )

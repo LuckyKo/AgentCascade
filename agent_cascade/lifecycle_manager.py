@@ -517,6 +517,7 @@ class AgentLifecycleManager:
                 # Normal case is a no-op (reused instances are IDLE/TERMINATED). Guards
                 # against stale callbacks that would leak the pool permit (2026-08-16 deadlock).
                 # Atomic under _state_lock to match execution_engine._release_slot.
+                _reuse_slot_key = None
                 if hasattr(instance, '_state_lock'):
                     with instance._state_lock:
                         if instance._slot_release is not None:
@@ -524,6 +525,7 @@ class AgentLifecycleManager:
                                 f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
                                 f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
                             )
+                            _reuse_slot_key = getattr(instance, '_slot_key', None)
                             release_cb = instance._slot_release
                             instance._slot_release = None
                             instance._slot_key = None
@@ -543,6 +545,7 @@ class AgentLifecycleManager:
                         f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
                         f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
                     )
+                    _reuse_slot_key = getattr(instance, '_slot_key', None)
                     release_cb = instance._slot_release
                     instance._slot_release = None
                     if hasattr(instance, '_slot_key'):
@@ -554,6 +557,22 @@ class AgentLifecycleManager:
                             f"[SLOT_RELEASE_ERROR] Failed to release slot for "
                             f"{instance.instance_name} on reuse: {e}", exc_info=True
                         )
+                # Structured drop-reuse event (sticky slot plan change #10d): one line per
+                # actually-released permit; no-op when nothing was held.
+                if _reuse_slot_key is not None:
+                    _waiters = -1
+                    try:
+                        _sched = getattr(self.pool, 'scheduler', None)
+                        _pool = _sched._pools.get(_reuse_slot_key) if (_sched and _reuse_slot_key) else None
+                        if _pool is not None:
+                            with _pool._cond:
+                                _waiters = len(_pool._waiters)
+                    except Exception:
+                        pass
+                    logger.debug(
+                        f"[SLOTPOOL] instance={instance.instance_name} pool={_reuse_slot_key} "
+                        f"action=drop-reuse waiters={_waiters}"
+                    )
 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always

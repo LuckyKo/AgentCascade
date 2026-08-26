@@ -363,6 +363,47 @@ class LifecycleMixin:
                         # Clean up the child mapping since this instance is being removed
                         self._async_registry.remove_child_mapping(instance_name)
 
+        # ── Sticky slot cleanup on dismiss (plan change #14 / §3.11, G8). ──
+        # The old thread may still hold the shared sequential slot (mid-LLM-call, mid-tool,
+        # or queued at FIFO tail after a yield) and its run()-finally release could be
+        # arbitrarily delayed past the 2s join below. Release the held permit NOW, at the
+        # dismiss site: idempotent capture-and-nullify under _state_lock (exact pattern of
+        # engine._release_slot / stop_session). The old thread's later release is a no-op
+        # (nullified callback; SlotPool.release() is also idempotent via acquisition_id).
+        if inst and hasattr(inst, '_state_lock'):
+            try:
+                _dismiss_slot_key = None
+                with inst._state_lock:
+                    if getattr(inst, '_slot_release', None) is not None:
+                        _dismiss_slot_key = getattr(inst, '_slot_key', None)
+                        release_cb = inst._slot_release
+                        inst._slot_release = None
+                        inst._slot_key = None
+                        try:
+                            release_cb()
+                        except Exception as e:
+                            logger.error(
+                                f"[SLOT_RELEASE_ERROR] Failed to release slot for "
+                                f"'{instance_name}' on dismiss: {e}", exc_info=True
+                            )
+                if _dismiss_slot_key is not None:
+                    _waiters = -1
+                    try:
+                        _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
+                        _pool = _sched._pools.get(_dismiss_slot_key) if (_sched and _dismiss_slot_key) else None
+                        if _pool is not None:
+                            with _pool._cond:
+                                _waiters = len(_pool._waiters)
+                    except Exception:
+                        pass
+                    logger.debug(
+                        f"[SLOTPOOL] instance={instance_name} pool={_dismiss_slot_key} "
+                        f"action=drop-dismiss waiters={_waiters}"
+                    )
+            except Exception as e:
+                # Non-critical: the old thread's own run()-finally release still covers it.
+                logger.warning(f"Slot release on dismiss failed for '{instance_name}' (non-critical): {e}")
+
         # Clear state label before removing from pool (terminate already clears it if active).
         if inst:
             self._clear_state_label(inst)

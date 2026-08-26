@@ -181,6 +181,11 @@ class SlotPool:
                 f"waiters={len(self._waiters)} holders={[h.instance_name for h in self._running.values()]} "
                 f"timeout={timeout:.0f}s"
             )
+            # Structured slot event (change #10a): one line per queue enqueue.
+            logger.debug(
+                f"[SLOTPOOL] instance={instance_name} pool={self.key} "
+                f"action=acquire-queued waiters={len(self._waiters)}"
+            )
 
             deadline = ticket.deadline
             

@@ -81,6 +81,7 @@ from agent_cascade.operation_manager import set_current_instance_name, clear_cur
 # ── Constants (core) ───────────────────────────────────────────────────────────
 SLEEPING_LOOP_BACKOFF = 0.1              # Seconds to sleep when re-entering loop from SLEEPING state
 _COMPRESSION_WAIT_TIMEOUT = 1.0          # Seconds to wait per iteration when suspended by compression
+REACQUIRE_TIMEOUT = 30.0                 # Bounded FAST re-acquire window (post-yield fast path); on timeout the instance re-enters FIFO at tail (unbounded)
 
 # MAX_TEXT_LENGTH_FOR_REGEX / MIN_OUTPUT_LENGTH now live in helpers.py (their true
 # home — used by the helper functions there); re-imported below alongside helpers.
@@ -182,11 +183,19 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             instance._slot_release = self.pool._acquire_slot(
                 instance.agent_class, instance.instance_name
             )
-            # Store slot key for diagnostics.
+            # Store slot key for diagnostics. Cursor-aware resolution (sticky slot
+            # plan change #6): the key must match the endpoint pool that
+            # _acquire_slot actually acquired (chain rotated by this instance's
+            # cursor), not the raw chain head.
             if instance._slot_release is not None:
                 router = self.pool.api_router
                 if router:
-                    slot_info = router.get_agent_slot_info(instance.agent_class)
+                    if hasattr(router, 'get_effective_slot_info'):
+                        slot_info = router.get_effective_slot_info(
+                            instance.agent_class, instance_name=instance.instance_name
+                        )
+                    else:
+                        slot_info = router.get_agent_slot_info(instance.agent_class)
                     instance._slot_key = slot_info.get('slot_key')
             logger.debug(
                 f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
@@ -448,6 +457,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # `try:` skips that finally entirely and leaves the instance stuck in
         # RUNNING state — the next engine.run() entry then trips the L1 race guard.
 
+        # Sticky slot plan change #7 (defensive, no behavior change): a non-None
+        # _slot_release here means a previous run leaked its permit without going
+        # through a release point — the stale-clear below would orphan it and pin
+        # the pool forever. Log loudly so the leak is findable; keep the clear as-is.
+        if getattr(instance, '_slot_release', None) is not None:
+            logger.warning(
+                f"[SLOT_LEAK_GUARD] run() entry for '{instance.instance_name}' found a "
+                f"non-None _slot_release (stale permit from key={getattr(instance, '_slot_key', None)}). "
+                f"Clearing without releasing — a release point was skipped upstream."
+            )
         instance._slot_release = None  # Initialize for proper cleanup in finally block
         instance._slot_key = None      # Clear stale slot key from previous run (if any)
         instance._compression_suspended_at = 0.0  # Reset per-run suspension marker (BUG-4/8 exit-finally)
@@ -460,7 +479,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
             # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
             if self._is_terminal_stop(instance.instance_name):
-                self._release_slot(instance, instance.instance_name)
+                self._release_slot(instance, instance.instance_name, action="drop-exit")
                 return  # Terminal stop — release slot and exit (exit finally → IDLE)
 
             # ── Phase 1: Setup ─────────────────────────────────────────────
@@ -859,8 +878,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     instance._continue_saved_msg = None
 
             # Release concurrency slot on exit if still held (using helper
-            # method FIX Mi3)
-            self._release_slot(instance, instance.instance_name)
+            # method FIX Mi3). Structured drop-exit event (change #10c).
+            self._release_slot(instance, instance.instance_name, action="drop-exit")
 
             # FIX LogAppendFixer: Final sync to ensure all messages in
             # conversation are logged
@@ -1205,7 +1224,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             with instance._state_lock:
                 instance._compression_suspended_at = time.monotonic()  # BUG-4/8 marker
                 save_instance_state(instance)
-            self._release_slot(instance, inst_name, "compression_halt")
+            self._release_slot(instance, inst_name, "compression_halt", action="drop-handoff")
 
         try:
             # ── BUG-6 FIX: plain sleep tick ─────────────────────────────────
@@ -1221,14 +1240,31 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         finally:
             if not self._is_terminal_stop(inst_name):
                 # Same re-acquire idiom as the tool_dispatcher sync-child path:
-                # reacquire_for handles no-slot endpoints, bounded FIFO wait,
-                # timeout/cancel degradation. Restore KV ONLY AFTER successful
-                # re-acquisition to avoid evicting another agent's model.
-                ok = self.reacquire_for(instance, inst_name, context="after_compression_resume")
+                # reacquire_for handles no-slot endpoints, bounded FIFO wait, and
+                # (since the sticky-slot change) re-raises on hard scheduler failure.
+                # Restore KV ONLY AFTER successful re-acquisition to avoid evicting
+                # another agent's model.
+                #
+                # SANCTIONED EXCEPTION to the "no ungated state" rule (documented):
+                # this is the ONLY place in the codebase where a slotless state is
+                # tolerated. It's a system path — if re-acquisition fails here (hard
+                # scheduler failure raised, OR reacquire_for returning False for a
+                # missing router), a stuck compression-resume is worse than a degraded
+                # one, so we swallow it and let compression resume WITHOUT re-acquiring
+                # its slot. Every other reacquire_for caller lets the exception propagate.
+                try:
+                    ok = self.reacquire_for(instance, inst_name, context="after_compression_resume")
+                except Exception as e:
+                    logger.error(
+                        f"[SLOT_REACQUIRE_DEGRADED] compression-resume for '{inst_name}' "
+                        f"failed to re-acquire its slot (pool={getattr(instance, '_slot_key', None) if instance else 'unknown'}); "
+                        f"continuing WITHOUT a re-acquired slot (sanctioned degrade): {e}",
+                        exc_info=True,
+                    )
+                    ok = False
                 if ok and instance is not None:
                     from agent_cascade.state_ops import restore_instance_state
                     restore_instance_state(instance)
-                # On failure: reacquire_for already logged + cleared slot state (degrade-to-slotless)
         return True  # Compression cleared — safe to continue
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
@@ -2112,7 +2148,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
 
     @staticmethod
-    def _release_slot(slot_holder: Any, holder_name: str, context: str = "cleanup") -> None:
+    def _release_slot(slot_holder: Any, holder_name: str, context: str = "cleanup",
+                      action: Optional[str] = None) -> None:
         """Release a concurrency slot from a slot holder with error handling.
 
         FIX Mi3: Extracted helper to eliminate code duplication across three locations.
@@ -2125,6 +2162,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             slot_holder: Object with _slot_release attribute (AgentInstance or similar)
             holder_name: Name of the holder for logging purposes
             context: Optional context description for logging (e.g., "sleep transition", "sync child")
+            action: Optional structured-event label (sticky slot plan change #10c):
+                'drop-sleep', 'drop-exit', 'drop-handoff'. When given, emits exactly one
+                [SLOTPOOL] instance=... pool=... action=<action> waiters=<n> line.
         """
         # Defensive guard: handle objects without _slot_release attribute
         if not hasattr(slot_holder, '_slot_release'):
@@ -2136,6 +2176,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             with slot_holder._state_lock:
                 if slot_holder._slot_release is not None:
                     release_callback = slot_holder._slot_release
+                    slot_key = getattr(slot_holder, '_slot_key', None)
                     slot_holder._slot_release = None
                     if hasattr(slot_holder, '_slot_key'):
                         slot_holder._slot_key = None
@@ -2145,6 +2186,29 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         logger.error(
                             f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
                             exc_info=True
+                        )
+                    # Structured slot event (change #10c): one line per drop, waiter count
+                    # snapshotted from the pool when available. This is a @staticmethod, so
+                    # there is no self.pool — recover the SlotPool from the release callback's
+                    # closure (SlotPool._make_release_cb closes over the pool). Best-effort:
+                    # any failure just yields waiters=-1.
+                    if action:
+                        _waiters = -1
+                        try:
+                            _pool = None
+                            for _cell in getattr(release_callback, '__closure__', None) or ():
+                                _obj = _cell.cell_contents
+                                if hasattr(_obj, '_waiters') and hasattr(_obj, '_cond'):
+                                    _pool = _obj
+                                    break
+                            if _pool is not None:
+                                with _pool._cond:
+                                    _waiters = len(_pool._waiters)
+                        except Exception:
+                            pass
+                        logger.debug(
+                            f"[SLOTPOOL] instance={holder_name} pool={slot_key} "
+                            f"action={action} waiters={_waiters}"
                         )
 
 
@@ -2166,9 +2230,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             context: Short label for log messages (e.g. "after_security_check").
 
         Returns:
-            True if the slot was re-acquired (or no slot is needed), False on
-            timeout/cancellation — in which case the instance is left in a clean
-            slotless state and subsequent calls degrade to the async path only.
+            True if the slot was re-acquired (or no slot is needed). There is NO
+            slotless degraded state (sticky slot plan change #5b / §3.9 Gap A): on a
+            30s fast-path timeout the instance re-enters the FIFO at the tail and
+            blocks until granted (unbounded, by design). False is returned only for
+            hard failures (no router available); SlotCancelled and any other failure
+            during the unbounded re-queue propagate to callers (never returns slotless).
         """
         # Lazy import to avoid a module-level circular dependency with api_router.
         from agent_cascade.slot_queue import SlotQueueTimeout, SlotCancelled
@@ -2181,7 +2248,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             logger.warning(f"[SLOT_REACQUIRE] No router available for '{holder_name}'")
             return False
 
-        slot_info = router.get_agent_slot_info(instance.agent_class)
+        # Cursor-aware resolution (sticky slot plan change #5a): resolve the pool this
+        # instance will ACTUALLY use next (chain rotated by its cursor), not the raw
+        # chain head — otherwise a parent whose effective endpoint is a conc=0 fallback
+        # would come back onto the primary's pool after yielding (G4).
+        if hasattr(router, 'get_effective_slot_info'):
+            slot_info = router.get_effective_slot_info(
+                instance.agent_class, instance_name=holder_name
+            )
+        else:
+            slot_info = router.get_agent_slot_info(instance.agent_class)
         if not slot_info or not slot_info.get('needs_slot'):
             # Unlimited endpoint — no slot to hold. Clear any stale state and done.
             with instance._state_lock:
@@ -2192,7 +2268,24 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         api_base = slot_info['api_base']
         concurrency_limit = slot_info['concurrency_limit']
 
-        REACQUIRE_TIMEOUT = 30.0  # bounded FIFO wait; fail fast on genuine deadlock
+        # Defensive fast-path: if the instance already holds a LIVE permit for exactly
+        # the desired key, return without acquiring. SlotPool has no reentrant path —
+        # an acquire() while holding the same capacity-1 pool self-deadlocks until the
+        # timeout. This should never trigger under current usage (callers release first),
+        # so a hit indicates unexpected usage and is logged as a warning.
+        desired_key = slot_info.get('slot_key')
+        with instance._state_lock:
+            already_held = (
+                getattr(instance, '_slot_key', None) == desired_key
+                and getattr(instance, '_slot_release', None) is not None
+            )
+        if already_held:
+            logger.warning(
+                f"[SLOTPOOL] instance={holder_name} pool={desired_key} "
+                f"action=sticky-keep (reacquire_for fast-path — unexpected: caller should "
+                f"have released first; skipping acquire to avoid self-deadlock)"
+            )
+            return True
 
         try:
             release_cb = router.scheduler.acquire(
@@ -2200,7 +2293,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 concurrency_limit=concurrency_limit,
                 instance_name=holder_name,
                 agent_class=instance.agent_class,
-                timeout=REACQUIRE_TIMEOUT,
+                timeout=REACQUIRE_TIMEOUT,  # module constant — bounded FAST re-acquire window
             )
             if release_cb is not None:
                 with instance._state_lock:
@@ -2215,18 +2308,62 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     instance._slot_release = None
                     instance._slot_key = None
                 return True
-        except (SlotQueueTimeout, SlotCancelled):
+        except SlotCancelled:
+            # Terminated mid-wait — propagate the clean abort (caller handles).
+            raise
+        except (SlotQueueTimeout, TimeoutError):
+            # Fast-window timeout. The pool raises SlotQueueTimeout, but we always
+            # acquire through EndpointScheduler.acquire, which re-raises it as a plain
+            # TimeoutError (scheduler.py) — so catch both. Falling through here means:
+            # re-enter the FIFO at the tail (unbounded), below.
             pass
 
-        # On failure — clean state and degrade to async-only.
+        # Sticky slot plan change #5b (user decision 3 / §3.9 Gap A): there is NO
+        # slotless degraded state. The 30s fast window above only bounds the
+        # post-yield fast path; on timeout the instance re-enters the FIFO at the
+        # TAIL for its resolved effective slot and blocks until granted — unbounded,
+        # by design (no timeouts, no bypass, no preemption). The old
+        # [SLOT_REACQUIRE_FAILED] "degrade to async-only" path is deleted: it left a
+        # conc=0 agent ungated, reintroducing the trashing window this project closes.
+        logger.info(
+            f"[SLOTPOOL] instance={holder_name} pool={slot_info.get('slot_key')} "
+            f"action=acquire-queued waiters=-1 (post-yield fast re-acquire timed out after "
+            f"{REACQUIRE_TIMEOUT:.0f}s — re-entering FIFO at tail, unbounded by design)"
+        )
+        try:
+            release_cb = router.scheduler.acquire(
+                api_base=api_base,
+                concurrency_limit=concurrency_limit,
+                instance_name=holder_name,
+                agent_class=instance.agent_class,
+                timeout=None,  # unbounded — blocks at FIFO tail by design
+            )
+        except SlotCancelled:
+            raise
+        except Exception as e:
+            # A transient failure here must NOT strand the instance slotless (that would be
+            # an ungated conc=0 state — plan §3.9). Log loudly and re-raise so the caller's
+            # exception handling deals with it, matching how SlotCancelled propagates above.
+            logger.error(
+                f"[SLOT_REACQUIRE_FAILED] {context} for '{holder_name}' during "
+                f"unbounded re-queue: {e}",
+                exc_info=True,
+            )
+            raise
+        if release_cb is not None:
+            with instance._state_lock:
+                instance._slot_release = release_cb
+                instance._slot_key = slot_info.get('slot_key')
+            logger.debug(
+                f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}' "
+                f"after unbounded FIFO wait"
+            )
+            return True
+        # Unlimited — acquire returned None, no callback needed.
         with instance._state_lock:
             instance._slot_release = None
             instance._slot_key = None
-        logger.warning(
-            f"[SLOT_REACQUIRE_FAILED] {context} for '{holder_name}' after {REACQUIRE_TIMEOUT}s. "
-            f"Subsequent calls will use ASYNC path only."
-        )
-        return False
+        return True
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.
@@ -2252,6 +2389,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     from agent_cascade.state_ops import save_instance_state
                     save_instance_state(instance)
 
+                    _sleep_slot_key = getattr(instance, '_slot_key', None)
                     release_cb = instance._slot_release
                     instance._slot_release = None
                     instance._slot_key = None
@@ -2263,6 +2401,22 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             f"{instance.instance_name} during sleep transition: {e}",
                             exc_info=True,
                         )
+                    # Structured drop-sleep event (change #10c). Waiter count is
+                    # snapshotted OUTSIDE instance._state_lock (the pool condition is a
+                    # different lock; no nesting hazard here since we own only the state lock).
+                    _waiters = -1
+                    try:
+                        _sched = getattr(self.pool, 'scheduler', None)
+                        _pool = _sched._pools.get(_sleep_slot_key) if (_sched and _sleep_slot_key) else None
+                        if _pool is not None:
+                            with _pool._cond:
+                                _waiters = len(_pool._waiters)
+                    except Exception:
+                        pass
+                    logger.debug(
+                        f"[SLOTPOOL] instance={instance.instance_name} pool={_sleep_slot_key} "
+                        f"action=drop-sleep waiters={_waiters}"
+                    )
 
                 # Mark activity before transitioning to SLEEPING so idle timer
                 # is updated

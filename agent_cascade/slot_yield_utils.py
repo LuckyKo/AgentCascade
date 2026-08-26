@@ -88,7 +88,9 @@ def yield_caller_slot(
         logger.debug(
             f"[{log_prefix}] Releasing slot for '{caller_name}' before {before_action}"
         )
-        engine._release_slot(caller_inst, caller_name, release_reason)
+        # Structured drop-handoff event (sticky slot plan change #9/#10c): system agents
+        # (Security/Compressor) use the same yield/reacquire path as sync children.
+        engine._release_slot(caller_inst, caller_name, release_reason, action="drop-handoff")
         return True
 
     # Callback is None. Check whether the pool STILL shows the caller as a

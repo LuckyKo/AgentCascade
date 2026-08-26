@@ -366,6 +366,270 @@ class APIRouter:
 
         return slot_info
 
+    def get_effective_slot_info(self, agent_class: str, instance_name: Optional[str] = None) -> dict:
+        """Cursor-aware variant of :meth:`get_agent_slot_info`.
+
+        Resolves the slot info for the endpoint the router will ACTUALLY call next
+        for this instance (chain rotated by the per-instance cursor), instead of the
+        raw chain head. Used by sticky-slot acquisition paths so a lifecycle slot
+        follows the agent's current allocation, not its primary endpoint.
+
+        Args:
+            agent_class: The class name of the agent
+            instance_name: Optional instance name; when given, the per-instance
+                endpoint cursor rotates the chain before resolution.
+
+        Returns:
+            Same dict shape as get_agent_slot_info().
+        """
+        try:
+            chain = self.get_endpoint_chain(agent_class, instance_name=instance_name)
+        except ValueError:
+            # No endpoint configured at all — same unlimited outcome as the
+            # chain-head resolver.
+            return {
+                'slot_key': None,
+                'is_sequential': False,
+                'concurrency_limit': -1,
+                'api_base': None,
+                'needs_slot': False,
+            }
+
+        llm_cfg = chain[0] if chain else (self.default_llm_cfg or {})
+        api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', '')
+
+        # Match the rotated endpoint against self.endpoints to get its concurrency
+        # limit. Identity key: (normalized base, model) — same matching rule as
+        # call_with_fallback's per-endpoint resolution.
+        _norm_endpoint_base = normalize_api_base(api_base) if api_base else ''
+        with self._lock:
+            for ep in self.endpoints.values():
+                if ep.enabled and normalize_api_base(ep.api_base) == _norm_endpoint_base \
+                        and ep.model == llm_cfg.get('model'):
+                    concurrency = ep.concurrency_limit
+                    break
+            else:
+                # Unmatched (e.g. Tier-4 default cfg not in self.endpoints):
+                # conservative sequential, mirroring get_effective_concurrency.
+                concurrency = 0
+
+        if concurrency == -1:
+            return {
+                'slot_key': None,
+                'is_sequential': False,
+                'concurrency_limit': -1,
+                'api_base': api_base or None,
+                'needs_slot': False,
+            }
+
+        slot_info = self.scheduler.get_slot_info(api_base, concurrency)
+        slot_info['api_base'] = api_base
+        slot_info['needs_slot'] = True
+        return slot_info
+
+    def sync_sticky_slot(
+        self,
+        instance,
+        desired_key: Optional[str] = None,
+        origin: str = "sticky",
+    ) -> bool:
+        """Keep an agent's lifecycle slot in sync with the endpoint it is about to call.
+
+        The sticky assignment lives on the instance (``_slot_key`` / ``_slot_release``).
+        This helper performs check-before-acquire — MANDATORY because SlotPool has no
+        reentrant path: on the capacity-1 shared pool, an instance already in
+        ``_running`` calling acquire() again self-deadlocks until the 300s timeout.
+
+        Behavior per iteration of ``call_with_fallback`` (or a side-call):
+          - desired key == held key           → sticky-keep (no-op fast path).
+          - holding a slot, desired needs none → drop (fallback-back to conc>0/-1).
+          - holding nothing / other pool,      → acquire at FIFO tail (blocking by design)
+            desired needs a slot.
+
+        Side-calls (``origin=sidecall:<path>``) are acquire-or-keep for their OWN pool:
+        holding nothing → acquire at FIFO tail; holding the same key → sticky-keep. The
+        one documented exception to "never drop" (plan §3.10 D1-2): a side-call whose
+        target is a DIFFERENT pool than the one held (e.g. a conc=0 shared-slot caption
+        while holding a conc>0 per-base permit) must release the current slot and acquire
+        the target — otherwise the HTTP would fire ungated. This is safe: the main call
+        re-syncs at the next endpoint iteration and swaps back if needed (the round-trip
+        is covered by N21). Release stays exclusively at lifecycle points for the STICKY
+        slot itself; a side-call's cross-pool swap is a temporary borrow, not a drop.
+
+        Args:
+            instance: The AgentInstance whose sticky slot is being synced (must expose
+                ``_state_lock``, ``_slot_key``, ``_slot_release``).
+            desired_key: Slot key to sync against. When None, resolved from the
+                instance's cursor-aware effective endpoint.
+            origin: Log label for the event lines ("sticky" or "sidecall:<path>").
+
+        Returns:
+            True if a slot is held after the call (or none was needed), False if the
+            instance holds nothing and a slot was not needed.
+        """
+        if instance is None:
+            return False
+
+        agent_class = getattr(instance, 'agent_class', '') or ''
+        inst_name = getattr(instance, 'instance_name', '') or 'unknown'
+
+        # Resolve the desired key (explicit for side-calls, cursor-aware otherwise).
+        if desired_key is None:
+            slot_info = self.get_effective_slot_info(agent_class, instance_name=inst_name)
+            needs_slot = bool(slot_info.get('needs_slot'))
+            desired_key = slot_info.get('slot_key')
+            acquire_api_base = slot_info.get('api_base') or ''
+            acquire_concurrency = slot_info.get('concurrency_limit', 0)
+        else:
+            # An explicit key always means the caller has already determined a pool
+            # is involved (conc=0 shared or conc>0 base). Recover this endpoint's real
+            # concurrency from the instance's chain so scheduler.acquire() creates the
+            # right capacity (shared slot → 1; conc>0 base → N).
+            needs_slot = True
+            acquire_api_base = ''
+            acquire_concurrency = 0
+            try:
+                for cfg in self.get_endpoint_chain(agent_class, instance_name=inst_name):
+                    cfg_base = cfg.get('api_base') or cfg.get('model_server', '')
+                    if not cfg_base:
+                        continue
+                    with self._lock:
+                        for ep in self.endpoints.values():
+                            if ep.enabled and normalize_api_base(ep.api_base) == normalize_api_base(cfg_base) \
+                                    and ep.model == cfg.get('model'):
+                                if (desired_key == '_shared_sequential_slot_' and ep.concurrency_limit == 0) or \
+                                        (desired_key != '_shared_sequential_slot_'
+                                         and normalize_api_base(ep.api_base) == desired_key):
+                                    acquire_api_base = cfg_base
+                                    acquire_concurrency = ep.concurrency_limit
+                                break
+            except Exception:
+                pass
+
+        origin_suffix = f" origin={origin}" if origin and origin != "sticky" else ""
+
+        with instance._state_lock:
+            held_key = getattr(instance, '_slot_key', None)
+            held_release = getattr(instance, '_slot_release', None)
+
+            # ── Sticky-keep: already holding exactly what is wanted. ──
+            if desired_key is not None and held_key == desired_key and held_release is not None:
+                logger.debug(
+                    f"[SLOTPOOL] instance={inst_name} pool={desired_key} "
+                    f"action=sticky-keep waiters={self._pool_waiter_count(desired_key)}{origin_suffix}"
+                )
+                return True
+
+            # ── Side-calls: acquire-or-keep for their own pool. ──
+            if origin.startswith('sidecall:'):
+                if desired_key is None:
+                    # Side-call target needs no slot — nothing to do, keep whatever is held.
+                    return True
+                # Cross-pool side-call (e.g. conc=0 shared-slot caption while holding a
+                # conc>0 per-base permit): the HTTP MUST be gated by the target pool, so
+                # fall through to drop-before-acquire below. This is the documented
+                # exception to "side-calls never drop" (plan §3.10 D1-2) — without it the
+                # caption would fire ungated, recreating the model-trashing window. The
+                # main call re-syncs at the next endpoint iteration and swaps back if its
+                # own pool differs (round-trip verified by N21).
+
+            # ── Drop-before-acquire: release the old pool when it differs. ──
+            # Capture the callback under the lock; invoke it OUTSIDE (the pool's own
+            # condition may block on waiters). State is nullified ONLY after a
+            # successful release — if release_cb() raises, the instance keeps exactly
+            # what it held, so the next sync can retry the same drop. Re-raising
+            # prevents the caller from proceeding ungated (plan §3.9: no slotless state).
+            old_key = None
+            release_cb_old = None
+            if held_release is not None and held_key != desired_key:
+                old_key = held_key
+                release_cb_old = held_release
+
+            # ── No slot needed for the desired endpoint: stay slotless. ──
+            if desired_key is None or not needs_slot:
+                if release_cb_old is not None:
+                    # Release OUTSIDE the state lock (the pool's condition may block on
+                    # waiters). Nullify state only AFTER a successful release — if it
+                    # raises, the instance keeps exactly what it held so the next sync
+                    # retries the same drop. Re-raise: proceeding would leave a conc>0
+                    # call ungated (plan §3.9: no slotless state).
+                    try:
+                        release_cb_old()
+                    except Exception as e:
+                        logger.critical(
+                            f"[SLOTPOOL] instance={inst_name} pool={old_key} "
+                            f"action=drop-fallback waiters={self._pool_waiter_count(old_key)} "
+                            f"release_error={e}",
+                            exc_info=True,
+                        )
+                        raise
+                    with instance._state_lock:
+                        instance._slot_release = None
+                        instance._slot_key = None
+                    logger.debug(
+                        f"[SLOTPOOL] instance={inst_name} pool={old_key} "
+                        f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}{origin_suffix}"
+                    )
+                return False
+
+        # ── Cross-pool swap: release the old permit BEFORE acquiring the new one. ──
+        # When the desired key differs from the held key (and a slot IS needed), the
+        # old permit must be released first — otherwise the instance holds TWO slots
+        # (one per pool), leaking capacity and violating the single-permit invariant.
+        # This path is reached for: (a) main-call sync to a different conc>0 base, and
+        # (b) side-call cross-pool swap (e.g. caption on shared while holding per-base).
+        if release_cb_old is not None:
+            try:
+                release_cb_old()
+            except Exception as e:
+                logger.critical(
+                    f"[SLOTPOOL] instance={inst_name} pool={old_key} "
+                    f"action=drop-fallback waiters={self._pool_waiter_count(old_key)} "
+                    f"release_error={e}",
+                    exc_info=True,
+                )
+                raise
+            logger.debug(
+                f"[SLOTPOOL] instance={inst_name} pool={old_key} "
+                f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}{origin_suffix}"
+            )
+
+        # ── Acquire at FIFO tail (blocking by design — no timeout, no bypass). ──
+        # Called OUTSIDE the state lock: the pool's condition may block on waiters. The
+        # old permit was already released above (its drop-fallback line logged there);
+        # if the release had raised we would have re-raised before reaching here.
+        release_cb = self.scheduler.acquire(
+            api_base=acquire_api_base or desired_key,
+            concurrency_limit=acquire_concurrency,
+            instance_name=inst_name,
+            agent_class=agent_class,
+            pool=self._pool,
+        )
+
+        # Store the new permit under the state lock. No other thread can grant this
+        # instance a second permit: SlotPool keys holders by instance name and the
+        # check-before-acquire above already confirmed we hold nothing on this key.
+        with instance._state_lock:
+            instance._slot_release = release_cb
+            instance._slot_key = desired_key
+
+        logger.debug(
+            f"[SLOTPOOL] instance={inst_name} pool={desired_key} "
+            f"action=acquire-grant waiters={self._pool_waiter_count(desired_key)}{origin_suffix}"
+        )
+        return True
+
+    def _pool_waiter_count(self, slot_key: Optional[str]) -> int:
+        """Snapshot the waiter count for a pool (short critical section)."""
+        if not slot_key:
+            return 0
+        try:
+            with self.scheduler._lock:
+                pool = self.scheduler._pools.get(slot_key)
+                return len(pool._waiters) if pool else 0
+        except Exception:
+            return 0
+
     # ── LLM Config Resolution ────────────────────────────────────────────
 
     def get_llm_config(self, agent_type: str) -> dict:
@@ -1226,8 +1490,10 @@ class APIRouter:
         Execute ``call_fn(*args, **kwargs)`` with automatic endpoint fallback.
         Supports both regular functions and generators.
 
-        Concurrency is controlled at the agent lifecycle level via SlotPool
-        (acquired before the turn starts). No per-call gating occurs here.
+        Concurrency is controlled at the agent lifecycle level via SlotPool.
+        For conc=0 endpoints: the instance's lifecycle slot is synced via
+        sync_sticky_slot() at call entry and held for the whole turn (sticky — no
+        per-call release). For conc>0/-1 endpoints: no shared-pool interaction.
 
         Args:
             agent_type: The type of agent making the call (e.g., 'coder', 'researcher')
@@ -1360,6 +1626,11 @@ class APIRouter:
                     try:
                         first_chunk = next(it)
                     except StopIteration:
+                        # Empty generator — close to release any underlying resources.
+                        try:
+                            result.close()
+                        except Exception:
+                            pass
                         return iter([])
 
                     def _gen_wrapper(first, rest):
@@ -1367,6 +1638,9 @@ class APIRouter:
                         try:
                             yield from rest
                         finally:
+                            # Sticky slot: the permit lives on the instance and is released
+                            # only at lifecycle points (sleep/exit/handoff/reuse/stop/dismiss) —
+                            # NOT when the stream completes (R9). No per-call release here.
                             # Close the underlying generator to release HTTP connection
                             try:
                                 rest.close()
@@ -1387,6 +1661,39 @@ class APIRouter:
                     f"(breaker open / another agent probing)"
                 )
                 continue
+
+            # ── Sticky slot (plan §3.1/§3.2 — replaces the former per-call acquisition). ──
+            # Sync the agent's lifecycle slot with THIS endpoint, the only place where
+            # "which endpoint am I actually calling now" is known:
+            #   - conc=0 endpoint → acquire (or sticky-keep) the shared sequential slot
+            #     BEFORE any HTTP fires. No ungated conc=0 path exists: acquire blocks at
+            #     FIFO tail by design. The permit is NOT released per call — it stays held
+            #     across turns on this endpoint (that is what stops model trashing).
+            #   - conc>0/-1 endpoint → drop the shared slot now if held (fallback-back
+            #     drop, requirement 2); hold nothing extra.
+            # Releases happen only at lifecycle points (sleep/exit/handoff/reuse/stop/dismiss).
+            if _inst_name and self._pool:
+                try:
+                    self.sync_sticky_slot(
+                        self._pool.get_instance(_inst_name),
+                        desired_key=(
+                            '_shared_sequential_slot_' if concurrency_limit == 0 else None
+                        ),
+                        origin='sticky',
+                    )
+                except AgentTerminatedError:
+                    raise
+                except Exception as e:
+                    # Sticky sync failure must NOT be swallowed: continuing would leave a
+                    # conc=0 attempt ungated (no valid slotless state exists — plan §3.9).
+                    # Log loudly, then re-raise so the caller's exception handling deals with
+                    # it / moves to the next endpoint rather than firing an ungated HTTP call.
+                    logger.error(
+                        f"[APIRouter] Sticky slot sync failed for '{_inst_name}' "
+                        f"(endpoint={endpoint_name} @ {endpoint_base}): {e}",
+                        exc_info=True,
+                    )
+                    raise
 
             # Half-open probe custody: when THIS thread won the single-probe claim it must be
             # released on EVERY exit path from the attempt loop (success/exception/exhaustion).
@@ -1467,8 +1774,9 @@ class APIRouter:
                                     f"recovered — blacklist cleared."
                                 )
 
-                        # Generator errors are already detected inside execute_api_call (first-chunk pull).
-                        # Pass the generator through directly — no double-wrapping needed.
+                        # Sticky slot: no per-call release on success (generator or not) —
+                        # the permit lives on the instance and is released only at lifecycle
+                        # points (sleep/exit/handoff/reuse/stop/dismiss).
                         return result
 
                     except Exception as e:
@@ -1672,6 +1980,9 @@ class APIRouter:
                             # Interruptible sleep: check termination every 0.5s during retry backoff
                             _interruptible_sleep(delay, self._pool, _inst_name)
             finally:
+                # Sticky slot: no per-endpoint release — the permit (if any) lives on the
+                # instance and is released only at lifecycle points. On chain exhaustion
+                # the next call re-syncs against the fresh chain (drop or re-acquire).
                 if _holds_probe:
                     self._breaker_release_probe(endpoint_base)
 
@@ -1752,12 +2063,14 @@ class APIRouter:
                 return cfg
         return None
 
-    def _get_vision_endpoint_for_agent(self, agent_type: str) -> Optional[dict]:
+    def _get_vision_endpoint_for_agent(self, agent_type: str, instance_name: Optional[str] = None) -> Optional[dict]:
         """Return the first vision-capable endpoint from the agent's own endpoint chain.
 
         Falls back to any vision endpoint if none in the chain has vision.
+        When ``instance_name`` is given, the per-instance cursor rotates the chain so
+        the resolved vision endpoint matches the agent's current allocation.
         """
-        chain = self.get_endpoint_chain(agent_type)
+        chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
         for cfg in chain:
             if cfg.get('vision_enabled', True):
                 return cfg
@@ -1765,7 +2078,7 @@ class APIRouter:
         return self._get_any_vision_endpoint()
 
     def caption_images(
-        self, messages, agent_type: str = 'generalist'
+        self, messages, agent_type: str = 'generalist', instance_name: Optional[str] = None
     ) -> List:
         """
         Generate captions for uncaptioned images in the message list.
@@ -1773,9 +2086,23 @@ class APIRouter:
         Uses the agent's own endpoint chain to find a vision-capable endpoint
         for captioning, preserving the agent's configured endpoint order.
 
+        Slot participation (side-call rule): when the resolved vision endpoint is
+        conc=0, the owning instance's sticky slot is synced BEFORE any HTTP fires —
+        acquire-or-keep for the shared pool, including a cross-pool swap when the
+        instance currently holds a different pool's permit (plan §3.10 D1-2). A sync
+        failure RE-RAISES: proceeding would fire an ungated conc=0 HTTP (same policy as
+        call_with_fallback — no slotless state). Callers that treat captioning as
+        best-effort (e.g. compression) already catch and degrade to '[Image]'
+        placeholders. On an autoloader endpoint with state-save enabled, the instance's
+        KV state is saved before and restored after the caption loop so its conversation
+        KV survives the cold request.
+
         Args:
             messages: List of Message objects (may contain images)
             agent_type: Agent type used for endpoint resolution
+            instance_name: Optional owning instance name — enables sticky-slot
+                participation and the autoloader KV guard. When absent, captioning
+                proceeds exactly as before (no slot interaction).
 
         Returns:
             Modified message list with captions attached to images.
@@ -1784,7 +2111,7 @@ class APIRouter:
             return messages
 
         from agent_cascade.llm.schema import ContentItem, Message
-        vision_cfg = self._get_vision_endpoint_for_agent(agent_type)
+        vision_cfg = self._get_vision_endpoint_for_agent(agent_type, instance_name=instance_name)
         if not vision_cfg:
             # Replace uncaptioned images with placeholder text to ensure safe fallback
             logger.warning("[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders")
@@ -1817,60 +2144,127 @@ class APIRouter:
         if not uncaptioned_items:
             return messages
 
+        # ── Side-call slot sync (plan §3.10): acquire-or-keep, NEVER drop. ──
+        # When the vision endpoint is conc=0 and the owning instance does not already
+        # hold the shared sequential slot, take it at FIFO tail BEFORE any caption HTTP
+        # fires. Holding the shared slot already → sticky-keep (zero cost). No release
+        # on completion — the permit stays on the instance for the lifecycle points.
+        _caption_instance = None
+        if instance_name and self._pool:
+            _caption_instance = self._pool.get_instance(instance_name)
+            if _caption_instance is not None:
+                try:
+                    _vbase = vision_cfg.get('api_base') or vision_cfg.get('model_server', 'unknown')
+                    with self._lock:
+                        _vconc = None
+                        for ep in self.endpoints.values():
+                            if ep.enabled and normalize_api_base(ep.api_base) == normalize_api_base(_vbase) \
+                                    and ep.model == vision_cfg.get('model'):
+                                _vconc = ep.concurrency_limit
+                                break
+                    if _vconc is None:
+                        # Unmatched endpoint (e.g. Tier-4 default): conservative sequential,
+                        # mirroring get_effective_concurrency — the slot must gate this call.
+                        _vconc = 0
+                    if _vconc == 0:
+                        self.sync_sticky_slot(
+                            _caption_instance,
+                            desired_key='_shared_sequential_slot_',
+                            origin='sidecall:caption',
+                        )
+                except AgentTerminatedError:
+                    raise
+                except Exception as e:
+                    # Sync failure must NOT be swallowed (same policy as
+                    # call_with_fallback): continuing would fire the caption HTTP at a
+                    # conc=0 endpoint without holding the shared slot — ungated, and the
+                    # instance may be left mid-swap. Re-raise; best-effort callers
+                    # (compression handler) catch this and degrade to '[Image]'
+                    # placeholders, while the pre-LLM caption path fails the turn rather
+                    # than trashing the model.
+                    logger.error(
+                        f"[APIRouter] Caption slot sync failed for '{instance_name}': {e}",
+                        exc_info=True,
+                    )
+                    raise
+
+        # ── Autoloader KV guard (plan §3.10 D1-3b): save the instance's KV state before
+        # the cold caption request so a saved-state label is not invalidated; restore in
+        # a finally after the loop (even on exception).
+        _kv_saved = False
+        if _caption_instance is not None and vision_cfg.get('state_save_enabled'):
+            try:
+                from agent_cascade.state_ops import save_instance_state
+                save_instance_state(_caption_instance)
+                _kv_saved = True
+            except Exception as e:
+                logger.debug(f"[APIRouter] Pre-caption KV save failed (non-fatal): {e}")
+
         # Process each uncaptioned image individually for accurate captions
         all_captions = {}  # key = (msg_idx, item_idx) -> caption text
-        
-        # Batch: send prompt + one image at a time to get per-image captions
-        for msg_idx, item_idx, img_val in uncaptioned_items:
-            try:
-                # ── Change E gate: never fire a captioning call at a breaker-open base.
-                # Captioning is non-critical — skip the busy endpoint and fall through to
-                # the '[Image]' placeholder below (same as any other caption failure).
-                _vbase = vision_cfg.get('api_base') or vision_cfg.get('model_server', 'unknown')
-                if self._breaker_is_open(_vbase):
-                    logger.info(
-                        f"[APIRouter] Server busy — skipping image captioning at {_vbase} "
-                        f"(breaker open); using '[Image]' placeholder."
-                    )
-                    raise RuntimeError(f"Server busy (breaker open) at {_vbase}")
-                chat_model = get_chat_model(vision_cfg)
-                cap_msg = Message(
-                    role='user',
-                    content=[
-                        ContentItem(text=self.CAPTION_PROMPT),
-                        ContentItem(image=img_val),
-                    ]
-                )
-                result_iter = chat_model.chat(
-                    messages=[cap_msg],
-                    stream=True,
-                    delta_stream=False,
-                    extra_generate_cfg=vision_cfg,
-                )
-                # Consume the generator to get the final response
-                last_chunk = None
-                for chunk in result_iter:
-                    last_chunk = chunk
-                if last_chunk and len(last_chunk) > 0:
-                    caption_text = ''
-                    for m in last_chunk:
-                        # Handle both Message objects and dicts returned by chat models
-                        content = getattr(m, 'content', None) or (m.get('content') if isinstance(m, dict) else None)
-                        if isinstance(content, str):
-                            caption_text += content
-                        elif isinstance(content, list):
-                            for ci in content:
-                                txt = getattr(ci, 'text', '') or (ci.get('text') if isinstance(ci, dict) else '')
-                                if txt:
-                                    caption_text += txt
-                    caption_text = caption_text.strip()[:MAX_CAPTION_LENGTH]  # Cap length to avoid bloating messages
-                else:
-                    caption_text = '[Image]'
-            except Exception as e:
-                logger.warning(f"[APIRouter] Failed to generate image caption: {e}")
-                caption_text = '[Image]'
 
-            all_captions[(msg_idx, item_idx)] = caption_text
+        try:
+            # Batch: send prompt + one image at a time to get per-image captions
+            for msg_idx, item_idx, img_val in uncaptioned_items:
+                try:
+                    # ── Change E gate: never fire a captioning call at a breaker-open base.
+                    # Captioning is non-critical — skip the busy endpoint and fall through to
+                    # the '[Image]' placeholder below (same as any other caption failure).
+                    _vbase = vision_cfg.get('api_base') or vision_cfg.get('model_server', 'unknown')
+                    if self._breaker_is_open(_vbase):
+                        logger.info(
+                            f"[APIRouter] Server busy — skipping image captioning at {_vbase} "
+                            f"(breaker open); using '[Image]' placeholder."
+                        )
+                        raise RuntimeError(f"Server busy (breaker open) at {_vbase}")
+                    chat_model = get_chat_model(vision_cfg)
+                    cap_msg = Message(
+                        role='user',
+                        content=[
+                            ContentItem(text=self.CAPTION_PROMPT),
+                            ContentItem(image=img_val),
+                        ]
+                    )
+                    result_iter = chat_model.chat(
+                        messages=[cap_msg],
+                        stream=True,
+                        delta_stream=False,
+                        extra_generate_cfg=vision_cfg,
+                    )
+                    # Consume the generator to get the final response
+                    last_chunk = None
+                    for chunk in result_iter:
+                        last_chunk = chunk
+                    if last_chunk and len(last_chunk) > 0:
+                        caption_text = ''
+                        for m in last_chunk:
+                            # Handle both Message objects and dicts returned by chat models
+                            content = getattr(m, 'content', None) or (m.get('content') if isinstance(m, dict) else None)
+                            if isinstance(content, str):
+                                caption_text += content
+                            elif isinstance(content, list):
+                                for ci in content:
+                                    txt = getattr(ci, 'text', '') or (ci.get('text') if isinstance(ci, dict) else '')
+                                    if txt:
+                                        caption_text += txt
+                        caption_text = caption_text.strip()[:MAX_CAPTION_LENGTH]  # Cap length to avoid bloating messages
+                    else:
+                        caption_text = '[Image]'
+                except Exception as e:
+                    logger.warning(f"[APIRouter] Failed to generate image caption: {e}")
+                    caption_text = '[Image]'
+
+                all_captions[(msg_idx, item_idx)] = caption_text
+        finally:
+            # ── Autoloader KV guard restore (plan §3.10 D1-3b): put the saved KV state
+            # back after the loop so the agent's conversation KV survives the cold
+            # caption request — even when a caption exception escaped the per-image try.
+            if _kv_saved:
+                try:
+                    from agent_cascade.state_ops import restore_instance_state
+                    restore_instance_state(_caption_instance)
+                except Exception as e:
+                    logger.warning(f"[APIRouter] Post-caption KV restore failed (non-fatal): {e}")
 
         # Patch captions back into messages in-place
         for msg_idx, item_idx, _ in uncaptioned_items:
