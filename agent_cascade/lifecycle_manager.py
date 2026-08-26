@@ -516,63 +516,24 @@ class AgentLifecycleManager:
                 # SLOT_LEAK HARDENING: Release any held slot permit BEFORE clearing it.
                 # Normal case is a no-op (reused instances are IDLE/TERMINATED). Guards
                 # against stale callbacks that would leak the pool permit (2026-08-16 deadlock).
-                # Atomic under _state_lock to match execution_engine._release_slot.
-                _reuse_slot_key = None
-                if hasattr(instance, '_state_lock'):
-                    with instance._state_lock:
-                        if instance._slot_release is not None:
-                            logger.warning(
-                                f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
-                                f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
-                            )
-                            _reuse_slot_key = getattr(instance, '_slot_key', None)
-                            release_cb = instance._slot_release
-                            instance._slot_release = None
-                            instance._slot_key = None
-                            try:
-                                release_cb()
-                            except Exception as e:
-                                logger.error(
-                                    f"[SLOT_RELEASE_ERROR] Failed to release slot for "
-                                    f"{instance.instance_name} on reuse: {e}", exc_info=True
-                                )
-                        else:
-                            # Normal case: no live permit. Clear the stale key (defensive).
-                            instance._slot_key = None
-                elif instance._slot_release is not None:
-                    # Fallback for objects without _state_lock (shouldn't happen for AgentInstance).
+                # Shared capture-nullify-release-log helper: atomic under _state_lock,
+                # drop-reuse line only when a live permit was actually released.
+                if getattr(instance, '_slot_release', None) is not None:
                     logger.warning(
                         f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
                         f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
                     )
-                    _reuse_slot_key = getattr(instance, '_slot_key', None)
-                    release_cb = instance._slot_release
-                    instance._slot_release = None
-                    if hasattr(instance, '_slot_key'):
-                        instance._slot_key = None
-                    try:
-                        release_cb()
-                    except Exception as e:
-                        logger.error(
-                            f"[SLOT_RELEASE_ERROR] Failed to release slot for "
-                            f"{instance.instance_name} on reuse: {e}", exc_info=True
-                        )
-                # Structured drop-reuse event (sticky slot plan change #10d): one line per
-                # actually-released permit; no-op when nothing was held.
-                if _reuse_slot_key is not None:
-                    _waiters = -1
-                    try:
-                        _sched = getattr(self.pool, 'scheduler', None)
-                        _pool = _sched._pools.get(_reuse_slot_key) if (_sched and _reuse_slot_key) else None
-                        if _pool is not None:
-                            with _pool._cond:
-                                _waiters = len(_pool._waiters)
-                    except Exception:
-                        pass
-                    logger.debug(
-                        f"[SLOTPOOL] instance={instance.instance_name} pool={_reuse_slot_key} "
-                        f"action=drop-reuse waiters={_waiters}"
-                    )
+                from agent_cascade.slot_queue import release_slot_permit
+                _reuse_pool = None
+                try:
+                    _sched = getattr(self.pool, 'scheduler', None)
+                    if _sched is not None:
+                        _held_key = getattr(instance, '_slot_key', None)
+                        _reuse_pool = _sched._pools.get(_held_key) if _held_key else None
+                except Exception:
+                    pass
+                release_slot_permit(instance, instance.instance_name, action="drop-reuse",
+                                    context="on reuse", pool=_reuse_pool)
 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always

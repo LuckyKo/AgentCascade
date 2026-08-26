@@ -2152,8 +2152,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                       action: Optional[str] = None) -> None:
         """Release a concurrency slot from a slot holder with error handling.
 
-        FIX Mi3: Extracted helper to eliminate code duplication across three locations.
-        Encapsulates the capture-nullify-release-log pattern for slot release.
+        Thin delegate to :func:`agent_cascade.slot_queue.release_slot_permit` —
+        the shared capture-nullify-release-log helper used by every sticky-slot
+        lifecycle point. Kept as a staticmethod so callers (tool_dispatcher,
+        slot_yield_utils, tests) can invoke it without an engine instance.
 
         Thread-safe: acquires instance._state_lock before checking/clearing _slot_release
         to prevent double-release with concurrent stop_session calls.
@@ -2166,50 +2168,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 'drop-sleep', 'drop-exit', 'drop-handoff'. When given, emits exactly one
                 [SLOTPOOL] instance=... pool=... action=<action> waiters=<n> line.
         """
-        # Defensive guard: handle objects without _slot_release attribute
-        if not hasattr(slot_holder, '_slot_release'):
-            return
-
-        context_suffix = f" during {context}" if context else ""
-        # Acquire state lock for atomic check-nullify-release
-        if hasattr(slot_holder, '_state_lock'):
-            with slot_holder._state_lock:
-                if slot_holder._slot_release is not None:
-                    release_callback = slot_holder._slot_release
-                    slot_key = getattr(slot_holder, '_slot_key', None)
-                    slot_holder._slot_release = None
-                    if hasattr(slot_holder, '_slot_key'):
-                        slot_holder._slot_key = None
-                    try:
-                        release_callback()
-                    except Exception as e:
-                        logger.error(
-                            f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
-                            exc_info=True
-                        )
-                    # Structured slot event (change #10c): one line per drop, waiter count
-                    # snapshotted from the pool when available. This is a @staticmethod, so
-                    # there is no self.pool — recover the SlotPool from the release callback's
-                    # closure (SlotPool._make_release_cb closes over the pool). Best-effort:
-                    # any failure just yields waiters=-1.
-                    if action:
-                        _waiters = -1
-                        try:
-                            _pool = None
-                            for _cell in getattr(release_callback, '__closure__', None) or ():
-                                _obj = _cell.cell_contents
-                                if hasattr(_obj, '_waiters') and hasattr(_obj, '_cond'):
-                                    _pool = _obj
-                                    break
-                            if _pool is not None:
-                                with _pool._cond:
-                                    _waiters = len(_pool._waiters)
-                        except Exception:
-                            pass
-                        logger.debug(
-                            f"[SLOTPOOL] instance={holder_name} pool={slot_key} "
-                            f"action={action} waiters={_waiters}"
-                        )
+        from agent_cascade.slot_queue import release_slot_permit
+        release_slot_permit(slot_holder, holder_name, action=action, context=context)
 
 
     def reacquire_for(self, instance: Any, holder_name: str, context: str = "reacquire") -> bool:
@@ -2381,42 +2341,27 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # where another thread steals the slot between release and state transition.
         with instance._state_lock:
             if instance.state == AgentState.RUNNING:
-                # Inline slot release under lock — avoids nested lock acquisition
-                # (matching agent_pool.py pattern at lines ~1118-1125)
+                # Shared capture-nullify-release-log helper (slot_queue.release_slot_permit):
+                # captures + nullifies under the state lock we already hold, then invokes
+                # the callback outside it (the pool's condition may block on waiters).
+                # The drop-sleep line is emitted only when a live permit was held.
                 if instance._slot_release is not None:
                     # Save KV cache BEFORE releasing slot so context persists while
                     # other agents may use the same conc=0 pool during sleep.
                     from agent_cascade.state_ops import save_instance_state
                     save_instance_state(instance)
 
-                    _sleep_slot_key = getattr(instance, '_slot_key', None)
-                    release_cb = instance._slot_release
-                    instance._slot_release = None
-                    instance._slot_key = None
-                    try:
-                        release_cb()
-                    except Exception as e:
-                        logger.error(
-                            f"[SLOT_RELEASE_ERROR] Failed to release slot for "
-                            f"{instance.instance_name} during sleep transition: {e}",
-                            exc_info=True,
-                        )
-                    # Structured drop-sleep event (change #10c). Waiter count is
-                    # snapshotted OUTSIDE instance._state_lock (the pool condition is a
-                    # different lock; no nesting hazard here since we own only the state lock).
-                    _waiters = -1
+                    from agent_cascade.slot_queue import release_slot_permit
+                    _sleep_pool = None
                     try:
                         _sched = getattr(self.pool, 'scheduler', None)
-                        _pool = _sched._pools.get(_sleep_slot_key) if (_sched and _sleep_slot_key) else None
-                        if _pool is not None:
-                            with _pool._cond:
-                                _waiters = len(_pool._waiters)
+                        if _sched is not None:
+                            _held_key = getattr(instance, '_slot_key', None)
+                            _sleep_pool = _sched._pools.get(_held_key) if _held_key else None
                     except Exception:
                         pass
-                    logger.debug(
-                        f"[SLOTPOOL] instance={instance.instance_name} pool={_sleep_slot_key} "
-                        f"action=drop-sleep waiters={_waiters}"
-                    )
+                    release_slot_permit(instance, instance.instance_name, action="drop-sleep",
+                                        context="sleep transition", pool=_sleep_pool)
 
                 # Mark activity before transitioning to SLEEPING so idle timer
                 # is updated

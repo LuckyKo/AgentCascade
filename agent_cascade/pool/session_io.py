@@ -185,37 +185,25 @@ class SessionIOMixin:
         held_count = 0
         if release_slots:
             try:
+                from agent_cascade.slot_queue import release_slot_permit
                 for inst_name, instance in list(self.instances.items()):
-                    _stop_slot_key = None
-                    with instance._state_lock:
-                        # Atomic check-and-clear to prevent double-release with execution threads
-                        if instance._slot_release is not None:
-                            _stop_slot_key = getattr(instance, '_slot_key', None)
-                            release_cb = instance._slot_release
-                            instance._slot_release = None
-                            instance._slot_key = None
-                            try:
-                                release_cb()
-                                released_count += 1
-                            except Exception as e:
-                                logger.warning(f"[STOP_SLOT] Failed to release slot for '{inst_name}': {e}")
-                        elif instance.state.name not in ('IDLE', 'TERMINATED'):
-                            held_count += 1
-                    # Structured drop-stop event (sticky slot plan change #10e).
-                    if _stop_slot_key is not None:
-                        _waiters = -1
-                        try:
-                            _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
-                            _pool = _sched._pools.get(_stop_slot_key) if (_sched and _stop_slot_key) else None
-                            if _pool is not None:
-                                with _pool._cond:
-                                    _waiters = len(_pool._waiters)
-                        except Exception:
-                            pass
-                        logger.debug(
-                            f"[SLOTPOOL] instance={inst_name} pool={_stop_slot_key} "
-                            f"action=drop-stop waiters={_waiters}"
-                        )
+                    # Shared capture-nullify-release-log helper: atomic check-and-clear
+                    # under _state_lock prevents double-release with execution threads.
+                    # The drop-stop line is emitted only when a live permit was held;
+                    # the waiter count is snapshotted from the pool when resolvable.
+                    _stop_pool = None
+                    try:
+                        _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
+                        if _sched is not None:
+                            _held_key = getattr(instance, '_slot_key', None)
+                            _stop_pool = _sched._pools.get(_held_key) if _held_key else None
+                    except Exception:
+                        pass
+                    if release_slot_permit(instance, inst_name, action="drop-stop",
+                                           context="on stop_session", pool=_stop_pool):
+                        released_count += 1
+                    elif instance.state.name not in ('IDLE', 'TERMINATED'):
+                        held_count += 1
             except Exception as e:
                 logger.warning(f"slot_release failed during stop_session (non-critical): {e}")
 

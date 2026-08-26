@@ -22,7 +22,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +352,118 @@ class SlotPool:
                     for h in self._running.values()
                 ],
             }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Shared slot-release helper (capture-nullify-release-log)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def release_slot_permit(
+    holder: Any,
+    holder_name: str,
+    action: Optional[str] = None,
+    context: Optional[str] = None,
+    pool: Optional['SlotPool'] = None,
+) -> bool:
+    """Atomically capture and release a slot permit held by ``holder``.
+
+    The canonical implementation of the capture-nullify-release-log pattern used
+    at every sticky-slot lifecycle point (run exit, sleep transition, dismiss,
+    stop_session, reuse, side-call cross-pool swap). All sites share these exact
+    semantics:
+
+      1. Under ``holder._state_lock``: if a live ``_slot_release`` callback is
+         held, capture it and nullify ``_slot_release``/``_slot_key`` (so a
+         concurrent release from the execution thread becomes a no-op).
+      2. Invoke the captured callback OUTSIDE the state lock — the pool's own
+         condition may block on waiters, so holding the state lock across it
+         would deadlock a dismiss racing a queued yield.
+      3. If ``action`` is given, emit exactly one structured line:
+         ``[SLOTPOOL] instance=<name> pool=<key> action=<action> waiters=<n>``
+         where the waiter count is snapshotted from ``pool`` when passed, else
+         best-effort recovered from the release callback's closure (see below),
+         else -1.
+
+    Thread-safe and idempotent: a second call after a successful release finds
+    no live callback and returns False without logging.
+
+    Args:
+        holder: Object exposing ``_state_lock``, ``_slot_release`` and
+            ``_slot_key`` (an AgentInstance or similar slot holder).
+        holder_name: Instance name used in log lines.
+        action: Structured event label ('drop-exit', 'drop-sleep', ...). When
+            None, no [SLOTPOOL] line is emitted (plain cleanup release).
+        context: Human-readable context appended to the failure log message
+            (e.g., "sleep transition", "sync child").
+        pool: The SlotPool this permit belongs to. Pass it when available —
+            the waiter count is then an exact snapshot under ``pool._cond``.
+            When None, the pool is recovered from the release callback's
+            closure cells (SlotPool._make_release_cb closes over the pool) as a
+            best-effort fallback; any failure yields waiters=-1.
+
+    Returns:
+        True if a live permit was captured and released, False if nothing was
+        held (no state change, no [SLOTPOOL] line).
+    """
+    if not hasattr(holder, '_slot_release'):
+        return False
+
+    context_suffix = f" during {context}" if context else ""
+    slot_key: Optional[str] = None
+    release_callback: Optional[Callable[[], None]] = None
+
+    # Acquire state lock for atomic check-nullify-capture.
+    if hasattr(holder, '_state_lock'):
+        with holder._state_lock:
+            if getattr(holder, '_slot_release', None) is not None:
+                release_callback = holder._slot_release
+                slot_key = getattr(holder, '_slot_key', None)
+                holder._slot_release = None
+                if hasattr(holder, '_slot_key'):
+                    holder._slot_key = None
+    elif getattr(holder, '_slot_release', None) is not None:
+        # Fallback for holders without a state lock (defensive; AgentInstance
+        # always has one). No atomicity guarantee on this path.
+        release_callback = holder._slot_release
+        slot_key = getattr(holder, '_slot_key', None)
+        holder._slot_release = None
+        if hasattr(holder, '_slot_key'):
+            holder._slot_key = None
+
+    if release_callback is None:
+        return False
+
+    try:
+        release_callback()
+    except Exception as e:
+        logger.error(
+            f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
+            exc_info=True,
+        )
+
+    if action:
+        _waiters = -1
+        try:
+            _pool = pool
+            if _pool is None:
+                # Last-resort recovery: SlotPool._make_release_cb closes over the
+                # pool, so scan the callback's closure cells for it. Best-effort —
+                # any failure just yields waiters=-1.
+                for _cell in getattr(release_callback, '__closure__', None) or ():
+                    _obj = _cell.cell_contents
+                    if hasattr(_obj, '_waiters') and hasattr(_obj, '_cond'):
+                        _pool = _obj
+                        break
+            if _pool is not None:
+                with _pool._cond:
+                    _waiters = len(_pool._waiters)
+        except Exception:
+            pass
+        logger.debug(
+            f"[SLOTPOOL] instance={holder_name} pool={slot_key} "
+            f"action={action} waiters={_waiters}"
+        )
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────────────────

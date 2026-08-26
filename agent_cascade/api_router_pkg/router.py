@@ -20,7 +20,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import requests
 
@@ -46,10 +46,14 @@ from agent_cascade.api_router_pkg.endpoints import (
     CANONICAL_AGENT_TYPES,
 )
 from agent_cascade.api_router_pkg.scheduler import EndpointScheduler
+from agent_cascade.slot_queue import release_slot_permit
 from agent_cascade.api_router_pkg.helpers import _check_termination, _interruptible_sleep
 from agent_cascade.api_router_pkg.normalization import (
     normalize_api_base,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids circular import
+    from agent_cascade.agent_instance import AgentInstance
 
 logger = logging.getLogger(__name__)
 
@@ -429,7 +433,7 @@ class APIRouter:
 
     def sync_sticky_slot(
         self,
-        instance,
+        instance: 'AgentInstance',
         desired_key: Optional[str] = None,
         origin: str = "sticky",
     ) -> bool:
@@ -474,37 +478,9 @@ class APIRouter:
         inst_name = getattr(instance, 'instance_name', '') or 'unknown'
 
         # Resolve the desired key (explicit for side-calls, cursor-aware otherwise).
-        if desired_key is None:
-            slot_info = self.get_effective_slot_info(agent_class, instance_name=inst_name)
-            needs_slot = bool(slot_info.get('needs_slot'))
-            desired_key = slot_info.get('slot_key')
-            acquire_api_base = slot_info.get('api_base') or ''
-            acquire_concurrency = slot_info.get('concurrency_limit', 0)
-        else:
-            # An explicit key always means the caller has already determined a pool
-            # is involved (conc=0 shared or conc>0 base). Recover this endpoint's real
-            # concurrency from the instance's chain so scheduler.acquire() creates the
-            # right capacity (shared slot → 1; conc>0 base → N).
-            needs_slot = True
-            acquire_api_base = ''
-            acquire_concurrency = 0
-            try:
-                for cfg in self.get_endpoint_chain(agent_class, instance_name=inst_name):
-                    cfg_base = cfg.get('api_base') or cfg.get('model_server', '')
-                    if not cfg_base:
-                        continue
-                    with self._lock:
-                        for ep in self.endpoints.values():
-                            if ep.enabled and normalize_api_base(ep.api_base) == normalize_api_base(cfg_base) \
-                                    and ep.model == cfg.get('model'):
-                                if (desired_key == '_shared_sequential_slot_' and ep.concurrency_limit == 0) or \
-                                        (desired_key != '_shared_sequential_slot_'
-                                         and normalize_api_base(ep.api_base) == desired_key):
-                                    acquire_api_base = cfg_base
-                                    acquire_concurrency = ep.concurrency_limit
-                                break
-            except Exception:
-                pass
+        resolved = self._resolve_sticky_target(agent_class, inst_name, desired_key)
+        needs_slot = resolved['needs_slot']
+        desired_key = resolved['desired_key']
 
         origin_suffix = f" origin={origin}" if origin and origin != "sticky" else ""
 
@@ -521,24 +497,24 @@ class APIRouter:
                 return True
 
             # ── Side-calls: acquire-or-keep for their own pool. ──
-            if origin.startswith('sidecall:'):
-                if desired_key is None:
-                    # Side-call target needs no slot — nothing to do, keep whatever is held.
-                    return True
-                # Cross-pool side-call (e.g. conc=0 shared-slot caption while holding a
-                # conc>0 per-base permit): the HTTP MUST be gated by the target pool, so
-                # fall through to drop-before-acquire below. This is the documented
-                # exception to "side-calls never drop" (plan §3.10 D1-2) — without it the
-                # caption would fire ungated, recreating the model-trashing window. The
-                # main call re-syncs at the next endpoint iteration and swaps back if its
-                # own pool differs (round-trip verified by N21).
+            if origin.startswith('sidecall:') and desired_key is None:
+                # Side-call target needs no slot — nothing to do, keep whatever is held.
+                return True
+            # Cross-pool side-call (e.g. conc=0 shared-slot caption while holding a
+            # conc>0 per-base permit): the HTTP MUST be gated by the target pool, so
+            # fall through to drop-before-acquire below. This is the documented
+            # exception to "side-calls never drop" (plan §3.10 D1-2) — without it the
+            # caption would fire ungated, recreating the model-trashing window. The
+            # main call re-syncs at the next endpoint iteration and swaps back if its
+            # own pool differs (round-trip verified by N21).
 
             # ── Drop-before-acquire: release the old pool when it differs. ──
-            # Capture the callback under the lock; invoke it OUTSIDE (the pool's own
-            # condition may block on waiters). State is nullified ONLY after a
-            # successful release — if release_cb() raises, the instance keeps exactly
-            # what it held, so the next sync can retry the same drop. Re-raising
-            # prevents the caller from proceeding ungated (plan §3.9: no slotless state).
+            # Capture the callback under the lock; _drop_held_permit invokes it
+            # OUTSIDE (the pool's own condition may block on waiters) and nullifies
+            # the permit state only after a successful release — if the release
+            # raises, the instance keeps exactly what it held so the next sync can
+            # retry the same drop. Re-raising prevents the caller from proceeding
+            # ungated (plan §3.9: no slotless state).
             old_key = None
             release_cb_old = None
             if held_release is not None and held_key != desired_key:
@@ -548,28 +524,7 @@ class APIRouter:
             # ── No slot needed for the desired endpoint: stay slotless. ──
             if desired_key is None or not needs_slot:
                 if release_cb_old is not None:
-                    # Release OUTSIDE the state lock (the pool's condition may block on
-                    # waiters). Nullify state only AFTER a successful release — if it
-                    # raises, the instance keeps exactly what it held so the next sync
-                    # retries the same drop. Re-raise: proceeding would leave a conc>0
-                    # call ungated (plan §3.9: no slotless state).
-                    try:
-                        release_cb_old()
-                    except Exception as e:
-                        logger.critical(
-                            f"[SLOTPOOL] instance={inst_name} pool={old_key} "
-                            f"action=drop-fallback waiters={self._pool_waiter_count(old_key)} "
-                            f"release_error={e}",
-                            exc_info=True,
-                        )
-                        raise
-                    with instance._state_lock:
-                        instance._slot_release = None
-                        instance._slot_key = None
-                    logger.debug(
-                        f"[SLOTPOOL] instance={inst_name} pool={old_key} "
-                        f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}{origin_suffix}"
-                    )
+                    self._drop_held_permit(instance, inst_name, old_key, release_cb_old, origin)
                 return False
 
         # ── Cross-pool swap: release the old permit BEFORE acquiring the new one. ──
@@ -579,28 +534,89 @@ class APIRouter:
         # This path is reached for: (a) main-call sync to a different conc>0 base, and
         # (b) side-call cross-pool swap (e.g. caption on shared while holding per-base).
         if release_cb_old is not None:
-            try:
-                release_cb_old()
-            except Exception as e:
-                logger.critical(
-                    f"[SLOTPOOL] instance={inst_name} pool={old_key} "
-                    f"action=drop-fallback waiters={self._pool_waiter_count(old_key)} "
-                    f"release_error={e}",
-                    exc_info=True,
-                )
-                raise
-            logger.debug(
-                f"[SLOTPOOL] instance={inst_name} pool={old_key} "
-                f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}{origin_suffix}"
-            )
+            self._drop_held_permit(instance, inst_name, old_key, release_cb_old, origin)
 
-        # ── Acquire at FIFO tail (blocking by design — no timeout, no bypass). ──
-        # Called OUTSIDE the state lock: the pool's condition may block on waiters. The
-        # old permit was already released above (its drop-fallback line logged there);
-        # if the release had raised we would have re-raised before reaching here.
+        return self._acquire_and_store_sticky_slot(
+            instance, inst_name, agent_class, desired_key, resolved, origin_suffix
+        )
+
+    def _resolve_sticky_target(
+        self,
+        agent_class: str,
+        inst_name: str,
+        desired_key: Optional[str],
+    ) -> Dict[str, Any]:
+        """Resolve the sticky-slot target for sync_sticky_slot (pure lookup).
+
+        Returns a dict with keys ``needs_slot``, ``desired_key``, ``api_base`` and
+        ``concurrency_limit`` describing the pool to sync against. When
+        ``desired_key`` is None it is resolved from the instance's cursor-aware
+        effective endpoint; an explicit key always means the caller has already
+        determined a pool is involved (conc=0 shared or conc>0 base).
+        """
+        if desired_key is None:
+            slot_info = self.get_effective_slot_info(agent_class, instance_name=inst_name)
+            return {
+                'needs_slot': bool(slot_info.get('needs_slot')),
+                'desired_key': slot_info.get('slot_key'),
+                'api_base': slot_info.get('api_base') or '',
+                'concurrency_limit': slot_info.get('concurrency_limit', 0),
+            }
+
+        # An explicit key always means the caller has already determined a pool
+        # is involved (conc=0 shared or conc>0 base). Recover this endpoint's real
+        # concurrency from the instance's chain so scheduler.acquire() creates the
+        # right capacity (shared slot → 1; conc>0 base → N).
+        api_base = ''
+        concurrency = 0
+        try:
+            for cfg in self.get_endpoint_chain(agent_class, instance_name=inst_name):
+                cfg_base = cfg.get('api_base') or cfg.get('model_server', '')
+                if not cfg_base:
+                    continue
+                with self._lock:
+                    for ep in self.endpoints.values():
+                        if ep.enabled and normalize_api_base(ep.api_base) == normalize_api_base(cfg_base) \
+                                and ep.model == cfg.get('model'):
+                            if (desired_key == '_shared_sequential_slot_' and ep.concurrency_limit == 0) or \
+                                    (desired_key != '_shared_sequential_slot_'
+                                     and normalize_api_base(ep.api_base) == desired_key):
+                                api_base = cfg_base
+                                concurrency = ep.concurrency_limit
+                            break
+        except Exception:
+            logger.debug(
+                "Failed to recover endpoint concurrency for explicit key "
+                f"(instance={inst_name}, desired_key={desired_key})",
+                exc_info=True,
+            )
+        return {
+            'needs_slot': True,
+            'desired_key': desired_key,
+            'api_base': api_base,
+            'concurrency_limit': concurrency,
+        }
+
+    def _acquire_and_store_sticky_slot(
+        self,
+        instance: 'AgentInstance',
+        inst_name: str,
+        agent_class: str,
+        desired_key: str,
+        resolved: Dict[str, Any],
+        origin_suffix: str,
+    ) -> bool:
+        """Acquire the sticky slot at the FIFO tail and store the new permit.
+
+        Called by sync_sticky_slot after any old permit has been released (its
+        drop-fallback line logged there); if that release had raised we would have
+        re-raised before reaching here. Acquire is OUTSIDE the state lock: the
+        pool's condition may block on waiters (blocking by design — no timeout,
+        no bypass).
+        """
         release_cb = self.scheduler.acquire(
-            api_base=acquire_api_base or desired_key,
-            concurrency_limit=acquire_concurrency,
+            api_base=resolved['api_base'] or desired_key,
+            concurrency_limit=resolved['concurrency_limit'],
             instance_name=inst_name,
             agent_class=agent_class,
             pool=self._pool,
@@ -618,6 +634,40 @@ class APIRouter:
             f"action=acquire-grant waiters={self._pool_waiter_count(desired_key)}{origin_suffix}"
         )
         return True
+
+    def _drop_held_permit(self, instance: 'AgentInstance', inst_name: str, old_key: str,
+                          release_cb_old: Callable[[], None], origin: str) -> None:
+        """Release a permit already captured (state NOT yet nullified) by the caller.
+
+        Used by both sync_sticky_slot drop paths (stay-slotless and cross-pool swap).
+        The callback was captured under instance._state_lock earlier in the call;
+        invoking it here is OUTSIDE that lock — the pool's condition may block on
+        waiters, so holding the state lock across it would deadlock.
+
+        State is nullified ONLY after a successful release (matching the original
+        drop paths): if the callback raises, the instance keeps exactly what it held
+        so the next sync can retry the same drop. Re-raising prevents the caller from
+        proceeding ungated (plan §3.9: no slotless state).
+        """
+        try:
+            release_cb_old()
+        except Exception as e:
+            logger.error(
+                f"[SLOTPOOL] instance={inst_name} pool={old_key} "
+                f"action=drop-fallback waiters={self._pool_waiter_count(old_key)} "
+                f"release_error={e}",
+                exc_info=True,
+            )
+            raise
+        # Nullify the captured permit state only now that the release succeeded.
+        with instance._state_lock:
+            instance._slot_release = None
+            instance._slot_key = None
+        logger.debug(
+            f"[SLOTPOOL] instance={inst_name} pool={old_key} "
+            f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}"
+            + (f" origin={origin}" if origin and origin != "sticky" else "")
+        )
 
     def _pool_waiter_count(self, slot_key: Optional[str]) -> int:
         """Snapshot the waiter count for a pool (short critical section)."""
@@ -654,8 +704,11 @@ class APIRouter:
         the general settings value. The general settings is a fallback only,
         not a hard cap — each agent type keeps its own configured limit.
         """
-        # Read general_limit AND resolve endpoint chain inside a single lock scope
-        # to ensure atomicity — no risk of general_limit changing mid-computation.
+        # The lock protects the read of self.default_llm_cfg, self.agent_priorities,
+        # and self.endpoints from concurrent modification (e.g. a config reload or
+        # priority update racing this lookup). It does NOT make the whole resolution
+        # atomic: agent_priorities and endpoints can still change after the lock is
+        # released, so the resolved value is a best-effort snapshot, not a guarantee.
         ep_limit = 0
         general_limit = 0
         with self._lock:

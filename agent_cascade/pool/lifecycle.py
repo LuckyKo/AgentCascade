@@ -372,34 +372,20 @@ class LifecycleMixin:
         # (nullified callback; SlotPool.release() is also idempotent via acquisition_id).
         if inst and hasattr(inst, '_state_lock'):
             try:
-                _dismiss_slot_key = None
-                with inst._state_lock:
-                    if getattr(inst, '_slot_release', None) is not None:
-                        _dismiss_slot_key = getattr(inst, '_slot_key', None)
-                        release_cb = inst._slot_release
-                        inst._slot_release = None
-                        inst._slot_key = None
-                        try:
-                            release_cb()
-                        except Exception as e:
-                            logger.error(
-                                f"[SLOT_RELEASE_ERROR] Failed to release slot for "
-                                f"'{instance_name}' on dismiss: {e}", exc_info=True
-                            )
-                if _dismiss_slot_key is not None:
-                    _waiters = -1
-                    try:
-                        _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
-                        _pool = _sched._pools.get(_dismiss_slot_key) if (_sched and _dismiss_slot_key) else None
-                        if _pool is not None:
-                            with _pool._cond:
-                                _waiters = len(_pool._waiters)
-                    except Exception:
-                        pass
-                    logger.debug(
-                        f"[SLOTPOOL] instance={instance_name} pool={_dismiss_slot_key} "
-                        f"action=drop-dismiss waiters={_waiters}"
-                    )
+                # Shared capture-nullify-release-log helper (slot_queue.release_slot_permit):
+                # same idempotent semantics as before — release under the state lock,
+                # [SLOTPOOL] drop-dismiss line only when a live permit was held.
+                from agent_cascade.slot_queue import release_slot_permit
+                _dismiss_pool = None
+                try:
+                    _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
+                    if _sched is not None:
+                        _held_key = getattr(inst, '_slot_key', None)
+                        _dismiss_pool = _sched._pools.get(_held_key) if _held_key else None
+                except Exception:
+                    pass
+                release_slot_permit(inst, instance_name, action="drop-dismiss",
+                                    context="on dismiss", pool=_dismiss_pool)
             except Exception as e:
                 # Non-critical: the old thread's own run()-finally release still covers it.
                 logger.warning(f"Slot release on dismiss failed for '{instance_name}' (non-critical): {e}")
