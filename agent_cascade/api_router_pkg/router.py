@@ -214,6 +214,20 @@ class APIRouter:
             for k, v in updates.items():
                 if hasattr(ep, k) and k != 'id':
                     setattr(ep, k, v)
+
+            # FIX (priority-swap cursor): any endpoint mutation (enable/disable toggle, api_base/
+            # model change, ...) can change the tier chain an instance is rotating through — a stale
+            # positional cursor would then point at the WRONG endpoint. Always-clear is safe and
+            # idempotent: a reset cursor just means "re-try top priority," which is correct after
+            # any endpoint change (mirrors the from_dict FIX-2a reset).
+            if self._instance_endpoint_position:
+                cleared = len(self._instance_endpoint_position)
+                self._instance_endpoint_position.clear()
+                logger.debug(
+                    f"[APIRouter.update_endpoint] Endpoint '{endpoint_id}' updated ({list(updates.keys())}) — "
+                    f"reset {cleared} instance endpoint cursor(s) (stale positional cursors invalidated)."
+                )
+
             self._save()
             return True
 
@@ -262,6 +276,20 @@ class APIRouter:
             else:
                 logger.debug(f"[APIRouter.set_agent_priorities] No action for {agent_type} "
                             f"(no valid IDs, no existing priorities)")
+
+            # FIX (priority-swap cursor): the per-instance cursor is a POSITIONAL index into
+            # the tier chain — reordering/replacing an agent's priority list invalidates every
+            # stale positional cursor (it would point at the WRONG endpoint, or out of range if
+            # the new chain is shorter). Reset ALL instance cursors under the lock so a live
+            # reorder never leaves a dangling rotation behind (mirrors the from_dict FIX-2a reset).
+            if self._instance_endpoint_position:
+                cleared = len(self._instance_endpoint_position)
+                self._instance_endpoint_position.clear()
+                logger.debug(
+                    f"[APIRouter.set_agent_priorities] Priorities changed for '{canonical}' — "
+                    f"reset {cleared} instance endpoint cursor(s) (stale positional cursors invalidated)."
+                )
+
             self._save()
 
     def get_agent_priorities(self, agent_type: str) -> List[str]:
