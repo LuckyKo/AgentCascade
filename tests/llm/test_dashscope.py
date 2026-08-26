@@ -121,7 +121,13 @@ def test_llm_retry_failure(stream, delta_stream):
     llm_cfg = {'model': 'qwen-turbo', 'api_key': 'invalid', 'generate_cfg': {'max_retries': 2}}
 
     llm = get_chat_model(llm_cfg)
-    assert llm.max_retries == 2
+    # Phase 2 refactor (commit 1d260be): L1 retries are disabled — generate_cfg['max_retries']
+    # is no longer propagated to the LLM instance. Retries are handled by L2 (API router,
+    # endpoint.max_retries / RetryPolicy) and L3 (execution engine). The attribute is kept
+    # at 0 for backwards compat only; see tests/test_retry_baseline.py::TestLLayerRetryBehavior.
+    assert llm.max_retries == 0
+    assert 'max_retries' not in llm.generate_cfg, \
+        "max_retries must be stripped from generate_cfg (L1 retries disabled)"
     assert llm.use_raw_api, "DashScope models should use raw API (streaming)"
 
     messages = [Message('user', 'hello')]
@@ -137,7 +143,11 @@ def test_llm_retry_failure_delta(delta_stream):
     llm_cfg = {'model': 'qwen-turbo', 'api_key': 'invalid', 'generate_cfg': {'max_retries': 2, 'use_raw_api': False}}
 
     llm = get_chat_model(llm_cfg)
-    assert llm.max_retries == 2
+    # Phase 2 refactor (commit 1d260be): L1 retries are disabled — max_retries is not
+    # propagated from generate_cfg (see test_llm_retry_failure above).
+    assert llm.max_retries == 0
+    assert 'max_retries' not in llm.generate_cfg, \
+        "max_retries must be stripped from generate_cfg (L1 retries disabled)"
     assert not llm.use_raw_api, "Should use non-raw API when explicitly disabled"
 
     messages = [Message('user', 'hello')]
