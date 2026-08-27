@@ -31,9 +31,8 @@ where ``i`` is the feature position where the FIRST repetition starts and
 list (SYSTEM-filtered). Popping that many messages keeps exactly ONE
 occurrence of the period.
 
-Complexity note (plan §3): runs on every LLM call — O(W) regex passes over ≤60
-messages plus a tail-first slice scan bounded by ~26k short-circuiting element
-comparations. Microseconds in practice; no KMP/Z-algorithm at this size.
+Complexity (plan §3): runs per LLM call — O(W) regex passes over ≤60 messages
+plus a bounded tail-first scan; microseconds in practice, no KMP needed.
 """
 
 from __future__ import annotations

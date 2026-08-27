@@ -147,30 +147,17 @@ AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv(
     'QWEN_AGENT_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
-# ── Two-tier loop detection (2026-08 redesign; plan: plans/loop_detector_exact_redesign_PLAN.md) ──
-# Tier 1 — exact multi-period matcher (exact_loop_detect.py): deterministic,
-# survey-validated (9/10 logs clean), takes over the removed legacy detect_loop
-# which already rolled back in production. Default ON; rollback still respects
-# auto_rollback_on_loop and max_auto_rollbacks.
+# ── Two-tier loop detection (2026-08 redesign; plan: plans/loop_detector_exact_redesign_PLAN.md §5.3) ──
+# Tier 1 — exact matcher (exact_loop_detect.py). Rollback still respects auto_rollback_on_loop / max_auto_rollbacks.
 LOOP_EXACT_ROLLBACK_ENABLED: bool = os.getenv(
     'QWEN_AGENT_LOOP_EXACT_ROLLBACK', '1') == '1'  # Tier 1 runs and rolls back on exact hits
-# Tier 2 — fuzzy tool-call detector (tool_loop_detect.py), demoted to
-# warning-first: injects ONE advisory USER message per detected run (throttled,
-# FUZZY_WARNING_COOLDOWN_TURNS). Warning-only has no destructive path → default ON.
+# Tier 2 — fuzzy detector (tool_loop_detect.py), warning-first: ONE advisory per run, no destructive path.
 LOOP_FUZZY_WARNING_ENABLED: bool = os.getenv(
     'QWEN_AGENT_LOOP_FUZZY_WARNING', '1') == '1'  # Tier 2 runs and may inject the advisory
-# Tier 2 escalation toggle: when True, a fuzzy loop still matching
-# FUZZY_ESCALATION_TURNS (2) LLM turns after the warning escalates to FULL
-# rollback. Default OFF = warning-only; flip after field telemetry shows
-# warnings alone don't stop Sample-1-class loops. Rollback path still respects
-# auto_rollback_on_loop and max_auto_rollbacks.
+# Tier 2 escalation: fuzzy loop persisting FUZZY_ESCALATION_TURNS turns after the warning → full rollback. Off by default.
 TOOL_LOOP_FUZZY_ROLLBACK_ENABLED: bool = os.getenv(
     'QWEN_AGENT_TOOL_LOOP_FUZZY_ROLLBACK', '0') == '1'  # Escalation off by default
-# DEPRECATED (2026-08): legacy KILL SWITCH only. Tier-2 enablement is now
-# LOOP_FUZZY_WARNING_ENABLED AND TOOL_LOOP_DETECTION_ENABLED — the old flag can
-# still DISABLE Tier 2 (existing deployments with QWEN_AGENT_TOOL_LOOP_DETECTION=0
-# keep their kill switch) but can never enable it on its own. Removed in a later
-# cleanup release.
+# DEPRECATED (2026-08): legacy kill switch only — can DISABLE Tier 2 (LOOP_FUZZY_WARNING_ENABLED AND this flag) but never enable it. Removed in a later cleanup release.
 TOOL_LOOP_DETECTION_ENABLED: bool = os.getenv(
     'QWEN_AGENT_TOOL_LOOP_DETECTION', '1') == '1'  # Legacy kill switch for the fuzzy tier
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv(

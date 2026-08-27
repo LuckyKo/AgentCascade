@@ -37,7 +37,7 @@ SAMPLES_DIR = Path(__file__).resolve().parents[1].parent / "loop_failure_samples
 
 
 def _fc_msg(tool: str, args: dict):
-    """Assistant message carrying a function_call."""
+    # Assistant message carrying a function_call.
     return Message(
         role=ASSISTANT, content="",
         function_call=FunctionCall(name=tool, arguments=json.dumps(args)),
@@ -45,7 +45,7 @@ def _fc_msg(tool: str, args: dict):
 
 
 def _fn_msg(tool: str, output: str):
-    """FUNCTION-role tool output message."""
+    # FUNCTION-role tool output message.
     return Message(role=FUNCTION, content=output, name=tool)
 
 
@@ -61,7 +61,7 @@ PYTEST_CMD = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INF
 
 
 def _poll_pair(justification="Check progress"):
-    """Sample-1-style __status poll pair (FC + terminal-error output)."""
+    # Sample-1-style __status poll pair (FC + terminal-error output).
     return [
         _fc_msg("shell_cmd", {"command": "__status", "tool_id": "1", "justification": justification}),
         _fn_msg("shell_cmd", POLL_OUTPUT),
@@ -73,7 +73,7 @@ def _pytest_pair(cmd: str, output: str):
 
 
 def failing_poll_pairs(count, user="poll"):
-    """`count` identical __status poll pairs with varying justification (Layer 1 fixture)."""
+    # `count` identical __status poll pairs, varying justification (Layer 1 fixture).
     msgs = [Message(role=USER, content=user)]
     for i in range(count):
         msgs += _poll_pair(justification=f"Check {i}")
@@ -81,9 +81,9 @@ def failing_poll_pairs(count, user="poll"):
 
 
 def churned_pytest_pairs(count, user="run"):
-    """`count` failing pytest pairs whose outputs differ only in GENUINE substantive
-    content (line number + prose) — isolates Layer 2; wrapper-only churn would be
-    normalized away and let Layer 1 fire at its own threshold."""
+    # `count` failing pytest pairs differing only in GENUINE substantive content (line
+    # number + prose) — isolates Layer 2; wrapper-only churn would normalize away and let
+    # Layer 1 fire at its own threshold.
     msgs = [Message(role=USER, content=user)]
     for i in range(count):
         out = (f"APPROVED: Command exited with return code 1. (elapsed {11.0 + i * 3.7}s)\n"
@@ -94,7 +94,7 @@ def churned_pytest_pairs(count, user="run"):
 
 
 def identical_pytest_pairs(count, output, user="run"):
-    """`count` failing pytest pairs with a byte-identical output (Layer 1 fixture)."""
+    # `count` failing pytest pairs with byte-identical output (Layer 1 fixture).
     msgs = [Message(role=USER, content=user)]
     for _ in range(count):
         msgs += _pytest_pair(PYTEST_CMD, output)
@@ -102,7 +102,7 @@ def identical_pytest_pairs(count, output, user="run"):
 
 
 def read_error_pairs(count, path="missing.txt", user="read it"):
-    """`count` identical failing read_file pairs (Layer 1 generic branch fixture)."""
+    # `count` identical failing read_file pairs (Layer 1 generic-branch fixture).
     err = "FileNotFoundError: [Errno 2] No such file or directory: 'missing.txt'"
     msgs = [Message(role=USER, content=user)]
     for _ in range(count):
@@ -117,7 +117,7 @@ def _load_fixture(name: str):
 
 
 def _load_raw_sample(name: str):
-    """Load a raw failure sample from the workspace (skips tests if absent)."""
+    # Load a raw failure sample from the workspace (skips tests if absent).
     path = SAMPLES_DIR / name
     if not path.exists():
         pytest.skip(f"raw sample not available: {path}")
@@ -130,7 +130,7 @@ def _load_raw_sample(name: str):
 # ══════════════════════════════════════════════
 
 class TestFixtures:
-    """Regression fixtures trimmed from the two real failure samples."""
+    # Regression fixtures trimmed from the two real failure samples.
 
     def test_sample1_tail_layer1_fires(self):
         msgs = _load_fixture("tool_loop_sample1_tail.jsonl")
@@ -143,8 +143,7 @@ class TestFixtures:
         assert pop_count > 0
 
     def test_sample2_tail_fires(self):
-        """Sample-2 tail must be detected; post-normalization it fires via Layer 1
-        (byte-identical run) instead of Layer 2, with the trigger point unchanged."""
+        # Post-normalization sample-2 fires via Layer 1 (byte-identical run), not Layer 2.
         msgs = _load_fixture("tool_loop_sample2_tail.jsonl")
         result = detect_tool_loop(msgs)
         assert result is not None, "detector should fire on sample-2 tail"
@@ -154,16 +153,15 @@ class TestFixtures:
         assert pop_count > 0
 
     def test_sample2_tail_trigger_point_unchanged(self):
-        """Normalization must not shift the sample-2 trigger point: the run of
-        8 identical normalized 'EXIT:1 / No output produced.' polls starts at
-        the same pair as before normalization (pop_count == 15)."""
+        # Normalization must not shift the trigger point: the run of 8 identical
+        # normalized polls starts at the same pair (pop_count == 15).
         msgs = _load_fixture("tool_loop_sample2_tail.jsonl")
         _, pop_count = detect_tool_loop(msgs)
         assert pop_count == 15, f"trigger point shifted: {pop_count} != 15"
 
     def test_layer2_still_fires_on_synthetic_churn(self):
-        """Layer 2 must fire when outputs differ in GENUINE content (varying line
-        number), which normalization cannot strip — only fuzzy matching can chain."""
+        # GENUINE content differences (varying line numbers) survive normalization;
+        # only fuzzy matching can chain them.
         msgs = churned_pytest_pairs(6)
         result = detect_tool_loop(msgs)
         assert result is not None, "Layer 2 should fire on near-duplicate failing churn"
@@ -173,7 +171,7 @@ class TestFixtures:
         assert pop_count > 0
 
     def test_fixture_pop_count_keeps_first_pair(self):
-        """pop_count convention: dropping that many messages leaves ONE pair of the run."""
+        # pop_count convention: dropping that many messages leaves ONE pair of the run.
         msgs = _load_fixture("tool_loop_sample1_tail.jsonl")
         reason, pop_count = detect_tool_loop(msgs)
         trimmed = msgs[:len(msgs) - pop_count]
@@ -184,8 +182,8 @@ class TestFixtures:
         assert len(msgs) - pop_count < len(msgs)
 
     def test_pop_count_with_prose_between_fc_and_output(self):
-        """CRITICAL regression: prose between FC and FUNCTION output must not
-        break the pop_count math — after rollback exactly one pair remains."""
+        # CRITICAL regression: prose between FC and FUNCTION output must not break the
+        # pop_count math — after rollback exactly one pair remains.
         # 5 identical __status polls; every iteration has assistant prose both
         # before the FC and between FC and output.
         out = POLL_OUTPUT
@@ -214,14 +212,11 @@ class TestFixtures:
 # ══════════════════════════════════════════════
 
 class TestExactTierSampleBehavior:
-    """Tier-1 (exact matcher) behavior on the raw failure samples.
-
-    REWRITTEN for the two-tier redesign (plan §7.1): these tests previously
-    pinned that the legacy detect_loop returned None on BOTH samples — that was
-    the motivation for the fuzzy tier. Under Tier 1, sample 2 now returns a hit
-    (L=2 exact period at the tail) while sample 1 must still return None
-    (regression guard: nobody "fixes" Tier 1 by loosening it into fuzzy
-    territory)."""
+    # Tier-1 (exact matcher) behavior on the raw failure samples. REWRITTEN for the
+    # two-tier redesign (plan §7.1): previously pinned that legacy detect_loop returned
+    # None on BOTH samples (the motivation for the fuzzy tier). Under Tier 1, sample 2
+    # now returns a hit (L=2 exact period at the tail) while sample 1 must still return
+    # None — regression guard against loosening Tier 1 into fuzzy territory.
 
     def test_raw_sample1_exact_none(self):
         msgs = _load_raw_sample("async_shell_polling_loop_20260821_kv-restore-confirm.jsonl")
@@ -244,10 +239,10 @@ class TestExactTierSampleBehavior:
 # ══════════════════════════════════════════════
 
 class TestFalsePositiveBattery:
-    """Legitimate tool usage patterns must NOT be flagged."""
+    # Legitimate tool usage patterns must NOT be flagged.
 
     def test_retry_until_success(self):
-        """4 failing retries followed by success — no detection."""
+        # 4 failing retries followed by success — no detection.
         msgs = [Message(role=USER, content="run the test")]
         for i in range(4):
             msgs += _pytest_pair(PYTEST_CMD, f"APPROVED: Command exited with return code 1. (elapsed {i + 10}s)")
@@ -255,7 +250,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is None
 
     def test_live_progress_polling_changing_outputs(self):
-        """10 polls with changing progress outputs — no detection."""
+        # 10 polls with changing progress outputs — no detection.
         msgs = [Message(role=USER, content="watch the build")]
         for i in range(10):
             out = f"Build progress: {i * 10}% done. Compiling module_{i}..."
@@ -264,7 +259,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is None
 
     def test_exploratory_grep_read_streak(self):
-        """Many different grep/read_file calls — no detection."""
+        # Many different grep/read_file calls — no detection.
         msgs = [Message(role=USER, content="find the bug")]
         for i in range(8):
             msgs.append(_fc_msg("grep", {"pattern": f"error_{i}", "path": "src"}))
@@ -274,7 +269,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is None
 
     def test_multi_file_failing_survey(self):
-        """Failing tests across DIFFERENT files (different targets) — no detection."""
+        # Failing tests across DIFFERENT files (different targets) — no detection.
         msgs = [Message(role=USER, content="survey the failing suite")]
         for i in range(8):
             cmd = f'python -m pytest tests/test_module_{i}.py -x 2>&1 | findstr /n "INFO"'
@@ -284,7 +279,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is None
 
     def test_failing_test_interleaved_with_edit_file(self):
-        """7 failing pytest runs each followed by an edit_file — run always broken."""
+        # 7 failing pytest runs each followed by an edit_file — run always broken.
         out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
         msgs = [Message(role=USER, content="fix the test")]
         for i in range(7):
@@ -294,7 +289,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is None
 
     def test_identical_successful_read_file_streak(self):
-        """Repeated identical successful read_file calls — no detection (no failure class)."""
+        # Repeated identical SUCCESSFUL reads — no detection (no failure class).
         msgs = [Message(role=USER, content="read it again")]
         for i in range(8):
             msgs.append(_fc_msg("read_file", {"path": "src/main.py"}))
@@ -328,7 +323,7 @@ class TestFalsePositiveBattery:
             assert result is not None
 
     def test_similarity_just_below_threshold(self):
-        """Core-command similarity just below 0.85 (min pairwise ≈ 0.84) — no detection."""
+        # Core-command similarity just below 0.85 (min pairwise ≈ 0.84) — no detection.
         base = 'python -m pytest tests/test_x.py::test_y -x --timeout=30 --maxfail=1 -q'
         # ~27-char unique tail per command → min pairwise sim ≈ 0.84 < 0.85
         suffixes = [f"--filter-token={chr(97 + i)}{'z' * (i * 6)}" for i in range(6)]
@@ -339,16 +334,14 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is None
 
     def test_similarity_at_threshold_fires(self):
-        """6 pairs with identical core commands (sim 1.0 ≥ 0.85) — detection."""
+        # Identical core commands (sim 1.0 ≥ 0.85) — detection.
         msgs = identical_pytest_pairs(6, "APPROVED: Command exited with return code 1. (elapsed 11.3s)")
         assert detect_tool_loop(msgs) is not None
 
     def test_similarity_just_above_threshold(self):
-        """Core-command similarity just above 0.85 — detection fires.
-
-        Robustness (review finding #5): the test asserts on the ACTUALLY
-        COMPUTED difflib ratio rather than trusting fixed suffix lengths to
-        stay above threshold if the base command ever changes."""
+        # Core-command similarity just above 0.85 — detection fires. Robustness (review
+        # finding #5): asserts on the ACTUALLY COMPUTED difflib ratio rather than trusting
+        # fixed suffix lengths to stay above threshold if the base command ever changes.
         from difflib import SequenceMatcher
         base = 'python -m pytest tests/test_x.py::test_y -x --timeout=30 --maxfail=1 -q'
         # ~4-char unique tail per command → pairwise sim ≈ 0.98 > 0.85
@@ -364,8 +357,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is not None
 
     def test_non_shell_identical_error_streak_fires_layer1(self):
-        """Byte-identical errors from a NON-shell tool (read_file ×5) must be
-        caught by Layer 1's generic branch."""
+        # Byte-identical errors from a NON-shell tool (read_file ×5) → Layer 1 generic branch.
         msgs = read_error_pairs(5)
         result = detect_tool_loop(msgs)
         assert result is not None, "identical non-shell error streak should fire Layer 1"
@@ -374,13 +366,13 @@ class TestFalsePositiveBattery:
         assert pop_count > 0
 
     def test_non_shell_identical_error_below_threshold(self):
-        """4 identical non-shell errors — below Layer 1 threshold, no detection."""
+        # 4 identical non-shell errors — below Layer 1 threshold (5), no detection.
         assert detect_tool_loop(read_error_pairs(4)) is None
 
     def test_terminal_signature_connection_refused(self):
-        """'Connection refused' is a terminal signature — 5 polls with that
-        byte-identical output fire Layer 1 (the exit-code line keeps the output
-        classifiable; the terminal signature lets identical outputs chain)."""
+        # 'Connection refused' is a terminal signature — 5 polls with that byte-identical
+        # output fire Layer 1 (exit-code line keeps the output classifiable; the terminal
+        # signature lets identical outputs chain).
         out = "APPROVED: Command exited with return code 1.\nConnection refused (host api.internal:8080)"
         msgs = [Message(role=USER, content="poll")]
         for i in range(5):
@@ -390,7 +382,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is not None
 
     def test_different_failure_class_breaks_run(self):
-        """Alternating EXIT:1 and TESTFAIL outputs — run broken, no detection."""
+        # Alternating EXIT:1 and TESTFAIL outputs — run broken, no detection.
         out_exit = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
         out_fail = ("APPROVED: Command completed successfully.\n"
                     "FAILED tests/test_x.py::test_y")
@@ -400,7 +392,7 @@ class TestFalsePositiveBattery:
         assert detect_tool_loop(msgs) is None
 
     def test_success_output_breaks_run(self):
-        """5 failing + 1 success at the tail — trailing run is only 1, no detection."""
+        # 5 failing + 1 success at the tail — trailing run is only 1, no detection.
         out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
         msgs = identical_pytest_pairs(5, out)
         msgs += _pytest_pair(PYTEST_CMD, "APPROVED: Command completed successfully.")
@@ -412,7 +404,7 @@ class TestFalsePositiveBattery:
 # ══════════════════════════════════════════════
 
 class TestRobustness:
-    """Edge cases and malformed input handling."""
+    # Edge cases and malformed input handling.
 
     def test_empty_list(self):
         assert detect_tool_loop([]) is None
@@ -422,7 +414,7 @@ class TestRobustness:
         assert detect_tool_loop(msgs) is None
 
     def test_malformed_json_args(self):
-        """FC arguments that are not valid JSON must not crash the detector."""
+        # Malformed FC arguments must not crash the detector.
         msgs = [Message(role=USER, content="run")]
         for i in range(8):
             fc = FunctionCall(name="shell_cmd", arguments="{not valid json")
@@ -431,7 +423,7 @@ class TestRobustness:
         assert detect_tool_loop(msgs) is None
 
     def test_missing_outputs(self):
-        """FC messages with no following FUNCTION output are dropped, not crashed on."""
+        # FC messages with no following FUNCTION output are dropped, not crashed on.
         msgs = [Message(role=USER, content="run")]
         for i in range(6):
             msgs.append(_fc_msg("shell_cmd", {"command": "__status", "tool_id": "1"}))
@@ -440,7 +432,7 @@ class TestRobustness:
         assert detect_tool_loop(msgs) is None
 
     def test_dict_messages_vs_message_objects(self):
-        """Same conversation as dicts and as Message objects → same result."""
+        # Same conversation as dicts vs Message objects → identical result.
         def build(as_dicts: bool):
             msgs = failing_poll_pairs(6)
             if not as_dicts:
@@ -462,7 +454,7 @@ class TestRobustness:
         assert res_objs[1] == res_dicts[1]
 
     def test_multimodal_content_list(self):
-        """FUNCTION content as a multimodal list must be handled without crashing."""
+        # FUNCTION content as a multimodal list must not crash the detector.
         msgs = failing_poll_pairs(6)
         # Replace last output with a multimodal list carrying the same terminal text
         from agent_cascade.llm.schema import ContentItem
@@ -471,7 +463,7 @@ class TestRobustness:
         assert detect_tool_loop(msgs) is not None
 
     def test_system_messages_ignored(self):
-        """System messages interleaved between poll pairs must not break detection."""
+        # Interleaved SYSTEM messages must not break detection.
         msgs = [Message(role=USER, content="poll")]
         for i in range(6):
             msgs.append(Message(role=SYSTEM, content=f"system note {i}"))
@@ -484,11 +476,11 @@ class TestRobustness:
 # ══════════════════════════════════════════════
 
 class TestOutputNormalization:
-    """Known wrapper formats are stripped; genuine output differences survive."""
+    # Known wrapper formats are stripped; genuine output differences survive.
 
     def test_polling_loop_with_wrapper_noise_fires_layer1(self):
-        """REGRESSION: a polling loop whose error replies embed varying timestamps,
-        elapsed markers and justification prose must still fire Layer 1."""
+        # REGRESSION: error replies embedding varying timestamps, elapsed markers and
+        # justification prose must still fire Layer 1.
         base = "Command exited with return code 1.\nConnection refused (host api.internal:8080)"
         msgs = [Message(role=USER, content="poll")]
         for i in range(6):
@@ -508,8 +500,8 @@ class TestOutputNormalization:
         assert pop_count > 0
 
     def test_genuinely_different_substantive_output_breaks_run(self):
-        """No over-normalization: 6 identical failing polls + 1 poll with a
-        genuinely different message AND exit code → both layers' chaining broken."""
+        # No over-normalization: 6 identical failing polls + 1 poll with a genuinely
+        # different message AND exit code → both layers' chaining broken.
         cmd = PYTEST_CMD
         msgs = [Message(role=USER, content="run")]
         # 6 identical failing polls ... (clean, non-noisy substantive error text)
@@ -528,8 +520,8 @@ class TestOutputNormalization:
             "genuine output difference must break the run (no over-normalization)"
 
     def test_fail_class_survives_normalization(self):
-        """Failure-class extraction on wrapped outputs: exit code, no-output and
-        FAILED banner each survive normalization."""
+        # Failure-class extraction on wrapped outputs: exit code, no-output and FAILED
+        # banner each survive normalization.
         from agent_cascade.tool_loop_detect import _normalize_output, _fail_class
 
         # EXIT:1 — the verdict prose is stripped but the exit-code sentence survives.
@@ -564,8 +556,8 @@ class TestOutputNormalization:
             "FAILED banner must survive normalization alongside the exit-code line"
 
     def test_spillover_lines_normalize_identical(self):
-        """Spillover/truncation lines with different paths/char counts must
-        normalize to identical text (the path varies per run)."""
+        # Spillover/truncation lines with different paths/char counts → identical after
+        # normalization (the path varies per run).
         from agent_cascade.tool_loop_detect import _normalize_output
 
         body = "AssertionError: expected 4, got 1"
@@ -576,8 +568,7 @@ class TestOutputNormalization:
         assert _normalize_output(t1) == _normalize_output(t2)
 
     def test_elapsed_and_timestamp_stripped_everywhere(self):
-        """Elapsed markers and ISO timestamps are stripped from anywhere in the
-        output, while surrounding genuine text survives."""
+        # Elapsed markers and ISO timestamps stripped from anywhere; genuine text survives.
         from agent_cascade.tool_loop_detect import _normalize_output
 
         a = "build took (elapsed 5s) and failed at 2026-08-24T13:00:48.976877"
@@ -587,8 +578,8 @@ class TestOutputNormalization:
         assert "and failed at" in _normalize_output(a)
 
     def test_genuine_content_differences_survive(self):
-        """Conservatism: only KNOWN wrapper formats are removed. Different error
-        text, different stdout, different exit codes all survive normalization."""
+        # Conservatism: only KNOWN wrapper formats are removed — different error text,
+        # stdout and exit codes all survive normalization.
         from agent_cascade.tool_loop_detect import _normalize_output
 
         d1 = _normalize_output("APPROVED: Command exited with return code 1. (elapsed 1s)\nAssertionError: got 4")
@@ -605,15 +596,12 @@ class TestOutputNormalization:
 # ══════════════════════════════════════════════
 
 class TestPreLlmChecksIntegration:
-    """_pre_llm_checks wiring for the fuzzy (Tier 2) detector — warning-first +
-    optional escalation (two-tier redesign, plan §5.2; fake-engine pattern).
-
-    State machine under test (plan §4.2): first trigger → ONE advisory USER
-    message (throttled per run); with tool_loop_fuzzy_rollback_enabled=True a
-    pattern still matching FUZZY_ESCALATION_TURNS (2) turns after the warning
-    escalates to FULL rollback; with the toggle off, warnings re-issue per
-    cooldown and NEVER roll back.
-    """
+    # _pre_llm_checks wiring for the fuzzy (Tier 2) detector — warning-first + optional
+    # escalation (two-tier redesign, plan §5.2; fake-engine pattern). State machine under
+    # test (plan §4.2): first trigger → ONE advisory USER message (throttled per run);
+    # with tool_loop_fuzzy_rollback_enabled=True a pattern still matching
+    # FUZZY_ESCALATION_TURNS (2) turns after the warning escalates to FULL rollback; with
+    # the toggle off, warnings re-issue per cooldown and NEVER roll back.
 
     def _make_fake_instance(self, name="test_agent"):
         class FakeInstance:
@@ -661,11 +649,11 @@ class TestPreLlmChecksIntegration:
         return engine
 
     def _tool_loop_msgs(self):
-        """Synthetic sample-1-style conversation (7 terminal-error poll pairs)."""
+        # Synthetic sample-1-style conversation (7 terminal-error poll pairs).
         return failing_poll_pairs(7, user="launch the run")
 
     def test_warning_injected_on_fuzzy_hit_toggle_off(self):
-        """Toggle OFF (default) → ONE advisory USER message, no rollback, no turn consumed."""
+        # Toggle OFF (default) → ONE advisory USER message, no rollback, no turn consumed.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -697,7 +685,7 @@ class TestPreLlmChecksIntegration:
         assert inst._fuzzy_escalation_armed is False
 
     def test_throttle_second_trigger_same_run_suppressed(self):
-        """Second trigger in the same run (1 turn later) → suppressed, no second message."""
+        # Second trigger in the same run (1 turn later) → suppressed, no second message.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -723,7 +711,7 @@ class TestPreLlmChecksIntegration:
         assert sup_kwargs["loop_type"] == "fuzzy_warning"
 
     def test_rearm_after_pattern_breaks(self):
-        """Pattern stops matching → re-arm; a later fresh run warns again."""
+        # Pattern stops matching → re-arm; a later fresh run warns again.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -749,7 +737,7 @@ class TestPreLlmChecksIntegration:
         assert engine._append_and_log.call_count == 2, "re-armed run must warn again"
 
     def test_escalation_rollback_when_toggle_on(self):
-        """Toggle ON: warn at T, suppress at T+1, FULL rollback at T+2 (fuzzy pop_count)."""
+        # Toggle ON: warn@T, suppress@T+1, FULL rollback@T+2 (fuzzy pop_count).
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -793,7 +781,7 @@ class TestPreLlmChecksIntegration:
         assert inst._fuzzy_escalation_armed is False
 
     def test_escalation_countdown_cancelled_when_pattern_breaks(self):
-        """Toggle ON but pattern stops matching at T+1 → countdown cancelled, no rollback."""
+        # Toggle ON but pattern stops matching at T+1 → countdown cancelled, no rollback.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -819,9 +807,9 @@ class TestPreLlmChecksIntegration:
             "cancelled countdown must not roll back later"
 
     def test_warn_break_resume_within_cooldown_toggle_off(self):
-        """REGRESSION (pre-commit review T2-1, toggle OFF): warn@T → break@T+1 →
-        resume@T+2 must WARN again — never silently suppressed by the stale
-        last-warning timestamp inside the 3-turn cooldown window."""
+        # REGRESSION (pre-commit review T2-1, toggle OFF): warn@T → break@T+1 → resume@T+2
+        # must WARN again — never silently suppressed by the stale last-warning timestamp
+        # inside the 3-turn cooldown window.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -849,11 +837,11 @@ class TestPreLlmChecksIntegration:
             "toggle OFF: no rollback path may fire"
 
     def test_warn_break_resume_within_cooldown_toggle_on(self):
-        """REGRESSION (pre-commit review T2-1, toggle ON): warn@T → break@T+1 →
-        resume@T+2 must produce EITHER a fresh warning OR an escalation rollback —
-        never silent suppression. With the countdown cancelled by the break, the
-        documented behavior is a fresh warning for the new run; the next matching
-        turn (T+4) escalates to rollback within FUZZY_ESCALATION_TURNS."""
+        # REGRESSION (pre-commit review T2-1, toggle ON): warn@T → break@T+1 → resume@T+2
+        # must produce EITHER a fresh warning OR an escalation rollback — never silent
+        # suppression. With the countdown cancelled by the break, the documented behavior
+        # is a fresh warning for the new run; the next matching turn (T+4) escalates to
+        # rollback within FUZZY_ESCALATION_TURNS.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -892,7 +880,7 @@ class TestPreLlmChecksIntegration:
         assert inst._loop_rollback_count == 1
 
     def test_post_compression_cooldown_resets_fuzzy_state(self):
-        """Post-compression cooldown resets ALL fuzzy state fields (incl. pending escalation)."""
+        # Post-compression cooldown resets ALL fuzzy state fields (incl. pending escalation).
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -922,7 +910,7 @@ class TestPreLlmChecksIntegration:
         assert inst._loop_rollback_count == 0
 
     def test_flag_off_no_op(self):
-        """loop_fuzzy_warning_enabled=False → detector never runs, no telemetry."""
+        # loop_fuzzy_warning_enabled=False → detector never runs, no telemetry.
         pool = self._make_fake_pool(loop_fuzzy_warning_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -938,7 +926,7 @@ class TestPreLlmChecksIntegration:
         tel.record_loop_detected.assert_not_called()
 
     def test_legacy_kill_switch_disables_fuzzy_tier(self):
-        """DEPRECATED kill switch: tool_loop_detection_enabled=False disables Tier 2."""
+        # DEPRECATED kill switch: tool_loop_detection_enabled=False disables Tier 2.
         pool = self._make_fake_pool(tool_loop_detection_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -952,7 +940,7 @@ class TestPreLlmChecksIntegration:
         tel.record_loop_detected.assert_not_called()
 
     def test_telemetry_fuzzy_warning_event(self):
-        """Warning path records loop_type='fuzzy_warning', auto_rolled_back=False, warned=True."""
+        # Warning path records loop_type='fuzzy_warning', auto_rolled_back=False, warned=True.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
@@ -968,12 +956,11 @@ class TestPreLlmChecksIntegration:
         assert kwargs["warned"] is True
 
     def test_exact_tier_takes_priority(self):
-        """Both tiers enabled and BOTH detectors armed: an exact (Tier 1) hit rolls back
-        and the fuzzy (Tier 2) tier never runs.
-
-        The mock for ``_detect_tool_loop`` is configured to FIRE (return a hit), not just
-        be patched to None — so if the wiring ever let Tier 2 run after an exact hit, this
-        test would fail on the rollback/telemetry assertions, not silently pass."""
+        # Both tiers enabled and BOTH detectors armed: an exact (Tier 1) hit rolls back and
+        # the fuzzy (Tier 2) tier never runs. The mock for ``_detect_tool_loop`` is
+        # configured to FIRE (return a hit), not just be patched to None — so if the wiring
+        # ever let Tier 2 run after an exact hit, this test would fail on the
+        # rollback/telemetry assertions, not silently pass.
         pool = self._make_fake_pool(
             tool_loop_fuzzy_rollback_enabled=True,          # escalation armed
             loop_fuzzy_warning_enabled=True,                # Tier-2 gate ON
@@ -1012,7 +999,7 @@ class TestPreLlmChecksIntegration:
         assert inst._fuzzy_escalation_armed is False
 
     def test_max_auto_rollbacks_enforced_for_fuzzy_escalation(self):
-        """max_auto_rollbacks=0: first fuzzy ESCALATION rollback → then terminate."""
+        # max_auto_rollbacks=0: first fuzzy ESCALATION rollback (1 > 0) → then terminate.
         pool = self._make_fake_pool(max_auto_rollbacks=0, tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()

@@ -310,9 +310,9 @@ class AgentInstance:
     # cooldown flag above); turn source = _current_turn (set every iteration in
     # engine/core.py before _pre_llm_checks). All three are reset on the
     # post-compression cooldown path.
-    _fuzzy_warn_armed: bool = field(default=True)                      # May a warning be injected right now?
-    _fuzzy_warn_last_turn: int = field(default=-10**9)                 # _current_turn when the last warning was issued
-    _fuzzy_escalation_armed: bool = field(default=False)               # Escalation countdown active (between a warning and re-arm / escalated rollback)
+    _fuzzy_warn_armed: bool = field(default=True)                      # Warning may be injected right now (throttle gate; True after re-arm, False after issuing one)
+    _fuzzy_warn_last_turn: int = field(default=-10**9)                 # _current_turn at which the last warning was issued (-10**9 = never)
+    _fuzzy_escalation_armed: bool = field(default=False)               # Escalation countdown active (True between a warning and re-arm / escalated rollback)
 
     # ── Continue Button Message Merge (Fix Duplication Bug Option B) ───────────
     # When Continue is clicked, the last assistant message is popped from conversation

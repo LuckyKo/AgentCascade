@@ -103,38 +103,29 @@ class LLMCallMixin:
         """
         inst_name = instance.instance_name
 
-        # 1. Stop/halt checks
         if self._check_stop_conditions(instance):
             logger.debug(f"[PRE_LLM] Stop/halt condition met for {inst_name}")
             return True  # Skip LLM call, yield and continue loop
 
-        # 2. Async message injection
         if self._inject_async_messages(instance, messages, llm_messages, response):
             turns_wrapper[0] -= 1  # R2: async injection is a real cycle
             return True  # Yield and continue loop to process new messages
 
-        # 3. Rollback command check (delegated to compression_handler)
-        # Pass response so notification messages get yielded (fixes compress
-        # feedback bug)
+        # Pass `response` so notification messages get yielded (fixes compress feedback bug).
         if self.compression_handler.handle_rollback_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Rollback command handled for {inst_name}")
             turns_wrapper[0] -= 1  # R3: user rollback command is a real cycle
             return True  # Command handled — yield and continue
 
-        # 4. Compress command check (Phase 4.2: delegated to
-        # compression_handler)
-        # Pass response so notification messages get yielded (fixes compress
-        # feedback bug)
         if self.compression_handler.handle_compress_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Compress command handled for {inst_name}")
             turns_wrapper[0] -= 1  # R4: user compress command is a real cycle
             return True  # Command handled — yield and continue
 
-        # 5. Compression trigger (pass response for notification feedback)
-        # Size the guard against the endpoint actually about to be called (post-cursor-
-        # rotation chain head), not just the first-priority limit — so failover onto a
-        # smaller assigned endpoint still compresses pre-send. Best-effort: any failure
-        # leaves assigned_max_tokens None and the guard falls back to its prior behavior.
+        # Size the compression guard against the endpoint actually about to be called
+        # (post-cursor-rotation chain head), not just the first-priority limit — so
+        # failover onto a smaller assigned endpoint still compresses pre-send.
+        # Best-effort: any failure leaves it None and the guard falls back to its prior behavior.
         _assigned_max_tokens = None
         try:
             if self.pool.api_router and hasattr(self.pool.api_router, 'get_assigned_max_tokens'):
@@ -150,22 +141,16 @@ class LLMCallMixin:
             turns_wrapper[0] -= 1  # R5: forced compression is a real cycle
             return True  # Compression triggered — yield and continue
 
-        # 6. Loop detection — two tiers (2026-08 redesign), with post-compression cooldown
-        # ───────────────────
-        # Tier 1 (exact): detect_exact_loop → ROLLBACK via the canonical
-        # _inline_rollback_and_hint path (loop_type="exact").
-        # Tier 2 (fuzzy): detect_tool_loop → WARNING-FIRST; full rollback only
-        # via the escalation branch behind settings.tool_loop_fuzzy_rollback_enabled.
-        # After compression, the conversation state has concentrated patterns
-        # that can trigger false-positive loop detection. Skip detection on the
-        # turn immediately following compression via the
-        # _suppress_loop_detection_next_turn flag (applies to BOTH tiers).
-        # Thread safety: Python GIL ensures atomic reads/writes for simple
-        # boolean/int attributes.
+        # Loop detection — two tiers (2026-08 redesign; flag semantics: plan §5.3).
+        # Tier 1 (exact): loop_exact_rollback_enabled → detect_exact_loop → rollback;
+        #   an exact hit returns before Tier 2, so it has priority.
+        # Tier 2 (fuzzy): loop_fuzzy_warning_enabled AND tool_loop_detection_enabled
+        #   (legacy kill switch) → detect_tool_loop → warning-first; full rollback only
+        #   via the escalation branch behind tool_loop_fuzzy_rollback_enabled.
+        # Both tiers are skipped on the turn after compression: compressed state has
+        # concentrated patterns that false-positive easily (_suppress_loop_detection_next_turn).
         if not getattr(instance, '_suppress_loop_detection_next_turn', False):
-            # ── Tier 1 — exact matcher (rollback) ────────────────────────────
-            # An exact hit returns True immediately (rolled back), so the
-            # Tier-2 block below is only reached when Tier 1 did NOT fire.
+            # Tier 1 — exact matcher (rollback)
             if getattr(self.pool.settings, 'loop_exact_rollback_enabled', True):
                 loop_info = _detect_exact_loop(messages)
                 if loop_info:
@@ -175,7 +160,6 @@ class LLMCallMixin:
                         f"pop_count={pop_count}, messages={len(messages)}, loop_type=exact"
                     )
 
-                    # ── Respect auto_rollback_on_loop toggle ─────────────────
                     if not self.pool.settings.auto_rollback_on_loop:
                         logger.info(
                             f"[LOOP_DETECTED_NO_ROLLBACK] {inst_name}: exact loop detected "
@@ -193,7 +177,7 @@ class LLMCallMixin:
                         # No turn consumed here; normal turn decrement applies.
                         return False
 
-                    # ── Inline rollback + hint (only when toggle is True) ────
+                    # Inline rollback + hint (only when the toggle is True)
                     rollbacks = getattr(instance, '_loop_rollback_count', 0) + 1
                     instance._loop_rollback_count = rollbacks
 
@@ -202,7 +186,7 @@ class LLMCallMixin:
                         messages, llm_messages, response,
                     )
 
-                    # ── Enforce configured max_auto_rollbacks limit ───────────
+                    # Enforce configured max_auto_rollbacks limit
                     max_rb = self.pool.settings.max_auto_rollbacks
                     if max_rb == -1:
                         effective_limit = sys.maxsize  # unlimited; max_turns still backstops
@@ -250,7 +234,7 @@ class LLMCallMixin:
                     turns_wrapper[0] -= 1  # R6: loop rollback is a real cycle
                     return True  # Continue loop with fresh state
 
-            # ── Tier 2 — fuzzy tool-call matcher (warning-first + optional escalation) ──
+            # Tier 2 — fuzzy tool-call matcher (warning-first + optional escalation).
             # Plain `if` (NOT elif on the exact flag!) so a disabled exact tier
             # still lets the fuzzy tier run. Enablement = new flag AND legacy
             # kill switch (plan §5.3).
@@ -274,7 +258,7 @@ class LLMCallMixin:
                     if (getattr(self.pool.settings, 'tool_loop_fuzzy_rollback_enabled', False)
                             and getattr(instance, '_fuzzy_escalation_armed', False)
                             and (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) >= FUZZY_ESCALATION_TURNS):
-                        # ── Escalation: the nudge demonstrably failed → FULL ROLLBACK ──
+                        # Escalation: the nudge demonstrably failed → FULL ROLLBACK
                         logger.info(
                             f"[LOOP_ESCALATION] {inst_name}: fuzzy loop persisted "
                             f"{current_turn - instance._fuzzy_warn_last_turn} turns after warning — "
@@ -294,7 +278,7 @@ class LLMCallMixin:
                         instance._fuzzy_escalation_armed = False
                         instance._fuzzy_warn_last_turn = -10**9
 
-                        # ── Enforce configured max_auto_rollbacks limit ───────
+                        # Enforce configured max_auto_rollbacks limit
                         max_rb = self.pool.settings.max_auto_rollbacks
                         if max_rb == -1:
                             effective_limit = sys.maxsize  # unlimited; max_turns still backstops
@@ -334,7 +318,7 @@ class LLMCallMixin:
 
                     if (not getattr(instance, '_fuzzy_warn_armed', True)
                             and (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) < FUZZY_WARNING_COOLDOWN_TURNS):
-                        # ── Throttled: one warning per run; suppress this trigger ──
+                        # Throttled: one warning per run; suppress this trigger
                         logger.debug(
                             f"[LOOP_WARNING_SUPPRESSED] {inst_name}: fuzzy loop still matching "
                             f"(pattern={reason}, pop_hint={pop_count}) but a warning was issued "
@@ -352,7 +336,7 @@ class LLMCallMixin:
                         # Escalation state unchanged; return False → proceed to LLM call.
                         return False
 
-                    # ── Inject the advisory USER message (warning-first) ──────
+                    # Inject the advisory USER message (warning-first)
                     # Same pattern as the turn-limit warnings in engine/core.py:
                     # _append_and_log (conversation pool + instance logger, atomic)
                     # then llm_messages.append so it is in the LLM context for the

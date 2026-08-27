@@ -63,7 +63,6 @@ class TestExactTierBasicDetection:
     """Test the core pattern-matching algorithm with crafted message lists."""
 
     def test_t1_clear_repeating_pattern_length_2(self):
-        """T1: USER→ASSISTANT repeating 3 times (L=2, K=3) should detect a loop."""
         # Pattern: [USER "hello", ASSISTANT "world"] × 3 = 6 messages
         msgs = [
             _msg(USER, "hello"),
@@ -80,7 +79,6 @@ class TestExactTierBasicDetection:
         assert pop_count > 0
 
     def test_t2_no_loop_on_short_conversation(self):
-        """T2: Fewer than 6 messages should return None."""
         msgs = [
             _msg(USER, "a"),
             _msg(ASSISTANT, "b"),
@@ -89,10 +87,7 @@ class TestExactTierBasicDetection:
         assert detect_exact_loop(msgs) is None
 
     def test_t3_pattern_length_4_repeating_3_times(self):
-        """T3: Pattern of length 4 repeating 3 times (L<5 → K=3 required).
-        
-        Since L=4 < 5, we need K=3 repetitions. So we create a pattern of length 4
-        repeated 3 times = 12 messages."""
+        # L=4 < 5 → K=3 required: pattern of length 4 × 3 = 12 messages.
         pat = [
             _msg(USER, "q1"),
             _msg(ASSISTANT, "a1"),
@@ -104,7 +99,7 @@ class TestExactTierBasicDetection:
         assert result is not None, "Should detect L=4 pattern repeated 3 times"
 
     def test_t3b_pattern_length_5_repeating_twice(self):
-        """T3 variant: Pattern of length 5 repeating twice (L≥5 → K=2)."""
+        # L≥5 → K=2 suffices.
         pat = [
             _msg(USER, "u1"),
             _msg(ASSISTANT, "a1"),
@@ -117,7 +112,6 @@ class TestExactTierBasicDetection:
         assert result is not None, "Should detect L=5 pattern repeated 2 times"
 
     def test_t4_non_repeating_conversation(self):
-        """T4: Each message has unique content — no loop."""
         msgs = [
             _msg(USER, f"question_{i}") for i in range(3)
         ] + [
@@ -126,7 +120,6 @@ class TestExactTierBasicDetection:
         assert detect_exact_loop(msgs) is None
 
     def test_t5_pattern_repeats_only_once(self):
-        """T5: Pattern repeats only twice with L<5 (needs K=3)."""
         # L=2 pattern repeated exactly 2 times = 4 messages (too short anyway)
         # Let's do L=2 pattern × 2 + some extras but not reaching K=3 threshold
         msgs = [
@@ -141,7 +134,6 @@ class TestExactTierBasicDetection:
         assert result is None, "Pattern repeated only 2× with L<5 should not trigger"
 
     def test_t5b_pattern_length_1_repeats_twice(self):
-        """T5 variant: Single-element pattern (L=1) repeating only twice."""
         msgs = [
             _msg(ASSISTANT, "same") for _ in range(2)
         ] + [_msg(USER, f"diff_{i}") for i in range(4)]  # pad to ≥6
@@ -153,9 +145,7 @@ class TestExactTierFalsePositiveGuards:
     """Test that common non-loop patterns are not flagged."""
 
     def test_t6_single_function_pattern(self):
-        """T6: Single-function pattern (L==1, FUNCTION role) should NOT detect.
-        
-        Parallel tool calls produce consecutive identical function messages."""
+        # Parallel tool calls produce consecutive identical function messages.
         msgs = [
             _msg(FUNCTION, "result") for _ in range(8)
         ]
@@ -163,7 +153,6 @@ class TestExactTierFalsePositiveGuards:
         assert result is None, "Single-function pattern should not trigger"
 
     def test_t7_consecutive_function_only(self):
-        """T7: Only FUNCTION messages — no ASSISTANT decisions between them."""
         msgs = [
             _msg(FUNCTION, f"tool_result_{i % 3}") for i in range(10)
         ]
@@ -171,11 +160,8 @@ class TestExactTierFalsePositiveGuards:
         assert result is None
 
     def test_t8_identical_user_messages_detected_as_l2_pattern(self):
-        """T8: Identical USER messages form an L=2 pattern that IS detected.
-        
-        Note: L==1 USER is guarded (single-element patterns skipped), but 8
-        identical USER messages also match as an [USER,USER] repeating K=3
-        times (L=2 < 5 → K=3 needed). So detection should succeed."""
+        # L==1 USER is guarded (single-element patterns skipped), but 8 identical
+        # USER messages also match as an [USER,USER] period (L=2 < 5 → K=3 needed).
         msgs = [
             _msg(USER, "same_input") for _ in range(8)
         ]
@@ -185,13 +171,12 @@ class TestExactTierFalsePositiveGuards:
         assert pop_count > 0
 
     def test_t8c_l1_assistant_detected_not_guarded(self):
-        """L=1 ASSISTANT should be detected (not guarded like USER/FUNCTION)."""
+        # L=1 ASSISTANT is NOT guarded (unlike USER/FUNCTION).
         msgs = [_msg(ASSISTANT, "same") for _ in range(8)]
         result = detect_exact_loop(msgs)
         assert result is not None, "L=1 ASSISTANT should be detected"
 
     def test_t8b_alternating_user_assistant_not_repeating(self):
-        """T8 variant: Alternating USER/ASSISTANT with unique content."""
         msgs = []
         for i in range(6):
             msgs.append(_msg(USER, f"question_{i}"))
@@ -204,10 +189,8 @@ class TestExactTierDivergenceBugs:
     """Test bugs that were fixed during the consolidation."""
 
     def test_t9_truncation_marker_normalization(self):
-        """T9: Messages with varying truncation markers should match after normalization.
-        
-        Before consolidation, '[TOOL RESPONSE TRUNCATED: 50%]' and
-        '[TOOL RESPONSE TRUNCATED: 48%]' were treated as different."""
+        # Before consolidation, varying '[TOOL RESPONSE TRUNCATED: N%]' markers were
+        # treated as different features.
         # Pattern repeats but with slightly different truncation percentages
         pat1 = [
             _msg(FUNCTION, "data...\n[TOOL RESPONSE TRUNCATED: 50%]"),
@@ -226,7 +209,6 @@ class TestExactTierDivergenceBugs:
         assert result is not None, "Should match after normalizing truncation markers"
 
     def test_t10_multimodal_content(self):
-        """T10: Multimodal content (list-type messages) should extract text correctly."""
         # Messages with list-style multimodal content
         pat = [
             _dict_msg(USER, [{"type": "text", "text": "hello"}, {"type": "image", "url": "x"}]),
@@ -237,7 +219,7 @@ class TestExactTierDivergenceBugs:
         assert result is not None, "Should detect loops in multimodal content"
 
     def test_t10b_multimodal_with_message_objects(self):
-        """T10 variant: Multimodal using Message objects with ContentItem lists."""
+        # Multimodal via Message objects with ContentItem lists.
         from agent_cascade.llm.schema import ContentItem
         
         text_hello = [ContentItem(text="hello")]
@@ -252,8 +234,7 @@ class TestExactTierDivergenceBugs:
         assert result is not None
 
     def test_t11_reasoning_tags(self):
-        """T11: Messages with reasoning_content (think tags) — combined logic."""
-        # Pattern where both reasoning and content are used for feature extraction
+        # Both reasoning and content feed the feature.
         pat = [
             _msg(USER, "solve this"),
             _msg(ASSISTANT, "The answer is 42", reasoning_content="Let me think..."),
@@ -263,7 +244,7 @@ class TestExactTierDivergenceBugs:
         assert result is not None, "Should detect loops with reasoning content"
 
     def test_t11b_reasoning_and_content_combination(self):
-        """T11 variant: Messages with <think> tags in content."""
+        # </think> tags embedded in content.
         pat = [
             _msg(USER, "question"),
             _msg(ASSISTANT, "<think>reasoning</think>\nanswer"),
@@ -273,8 +254,7 @@ class TestExactTierDivergenceBugs:
         assert result is not None
 
     def test_t11c_reasoning_only_no_content(self):
-        """T11 variant: Messages where reasoning content differs but content matches."""
-        # Different reasoning should produce different features → no loop
+        # Different reasoning → different features → no loop.
         msgs = [
             _msg(USER, "q"),
             _msg(ASSISTANT, "a", reasoning_content="r1"),
@@ -292,13 +272,8 @@ class TestExactTierPopCountAccuracy:
     """Verify that pop_count correctly identifies messages to remove."""
 
     def test_t12_pop_count_correct_for_known_pattern(self):
-        """T12: Verify pop_count removes duplicate repetitions but keeps the first occurrence.
-        
-        For a pattern [A, B] × 3 = [A, B, A, B, A, B]:
-        - First occurrence is indices 0-1 (A, B)
-        - Second repetition starts at index 2
-        - pop_count should remove from the end back to just after first occurrence
-        """
+        # [A, B] × 3: second rep starts at index 2 → pop from the end back to just
+        # after the first occurrence.
         msgs = [
             _msg(USER, "hello"),      # 0
             _msg(ASSISTANT, "world"), # 1
@@ -322,8 +297,7 @@ class TestExactTierPopCountAccuracy:
         assert len(msgs) - pop_count == 2, f"Expected exactly 2 remaining after popping {pop_count}"
 
     def test_t12b_pop_count_respects_window_boundary(self):
-        """T12 variant: Pop count is correct even with extra prefix messages."""
-        # Add non-repeating prefix messages before the loop
+        # Non-repeating prefix before the loop.
         prefix = [
             _msg(USER, "start"),
             _msg(ASSISTANT, "ok starting"),
@@ -347,7 +321,7 @@ class TestExactTierPopCountAccuracy:
         assert len(remaining) >= len(prefix) + 2
 
     def test_t12c_pop_count_with_system_messages(self):
-        """T12 variant: Pop count accounts for filtered SYSTEM messages in between."""
+        # Interleaved SYSTEM messages (filtered from features but present in the list).
         pat = [
             _msg(USER, "q"),
             _msg(ASSISTANT, "a"),
@@ -381,7 +355,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r1_surgical_rollback_targets_specific_agent(self, mock_run):
-        """R1: LoopDetectedError with agent_name set → surgical_rollback targets that agent."""
+        # LoopDetectedError with agent_name set → surgical_rollback targets that agent.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("main_agent")
@@ -411,7 +385,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r2_fallback_to_instance_name(self, mock_run):
-        """R2: LoopDetectedError without agent_name → falls back to instance_name."""
+        # No agent_name on the error → fallback to instance_name.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("my_agent")
@@ -437,7 +411,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r3_retry_limit_enforcement(self, mock_run):
-        """R3: After max_auto_retries failures, yields error message."""
+        # max_auto_retries=2 → 3 attempts total (retry_count 0, 1, 2), then error yield.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("test_agent")
@@ -465,7 +439,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r4_hint_injection(self, mock_run):
-        """R4: Verify loop avoidance hint is appended to the correct instance."""
+        # Loop-avoidance hint appended (USER role) to the rolled-back instance.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("test_agent")
@@ -493,7 +467,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r5_auto_rollback_disabled(self, mock_run):
-        """R5: auto_rollback_enabled=False → yield error without rollback."""
+        # auto_rollback_enabled=False → error yielded, no rollback / hint.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("test_agent")
@@ -514,7 +488,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r6_instance_not_found_after_rollback(self, mock_run):
-        """R6: pool.get_instance returns None after rollback → error yield + break."""
+        # get_instance returns None for the looped agent post-rollback → error yield.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("test_agent")
@@ -542,7 +516,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r7_unlimited_retries(self, mock_run):
-        """R7: max_auto_retries=-1 → retries exceed default limit (converted to 999_999)."""
+        # max_auto_retries=-1 → unlimited mode (converted to 999_999 internally).
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("test_agent")
@@ -565,7 +539,7 @@ class TestRecoveryHandler:
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r9_non_loop_exception(self, mock_run):
-        """R9: Non-loop exceptions yield error message."""
+        # Non-loop exception → "SYSTEM ERROR" yield (not the loop-recovery path).
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
         
         pool, inst = self._make_pool("test_agent")
@@ -592,10 +566,7 @@ class TestExecutionEngineIntegration:
     """Test the full flow through ExecutionEngine."""
 
     def test_i1_main_agent_loop_detection(self):
-        """I1: Main agent loop detection → LoopDetectedError raised with correct agent_name.
-        
-        Import from canonical module (not internal alias) to avoid fragility."""
-        # Use the same detect_exact_loop that execution_engine imports as _canonical_detect_exact_loop
+        # Uses the canonical detect_exact_loop (same function the engine wires in).
         import_func = detect_exact_loop  # same function referenced by execution engine
         
         # Simulate messages accumulating in execution engine
@@ -617,11 +588,8 @@ class TestExecutionEngineIntegration:
         assert result is not None
 
     def test_i2_compression_cooldown(self):
-        """I2: Compression cooldown suppresses detection for one turn, then resumes.
-        
-        The execution engine sets _suppress_loop_detection_next_turn=True after compression.
-        We verify the suppression flag is respected by patching detect_exact_loop at the module
-        level where execution_engine imports it and checking call counts."""
+        # The engine sets _suppress_loop_detection_next_turn=True after compression; verify
+        # the flag is respected by patching detect_exact_loop where the engine imports it.
         from agent_cascade.execution_engine import ExecutionEngine
         
         # Build messages with a loop pattern
@@ -660,11 +628,8 @@ class TestExecutionEngineIntegration:
             assert mock_detect.call_count == 1, "detect_exact_loop should be called after cooldown clears"
 
     def test_i3_sub_agent_loop_via_manager_ops(self):
-        """I3: Sub-agent loop detection via manager_ops → internal retry kicks in.
-        
-        manager_ops imports detect_exact_loop from the canonical module inside its functions,
-        so we use the same import path to verify compatibility."""
-        # Simulate what manager_ops does: call detect_exact_loop on accumulated messages
+        # manager_ops imports detect_exact_loop from the canonical module; use the same
+        # import path to verify compatibility.
         from agent_cascade.exact_loop_detect import detect_exact_loop as _mgr_detect_exact_loop
         
         msgs = []
@@ -692,19 +657,15 @@ class TestEdgeCases:
     """Test boundary conditions and unusual inputs."""
 
     def test_e1_empty_message_list(self):
-        """E1: Empty message list should return None without errors."""
         assert detect_exact_loop([]) is None
 
     def test_e2_all_system_messages(self):
-        """E2: All SYSTEM messages (filtered out) should return None."""
         msgs = [_msg(SYSTEM, f"instruction_{i}") for i in range(10)]
         result = detect_exact_loop(msgs)
         assert result is None
 
     def test_e3_none_content(self):
-        """E3: Messages with None content should not crash.
-        
-        Verifies that empty-string messages form a valid loop pattern (they match)."""
+        # Empty-string messages are identical → they DO form a loop pattern.
         msgs = [
             _msg(USER, ""),  # Empty string (None becomes "" in Message constructor)
             _msg(ASSISTANT, ""),
@@ -717,7 +678,7 @@ class TestEdgeCases:
         assert result is not None  # Empty strings are identical → loop detected
 
     def test_e3b_none_content_no_crash_with_dicts(self):
-        """E3 variant: Dict messages with missing content key."""
+        # Same as E3 but with dict-style messages.
         msgs = [
             {"role": USER, "content": None},
             {"role": ASSISTANT, "content": None},
@@ -730,8 +691,7 @@ class TestEdgeCases:
         assert result is not None
 
     def test_e4_very_long_conversation(self):
-        """E4: Very long conversations (>40 messages — window limit)."""
-        # Create 60 unique messages followed by a repeating pattern at the end
+        # 60 unique messages, then a repeating pattern at the tail (within window).
         msgs = [_msg(USER, f"unique_{i}") for i in range(30)] + \
                [_msg(ASSISTANT, f"answer_{i}") for i in range(30)]
         
@@ -767,7 +727,7 @@ class TestEdgeCases:
         assert result is None
 
     def test_e5_function_call_messages(self):
-        """E5: Messages with function_call should use name+args for features."""
+        # feature = name + args (not content).
         pat = [
             _msg(ASSISTANT, "", function_call=FunctionCall("write_file", '{"path":"x"}')),
             _msg(FUNCTION, "done"),
@@ -777,7 +737,7 @@ class TestEdgeCases:
         assert result is not None
 
     def test_e6_mixed_message_types(self):
-        """E6: Mix of Message objects and dicts in the same list."""
+        # Mixed Message objects and dicts in one list.
         msgs = [
             _msg(USER, "hello"),
             {"role": ASSISTANT, "content": "world"},
@@ -790,7 +750,7 @@ class TestEdgeCases:
         assert result is not None
 
     def test_e7_mixed_role_pattern(self):
-        """E7: Pattern with USER→ASSISTANT→FUNCTION roles."""
+        # USER→ASSISTANT→FUNCTION period.
         pat = [
             _msg(USER, "query"),
             _msg(ASSISTANT, "thinking"),
@@ -801,14 +761,13 @@ class TestEdgeCases:
         assert result is not None
 
     def test_e8_single_pattern_length_1_assistant(self):
-        """E8: Single ASSISTANT pattern (L==1) should detect."""
+        # L=1 ASSISTANT is not guarded → detected.
         msgs = [_msg(ASSISTANT, "same_response") for _ in range(6)]
         result = detect_exact_loop(msgs)
         assert result is not None
 
     def test_e9_pattern_at_exact_boundary(self):
-        """E9: Pattern detection at exact window boundary (40 messages)."""
-        # Exactly 40 messages with a pattern of L=5 × K=2 at the end
+        # 30 unique prefix + L=5 × K=2 period at the tail.
         prefix = [_msg(USER, f"p{i}") for i in range(30)] + \
                  [_msg(ASSISTANT, f"a{i}") for i in range(10)]
         pat = [
@@ -840,7 +799,6 @@ class TestParametrizedPatternLengths:
         (4, 2, False),  # L=4 needs K=3, only 2 reps ✗
     ])
     def test_various_pattern_lengths(self, pattern_length, repetitions, should_detect):
-        """Test detection across different pattern lengths and repetition counts."""
         roles_cycle = [USER, ASSISTANT, FUNCTION]
         
         pat = []
@@ -865,12 +823,8 @@ class TestParametrizedPatternLengths:
 
     @pytest.mark.parametrize("role", [USER, ASSISTANT, FUNCTION])
     def test_single_role_patterns(self, role):
-        """Test that single-role patterns of length 1 are handled correctly.
-        
-        Note: identical messages also form L=2 patterns (e.g., [user,user] repeating).
-        The L==1 guard only prevents detection when the FIRST match is a single-element
-        pattern. Since all messages are identical, both L==1 and L==2 match. We verify
-        that detection works for at least one role."""
+        # Identical messages also form L=2 patterns; the L==1 guard only applies when
+        # the FIRST match is a single-element period. FUNCTION-only sequences are filtered.
         msgs = [_msg(role, "same") for _ in range(6)]
         
         # FUNCTION-only sequences are filtered (all-function guard), so expect no detection
@@ -886,7 +840,6 @@ class TestParametrizedPatternLengths:
         lambda i: "<think>reasoning</think>\nresult",
     ])
     def test_content_variations(self, content_type):
-        """Test detection with different content types."""
         pat = [
             _msg(USER, "query"),
             _msg(ASSISTANT, content_type(0)),
@@ -904,8 +857,7 @@ class TestFeatureExtraction:
     """Test the internal feature extraction logic indirectly via detect_exact_loop."""
 
     def test_function_call_feature(self):
-        """Messages with function calls use name:args as features, not content."""
-        # Two messages with same role but different content — should NOT loop
+        # Same FC (name+args) with differing prose → still loops (content is ignored).
         msgs = [
             _msg(ASSISTANT, "different_content_1", 
                  function_call=FunctionCall("tool_a", '{"arg":"val"}')),
@@ -921,7 +873,7 @@ class TestFeatureExtraction:
         assert result is not None, "Same function call should match regardless of content"
 
     def test_reasoning_content_feature(self):
-        """Different reasoning content produces different features."""
+        # Different reasoning → different features → no loop.
         msgs = [
             _msg(USER, "q"),
             _msg(ASSISTANT, "a", reasoning_content="reason_1"),
@@ -934,11 +886,8 @@ class TestFeatureExtraction:
         assert result is None, "Different reasoning → different features"
 
     def test_thought_attribute_fallback(self):
-        """Messages with 'thought' attribute (instead of reasoning_content) should work.
-        
-        The feature extraction logic falls back to 'thought' when reasoning_content is absent,
-        supporting older message formats or alternative schema implementations."""
-        # Use dict messages with 'thought' key instead of 'reasoning_content'
+        # Feature extraction falls back to the legacy 'thought' attribute when
+        # reasoning_content is absent (older message formats).
         pat = [
             _dict_msg(USER, "solve this"),
             _dict_msg(ASSISTANT, "The answer is 42", thought="Let me think..."),
@@ -948,7 +897,7 @@ class TestFeatureExtraction:
         assert result is not None, "Should detect loops using 'thought' attribute fallback"
 
     def test_long_content_truncation(self):
-        """Very long content is truncated to 3000 chars for feature extraction."""
+        # Long prose (truncated to 3000 chars in the feature) still matches when identical.
         long_text = "word " * 500  # ~2500 chars per message
         msgs = []
         for i in range(3):
@@ -1010,7 +959,7 @@ class TestMaxAutoRollbacksEnforcement:
         return engine
 
     def test_rollback_limit_enforced(self):
-        """max_auto_rollbacks=2: termination after 3rd loop detection (exceeds limit)."""
+        # max=2: rollbacks 1 and 2 proceed; the 3rd (3 > 2) terminates.
         pool = self._make_fake_pool(max_auto_rollbacks=2, auto_rollback_on_loop=True)
         engine = self._make_engine(pool)
 
@@ -1056,7 +1005,7 @@ class TestMaxAutoRollbacksEnforcement:
         assert call_kwargs.kwargs.get("set_global_stopped") is False
 
     def test_rollback_limit_unlimited(self):
-        """max_auto_rollbacks=-1: many loop detections, no termination by rollback limit."""
+        # max=-1 (unlimited): 10 consecutive rollbacks, no termination.
         pool = self._make_fake_pool(max_auto_rollbacks=-1, auto_rollback_on_loop=True)
         engine = self._make_engine(pool)
 
@@ -1082,7 +1031,7 @@ class TestMaxAutoRollbacksEnforcement:
         assert inst._loop_rollback_count == 10
 
     def test_rollback_limit_zero(self):
-        """max_auto_rollbacks=0: first loop detection → rollback then terminate (1 > 0)."""
+        # max=0: the FIRST rollback (1 > 0) already terminates.
         pool = self._make_fake_pool(max_auto_rollbacks=0, auto_rollback_on_loop=True)
         engine = self._make_engine(pool)
 
@@ -1105,7 +1054,7 @@ class TestMaxAutoRollbacksEnforcement:
         pool.terminate_instance.assert_called_once()
 
     def test_auto_rollback_disabled_no_rollback(self):
-        """auto_rollback_on_loop=False: loop detected → no rollback, returns False to proceed to LLM."""
+        # Toggle off: detection only — no rollback, returns False (proceed to LLM).
         pool = self._make_fake_pool(max_auto_rollbacks=5, auto_rollback_on_loop=False)
         engine = self._make_engine(pool)
 
@@ -1129,7 +1078,6 @@ class TestMaxAutoRollbacksEnforcement:
         assert turns[0] == 50
 
     def test_turn_consumed_on_loop_rollback(self):
-        """Verify turns_wrapper[0] decremented after loop rollback."""
         pool = self._make_fake_pool(max_auto_rollbacks=5, auto_rollback_on_loop=True)
         engine = self._make_engine(pool)
 
@@ -1148,7 +1096,7 @@ class TestMaxAutoRollbacksEnforcement:
         assert turns[0] == 41, "Turn should be consumed on loop rollback"
 
     def test_config_handler_accepts_minus_one(self):
-        """Config handler preserves -1 as unlimited."""
+        # Only -1 is special-cased (unlimited).
         from agent_cascade.config_handlers import _handle_max_auto_rollbacks
 
         pool = self._make_fake_pool(max_auto_rollbacks=3)
@@ -1159,7 +1107,7 @@ class TestMaxAutoRollbacksEnforcement:
         assert pool.settings.max_auto_rollbacks == -1, "-1 should be preserved as unlimited"
 
     def test_config_handler_clamps_other_negatives_to_zero(self):
-        """Config handler clamps other negative values (e.g., -5) to 0."""
+        # Other negatives (e.g. -5) clamp to 0.
         from agent_cascade.config_handlers import _handle_max_auto_rollbacks
 
         pool = self._make_fake_pool(max_auto_rollbacks=3)

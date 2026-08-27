@@ -1,19 +1,22 @@
-"""
-Loop Detection — Standalone module for the AgentCascade Architecture Rewrite.
+"""⚠️ DEPRECATED — DO NOT USE for new code.
 
-Per DESIGN_REWRITE.md §7.1, loop detection is extracted into a dedicated
-module so it can be shared across ExecutionEngine, api_server streaming, and
-any future consumers without circular dependencies.
+This module is a backward-compatibility stub. Loop detection lives elsewhere:
+
+- Tier 1 (exact, rollback):   :mod:`agent_cascade.exact_loop_detect`
+- Tier 2 (fuzzy, warning-first): :mod:`agent_cascade.tool_loop_detect`
+
+See plans/loop_detector_exact_redesign_PLAN.md.
 
 REPLACED (2026-08 two-tier redesign): the exact contiguous matcher
 ``detect_loop`` that lived here was REMOVED and replaced by
 :mod:`agent_cascade.exact_loop_detect` (Tier 1, window 60, max period 12,
 wrapper-stripped FUNCTION features). The fuzzy tool-call detector lives in
 :mod:`agent_cascade.tool_loop_detect` (Tier 2, warning-first with optional
-escalation). See plans/loop_detector_exact_redesign_PLAN.md.
+escalation).
 
-Only :class:`LoopDetectedError` remains in this module (kept for backward
-compatibility with existing tests and external consumers).
+Only :class:`LoopDetectedError` remains in this module. It is no longer raised
+by production code; it is kept ONLY because ``api_integration_pkg/runner.py``
+and existing tests import it. Do not add new imports of this module.
 """
 
 
