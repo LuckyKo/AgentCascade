@@ -5,8 +5,11 @@ Method bodies are moved VERBATIM from ``agent_cascade/execution_engine.py``; onl
 the class wrapper and the imports needed by these methods were added. The mixin is
 composed into ``ExecutionEngine`` in :mod:`agent_cascade.engine.core`.
 
-The bare-global call to ``_canonical_detect_loop`` inside ``_pre_llm_checks`` is
-preserved as-is (v3 decision: patch targets point at this true home module).
+Loop detection in ``_pre_llm_checks`` is two-tier (2026-08 redesign): Tier 1
+exact matcher (``detect_exact_loop``, rollback) then Tier 2 fuzzy tool-call
+matcher (``detect_tool_loop``, warning-first with optional escalation).
+Bare-global calls are preserved as-is so test patch targets point at this true
+home module.
 """
 
 from __future__ import annotations
@@ -36,8 +39,28 @@ from agent_cascade.utils.utils import extract_text_from_message, msg_field
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.inner_loop_detect import InnerLoopDetector, save_loop_sample
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
-from agent_cascade.loop_detection import detect_loop as _canonical_detect_loop
+from agent_cascade.exact_loop_detect import detect_exact_loop as _detect_exact_loop
 from agent_cascade.tool_loop_detect import detect_tool_loop as _detect_tool_loop
+
+# ── Two-tier loop detection tunables (plan §1) ───────────────────────────────
+#: Tier 2 throttle: after a warning is injected, the detector re-arms only when
+#: the fuzzy pattern stops matching OR at least this many LLM turns have passed.
+#: One well-worded nudge per detected run; spamming every turn would burn tokens
+#: and itself break Tier-1 contiguity.
+FUZZY_WARNING_COOLDOWN_TURNS = 3
+#: Tier 2 escalation: with TOOL_LOOP_FUZZY_ROLLBACK_ENABLED=True, a fuzzy loop
+#: still matching this many LLM turns after the warning escalates to full
+#: rollback (the nudge demonstrably failed).
+FUZZY_ESCALATION_TURNS = 2
+
+#: Final wording for the Tier-2 advisory USER message (plan §4.2 — accepted as final).
+_FUZZY_WARNING_TEMPLATE = (
+    "[SYSTEM WARNING: Possible repeating action] You appear to be repeating the same tool "
+    "action without progress — {reason}. This is a warning only; your history was NOT "
+    "modified. Change strategy: if you are polling an async shell that reports \"No running "
+    "shell found\", treat it as terminal (the run has ended) and act on the last real output; "
+    "otherwise verify preconditions or use a different tool/approach before retrying."
+)
 
 from agent_cascade.engine.compression_exec import (
     FALLBACK_COMPRESSION_MAX_ROUNDS,
@@ -127,125 +150,256 @@ class LLMCallMixin:
             turns_wrapper[0] -= 1  # R5: forced compression is a real cycle
             return True  # Compression triggered — yield and continue
 
-        # 6. Loop detection (with post-compression cooldown)
+        # 6. Loop detection — two tiers (2026-08 redesign), with post-compression cooldown
         # ───────────────────
+        # Tier 1 (exact): detect_exact_loop → ROLLBACK via the canonical
+        # _inline_rollback_and_hint path (loop_type="exact").
+        # Tier 2 (fuzzy): detect_tool_loop → WARNING-FIRST; full rollback only
+        # via the escalation branch behind settings.tool_loop_fuzzy_rollback_enabled.
         # After compression, the conversation state has concentrated patterns
-        # that
-        # can trigger false-positive loop detection. Skip detection on the turn
-        # immediately following compression via
-        # _suppress_loop_detection_next_turn flag.
+        # that can trigger false-positive loop detection. Skip detection on the
+        # turn immediately following compression via the
+        # _suppress_loop_detection_next_turn flag (applies to BOTH tiers).
         # Thread safety: Python GIL ensures atomic reads/writes for simple
-        # boolean attributes.
+        # boolean/int attributes.
         if not getattr(instance, '_suppress_loop_detection_next_turn', False):
-            loop_info = _canonical_detect_loop(messages)
-            loop_type = "outer"
-            # Tool-call loop detector (parallel checker for tool-call failure
-            # loops invisible to the exact contiguous matcher). Gated by
-            # tool_loop_detection_enabled; while tool_loop_rollback_enabled is
-            # False it runs in log-only mode (telemetry recorded, no rollback).
-            if loop_info is None and getattr(self.pool.settings, 'tool_loop_detection_enabled', True):
-                loop_info = _detect_tool_loop(messages)
+            # ── Tier 1 — exact matcher (rollback) ────────────────────────────
+            # An exact hit returns True immediately (rolled back), so the
+            # Tier-2 block below is only reached when Tier 1 did NOT fire.
+            if getattr(self.pool.settings, 'loop_exact_rollback_enabled', True):
+                loop_info = _detect_exact_loop(messages)
                 if loop_info:
-                    loop_type = "tool"
-            if loop_info:
-                reason, pop_count = loop_info
-                logger.debug(
-                    f"[LOOP_DETECTED] {inst_name}: pattern={reason}, "
-                    f"pop_count={pop_count}, messages={len(messages)}, loop_type={loop_type}"
-                )
+                    reason, pop_count = loop_info
+                    logger.debug(
+                        f"[LOOP_DETECTED] {inst_name}: pattern={reason}, "
+                        f"pop_count={pop_count}, messages={len(messages)}, loop_type=exact"
+                    )
 
-                # ── Respect auto_rollback_on_loop toggle ──────────────────────
-                # Tool-loop hits also respect tool_loop_rollback_enabled: while
-                # False (staged-rollout log-only mode) they behave exactly like
-                # the auto_rollback_on_loop=False branch below.
-                _tool_log_only = (
-                    loop_type == "tool"
-                    and not getattr(self.pool.settings, 'tool_loop_rollback_enabled', False)
-                )
-                if not self.pool.settings.auto_rollback_on_loop or _tool_log_only:
-                    logger.info(
-                        f"[LOOP_DETECTED_NO_ROLLBACK] {inst_name}: loop detected "
-                        f"(pattern={reason}, loop_type={loop_type}) but auto-rollback "
-                        f"is disabled for this detector. Continuing to LLM call."
+                    # ── Respect auto_rollback_on_loop toggle ─────────────────
+                    if not self.pool.settings.auto_rollback_on_loop:
+                        logger.info(
+                            f"[LOOP_DETECTED_NO_ROLLBACK] {inst_name}: exact loop detected "
+                            f"(pattern={reason}) but auto-rollback is disabled. Continuing to LLM call."
+                        )
+                        # Telemetry for observability
+                        if (tel := self._telemetry()) is not None:
+                            try:
+                                tel.record_loop_detected(
+                                    inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type="exact",
+                                )
+                            except Exception:
+                                pass
+                        # Return False → proceed to LLM call with current context.
+                        # No turn consumed here; normal turn decrement applies.
+                        return False
+
+                    # ── Inline rollback + hint (only when toggle is True) ────
+                    rollbacks = getattr(instance, '_loop_rollback_count', 0) + 1
+                    instance._loop_rollback_count = rollbacks
+
+                    self._inline_rollback_and_hint(
+                        instance, inst_name, pop_count, reason,
+                        messages, llm_messages, response,
+                    )
+
+                    # ── Enforce configured max_auto_rollbacks limit ───────────
+                    max_rb = self.pool.settings.max_auto_rollbacks
+                    if max_rb == -1:
+                        effective_limit = sys.maxsize  # unlimited; max_turns still backstops
+                    else:
+                        effective_limit = max_rb
+
+                    if rollbacks > effective_limit:
+                        logger.warning(
+                            f"Loop recovery for {inst_name}: exceeded configured limit "
+                            f"(rolled back {rollbacks} times, max={max_rb}). Terminating."
+                        )
+                        # Append clear failure message for caller visibility
+                        fail_msg = Message(
+                            role=USER,
+                            content=(
+                                f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
+                                f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
+                                f"The detected pattern was: {reason}. Please adjust your prompt or task."
+                            ),
+                        )
+                        self._append_and_log(instance, fail_msg)
+                        # Terminate this instance (and its children). Use set_global_stopped=False
+                        # so other agents are unaffected.
+                        self.pool.terminate_instance(inst_name, set_global_stopped=False)
+                        # Turn consumed for this rollback cycle
+                        turns_wrapper[0] -= 1
+                        return True  # Caller will break on _check_stop_conditions next iteration
+                    elif rollbacks >= 3 and rollbacks < effective_limit:
+                        # Warn at ≥3rd rollback only if we still have headroom before limit
+                        logger.warning(
+                            f"Loop recovery for {inst_name}: rolled back "
+                            f"{rollbacks} times without success. Continuing."
+                        )
+
+                    # Telemetry: record loop detection (non-blocking)
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_loop_detected(
+                                inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type="exact",
+                            )
+                        except Exception:
+                            pass
+
+                    # Turn consumed for this rollback cycle (Change 2 integration)
+                    turns_wrapper[0] -= 1  # R6: loop rollback is a real cycle
+                    return True  # Continue loop with fresh state
+
+            # ── Tier 2 — fuzzy tool-call matcher (warning-first + optional escalation) ──
+            # Plain `if` (NOT elif on the exact flag!) so a disabled exact tier
+            # still lets the fuzzy tier run. Enablement = new flag AND legacy
+            # kill switch (plan §5.3).
+            if (getattr(self.pool.settings, 'loop_fuzzy_warning_enabled', True)
+                    and getattr(self.pool.settings, 'tool_loop_detection_enabled', True)):
+                info = _detect_tool_loop(messages)
+                if info is None:
+                    # Pattern not matching → run broken / no loop: re-arm the
+                    # warning, cancel any pending escalation countdown, and
+                    # reset the last-warning timestamp. The run genuinely ended,
+                    # so a later (re)appearance of the pattern is a NEW run with
+                    # its own warning opportunity — keeping the stale timestamp
+                    # would let the throttle silently suppress the resumed loop
+                    # within the cooldown window (pre-commit review T2-1).
+                    instance._fuzzy_warn_armed = True
+                    instance._fuzzy_escalation_armed = False
+                    instance._fuzzy_warn_last_turn = -10**9
+                else:
+                    reason, pop_count = info
+                    current_turn = getattr(instance, '_current_turn', 0)
+                    if (getattr(self.pool.settings, 'tool_loop_fuzzy_rollback_enabled', False)
+                            and getattr(instance, '_fuzzy_escalation_armed', False)
+                            and (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) >= FUZZY_ESCALATION_TURNS):
+                        # ── Escalation: the nudge demonstrably failed → FULL ROLLBACK ──
+                        logger.info(
+                            f"[LOOP_ESCALATION] {inst_name}: fuzzy loop persisted "
+                            f"{current_turn - instance._fuzzy_warn_last_turn} turns after warning — "
+                            f"rolling back {pop_count}"
+                        )
+                        rollbacks = getattr(instance, '_loop_rollback_count', 0) + 1
+                        instance._loop_rollback_count = rollbacks
+
+                        self._inline_rollback_and_hint(
+                            instance, inst_name, pop_count, reason,
+                            messages, llm_messages, response,
+                        )
+
+                        # Post-escalation: the conversation changed → fully reset
+                        # (re-arm) the fuzzy state machine.
+                        instance._fuzzy_warn_armed = True
+                        instance._fuzzy_escalation_armed = False
+                        instance._fuzzy_warn_last_turn = -10**9
+
+                        # ── Enforce configured max_auto_rollbacks limit ───────
+                        max_rb = self.pool.settings.max_auto_rollbacks
+                        if max_rb == -1:
+                            effective_limit = sys.maxsize  # unlimited; max_turns still backstops
+                        else:
+                            effective_limit = max_rb
+
+                        if rollbacks > effective_limit:
+                            logger.warning(
+                                f"Loop recovery for {inst_name}: exceeded configured limit "
+                                f"(rolled back {rollbacks} times, max={max_rb}). Terminating."
+                            )
+                            fail_msg = Message(
+                                role=USER,
+                                content=(
+                                    f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
+                                    f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
+                                    f"The detected pattern was: {reason}. Please adjust your prompt or task."
+                                ),
+                            )
+                            self._append_and_log(instance, fail_msg)
+                            self.pool.terminate_instance(inst_name, set_global_stopped=False)
+                            turns_wrapper[0] -= 1
+                            return True  # Caller will break on _check_stop_conditions next iteration
+
+                        # Telemetry (non-blocking)
+                        if (tel := self._telemetry()) is not None:
+                            try:
+                                tel.record_loop_detected(
+                                    inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type="fuzzy_rollback",
+                                )
+                            except Exception:
+                                pass
+
+                        # Turn consumed for this rollback cycle (exactly like a Tier-1 rollback)
+                        turns_wrapper[0] -= 1
+                        return True  # Continue loop with fresh state
+
+                    if (not getattr(instance, '_fuzzy_warn_armed', True)
+                            and (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) < FUZZY_WARNING_COOLDOWN_TURNS):
+                        # ── Throttled: one warning per run; suppress this trigger ──
+                        logger.debug(
+                            f"[LOOP_WARNING_SUPPRESSED] {inst_name}: fuzzy loop still matching "
+                            f"(pattern={reason}, pop_hint={pop_count}) but a warning was issued "
+                            f"{current_turn - instance._fuzzy_warn_last_turn} turn(s) ago — suppressing"
+                        )
+                        # Telemetry for observability (warned=False: no message injected)
+                        if (tel := self._telemetry()) is not None:
+                            try:
+                                tel.record_loop_detected(
+                                    inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
+                                    loop_type="fuzzy_warning", warned=False,
+                                )
+                            except Exception:
+                                pass
+                        # Escalation state unchanged; return False → proceed to LLM call.
+                        return False
+
+                    # ── Inject the advisory USER message (warning-first) ──────
+                    # Same pattern as the turn-limit warnings in engine/core.py:
+                    # _append_and_log (conversation pool + instance logger, atomic)
+                    # then llm_messages.append so it is in the LLM context for the
+                    # pending call this turn. NOT appended to the local `messages`
+                    # list — the loop-detection view may omit it, which keeps our
+                    # own warning outside Tier-1's window on the next check.
+                    warn_msg = Message(role=USER, content=_FUZZY_WARNING_TEMPLATE.format(reason=reason))
+                    self._append_and_log(instance, warn_msg)
+                    llm_messages.append(warn_msg)
+
+                    instance._fuzzy_warn_armed = False
+                    instance._fuzzy_warn_last_turn = current_turn
+                    # Escalation countdown is only active when the toggle allows it.
+                    instance._fuzzy_escalation_armed = bool(getattr(self.pool.settings, 'tool_loop_fuzzy_rollback_enabled', False))
+
+                    logger.warning(
+                        f"[LOOP_WARNING] {inst_name}: {reason} (pop_hint={pop_count}) — "
+                        f"injected advisory, no rollback"
                     )
                     # Telemetry for observability
                     if (tel := self._telemetry()) is not None:
                         try:
                             tel.record_loop_detected(
-                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type=loop_type,
+                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
+                                loop_type="fuzzy_warning", warned=True,
                             )
                         except Exception:
                             pass
-                    # Return False → proceed to LLM call with current context.
-                    # No turn consumed here; normal turn decrement at line 1343 applies.
+                    # Return False → proceed to LLM call with the advisory in context.
+                    # No turn consumed here; normal turn decrement applies.
                     return False
-
-                # ── Inline rollback + hint (only when toggle is True) ─────────
-                rollbacks = getattr(instance, '_loop_rollback_count', 0) + 1
-                instance._loop_rollback_count = rollbacks
-
-                self._inline_rollback_and_hint(
-                    instance, inst_name, pop_count, reason,
-                    messages, llm_messages, response,
-                )
-
-                # ── Enforce configured max_auto_rollbacks limit ───────────────
-                max_rb = self.pool.settings.max_auto_rollbacks
-                if max_rb == -1:
-                    effective_limit = sys.maxsize  # unlimited; max_turns still backstops
-                else:
-                    effective_limit = max_rb
-
-                if rollbacks > effective_limit:
-                    logger.warning(
-                        f"Loop recovery for {inst_name}: exceeded configured limit "
-                        f"(rolled back {rollbacks} times, max={max_rb}). Terminating."
-                    )
-                    # Append clear failure message for caller visibility
-                    fail_msg = Message(
-                        role=USER,
-                        content=(
-                            f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
-                            f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
-                            f"The detected pattern was: {reason}. Please adjust your prompt or task."
-                        ),
-                    )
-                    self._append_and_log(instance, fail_msg)
-                    # Terminate this instance (and its children). Use set_global_stopped=False
-                    # so other agents are unaffected.
-                    self.pool.terminate_instance(inst_name, set_global_stopped=False)
-                    # Turn consumed for this rollback cycle
-                    turns_wrapper[0] -= 1
-                    return True  # Caller will break on _check_stop_conditions next iteration
-                elif rollbacks >= 3 and rollbacks < effective_limit:
-                    # Warn at ≥3rd rollback only if we still have headroom before limit
-                    logger.warning(
-                        f"Loop recovery for {inst_name}: rolled back "
-                        f"{rollbacks} times without success. Continuing."
-                    )
-
-                # Telemetry: record loop detection (non-blocking)
-                if (tel := self._telemetry()) is not None:
-                    try:
-                        tel.record_loop_detected(
-                            inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type=loop_type,
-                        )
-                    except Exception:
-                        pass
-
-                # Turn consumed for this rollback cycle (Change 2 integration)
-                turns_wrapper[0] -= 1  # R6: loop rollback is a real cycle
-                return True  # Continue loop with fresh state
         else:
             # Clear the cooldown flag now that we've skipped loop detection
-            # this turn.
-            # Next turn will run normal loop detection (no more suppression).
+            # this turn. Next turn will run normal loop detection (no more suppression).
             instance._suppress_loop_detection_next_turn = False
 
             # Also reset rollback counter after compression (conversation state
             # changed)
             if hasattr(instance, '_loop_rollback_count'):
                 instance._loop_rollback_count = 0
+
+            # Reset ALL fuzzy state fields: compression changes the conversation
+            # state, so stale arming/countdown would suppress a fresh legitimate
+            # warning or escalate on a stale turn delta.
+            instance._fuzzy_warn_armed = True
+            instance._fuzzy_escalation_armed = False
+            instance._fuzzy_warn_last_turn = -10**9
 
         return False  # Continue to LLM call normally
 

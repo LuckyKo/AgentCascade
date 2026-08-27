@@ -24,7 +24,7 @@ from agent_cascade.settings import (
     COMPRESSION_SECURITY_CHECK_TIMEOUT,
     AGENT_IDLE_TIMEOUT, SYSTEM_AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
     AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
-    TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_ROLLBACK_ENABLED,
+    TOOL_LOOP_DETECTION_ENABLED,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
     CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
     CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
@@ -303,6 +303,16 @@ class AgentInstance:
     # false-positive loop detection. This flag suppresses loop detection on the next turn only.
     _suppress_loop_detection_next_turn: bool = field(default=False)     # Cooldown flag for loop detection after compression/rollback
     _loop_rollback_count: int = field(default=0)                       # Track rollback count to prevent infinite recovery loops
+
+    # ── Fuzzy (Tier 2) loop-detection state machine (two-tier redesign) ───────
+    # Warning-first throttling + optional escalation countdown, driven per
+    # _pre_llm_checks pass. GIL-atomic simple fields (same pattern as the
+    # cooldown flag above); turn source = _current_turn (set every iteration in
+    # engine/core.py before _pre_llm_checks). All three are reset on the
+    # post-compression cooldown path.
+    _fuzzy_warn_armed: bool = field(default=True)                      # May a warning be injected right now?
+    _fuzzy_warn_last_turn: int = field(default=-10**9)                 # _current_turn when the last warning was issued
+    _fuzzy_escalation_armed: bool = field(default=False)               # Escalation countdown active (between a warning and re-arm / escalated rollback)
 
     # ── Continue Button Message Merge (Fix Duplication Bug Option B) ───────────
     # When Continue is clicked, the last assistant message is popped from conversation
@@ -733,11 +743,12 @@ class PoolSettings:
     max_turns: int = DEFAULT_MAX_TURNS              # Default turn limit per agent execution
     auto_rollback_on_loop: bool = True              # Auto-rollback on detected loops (loop recovery toggle)
 
-    # Tool-call loop detection (parallel checker, see tool_loop_detect.py).
-    # Staged rollout: detection ON by default; rollback OFF until the log-only
-    # burn-in shows zero false positives.
-    tool_loop_detection_enabled: bool = TOOL_LOOP_DETECTION_ENABLED   # Master switch for the tool-call loop detector
-    tool_loop_rollback_enabled: bool = TOOL_LOOP_ROLLBACK_ENABLED     # False = log/telemetry only, no rollback
+    # Two-tier loop detection (2026-08 redesign).
+    # DEPRECATED (kill switch only): legacy flag that can still DISABLE the fuzzy
+    # (Tier 2) tier but cannot enable it on its own. Tier-2 enablement is
+    # settings.loop_fuzzy_warning_enabled AND tool_loop_detection_enabled,
+    # evaluated in _pre_llm_checks. Removed in a later cleanup release.
+    tool_loop_detection_enabled: bool = TOOL_LOOP_DETECTION_ENABLED   # Legacy kill switch for the fuzzy tier
 
     # Inner-loop detection toggle (enabled by default for loop prevention)
     inner_loop_detect_enabled: bool = True    # Enable in-message loop detection during streaming

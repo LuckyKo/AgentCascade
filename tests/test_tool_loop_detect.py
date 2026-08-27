@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.loop_detection import detect_loop
+from agent_cascade.exact_loop_detect import detect_exact_loop
 from agent_cascade.tool_loop_detect import detect_tool_loop
 from agent_cascade.llm.schema import (
     SYSTEM, USER, ASSISTANT, FUNCTION, Message, FunctionCall,
@@ -213,16 +213,30 @@ class TestFixtures:
 # PART 2 — Legacy detector pin
 # ══════════════════════════════════════════════
 
-class TestLegacyDetectorUnaffected:
-    """The exact-match legacy detector must still return None on both raw samples."""
+class TestExactTierSampleBehavior:
+    """Tier-1 (exact matcher) behavior on the raw failure samples.
 
-    def test_raw_sample1_legacy_none(self):
+    REWRITTEN for the two-tier redesign (plan §7.1): these tests previously
+    pinned that the legacy detect_loop returned None on BOTH samples — that was
+    the motivation for the fuzzy tier. Under Tier 1, sample 2 now returns a hit
+    (L=2 exact period at the tail) while sample 1 must still return None
+    (regression guard: nobody "fixes" Tier 1 by loosening it into fuzzy
+    territory)."""
+
+    def test_raw_sample1_exact_none(self):
         msgs = _load_raw_sample("async_shell_polling_loop_20260821_kv-restore-confirm.jsonl")
-        assert detect_loop(msgs) is None, "legacy detector should not flag sample 1"
+        assert detect_exact_loop(msgs) is None, "exact tier must not flag sample 1 (fuzzy-only loop)"
 
-    def test_raw_sample2_legacy_none(self):
+    def test_raw_sample2_exact_hit(self):
         msgs = _load_raw_sample("coder_impl_phase1_D_fixup_20260824_124318.jsonl")
-        assert detect_loop(msgs) is None, "legacy detector should not flag sample 2"
+        result = detect_exact_loop(msgs)
+        assert result is not None, "exact tier should flag sample 2's tail loop"
+        reason, pop_count = result
+        # Planner-verified (plan header): L=2 period, K>=3 repeats at the stable tail.
+        assert "period=2" in reason, f"expected L=2 period, got: {reason}"
+        assert "repeated 3 times" in reason or "repeated 4 times" in reason, \
+            f"expected K>=3 repetitions, got: {reason}"
+        assert pop_count > 0
 
 
 # ══════════════════════════════════════════════
@@ -591,22 +605,39 @@ class TestOutputNormalization:
 # ══════════════════════════════════════════════
 
 class TestPreLlmChecksIntegration:
-    """_pre_llm_checks wiring for the tool-loop detector (fake-engine pattern)."""
+    """_pre_llm_checks wiring for the fuzzy (Tier 2) detector — warning-first +
+    optional escalation (two-tier redesign, plan §5.2; fake-engine pattern).
+
+    State machine under test (plan §4.2): first trigger → ONE advisory USER
+    message (throttled per run); with tool_loop_fuzzy_rollback_enabled=True a
+    pattern still matching FUZZY_ESCALATION_TURNS (2) turns after the warning
+    escalates to FULL rollback; with the toggle off, warnings re-issue per
+    cooldown and NEVER roll back.
+    """
 
     def _make_fake_instance(self, name="test_agent"):
         class FakeInstance:
             def __init__(self, instance_name):
                 self.instance_name = instance_name
+                # Fuzzy state machine fields (defaults mirror AgentInstance)
+                self._fuzzy_warn_armed = True
+                self._fuzzy_warn_last_turn = -10**9
+                self._fuzzy_escalation_armed = False
+                self._suppress_loop_detection_next_turn = False
+                self._loop_rollback_count = 0
+                self._current_turn = 0
         return FakeInstance(name)
 
     def _make_fake_pool(self, max_auto_rollbacks=3, auto_rollback_on_loop=True,
-                        tool_loop_detection_enabled=True, tool_loop_rollback_enabled=False):
+                        loop_fuzzy_warning_enabled=True, tool_loop_detection_enabled=True,
+                        tool_loop_fuzzy_rollback_enabled=False):
         pool = MagicMock()
         pool.settings = MagicMock()
         pool.settings.max_auto_rollbacks = max_auto_rollbacks
         pool.settings.auto_rollback_on_loop = auto_rollback_on_loop
+        pool.settings.loop_fuzzy_warning_enabled = loop_fuzzy_warning_enabled
         pool.settings.tool_loop_detection_enabled = tool_loop_detection_enabled
-        pool.settings.tool_loop_rollback_enabled = tool_loop_rollback_enabled
+        pool.settings.tool_loop_fuzzy_rollback_enabled = tool_loop_fuzzy_rollback_enabled
         return pool
 
     def _make_engine(self, pool):
@@ -633,49 +664,266 @@ class TestPreLlmChecksIntegration:
         """Synthetic sample-1-style conversation (7 terminal-error poll pairs)."""
         return failing_poll_pairs(7, user="launch the run")
 
-    def test_rollback_when_tool_rollback_enabled(self):
-        """tool_loop_rollback_enabled=True → rollback path with correct pop_count."""
-        pool = self._make_fake_pool(tool_loop_rollback_enabled=True)
+    def test_warning_injected_on_fuzzy_hit_toggle_off(self):
+        """Toggle OFF (default) → ONE advisory USER message, no rollback, no turn consumed."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+        msgs = self._tool_loop_msgs()
+
+        turns = [50]
+        result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+        assert result is False, "warning mode must proceed to the LLM call"
+        engine._inline_rollback_and_hint.assert_not_called(), \
+            "toggle OFF: no code path may roll back from a Tier-2 trigger"
+        pool.terminate_instance.assert_not_called()
+        assert turns[0] == 50, "no turn consumed in warning mode"
+        # Advisory injected exactly once via the engine's warning pattern.
+        # _append_and_log(instance, msg) → args[1] is the Message.
+        engine._append_and_log.assert_called_once()
+        warn_msg = engine._append_and_log.call_args.args[1]
+        assert "[SYSTEM WARNING: Possible repeating action]" in (warn_msg.content or "")
+        assert warn_msg.role == USER
+        # Telemetry: fuzzy_warning, not rolled back, warned=True.
+        tel = engine._telemetry.return_value
+        tel.record_loop_detected.assert_called_once()
+        kwargs = tel.record_loop_detected.call_args.kwargs
+        assert kwargs["auto_rolled_back"] is False
+        assert kwargs["loop_type"] == "fuzzy_warning"
+        assert kwargs["warned"] is True
+        # State machine: disarmed after the warning, escalation NOT armed (toggle off).
+        assert inst._fuzzy_warn_armed is False
+        assert inst._fuzzy_escalation_armed is False
+
+    def test_throttle_second_trigger_same_run_suppressed(self):
+        """Second trigger in the same run (1 turn later) → suppressed, no second message."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+        msgs = self._tool_loop_msgs()
+
+        # Turn T: warning issued.
+        inst._current_turn = 10
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        engine._append_and_log.assert_called_once()
+
+        # Turn T+1: pattern still matching → suppressed by the per-run throttle.
+        inst._current_turn = 11
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        engine._append_and_log.assert_called_once(), \
+            "no second advisory within the same run (throttle)"
+        # Suppression still telemetry'd with warned=False.
+        tel = engine._telemetry.return_value
+        assert tel.record_loop_detected.call_count == 2
+        sup_kwargs = tel.record_loop_detected.call_args.kwargs
+        assert sup_kwargs["warned"] is False
+        assert sup_kwargs["loop_type"] == "fuzzy_warning"
+
+    def test_rearm_after_pattern_breaks(self):
+        """Pattern stops matching → re-arm; a later fresh run warns again."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+
+        # Turn 10: loop present → warning.
+        inst._current_turn = 10
+        engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
+        assert inst._fuzzy_warn_armed is False
+
+        # Turn 11: pattern broken (unique work) → re-arm, no telemetry.
+        unique = [Message(role=USER, content=f"work_{i}") for i in range(6)]
+        inst._current_turn = 11
+        result = engine._pre_llm_checks(inst, unique, [], [], [50])
+        assert result is False
+        assert inst._fuzzy_warn_armed is True
+        tel = engine._telemetry.return_value
+        tel.record_loop_detected.assert_called_once()  # only the first warning
+
+        # Turn 12: a NEW run of the same loop → warns again (re-armed).
+        inst._current_turn = 12
+        result = engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
+        assert result is False
+        assert engine._append_and_log.call_count == 2, "re-armed run must warn again"
+
+    def test_escalation_rollback_when_toggle_on(self):
+        """Toggle ON: warn at T, suppress at T+1, FULL rollback at T+2 (fuzzy pop_count)."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = self._tool_loop_msgs()
 
         expected_pop = detect_tool_loop(msgs)[1]
+
+        # Turn T: warning.
+        inst._current_turn = 10
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        engine._append_and_log.assert_called_once()
+        assert inst._fuzzy_escalation_armed is True, "countdown armed when toggle on"
+
+        # Turn T+1: suppressed (no second message, no rollback yet).
+        inst._current_turn = 11
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        engine._append_and_log.assert_called_once(), "no second advisory at T+1"
+        engine._inline_rollback_and_hint.assert_not_called(), "no rollback before T+2"
+
+        # Turn T+2: pattern still matching → FULL ROLLBACK with the fuzzy pop_count.
+        inst._current_turn = 12
         turns = [50]
         result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
-        assert result is True, "rollback cycle should continue the loop"
+        assert result is True, "escalation rollback cycle should continue the loop"
         engine._inline_rollback_and_hint.assert_called_once()
         args = engine._inline_rollback_and_hint.call_args.args
-        assert args[2] == expected_pop, "pop_count passed to rollback must match detector"
+        assert args[2] == expected_pop, "pop_count passed to rollback must match the fuzzy detector"
         assert inst._loop_rollback_count == 1
         pool.terminate_instance.assert_not_called()
-        assert turns[0] == 49, "turn consumed on loop rollback"
+        assert turns[0] == 49, "turn consumed on escalation rollback"
+        # Telemetry: fuzzy_rollback with auto_rolled_back=True.
+        tel = engine._telemetry.return_value
+        rb_kwargs = tel.record_loop_detected.call_args.kwargs
+        assert rb_kwargs["loop_type"] == "fuzzy_rollback"
+        assert rb_kwargs["auto_rolled_back"] is True
+        # Post-escalation: fuzzy state fully reset (re-armed).
+        assert inst._fuzzy_warn_armed is True
+        assert inst._fuzzy_escalation_armed is False
 
-    def test_log_only_when_rollback_disabled(self):
-        """tool_loop_rollback_enabled=False (default) → no rollback, continues to LLM."""
-        pool = self._make_fake_pool(tool_loop_rollback_enabled=False)
+    def test_escalation_countdown_cancelled_when_pattern_breaks(self):
+        """Toggle ON but pattern stops matching at T+1 → countdown cancelled, no rollback."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = self._tool_loop_msgs()
 
+        # Turn T: warning.
+        inst._current_turn = 10
+        engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert inst._fuzzy_escalation_armed is True
+
+        # Turn T+1: pattern broken → escalation cancelled.
+        unique = [Message(role=USER, content=f"work_{i}") for i in range(6)]
+        inst._current_turn = 11
+        result = engine._pre_llm_checks(inst, unique, [], [], [50])
+        assert result is False
+        assert inst._fuzzy_escalation_armed is False, "countdown must cancel on pattern break"
+
+        # Turn T+2: even though the loop resumes, the fresh run only WARNS again.
+        inst._current_turn = 12
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        engine._inline_rollback_and_hint.assert_not_called(), \
+            "cancelled countdown must not roll back later"
+
+    def test_warn_break_resume_within_cooldown_toggle_off(self):
+        """REGRESSION (pre-commit review T2-1, toggle OFF): warn@T → break@T+1 →
+        resume@T+2 must WARN again — never silently suppressed by the stale
+        last-warning timestamp inside the 3-turn cooldown window."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+        msgs = self._tool_loop_msgs()
+
+        # T: warning issued.
+        inst._current_turn = 10
+        engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert engine._append_and_log.call_count == 1
+        assert inst._fuzzy_warn_armed is False
+
+        # T+1: pattern broken (unique work) → re-arm; the run genuinely ended.
+        unique = [Message(role=USER, content=f"work_{i}") for i in range(6)]
+        inst._current_turn = 11
+        engine._pre_llm_checks(inst, unique, [], [], [50])
+        assert inst._fuzzy_warn_armed is True
+
+        # T+2: the loop RESUMES within the cooldown window → fresh warning required.
+        inst._current_turn = 12
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        assert engine._append_and_log.call_count == 2, \
+            "resumed loop must warn again — silent suppression of a resumed loop is the T2-1 bug"
+        engine._inline_rollback_and_hint.assert_not_called(), \
+            "toggle OFF: no rollback path may fire"
+
+    def test_warn_break_resume_within_cooldown_toggle_on(self):
+        """REGRESSION (pre-commit review T2-1, toggle ON): warn@T → break@T+1 →
+        resume@T+2 must produce EITHER a fresh warning OR an escalation rollback —
+        never silent suppression. With the countdown cancelled by the break, the
+        documented behavior is a fresh warning for the new run; the next matching
+        turn (T+4) escalates to rollback within FUZZY_ESCALATION_TURNS."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+        msgs = self._tool_loop_msgs()
+
+        # T: warning issued, escalation countdown armed.
+        inst._current_turn = 10
+        engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert inst._fuzzy_escalation_armed is True
+
+        # T+1: pattern broken → countdown cancelled.
+        unique = [Message(role=USER, content=f"work_{i}") for i in range(6)]
+        inst._current_turn = 11
+        engine._pre_llm_checks(inst, unique, [], [], [50])
+        assert inst._fuzzy_escalation_armed is False
+
+        # T+2: loop resumes within the cooldown window → fresh warning (not silent).
+        inst._current_turn = 12
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        assert engine._append_and_log.call_count == 2, \
+            "resumed loop must warn again — no warning AND no rollback would be the T2-1 bug"
+        engine._inline_rollback_and_hint.assert_not_called(), \
+            "cancelled countdown must not roll back at the resume point"
+
+        # T+4: still matching FUZZY_ESCALATION_TURNS (2) turns after the fresh
+        # warning → escalation rollback within the documented window.
+        inst._current_turn = 13
+        engine._pre_llm_checks(inst, msgs, [], [], [50])  # suppressed by new-run throttle
+        inst._current_turn = 14
         turns = [50]
         result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+        assert result is True
+        engine._inline_rollback_and_hint.assert_called_once(), \
+            "resumed loop must escalate to rollback within the documented window"
+        assert inst._loop_rollback_count == 1
 
-        assert result is False, "log-only mode must proceed to the LLM call"
-        engine._inline_rollback_and_hint.assert_not_called()
-        pool.terminate_instance.assert_not_called()
-        assert turns[0] == 50, "no turn consumed in log-only mode"
-        # Telemetry recorded with auto_rolled_back=False and loop_type="tool"
+    def test_post_compression_cooldown_resets_fuzzy_state(self):
+        """Post-compression cooldown resets ALL fuzzy state fields (incl. pending escalation)."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=True)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+
+        # Simulate a mid-countdown state: warning issued, escalation armed.
+        inst._fuzzy_warn_armed = False
+        inst._fuzzy_warn_last_turn = 10
+        inst._fuzzy_escalation_armed = True
+        inst._loop_rollback_count = 2
+
+        # Next turn runs with the post-compression suppression flag set.
+        inst._suppress_loop_detection_next_turn = True
+        inst._current_turn = 11
+        result = engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
+
+        assert result is False
+        # No detection ran this turn at all → no telemetry, no rollback, no warning.
         tel = engine._telemetry.return_value
-        tel.record_loop_detected.assert_called_once()
-        kwargs = tel.record_loop_detected.call_args.kwargs
-        assert kwargs["auto_rolled_back"] is False
-        assert kwargs["loop_type"] == "tool"
+        tel.record_loop_detected.assert_not_called()
+        engine._inline_rollback_and_hint.assert_not_called()
+        engine._append_and_log.assert_not_called()
+        # Cooldown flag cleared and ALL fuzzy state reset.
+        assert inst._suppress_loop_detection_next_turn is False
+        assert inst._fuzzy_warn_armed is True
+        assert inst._fuzzy_escalation_armed is False
+        assert inst._fuzzy_warn_last_turn == -10**9
+        assert inst._loop_rollback_count == 0
 
     def test_flag_off_no_op(self):
-        """tool_loop_detection_enabled=False → detector never runs, no telemetry."""
-        pool = self._make_fake_pool(tool_loop_detection_enabled=False)
+        """loop_fuzzy_warning_enabled=False → detector never runs, no telemetry."""
+        pool = self._make_fake_pool(loop_fuzzy_warning_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = self._tool_loop_msgs()
@@ -685,12 +933,27 @@ class TestPreLlmChecksIntegration:
 
         assert result is False
         engine._inline_rollback_and_hint.assert_not_called()
+        engine._append_and_log.assert_not_called()
         tel = engine._telemetry.return_value
         tel.record_loop_detected.assert_not_called()
 
-    def test_telemetry_loop_type_tool_on_rollback(self):
-        """Rollback path records loop_type='tool' (not 'outer') for tool-loop hits."""
-        pool = self._make_fake_pool(tool_loop_rollback_enabled=True)
+    def test_legacy_kill_switch_disables_fuzzy_tier(self):
+        """DEPRECATED kill switch: tool_loop_detection_enabled=False disables Tier 2."""
+        pool = self._make_fake_pool(tool_loop_detection_enabled=False)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+        msgs = self._tool_loop_msgs()
+
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+
+        assert result is False
+        engine._append_and_log.assert_not_called()
+        tel = engine._telemetry.return_value
+        tel.record_loop_detected.assert_not_called()
+
+    def test_telemetry_fuzzy_warning_event(self):
+        """Warning path records loop_type='fuzzy_warning', auto_rolled_back=False, warned=True."""
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = self._tool_loop_msgs()
@@ -700,12 +963,22 @@ class TestPreLlmChecksIntegration:
         tel = engine._telemetry.return_value
         tel.record_loop_detected.assert_called_once()
         kwargs = tel.record_loop_detected.call_args.kwargs
-        assert kwargs["loop_type"] == "tool"
-        assert kwargs["auto_rolled_back"] is True
+        assert kwargs["loop_type"] == "fuzzy_warning"
+        assert kwargs["auto_rolled_back"] is False
+        assert kwargs["warned"] is True
 
-    def test_outer_detector_takes_priority(self):
-        """When the legacy detector fires, loop_type stays 'outer' and tool detector is skipped."""
-        pool = self._make_fake_pool(tool_loop_rollback_enabled=True)
+    def test_exact_tier_takes_priority(self):
+        """Both tiers enabled and BOTH detectors armed: an exact (Tier 1) hit rolls back
+        and the fuzzy (Tier 2) tier never runs.
+
+        The mock for ``_detect_tool_loop`` is configured to FIRE (return a hit), not just
+        be patched to None — so if the wiring ever let Tier 2 run after an exact hit, this
+        test would fail on the rollback/telemetry assertions, not silently pass."""
+        pool = self._make_fake_pool(
+            tool_loop_fuzzy_rollback_enabled=True,          # escalation armed
+            loop_fuzzy_warning_enabled=True,                # Tier-2 gate ON
+            tool_loop_detection_enabled=True,               # legacy kill switch ON
+        )
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = [
@@ -714,22 +987,45 @@ class TestPreLlmChecksIntegration:
             Message(role=USER, content="q"), Message(role=ASSISTANT, content="a"),
         ]
 
-        with patch("agent_cascade.engine.llm_call._canonical_detect_loop", return_value=("repeat", 2)), \
-             patch("agent_cascade.engine.llm_call._detect_tool_loop") as mock_tool:
-            engine._pre_llm_checks(inst, msgs, [], [], [50])
+        with patch("agent_cascade.engine.llm_call._detect_exact_loop", return_value=("repeat", 2)), \
+             patch("agent_cascade.engine.llm_call._detect_tool_loop",
+                   return_value=("fuzzy hit", 3)) as mock_tool:
+            turns = [50]
+            result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
-        mock_tool.assert_not_called()
+        assert result is True, "exact hit must consume the turn and continue the loop"
+        mock_tool.assert_not_called(), "fuzzy tier must not run after an exact hit"
+        # Tier-1 rollback executed with the EXACT detector's pop_count (2), not fuzzy's 3.
+        engine._inline_rollback_and_hint.assert_called_once()
+        rb_args = engine._inline_rollback_and_hint.call_args.args
+        assert rb_args[2] == 2, "pop_count must come from the exact detector"
+        assert inst._loop_rollback_count == 1
+        assert turns[0] == 49, "turn consumed on Tier-1 rollback"
+        # Telemetry: exactly ONE event, loop_type="exact".
         tel = engine._telemetry.return_value
+        tel.record_loop_detected.assert_called_once()
         kwargs = tel.record_loop_detected.call_args.kwargs
-        assert kwargs["loop_type"] == "outer"
+        assert kwargs["loop_type"] == "exact"
+        assert kwargs["auto_rolled_back"] is True
+        # Fuzzy state machine untouched (Tier 2 never ran).
+        assert inst._fuzzy_warn_armed is True
+        assert inst._fuzzy_escalation_armed is False
 
-    def test_max_auto_rollbacks_enforced_for_tool_loops(self):
-        """max_auto_rollbacks=0: first tool-loop detection → rollback then terminate."""
-        pool = self._make_fake_pool(max_auto_rollbacks=0, tool_loop_rollback_enabled=True)
+    def test_max_auto_rollbacks_enforced_for_fuzzy_escalation(self):
+        """max_auto_rollbacks=0: first fuzzy ESCALATION rollback → then terminate."""
+        pool = self._make_fake_pool(max_auto_rollbacks=0, tool_loop_fuzzy_rollback_enabled=True)
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = self._tool_loop_msgs()
 
+        # Turn T: warning (no rollback yet).
+        inst._current_turn = 10
+        result = engine._pre_llm_checks(inst, msgs, [], [], [50])
+        assert result is False
+        engine._inline_rollback_and_hint.assert_not_called()
+
+        # Turn T+2: escalation → rollback (count=1 > max=0) → terminate.
+        inst._current_turn = 12
         result = engine._pre_llm_checks(inst, msgs, [], [], [50])
 
         assert result is True

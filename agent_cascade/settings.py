@@ -147,13 +147,32 @@ AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv(
     'QWEN_AGENT_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
-# Tool-call loop detection (parallel checker, see tool_loop_detect.py).
-# Staged rollout: detection is ON by default but rollback starts OFF (log-only
-# telemetry mode); flip TOOL_LOOP_ROLLBACK_ENABLED after a zero-FP burn-in.
+# ── Two-tier loop detection (2026-08 redesign; plan: plans/loop_detector_exact_redesign_PLAN.md) ──
+# Tier 1 — exact multi-period matcher (exact_loop_detect.py): deterministic,
+# survey-validated (9/10 logs clean), takes over the removed legacy detect_loop
+# which already rolled back in production. Default ON; rollback still respects
+# auto_rollback_on_loop and max_auto_rollbacks.
+LOOP_EXACT_ROLLBACK_ENABLED: bool = os.getenv(
+    'QWEN_AGENT_LOOP_EXACT_ROLLBACK', '1') == '1'  # Tier 1 runs and rolls back on exact hits
+# Tier 2 — fuzzy tool-call detector (tool_loop_detect.py), demoted to
+# warning-first: injects ONE advisory USER message per detected run (throttled,
+# FUZZY_WARNING_COOLDOWN_TURNS). Warning-only has no destructive path → default ON.
+LOOP_FUZZY_WARNING_ENABLED: bool = os.getenv(
+    'QWEN_AGENT_LOOP_FUZZY_WARNING', '1') == '1'  # Tier 2 runs and may inject the advisory
+# Tier 2 escalation toggle: when True, a fuzzy loop still matching
+# FUZZY_ESCALATION_TURNS (2) LLM turns after the warning escalates to FULL
+# rollback. Default OFF = warning-only; flip after field telemetry shows
+# warnings alone don't stop Sample-1-class loops. Rollback path still respects
+# auto_rollback_on_loop and max_auto_rollbacks.
+TOOL_LOOP_FUZZY_ROLLBACK_ENABLED: bool = os.getenv(
+    'QWEN_AGENT_TOOL_LOOP_FUZZY_ROLLBACK', '0') == '1'  # Escalation off by default
+# DEPRECATED (2026-08): legacy KILL SWITCH only. Tier-2 enablement is now
+# LOOP_FUZZY_WARNING_ENABLED AND TOOL_LOOP_DETECTION_ENABLED — the old flag can
+# still DISABLE Tier 2 (existing deployments with QWEN_AGENT_TOOL_LOOP_DETECTION=0
+# keep their kill switch) but can never enable it on its own. Removed in a later
+# cleanup release.
 TOOL_LOOP_DETECTION_ENABLED: bool = os.getenv(
-    'QWEN_AGENT_TOOL_LOOP_DETECTION', '1') == '1'  # Master switch for the tool-call loop detector
-TOOL_LOOP_ROLLBACK_ENABLED: bool = os.getenv(
-    'QWEN_AGENT_TOOL_LOOP_ROLLBACK', '0') == '1'   # False = log/telemetry only, no rollback
+    'QWEN_AGENT_TOOL_LOOP_DETECTION', '1') == '1'  # Legacy kill switch for the fuzzy tier
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv(
     'QWEN_AGENT_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
 AGENT_MAX_WORKERS: int = int(os.getenv(
@@ -269,7 +288,7 @@ LLM_RETRY_MAX_BACKOFF: float = float(os.getenv(
 
 # Settings for streaming timeouts (Layer 1-3 defense against stuck streams)
 STREAM_MAX_SILENCE_SECONDS: float = float(os.getenv(
-    'QWEN_AGENT_STREAM_MAX_SILENCE_SECONDS', 120.0))  # Max seconds between chunks before considering stream stalled
+    'QWEN_AGENT_STREAM_MAX_SILENCE_SECONDS', 180.0))  # Max seconds between chunks before considering stream stalled
 STREAM_MAX_TOTAL_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_STREAM_MAX_TOTAL_SECONDS', 900.0))  # Max total duration of a streaming response
 

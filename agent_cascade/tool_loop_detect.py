@@ -1,8 +1,8 @@
-"""Tool-call loop detection — parallel checker for tool-call failure loops.
+"""Tool-call loop detection — Tier 2 (fuzzy) checker for tool-call failure loops.
 
-Complements :func:`agent_cascade.loop_detection.detect_loop` (exact contiguous
-pattern matcher) with a trailing-run scan over (function_call, function_output)
-pairs:
+Complements :func:`agent_cascade.exact_loop_detect.detect_exact_loop` (Tier 1,
+exact contiguous pattern matcher) with a trailing-run scan over
+(function_call, function_output) pairs:
 
 * **Layer 1** — ≥5 trailing same-action pairs with byte-identical or
   terminal-error outputs (async-shell polling loops).
@@ -501,7 +501,7 @@ def detect_tool_loop(
 
     Returns:
         ``(reason, pop_count)`` if a tool-call loop is detected, else ``None``.
-        ``pop_count`` follows the same convention as :func:`detect_loop`:
+        ``pop_count`` follows the same convention as :func:`detect_exact_loop`:
         number of messages to remove from the end so that ONE occurrence of the
         trailing run remains (i.e., keep the first pair of the run — its FC and
         FUNCTION output plus any interleaved prose belonging to that iteration

@@ -31,8 +31,9 @@ POOL_SETTINGS_KEYS = frozenset({
     'idle_timeout_seconds', 'system_agent_idle_timeout_seconds', 'max_parallel_agents', 'max_workers',
     'auto_continue', 'enable_agent_budgeting', 'max_turns', 'max_auto_rollbacks',
     'auto_rollback_on_loop',
-    # Tool-call loop detection (staged rollout)
-    'tool_loop_detection_enabled', 'tool_loop_rollback_enabled',
+    # Two-tier loop detection (2026-08 redesign)
+    'loop_exact_rollback_enabled', 'loop_fuzzy_warning_enabled',
+    'tool_loop_fuzzy_rollback_enabled', 'tool_loop_detection_enabled',
     # Inner-loop detection
     'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars',
     'loop_char_run_enabled', 'loop_char_run_limit', 'loop_max_chars_enabled',
@@ -506,18 +507,32 @@ def _handle_auto_rollback_on_loop(ui_cfg: dict, agent_pool: Optional[Any], agent
         agent_pool.settings.auto_rollback_on_loop = bool(ui_cfg.get('auto_rollback_on_loop', True))
 
 
+@register_config_handler('loop_exact_rollback_enabled')
+def _handle_loop_exact_rollback_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Tier 1 (exact matcher): run and roll back on exact hits (default True)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_exact_rollback_enabled = bool(ui_cfg.get('loop_exact_rollback_enabled', True))
+
+
+@register_config_handler('loop_fuzzy_warning_enabled')
+def _handle_loop_fuzzy_warning_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Tier 2 (fuzzy matcher): run and inject the advisory warning (default True)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_fuzzy_warning_enabled = bool(ui_cfg.get('loop_fuzzy_warning_enabled', True))
+
+
+@register_config_handler('tool_loop_fuzzy_rollback_enabled')
+def _handle_tool_loop_fuzzy_rollback_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Tier 2 escalation toggle: full rollback when a fuzzy loop persists FUZZY_ESCALATION_TURNS after the warning (default False)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.tool_loop_fuzzy_rollback_enabled = bool(ui_cfg.get('tool_loop_fuzzy_rollback_enabled', False))
+
+
 @register_config_handler('tool_loop_detection_enabled')
 def _handle_tool_loop_detection_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Master switch for the tool-call loop detector (parallel checker)."""
+    """DEPRECATED (2026-08): legacy KILL SWITCH for the fuzzy tier only — can disable Tier 2 but never enable it on its own."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.tool_loop_detection_enabled = bool(ui_cfg.get('tool_loop_detection_enabled', True))
-
-
-@register_config_handler('tool_loop_rollback_enabled')
-def _handle_tool_loop_rollback_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle auto-rollback for tool-call loops (staged rollout: False = log-only)."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.tool_loop_rollback_enabled = bool(ui_cfg.get('tool_loop_rollback_enabled', False))
 
 
 @register_config_handler('tool_result_max_chars')

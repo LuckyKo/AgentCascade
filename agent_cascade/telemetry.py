@@ -586,8 +586,14 @@ class TelemetryCollector:
 
         self._write_event(event)
 
-    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0, loop_type: str = "outer"):
-        """Record a loop detection event."""
+    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0, loop_type: str = "outer", warned: bool = True):
+        """Record a loop detection event.
+
+        ``warned`` (two-tier redesign): for fuzzy-warning events, True when an
+        advisory USER message was actually injected and False when the trigger
+        was suppressed by the per-run throttle / escalation countdown. Default
+        True keeps all pre-existing callers unchanged.
+        """
         with _telemetry_lock:
             event = {
                 "type": "loop_detected",
@@ -596,6 +602,7 @@ class TelemetryCollector:
                 "auto_rolled_back": auto_rolled_back,
                 "pop_count": pop_count,
                 "loop_type": loop_type,
+                "warned": warned,
                 "timestamp": _now_iso(),
             }
             self._session_stats["total_loops_detected"] += 1
