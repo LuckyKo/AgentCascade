@@ -42,7 +42,7 @@ def _disable_sanity_probe():
     it is unit-tested separately in tests/test_sanity_probe.py (which patches
     requests.get). See .agent_lessons/sanity-probe-breaks-latency-baseline-test.md.
     """
-    with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain: chain):
+    with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain, **kw: chain):
         yield
 
 
