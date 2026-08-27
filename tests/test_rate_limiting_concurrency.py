@@ -23,6 +23,14 @@ from agent_cascade.api_router import APIRouter, APIEndpoint
 # Fixtures and helpers
 # ============================================================================
 
+@pytest.fixture(autouse=True)
+def _disable_sanity_probe():
+    """Disable the sanity probe for these tests — they use fake endpoints and test
+    slot/semaphore/rate-limit logic, not endpoint validation."""
+    with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain, **kw: chain):
+        yield
+
+
 @pytest.fixture
 def router(tmp_path_factory):
     """Create an isolated APIRouter instance with its own config dir."""
