@@ -37,6 +37,26 @@ from agent_cascade.api_router import APIRouter, APIEndpoint
 # ============================================================================
 
 
+@pytest.fixture(autouse=True)
+def _disable_sanity_probe():
+    """Disable the lazy per-endpoint sanity probe for every test in this module.
+
+    These tests use unreachable fake endpoints (http://default-api, http://caller-api, ...)
+    and exercise call_with_fallback's endpoint-resolution logic — not endpoint validation.
+    The lazy probe (inside call_with_fallback's endpoint loop) would issue a REAL HTTP
+    GET /models to each endpoint just before trying it and SKIP endpoints that fail
+    probing, pruning the fake chain. Disabling SANITY_PROBE_ENABLED keeps the chains
+    intact. Probe coverage lives in tests/test_sanity_probe.py and
+    tests/test_probe_trigger.py."""
+    import agent_cascade.api_router_pkg.router as router_mod
+    orig = router_mod.SANITY_PROBE_ENABLED
+    router_mod.SANITY_PROBE_ENABLED = False
+    try:
+        yield
+    finally:
+        router_mod.SANITY_PROBE_ENABLED = orig
+
+
 @pytest.fixture
 def router(tmp_path_factory):
     """Create an isolated APIRouter instance with its own config dir."""

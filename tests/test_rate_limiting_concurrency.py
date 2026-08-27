@@ -26,9 +26,20 @@ from agent_cascade.api_router import APIRouter, APIEndpoint
 @pytest.fixture(autouse=True)
 def _disable_sanity_probe():
     """Disable the sanity probe for these tests — they use fake endpoints and test
-    slot/semaphore/rate-limit logic, not endpoint validation."""
-    with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain, **kw: chain):
-        yield
+    slot/semaphore/rate-limit logic, not endpoint validation.
+
+    The LAZY per-endpoint probe (inside call_with_fallback's endpoint loop) is gated by
+    the module-level SANITY_PROBE_ENABLED flag; disabling it keeps the unreachable fake
+    endpoints in the chain. The pre_validate_endpoint_chain stub is kept for any residual
+    caller of that method (call_with_fallback no longer invokes it eagerly)."""
+    import agent_cascade.api_router_pkg.router as router_mod
+    orig = router_mod.SANITY_PROBE_ENABLED
+    router_mod.SANITY_PROBE_ENABLED = False
+    try:
+        with patch.object(APIRouter, 'pre_validate_endpoint_chain', lambda self, chain, **kw: chain):
+            yield
+    finally:
+        router_mod.SANITY_PROBE_ENABLED = orig
 
 
 @pytest.fixture

@@ -406,8 +406,17 @@ class TestD1FailFast:
         """After the window elapses exactly one probe fires; success closes the breaker."""
         import agent_cascade.api_router_pkg.router as router_mod
         orig_window = router_mod.BREAKER_BASE_WINDOW_SECONDS
+        orig_probe_enabled = router_mod.SANITY_PROBE_ENABLED
         orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
         router_mod.BREAKER_BASE_WINDOW_SECONDS = 0.5   # module global, read at trip time
+        # Disable the Fix D lazy sanity probe: this test verifies the BREAKER's
+        # single-probe recovery with exact call semantics on a fake endpoint
+        # (http://default-api — unresolvable). The lazy probe would fire a REAL
+        # GET /models at the default endpoint just before trying it, fail (no such
+        # host), and skip the endpoint — breaking the busy-error trip/recovery
+        # sequence this test exercises. Probe behavior is covered by
+        # tests/test_sanity_probe.py and tests/test_probe_trigger.py.
+        router_mod.SANITY_PROBE_ENABLED = False
         try:
             calls = []
             def fn(cfg, *a, **k):
@@ -421,6 +430,7 @@ class TestD1FailFast:
             assert normalize_api_base('http://default-api') not in router._server_breakers
         finally:
             router_mod.BREAKER_BASE_WINDOW_SECONDS = orig_window
+            router_mod.SANITY_PROBE_ENABLED = orig_probe_enabled
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
 
 

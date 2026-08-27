@@ -294,6 +294,99 @@ class TestWalkUntilLive:
 
 
 # ============================================================================
+# Lazy probe: a live primary costs ZERO probes to its (dead) fallbacks
+# ============================================================================
+
+class TestLazyProbeSkipsUnreachedFallbacks:
+    """The WinError 10055 fix: with chain [healthy_primary, dead_a, dead_b], the eager
+    pre_validate_endpoint_chain used to probe dead_a AND dead_b on EVERY turn — even though
+    the healthy primary is committed and the fallbacks are never reached. Lazy probing must
+    touch ONLY the endpoint actually tried."""
+
+    def test_dead_fallbacks_never_probed_when_primary_live(self, router):
+        """Chain [healthy, dead_a, dead_b]: only the healthy primary is probed (turn 1) or
+        fast-pathed (turn 2+); dead_a and dead_b receive ZERO requests of any kind."""
+        head = _StubServer({'probes': 0, 'posts': 0, 'timeout': False})
+        head.start()
+        try:
+            # Two dead endpoints: closed ports — nothing listening.
+            dead_a_base = f'http://127.0.0.1:{_free_port()}/v1'
+            dead_b_base = f'http://127.0.0.1:{_free_port()}/v1'
+
+            _add_endpoint(router, 'head', head.base, model='head-model', concurrency_limit=-1)
+            _add_endpoint(router, 'dead_a', dead_a_base, model='dead-a-model', concurrency_limit=-1)
+            _add_endpoint(router, 'dead_b', dead_b_base, model='dead-b-model', concurrency_limit=-1)
+            eps = router.list_endpoints()
+            ids = [next(e.id for e in eps if e.api_base == b)
+                   for b in (head.base, dead_a_base, dead_b_base)]
+            router.set_agent_priorities('coder', ids)
+
+            # Turn 1 — fresh acquisition: the healthy head is probed once and used. The two
+            # dead fallbacks are never reached → they must receive ZERO requests (the eager
+            # probe would have fired a GET /models at each of them).
+            r1 = router.call_with_fallback('coder', _http_call, agent_instance_name='lazyA')
+            assert r1 == 'head-model'
+            assert head.ref['probes'] == 1, "fresh acquisition must probe the live primary once"
+            assert head.ref['posts'] == 1
+
+            # Turn 2 — same instance, primary still committed: NO probes at all (fast path).
+            r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='lazyA')
+            assert r2 == 'head-model'
+            assert head.ref['probes'] == 1, "committed live primary must not be re-probed"
+
+            # The invariant: the dead fallbacks were NEVER touched. A probe failure records a
+            # cooldown entry — its absence proves each dead endpoint was never probed (a closed
+            # port cannot be reached by any other request path).
+            from agent_cascade.api_router_pkg.normalization import normalize_api_base
+            with router._lock:
+                for base, model in ((dead_a_base, 'dead-a-model'), (dead_b_base, 'dead-b-model')):
+                    assert (normalize_api_base(base), model) not in router._endpoint_failure_times, \
+                        f"dead fallback {base} must never be probed while the primary is live"
+        finally:
+            head.stop()
+
+    def test_dead_fallbacks_never_probed_when_primary_live_multi_turn(self, router):
+        """Repeated turns on a live primary: total probe count stays at exactly 1 and the dead
+        fallbacks' bases never appear in the cooldown store (never probed)."""
+        head = _StubServer({'probes': 0, 'posts': 0, 'timeout': False})
+        head.start()
+        try:
+            dead_a_base = f'http://127.0.0.1:{_free_port()}/v1'
+            dead_b_base = f'http://127.0.0.1:{_free_port()}/v1'
+
+            _add_endpoint(router, 'head', head.base, model='head-model', concurrency_limit=-1)
+            _add_endpoint(router, 'dead_a', dead_a_base, model='dead-a-model', concurrency_limit=-1)
+            _add_endpoint(router, 'dead_b', dead_b_base, model='dead-b-model', concurrency_limit=-1)
+            eps = router.list_endpoints()
+            ids = [next(e.id for e in eps if e.api_base == b)
+                   for b in (head.base, dead_a_base, dead_b_base)]
+            router.set_agent_priorities('coder', ids)
+
+            from agent_cascade.api_router_pkg.normalization import normalize_api_base
+            dead_keys = {
+                (normalize_api_base(dead_a_base), 'dead-a-model'),
+                (normalize_api_base(dead_b_base), 'dead-b-model'),
+            }
+
+            for turn in range(3):
+                r = router.call_with_fallback('coder', _http_call, agent_instance_name='lazyB')
+                assert r == 'head-model'
+
+            # Exactly ONE probe fired across all turns (turn 1); turns 2-3 are fast-pathed.
+            assert head.ref['probes'] == 1, \
+                f"live primary must be probed exactly once across {3} turns, got {head.ref['probes']}"
+            assert head.ref['posts'] == 3
+
+            # Neither dead fallback was ever probed → no cooldown entries for them.
+            with router._lock:
+                probed_dead = [k for k in dead_keys if k in router._endpoint_failure_times]
+            assert not probed_dead, \
+                f"dead fallbacks must never be probed while the primary is live: {probed_dead}"
+        finally:
+            head.stop()
+
+
+# ============================================================================
 # Timeout → slot release → next acquisition re-probes from the top
 # ============================================================================
 

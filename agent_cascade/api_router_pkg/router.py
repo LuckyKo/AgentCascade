@@ -1687,36 +1687,16 @@ class APIRouter:
         chain = self.get_endpoint_chain(
             agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
         )
-        # ── Fix D: Pre-allocation sanity probe (lock is NOT held here — safe for network).
-        #    Skipped when no agent_type is given (no priority chain to validate), and when
-        #    EVERY endpoint in the chain sits on a breaker-open physical server — that is the
-        #    D1 "all busy" case, where the fail-fast scan below + ServerBusyError degradation
-        #    own the outcome. Probing there would add latency (up to one probe per endpoint)
-        #    and its 503s carry the SERVER_BUSY_LOADING signature (Change B), tripping/
-        #    re-growing breakers on a base that is already gated — corrupting single-probe
-        #    recovery. Mixed chains (some busy, some not) still probe: pre_validate_endpoint_chain
-        #    passes breaker-open endpoints through untouched and only probes the rest. ──
-        if SANITY_PROBE_ENABLED and agent_type and chain:
-            _all_breaker_open = all(
-                self._breaker_is_open(cfg.get('api_base') or cfg.get('model_server', 'unknown'))
-                for cfg in chain
-            )
-            if not _all_breaker_open:
-                try:
-                    # instance_name threads the caller's identity so pre_validate can fast-path
-                    # a LIVE connection this instance already holds (no re-probe across turns /
-                    # engine retries of a still-live endpoint — Part 2 flood fix).
-                    chain = self.pre_validate_endpoint_chain(chain, instance_name=_inst_name)
-                except RuntimeError as e:
-                    # All endpoints failed validation. Log the detail, then let the endpoint
-                    # loop below run so the per-endpoint breaker/consult machinery (D1 wait,
-                    # ServerBusyError degradation, exhaustion error) still applies — same as
-                    # if the chain had been returned unvalidated. The probe's own per-endpoint
-                    # failures are already logged by pre_validate_endpoint_chain.
-                    logger.error(
-                        f"[APIRouter] Sanity probe validation failed for '{agent_type}': {e} "
-                        f"Continuing with the original chain so breaker/fallback machinery applies."
-                    )
+        # ── Fix D: Pre-allocation sanity probe — LAZY (per-endpoint, inside the loop below).
+        #    Each endpoint is probed at most once, JUST BEFORE it is tried (see the lazy
+        #    gate at the top of the for-loop). This fixes the WinError 10055 socket-buffer
+        #    exhaustion: with the former eager pre_validate_endpoint_chain call here, a chain
+        #    like [healthy_primary, dead_a, dead_b] probed dead_a AND dead_b on EVERY turn —
+        #    even though the healthy primary is committed and the fallbacks are never reached.
+        #    Lazy probing means a live primary costs ZERO probe HTTP to its fallbacks. The
+        #    per-endpoint gates (breaker-open skip, committed fast-path, blacklist skip) apply
+        #    identically to each endpoint; pre_validate_endpoint_chain is kept for callers that
+        #    want whole-chain validation. ──
         # D1 fail-fast scan: use the NON-mutating _breaker_is_open (not _breaker_should_skip).
         # The pre-loop scan must NOT claim the single half-open probe — doing so would wedge
         # recovery (the probe is claimed here, then the endpoint loop re-consults, sees
@@ -1752,6 +1732,92 @@ class APIRouter:
         all_errors = []
 
         for cfg_idx, llm_cfg in enumerate(chain):
+            # ── Lazy sanity probe (Fix D, lazy variant): validate THIS endpoint only, just
+            # before trying it. Mirrors the per-endpoint gate of pre_validate_endpoint_chain,
+            # but runs for the CURRENT endpoint alone — a live committed primary therefore
+            # costs ZERO probe HTTP to its fallbacks (WinError 10055 fix). Gates in priority
+            # order: breaker-open → skip without probing (breaker machinery owns it);
+            # committed live + not blacklisted → fast-path, no probe; blacklisted → skip
+            # without probing; else probe once — pass proceeds to the call, fail records a
+            # cooldown and moves on. Cooldown-filtered endpoints never reach here (filtered by
+            # get_endpoint_chain); the probe-failure path below still sets one for the next
+            # acquisition. ──
+            if SANITY_PROBE_ENABLED and agent_type:
+                _probe_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', '')
+                _probe_key = (normalize_api_base(_probe_base), llm_cfg.get('model', ''))
+                _now_probe = time.time()
+
+                if self._breaker_is_open(_probe_base):
+                    logger.debug(
+                        f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                        f"(server breaker open — leaving to breaker/fallback machinery)"
+                    )
+                else:
+                    if _inst_name:
+                        with self._lock:
+                            _is_live = self._instance_committed_endpoint.get(_inst_name) == _probe_key
+                            _blacklist = getattr(self, '_endpoint_blacklist', {})
+                            _blacklisted = _probe_key in _blacklist and _blacklist[_probe_key] > _now_probe
+                    else:
+                        with self._lock:
+                            _blacklist = getattr(self, '_endpoint_blacklist', {})
+                            _blacklisted = _probe_key in _blacklist and _blacklist[_probe_key] > _now_probe
+                        _is_live = False
+
+                    if _is_live and not _blacklisted:
+                        logger.debug(
+                            f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                            f"(instance '{_inst_name}' holds a live connection — fast path)"
+                        )
+                    elif _blacklisted:
+                        logger.debug(
+                            f"[APIRouter] Skipping endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                            f"(blacklisted — no sanity probe)"
+                        )
+                        continue
+                    else:
+                        # Network probe (NO lock held — safe for I/O) — at most ONE per fresh
+                        # acquisition of this endpoint.
+                        _probe_ok = self._sanity_probe(llm_cfg)
+
+                        # Re-consult the breaker AFTER the probe: if the base tripped OPEN during
+                        # the probe (e.g. a busy 503 carrying the SERVER_BUSY_LOADING signature),
+                        # do NOT drop it — leave it to the breaker machinery below (the consult
+                        # will skip or claim the single probe). Mirrors pre_validate_endpoint_chain.
+                        if _probe_ok and self._breaker_is_open(_probe_base):
+                            logger.debug(
+                                f"[APIRouter] Keeping '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                f"(server breaker tripped open during probe — leaving to breaker machinery)"
+                            )
+                        elif _probe_ok:
+                            # Clear the Fix B1 blacklist entry on recovery (defensive — attribute
+                            # may not exist until the parallel B1 workstream lands).
+                            with self._lock:
+                                _blacklist = getattr(self, '_endpoint_blacklist', None)
+                                if _blacklist is not None and _probe_key in _blacklist:
+                                    del _blacklist[_probe_key]
+                                    _failures = getattr(self, '_endpoint_deterministic_failures', None)
+                                    if _failures is not None:
+                                        _failures.pop(_probe_key, None)
+                            logger.info(
+                                f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                f"passed sanity probe."
+                            )
+                        else:
+                            # Probe failure = the endpoint is unreachable RIGHT NOW. Record it
+                            # into the cooldown so get_endpoint_chain filters it out on the next
+                            # acquisition — otherwise an engine retry of this same fresh
+                            # acquisition would immediately re-probe the just-failed endpoint.
+                            if ENDPOINT_COOLDOWN_SECONDS > 0:
+                                with self._lock:
+                                    self._cleanup_stale_failure_records(time.time())
+                                    self._endpoint_failure_times[_probe_key] = time.time()
+                            logger.info(
+                                f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s)."
+                            )
+                            continue
+
             # Default per-endpoint retry count from policy. Endpoint config (max_retries field)
             # overrides this — explicit endpoint max_retries always takes precedence.
             max_retries = self.policy.endpoint_max_retries
