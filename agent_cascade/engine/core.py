@@ -2184,13 +2184,19 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         if self._check_for_tool_calls_in_output(instance, response):
             return True  # Tool was called — continue the loop (tool result will be in next turn)
 
-        # 2. Detect pure thinking turn (stalled agent)
-        if self._detect_pure_thinking_turn(instance, response):
-            return False  # Pure reasoning detected — break out of loop (agent stalled)
-
-        # 3. Transition to SLEEPING if async tools pending
+        # 2. Transition to SLEEPING if async tools pending
+        #    A pending background tool is real outstanding work and must take priority
+        #    over the stall detector below — otherwise a parent that dispatched an async
+        #    child then emitted a reasoning-only post-turn would wrongly break to IDLE
+        #    before it could sleep, losing the child's later result.
         if self._transition_to_sleeping_if_pending(instance, inst_name):
             return True  # Continue loop → hits SLEEPING guard at top
+
+        # 3. Detect pure thinking turn (stalled agent)
+        #    Only reached when there is NO pending async work, so a genuinely stuck
+        #    agent (no outstanding tools) still breaks out of the loop here.
+        if self._detect_pure_thinking_turn(instance, response):
+            return False  # Pure reasoning detected — break out of loop (agent stalled)
 
         # 4. Drain post-generation messages (safety drain)
         if self._drain_post_generation_messages(
