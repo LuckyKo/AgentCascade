@@ -337,29 +337,45 @@ class LifecycleMixin:
                 inst.terminate()
 
         # Wake SLEEPING parent when async child is dismissed (Bug41 fix).
+        # Fix B (idle-wakeup): also relaunch an IDLE parent — its run() thread has
+        # already exited, so enqueue+notify alone would leave the dismissal result
+        # unprocessed (mirrors the user-message path's enqueue + relaunch).
         if inst and inst.parent_instance:
             parent_name = inst.parent_instance
             parent = self.get_instance(parent_name)
             if parent:
                 from agent_cascade.agent_instance import AgentState
                 with parent._state_lock:
-                    parent_is_sleeping = (parent.state == AgentState.SLEEPING)
+                    parent_state = parent.state
+                parent_is_sleeping = (parent_state == AgentState.SLEEPING)
+                parent_is_idle = (parent_state == AgentState.IDLE)
 
-                if parent_is_sleeping and hasattr(self, '_async_registry'):
+                if (parent_is_sleeping or parent_is_idle) and hasattr(self, '_async_registry'):
                     # Look up the async registration for this child
                     parent_info = self._async_registry.get_parent_for_child(instance_name)
                     if parent_info:
                         _, func_id = parent_info
                         result_msg = f"[Agent '{instance_name}' Dismissed]:\nAgent was dismissed before completing."
                         try:
-                            # Enqueue the dismissal result to wake up the sleeping parent
+                            # Enqueue the dismissal result to wake up the parent
                             self.enqueue_message(parent_name, result_msg)
                             logger.debug(
                                 f"[ASYNC_WAKEUP] Enqueued dismissal result for child '{instance_name}' "
-                                f"to wake SLEEPING parent '{parent_name}'"
+                                f"to wake {parent_state.name} parent '{parent_name}'"
                             )
                         except Exception as e:
                             logger.debug(f"Failed to enqueue dismissal result for {instance_name}: {e}")
+                        # Fix B: a SLEEPING parent's live poll thread drains the queue
+                        # itself — only an IDLE parent needs a relaunch. No-op in all
+                        # other cases (stopped pool / terminated instance / non-IDLE).
+                        if parent_is_idle:
+                            try:
+                                from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
+                                relaunch_idle_agent(self, parent_name)
+                            except Exception as e:
+                                logger.debug(
+                                    f"[ASYNC_WAKEUP] Idle relaunch failed for parent '{parent_name}' (non-critical): {e}"
+                                )
                         # Clean up the child mapping since this instance is being removed
                         self._async_registry.remove_child_mapping(instance_name)
 

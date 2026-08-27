@@ -232,7 +232,20 @@ class AsyncToolRegistry:
                         logger.error(
                             f"[AsyncToolRegistry] Failed to enqueue result for {entry.agent_instance_name}: {e}"
                         )
-    
+            # Fix B (idle-wakeup): an IDLE parent whose run() thread already exited
+            # never drains its queue — relaunch it, mirroring the user-message path.
+            # Enqueue happens first (above) so the relaunched run() finds the result
+            # on its first drain. The helper is a no-op unless the instance is IDLE
+            # and not stopped/terminated; called outside _lock (it spawns a thread).
+            if self.pool:
+                try:
+                    from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
+                    relaunch_idle_agent(self.pool, entry.agent_instance_name)
+                except Exception as e:
+                    logger.debug(
+                        f"[AsyncToolRegistry] Idle relaunch failed for {entry.agent_instance_name} (non-critical): {e}"
+                    )
+
     def has_pending(self, instance_name: str) -> bool:
         """Check if any background tools are still pending for this instance.
         
