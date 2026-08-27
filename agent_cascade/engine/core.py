@@ -958,10 +958,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         """
         inst_name = instance.instance_name
 
-        # Restore state if agent has a saved label.
-        # Clear label on failure so we don't retry stale state.
-        from agent_cascade.state_ops import restore_instance_state
-        restore_instance_state(instance)
+        # Restore KV state ONLY if this instance currently holds a concurrency slot,
+        # and target the endpoint it actually holds — never the stale
+        # _last_endpoint_config (which may point at a shared conc=0 autoloader we no
+        # longer own; loading there would auto-evict a live sibling's resident model).
+        # The FIFO guarantees single-holder for conc=0, so restoring while holding the
+        # slot can never evict another agent. A missed restore is far better than a
+        # wrongful eviction — any resolution failure skips the restore.
+        if instance._slot_release is None:
+            logger.debug("[STATE_RESTORE_SKIP] %s holds no slot — skipping state restore", inst_name)
+        else:
+            self._restore_held_slot_state(instance, inst_name)
 
         with instance._compression_lock:
             conv = list(instance.conversation)
@@ -1263,9 +1270,56 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     )
                     ok = False
                 if ok and instance is not None:
-                    from agent_cascade.state_ops import restore_instance_state
-                    restore_instance_state(instance)
+                    # Gate on ACTUAL slot ownership (ok=True also covers the no-slot /
+                    # unlimited case where _slot_release is None), and target the held
+                    # endpoint — never the stale _last_endpoint_config (eviction safety,
+                    # same rationale as the _setup_turn gate).
+                    if instance._slot_release is not None:
+                        self._restore_held_slot_state(instance, inst_name)
         return True  # Compression cleared — safe to continue
+
+    def _resolve_held_endpoint(self, instance: AgentInstance) -> Optional[dict]:
+        """Resolve the endpoint the instance currently holds a slot on.
+
+        Returns {'api_base', 'model'} for the cursor-aware effective endpoint (the
+        same resolution used at slot acquisition), or None if it cannot be resolved.
+        Used by state-restore call sites so they only ever load onto an owned
+        endpoint — loading a stale _last_endpoint_config on a shared conc=0 autoloader
+        would auto-evict a live sibling's resident model.
+        """
+        router = self.pool.api_router if hasattr(self.pool, 'api_router') else None
+        if not router or not hasattr(router, 'get_effective_slot_info'):
+            return None
+        slot_info = router.get_effective_slot_info(
+            instance.agent_class, instance_name=instance.instance_name
+        ) or {}
+        api_base = slot_info.get('api_base') or ''
+        # get_effective_slot_info carries no model — take it from the rotated chain head.
+        chain = router.get_endpoint_chain(
+            instance.agent_class, instance_name=instance.instance_name
+        ) or []
+        model = (chain[0].get('model') if chain else '') or ''
+        if not api_base or not model:
+            return None
+        return {'api_base': api_base, 'model': model}
+
+    def _restore_held_slot_state(self, instance: AgentInstance, inst_name: str) -> bool:
+        """Restore KV state to the endpoint the instance currently holds a slot on.
+
+        Defensive by design: any resolution failure skips the restore (a missed
+        restore is far better than a wrongful eviction of a sibling's model).
+        """
+        try:
+            held_cfg = self._resolve_held_endpoint(instance)
+            if not held_cfg:
+                logger.debug("[STATE_RESTORE_SKIP] %s — could not resolve held endpoint", inst_name)
+                return False
+            from agent_cascade.state_ops import restore_instance_state
+            return restore_instance_state(instance, held_endpoint_cfg=held_cfg)
+        except Exception as e:
+            # Never evict on a resolution error — skip the restore.
+            logger.debug("[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s", inst_name, e)
+            return False
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
         """Check if we should skip the LLM call due to stop conditions.
@@ -2441,9 +2495,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             if self._is_terminal_stop(inst_name):
                 return SleepAction.BREAK_LOOP, None
 
-            # Restore KV cache after slot acquired, before resuming execution
-            from agent_cascade.state_ops import restore_instance_state
-            restore_instance_state(instance)
+            # Restore KV cache after slot acquired, before resuming execution —
+            # gated on actual slot ownership and targeting the held endpoint only
+            # (eviction safety; _slot_release is None for unlimited/no-slot endpoints).
+            if instance._slot_release is not None:
+                self._restore_held_slot_state(instance, inst_name)
 
             # Compression-halt after wakeup: proceed to main loop (Site 3 will wait if needed)
 
@@ -2537,9 +2593,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # Re-acquire concurrency slot after waking from SLEEPING
                 self._acquire_slot_with_logging(instance, "after_stable_drain")
 
-                # Restore KV cache after slot acquired, before resuming execution
-                from agent_cascade.state_ops import restore_instance_state
-                restore_instance_state(instance)
+                # Restore KV cache after slot acquired, before resuming execution —
+                # gated on actual slot ownership and targeting the held endpoint only
+                # (eviction safety; _slot_release is None for unlimited/no-slot endpoints).
+                if instance._slot_release is not None:
+                    self._restore_held_slot_state(instance, inst_name)
 
                 # Exit if stopped after re-acquiring slot in sleep loop
                 if self._is_terminal_stop(inst_name):

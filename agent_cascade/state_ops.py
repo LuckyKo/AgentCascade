@@ -71,7 +71,8 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
         return False
 
 
-def restore_instance_state(instance: 'AgentInstance') -> bool:
+def restore_instance_state(instance: 'AgentInstance',
+                           held_endpoint_cfg: Optional[dict] = None) -> bool:
     """Restore KV cache state for an instance.
 
     Reads the label and endpoint config from the instance under lock, uses cached
@@ -80,6 +81,14 @@ def restore_instance_state(instance: 'AgentInstance') -> bool:
 
     Args:
         instance: AgentInstance to restore state for.
+        held_endpoint_cfg: Optional {'api_base', 'model'} dict of the endpoint the
+            instance CURRENTLY holds a slot on. When provided, it is used as the
+            restore target INSTEAD of ``instance._last_endpoint_config`` — which may
+            be stale (e.g. pointing at a shared conc=0 autoloader the agent no longer
+            owns). Restoring to an endpoint we don't hold would make the autoloader
+            load the model and auto-evict a live sibling's resident model, so callers
+            that own a slot must pass the held endpoint. When None (backward-compat
+            path), falls back to ``_last_endpoint_config`` as before.
 
     Returns:
         True if state was restored successfully, False otherwise.
@@ -94,6 +103,11 @@ def restore_instance_state(instance: 'AgentInstance') -> bool:
         if not label:
             logger.debug("No state label to restore for %s", instance.instance_name)
             return False
+
+        # Prefer the endpoint the caller confirmed we currently hold a slot on.
+        # This is the eviction-safety gate: only ever load onto an owned endpoint.
+        if held_endpoint_cfg and isinstance(held_endpoint_cfg, dict):
+            endpoint_cfg = held_endpoint_cfg
 
         if not endpoint_cfg or not isinstance(endpoint_cfg, dict):
             logger.debug("No cached endpoint config for %s", instance.instance_name)

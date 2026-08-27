@@ -2510,7 +2510,12 @@ class APIRouter:
             # ── Autoloader KV guard restore (plan §3.10 D1-3b): put the saved KV state
             # back after the loop so the agent's conversation KV survives the cold
             # caption request — even when a caption exception escaped the per-image try.
-            if _kv_saved:
+            if _kv_saved and _caption_instance is not None \
+                    and getattr(_caption_instance, '_slot_release', None) is not None:
+                # Slot-ownership gate: the side-call slot sync above guarantees the
+                # instance holds the shared conc=0 slot for this restore — restoring to
+                # its stale _last_endpoint_config could instead load onto an endpoint we
+                # don't own and evict a live sibling's resident model. Skip if no slot.
                 try:
                     from agent_cascade.state_ops import restore_instance_state
                     restore_instance_state(_caption_instance)

@@ -106,16 +106,18 @@ class TestBug1SlotReleaseOnHalt:
             # Halt must already be cleared for the re-acquire to proceed.
             assert not pool._compression_halted
             if reacquire_results.pop(0):
+                # Mirror real reacquire_for: set _slot_release/_slot_key on success.
                 instance_arg._slot_release = tracker.release
                 instance_arg._slot_key = "_shared_sequential_slot_"
                 tracker.acquired = True
             return reacquire_results.insert(0, True) or True
 
+        # restore is now invoked as restore_instance_state(instance, held_endpoint_cfg=...)
         with patch.object(engine, "reacquire_for", side_effect=fake_reacquire), \
              patch("agent_cascade.state_ops.save_instance_state",
                    side_effect=lambda i: save_calls.append(i.instance_name)), \
              patch("agent_cascade.state_ops.restore_instance_state",
-                   side_effect=lambda i: restore_calls.append(i.instance_name)):
+                   side_effect=lambda i, **kw: restore_calls.append(i.instance_name)):
             suspend(pool)
             # Resume from another thread after a tick, mirroring Compressor completion.
             threading.Timer(0.05, lambda: resume(pool)).start()
