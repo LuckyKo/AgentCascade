@@ -679,14 +679,23 @@ class AgentInstanceLogger:
                     )
                     return False
 
-                # Identify the LAST marker in JSONL — this should correspond to M7 (newest kept).
-                # All markers before it are candidates for consolidation.
-                last_jsonl_marker_idx = -1
-                for i in range(len(existing_msgs) - 1, -1, -1):
-                    content = existing_msgs[i].get('content', '')
-                    if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                        last_jsonl_marker_idx = i
+                # Identify which marker in JSONL corresponds to the last (newest) marker in pool state.
+                # The newest L1 marker may not yet be in the JSONL (written later by reset_history).
+                last_pool_marker_content = None
+                for msg in reversed(new_pool_state):
+                    role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                    if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                        last_pool_marker_content = content
                         break
+
+                last_jsonl_marker_idx = -1
+                if last_pool_marker_content is not None:
+                    for i in range(len(existing_msgs) - 1, -1, -1):
+                        file_content = existing_msgs[i].get('content', '')
+                        if isinstance(file_content, str) and file_content == last_pool_marker_content:
+                            last_jsonl_marker_idx = i
+                            break
 
                 # Use shared consolidation filtering strategy
                 result_msgs, markers_removed = filter_jsonl_for_consolidation(

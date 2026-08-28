@@ -489,6 +489,59 @@ Safety Net (handler.py, default 100 compressions):
 
 **On Session Reload (crash recovery):** The system performs a single forward pass through the JSONL file, finds all compression markers, stacks them in order, and takes the tail after the last marker. This produces the same working set that would exist in memory — no backward scanning or complex reconstruction needed.
 
+#### 5.2a Hierarchical Consolidation (L2)
+
+When an agent accumulates many compression markers over a long session, the markers themselves become a token burden. L2 consolidation merges older markers into a single higher-level summary, reducing marker count while preserving all raw message history in the JSONL log.
+
+**Trigger:** After every successful `compress_context()` call (L1), the system checks the agent's current marker count. If it meets or exceeds `COMPRESSION_CONSOLIDATION_THRESHOLD` (default **8**, env: `QWEN_AGENT_COMPRESSION_CONSOLIDATION_THRESHOLD`), consolidation is triggered automatically. Consolidation failure is **non-fatal** — normal compression has already succeeded; markers will be consolidated on the next cycle.
+
+**Strategy:** All markers except the newest are consolidated into one L2 marker. The newest marker is preserved because it represents the most recent summary boundary and may reference context not yet superseded.
+
+```
+Before consolidation (8 markers):
+  Pool:  [SYS][U0][M0][raw...][M1][raw...][M2][raw...][M3][raw...][M4][raw...][M5][raw...][M6][raw...][M7][tail...]
+  JSONL: [SYS][U0][raw...][M0][raw...][M1][raw...][M2][raw...][M3][raw...][M4][raw...][M5][raw...][M6][raw...][M7][tail...]
+
+After consolidation:
+  Pool:  [SYS][U0][L2(M0..M6)][raw...][M7][tail...]
+  JSONL: [SYS][U0][raw...][L2(M0..M6)][raw...][M7][tail...]
+                          ↑ M1..M6 marker lines removed; raw segments between them preserved
+```
+
+**Pool mutation (authoritative):**
+1. Extract summary text from each of the N-1 markers being consolidated (parsing `<context_summary>` tags). If no valid summaries are extracted, consolidation aborts entirely (no partial writes).
+2. Token-size guard: if total summary tokens exceed `COMPRESSION_MAX_CONSOLIDATION_TOKENS` (default **100,000**, env: `QWEN_AGENT_COMPRESSION_MAX_CONSOLIDATION_TOKENS`), abort to prevent compressor failure.
+3. Invoke the Compressor agent with a consolidation-specific prompt (summarize summaries, not raw messages; keep chronological/important events, drop details).
+4. Build new L2 marker via `build_consolidation_marker_message()` — header reads `"L2, N summaries consolidated"`.
+5. Under `_compression_lock`: re-read pool state (defensive against concurrent changes), re-verify threshold still met, then rebuild conversation:
+   - Replace the **first** consolidated marker's position with the new L2 marker.
+   - Remove all **intermediate** markers (positions 1..N-2 of the consolidation set).
+   - **Preserve all raw message segments** between markers — only marker messages are removed/replaced.
+6. Update via `rebuild_conversation()` (atomic).
+
+**JSONL sync (non-fatal, best-effort):**
+After pool mutation succeeds, `_consolidate_markers_in_jsonl()` is called (outside the compression lock):
+1. Reads the full JSONL file from disk.
+2. Determines which marker in the JSONL corresponds to the newest marker in the **pool state** by matching content. The newest L1 marker may not yet be in the JSONL (it will be appended later by `reset_history`), so this step can yield "not found."
+3. Applies `filter_jsonl_for_consolidation()`:
+   - If the newest pool marker IS in the file: first marker before it → **replaced** with the new L2 marker; intermediate markers (M1..M6) → **removed**; the matching last marker (M7) → **kept as-is**.
+   - If the newest pool marker is NOT yet in the file: ALL markers currently in the file are consolidation candidates — first → replaced with L2, rest → removed. The newest L1 will be appended later by `reset_history`.
+   - All non-marker (raw) messages → **always preserved** in both cases.
+4. Rewrites the entire JSONL file atomically (single write under `_write_lock`).
+5. Updates internal logger tracking to match new pool state.
+
+If JSONL sync fails, a warning is logged: "pool is authoritative; JSONL will be corrected on next compression." The pool remains correct regardless.
+
+**Recursion guard:** A module-level `_consolidating_agents` set (protected by `_consolidation_lock`) prevents re-entry. If `compress_context()` is called for an agent already undergoing consolidation, the consolidation step is skipped. The guard is cleared in a `finally` block.
+
+**L2 markers are still markers:** The L2 marker starts with `COMPRESSION_MARKER` and contains `<context_summary>` tags, so it counts toward the threshold on future consolidations. This means repeated long sessions can produce L2→L3-style consolidation (the header remains "L2" cosmetically; there is no depth tracking yet).
+
+**Invariants:**
+- Raw messages are **never deleted** from JSONL by consolidation — only redundant marker lines are removed.
+- The tail past the last (newest) marker is **never touched**.
+- Pool and JSONL may diverge in message count (pool has fewer due to discarded raw segments from L1; JSONL retains full history), but the tail-past-last-marker invariant holds in both.
+- Consolidation reduces marker count from N to 2 (one L2 + one kept newest), far below threshold — no re-trigger until 6 more L1 compressions occur.
+
 ### 5.3 Loop Detection & Recovery
 
 Agent Cascade uses two complementary loop detection systems: one operates at the turn level (inter-turn), and the other operates in real time during LLM streaming (intra-generation).
@@ -1068,6 +1121,8 @@ Clients handle both types transparently — full snapshots replace the current v
 | `compression_force_threshold` | 95.0 | Force compression at X% token usage |
 | `compression_warning_threshold` | 85.0 | Warn agent at X% token usage |
 | `compression_timeout` | 120 | Max seconds for compression to complete |
+| `compression_consolidation_threshold` | 8 | Trigger L2 consolidation when marker count reaches this value |
+| `compression_max_consolidation_tokens` | 100,000 | Abort consolidation if input summaries exceed this token count |
 | `security_check_timeout` | 120 | Max seconds for Security Advisor response |
 | `max_auto_rollbacks` | 3 | Max loop recovery retries before escalation |
 

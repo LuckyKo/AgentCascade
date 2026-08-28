@@ -62,15 +62,22 @@ def filter_jsonl_for_consolidation(
 ) -> Tuple[List[dict], int]:
     """Filter JSONL messages for hierarchical consolidation.
 
-    Strategy (aligns with pool consolidation): keep the last marker in JSONL
-    (newest, M7 equivalent), replace the first marker before it with the new
-    L2 consolidated marker, and remove all intermediate redundant markers (M1..M6).
+    Strategy (aligns with pool consolidation): keep the marker in JSONL that matches
+    the newest marker in pool state (M7 equivalent), replace the first marker before it
+    with the new L2 consolidated marker, and remove all intermediate redundant markers.
     All raw (non-marker) messages are preserved.
+
+    When ``last_marker_idx`` is -1, the newest L1 marker has not yet been written to the
+    JSONL file (it will be appended later by ``reset_history``). In that case ALL markers
+    currently in the file are consolidation candidates: the first is replaced with the new
+    L2 marker and all others are skipped — no file marker is kept as-is.
 
     Args:
         existing_msgs: Current messages in JSONL (as dicts).
         new_marker_msg: The new L2 consolidated marker message dict to insert.
-        last_marker_idx: Index of the last marker in existing_msgs (always kept).
+        last_marker_idx: Index of the marker in existing_msgs that matches the newest
+            marker in pool state (always kept), or -1 if that marker is not yet in the file
+            (all file markers are then consolidation candidates).
 
     Returns:
         Tuple of (filtered_messages, markers_removed_count).
@@ -85,8 +92,10 @@ def filter_jsonl_for_consolidation(
         content = msg.get('content', '')
 
         if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-            # This is the last marker in JSONL (M7 equivalent) — always keep it
-            if i == last_marker_idx:
+            # This is the marker in JSONL matching pool's newest — always keep it.
+            # When last_marker_idx == -1 (newest L1 not yet written to file), no marker
+            # matches this branch, so all markers flow through the replace/skip path below.
+            if last_marker_idx >= 0 and i == last_marker_idx:
                 result_msgs.append(msg)
             elif not new_marker_inserted:
                 # First marker before last — replace with new L2 marker
