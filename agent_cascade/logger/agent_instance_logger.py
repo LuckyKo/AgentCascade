@@ -221,6 +221,34 @@ class AgentInstanceLogger:
             logger.error(f"Failed to append to agent log {self.log_path}: {e}")
             self._file_handle = None  # Invalidate so _ensure_file reopens clean next time
 
+    def _atomic_write_lines(self, lines: List[str]) -> bool:
+        """Atomically replace the log file with `lines`.
+
+        Writes to a temp file in the same directory, then os.replace() onto the target.
+        A crash or disk-full mid-write leaves the previous file intact (no truncation).
+        Returns True on success, False on error.
+        """
+        # Unique per-call temp name (pid + thread id + counter) to avoid cross-thread
+        # collisions when multiple threads rewrite the same file concurrently.
+        import itertools
+        if not hasattr(self, '_atomic_tmp_counter'):
+            self._atomic_tmp_counter = itertools.count()
+        tmp_path = f"{self.log_path}.{os.getpid()}.{threading.get_ident()}.{next(self._atomic_tmp_counter)}.tmp"
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.log_path)
+            return True
+        except Exception as e:
+            logger.error(f"Atomic write failed for {self.log_path}: {e}")
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
+
     def _initial_save(self):
         """Write metadata as the first line. Guard against duplicate calls,
         and also check if file already has metadata from another logger instance.
@@ -461,7 +489,7 @@ class AgentInstanceLogger:
 
     # ── History reset / rewrite ────────────────────────────────────────────────────
 
-    def rewrite_log_with_history(self, new_history: List[Any]) -> bool:
+    def rewrite_log_with_history(self, new_history: List[Any], allow_shrink: bool = False) -> bool:
         """Rewrite the log file from scratch with a complete history.
 
         SRP: Session load rewriting — writes the full message list as-is.
@@ -469,41 +497,80 @@ class AgentInstanceLogger:
         Used when the caller already has the definitive history (session load,
         edit, delete, retry-trim operations).
 
+        SHRINK GUARD: By default this method REFUSES to replace the tracked working-set
+        history with a list that is drastically smaller (silent data loss from writing a
+        shrunken in-memory state over a larger tracked set). Callers that intentionally
+        shrink (e.g. user delete) must pass allow_shrink=True.
+
+        Thread-safety: Uses self._write_lock for the read-modify-write of the file,
+        consistent with _consolidate_markers_in_jsonl().
+
         Args:
             new_history: Complete list of messages to write to the log file.
+            allow_shrink: If True, permit writing a much smaller history than what is
+                currently tracked. Default False (protects against accidental loss).
 
         Returns:
-            True on success, False on error.
+            True on success, False on error or if the shrink guard aborted the write.
         """
-        # Close cached handle before overwriting (Fix #1)
-        if self._file_handle and not self._file_handle.closed:
-            self._file_handle.flush()
-            self._file_handle.close()
+        # Fix 5: Log caller + incoming size for future diagnosability.
+        import inspect
+        try:
+            caller = inspect.stack()[1].function
+        except Exception:
+            caller = "unknown"
+
+        with self._write_lock:
+            # Close cached handle before overwriting (Fix #1)
+            if self._file_handle and not self._file_handle.closed:
+                self._file_handle.flush()
+                self._file_handle.close()
             self._file_handle = None
 
-        try:
-            formatted_msgs = [self._format_message(m) for m in new_history]
+            # Fix 2: Shrink guard — abort if this would drastically reduce the TRACKED
+            # working-set history (the count-based delta-sync cursor). Baseline is
+            # len(self.data["history"]) — NOT the retained-file line count, because by
+            # design (design doc §5.2) the JSONL file retains FULL history while
+            # data["history"] holds the trimmed pool working set. Comparing against the
+            # file count would wrongly reject legitimate edits/rewrites that pass the
+            # trimmed working set after compression. A real data-loss signal is when the
+            # incoming history is far smaller than what we last tracked in memory.
+            prev_tracked = len(self.data["history"])
+            new_count = len(new_history)
+            if (not allow_shrink and prev_tracked > 0 and new_count < prev_tracked * 0.5):
+                logger.critical(
+                    f"SHRINK GUARD: rewrite_log_with_history REFUSED for {self.log_path} "
+                    f"(caller={caller}). Incoming history has {new_count} messages but the "
+                    f"tracked working set holds {prev_tracked}. Writing would discard "
+                    f"{prev_tracked - new_count} tracked messages. Pass allow_shrink=True "
+                    f"to override."
+                )
+                return False
 
-            # Write metadata header + all messages
-            lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
-            for msg in formatted_msgs:
-                lines.append(json.dumps(msg, ensure_ascii=False) + '\n')
+            try:
+                formatted_msgs = [self._format_message(m) for m in new_history]
 
-            with open(self.log_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+                # Write metadata header + all messages
+                lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+                for msg in formatted_msgs:
+                    lines.append(json.dumps(msg, ensure_ascii=False) + '\n')
 
-            self._file_handle = None  # Invalidate so _ensure_file reopens clean after overwrite
-            logger.info(f"Rewrote agent log {self.log_path} with {len(formatted_msgs)} messages.")
-        except Exception as e:
-            logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
-            return False
+                # Fix 4: atomic write — temp file + os.replace() prevents partial-write corruption.
+                if not self._atomic_write_lines(lines):
+                    return False
 
-        # Update internal tracking — mirror what was written to disk.
-        # After rewrite, logger history is the single source of truth for this session.
-        self.data["history"] = formatted_msgs  # Use already-formatted list from above (avoids re-formatting which can assign new timestamps)
-        self._file_history_synced = True  # Prevent unnecessary file reload on next update_history()
+                self._file_handle = None  # Invalidate so _ensure_file reopens clean after overwrite
+                logger.info(f"Rewrote agent log {self.log_path} with {len(formatted_msgs)} messages (caller={caller}).")
+            except Exception as e:
+                logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
+                return False
 
-        return True
+            # Update internal tracking — mirror what was written to disk.
+            # After rewrite, logger history is the single source of truth for this session.
+            self.data["history"] = formatted_msgs  # Use already-formatted list from above (avoids re-formatting which can assign new timestamps)
+            self._file_history_synced = True  # Prevent unnecessary file reload on next update_history()
+
+            return True
 
     def _sync_marker_single_write(self, new_pool_state: List[Any]) -> bool:
         """Single-write marker insertion for reset_history(rewrite=True).
@@ -519,98 +586,102 @@ class AgentInstanceLogger:
         Returns:
             True on success, False on error.
         """
-        # Close cached handle before writing (Fix #1)
-        if self._file_handle and not self._file_handle.closed:
-            self._file_handle.flush()
-            self._file_handle.close()
-            self._file_handle = None
+        # Thread-safety: read-modify-write of the JSONL file under _write_lock,
+        # consistent with _consolidate_markers_in_jsonl().
+        with self._write_lock:
+            # Close cached handle before writing (Fix #1)
+            if self._file_handle and not self._file_handle.closed:
+                self._file_handle.flush()
+                self._file_handle.close()
+                self._file_handle = None
 
-        from agent_cascade.llm.schema import USER as USER_ROLE
+            from agent_cascade.llm.schema import USER as USER_ROLE
 
-        try:
-            # ── Read existing log messages from disk (full history) ──
-            if not self.log_path or not os.path.exists(self.log_path):
-                logger.debug(
-                    f"Log file missing for {self.instance_name} ({self.log_path}) — "
-                    f"writing pool state directly."
-                )
-                existing_msgs = []
-            else:
-                # Read existing log messages from disk (full history)
-                existing_msgs = []
-                with open(self.log_path, 'r', encoding='utf-8') as f:
-                    for line_num, line in enumerate(f, 1):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            item = json.loads(line)
-                            if isinstance(item, dict) and "metadata" not in item and "event" not in item:
-                                existing_msgs.append(item)
-                        except json.JSONDecodeError:
-                            logger.debug(
-                                f"Skipping corrupted JSONL line {line_num} in {self.log_path}: "
-                                f"'{line[:60]}...'"
-                            )
-
-            # ── Find the LAST (newest) compression marker in pool state ──
-            last_marker_idx = -1
-            for i in range(len(new_pool_state) - 1, -1, -1):
-                msg = new_pool_state[i]
-                role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                    last_marker_idx = i
-                    break
-
-            # ── Build result messages ──
-            # Design §5.2: Insert marker at mirrored position, keep all originals (full history retention).
-            if last_marker_idx >= 0:
-                actual_tail_count = len(new_pool_state) - last_marker_idx - 1
-                formatted_marker = self._format_message(new_pool_state[last_marker_idx])
-
-                insert_pos = max(0, len(existing_msgs) - actual_tail_count)
-
-                # Dedup guard: skip if marker already in file (idempotent no-op)
-                marker_already_in_file = any(
-                    isinstance(m.get('content', ''), str) and m['content'] == formatted_marker['content']
-                    for m in existing_msgs
-                )
-
-                if marker_already_in_file:
-                    result_msgs = list(existing_msgs)
+            try:
+                # ── Read existing log messages from disk (full history) ──
+                if not self.log_path or not os.path.exists(self.log_path):
+                    logger.debug(
+                        f"Log file missing for {self.instance_name} ({self.log_path}) — "
+                        f"writing pool state directly."
+                    )
+                    existing_msgs = []
                 else:
-                    # Design §5.2: Insert marker at insert_pos, keep all original messages (tail already in file)
-                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
-            elif new_pool_state:
-                # No markers in pool — use pool state as-is (session load path)
-                result_msgs = [self._format_message(m) for m in new_pool_state]
-            else:
-                # Both empty or no marker — just write what we have
-                if existing_msgs and not new_pool_state:
-                    result_msgs = [self._format_message(m) for m in existing_msgs]
+                    # Read existing log messages from disk (full history)
+                    existing_msgs = []
+                    with open(self.log_path, 'r', encoding='utf-8') as f:
+                        for line_num, line in enumerate(f, 1):
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                item = json.loads(line)
+                                if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                                    existing_msgs.append(item)
+                            except json.JSONDecodeError:
+                                logger.debug(
+                                    f"Skipping corrupted JSONL line {line_num} in {self.log_path}: "
+                                    f"'{line[:60]}...'"
+                                )
+
+                # ── Find the LAST (newest) compression marker in pool state ──
+                last_marker_idx = -1
+                for i in range(len(new_pool_state) - 1, -1, -1):
+                    msg = new_pool_state[i]
+                    role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                    if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                        last_marker_idx = i
+                        break
+
+                # ── Build result messages ──
+                # Design §5.2: Insert marker at mirrored position, keep all originals (full history retention).
+                if last_marker_idx >= 0:
+                    actual_tail_count = len(new_pool_state) - last_marker_idx - 1
+                    formatted_marker = self._format_message(new_pool_state[last_marker_idx])
+
+                    insert_pos = max(0, len(existing_msgs) - actual_tail_count)
+
+                    # Dedup guard: skip if marker already in file (idempotent no-op)
+                    marker_already_in_file = any(
+                        isinstance(m.get('content', ''), str) and m['content'] == formatted_marker['content']
+                        for m in existing_msgs
+                    )
+
+                    if marker_already_in_file:
+                        result_msgs = list(existing_msgs)
+                    else:
+                        # Design §5.2: Insert marker at insert_pos, keep all original messages (tail already in file)
+                        result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
+                elif new_pool_state:
+                    # No markers in pool — use pool state as-is (session load path)
+                    result_msgs = [self._format_message(m) for m in new_pool_state]
                 else:
-                    result_msgs = []
+                    # Both empty or no marker — just write what we have
+                    if existing_msgs and not new_pool_state:
+                        result_msgs = [self._format_message(m) for m in existing_msgs]
+                    else:
+                        result_msgs = []
 
-            # ── Single write to disk ──
-            lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
-            for msg in result_msgs:
-                lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
+                # ── Single write to disk ──
+                lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+                for msg in result_msgs:
+                    lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
 
-            with open(self.log_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+                # Fix 4: atomic write — temp file + os.replace() prevents partial-write corruption.
+                if not self._atomic_write_lines(lines):
+                    return False
 
-            self._file_handle = None
-            logger.info(f"Synced compression marker in {self.log_path} ({len(result_msgs)} messages).")
+                self._file_handle = None
+                logger.info(f"Synced compression marker in {self.log_path} ({len(result_msgs)} messages).")
 
-            # Update internal tracking — pool state (active set) for in-memory history
-            self.data["history"] = [self._format_message(msg) for msg in new_pool_state]
-            self._file_history_synced = True
+                # Update internal tracking — pool state (active set) for in-memory history
+                self.data["history"] = [self._format_message(msg) for msg in new_pool_state]
+                self._file_history_synced = True
 
-            return True
-        except Exception as e:
-            logger.error(f"Failed to sync compression marker for {self.log_path}: {e}")
-            return False
+                return True
+            except Exception as e:
+                logger.error(f"Failed to sync compression marker for {self.log_path}: {e}")
+                return False
 
     def _consolidate_markers_in_jsonl(
         self,
@@ -707,8 +778,9 @@ class AgentInstanceLogger:
                 for msg in result_msgs:
                     lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
 
-                with open(self.log_path, 'w', encoding='utf-8') as f:
-                    f.writelines(lines)
+                # Fix 4: atomic write — temp file + os.replace() prevents partial-write corruption.
+                if not self._atomic_write_lines(lines):
+                    return False
 
                 self._file_handle = None
                 logger.info(

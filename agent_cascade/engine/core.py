@@ -1136,30 +1136,24 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             m0.content = m0_content
                         logger.debug(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name} ({', '.join(diff_summary)})")
 
-                        # Persist updated system message to file so it survives
-                        # restarts.
-                        # After session load, rewrite_log_with_history()
-                        # already wrote full history
-                        # (63 msgs) and set _file_history_synced=True. Calling
-                        # update_history()
-                        # with only the working set (~8 msgs) does a surgical
-                        # merge that can
-                        # insert duplicates when messages are found at
-                        # non-contiguous positions.
-                        # Instead, directly update logger memory then rewrite
-                        # via existing method.
+                        # Update the in-memory tracked system message only — do NOT
+                        # rewrite the JSONL file here. data["history"] is a count-based
+                        # delta-sync cursor aligned to the (possibly compression-trimmed)
+                        # pool working set, so rewriting the full-history file from it
+                        # would silently destroy retained history (the original bug).
+                        # The new system text persists on the next append/rewrite.
                         try:
                             log_inst = self.pool.get_logger(inst_name, instance.agent_class)
                             if log_inst.data["history"]:
-                                # Update the system message content in logger's
-                                # in-memory history
-                                formatted_sys = log_inst._format_message(m0)
-                                log_inst.data["history"][0] = formatted_sys
-                                # Rewrite file using existing method (handles
-                                # handle flush, metadata, etc.)
-                                log_inst.rewrite_log_with_history(log_inst.data["history"])
+                                # Update the in-memory tracked system message ONLY.
+                                # Do NOT rewrite the JSONL file here: data["history"] is a
+                                # count-based delta-sync cursor aligned to the (possibly
+                                # trimmed) pool working set, so rewriting the full-history
+                                # file from it would silently destroy retained history.
+                                # The new system text persists on the next append/rewrite.
+                                log_inst.data["history"][0] = log_inst._format_message(m0)
                         except Exception as e:
-                            logger.warning(f"Failed to persist system message update for {inst_name}: {e}")
+                            logger.warning(f"Failed to update in-memory system message for {inst_name}: {e}")
                     else:
                         logger.debug(f"[CACHE_REBUILD] System prompt for {inst_name} textually identical — skipping pool update")
 

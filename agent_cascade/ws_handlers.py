@@ -1063,7 +1063,8 @@ class WsMessageHandler:
                     target_name,
                     'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
                 )
-                logger_inst.rewrite_log_with_history(history)
+                # Intentional shrink — user explicitly deleted messages.
+                logger_inst.rewrite_log_with_history(history, allow_shrink=True)
 
                 if target_name != self.session['session_name'] and target_name in self.agent_pool.instance_state:
                     self.agent_pool.instance_state[target_name]['messages'] = list(history)
