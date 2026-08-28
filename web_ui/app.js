@@ -276,6 +276,7 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
     if (scrollContainer) {
       scrollContainer.addEventListener('scroll', () => {
         const lock = subAgentScrollLocks[name];
+        if (!lock) return; // entry removed on agent teardown — nothing to update
         const currentScrollTop = scrollContainer.scrollTop;
 
         // Upward-scroll detection: if user scrolls up (scrollTop decreases), unlock immediately
