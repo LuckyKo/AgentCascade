@@ -364,6 +364,9 @@ class ShellCmd(BaseTool):
 
             if not approved:
                 return f"REJECTED: {reason}"
+            justification_text = reason
+        else:
+            justification_text = ""
 
         tracker = self._get_tracker()
         if tracker is None:
@@ -400,8 +403,12 @@ class ShellCmd(BaseTool):
             elapsed = time.time() - start_time
             rc = return_code if return_code is not None else 0
             status = "success" if (rc == 0) else f"exit code {rc}"
+            approval_line = "AUTO-APPROVED\n" if is_safe else "APPROVED\n"
+            if not is_safe and justification_text:
+                approval_line += f"Security Justification: {justification_text}\n"
             result = (
-                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
+                f"⟨shell_cmd completed⟩ Tool ID: {tool_id} | PID: {pid}\n"
+                f"{approval_line}"
                 f"Completed in {elapsed:.1f} s ({status}).\n"
             )
             # Append early output if available (truncate if large)
@@ -425,8 +432,12 @@ class ShellCmd(BaseTool):
 
         # Case 2 & 3: Still running — return launched message, with early output appended if available
         console_line = "A console window has been opened for inspection (Windows).\n" if console_window else ""
+        approval_line = "AUTO-APPROVED\n" if is_safe else "APPROVED\n"
+        if not is_safe and justification_text:
+            approval_line += f"Security Justification: {justification_text}\n"
         launched_msg = (
-            f"⟨shell_cmd launched⟩ Tool ID: {tool_id}\n"
+            f"⟨shell_cmd launched⟩ Tool ID: {tool_id} | PID: {pid}\n"
+            f"{approval_line}"
             f"Command running in background.\n"
             f"Command: `{command[:200]}`\n"
             f"Heartbeat interval: {heartbeat_interval}s\n"
