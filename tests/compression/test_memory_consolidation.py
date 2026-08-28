@@ -1371,3 +1371,393 @@ class TestFindAllMarkerIndicesFixed:
             assert _is_compression_marker(history[idx]), \
                 f"Index {idx} does not point to a compression marker"
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# 10. Regression — consolidation JSONL sync (core.py get_logger keying)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestConsolidationJsonlSyncRegression:
+    """End-to-end regression test for the consolidation JSONL sync bug.
+
+    The bug: ``_consolidate_markers`` called ``agent_pool.get_logger(name, None)``,
+    which created a NEW empty logger (keyed by ``(name, '')``) instead of retrieving
+    the existing one keyed by ``(name, agent_class)``. The real JSONL file for the
+    agent was therefore never updated; consolidation only mutated the in-memory pool.
+
+    This test uses the REAL ``AgentInstanceLogger._consolidate_markers_in_jsonl``
+    (NOT mocked) against a REAL log directory and verifies BOTH:
+      1. the agent pool's conversation history is rebuilt correctly, and
+      2. the ACTUAL JSONL file on disk (keyed by ``(instance_name, agent_class)``)
+         is surgically updated — intermediate markers removed, L2 marker inserted,
+         raw messages preserved — instead of a new/wrong empty file being created.
+
+    If the fix at core.py:214 is reverted to ``get_logger(name, None)``, this test
+    fails because consolidation writes to a different (empty) logger/file and the
+    real agent's JSONL is left untouched.
+    """
+
+    AGENT_NAME = "TestAgent"
+    AGENT_CLASS = "coder"
+
+    @pytest.fixture(autouse=True)
+    def reset_consolidation_state(self):
+        """Reset the module-level recursion guard before and after each test."""
+        from agent_cascade.compression.core import _consolidating_agents, _consolidation_lock
+        with _consolidation_lock:
+            _consolidating_agents.clear()
+        yield
+        with _consolidation_lock:
+            _consolidating_agents.clear()
+
+    def test_consolidation_updates_real_jsonl_file(self, tmp_path):
+        """Consolidation must update the pool AND the real JSONL file for the agent."""
+        from agent_cascade.compression.core import _consolidate_markers
+        from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+
+        # ── Build a history with 8 compression markers (>= threshold of 8) ──
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+        original_marker_count = AgentPool.count_markers(history)
+        assert original_marker_count == 8
+
+        # Raw (non-marker) messages that must survive consolidation.
+        raw_contents = [
+            str(getattr(m, "content", m.get("content", "")))
+            for m in history if not _is_compression_marker(m)
+        ]
+        assert len(raw_contents) > 0
+
+        # ── Real logger with a real JSONL file under tmp_path ──
+        log_dir = str(tmp_path / "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"{self.AGENT_CLASS}_{self.AGENT_NAME}.jsonl")
+
+        logger_inst = AgentInstanceLogger(
+            agent_class=self.AGENT_CLASS,
+            instance_name=self.AGENT_NAME,
+            log_dir=log_dir,
+            log_path=log_path,
+        )
+        # Pre-populate the JSONL with the full history (as real logging would have).
+        for msg in history:
+            logger_inst.log_message(msg)
+
+        def _read_jsonl_msgs(path):
+            """Return message dicts from a JSONL file (skip metadata/event lines)."""
+            msgs = []
+            if not os.path.exists(path):
+                return msgs
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                        msgs.append(item)
+            return msgs
+
+        # Sanity: the real file now holds all messages including every marker.
+        pre_msgs = _read_jsonl_msgs(log_path)
+        pre_marker_count = sum(
+            1 for m in pre_msgs
+            if isinstance(m.get("content", ""), str) and m["content"].startswith(COMPRESSION_MARKER)
+        )
+        assert pre_marker_count == original_marker_count, \
+            f"Setup: expected {original_marker_count} markers in JSONL, got {pre_marker_count}"
+
+        # ── Minimal pool wiring around the REAL logger ──
+        inst = MagicMock()
+        inst.conversation = list(history)
+        inst._compression_lock = threading.Lock()
+        inst.agent_class = self.AGENT_CLASS
+        inst.rebuild_conversation = lambda new_hist: setattr(inst, "conversation", list(new_hist))
+
+        # A SECOND, empty logger for the (name, '') key — exactly what the real
+        # LoggerManager creates when get_logger is called with agent_class=None.
+        # It points at a DIFFERENT file so we can prove consolidation did NOT write
+        # to the agent's real log.
+        stray_log_path = os.path.join(log_dir, f"stray_{self.AGENT_NAME}.jsonl")
+        stray_logger = AgentInstanceLogger(
+            agent_class=None,
+            instance_name=self.AGENT_NAME,
+            log_dir=log_dir,
+            log_path=stray_log_path,
+        )
+
+        # Reproduce the real LoggerManager keying: (instance_name, normalized class)
+        # → logger. The fixed code passes target_inst.agent_class and lands on the
+        # real logger; a regression passing None lands on the empty stray logger.
+        def _fake_get_logger(instance_name, agent_class):
+            if instance_name != self.AGENT_NAME:
+                raise AssertionError(f"Unexpected get_logger name: {instance_name!r}")
+            normalized = (agent_class or "").strip().lower()
+            return logger_inst if normalized == self.AGENT_CLASS else stray_logger
+
+        pool = MagicMock()
+        pool.get_instance.return_value = inst
+        pool.get_logger.side_effect = _fake_get_logger
+
+        # Pin the threshold explicitly so the test doesn't depend on the default.
+        with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 8), \
+             patch("agent_cascade.compression.agent_invoker.invoke_consolidation_agent") as mock_invoke:
+            mock_invoke.return_value = "REGRESSION-CONSOLIDATED-SUMMARY"
+            _consolidate_markers(pool, self.AGENT_NAME)
+
+        # Consolidation actually ran (LLM was invoked).
+        assert mock_invoke.called, "Consolidation LLM was not invoked — test setup broken"
+
+        # ── 1. Pool state: rebuilt with L2 marker + recent messages (not full history) ──
+        new_history = list(inst.conversation)
+        assert len(new_history) < len(history), \
+            f"Pool history should shrink after consolidation ({len(history)} → {len(new_history)})"
+
+        # Exactly 2 markers remain: the new L2 marker + the kept newest marker.
+        new_marker_indices = AgentPool.find_all_marker_indices(new_history)
+        assert len(new_marker_indices) == 2, \
+            f"Expected exactly 2 markers after consolidation, got {len(new_marker_indices)}"
+
+        # The first remaining marker is the L2 consolidated marker (references the count).
+        l2_msg = new_history[new_marker_indices[0]]
+        assert "L2" in str(l2_msg.content), \
+            f"First marker should be the L2 consolidation marker, got: {str(l2_msg.content)[:80]}"
+
+        # All raw (non-marker) messages are preserved.
+        new_raw_contents = [
+            str(getattr(m, "content", m.get("content", "")))
+            for m in new_history if not _is_compression_marker(m)
+        ]
+        assert new_raw_contents == raw_contents, \
+            "Raw message segments must be preserved through consolidation"
+
+        # ── 2. JSONL file on disk: surgically updated, NOT a new/wrong file ──
+        # Exactly one JSONL file exists in the log dir (no stray empty file created).
+        jsonl_files = [f for f in os.listdir(log_dir) if f.endswith(".jsonl")]
+        assert len(jsonl_files) == 1, \
+            f"Expected exactly 1 JSONL file, got {jsonl_files} — a new/wrong file was created"
+        assert jsonl_files[0] == os.path.basename(log_path), \
+            f"The updated file must be the agent's real log file, got {jsonl_files[0]}"
+
+        post_msgs = _read_jsonl_msgs(log_path)
+
+        # Marker count dropped: 8 → 2 (L2 + kept newest).
+        post_marker_count = sum(
+            1 for m in post_msgs
+            if isinstance(m.get("content", ""), str) and m["content"].startswith(COMPRESSION_MARKER)
+        )
+        assert post_marker_count == 2, \
+            f"JSONL should have 2 markers after consolidation (was {pre_marker_count}), got {post_marker_count}"
+
+        # The new L2 marker is present in the file.
+        l2_in_file = any(
+            isinstance(m.get("content", ""), str) and "REGRESSION-CONSOLIDATED-SUMMARY" in m["content"]
+            for m in post_msgs
+        )
+        assert l2_in_file, "The new L2 consolidated marker is missing from the JSONL file"
+
+        # Raw messages preserved in the file.
+        file_raw_contents = [
+            str(m.get("content", ""))
+            for m in post_msgs
+            if not (isinstance(m.get("content", ""), str) and m["content"].startswith(COMPRESSION_MARKER))
+        ]
+        assert file_raw_contents == raw_contents, \
+            "JSONL must preserve all raw messages during consolidation"
+
+        # The file is NOT a fresh empty file — it still holds the full retained history.
+        assert len(post_msgs) > 0, "The JSONL file was emptied (wrong logger targeted)"
+
+    def test_consolidation_when_newest_marker_not_in_jsonl(self, tmp_path):
+        """Regression: newest L1 marker not yet in JSONL at consolidation time.
+
+        In production, consolidation runs BEFORE reset_history writes the newest
+        marker to the file. The JSONL has M0..M6 but NOT M7. The pool state has
+        L2 + M7. The function must NOT keep M6 (the last marker in the file) —
+        it should consolidate ALL file markers into L2, leaving only L2 in the
+        file. M7 will be added later by reset_history.
+
+        If this test fails (2 markers in JSONL after consolidation — L2 + a kept M6),
+        the bug is: last_marker_idx was determined from the file instead of pool state.
+        """
+        from agent_cascade.compression.core import _consolidate_markers
+        from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+
+        # ── Build a history with 8 compression markers (>= threshold of 8) ──
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+        original_marker_count = AgentPool.count_markers(history)
+        assert original_marker_count == 8
+
+        # Locate the newest marker (M7) and the one before it (M6). The JSONL is
+        # pre-populated with everything up to and including M6, but NOT M7 — this
+        # mirrors production where reset_history(rewrite=True) writes M7 only AFTER
+        # consolidation has already run.
+        all_marker_indices = AgentPool.find_all_marker_indices(history)
+        assert len(all_marker_indices) == original_marker_count
+        m6_idx = all_marker_indices[-2]   # second-newest marker (M6)
+        m7_idx = all_marker_indices[-1]   # newest marker (M7), NOT yet in the file
+
+        # Messages that will be written to the JSONL: SYSTEM + M0..M6 + their raw
+        # segments, but excluding M7 and any messages after it.
+        jsonl_msgs = history[: m6_idx + 1]
+        # Sanity: the newest marker must NOT be in the pre-populated JSONL slice.
+        jsonl_marker_count = sum(1 for m in jsonl_msgs if _is_compression_marker(m))
+        assert jsonl_marker_count == original_marker_count - 1, \
+            f"Setup: expected {original_marker_count - 1} markers in JSONL slice, got {jsonl_marker_count}"
+
+        # Raw (non-marker) messages that must survive consolidation. These are the raw
+        # segments from M0..M6 only — M7's trailing segment is not in the file yet and
+        # will be appended later by reset_history, so it is NOT expected here.
+        raw_contents = [
+            str(getattr(m, "content", m.get("content", "")))
+            for m in jsonl_msgs if not _is_compression_marker(m)
+        ]
+        assert len(raw_contents) > 0
+
+        # ── Real logger with a real JSONL file under tmp_path ──
+        log_dir = str(tmp_path / "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"{self.AGENT_CLASS}_{self.AGENT_NAME}.jsonl")
+
+        logger_inst = AgentInstanceLogger(
+            agent_class=self.AGENT_CLASS,
+            instance_name=self.AGENT_NAME,
+            log_dir=log_dir,
+            log_path=log_path,
+        )
+        # Pre-populate the JSONL with ONLY M0..M6 + their raw segments (NOT M7).
+        for msg in jsonl_msgs:
+            logger_inst.log_message(msg)
+
+        def _read_jsonl_msgs(path):
+            """Return message dicts from a JSONL file (skip metadata/event lines)."""
+            msgs = []
+            if not os.path.exists(path):
+                return msgs
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                        msgs.append(item)
+            return msgs
+
+        # Sanity: the real file holds M0..M6 but NOT the newest marker (M7).
+        pre_msgs = _read_jsonl_msgs(log_path)
+        pre_marker_count = sum(
+            1 for m in pre_msgs
+            if isinstance(m.get("content", ""), str) and m["content"].startswith(COMPRESSION_MARKER)
+        )
+        assert pre_marker_count == original_marker_count - 1, \
+            f"Setup: expected {original_marker_count - 1} markers in JSONL (no M7), got {pre_marker_count}"
+
+        # ── Minimal pool wiring around the REAL logger ──
+        inst = MagicMock()
+        inst.conversation = list(history)  # FULL history: all 8 markers in the pool
+        inst._compression_lock = threading.Lock()
+        inst.agent_class = self.AGENT_CLASS
+        inst.rebuild_conversation = lambda new_hist: setattr(inst, "conversation", list(new_hist))
+
+        # A SECOND, empty logger for the (name, '') key — exactly what the real
+        # LoggerManager creates when get_logger is called with agent_class=None.
+        stray_log_path = os.path.join(log_dir, f"stray_{self.AGENT_NAME}.jsonl")
+        stray_logger = AgentInstanceLogger(
+            agent_class=None,
+            instance_name=self.AGENT_NAME,
+            log_dir=log_dir,
+            log_path=stray_log_path,
+        )
+
+        # Reproduce the real LoggerManager keying: (instance_name, normalized class)
+        # → logger. The fixed code passes target_inst.agent_class and lands on the
+        # real logger; a regression passing None lands on the empty stray logger.
+        def _fake_get_logger(instance_name, agent_class):
+            if instance_name != self.AGENT_NAME:
+                raise AssertionError(f"Unexpected get_logger name: {instance_name!r}")
+            normalized = (agent_class or "").strip().lower()
+            return logger_inst if normalized == self.AGENT_CLASS else stray_logger
+
+        pool = MagicMock()
+        pool.get_instance.return_value = inst
+        pool.get_logger.side_effect = _fake_get_logger
+
+        # Pin the threshold explicitly so the test doesn't depend on the default.
+        with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 8), \
+             patch("agent_cascade.compression.agent_invoker.invoke_consolidation_agent") as mock_invoke:
+            mock_invoke.return_value = "TIMING-CONSOLIDATED-SUMMARY"
+            _consolidate_markers(pool, self.AGENT_NAME)
+
+        # Consolidation actually ran (LLM was invoked).
+        assert mock_invoke.called, "Consolidation LLM was not invoked — test setup broken"
+
+        # ── 1. Pool state: rebuilt with L2 marker + kept newest marker (M7) ──
+        new_history = list(inst.conversation)
+        assert len(new_history) < len(history), \
+            f"Pool history should shrink after consolidation ({len(history)} → {len(new_history)})"
+
+        # Exactly 2 markers remain in the pool: the new L2 marker + the kept newest (M7).
+        new_marker_indices = AgentPool.find_all_marker_indices(new_history)
+        assert len(new_marker_indices) == 2, \
+            f"Expected exactly 2 markers in pool after consolidation, got {len(new_marker_indices)}"
+
+        # The first remaining marker is the L2 consolidated marker.
+        l2_msg = new_history[new_marker_indices[0]]
+        assert "L2" in str(l2_msg.content), \
+            f"First pool marker should be the L2 consolidation marker, got: {str(l2_msg.content)[:80]}"
+
+        # ── 2. JSONL file on disk: ALL file markers consolidated into L2 ──
+        # Exactly one JSONL file exists in the log dir (no stray empty file created).
+        jsonl_files = [f for f in os.listdir(log_dir) if f.endswith(".jsonl")]
+        assert len(jsonl_files) == 1, \
+            f"Expected exactly 1 JSONL file, got {jsonl_files} — a new/wrong file was created"
+        assert jsonl_files[0] == os.path.basename(log_path), \
+            f"The updated file must be the agent's real log file, got {jsonl_files[0]}"
+
+        post_msgs = _read_jsonl_msgs(log_path)
+
+        # KEY ASSERTION: only ONE marker remains in the file (the new L2). M6 must NOT
+        # be kept as-is (old bug), and M7 is also NOT here yet (reset_history adds it
+        # later). If this reads 2, last_marker_idx was wrongly taken from the file.
+        post_marker_count = sum(
+            1 for m in post_msgs
+            if isinstance(m.get("content", ""), str) and m["content"].startswith(COMPRESSION_MARKER)
+        )
+        assert post_marker_count == 1, \
+            f"JSONL should have exactly 1 marker after consolidation (only L2), got {post_marker_count} " \
+            f"— M6 was kept as-is, meaning last_marker_idx came from the file instead of pool state"
+
+        # The new L2 marker is present in the file.
+        l2_in_file = any(
+            isinstance(m.get("content", ""), str) and "TIMING-CONSOLIDATED-SUMMARY" in m["content"]
+            for m in post_msgs
+        )
+        assert l2_in_file, "The new L2 consolidated marker is missing from the JSONL file"
+
+        # M6 (the last marker that WAS in the file) must have been removed/consolidated.
+        m6_content = str(getattr(history[m6_idx], "content", history[m6_idx].get("content", "")))
+        m6_still_in_file = any(
+            isinstance(m.get("content", ""), str) and m["content"] == m6_content
+            for m in post_msgs
+        )
+        assert not m6_still_in_file, \
+            "M6 (last marker in the file) must NOT survive — all file markers consolidate into L2"
+
+        # All raw messages from the M0..M6 segments are preserved in the JSONL.
+        file_raw_contents = [
+            str(m.get("content", ""))
+            for m in post_msgs
+            if not (isinstance(m.get("content", ""), str) and m["content"].startswith(COMPRESSION_MARKER))
+        ]
+        assert file_raw_contents == raw_contents, \
+            "JSONL must preserve all raw messages from the M0..M6 segments during consolidation"
+
+        # The file is NOT a fresh empty file — it still holds the retained history.
+        assert len(post_msgs) > 0, "The JSONL file was emptied (wrong logger targeted)"
+

@@ -211,7 +211,7 @@ def _consolidate_markers(
 
         # ── Phase 4: Sync logger (outside lock, non-fatal) ──
         try:
-            log_inst = agent_pool.get_logger(target_agent_name, None)
+            log_inst = agent_pool.get_logger(target_agent_name, target_inst.agent_class)
             success = log_inst._consolidate_markers_in_jsonl(
                 new_pool_state=new_history,
             )

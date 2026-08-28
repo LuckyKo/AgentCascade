@@ -100,6 +100,15 @@ def _count_markers(msgs: list) -> int:
 
 
 # ──────────────────────────────────────────────
+# Helper: check whether a single message dict is a compression marker
+# ──────────────────────────────────────────────
+
+def _is_marker_dict(msg: dict) -> bool:
+    """Check if a message dict is a compression marker."""
+    return isinstance(msg.get("content"), str) and msg["content"].startswith(COMPRESSION_MARKER)
+
+
+# ──────────────────────────────────────────────
 # Helper: verify _format_message added timestamps to written messages
 # ──────────────────────────────────────────────
 
@@ -589,4 +598,220 @@ class TestFullMessageRetention:
         assert len(final_msgs) == 13, (
             f"Final message count should be 13 but got {len(final_msgs)}. "
             f"Data integrity violation! Messages: {[m['content'][:25] for m in final_msgs]}"
+        )
+
+
+# ──────────────────────────────────────────────
+# 8. Idempotency: calling reset_history(rewrite=True) twice with same pool state
+# ──────────────────────────────────────────────
+
+class TestIdempotentRewrite:
+    """reset_history(rewrite=True) must be idempotent when called with the same pool state.
+
+    The dedup guard in _sync_marker_single_write checks if the marker content already
+    exists in the file and skips insertion if so. Without this guard, a double-call
+    (e.g., handler retry or concurrent sync) would duplicate the marker line.
+    """
+
+    def test_double_call_same_pool_state_no_duplicate(self, tmp_log):
+        """Calling reset_history twice with identical pool state adds the marker only once."""
+        log_path, logger_inst = tmp_log
+
+        # Seed file with some original messages
+        orig_msgs = [_user("orig_a"), _assistant("reply_a"), _user("orig_b")]
+        lines = [json.dumps({"metadata": {"agent_class": "coder"}})] + [
+            json.dumps(m) for m in orig_msgs
+        ]
+        log_path.write_text("\n".join(lines) + "\n")
+
+        # Pool state: one marker + 2 tail messages
+        pool_history = [_marker("idempotent_summary"), _user("tail_1"), _assistant("tail_reply")]
+
+        # First call — inserts the marker
+        assert logger_inst.reset_history(pool_history, rewrite=True) is True
+        msgs_after_first = _read_log_messages(log_path)
+        marker_count_first = _count_markers(msgs_after_first)
+        total_first = len(msgs_after_first)
+        assert marker_count_first == 1, f"Expected 1 marker after first call, got {marker_count_first}"
+
+        # Second call — same pool state, should be a no-op (dedup guard)
+        assert logger_inst.reset_history(pool_history, rewrite=True) is True
+        msgs_after_second = _read_log_messages(log_path)
+        marker_count_second = _count_markers(msgs_after_second)
+        total_second = len(msgs_after_second)
+
+        # Marker count must NOT increase
+        assert marker_count_second == 1, (
+            f"Idempotency violation: marker count went from {marker_count_first} to "
+            f"{marker_count_second} after second call with same pool state"
+        )
+        # Total message count must NOT change
+        assert total_second == total_first, (
+            f"Idempotency violation: message count changed from {total_first} to "
+            f"{total_second} after redundant reset_history call"
+        )
+
+    def test_triple_call_stable(self, tmp_log):
+        """Three consecutive calls with same state remain stable."""
+        log_path, logger_inst = tmp_log
+
+        orig_msgs = [_user("seed_1"), _assistant("seed_reply")]
+        lines = [json.dumps({"metadata": {"agent_class": "coder"}})] + [
+            json.dumps(m) for m in orig_msgs
+        ]
+        log_path.write_text("\n".join(lines) + "\n")
+
+        pool_history = [_marker("triple_call_test"), _user("tail_x")]
+
+        for i in range(3):
+            assert logger_inst.reset_history(pool_history, rewrite=True) is True
+
+        final_msgs = _read_log_messages(log_path)
+        assert _count_markers(final_msgs) == 1, (
+            f"After 3 identical calls, expected exactly 1 marker, got {_count_markers(final_msgs)}"
+        )
+        # 2 originals + 1 marker + 1 tail (already in file? No — tail_x is new) = 4
+        # Actually: existing_msgs has 2, pool tail = 1, insert_pos = max(0, 2-1) = 1
+        # result = [seed_1] + [marker] + [seed_reply] → but wait, tail_x from pool is NOT in file
+        # The code does: existing_msgs[:insert_pos] + [marker] + existing_msgs[insert_pos:]
+        # So it inserts marker into existing msgs, doesn't add pool tails that aren't in file.
+        # Total = 2 originals + 1 marker = 3
+        assert len(final_msgs) == 3, (
+            f"Expected 3 messages (2 orig + 1 marker), got {len(final_msgs)}: "
+            f"{[m['content'][:30] for m in final_msgs]}"
+        )
+
+
+# ──────────────────────────────────────────────
+# 9. Multi-marker pool state: only newest marker is inserted
+# ──────────────────────────────────────────────
+
+class TestMultiMarkerPoolState:
+    """When pool state contains multiple markers (e.g., [M_old, M_new, tail]),
+    _sync_marker_single_write must find ONLY the last (newest) marker and insert it.
+    Older markers already in the file must NOT be re-inserted.
+    """
+
+    def test_pool_with_two_markers_only_newest_inserted(self, tmp_log):
+        """Pool has [M_old, M_new, tail]. File already has M_old. Only M_new is inserted."""
+        log_path, logger_inst = tmp_log
+
+        # Seed file: original messages + M_old (from a previous compression cycle)
+        m_old = _marker("old_summary_from_previous_cycle")
+        orig_msgs = [_user("orig_1"), _assistant("reply_1")]
+        lines = [json.dumps({"metadata": {"agent_class": "coder"}})] + [
+            json.dumps(m) for m in orig_msgs
+        ] + [json.dumps(m_old)]
+        log_path.write_text("\n".join(lines) + "\n")
+
+        # Verify M_old is in the file
+        pre_msgs = _read_log_messages(log_path)
+        assert _count_markers(pre_msgs) == 1, "Setup: expected 1 marker (M_old) in file"
+
+        # Pool state after second compression: [M_old, M_new, tail_msg]
+        # In production, the pool keeps old markers as part of its trimmed history.
+        m_new = _marker("new_summary_from_current_cycle")
+        pool_history = [m_old, m_new, _user("tail_after_new")]
+
+        assert logger_inst.reset_history(pool_history, rewrite=True) is True
+
+        post_msgs = _read_log_messages(log_path)
+        marker_count = _count_markers(post_msgs)
+
+        # Should have exactly 2 markers: M_old (already in file) + M_new (just inserted)
+        assert marker_count == 2, (
+            f"Expected 2 markers after inserting M_new into file that has M_old, "
+            f"got {marker_count}. Markers: "
+            f"{[m['content'][:50] for m in post_msgs if _is_marker_dict(m)]}"
+        )
+
+        # M_old must appear exactly once (not re-inserted)
+        old_content = m_old["content"]
+        old_count = sum(1 for m in post_msgs if m.get("content") == old_content)
+        assert old_count == 1, (
+            f"M_old appears {old_count} times in file — should be exactly 1 "
+            f"(dedup guard must prevent re-insertion)"
+        )
+
+        # M_new must appear exactly once
+        new_content = m_new["content"]
+        new_count = sum(1 for m in post_msgs if m.get("content") == new_content)
+        assert new_count == 1, f"M_new appears {new_count} times — expected exactly 1"
+
+    def test_pool_with_three_markers_only_newest_inserted(self, tmp_log):
+        """Pool has [M_1, M_2, M_3, tail]. File has M_1 and M_2. Only M_3 is inserted."""
+        log_path, logger_inst = tmp_log
+
+        m1 = _marker("summary_one")
+        m2 = _marker("summary_two")
+        orig_msgs = [_user("base_msg")]
+        lines = [json.dumps({"metadata": {"agent_class": "coder"}})] + [
+            json.dumps(m) for m in orig_msgs
+        ] + [json.dumps(m1), json.dumps(m2)]
+        log_path.write_text("\n".join(lines) + "\n")
+
+        pre_msgs = _read_log_messages(log_path)
+        assert _count_markers(pre_msgs) == 2, "Setup: expected 2 markers in file"
+
+        # Pool state: all three markers + tail (simulates pool after 3rd compression)
+        m3 = _marker("summary_three")
+        pool_history = [m1, m2, m3, _user("final_tail")]
+
+        assert logger_inst.reset_history(pool_history, rewrite=True) is True
+
+        post_msgs = _read_log_messages(log_path)
+        marker_count = _count_markers(post_msgs)
+        assert marker_count == 3, (
+            f"Expected 3 markers total (M_1 + M_2 + M_3), got {marker_count}"
+        )
+
+        # Each marker appears exactly once
+        for m in (m1, m2, m3):
+            count = sum(1 for msg in post_msgs if msg.get("content") == m["content"])
+            assert count == 1, (
+                f"Marker '{m['content'][:40]}...' appears {count} times — expected exactly 1"
+            )
+
+    def test_multi_marker_pool_no_file_markers_only_newest_inserted(self, tmp_log):
+        """Pool has [M_old, M_new, tail] but file has NO markers. Only M_new is inserted.
+
+        This simulates a scenario where the file was truncated/corrupted and lost
+        old markers, but the pool still references them. The code should only insert
+        the newest marker (the one it's designed to sync), not try to reconstruct
+        older ones from pool state.
+        """
+        log_path, logger_inst = tmp_log
+
+        # File has only raw messages, no markers
+        orig_msgs = [_user("raw_1"), _assistant("raw_reply_1")]
+        lines = [json.dumps({"metadata": {"agent_class": "coder"}})] + [
+            json.dumps(m) for m in orig_msgs
+        ]
+        log_path.write_text("\n".join(lines) + "\n")
+
+        # Pool state has two markers (old one from memory, new one just created)
+        m_old = _marker("orphaned_old_marker")
+        m_new = _marker("current_cycle_marker")
+        pool_history = [m_old, m_new, _user("tail_msg")]
+
+        assert logger_inst.reset_history(pool_history, rewrite=True) is True
+
+        post_msgs = _read_log_messages(log_path)
+        marker_count = _count_markers(post_msgs)
+
+        # Only the NEWEST marker (M_new) should be inserted. M_old is NOT in the file
+        # and the code only inserts the last marker it finds in pool state.
+        assert marker_count == 1, (
+            f"Expected exactly 1 marker (M_new) in file, got {marker_count}. "
+            f"The code should only insert the newest pool marker, not all of them."
+        )
+
+        # Verify it's M_new, not M_old
+        new_content = m_new["content"]
+        assert any(m.get("content") == new_content for m in post_msgs), (
+            "The inserted marker should be M_new (the newest in pool state)"
+        )
+        old_content = m_old["content"]
+        assert not any(m.get("content") == old_content for m in post_msgs), (
+            "M_old should NOT have been inserted — only the last marker in pool is synced"
         )
