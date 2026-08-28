@@ -172,10 +172,9 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
   // Tool char limits
   { id: '#setting-tool-result-max-chars', prop: 'value', key: 'tool_result_max_chars', localKey: 'tool-result-max-chars' },
-  // NOTE: localKey MUST match the exact key saveSettings()/getGenerateCfg() writes to localStorage.
-  // This family is stored via getGenerateCfg() as underscore keys (see comment in saveSettings),
-  // so localKey uses underscores here — NOT hyphens. A mismatch makes the respect-local-preference
-  // guard in syncPoolSettings() dead code and causes mid-stream stomp-reverts (settings live-edit bug).
+  // NOTE: localKey must match the localStorage key written by saveSettings()/getGenerateCfg().
+  // This family uses underscore keys via getGenerateCfg(), NOT hyphens — mismatch breaks the
+  // respect-local-preference guard and causes mid-stream stomp-reverts.
   { id: '#setting-grep-char-limit', prop: 'value', key: 'grep_char_limit', localKey: 'grep_char_limit' },
   { id: '#setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep_spillover' },
   { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell_char_limit' },
@@ -218,7 +217,8 @@ function syncPoolSettings(ps) {
       const newVal = transform ? transform(ps[key]) : ps[key];
       // No-op filter: skip if value already matches — avoids `changed=true` churn and the
       // associated saveSettings(false) localStorage write on every stream tick.
-      if (String(el[prop]) === String(newVal)) continue;
+      if (prop === 'checked') { if (el[prop] === !!newVal) continue; }
+      else { if (String(el[prop]) === String(newVal)) continue; }
       el[prop] = newVal;
       changed = true;
     }
