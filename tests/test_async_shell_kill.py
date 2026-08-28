@@ -231,7 +231,7 @@ class TestKillTaskWithRealProcess:
         # Wait for tracking thread to set the PID on the task
         time.sleep(0.5)
 
-        # Get real PID from task (launch returns 0 since PID is set async)
+        # Get real PID from task (may be available in launch return now, but read from task for certainty)
         task = tracker._get_task('test_agent', tool_id)
         pid = task.pid if task else None
         assert pid is not None and pid > 0, f"PID not set yet: {pid}"

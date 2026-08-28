@@ -198,7 +198,7 @@ class AsyncShellTracker:
         Returns:
             Tuple of (tool_id, pid, early_output, completed_early, return_code):
               - tool_id: Simple counter per agent.
-              - pid: 0 until the process actually starts (set asynchronously).
+              - pid: OS process ID (0 if the process hadn't started by the time the launch wait expired).
               - early_output: List of non-empty output lines captured during launch wait, or None.
               - completed_early: True if the command finished within the launch wait period.
               - return_code: Exit code if completed_early is True, else None.
@@ -256,7 +256,7 @@ class AsyncShellTracker:
         # completed=True, we set completed_at_launch=True so the tracking thread skips
         # sending any messages (heartbeats, output, completion).
         try:
-            early_output, completed_early, return_code = self._get_launch_result(
+            pid, early_output, completed_early, return_code = self._get_launch_result(
                 agent_name, tool_id, timeout=EARLY_OUTPUT_CHECK_TIMEOUT
             )
         finally:
@@ -264,12 +264,12 @@ class AsyncShellTracker:
             # This prevents deadlock if _get_launch_result raises unexpectedly.
             task.launch_check_done.set()
 
-        return tool_id, 0, early_output, completed_early, return_code
+        return tool_id, pid, early_output, completed_early, return_code
 
     # ────────────────────────────────────────────────────────────────
     def _get_launch_result(
         self, agent_name: str, tool_id: int, timeout: float = EARLY_OUTPUT_CHECK_TIMEOUT
-    ) -> Tuple[Optional[List[str]], bool, Optional[int]]:
+    ) -> Tuple[int, Optional[List[str]], bool, Optional[int]]:
         """Briefly poll after launch for early output or completion.
 
         After spawning the tracking thread, waits up to `timeout` seconds checking
@@ -277,9 +277,9 @@ class AsyncShellTracker:
         a redundant "launched" message when a command completes very quickly.
 
         Three possible outcomes:
-        - Process started and completed within timeout: returns output (if any), True, return_code
-        - Process started with output but still running: returns output lines, False, None
-        - Timeout elapsed before process started: returns None, False, None (normal launched behavior)
+        - Process started and completed within timeout: returns pid, output (if any), True, return_code
+        - Process started with output but still running: returns pid, output lines, False, None
+        - Timeout elapsed before process started: returns 0, None, False, None (normal launched behavior)
 
         Args:
             agent_name: Owner agent name
@@ -287,9 +287,9 @@ class AsyncShellTracker:
             timeout: Maximum seconds to wait (default EARLY_OUTPUT_CHECK_TIMEOUT)
 
         Returns:
-            Tuple of (early_output_lines_or_None, completed_early_bool, return_code_or_None).
-            If completion was detected early, sets task.completed_at_launch=True so
-            the tracking thread skips all messages.
+            Tuple of (pid, early_output_lines_or_None, completed_early_bool, return_code_or_None).
+            pid is 0 if the process hasn't started yet. If completion was detected early,
+            sets task.completed_at_launch=True so the tracking thread skips all messages.
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
@@ -297,7 +297,7 @@ class AsyncShellTracker:
                 f"[AsyncShell] Task not found during launch result check: "
                 f"{agent_name} tool_id={tool_id}"
             )
-            return None, False, None
+            return 0, None, False, None
 
         start_wait = time.time()
         while True:
@@ -340,7 +340,7 @@ class AsyncShellTracker:
                     f"[AsyncShell] Early completion detected for {agent_name} "
                     f"tool_id={tool_id}, PID={pid}, rc={return_code}"
                 )
-                return early_output, completed_early, return_code
+                return pid, early_output, completed_early, return_code
 
             # Process started but not yet completed — continue polling briefly.
             # This allows fast commands to be detected as complete even after output arrives.
@@ -351,18 +351,19 @@ class AsyncShellTracker:
             if task.process is not None:
                 combined = list(task.stdout_lines) + list(task.stderr_lines)
                 final_output = [l for l in combined if l.strip()] if combined else None
+                pid = task.pid
 
                 # Check completion one last time before giving up
                 if task.completed:
                     task.completed_at_launch = True
-                    return final_output, True, task.return_code
+                    return pid, final_output, True, task.return_code
 
                 # Mark output as shown so tracking thread doesn't resend it
                 if final_output is not None:
                     task.last_heartbeat_sent_pos = len(combined)
 
-                return final_output, False, None
-            return None, False, None
+                return pid, final_output, False, None
+            return 0, None, False, None
 
     # ────────────────────────────────────────────────────────────────
     @staticmethod
