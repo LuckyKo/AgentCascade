@@ -1136,21 +1136,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             m0.content = m0_content
                         logger.debug(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name} ({', '.join(diff_summary)})")
 
-                        # Update the in-memory tracked system message only — do NOT
-                        # rewrite the JSONL file here. data["history"] is a count-based
-                        # delta-sync cursor aligned to the (possibly compression-trimmed)
-                        # pool working set, so rewriting the full-history file from it
-                        # would silently destroy retained history (the original bug).
-                        # The new system text persists on the next append/rewrite.
                         try:
                             log_inst = self.pool.get_logger(inst_name, instance.agent_class)
                             if log_inst.data["history"]:
-                                # Update the in-memory tracked system message ONLY.
-                                # Do NOT rewrite the JSONL file here: data["history"] is a
-                                # count-based delta-sync cursor aligned to the (possibly
-                                # trimmed) pool working set, so rewriting the full-history
-                                # file from it would silently destroy retained history.
-                                # The new system text persists on the next append/rewrite.
+                                # Update in-memory system message only — do NOT rewrite the JSONL file here.
+                                # data["history"] is the trimmed working set; rewriting the full-history file
+                                # from it would destroy retained history. New text persists on next append.
                                 log_inst.data["history"][0] = log_inst._format_message(m0)
                         except Exception as e:
                             logger.warning(f"Failed to update in-memory system message for {inst_name}: {e}")

@@ -8,6 +8,7 @@ Ported from agent_logger.py for the new unified architecture.
 Writes to Layer 1 (JSONL file). The pool owns Layer 2 (in-memory working set).
 """
 
+import itertools
 import json
 import os
 import shutil
@@ -24,6 +25,11 @@ from agent_cascade.prompts.dna import COMPRESSION_MARKER
 # datetime.now().isoformat() can produce identical values within the same microsecond.
 _timestamp_counter = 0
 _timestamp_lock = threading.Lock()
+
+# Shrink-guard threshold for rewrite_log_with_history(). A rewrite is refused when the
+# incoming history is smaller than this fraction of the tracked working set. Catches
+# catastrophic loss (>50% reduction); legitimate trims like edit/delete stay below it.
+_SHRINK_GUARD_RATIO = 0.5
 
 def _next_unique_timestamp() -> str:
     """Generate a strictly increasing timestamp string (microsecond resolution + monotonic counter).
@@ -96,6 +102,7 @@ class AgentInstanceLogger:
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
         self._file_history_synced = False  # One-shot file sync guard for update_history() — prevents duplicate file loads
         self._write_lock = threading.Lock()  # Lock for read-modify-write operations on JSONL file
+        self._atomic_tmp_counter = itertools.count()  # Per-instance counter for unique temp filenames in _atomic_write_lines
         self._initial_save()
 
     def update_supervisor(self, value: str) -> None:
@@ -230,9 +237,6 @@ class AgentInstanceLogger:
         """
         # Unique per-call temp name (pid + thread id + counter) to avoid cross-thread
         # collisions when multiple threads rewrite the same file concurrently.
-        import itertools
-        if not hasattr(self, '_atomic_tmp_counter'):
-            self._atomic_tmp_counter = itertools.count()
         tmp_path = f"{self.log_path}.{os.getpid()}.{threading.get_ident()}.{next(self._atomic_tmp_counter)}.tmp"
         try:
             with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -485,11 +489,12 @@ class AgentInstanceLogger:
                     self._append_line(msg)
 
         if needs_rewrite:
-            self.rewrite_log_with_history(old_history)
+            self.rewrite_log_with_history(old_history, caller="update_history")
 
     # ── History reset / rewrite ────────────────────────────────────────────────────
 
-    def rewrite_log_with_history(self, new_history: List[Any], allow_shrink: bool = False) -> bool:
+    def rewrite_log_with_history(self, new_history: List[Any], allow_shrink: bool = False,
+                                 caller: str = "unknown") -> bool:
         """Rewrite the log file from scratch with a complete history.
 
         SRP: Session load rewriting — writes the full message list as-is.
@@ -498,9 +503,9 @@ class AgentInstanceLogger:
         edit, delete, retry-trim operations).
 
         SHRINK GUARD: By default this method REFUSES to replace the tracked working-set
-        history with a list that is drastically smaller (silent data loss from writing a
-        shrunken in-memory state over a larger tracked set). Callers that intentionally
-        shrink (e.g. user delete) must pass allow_shrink=True.
+        history with a list smaller than _SHRINK_GUARD_RATIO of it (silent data loss
+        from writing a shrunken in-memory state over a larger tracked set). Callers that
+        intentionally shrink (e.g. user delete) must pass allow_shrink=True.
 
         Thread-safety: Uses self._write_lock for the read-modify-write of the file,
         consistent with _consolidate_markers_in_jsonl().
@@ -509,17 +514,11 @@ class AgentInstanceLogger:
             new_history: Complete list of messages to write to the log file.
             allow_shrink: If True, permit writing a much smaller history than what is
                 currently tracked. Default False (protects against accidental loss).
+            caller: Name of the calling function, used only in diagnostic log messages.
 
         Returns:
             True on success, False on error or if the shrink guard aborted the write.
         """
-        # Fix 5: Log caller + incoming size for future diagnosability.
-        import inspect
-        try:
-            caller = inspect.stack()[1].function
-        except Exception:
-            caller = "unknown"
-
         with self._write_lock:
             # Close cached handle before overwriting (Fix #1)
             if self._file_handle and not self._file_handle.closed:
@@ -537,7 +536,7 @@ class AgentInstanceLogger:
             # incoming history is far smaller than what we last tracked in memory.
             prev_tracked = len(self.data["history"])
             new_count = len(new_history)
-            if (not allow_shrink and prev_tracked > 0 and new_count < prev_tracked * 0.5):
+            if (not allow_shrink and prev_tracked > 0 and new_count < prev_tracked * _SHRINK_GUARD_RATIO):
                 logger.critical(
                     f"SHRINK GUARD: rewrite_log_with_history REFUSED for {self.log_path} "
                     f"(caller={caller}). Incoming history has {new_count} messages but the "

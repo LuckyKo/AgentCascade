@@ -598,7 +598,7 @@ class SessionIOMixin:
             # Rewrite log with cleaned (full history), not working_set.
             # Design §5.2: "Agent memory and JSONL are NOT in full sync — the logs retain
             # the full conversation history at all times." Only in-memory gets [SYS][U0][COMP][tail].
-            log_inst.rewrite_log_with_history(cleaned)
+            log_inst.rewrite_log_with_history(cleaned, caller="load_session_from_log")
 
             with self._logger._lock:
                 self._logger._loggers[key] = log_inst

@@ -163,16 +163,59 @@ class TestShrinkGuard:
         assert _count_messages(log_path) == 1
         assert len(logger_inst.data["history"]) == 1
 
-    def test_boundary_at_half_is_allowed(self, tmp_log):
-        """new_count == prev_tracked * 0.5 is NOT < half → allowed (boundary)."""
+    def test_refuses_just_under_half(self, tmp_log):
+        """new_count < prev_tracked * _SHRINK_GUARD_RATIO → refused."""
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 10)
         _set_tracked(logger_inst, 10)          # tracked = 10, half = 5
 
-        result = logger_inst.rewrite_log_with_history([_user(f"edge {i}") for i in range(5)])
+        result = logger_inst.rewrite_log_with_history([_user(f"under {i}") for i in range(4)])  # 4 < 5
 
-        assert result is True, "exactly-half incoming history must be allowed (not a drastic shrink)"
-        assert _count_messages(log_path) == 5
+        assert result is False, "just-under-half incoming history must be refused (drastic shrink)"
+        assert _count_messages(log_path) == 10
+
+    def test_allows_well_above_half(self, tmp_log):
+        """new_count > prev_tracked * _SHRINK_GUARD_RATIO → allowed."""
+        log_path, logger_inst = tmp_log
+        _seed_file(log_path, 10)
+        _set_tracked(logger_inst, 10)          # tracked = 10, half = 5
+
+        result = logger_inst.rewrite_log_with_history([_user(f"above {i}") for i in range(7)])  # 7 > 5
+
+        assert result is True, "well-above-half incoming history must be allowed (not a drastic shrink)"
+        assert _count_messages(log_path) == 7
+
+
+# ──────────────────────────────────────────────
+# 1b. Regression: original data-loss scenario
+# ──────────────────────────────────────────────
+
+class TestOriginalScenarioRegression:
+    """Mirror the real trigger that caused the bug.
+
+    After compression, the JSONL file retains FULL history while data["history"] is
+    trimmed to the pool working set. A cache-rebuild-style update (just mutating
+    data["history"][0]) must NOT rewrite the full-history file from the trimmed set —
+    doing so would silently destroy all retained messages.
+    """
+
+    def test_cache_rebuild_update_preserves_full_file(self, tmp_log):
+        log_path, logger_inst = tmp_log
+
+        # Seed the on-disk file with FULL history (the retained conversation).
+        _seed_file(log_path, 100)
+        original_text = log_path.read_text()
+
+        # Simulate post-compression state: in-memory tracked working set is trimmed to ~20.
+        _set_tracked(logger_inst, 20)
+
+        # The cache-rebuild path: update ONLY the in-memory system message (index 0).
+        # This is exactly what core.py does — it must not touch the file at all.
+        logger_inst.data["history"][0] = logger_inst._format_message(_user("updated sys prompt"))
+
+        # File must still hold all 100 messages, byte-for-byte unchanged.
+        assert _count_messages(log_path) == 100, "cache-rebuild update must not shrink the full-history file"
+        assert log_path.read_text() == original_text, "file must be left completely intact"
 
 
 # ──────────────────────────────────────────────
@@ -201,12 +244,12 @@ class TestAtomicWrite:
         assert _temp_files(log_path.parent) == [], "no .tmp files may remain after success"
 
     def test_failure_leaves_previous_intact(self, tmp_log):
-        """If the write fails (target dir not writable), the prior file must survive."""
+        """If the write fails (target path does not exist), the prior file must survive."""
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 4)
         original_text = log_path.read_text()
 
-        # Point the logger at a non-writable path to force os.replace/open failure.
+        # Point the logger at a non-existent path to force os.replace/open failure.
         unwritable_dir = log_path.parent / "no_such_dir"
         logger_inst.log_path = str(unwritable_dir / "impossible.jsonl")
 
