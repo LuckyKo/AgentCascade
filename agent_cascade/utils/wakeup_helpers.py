@@ -30,7 +30,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from agent_cascade.agent_pool import AgentPool
 
 
-def _drive_run(pool, instance_name: str) -> None:
+def _drive_instance_run(pool, instance_name: str) -> None:
     """Thread target: exhaust the run_agent_in_pool generator for one instance.
 
     Yields are UI state updates; background wakeups silently drain them (the
@@ -98,7 +98,7 @@ def relaunch_idle_agent(pool, instance_name: str) -> bool:
 
     The pre-check under ``_state_lock`` is an optimization; the authoritative
     double-launch guard is ``engine.run()``'s atomic IDLE→RUNNING transition,
-    whose RuntimeError is caught in the spawned thread (see ``_drive_run``).
+    whose RuntimeError is caught in the spawned thread (see ``_drive_instance_run``).
     The run-generation mechanism needs no extra work here: ``run()`` captures
     ``pool._run_generation`` at entry and self-aborts if it has advanced.
 
@@ -152,7 +152,7 @@ def relaunch_idle_agent(pool, instance_name: str) -> bool:
 
     try:
         t = threading.Thread(
-            target=_drive_run,
+            target=_drive_instance_run,
             args=(pool, instance_name),
             name=f"wakeup-relaunch-{instance_name}",
             daemon=True,

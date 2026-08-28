@@ -1098,29 +1098,28 @@ class APIRouter:
 
         Called from call_with_fallback AFTER get_endpoint_chain returns (lock released).
 
-        Probe trigger model (Part 2 — per-connection health, NOT a global TTL): an
-        endpoint is probed at most ONCE per fresh slot acquisition, and only when the
-        caller has no LIVE connection to it. The gate, in priority order:
-          - breaker open on this base            → keep in chain, NO probe (busy machinery owns it)
-          - instance holds a LIVE connection here → keep in chain, NO probe (fast path — kills the flood)
+        Probe trigger model (per-connection health, NOT a global TTL): an endpoint is
+        probed at most ONCE per fresh slot acquisition, and only when the caller has no
+        LIVE connection to it. Gate, in priority order:
+          - breaker open on this base            → keep, NO probe (busy machinery owns it)
+          - instance holds a LIVE connection here → keep, NO probe (fast path — kills the flood)
           - blacklisted (Fix B1)                 → drop, NO probe
           - else                                 → probe ONCE; pass → keep, fail → drop + cooldown
 
-        ``instance_name`` is the calling instance's name (threaded from call_with_fallback).
-        When given and this instance already holds a live connection to an endpoint in the
-        chain, that endpoint is fast-pathed: no re-probe across turns OR engine retries of
-        a still-live connection. This is what stops a healthy primary being probed every
-        turn + every retry (the accept-queue-exhaustion flood).
+        ``instance_name`` (threaded from call_with_fallback): if this instance already holds
+        a live connection to an endpoint in the chain, that endpoint is fast-pathed — no
+        re-probe across turns or engine retries of a still-live connection. This stops a
+        healthy primary being probed every turn + every retry (the accept-queue flood).
 
         Thread-safety: self._lock is held ONLY for dict reads/writes (live-endpoint check,
-        blacklist check, cooldown store, blacklist clear). It is RELEASED before
+        blacklist check, cooldown store, blacklist clear); it is RELEASED before
         _sanity_probe() makes its network call and RE-ACQUIRED after. Concurrent probes of
         the same endpoint are possible but benign (both test the same state within ms).
 
-        Returns the filtered chain (may be shorter than input). If ALL endpoints fail
-        validation, raises a clear RuntimeError — silently returning an empty chain would
-        let call_with_fallback fall through to the generic "All API endpoints exhausted"
-        error with no per-endpoint detail, hiding the real cause.
+        Returns the filtered chain (may be shorter). If ALL endpoints fail validation,
+        raises a clear RuntimeError — an empty chain would let call_with_fallback fall
+        through to the generic "All API endpoints exhausted" error with no per-endpoint
+        detail, hiding the real cause.
         """
         if not SANITY_PROBE_ENABLED or not chain:
             return chain
@@ -1687,23 +1686,17 @@ class APIRouter:
         chain = self.get_endpoint_chain(
             agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
         )
-        # ── Fix D: Pre-allocation sanity probe — LAZY (per-endpoint, inside the loop below).
-        #    Each endpoint is probed at most once, JUST BEFORE it is tried (see the lazy
-        #    gate at the top of the for-loop). This fixes the WinError 10055 socket-buffer
-        #    exhaustion: with the former eager pre_validate_endpoint_chain call here, a chain
-        #    like [healthy_primary, dead_a, dead_b] probed dead_a AND dead_b on EVERY turn —
-        #    even though the healthy primary is committed and the fallbacks are never reached.
-        #    Lazy probing means a live primary costs ZERO probe HTTP to its fallbacks. The
-        #    per-endpoint gates (breaker-open skip, committed fast-path, blacklist skip) apply
-        #    identically to each endpoint; pre_validate_endpoint_chain is kept for callers that
-        #    want whole-chain validation. ──
-        # D1 fail-fast scan: use the NON-mutating _breaker_is_open (not _breaker_should_skip).
-        # The pre-loop scan must NOT claim the single half-open probe — doing so would wedge
-        # recovery (the probe is claimed here, then the endpoint loop re-consults, sees
-        # half_open/probing, skips the busy base, and the claimed probe is never fired). Only
-        # the endpoint loop's consult may claim the probe. _breaker_is_open returns the same
-        # open/skip boolean (closed→False, open-within-window→True, open-elapsed→False,
-        # half_open/probing→True) WITHOUT that side effect.
+        # ── Fix D: sanity probe is LAZY — each endpoint is probed at most once, just before
+        # it is tried (gate at the top of the loop below). Fixes WinError 10055 socket-buffer
+        # exhaustion: the former eager pre_validate_endpoint_chain call here probed every
+        # fallback on EVERY turn even when a committed healthy primary was never going to
+        # fall back. Lazy probing means a live primary costs ZERO probe HTTP to its fallbacks.
+        # Gates per endpoint, in priority order: breaker-open → skip; committed-live + not
+        # blacklisted → fast-path (no probe); blacklisted → skip; else probe once. ──
+        # D1 fail-fast scan uses the NON-mutating _breaker_is_open (not _breaker_should_skip):
+        # a pre-loop claim of the single half-open probe would wedge recovery — the endpoint
+        # loop re-consults, sees half_open/probing, skips the busy base, and the claimed probe
+        # never fires. Only the endpoint loop's consult may claim it.
         if chain and all(
             self._breaker_is_open(
                 cfg.get('api_base') or cfg.get('model_server', 'unknown')
@@ -1732,16 +1725,13 @@ class APIRouter:
         all_errors = []
 
         for cfg_idx, llm_cfg in enumerate(chain):
-            # ── Lazy sanity probe (Fix D, lazy variant): validate THIS endpoint only, just
-            # before trying it. Mirrors the per-endpoint gate of pre_validate_endpoint_chain,
-            # but runs for the CURRENT endpoint alone — a live committed primary therefore
-            # costs ZERO probe HTTP to its fallbacks (WinError 10055 fix). Gates in priority
-            # order: breaker-open → skip without probing (breaker machinery owns it);
-            # committed live + not blacklisted → fast-path, no probe; blacklisted → skip
-            # without probing; else probe once — pass proceeds to the call, fail records a
-            # cooldown and moves on. Cooldown-filtered endpoints never reach here (filtered by
-            # get_endpoint_chain); the probe-failure path below still sets one for the next
-            # acquisition. ──
+            # ── Lazy sanity probe (Fix D): validate THIS endpoint only, just before trying it.
+            # Same gate as pre_validate_endpoint_chain but for the current endpoint alone — a
+            # live committed primary costs ZERO probe HTTP to its fallbacks (WinError 10055).
+            # Gates in priority order: breaker-open → skip (breaker machinery owns it);
+            # committed-live + not blacklisted → fast-path, no probe; blacklisted → skip;
+            # else probe once — pass proceeds, fail records a cooldown and moves on.
+            # (Cooldown-filtered endpoints never reach here — get_endpoint_chain drops them.) ──
             if SANITY_PROBE_ENABLED and agent_type:
                 _probe_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', '')
                 _probe_key = (normalize_api_base(_probe_base), llm_cfg.get('model', ''))

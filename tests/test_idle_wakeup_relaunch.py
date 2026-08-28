@@ -25,7 +25,7 @@ import pytest
 
 from agent_cascade.agent_instance import AgentState
 from agent_cascade.async_tools import AsyncToolRegistry
-from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent, _drive_run
+from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent, _drive_instance_run
 
 
 # ============================================================================
@@ -111,7 +111,7 @@ class _FakeThread:
     def run(self):
         try:
             self.target(*self.args)
-        except Exception as e:  # pragma: no cover - _drive_run catches internally
+        except Exception as e:  # pragma: no cover - _drive_instance_run catches internally
             self.exc = e
 
     def join(self, timeout=None):
@@ -138,7 +138,7 @@ class TestRelaunchGates:
         assert ft.started
         assert ft.daemon is True
         # Target drives the instance through run_agent_in_pool.
-        assert ft.target is _drive_run
+        assert ft.target is _drive_instance_run
         assert ft.args == (pool, "Maine")
 
     def test_sleeping_parent_no_relaunch(self):
@@ -334,10 +334,10 @@ class TestAsyncCompletionWiring:
         pool = self._make_pool_with_registry_surface(AgentState.IDLE)
         registry = AsyncToolRegistry(pool=pool)
 
-        # Patch the helper's _drive_run so no real thread is spawned; the
+        # Patch the helper's _drive_instance_run so no real thread is spawned; the
         # executor keeps its real threads, so completion is fast and
         # deterministic. The fake captures the spawn-attempt args.
-        with patch('agent_cascade.utils.wakeup_helpers._drive_run') as mock_drive:
+        with patch('agent_cascade.utils.wakeup_helpers._drive_instance_run') as mock_drive:
             self._register_and_wait(registry)
 
         assert not registry.has_pending("Maine")
@@ -356,7 +356,7 @@ class TestAsyncCompletionWiring:
         pool = self._make_pool_with_registry_surface(AgentState.SLEEPING)
         registry = AsyncToolRegistry(pool=pool)
 
-        with patch('agent_cascade.utils.wakeup_helpers._drive_run') as mock_drive:
+        with patch('agent_cascade.utils.wakeup_helpers._drive_instance_run') as mock_drive:
             self._register_and_wait(registry)
 
         pool.enqueue_message.assert_called_once()  # existing behavior preserved
@@ -367,7 +367,7 @@ class TestAsyncCompletionWiring:
         pool.stopped = True
         registry = AsyncToolRegistry(pool=pool)
 
-        with patch('agent_cascade.utils.wakeup_helpers._drive_run') as mock_drive:
+        with patch('agent_cascade.utils.wakeup_helpers._drive_instance_run') as mock_drive:
             self._register_and_wait(registry)
 
         pool.enqueue_message.assert_called_once()  # enqueue still happens
