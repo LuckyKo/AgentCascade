@@ -3206,12 +3206,37 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         from agent_cascade.api_integration import _resolve_max_tokens
         return _resolve_max_tokens(self.pool, instance)
 
-    def _count_history_tokens(self, messages: List[Message], instance: AgentInstance = None) -> int:
+    def _get_active_functions_for_counting(self, instance: AgentInstance):
+        """Resolve the active tool schemas for an instance (for token estimation).
+
+        Mirrors how the LLM call resolves its tools (llm_call.py →
+        _get_active_functions_from_template). Fail-soft: returns [] on any error so a
+        counting path never crashes because of template resolution.
+        """
+        try:
+            from agent_cascade.engine.helpers import _get_active_functions_from_template
+            template = self.pool.get_template(instance.agent_class)
+            if not template:
+                return []
+            return _get_active_functions_from_template(template, instance, pool=self.pool)
+        except Exception as e:
+            logger.debug(f"Active function resolution for token counting failed (non-fatal): {e}")
+            return []
+
+    def _count_history_tokens(self, messages: List[Message], instance: AgentInstance = None, functions=None) -> int:
         """Calculate total tokens in a message list (with caching — Fix #2).
-        
+
         Uses get_message_stats() for consistent token counting including chat
         template overhead. This aligns with llm/base.py::_count_tokens and ensures
         all code paths report the same estimates that match llama.cpp's actual counts.
+
+        Args:
+            messages: The conversation messages to count.
+            instance: Optional AgentInstance (for per-instance caching / thread safety).
+            functions: Optional active tool schemas. When provided, their serialized
+                payload is added to the total — these are always sent to the API as
+                ``tools=`` and were previously invisible to this compression-trigger
+                count (causing late compression in tool-heavy sessions).
         """
         try:
             # Check cache: if conversation length hasn't changed, reuse the
@@ -3224,6 +3249,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             for msg in messages:
                 stats = get_message_stats(msg)
                 total += stats['tokens']
+
+            # Tool schemas are sent on every call but are not part of the message list,
+            # so they were being undercounted here. Count them when provided.
+            if functions:
+                from agent_cascade.utils.utils import estimate_functions_tokens
+                total += estimate_functions_tokens(functions)
 
             # Update cache
             if inst:

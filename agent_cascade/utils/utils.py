@@ -1135,6 +1135,63 @@ def estimate_functions_tokens(functions) -> int:
         return 0
 
 
+def _tool_calls_wire_json(msg) -> str:
+    """Serialize an assistant message's tool calls to the JSON wire format actually
+    sent to the API (mirrors BaseChatModel._conv_agent_cascade_messages_to_oai).
+
+    Handles both the legacy single ``function_call`` field and the modern
+    ``tool_calls`` array. Returns '' when there are no tool calls, or a JSON string
+    of the form ``[{'id':..., 'type':'function', 'function':{'name':..., 'arguments':...}}]``.
+
+    Used only for token estimation (never for display). Fail-soft: returns '' on any
+    serialization error so an undumpable call can never crash the estimator.
+    """
+    try:
+        # Legacy single function_call takes priority — this mirrors the wire converter
+        # (base.py only reads function_call; a well-formed message has at most one of the
+        # two fields, so falling through to tool_calls only happens when function_call is
+        # absent). Using elif avoids double-counting a malformed message that carries both.
+        fc = _msg_field_or_extra(msg, 'function_call')
+        if fc is not None:
+            if isinstance(fc, dict):
+                fc_name = fc.get('name', '')
+                fc_args = fc.get('arguments', '')
+            else:
+                fc_name = getattr(fc, 'name', '')
+                fc_args = getattr(fc, 'arguments', '')
+            extra = _msg_field_or_extra(msg, 'extra') or {}
+            fid = (extra.get('function_id', '1') if isinstance(extra, dict) else '1')
+            calls = [{'id': fid, 'type': 'function',
+                      'function': {'name': fc_name, 'arguments': fc_args}}]
+        else:
+            # Modern tool_calls array
+            tc = _msg_field_or_extra(msg, 'tool_calls')
+            calls = []
+            if isinstance(tc, list):
+                for i, item in enumerate(tc):
+                    if isinstance(item, dict):
+                        cid = item.get('id', str(i + 1))
+                        cfunc = item.get('function', {}) or {}
+                        cname = cfunc.get('name', '')
+                        cargs = cfunc.get('arguments', '')
+                    else:
+                        cid = getattr(item, 'id', None) or str(i + 1)
+                        cfunc = getattr(item, 'function', None)
+                        if cfunc is not None:
+                            cname = getattr(cfunc, 'name', '')
+                            cargs = getattr(cfunc, 'arguments', '')
+                        else:
+                            cname, cargs = '', ''
+                    calls.append({'id': cid, 'type': 'function',
+                                  'function': {'name': cname, 'arguments': cargs}})
+
+        if not calls:
+            return ''
+        return json.dumps(calls, ensure_ascii=False)
+    except Exception:
+        return ''
+
+
 def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     """Return tokens and words for a message with consistency.
     Uses logic aligned with BaseChatModel._truncate_input_messages_roughly.
@@ -1163,7 +1220,12 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         role = msg.get(ROLE, '')
         function_call = msg.get('function_call')
         if role == ASSISTANT and function_call:
-            text = f'{function_call}'
+            # Count tool call in the JSON wire format actually sent to the API
+            # (not Python repr), plus any reasoning_content which is always shipped.
+            text = _tool_calls_wire_json(msg)
+            rc_text = _reasoning_to_text(_msg_field_or_extra(msg, 'reasoning_content'), truncate=False)
+            if rc_text:
+                text = f'{text}\n{rc_text}'
             stats = {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
             msg['_tokens'] = stats['tokens']
             msg['_words'] = stats['words']
@@ -1185,7 +1247,12 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         role = getattr(msg, 'role', '')
         function_call = getattr(msg, 'function_call', None)
         if role == ASSISTANT and function_call:
-            text = f'{function_call}'
+            # Count tool call in the JSON wire format actually sent to the API
+            # (not Python repr), plus any reasoning_content which is always shipped.
+            text = _tool_calls_wire_json(msg)
+            rc_text = _reasoning_to_text(_msg_field_or_extra(msg, 'reasoning_content'), truncate=False)
+            if rc_text:
+                text = f'{text}\n{rc_text}'
             return {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
         msg_obj = msg
         is_dict = False
@@ -1201,8 +1268,14 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     role = getattr(msg_obj, 'role', '')
     content = getattr(msg_obj, 'content', '')
     fc = getattr(msg_obj, 'function_call', None)
-    
-    # Build a hashable key from the message content using MD5 of the full text
+
+    # Build a hashable key from the message content using MD5 of the full text.
+    # reasoning_content and tool_calls are always shipped to the API, so they must be
+    # part of the cache key — otherwise two messages differing only in reasoning/tool
+    # calls would collide on a stale cached token count (undercount).
+    rc_for_key = _reasoning_to_text(_msg_field_or_extra(msg_obj, 'reasoning_content'), truncate=False)
+    tc_json_for_key = _tool_calls_wire_json(msg_obj)
+
     if fc:
         content_key = ('fc', str(fc))
     elif isinstance(content, list):
@@ -1214,8 +1287,17 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         full_text = str(content)
         content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
         content_key = ('text', content_hash)
-    
-    cache_key = (role, str(content_key))
+
+    # Whether content is non-empty matters: when empty, extract_text_from_message surfaces
+    # reasoning/tool_calls as display text (counted once); when non-empty they are added on
+    # top. Two messages with the same rc/tc but differing content-presence must NOT share a
+    # cache entry, so fold a presence flag into the key.
+    content_present = bool(content is not None and str(content).strip())
+    extra_hash = hashlib.md5(
+        (str(content_present) + '\x00' + rc_for_key + '\x00' + tc_json_for_key)
+        .encode('utf-8', errors='replace')
+    ).hexdigest()[:16]
+    cache_key = (role, str(content_key), extra_hash)
 
     # Check Message object LRU cache — move to end on hit (most recently used)
     if cache_key in msg_cache:
@@ -1232,6 +1314,19 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         
         text_for_tokens = IMAGE_REGEX.sub(repl, text)
         tokens = qwen_count(text_for_tokens) + image_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD
+
+        # reasoning_content / tool_calls are ALWAYS shipped to the API (base.py), so they
+        # must be counted. But only when content is non-empty: when content IS empty,
+        # extract_text_from_message() already surfaced them as display text ([THOUGHT:...] /
+        # [TOOL CALL:...]) and qwen_count(text_for_tokens) above has already counted them —
+        # adding the raw fields again would double-count. (The function_call early-return
+        # paths handle the empty-content case separately.)
+        if content is not None and str(content).strip():
+            if rc_for_key:
+                tokens += qwen_count(rc_for_key)
+            if tc_json_for_key:
+                tokens += qwen_count(tc_json_for_key)
+
         words = len(text.split())
         stats = {'tokens': tokens, 'words': words}
         

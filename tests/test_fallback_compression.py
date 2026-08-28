@@ -2635,3 +2635,180 @@ class TestToolSchemaTokenAccounting:
         _, kwargs = router.call_with_fallback.call_args
         assert kwargs.get('functions') == schemas, \
             f"functions not forwarded to the router: {kwargs.keys()}"
+
+
+class TestTokenEstimatorUndercountFixes:
+    """Regression tests for the context token estimator undercount (~10k / 10% vs
+    llama.cpp's actual count). Three root causes fixed in get_message_stats and
+    _count_history_tokens:
+
+      1. reasoning_content was invisible to the estimator (only used as a display
+         fallback) even though it is ALWAYS shipped to the API.
+      2. tool_calls / function_call were counted with Python repr instead of the JSON
+         wire format actually sent to the API.
+      3. _count_history_tokens (compression trigger) did not count tool schemas.
+
+    These are pure unit tests — no LLM or API server required.
+    """
+
+    # ── Fix 1: reasoning_content is counted ────────────────────────────────
+    def test_reasoning_content_counted_general_path(self):
+        """An assistant message with non-empty content AND reasoning_content must
+        count MORE tokens than the same message without reasoning_content."""
+        from agent_cascade.utils.utils import get_message_stats
+
+        base = Message(role=ASSISTANT, content="The answer is 42.")
+        with_rc = Message(
+            role=ASSISTANT, content="The answer is 42.",
+            reasoning_content=("Let me work through this carefully. First I consider the "
+                               "constraints, then I eliminate each candidate solution until "
+                               "only one remains, and finally I verify it against the original problem."),
+        )
+        base_tokens = get_message_stats(base)['tokens']
+        rc_tokens = get_message_stats(with_rc)['tokens']
+        assert rc_tokens > base_tokens, \
+            f"reasoning_content must increase the estimate ({rc_tokens} <= {base_tokens})"
+
+    def test_reasoning_content_counted_in_function_call_path(self):
+        """The function_call early-return path (dict + Message) must also count
+        reasoning_content, which is shipped alongside the tool call."""
+        from agent_cascade.utils.utils import get_message_stats
+        from agent_cascade.llm.schema import FunctionCall
+
+        fc = {'name': 'grep', 'arguments': '{"pattern": "x"}'}
+        d_base = dict({'role': ASSISTANT, 'function_call': fc})
+        d_rc = dict(d_base)
+        d_rc['reasoning_content'] = "I need to search the codebase for this symbol before editing it."
+
+        base_tokens = get_message_stats(dict(d_base))['tokens']
+        rc_tokens = get_message_stats(dict(d_rc))['tokens']
+        assert rc_tokens > base_tokens, \
+            f"reasoning_content must be counted on the function_call dict path ({rc_tokens} <= {base_tokens})"
+
+        # Message-object variant of the same early-return path
+        m_base = Message(role=ASSISTANT, content='', function_call=FunctionCall('grep', '{"pattern": "x"}'))
+        m_rc = Message(role=ASSISTANT, content='', function_call=FunctionCall('grep', '{"pattern": "x"}'),
+                       reasoning_content="I need to search the codebase for this symbol before editing it.")
+        mb = get_message_stats(m_base)['tokens']
+        mr = get_message_stats(m_rc)['tokens']
+        assert mr > mb, \
+            f"reasoning_content must be counted on the function_call Message path ({mr} <= {mb})"
+
+    def test_reasoning_cache_key_isolated(self):
+        """Two messages with identical content but different reasoning_content must NOT
+        collide in the LRU cache (the cache key must include a reasoning hash)."""
+        from agent_cascade.utils.utils import get_message_stats
+
+        m1 = Message(role=ASSISTANT, content="same visible content")
+        m2 = Message(role=ASSISTANT, content="same visible content",
+                     reasoning_content="entirely different hidden reasoning that changes the token count")
+        assert get_message_stats(m1)['tokens'] != get_message_stats(m2)['tokens'], \
+            "cache key must distinguish messages by reasoning_content"
+
+    def test_reasoning_no_double_count_empty_content(self):
+        """When content is empty, extract_text_from_message already surfaces reasoning as
+        display text ([THOUGHT: ...]) and it is counted once. The estimator must NOT add the
+        raw reasoning again — an empty-content message with reasoning must not exceed a
+        non-empty-content message carrying the SAME reasoning."""
+        from agent_cascade.utils.utils import get_message_stats
+
+        rc = "Let me reason about this carefully for a while."
+        empty_rc = Message(role=ASSISTANT, content="", reasoning_content=rc)
+        nonempty_rc = Message(role=ASSISTANT, content="The answer is 42.", reasoning_content=rc)
+
+        t_empty = get_message_stats(empty_rc)['tokens']
+        t_nonempty = get_message_stats(nonempty_rc)['tokens']
+        assert t_empty <= t_nonempty, \
+            (f"empty-content message ({t_empty}) must not exceed non-empty ({t_nonempty}) "
+             f"— reasoning_content is being double-counted")
+
+    def test_tool_calls_no_double_count_empty_content(self):
+        """Same invariant for tool_calls: an empty-content assistant message with a
+        tool_call must not exceed a non-empty-content message carrying the same call."""
+        from agent_cascade.utils.utils import get_message_stats
+        from agent_cascade.llm.schema import FunctionCall
+
+        tc = FunctionCall('grep', '{"pattern": "x", "path": "src"}')
+        empty_tc = Message(role=ASSISTANT, content="", function_call=tc)
+        nonempty_tc = Message(role=ASSISTANT, content="I will search now.", function_call=tc)
+
+        t_empty = get_message_stats(empty_tc)['tokens']
+        t_nonempty = get_message_stats(nonempty_tc)['tokens']
+        assert t_empty <= t_nonempty, \
+            (f"empty-content message ({t_empty}) must not exceed non-empty ({t_nonempty}) "
+             f"— tool_calls are being double-counted")
+
+    # ── Fix 2: tool_calls counted in JSON wire format ──────────────────────
+    def test_tool_calls_counted_wire_format(self):
+        """A modern assistant message carrying a tool_calls array (in extra) must count
+        MORE tokens than the same message without it."""
+        from agent_cascade.utils.utils import get_message_stats
+
+        plain = Message(role=ASSISTANT, content="ok")
+        tc_msg = Message(
+            role=ASSISTANT, content="ok",
+            extra={'tool_calls': [
+                {'id': '1', 'type': 'function',
+                 'function': {'name': 'grep', 'arguments': '{"pattern": "x", "path": "src"}'}},
+            ]},
+        )
+        p = get_message_stats(plain)['tokens']
+        t = get_message_stats(tc_msg)['tokens']
+        assert t > p, f"tool_calls must increase the estimate ({t} <= {p})"
+
+    def test_function_call_serialized_as_json_not_repr(self):
+        """The wire-format helper must emit JSON (the on-the-wire shape), not a Python
+        repr. Verify against the exact dict structure base.py ships."""
+        from agent_cascade.utils.utils import _tool_calls_wire_json
+        from agent_cascade.llm.schema import FunctionCall
+
+        msg = Message(role=ASSISTANT, content='', function_call=FunctionCall('grep', '{"pattern": "x"}'))
+        wire = _tool_calls_wire_json(msg)
+        # Must be valid JSON (repr of a dict with single quotes would not parse).
+        import json as _json
+        parsed = _json.loads(wire)
+        assert isinstance(parsed, list) and len(parsed) == 1
+        call = parsed[0]
+        assert call['type'] == 'function'
+        assert call['function']['name'] == 'grep'
+        assert call['function']['arguments'] == '{"pattern": "x"}'
+
+    # ── Fix 3: _count_history_tokens counts tool schemas ───────────────────
+    def test_count_history_tokens_includes_function_schemas(self):
+        """_count_history_tokens must add estimate_functions_tokens(functions) to the
+        message total when functions are provided, and be unchanged when they are not."""
+        from types import SimpleNamespace
+        from agent_cascade.engine.core import ExecutionEngine
+        from agent_cascade.utils.utils import get_message_stats, estimate_functions_tokens
+
+        engine = object.__new__(ExecutionEngine)  # bare instance; method uses no __init__ state
+        messages = [Message(role=USER, content="hello world this is a test message")]
+        schemas = [{'name': 'grep', 'description': 'd' * 50,
+                    'parameters': {'type': 'object', 'properties': {'p': {'type': 'string'}}}}]
+
+        def _inst():
+            return SimpleNamespace(_last_token_count_conversation_length=-1, _cached_token_count=0)
+
+        no_fn = ExecutionEngine._count_history_tokens(engine, messages, _inst(), functions=None)
+        with_fn = ExecutionEngine._count_history_tokens(engine, messages, _inst(), functions=schemas)
+
+        msg_only = get_message_stats(messages[0])['tokens']
+        assert no_fn == msg_only, \
+            f"functions=None must equal the message-only total ({no_fn} != {msg_only})"
+        expected_growth = estimate_functions_tokens(schemas)
+        assert with_fn - no_fn == expected_growth, \
+            f"growth {with_fn - no_fn} != schema token count {expected_growth}"
+
+    def test_count_history_tokens_default_backward_compatible(self):
+        """Omitting the new `functions` argument (all pre-existing call sites) must keep
+        working and equal the message-only total."""
+        from types import SimpleNamespace
+        from agent_cascade.engine.core import ExecutionEngine
+        from agent_cascade.utils.utils import get_message_stats
+
+        engine = object.__new__(ExecutionEngine)
+        messages = [Message(role=USER, content="backward compatibility check")]
+        inst = SimpleNamespace(_last_token_count_conversation_length=-1, _cached_token_count=0)
+
+        total = ExecutionEngine._count_history_tokens(engine, messages, inst)  # no functions arg
+        assert total == get_message_stats(messages[0])['tokens']

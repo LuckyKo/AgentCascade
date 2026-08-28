@@ -109,6 +109,11 @@ class CompressionExecMixin:
         actual_tokens = instance._last_actual_token_count
         allocated_max = instance._allocated_max_input_tokens
 
+        # Tool schemas are sent on every LLM call but live outside the message list;
+        # include them in the full-history count so compression fires on time in
+        # tool-heavy sessions. (Not added to the delta — that only covers new messages.)
+        active_functions = self._get_active_functions_for_counting(instance)
+
         if actual_tokens > 0 and allocated_max > 0:
             # Calculate delta: messages added since last token count
             delta_start = instance._last_token_count_conversation_length
@@ -133,7 +138,7 @@ class CompressionExecMixin:
                     f"(delta_start={delta_start}, actual={actual_tokens}/{allocated_max}), forcing recount"
                 )
                 with instance._compression_lock:
-                    actual_tokens = self._count_history_tokens(messages, instance)
+                    actual_tokens = self._count_history_tokens(messages, instance, functions=active_functions)
                 delta_tokens = 0
 
             current_tokens = actual_tokens + delta_tokens
@@ -141,7 +146,7 @@ class CompressionExecMixin:
         else:
             # Fallback: first turn or no cached data yet
             with instance._compression_lock:
-                current_tokens = self._count_history_tokens(messages, instance)
+                current_tokens = self._count_history_tokens(messages, instance, functions=active_functions)
             max_tokens_for_check = max_tokens_fresh
 
         # Reserve tokens for LLM call overhead (system prompt, function schemas, reasoning)
@@ -243,8 +248,9 @@ class CompressionExecMixin:
             if effective_limit <= 0:
                 effective_limit = max_tokens
 
+            active_functions = self._get_active_functions_for_counting(instance)
             with instance._compression_lock:
-                current_tokens = self._count_history_tokens(messages, instance)
+                current_tokens = self._count_history_tokens(messages, instance, functions=active_functions)
 
             usage_pct = (current_tokens / effective_limit * 100) if effective_limit > 0 else 0
 
