@@ -172,11 +172,15 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
   // Tool char limits
   { id: '#setting-tool-result-max-chars', prop: 'value', key: 'tool_result_max_chars', localKey: 'tool-result-max-chars' },
-  { id: '#setting-grep-char-limit', prop: 'value', key: 'grep_char_limit', localKey: 'grep-char-limit' },
-  { id: '#setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep-spillover' },
-  { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell-char-limit' },
-  { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code-char-limit' },
-  { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list-dir-char-limit' },
+  // NOTE: localKey MUST match the exact key saveSettings()/getGenerateCfg() writes to localStorage.
+  // This family is stored via getGenerateCfg() as underscore keys (see comment in saveSettings),
+  // so localKey uses underscores here — NOT hyphens. A mismatch makes the respect-local-preference
+  // guard in syncPoolSettings() dead code and causes mid-stream stomp-reverts (settings live-edit bug).
+  { id: '#setting-grep-char-limit', prop: 'value', key: 'grep_char_limit', localKey: 'grep_char_limit' },
+  { id: '#setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep_spillover' },
+  { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell_char_limit' },
+  { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code_char_limit' },
+  { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list_dir_char_limit' },
   // Approval timeout settings
   { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
   { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
@@ -209,7 +213,13 @@ function syncPoolSettings(ps) {
     if (el && ps[key] !== undefined) {
       // Respect existing local preference — only overwrite if not already set in localStorage
       if (localKey && saved[localKey] !== undefined) continue;
-      el[prop] = transform ? transform(ps[key]) : ps[key];
+      // Skip if the user is actively editing this field (prevents stale-tick stomps mid-edit).
+      if (el === document.activeElement) continue;
+      const newVal = transform ? transform(ps[key]) : ps[key];
+      // No-op filter: skip if value already matches — avoids `changed=true` churn and the
+      // associated saveSettings(false) localStorage write on every stream tick.
+      if (String(el[prop]) === String(newVal)) continue;
+      el[prop] = newVal;
       changed = true;
     }
   }
