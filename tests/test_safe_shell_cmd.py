@@ -2,7 +2,6 @@
 """Test the _is_safe_readonly_shell_command logic in OperationManager."""
 
 import sys
-sys.path.insert(0, r'N:\work\WD\AgentCascade_unified')
 
 from agent_cascade.operation_manager import OperationManager
 
@@ -162,7 +161,7 @@ def test_safe_commands():
         if not result:
             failed.append(cmd)
 
-    return failed
+    assert not failed, f"{len(failed)} safe commands were incorrectly rejected: {failed}"
 
 def test_unsafe_commands():
     """Commands that should require approval (potentially dangerous)."""
@@ -292,7 +291,7 @@ def test_unsafe_commands():
         if result:
             failed.append(cmd)
 
-    return failed
+    assert not failed, f"{len(failed)} unsafe commands were incorrectly auto-approved: {failed}"
 
 def test_strip_cd_prefix():
     """Test the _strip_cd_prefix helper directly."""
@@ -330,17 +329,19 @@ def test_strip_cd_prefix():
         if result != expected:
             failed.append((cmd, expected, result))
 
-    return failed
+    assert not failed, f"{len(failed)} _strip_cd_prefix tests failed: {failed}"
 
 if __name__ == "__main__":
-    safe_failures = test_safe_commands()
-    unsafe_failures = test_unsafe_commands()
-    prefix_failures = test_strip_cd_prefix()
+    # Run the three test functions; each asserts internally and raises on failure.
+    try:
+        test_safe_commands()
+        test_unsafe_commands()
+        test_strip_cd_prefix()
+    except AssertionError as e:
+        print(f"\n✗ Test assertion failed: {e}")
+        sys.exit(1)
 
-    print("\n=== SUMMARY ===")
-    total_issues = len(safe_failures) + len(unsafe_failures) + len(prefix_failures)
-
-    # ── Test async control commands ──────────────────────────────────
+    # ── Async control command checks (manual, not covered by the functions above) ──
     async_safe = ["__status", "__kill", "__ctrl_c", "__heartbeat=5", "__heartbeat=0", "__heartbeat=10.5", "__heartbeat=", "__heartbeat=abc"]
     async_unsafe = ["__heartbeat", "__status_extra", "__kill_me"]
     async_failures = []
@@ -352,31 +353,12 @@ if __name__ == "__main__":
         result = OperationManager._is_safe_readonly_shell_command(cmd)
         if result:
             async_failures.append((cmd, False, result))
-    total_issues += len(async_failures)
-
-    if safe_failures:
-        print(f"\n✗ {len(safe_failures)} safe commands were incorrectly rejected:")
-        for cmd in safe_failures:
-            print(f"    {cmd}")
-
-    if unsafe_failures:
-        print(f"\n✗ {len(unsafe_failures)} unsafe commands were incorrectly auto-approved:")
-        for cmd in unsafe_failures:
-            print(f"    {cmd}")
-
-    if prefix_failures:
-        print(f"\n✗ {len(prefix_failures)} cd prefix tests failed:")
-        for cmd, expected, got in prefix_failures:
-            print(f"    '{cmd}' → expected '{expected}', got '{got}'")
 
     if async_failures:
         print(f"\n✗ {len(async_failures)} async control command tests failed:")
         for cmd, expected, got in async_failures:
             print(f"    '{cmd}' → expected {expected}, got {got}")
-
-    if total_issues == 0:
-        print("✓ All tests passed!")
-        sys.exit(0)
-    else:
-        print(f"\n✗ {total_issues} test(s) failed")
         sys.exit(1)
+
+    print("\n✓ All tests passed!")
+    sys.exit(0)

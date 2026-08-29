@@ -124,7 +124,7 @@ class TestShellCmdCwdResolution:
         expected_cwd = Path(DEFAULT_WORKSPACE).resolve()
 
         result = shell_cmd_tool.call(
-            '{"command": "pwd", "cwd": ".", "async_mode": true, "justification": "test"}'
+            '{"command": "pwd", "cwd": ".", "execution_mode": "async", "justification": "test"}'
         )
 
         assert 'ERROR' not in result
@@ -140,7 +140,7 @@ class TestShellCmdCwdResolution:
         expected_cwd = (base / 'tests').resolve()
 
         result = shell_cmd_tool.call(
-            '{"command": "ls", "cwd": "/workspace/tests", "async_mode": true, "justification": "test"}'
+            '{"command": "ls", "cwd": "/workspace/tests", "execution_mode": "async", "justification": "test"}'
         )
 
         assert 'ERROR' not in result
@@ -157,7 +157,7 @@ class TestShellCmdCwdResolution:
             outside_path = '/etc/passwd'
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{outside_path}", "async_mode": true, "justification": "test"}}'
+            f'{{"command": "ls", "cwd": "{outside_path}", "execution_mode": "async", "justification": "test"}}'
         )
 
         assert 'ERROR' in result
@@ -166,7 +166,7 @@ class TestShellCmdCwdResolution:
     def test_cwd_traversal_escape_returns_error(self, shell_cmd_tool, tool_with_tracker):
         """Cwd with path traversal should return error."""
         result = shell_cmd_tool.call(
-            '{"command": "ls", "cwd": "../../../../../../../../../../../etc/passwd", "async_mode": true, "justification": "test"}'
+            '{"command": "ls", "cwd": "../../../../../../../../../../../etc/passwd", "execution_mode": "async", "justification": "test"}'
         )
 
         assert 'ERROR' in result
@@ -182,7 +182,7 @@ class TestShellCmdCwdResolution:
         abs_cwd_str = str(abs_cwd).replace('\\', '/')
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{abs_cwd_str}", "async_mode": true, "justification": "test"}}'
+            f'{{"command": "ls", "cwd": "{abs_cwd_str}", "execution_mode": "async", "justification": "test"}}'
         )
 
         assert 'ERROR' not in result
@@ -199,7 +199,7 @@ class TestShellCmdCwdResolution:
             bad_cwd = '/etc/shadow'
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{bad_cwd}", "async_mode": true, "justification": "test"}}'
+            f'{{"command": "ls", "cwd": "{bad_cwd}", "execution_mode": "async", "justification": "test"}}'
         )
 
         assert 'ERROR' in result

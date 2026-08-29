@@ -213,7 +213,7 @@ class MessageQueueMixin:
         # Check async tool registry (call_agent background tools)
         if self._async_registry.has_pending(instance_name):
             return True
-        # Also check async shell tasks (async_mode=true shell commands)
+        # Also check async shell tasks (shell commands launched in async execution mode)
         if hasattr(self, '_async_shell_tracker') and self._async_shell_tracker:
             if self._async_shell_tracker.has_active_tasks(instance_name):
                 return True

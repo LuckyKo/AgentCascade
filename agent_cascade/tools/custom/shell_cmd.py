@@ -141,10 +141,10 @@ class ShellCmd(BaseTool):
                 'minimum': 1,
                 'description': TOOL_METADATA['shell_cmd']['parameters']['timeout']
             },
-            'async_mode': {
-                'type': 'boolean',
-                'default': False,
-                'description': TOOL_METADATA['shell_cmd']['parameters']['async_mode']
+            'execution_mode': {
+                'type': ['string', 'null'],
+                'enum': ['sync', 'async', None],
+                'description': TOOL_METADATA['shell_cmd']['parameters']['execution_mode']
             },
             'heartbeat_interval': {
                 'type': 'integer',
@@ -211,14 +211,19 @@ class ShellCmd(BaseTool):
         cwd = params.get('cwd', '.')
         timeout = params.get('timeout')  # None means use default (30s sync / 3600s async)
 
-        # ── Parse new async parameters ──────────────────────────────
-        async_mode = bool(params.get('async_mode', False))
+        # ── Parse execution parameters ──────────────────────────────
+        # execution_mode is a 2-value enum ('sync'/'async') with auto via ABSENCE/null
+        # (jsonschema default does not inject, so omission arrives as None):
+        #   None/absent/null → auto: async iff timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD
+        #   'sync'           → force blocking, never auto-async (even for long timeouts)
+        #   'async'          → force background regardless of timeout
+        mode = params.get('execution_mode')
+        run_async = (mode == 'async') or (mode is None and timeout is not None and timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD)
         heartbeat_interval = float(params.get('heartbeat_interval', -1))
         tool_id = params.get('tool_id')
 
-        # Auto-async mode: if timeout exceeds threshold and async_mode not explicitly set
-        if timeout is not None and timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD and 'async_mode' not in params:
-            async_mode = True
+        # Auto-async mode: only when execution_mode omitted and timeout exceeds threshold
+        if run_async and mode is None:
             logger.info(f"Auto-async mode triggered for shell_cmd: timeout={timeout}s")
             # Default heartbeat for auto-async unless explicitly set
             if 'heartbeat_interval' not in params:
@@ -253,7 +258,7 @@ class ShellCmd(BaseTool):
             )
 
         # ── Async mode: launch new background shell ────────────────
-        if async_mode:
+        if run_async:
             # Validate control commands aren't used without tool_id
             if command in ShellMixin._CONTROL_COMMANDS or command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX):
                 return f"[shell_cmd] Control command '{command}' requires a tool_id. Launch a shell first, then use the returned tool_id."
@@ -358,7 +363,7 @@ class ShellCmd(BaseTool):
             approved, reason = self.agent_pool.operation_manager.request_user_approval(
                 agent_name=agent_name,
                 tool_name='shell_cmd',
-                tool_args={'command': command, 'justification': justification, 'cwd': cwd, 'async_mode': True},
+                tool_args={'command': command, 'justification': justification, 'cwd': cwd, 'execution_mode': 'async'},
                 description=description,
             )
 

@@ -9,8 +9,6 @@ import threading
 import time
 from unittest.mock import MagicMock, patch, PropertyMock
 
-sys.path.insert(0, r'N:\work\WD\AgentCascade_unified')
-
 import importlib.util as _util
 import os as _os
 
@@ -272,7 +270,7 @@ class TestWaitCommand:
 
     def test_wait_no_running_shell(self, shell_cmd_tool, mock_tracker):
         _make_tool_with_tracker(shell_cmd_tool, mock_tracker)
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 999, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 999, "execution_mode": "async"}')
         assert 'No running shell found' in result
         assert 'Tool ID: 999' in result
 
@@ -283,7 +281,7 @@ class TestWaitCommand:
         _setup_task(tracker, task)
         _make_tool_with_tracker(shell_cmd_tool, tracker)
 
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 2, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 2, "execution_mode": "async"}')
         assert 'already completed' in result.lower() or 'Process already completed' in result
         assert 'Tool ID: 2' in result
         assert 'elapsed' in result, f"__wait (already completed) missing elapsed time: {result!r}"
@@ -302,7 +300,7 @@ class TestWaitCommand:
         thread = threading.Thread(target=delayed_completion, daemon=True)
         thread.start()
 
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
         thread.join(timeout=2)
 
         assert '⟨shell_cmd wait⟩' in result
@@ -314,7 +312,7 @@ class TestWaitCommand:
         _, fake_time_mod, _ = self._wait_env(shell_cmd_tool, mock_task_running)
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
-            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         assert '⟨shell_cmd wait⟩' in result
         assert 'No new output' in result
@@ -326,7 +324,7 @@ class TestWaitCommand:
         _, fake_time_mod, state = self._wait_env(shell_cmd_tool, task)
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
-            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         assert state['elapsed'] <= 180.0, f"__wait waited {state['elapsed']:.1f}s, should cap at 180s (3 min)"
         assert state['elapsed'] >= 179.0, f"__wait waited {state['elapsed']:.1f}s, should be ~180s"
@@ -340,7 +338,7 @@ class TestWaitCommand:
         _, fake_time_mod, state = self._wait_env(shell_cmd_tool, task)
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
-            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         assert state['elapsed'] <= 90.0, f"__wait waited {state['elapsed']:.1f}s, should be heartbeat interval 90s (below cap)"
         assert state['elapsed'] >= 89.0, f"__wait waited {state['elapsed']:.1f}s, should be ~90s"
@@ -354,7 +352,7 @@ class TestWaitCommand:
         _, fake_time_mod, state = self._wait_env(shell_cmd_tool, task)
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
-            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         # min(180.0, 180.0) == 180.0; allow a small overshoot from the 0.5s poll step
         assert state['elapsed'] <= 181.0, f"__wait waited {state['elapsed']:.1f}s, should be ~180s at exact cap"
@@ -368,7 +366,7 @@ class TestWaitCommand:
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
             for _ in range(3):
-                result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+                result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
                 assert '⟨shell_cmd wait⟩' in result
 
     def test_wait_proper_lock_handling(self, shell_cmd_tool):
@@ -376,7 +374,7 @@ class TestWaitCommand:
         _, fake_time_mod, _ = self._wait_env(shell_cmd_tool, task)
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
-            shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+            shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         with task._lock:
             assert task.completed is False
@@ -390,7 +388,7 @@ class TestWaitCommand:
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg)
 
         start = time.time()
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
         elapsed = time.time() - start
 
         assert result == msg
@@ -408,7 +406,7 @@ class TestWaitCommand:
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', user_msg)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', shell_msg)
 
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         # Front is the user msg (not this shell) → default wake-up string, NOT the shell msg.
         assert 'Woken by queued message (not this shell)' in result, f"expected default wake-up: {result!r}"
@@ -428,7 +426,7 @@ class TestWaitCommand:
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', user_msg)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', heartbeat)
 
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         assert 'Woken by queued message (not this shell)' in result, f"expected default wake-up: {result!r}"
         # Both still queued in original order — drain will deliver user then heartbeat.
@@ -446,7 +444,7 @@ class TestWaitCommand:
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg2)  # other tool at FRONT
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg1)
 
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         # Front is tool 2's msg (not ours) → default wake-up, NOT consumed.
         assert 'Woken by queued message (not this shell)' in result, f"expected default wake-up: {result!r}"
@@ -479,7 +477,7 @@ class TestWaitCommand:
         assert 'dup line A' in first_msg and 'dup line B' in first_msg
 
         # __wait consumes that heartbeat verbatim.
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
         assert result == first_msg
 
         # Now the tracker sends a SECOND heartbeat with NO new output. Because
@@ -523,7 +521,7 @@ class TestWaitCommand:
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_12)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_1)
 
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         # Front is the Tool ID: 12 message (NOT ours — boundary regex rejects it).
         assert 'Woken by queued message (not this shell)' in result, \
@@ -543,7 +541,7 @@ class TestWaitCommand:
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_1)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_12)
 
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         assert result == msg_1, f"__wait(1) should consume its own front message verbatim: {result!r}"
         remaining = shell_cmd_tool.agent_pool.get_queue_messages('test_agent')
@@ -559,7 +557,7 @@ class TestWaitCommand:
         self._wait_env_queue(shell_cmd_tool, task)
 
         start = time.time()
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
         elapsed = time.time() - start
 
         assert '⟨shell_cmd wait⟩' in result
@@ -578,7 +576,7 @@ class TestWaitCommand:
         shell_cmd_tool.agent_pool.terminated = True  # make is_instance_terminated return True
 
         start = time.time()
-        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
         elapsed = time.time() - start
 
         assert '⟨shell_cmd wait⟩' in result
@@ -603,7 +601,7 @@ class TestOptionalJustification:
     def test_control_command_without_justification(self, shell_cmd_tool):
         tracker = self._tracker_with_task()
         _make_tool_with_tracker(shell_cmd_tool, tracker)
-        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 1, "execution_mode": "async"}')
         assert 'ValueError' not in result
         assert '⟨shell_cmd status⟩' in result
         assert 'Tool ID: 1' in result
@@ -611,20 +609,20 @@ class TestOptionalJustification:
     def test_kill_command_without_justification(self, shell_cmd_tool):
         tracker = self._tracker_with_task()
         _make_tool_with_tracker(shell_cmd_tool, tracker)
-        result = shell_cmd_tool.call('{"command": "__kill", "tool_id": 1, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__kill", "tool_id": 1, "execution_mode": "async"}')
         assert 'ValueError' not in result
 
     def test_ctrl_c_without_justification(self, shell_cmd_tool):
         tracker = self._tracker_with_task(tool_id=3, heartbeat_interval=5.0)
         _make_tool_with_tracker(shell_cmd_tool, tracker)
-        result = shell_cmd_tool.call('{"command": "__ctrl_c", "tool_id": 3, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__ctrl_c", "tool_id": 3, "execution_mode": "async"}')
         assert 'ValueError' not in result
         assert 'Tool ID: 3' in result or 'Ctrl+C sent' in result or 'Failed' in result
 
     def test_heartbeat_update_without_justification(self, shell_cmd_tool):
         tracker = self._tracker_with_task(tool_id=4, heartbeat_interval=10.0)
         _make_tool_with_tracker(shell_cmd_tool, tracker)
-        result = shell_cmd_tool.call('{"command": "__heartbeat=5", "tool_id": 4, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__heartbeat=5", "tool_id": 4, "execution_mode": "async"}')
         assert 'ValueError' not in result
         assert 'updated' in result.lower() or 'Tool ID: 4' in result
 
@@ -636,7 +634,7 @@ class TestOptionalJustification:
         _setup_task(tracker, task)
         _make_tool_with_tracker(shell_cmd_tool, tracker)
 
-        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 5, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 5, "execution_mode": "async"}')
         assert '⟨shell_cmd status⟩' in result
         assert 'Tool ID: 5' in result
         assert 'line1' in result or 'line2' in result or 'running' in result.lower()
@@ -650,7 +648,7 @@ class TestOptionalJustification:
         _setup_task(tracker, task)
         _make_tool_with_tracker(shell_cmd_tool, tracker)
 
-        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 6, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 6, "execution_mode": "async"}')
         assert '⟨shell_cmd status⟩' in result
         assert 'completed' in result.lower()
         assert 'elapsed' in result or 's)' in result, \
@@ -663,7 +661,7 @@ class TestOptionalJustification:
         _setup_task(tracker, task)
         _make_tool_with_tracker(shell_cmd_tool, tracker)
 
-        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 7, "async_mode": true}')
+        result = shell_cmd_tool.call('{"command": "__status", "tool_id": 7, "execution_mode": "async"}')
         assert '⟨shell_cmd status⟩' in result
         assert 'running' in result.lower()
         assert 'elapsed' in result, f"__status (running) missing elapsed time: {result!r}"
@@ -722,7 +720,7 @@ class TestOptionalJustification:
     def test_async_launch_without_justification_raises(self, shell_cmd_tool, mock_tracker):
         _make_tool_with_tracker(shell_cmd_tool, mock_tracker)
         with pytest.raises(ValueError) as exc_info:
-            shell_cmd_tool.call('{"command": "echo hello", "async_mode": true}')
+            shell_cmd_tool.call('{"command": "echo hello", "execution_mode": "async"}')
         assert 'justification' in str(exc_info.value).lower()
 
     def test_async_launch_with_justification_works(self, shell_cmd_tool, mock_tracker):
@@ -737,7 +735,7 @@ class TestOptionalJustification:
         shell_cmd_tool.agent_pool = mock_pool
         shell_cmd_tool.agent_name = 'test_agent'
 
-        result = shell_cmd_tool.call('{"command": "echo hello", "async_mode": true, "justification": "test"}')
+        result = shell_cmd_tool.call('{"command": "echo hello", "execution_mode": "async", "justification": "test"}')
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd launched⟩' in result
         assert 'Tool ID: 1' in result
@@ -755,7 +753,7 @@ class TestOptionalJustification:
         shell_cmd_tool.agent_pool = mock_pool
         shell_cmd_tool.agent_name = 'test_agent'
 
-        result = shell_cmd_tool.call('{"command": "echo hello", "async_mode": true, "justification": "test"}')
+        result = shell_cmd_tool.call('{"command": "echo hello", "execution_mode": "async", "justification": "test"}')
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd completed⟩' in result
         assert 'Tool ID: 1' in result
@@ -775,7 +773,7 @@ class TestOptionalJustification:
         shell_cmd_tool.agent_pool = mock_pool
         shell_cmd_tool.agent_name = 'test_agent'
 
-        result = shell_cmd_tool.call('{"command": "long_running_task", "async_mode": true, "justification": "test"}')
+        result = shell_cmd_tool.call('{"command": "long_running_task", "execution_mode": "async", "justification": "test"}')
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd launched⟩' in result
         assert 'Tool ID: 1' in result
@@ -831,12 +829,22 @@ class TestAutoAsyncMode:
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd launched⟩' in result
 
-    def test_timeout_gt_60_with_explicit_async_mode_false_stays_sync(self, shell_cmd_tool):
+    def test_timeout_gt_60_with_explicit_sync_stays_sync(self, shell_cmd_tool):
+        """execution_mode='sync' forces blocking even when timeout > 60 (headline fix)."""
         with patch.object(shell_cmd_tool, '_execute_sync', return_value='output') as mock_exec:
             shell_cmd_tool.agent_pool = MagicMock()
             shell_cmd_tool.agent_name = 'test_agent'
-            result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "async_mode": false, "justification": "sync"}')
+            result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "execution_mode": "sync", "justification": "sync"}')
             mock_exec.assert_called_once()
+            assert 'output' in result
+
+    def test_execution_mode_sync_with_large_timeout_stays_sync(self, shell_cmd_tool):
+        """Headline regression: execution_mode='sync' with a large timeout (300) must NOT auto-async."""
+        tracker = self._tool_with_tracker(shell_cmd_tool)
+        with patch.object(shell_cmd_tool, '_execute_sync', return_value='output') as mock_exec:
+            result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 300, "execution_mode": "sync", "justification": "sync"}')
+            mock_exec.assert_called_once()
+            tracker.launch.assert_not_called()
             assert 'output' in result
 
     @pytest.mark.parametrize('timeout', [30, 60])
@@ -848,9 +856,24 @@ class TestAutoAsyncMode:
             mock_exec.assert_called_once()
             assert 'output' in result
 
-    def test_explicit_async_mode_true_ignores_timeout_threshold(self, shell_cmd_tool, mock_tracker):
+    def test_explicit_async_ignores_timeout_threshold(self, shell_cmd_tool, mock_tracker):
+        """execution_mode='async' with a small timeout forces background (forced-async regression)."""
         tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
-        result = shell_cmd_tool.call('{"command": "echo hello", "async_mode": true, "timeout": 1, "justification": "async"}')
+        result = shell_cmd_tool.call('{"command": "echo hello", "execution_mode": "async", "timeout": 1, "justification": "async"}')
+        tracker.launch.assert_called_once()
+        assert '⟨shell_cmd launched⟩' in result
+
+    def test_omitted_execution_mode_with_large_timeout_auto_async(self, shell_cmd_tool, mock_tracker):
+        """Omitted execution_mode + timeout>60 → AUTO-ASYNC (auto rule regression)."""
+        tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
+        result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "justification": "test"}')
+        tracker.launch.assert_called_once()
+        assert '⟨shell_cmd launched⟩' in result
+
+    def test_null_execution_mode_with_large_timeout_auto_async(self, shell_cmd_tool, mock_tracker):
+        """Explicit null execution_mode + timeout>60 behaves as AUTO (same as omission)."""
+        tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
+        result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "execution_mode": null, "justification": "test"}')
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd launched⟩' in result
 
@@ -922,7 +945,7 @@ class TestEdgeCases:
         fake_time_mod, state = _fake_time_module()
 
         with patch.dict('sys.modules', {'time': fake_time_mod}):
-            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "async_mode": true}')
+            result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 1, "execution_mode": "async"}')
 
         assert state['elapsed'] >= 29.0, f"__wait waited {state['elapsed']:.1f}s, expected ~30s"
         assert state['elapsed'] <= 31.0, f"__wait waited {state['elapsed']:.1f}s, expected ~30s"
