@@ -326,6 +326,116 @@ class TestCompressContextCaptionIntegration:
             assert real_logger.data["metadata"]["caption"] == "My session caption"
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 5. /compress command uses single-executor path (caption fix)
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestCompressCommandCaptionPath:
+    """Verify handle_compress_command calls compress_context with dry_run=False
+    and no precomputed_summary, so the caption is parsed and saved in one pass."""
+
+    def _make_handler(self):
+        """Build a CompressionHandler with mocked pool/engine for unit testing."""
+        from agent_cascade.compression.handler import CompressionHandler
+        handler = CompressionHandler(MagicMock())
+        # Mock engine with required methods
+        engine = MagicMock()
+        engine._telemetry.return_value = None  # skip telemetry
+        handler.set_engine(engine)
+        return handler, engine
+
+    def test_compress_command_calls_tool_without_dry_run(self):
+        """The new single-pass path must NOT pass dry_run=True or precomputed_summary."""
+        from agent_cascade.llm.schema import Message, USER
+
+        handler, engine = self._make_handler()
+
+        # Mock the pool/template/tool chain
+        mock_tool = MagicMock()
+        mock_tool.call.return_value = "Compressed 50% of history successfully."
+        template = MagicMock()
+        template.function_map = {'compress_context': mock_tool}
+        handler.pool.get_template.return_value = template
+
+        # Mock instance
+        instance = MagicMock()
+        instance.instance_name = "test-agent"
+        instance.agent_class = "coder"
+        instance._allocated_max_input_tokens = 128000
+        instance.parent_instance = None
+
+        # detect_and_parse_compress_command returns a fraction
+        handler.detect_and_parse_compress_command = MagicMock(return_value=0.5)
+
+        # Mock pool.get_conversation to return a small valid list
+        handler.pool.get_conversation.return_value = [Message(role=USER, content="x")]
+
+        # Run the command
+        result = handler.handle_compress_command(instance, [], [], response=None)
+
+        assert result is True
+
+        # THE KEY ASSERTION: compress_tool.call was invoked WITHOUT dry_run and
+        # WITHOUT precomputed_summary — this means core.py reaches set_caption().
+        call_kwargs = mock_tool.call.call_args.kwargs
+        assert 'dry_run' not in call_kwargs, (
+            "handle_compress_command must NOT pass dry_run=True; "
+            "the caption would be skipped by the core.py guard"
+        )
+        assert 'precomputed_summary' not in call_kwargs, (
+            "handle_compress_command must NOT pass precomputed_summary; "
+            "the LLM must run so caption is parsed and saved"
+        )
+
+    def test_compress_command_tool_unavailable_returns_true(self):
+        """When compress_context tool is missing, the command is still 'handled'."""
+        handler, engine = self._make_handler()
+
+        # Template without compress_context in function_map
+        template = MagicMock()
+        template.function_map = {}
+        handler.pool.get_template.return_value = template
+
+        instance = MagicMock()
+        instance.instance_name = "test-agent"
+        instance.agent_class = "coder"
+
+        handler.detect_and_parse_compress_command = MagicMock(return_value=0.5)
+
+        result = handler.handle_compress_command(instance, [], [], response=None)
+        assert result is True  # command was handled (with error notification)
+
+    def test_compress_command_failure_notification(self):
+        """When the tool returns a failure string, a notification is injected."""
+        from agent_cascade.llm.schema import Message, USER
+
+        handler, engine = self._make_handler()
+
+        mock_tool = MagicMock()
+        mock_tool.call.return_value = "Compression failed: not enough messages"
+        template = MagicMock()
+        template.function_map = {'compress_context': mock_tool}
+        handler.pool.get_template.return_value = template
+
+        instance = MagicMock()
+        instance.instance_name = "test-agent"
+        instance.agent_class = "coder"
+
+        handler.detect_and_parse_compress_command = MagicMock(return_value=0.5)
+
+        # Patch the notification method to verify it's called with the right text
+        mock_inject = MagicMock()
+        handler._inject_compression_notification = mock_inject
+
+        result = handler.handle_compress_command(instance, [], [], response=None)
+        assert result is True  # command handled (failure notified)
+
+        # _inject_compression_notification should have been called with failure text
+        mock_inject.assert_called_once()
+        call_args = mock_inject.call_args
+        assert "Compression failed" in call_args[0][1]
+
+
 def Message_obj(role, content):
     """Local factory (avoids importing Message at module top to keep imports light)."""
     from agent_cascade.llm.schema import Message

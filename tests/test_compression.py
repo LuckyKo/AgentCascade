@@ -22,6 +22,7 @@ from agent_cascade.compression.helpers import (
     rebuild_working_set,
 )
 from agent_cascade.compression.core import compress_context
+from agent_cascade.settings import COMPRESSION_MAX_RETRIES
 
 # Shared mock pool from conftest — no need to redefine locally
 from tests.conftest import MockAgentPool
@@ -1251,21 +1252,19 @@ class TestCompressionRetryReuse:
                 "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
                 side_effect=fake_execute,
             ):
-                with pytest.raises(RuntimeError, match="after 3 attempts"):
+                with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
                         target_messages=[{"role": "user", "content": "hello"}],
                         caller_name="TestCaller",
                     )
 
-        # Verify the SAME instance was used for all 3 attempts
-        assert len(executed_instances) == 3
-        assert executed_instances[0] is mock_instance
-        assert executed_instances[1] is mock_instance
-        assert executed_instances[2] is mock_instance
+        # Verify the SAME instance was used for all attempts
+        assert len(executed_instances) == COMPRESSION_MAX_RETRIES
+        assert all(inst is mock_instance for inst in executed_instances)
 
-        # Verify rebuild_conversation was called twice (before attempt 2 and 3)
-        assert len(rebuild_calls) == 2
+        # Verify rebuild_conversation was called before each retry (attempts 2..N)
+        assert len(rebuild_calls) == COMPRESSION_MAX_RETRIES - 1
 
         # Verify _create_system_agent was called exactly ONCE (not per-retry)
         mock_engine._create_system_agent.assert_called_once()
@@ -1301,17 +1300,17 @@ class TestCompressionRetryReuse:
                 "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
                 side_effect=fake_execute,
             ):
-                with pytest.raises(RuntimeError, match="after 3 attempts"):
+                with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
                         target_messages=[{"role": "user", "content": "hello"}],
                         caller_name="TestCaller",
                     )
 
-        assert len(executed_instances) == 3
+        assert len(executed_instances) == COMPRESSION_MAX_RETRIES
         assert all(inst is mock_instance for inst in executed_instances)
-        # rebuild_conversation called before attempts 2 and 3
-        assert mock_instance.rebuild_conversation.call_count == 2
+        # rebuild_conversation called before each retry (attempts 2..N)
+        assert mock_instance.rebuild_conversation.call_count == COMPRESSION_MAX_RETRIES - 1
         mock_engine._create_system_agent.assert_called_once()
 
     def test_hard_failure_does_not_retry(self):
@@ -1530,15 +1529,15 @@ class TestCompressionRetryReuse:
                 "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
                 side_effect=fake_execute,
             ):
-                with pytest.raises(RuntimeError, match="after 3 attempts"):
+                with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
                         target_messages=[{"role": "user", "content": "hello"}],
                         caller_name="TestCaller",
                     )
 
-        # rebuild_conversation called twice (before attempts 2 and 3)
-        assert len(rebuild_args) == 2
+        # rebuild_conversation called before each retry (attempts 2..N)
+        assert len(rebuild_args) == COMPRESSION_MAX_RETRIES - 1
         # Each reset conversation equals the initial [system, task] state
         for reset_conv in rebuild_args:
             assert reset_conv == initial_conv
