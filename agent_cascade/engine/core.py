@@ -3206,6 +3206,19 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         from agent_cascade.api_integration import _resolve_max_tokens
         return _resolve_max_tokens(self.pool, instance)
 
+    def _get_effective_limit(self, instance: AgentInstance) -> int:
+        """Usable context window = max_input_tokens minus the compression reserve.
+
+        This is the denominator that usage_pct is computed against (see
+        compression_exec.py). Exposed as a single source of truth so any display of
+        "A/B tokens" alongside a percentage uses the SAME B, keeping the ratio and the
+        percent consistent. Falls back to the raw max if the reserve would make it <= 0.
+        """
+        max_tokens = self._get_max_tokens(instance)
+        reserve = getattr(self.pool.settings, 'compression_context_reserve_tokens', 0) or 0
+        effective = max_tokens - reserve
+        return effective if effective > 0 else max_tokens
+
     def _get_active_functions_for_counting(self, instance: AgentInstance):
         """Resolve the active tool schemas for an instance (for token estimation).
 

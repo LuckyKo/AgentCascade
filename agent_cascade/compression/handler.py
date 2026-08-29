@@ -692,8 +692,9 @@ class CompressionHandler:
                     f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle"
                 )
                 current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
-                max_tokens = self.engine._get_max_tokens(instance)
-                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+                # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
+                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
+                                                        self.engine._get_effective_limit(instance))
                 return True
             
             # Mark this compression attempt (under lock for thread safety)
@@ -781,8 +782,9 @@ class CompressionHandler:
                     f"(attempt failed {elapsed:.0f}s ago, streak={streak}, backoff={backoff:.0f}s)"
                 )
                 current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
-                max_tokens = self.engine._get_max_tokens(instance)
-                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+                # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
+                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
+                                                        self.engine._get_effective_limit(instance))
                 return False  # Explicit: not compressed, keep going
 
         # Halt other agents (exempt target, all Compressor instances, and root agent)

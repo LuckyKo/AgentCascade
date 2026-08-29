@@ -189,7 +189,9 @@ class CompressionExecMixin:
 
         # Warning injection at >90% (configurable via compression_warning_threshold)
         if usage_pct > self.pool.settings.compression_warning_threshold:
-            self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens_for_check)
+            # Pass effective_limit (not the raw window) so the printed "A/B" ratio matches
+            # usage_pct, which is computed against the reserve-reduced effective limit.
+            self._inject_compression_warning(llm_messages, usage_pct, current_tokens, effective_limit)
 
         return False
 
