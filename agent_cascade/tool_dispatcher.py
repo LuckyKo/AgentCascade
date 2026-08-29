@@ -231,8 +231,8 @@ class ToolDispatcher:
         # This is a hallucination/misuse, so reject outright (unconditional — even if
         # the caller is currently active/stacked). Replaces the old P2 self-clone.
         if target_canonical.lower() == caller_ci:
-            logger.warning("call_agent self-call rejected - %s tried to call itself as '%s'",
-                          caller_name, instance_name)
+            logger.warning("Self-call guard rejected: %s tried to call itself as '%s'",
+                           caller_name, instance_name)
             return (f"Error: Cannot call_agent yourself ('{caller_name}'). "
                     f"Use a different instance name.")
 
@@ -266,8 +266,8 @@ class ToolDispatcher:
                             and orig_req_name.lower() == target_canonical.lower())
             class_mismatch = bool(have_class_ci and req_class_ci and have_class_ci != req_class_ci)
             if name_variant or class_mismatch:
-                logger.warning("call_agent identity mismatch - %s requested '%s'/%s but '%s' exists as '%s'",
-                              caller_name, instance_name, agent_class, target_canonical, have_class_ci)
+                logger.warning("Resurrection guard rejected: %s requested '%s'/%s but '%s' exists as '%s'",
+                               caller_name, instance_name, agent_class, target_canonical, have_class_ci)
                 return (f"Error: Agent '{target_canonical}' already exists as '{have_class_ci or 'unknown class'}'. "
                         f"Requested identity ('{orig_req_name}' / '{agent_class}') does not match. "
                         f"Use a different instance name.")
