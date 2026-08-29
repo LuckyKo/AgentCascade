@@ -88,14 +88,12 @@ COMPRESSION_MARKER = "--- CONTEXT COMPRESSED"
 COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
 
 # Shared caption-format instruction appended to both compression prompts.
-# The model's VERY LAST line must be the end marker + a one-line caption on the
-# same line; the parser (agent_invoker._parse_compression_output) splits them.
+# The end marker + optional one-line caption go on the same final line;
+# the parser (agent_invoker._parse_compression_output) splits them.
 CAPTION_INSTRUCTION = (
-    f"The VERY LAST line of your entire output MUST be exactly this single line: "
-    f"`{COMPRESSION_END_MARKER} CAPTION: <one short sentence describing what this session was about>` — "
-    f"i.e. the marker `{COMPRESSION_END_MARKER}` followed on the SAME line (no newline) by `CAPTION:` and a one-line caption. "
-    "Do NOT emit the marker anywhere else and do NOT put a bare marker line without the caption. It will NOT be validated without this final line. "
-    "The caption must be a single line only (≤ ~120 characters, no newlines) and describe the session's topic/goal — not the summary itself."
+    f"End your output with the marker `{COMPRESSION_END_MARKER}` followed on the same line "
+    f"(no newline) by `CAPTION: <one short phrase, ≤120 chars>` describing the session's topic. "
+    f"The caption is optional metadata — focus primarily on producing a high-quality summary."
 )
 
 COMPRESSION_PROMPT = (
