@@ -353,7 +353,7 @@ class TestCompressContextTargetMessages:
         pool, _ = _build_pool_with_history(num_user_msgs=5)
 
         captured_target_messages = []
-        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None):
+        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False):
             captured_target_messages.append(target_messages)
             return ("Summary", "")
 
@@ -397,7 +397,7 @@ class TestCompressContextTargetMessages:
         pool = MockAgentPool(history)
 
         captured_target_messages = []
-        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None):
+        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False):
             captured_target_messages.append((target_messages, existing_summary))
             return ("Compound summary", "")
 

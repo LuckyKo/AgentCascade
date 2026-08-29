@@ -495,6 +495,7 @@ def invoke_compression_agent(
     target_messages: List[Any],
     existing_summary: str | None = None,
     caller_name: str | None = None,
+    want_caption: bool = False,
 ) -> Tuple[str, str]:
     """
     Invoke the Compression Agent to generate a summary of target messages.
@@ -541,7 +542,11 @@ def invoke_compression_agent(
             f"NEW CONVERSATION TO SUMMARIZE:\n{history_text}"
         )
 
-    summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text)
+    # Build the end instruction: marker always, caption only when requested.
+    from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION, CAPTION_INSTRUCTION
+    end_instruction = " " + END_MARKER_INSTRUCTION + (CAPTION_INSTRUCTION if want_caption else "")
+
+    summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text, end_instruction=end_instruction)
 
     # Get the caller name for parent tracking and slot management
     if caller_name is None:
@@ -676,7 +681,12 @@ def invoke_consolidation_agent(
     for i, s in enumerate(marker_summaries, 1):
         summaries_text += f"SUMMARY {i}:\n{s}\n\n"
 
-    consolidation_prompt = CONSOLIDATION_PROMPT.format(summaries_text=summaries_text.strip())
+    from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
+    end_instruction = " " + END_MARKER_INSTRUCTION  # marker only, no caption for compaction
+
+    consolidation_prompt = CONSOLIDATION_PROMPT.format(
+        summaries_text=summaries_text.strip(), end_instruction=end_instruction
+    )
 
     try:
         logger.info(

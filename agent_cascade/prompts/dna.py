@@ -87,13 +87,15 @@ DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 COMPRESSION_MARKER = "--- CONTEXT COMPRESSED"
 COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
 
-# Shared caption-format instruction appended to both compression prompts.
-# The end marker + optional one-line caption go on the same final line;
-# the parser (agent_invoker._parse_compression_output) splits them.
+# End-marker instruction (ALWAYS appended — required for output validation).
+END_MARKER_INSTRUCTION = (
+    f"End your output with the marker `{COMPRESSION_END_MARKER}` on its own final line."
+)
+
+# Optional caption instruction (only included on first compression when no caption exists yet).
 CAPTION_INSTRUCTION = (
-    f"End your output with the marker `{COMPRESSION_END_MARKER}` followed on the same line "
-    f"(no newline) by `CAPTION: <one short phrase, ≤120 chars>` describing the session's topic. "
-    f"The caption is optional metadata — focus primarily on producing a high-quality summary."
+    f" On the same line as the marker (no newline), append `CAPTION: <one short phrase, ≤120 chars>` "
+    f"describing the session's topic."
 )
 
 COMPRESSION_PROMPT = (
@@ -106,7 +108,7 @@ COMPRESSION_PROMPT = (
     "4. Retain a compacted initial request and any follow ups from user in the summary.\n"
     "5. Existing summary is just for reference, focus on summarizing the events after that.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
-    f"Present the summary below. {CAPTION_INSTRUCTION}"
+    "Present the summary below.{end_instruction}"
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
@@ -131,7 +133,7 @@ CONSOLIDATION_PROMPT = (
     "- Maintain chronological order implicitly (earliest events first).\n"
     "- If conflicting information appears across summaries, prefer the most recent version.\n\n"
     "--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n"
-    f"Present the consolidated summary below. {CAPTION_INSTRUCTION}"
+    "Present the consolidated summary below.{end_instruction}"
 )
 
 COMPRESSION_NOTICE_TEMPLATE = ""  # Unused — header is now minimal

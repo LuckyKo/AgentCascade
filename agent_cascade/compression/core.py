@@ -532,6 +532,17 @@ def compress_context(
         generated_summary = summary_text.strip()
     else:
         try:
+            # Only request a caption if one doesn't already exist (first-wins).
+            _want_caption = False
+            if not dry_run:
+                try:
+                    _cap_inst = agent_pool.get_instance(target_agent_name)
+                    _cap_class = getattr(_cap_inst, 'agent_class', None) or target_agent_name
+                    _cap_logger = agent_pool.get_logger(target_agent_name, _cap_class)
+                    _want_caption = not _cap_logger.data["metadata"].get("caption")
+                except Exception:
+                    pass  # Non-fatal: default to no caption if logger unavailable
+
             # invoke_compression_agent() handles retries internally (reuses the same
             # compressor instance and resends the prompt on retryable validation failures).
             generated_summary, generated_caption = invoke_compression_agent(
@@ -539,6 +550,7 @@ def compress_context(
                 target_messages=target_messages,
                 existing_summary=existing_summary,
                 caller_name=target_agent_name,  # Pass actual instance name for slot management
+                want_caption=_want_caption,
             )
         except RuntimeError as e:
             logger.error(f"Compression Agent failed: {e}")
