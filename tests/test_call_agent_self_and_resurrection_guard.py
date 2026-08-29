@@ -51,6 +51,23 @@ class FakePool:
         self.api_router = None  # → child needs no slot → ASYNC path
         self.settings = MagicMock()
         self.settings.max_nesting_depth = 10
+        # Template registry — the unknown-class guard calls pool.get_template()/list_agents().
+        # Default to a small set of valid classes so legitimate routing tests pass the guard.
+        self.templates = {
+            "coder": MagicMock(), "orchestrator": MagicMock(), "reviewer": MagicMock(),
+        }
+
+    def get_template(self, name: str):
+        """Case-insensitive fallback mirroring pool/config_persist.py."""
+        if name in self.templates:
+            return self.templates[name]
+        for key in self.templates:
+            if key.lower() == name.lower():
+                return self.templates[key]
+        return None
+
+    def list_agents(self):
+        return list(self.templates.keys())
 
     def _resolve_instance_name(self, instance_name: str, exclude=None):
         """Case-insensitive resolution mirroring pool/lifecycle.py."""

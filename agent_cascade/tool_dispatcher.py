@@ -272,6 +272,21 @@ class ToolDispatcher:
                         f"Requested identity ('{orig_req_name}' / '{agent_class}') does not match. "
                         f"Use a different instance name.")
 
+        # Unknown-class guard — reject an agent_class that has no registered template.
+        # get_template() does case-insensitive fallback (exact → lowercase → titlecase),
+        # so a valid class is always found; a genuinely unknown class returns None and
+        # would otherwise crash deep in lifecycle_manager.build_system_message() with a
+        # bare "No template for agent class" error. Surface the valid classes instead.
+        if self.pool.get_template(agent_class) is None:
+            available = sorted(self.pool.list_agents())
+            logger.warning("Unknown agent_class rejected: %s requested '%s'; available=%s",
+                           caller_name, agent_class, available)
+            if not available:
+                return f"Error: Unknown agent_class '{agent_class}'. No agent classes are registered."
+            return (f"Error: Unknown agent_class '{agent_class}'. "
+                    f"Available classes: {', '.join(available)}. "
+                    f"Use one of these or check your spelling.")
+
         # Extracted to _check_nesting_depth() - Phase 4.3
         caller_depth = 0
         if caller_inst := self.pool.get_instance(instance.instance_name):
