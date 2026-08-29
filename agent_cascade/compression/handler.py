@@ -1095,12 +1095,13 @@ class CompressionHandler:
         # Step 3: Execute compression (single pass — same path as forced/auto)
         try:
             params = json.dumps({'fraction': fraction, 'mode': 'auto'})
-            result_str = str(compress_tool.call(
+            # compress_tool.call() returns a str (success feedback or "ERROR: ...").
+            result_str = compress_tool.call(
                 params,
                 messages=messages,
                 agent_instance_name=inst_name,
                 agent_obj=instance,
-            ))
+            )
             logger.info(f"/compress applied for {inst_name}: {result_str}")
 
             # Handle tool-level failure (tool returns error string)
@@ -1109,7 +1110,7 @@ class CompressionHandler:
                 self._inject_compression_notification(instance, notification_text, inst_name)
                 return True
 
-            # --- Success side effects (ported from old apply_approved_compression) ---
+            # --- Success side effects (same post-compression sequence as forced compression) ---
 
             # Validate message pool after compression
             conv = self.pool.get_conversation(inst_name)
