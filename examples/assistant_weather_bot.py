@@ -29,7 +29,7 @@ def init_agent_service(llm_cfg=None):
               '你需要查询相应地区的天气，然后调用给你的画图工具绘制一张城市的图，并从给定的诗词文档中选一首相关的诗词来描述天气，不要说文档以外的诗词。')
 
     # image_gen requires llm_cfg passed via dict config
-    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'amap_weather']
+    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'web_search']
     bot = Assistant(
         llm=llm_cfg,
         name='天气预报助手',

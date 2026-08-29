@@ -330,7 +330,7 @@ TOOL_METADATA = {
             'justification': 'Why you need to execute this command.',
             'cwd': 'Optional working directory, absolute or relative to workspace root.',
             'timeout': 'Optional timeout in seconds. Use a higher value for long-running commands. Values over 60s will automatically be treated as async_mode=true. Default: 30s.',
-            'async_mode': 'Run the command in background and return immediately with tool_id + PID. The agent continues working while the command runs. Heartbeat updates are injected as user messages at intervals. Default: false (blocking/synchronous execution).',
+            'async_mode': 'Run the command in background and return immediately with tool_id + PID. The agent continues working while the command runs. Heartbeat updates are injected as user messages at intervals. Set to false to enforce blocking/synchronous execution regardless of timeout value.',
             'heartbeat_interval': 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective when async_mode=true. Default: -1.',
             'tool_id': 'Reference an existing running shell by its tool_id to send input, update settings, or kill it. Returned in the initial response when launching with async_mode=true.'
         }
@@ -381,12 +381,6 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'query': 'The search query.'
-        }
-    },
-    'amap_weather': {
-        'description': '获取对应城市的天气数据 (Get weather data for a specific city).',
-        'parameters': {
-            'location': '城市/区具体名称，如`北京市海淀区`请描述为`海淀区` (Specific city/district name).'
         }
     },
     'doc_parser': {

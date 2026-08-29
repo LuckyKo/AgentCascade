@@ -18,26 +18,7 @@ import os
 import pytest
 import requests
 
-from agent_cascade.tools import AmapWeather, CodeInterpreter, ImageGen, Retrieval, WebSearch
-
-
-# [NOTE] 不带"市"会出错
-@pytest.mark.extra_tools
-@pytest.mark.parametrize('params', [json.dumps({'location': '北京市'}), {'location': '杭州市'}])
-def test_amap_weather(params):
-    """Test AmapWeather tool - verify it returns weather information."""
-    os.environ.setdefault('AMAP_TOKEN', 'test_token')
-    tool = AmapWeather()
-    try:
-        result = tool.call(params)
-        assert isinstance(result, str), f"Expected string result, got {type(result)}"
-        assert len(result.strip()) > 0, "AmapWeather returned empty result"
-    except RuntimeError as e:
-        # Amap API token might be invalid; skip if the call fails with a known error
-        err_msg = str(e)
-        if 'INVALID_USER_KEY' in err_msg or 'NO_DATA' in err_msg:
-            pytest.skip(f'AmapWeather returned: {err_msg}')
-        raise
+from agent_cascade.tools import CodeInterpreter, ImageGen, Retrieval, WebSearch
 
 
 @pytest.mark.parametrize('params', ["print('hello qwen')", {'code': "print('hello qwen')"}])

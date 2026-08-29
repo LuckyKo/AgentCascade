@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .amap_weather import AmapWeather
 from .base import TOOL_REGISTRY, BaseTool
 from .code_interpreter import CodeInterpreter
 from .doc_parser import DocParser
@@ -29,7 +28,6 @@ __all__ = [
     'BaseTool',
     'CodeInterpreter',
     'ImageGen',
-    'AmapWeather',
     'TOOL_REGISTRY',
     'DocParser',
     'KeywordSearch',

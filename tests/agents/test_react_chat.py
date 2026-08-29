@@ -25,7 +25,7 @@ from agent_cascade.llm.schema import ContentItem, Message
 @pytest.mark.skip_if_no_local
 def test_react_chat(local_llm_cfg):
     llm_cfg = dict(local_llm_cfg)
-    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'amap_weather']
+    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'web_search']
     agent = ReActChat(llm=llm_cfg, function_list=tools)
 
     messages = [Message('user', '海淀区天气')]

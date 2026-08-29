@@ -26,11 +26,7 @@ def test_assistant_system_and_tool(local_llm_cfg):
     llm_cfg = dict(local_llm_cfg)
     system = '你扮演一个天气预报助手，你具有查询天气能力。'
 
-    # image_gen requires llm_cfg in its config; amap_weather does not
-    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'amap_weather']
-    # Set AMAP_TOKEN to avoid assertion failure in AmapWeather tool init
-    import os
-    os.environ.setdefault('AMAP_TOKEN', 'test_token')
+    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'web_search']
     agent = Assistant(llm=llm_cfg, system_message=system, function_list=tools)
 
     messages = [Message('user', '海淀区天气')]
@@ -39,7 +35,7 @@ def test_assistant_system_and_tool(local_llm_cfg):
 
     # Verify the conversation has tool interaction (local models may vary in exact format)
     assert len(last) >= 2, f"Expected at least 2 messages in response, got {len(last)}"
-    # Check that some tool was called (not necessarily amap_weather specifically)
+    # Check that some tool was called (not necessarily web_search specifically)
     func_calls = [msg for msg in last if getattr(msg, 'function_call', None)]
     assert len(func_calls) > 0 or any('天气' in str(msg.content) for msg in last), \
         f"Expected tool call or weather-related response. Got: {[str(m.content) for m in last]}"

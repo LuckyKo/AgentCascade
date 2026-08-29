@@ -24,7 +24,7 @@ def test_router(local_llm_cfg, local_vl_llm_cfg):
     """Test router with local LLM models — delegates to VL and tool agents."""
     llm_cfg = dict(local_llm_cfg)
     llm_cfg_vl = dict(local_vl_llm_cfg)
-    tools = ['amap_weather']
+    tools = ['web_search']
 
     # Define a vl agent
     bot_vl = Assistant(llm=llm_cfg_vl, name='多模态助手', description='可以理解图像内容。')
@@ -56,9 +56,9 @@ def test_router(local_llm_cfg, local_vl_llm_cfg):
     assert len(last) >= 2, f"Expected at least 2 messages in router response, got {len(last)}"
     func_calls = [msg for msg in last if getattr(msg, 'function_call', None)]
     if func_calls:
-        # If tool was called, verify it's amap_weather with reasonable arguments
-        assert any('amap_weather' in str(fc.function_call.name) for fc in func_calls), \
-            f"Expected amap_weather call, got {[str(fc.function_call.name) for fc in func_calls]}"
+        # If tool was called, verify it's web_search with reasonable arguments
+        assert any('web_search' in str(fc.function_call.name) for fc in func_calls), \
+            f"Expected web_search call, got {[str(fc.function_call.name) for fc in func_calls]}"
     else:
         # No tool call — just verify the response has content about weather
         assert len(last[-1].content) > 0, "Final response has no content"
