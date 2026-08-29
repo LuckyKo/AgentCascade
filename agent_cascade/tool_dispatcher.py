@@ -201,8 +201,8 @@ class ToolDispatcher:
         
         This method orchestrates the entire call_agent flow:
         1. Validates arguments via _validate_call_agent_args()
-        2. Handles recursive self-call cloning
-        3. Checks for class mismatch on existing instances
+        2. Rejects self-calls (case-insensitive) and identity-mismatched resurrections
+        3. Clones stacked non-self duplicate names; checks class mismatch on existing instances
         4. Checks nesting depth via _check_nesting_depth()
         5. Routes to sync or async path based on slot collision detection
         
@@ -222,21 +222,55 @@ class ToolDispatcher:
         if error:
             return error
 
-        # P2: Recursive self-call cloning — prevent state corruption on self-delegation
+        # Resolve the canonical target name (case-insensitive match against pool).
+        target_canonical = self.pool._resolve_instance_name(instance_name)
+        caller_ci = caller_name.strip().lower()
+
+        # Self-call guard — an agent calling itself writes into its own log file
+        # ({agent_class}_{instance_name}_{ts}.jsonl), corrupting logs and state.
+        # This is a hallucination/misuse, so reject outright (unconditional — even if
+        # the caller is currently active/stacked). Replaces the old P2 self-clone.
+        if target_canonical.lower() == caller_ci:
+            logger.warning("call_agent self-call rejected - %s tried to call itself as '%s'",
+                          caller_name, instance_name)
+            return (f"Error: Cannot call_agent yourself ('{caller_name}'). "
+                    f"Use a different instance name.")
+
+        # P2: Stacked-name cloning — if the target name is already in the execution stack
+        # (a non-self duplicate), clone to {name}_child{N} to avoid state corruption.
+        # Self-calls are rejected above, so this only sees other agents' duplicates.
         with self.pool._execution._state_lock:
             if any(n == instance_name for n, _depth in self.pool._execution.active_stack):
                 count = sum(1 for n, _depth in self.pool._execution.active_stack if n == instance_name)
                 original_instance = instance_name
                 instance_name = f"{instance_name}_child{count}"
-                logger.debug("Recursive self-call - cloning %s to %s", original_instance, instance_name)
+                logger.debug("Stacked duplicate - cloning %s to %s", original_instance, instance_name)
 
-        # P5: Class mismatch detection — clear history if class differs on existing instance
-        existing_class = self.pool.instance_classes.get(instance_name)
-        if existing_class and agent_class and existing_class.lower() != agent_class:
-            logger.warning("call_agent class mismatch - %s/%s exists as %s, requested %s", 
-                          caller_name, instance_name, existing_class, agent_class)
-            return (f"Error: Agent '{instance_name}' already exists as '{existing_class}'. "
-                    f"Cannot create as '{agent_class}'. Use a different instance name.")
+        # P5: Resurrection identity-mismatch guard — reject when an existing instance
+        # under the resolved canonical name has a persisted identity that differs from
+        # the request on either dimension (case-insensitive):
+        #   - requested name is a case-only variant of the canonical name, OR
+        #   - requested agent_class differs from the existing instance's class.
+        existing = self.pool.instances.get(target_canonical)
+        if existing is not None:
+            # Use the ORIGINAL requested name (not the P2-renamed `instance_name`, which may
+            # have become a _child{N} clone for stacked duplicates — that must NOT count as a
+            # variant). A case-only NAME variant means the request differs from the canonical
+            # spelling but matches it case-insensitively; reject it so we never silently
+            # resurrect an idle/terminated instance under a shifted name. Class mismatch is
+            # compared case-insensitively.
+            orig_req_name = (args.get('instance_name') or '').strip()
+            have_class_ci = (getattr(existing, 'agent_class', '') or '').strip().lower()
+            req_class_ci = agent_class.strip().lower()
+            name_variant = (orig_req_name != target_canonical
+                            and orig_req_name.lower() == target_canonical.lower())
+            class_mismatch = bool(have_class_ci and req_class_ci and have_class_ci != req_class_ci)
+            if name_variant or class_mismatch:
+                logger.warning("call_agent identity mismatch - %s requested '%s'/%s but '%s' exists as '%s'",
+                              caller_name, instance_name, agent_class, target_canonical, have_class_ci)
+                return (f"Error: Agent '{target_canonical}' already exists as '{have_class_ci or 'unknown class'}'. "
+                        f"Requested identity ('{orig_req_name}' / '{agent_class}') does not match. "
+                        f"Use a different instance name.")
 
         # Extracted to _check_nesting_depth() - Phase 4.3
         caller_depth = 0

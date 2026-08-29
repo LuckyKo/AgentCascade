@@ -120,6 +120,21 @@ def _make_mock_pool(router: APIRouter, caller_instance=None, max_nesting_depth=1
     pool.instance_conversations = {}
     pool.instance_classes = {}
 
+    # Real dict + case-insensitive resolver (mirrors pool/lifecycle.py) so the
+    # self-call / resurrection identity guards in handle_call_agent work correctly.
+    pool.instances = {}
+    if caller_instance is not None:
+        pool.instances[caller_instance.instance_name] = caller_instance
+
+    def _resolve(name, exclude=None):
+        name = name.strip()
+        for n in pool.instances:
+            if n != exclude and n.lower() == name.lower():
+                return n
+        return name
+
+    pool._resolve_instance_name.side_effect = _resolve
+
     return pool
 
 
