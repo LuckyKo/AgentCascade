@@ -829,17 +829,8 @@ class TestAutoAsyncMode:
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd launched⟩' in result
 
-    def test_timeout_gt_60_with_explicit_sync_stays_sync(self, shell_cmd_tool):
-        """execution_mode='sync' forces blocking even when timeout > 60 (headline fix)."""
-        with patch.object(shell_cmd_tool, '_execute_sync', return_value='output') as mock_exec:
-            shell_cmd_tool.agent_pool = MagicMock()
-            shell_cmd_tool.agent_name = 'test_agent'
-            result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "execution_mode": "sync", "justification": "sync"}')
-            mock_exec.assert_called_once()
-            assert 'output' in result
-
     def test_execution_mode_sync_with_large_timeout_stays_sync(self, shell_cmd_tool):
-        """Headline regression: execution_mode='sync' with a large timeout (300) must NOT auto-async."""
+        """Headline regression: execution_mode='sync' with a large timeout (300) must stay sync, never auto-async."""
         tracker = self._tool_with_tracker(shell_cmd_tool)
         with patch.object(shell_cmd_tool, '_execute_sync', return_value='output') as mock_exec:
             result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 300, "execution_mode": "sync", "justification": "sync"}')

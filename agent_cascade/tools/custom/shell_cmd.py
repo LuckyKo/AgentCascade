@@ -212,8 +212,8 @@ class ShellCmd(BaseTool):
         timeout = params.get('timeout')  # None means use default (30s sync / 3600s async)
 
         # ── Parse execution parameters ──────────────────────────────
-        # execution_mode is a 2-value enum ('sync'/'async') with auto via ABSENCE/null
-        # (jsonschema default does not inject, so omission arrives as None):
+        # execution_mode is a tri-state parameter ('sync'/'async'/auto). Auto is expressed by
+        # ABSENCE/null (jsonschema default does not inject, so omission arrives as None):
         #   None/absent/null → auto: async iff timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD
         #   'sync'           → force blocking, never auto-async (even for long timeouts)
         #   'async'          → force background regardless of timeout

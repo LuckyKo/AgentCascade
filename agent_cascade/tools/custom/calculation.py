@@ -73,14 +73,9 @@ class Calculate(BaseTool):
         processed_expr = expression.replace('^', '**')
         
         try:
-            # We use a restricted eval here for safety.
-            # Only math functions and basic built-ins are allowed.
-            # __builtins__ is set to empty to disable access to dangerous functions like __import__.
-            # NOTE on attribute access: the allowlist restricts NAME lookups only, so expressions
-            # like (1).__class__ can introspect type objects. This is NOT an exploit vector: with
-            # __builtins__={} and no module/class-with-side-effects in scope, there is no path from
-            # those type objects to code execution or file access (verified — see tests/test_calculate.py).
-            # A hard block would require an AST whitelist, which is out of scope for this tool.
+            # Restricted eval: only allowlisted math funcs + safe built-ins; __builtins__={} blocks
+            # dangerous names like __import__. Attribute access (e.g. (1).__class__) can introspect
+            # type objects but is NOT exploitable — no side-effect object is in scope (see tests).
             result = eval(processed_expr, {"__builtins__": {}}, self.allowed_names)
             
             # Format the result to be clean
