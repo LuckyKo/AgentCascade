@@ -2812,3 +2812,71 @@ class TestTokenEstimatorUndercountFixes:
 
         total = ExecutionEngine._count_history_tokens(engine, messages, inst)  # no functions arg
         assert total == get_message_stats(messages[0])['tokens']
+
+    # ── Fix 4: refinement edge cases (function_call+content, multimodal, malformed tool_calls) ──
+    def test_function_call_with_content_counts_both(self):
+        """A malformed assistant message carrying BOTH function_call AND non-empty content must
+        count the content tokens too — the early-return path must not silently drop them."""
+        from agent_cascade.utils.utils import get_message_stats
+        from agent_cascade.llm.schema import FunctionCall
+
+        fc = {'name': 'grep', 'arguments': '{"pattern": "x"}'}
+        d_fc_only = dict({'role': ASSISTANT, 'function_call': fc})
+        d_fc_content = dict(d_fc_only)
+        d_fc_content['content'] = "I will now search the codebase for this symbol."
+        t_only = get_message_stats(dict(d_fc_only))['tokens']
+        t_both = get_message_stats(dict(d_fc_content))['tokens']
+        assert t_both > t_only, \
+            f"function_call + content must count MORE than function_call alone ({t_both} <= {t_only})"
+
+        # Message-object variant of the same early-return path
+        m_fc_only = Message(role=ASSISTANT, content='', function_call=FunctionCall('grep', '{"pattern": "x"}'))
+        m_fc_content = Message(
+            role=ASSISTANT,
+            content="I will now search the codebase for this symbol.",
+            function_call=FunctionCall('grep', '{"pattern": "x"}'),
+        )
+        tm_only = get_message_stats(m_fc_only)['tokens']
+        tm_both = get_message_stats(m_fc_content)['tokens']
+        assert tm_both > tm_only, \
+            f"Message: function_call + content must count MORE ({tm_both} <= {tm_only})"
+
+    def test_multimodal_image_only_reasoning_not_double_counted(self):
+        """An image-only multimodal message (no text items) renders a '[Image]' placeholder, so
+        extract_text_from_message does NOT surface reasoning as [THOUGHT:...]. The estimator must
+        therefore count reasoning_content exactly ONCE via the content-present guard — not zero
+        and not twice. A literal str(list)-truthy check would double-count; a text-only check
+        would drop it entirely."""
+        from agent_cascade.utils.utils import get_message_stats
+        from agent_cascade.llm.schema import ContentItem
+        from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+
+        img = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        rc = "Let me reason about this carefully for a while."
+        with_rc = get_message_stats(
+            Message(role=ASSISTANT, content=[ContentItem(image=img)], reasoning_content=rc))['tokens']
+        no_rc = get_message_stats(Message(role=ASSISTANT, content=[ContentItem(image=img)]))['tokens']
+
+        diff = with_rc - no_rc
+        assert diff == qwen_count(rc), \
+            (f"reasoning must be counted exactly once for image-only multimodal "
+             f"(diff={diff} != qwen_count(rc)={qwen_count(rc)})")
+        assert diff != 2 * qwen_count(rc), "reasoning_content is being double-counted"
+
+    def test_malformed_tool_calls_missing_function_key_does_not_crash(self):
+        """A tool_calls entry missing the 'function' key (malformed wire data) must not crash
+        _tool_calls_wire_json or get_message_stats — it should serialize fail-soft."""
+        from agent_cascade.utils.utils import get_message_stats, _tool_calls_wire_json
+
+        malformed = Message(
+            role=ASSISTANT, content="ok",
+            extra={'tool_calls': [{'id': '1', 'type': 'function'}]},  # no 'function' key
+        )
+        wire = _tool_calls_wire_json(malformed)  # must not raise
+        import json as _json
+        parsed = _json.loads(wire)
+        assert isinstance(parsed, list) and len(parsed) == 1
+        # Fail-soft: missing function yields empty name/arguments, never an exception.
+        assert parsed[0]['function']['name'] == ''
+        stats = get_message_stats(malformed)  # must not raise
+        assert 'tokens' in stats and 'words' in stats

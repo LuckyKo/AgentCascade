@@ -941,6 +941,25 @@ def _get_item_attr(item, attr_name: str):
     return getattr(item, attr_name, None)
 
 
+def _content_item_has_visible_text(item) -> bool:
+    """Return True if a multimodal content item renders as visible text.
+
+    Used by get_message_stats to decide whether extract_text_from_message will surface
+    reasoning/tool_calls as display text (only when the visible content is empty). A text
+    item counts only if its text is non-blank; media items (image/audio/video/file) always
+    count because format_as_text_message renders them as placeholders like '[Image]'.
+    Handles both ContentItem objects and plain dicts.
+    """
+    text = _get_item_attr(item, 'text')
+    if isinstance(text, str) and text.strip():
+        return True
+    # Any non-text content type renders a placeholder → visible text is non-empty.
+    for media in ('image', 'file', 'audio', 'video'):
+        if _get_item_attr(item, media):
+            return True
+    return False
+
+
 def extract_files_from_messages(messages: List[Union[dict, Message]], include_images: bool) -> List[str]:
     files = []
     for msg in messages:
@@ -1226,6 +1245,10 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
             rc_text = _reasoning_to_text(_msg_field_or_extra(msg, 'reasoning_content'), truncate=False)
             if rc_text:
                 text = f'{text}\n{rc_text}'
+            # Also count content if present (defensive: malformed messages may have both)
+            fc_content = msg.get('content', '')
+            if fc_content and str(fc_content).strip():
+                text = f'{text}\n{fc_content}'
             stats = {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
             msg['_tokens'] = stats['tokens']
             msg['_words'] = stats['words']
@@ -1253,6 +1276,10 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
             rc_text = _reasoning_to_text(_msg_field_or_extra(msg, 'reasoning_content'), truncate=False)
             if rc_text:
                 text = f'{text}\n{rc_text}'
+            # Also count content if present (defensive: malformed messages may have both)
+            fc_content = getattr(msg, 'content', '')
+            if fc_content and str(fc_content).strip():
+                text = f'{text}\n{fc_content}'
             return {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
         msg_obj = msg
         is_dict = False
@@ -1288,11 +1315,19 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
         content_key = ('text', content_hash)
 
-    # Whether content is non-empty matters: when empty, extract_text_from_message surfaces
-    # reasoning/tool_calls as display text (counted once); when non-empty they are added on
-    # top. Two messages with the same rc/tc but differing content-presence must NOT share a
-    # cache entry, so fold a presence flag into the key.
-    content_present = bool(content is not None and str(content).strip())
+    # Whether extract_text_from_message will surface reasoning/tool_calls as display text
+    # matters: it only does so when the visible content text is EMPTY (see its `if not
+    # text.strip()` branch). When there IS visible text, they are added on top instead. Two
+    # messages with the same rc/tc but differing content-presence must NOT share a cache entry,
+    # so fold a presence flag into the key. For multimodal list content, str(list) is always
+    # truthy even when every item has empty text — check the items directly. Media items
+    # (image/audio/video/file) render as placeholders like '[Image]', which make the visible
+    # text non-empty and therefore suppress the [THOUGHT:...]/[TOOL CALL:...] surfacing, so they
+    # count as "present" here too (mirrors format_as_text_message).
+    if isinstance(content, list):
+        content_present = any(_content_item_has_visible_text(item) for item in content)
+    else:
+        content_present = bool(content is not None and str(content).strip())
     extra_hash = hashlib.md5(
         (str(content_present) + '\x00' + rc_for_key + '\x00' + tc_json_for_key)
         .encode('utf-8', errors='replace')
@@ -1316,12 +1351,13 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         tokens = qwen_count(text_for_tokens) + image_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD
 
         # reasoning_content / tool_calls are ALWAYS shipped to the API (base.py), so they
-        # must be counted. But only when content is non-empty: when content IS empty,
+        # must be counted. But only when content carries actual text: when it does not,
         # extract_text_from_message() already surfaced them as display text ([THOUGHT:...] /
         # [TOOL CALL:...]) and qwen_count(text_for_tokens) above has already counted them —
         # adding the raw fields again would double-count. (The function_call early-return
-        # paths handle the empty-content case separately.)
-        if content is not None and str(content).strip():
+        # paths handle the empty-content case separately.) Use the same content_present flag
+        # as the cache key so image-only / empty-text multimodal lists are handled consistently.
+        if content_present:
             if rc_for_key:
                 tokens += qwen_count(rc_for_key)
             if tc_json_for_key:
