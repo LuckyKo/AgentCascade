@@ -87,6 +87,17 @@ DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 COMPRESSION_MARKER = "--- CONTEXT COMPRESSED"
 COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
 
+# Shared caption-format instruction appended to both compression prompts.
+# The model's VERY LAST line must be the end marker + a one-line caption on the
+# same line; the parser (agent_invoker._parse_compression_output) splits them.
+CAPTION_INSTRUCTION = (
+    f"The VERY LAST line of your entire output MUST be exactly this single line: "
+    f"`{COMPRESSION_END_MARKER} CAPTION: <one short sentence describing what this session was about>` — "
+    f"i.e. the marker `{COMPRESSION_END_MARKER}` followed on the SAME line (no newline) by `CAPTION:` and a one-line caption. "
+    "Do NOT emit the marker anywhere else and do NOT put a bare marker line without the caption. It will NOT be validated without this final line. "
+    "The caption must be a single line only (≤ ~120 characters, no newlines) and describe the session's topic/goal — not the summary itself."
+)
+
 COMPRESSION_PROMPT = (
     "Summarize the following conversation history.\n"
     "Focus strictly on key decisions, important facts, established context, and the current state of tasks.\n"
@@ -97,11 +108,7 @@ COMPRESSION_PROMPT = (
     "4. Retain a compacted initial request and any follow ups from user in the summary.\n"
     "5. Existing summary is just for reference, focus on summarizing the events after that.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
-    f"Present the summary below. The VERY LAST line of your entire output MUST be exactly this single line: "
-    f"`{COMPRESSION_END_MARKER} CAPTION: <one short sentence describing what this session was about>` — "
-    f"i.e. the marker `{COMPRESSION_END_MARKER}` followed on the SAME line (no newline) by `CAPTION:` and a one-line caption. "
-    "Do NOT emit the marker anywhere else and do NOT put a bare marker line without the caption. It will NOT be validated without this final line. "
-    "The caption must be a single line only (≤ ~120 characters, no newlines) and describe the session's topic/goal — not the summary itself."
+    f"Present the summary below. {CAPTION_INSTRUCTION}"
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
@@ -126,11 +133,7 @@ CONSOLIDATION_PROMPT = (
     "- Maintain chronological order implicitly (earliest events first).\n"
     "- If conflicting information appears across summaries, prefer the most recent version.\n\n"
     "--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n"
-    f"Present the consolidated summary below. The VERY LAST line of your entire output MUST be exactly this single line: "
-    f"`{COMPRESSION_END_MARKER} CAPTION: <one short sentence describing what this session was about>` — "
-    f"i.e. the marker `{COMPRESSION_END_MARKER}` followed on the SAME line (no newline) by `CAPTION:` and a one-line caption. "
-    "Do NOT emit the marker anywhere else and do NOT put a bare marker line without the caption. It will NOT be validated without this final line. "
-    "The caption must be a single line only (≤ ~120 characters, no newlines) and describe the session's topic/goal — not the summary itself."
+    f"Present the consolidated summary below. {CAPTION_INSTRUCTION}"
 )
 
 COMPRESSION_NOTICE_TEMPLATE = ""  # Unused — header is now minimal

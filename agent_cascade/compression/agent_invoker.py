@@ -88,10 +88,12 @@ def _parse_compression_output(raw: str) -> Tuple[str, str]:
         )
 
     summary_body = raw_stripped[:marker_idx].strip()
-    # Defensive fallback: if the LAST marker leaves another marker in the body (the model
-    # emitted a spurious second marker, e.g. inside a caption), use the FIRST marker as the
-    # boundary instead so the body is guaranteed marker-free. This never degrades the
-    # normal single-marker case and keeps the caption/marker out of model context.
+    # Defensive fallback: if the LAST marker leaves another copy of the marker in the body,
+    # the model echoed the marker string (e.g. the summarized content itself contained
+    # "--- END SUMMARY ---", or it leaked into the caption). Re-anchor on the FIRST marker so
+    # the summary body is guaranteed marker-free — a stray marker in the body would otherwise
+    # be mis-detected as a compression marker later. Rare but cheap to guard, and tested
+    # (see tests/test_session_caption.py); the normal single-marker case is unaffected.
     if COMPRESSION_END_MARKER in summary_body:
         first_idx = raw_stripped.find(COMPRESSION_END_MARKER)
         alt_body = raw_stripped[:first_idx].strip()

@@ -2289,14 +2289,6 @@ body {
   border-radius: 10px;
 }
 
-.session-item-caption {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .session-item-meta {
   display: flex;
   justify-content: space-between;

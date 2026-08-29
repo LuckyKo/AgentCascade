@@ -153,14 +153,16 @@ def _set_generating_true(session: dict) -> None:
 
 
 # Display length cap for the /api/sessions caption fallback (first USER message). A first
-# user message can be a long prompt or a pasted file, so it is never returned raw.
+# user message can be a long prompt or a pasted file, so it is never returned raw. 120 chars
+# is a UI display heuristic — roughly one readable line in the session-list column; not a
+# protocol limit, so a plain module constant (no env override) is intentional.
 _SESSION_CAPTION_MAX_LEN = 120
 
 
 def _truncate_caption(text: str) -> str:
-    """Collapse whitespace and truncate ``text`` to _SESSION_CAPTION_MAX_LEN chars.
+    """Collapse whitespace and truncate ``text`` to ``_SESSION_CAPTION_MAX_LEN`` chars.
 
-    Appends an ellipsis (``…``) when the text was cut. Returns "" for empty/None input.
+    Appends an ellipsis (``…``) when the text was cut. Returns "" for falsy input.
     """
     if not text:
         return ""

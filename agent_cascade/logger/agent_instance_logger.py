@@ -126,6 +126,11 @@ class AgentInstanceLogger:
         First-meaningful-caption-wins: the field is only set if it is not already
         present/non-empty, so a later compression (or a user-edited value on disk that
         was merged into base_metadata) never clobbers an earlier caption.
+
+        Note the deliberate contrast with update_supervisor(): supervisor is meant to be
+        re-assignable (ownership can transfer), so it overwrites; a caption is set once by
+        the first compression and should not churn, so it is first-wins. The difference is
+        intentional, not an oversight.
         """
         current = self.data["metadata"].get("caption")
         if current:  # already set to a non-empty value — do not clobber
