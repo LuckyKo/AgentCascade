@@ -89,7 +89,7 @@ COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append;
 
 # End-marker instruction (ALWAYS appended — required for output validation).
 END_MARKER_INSTRUCTION = (
-    f"End your output with the marker `{COMPRESSION_END_MARKER}` on its own final line."
+    f"End your output with the marker `{COMPRESSION_END_MARKER}` on its own final line, it's required to validate the summary."
 )
 
 # Optional caption instruction (only included on first compression when no caption exists yet).
@@ -102,11 +102,10 @@ COMPRESSION_PROMPT = (
     "Summarize the following conversation history.\n"
     "Focus strictly on key decisions, important facts, established context, and the current state of tasks.\n"
     "CRITICAL RULES:\n"
-    "1. Output ONLY the summary. Do not include introductory or concluding remarks (e.g. 'Here is a summary').\n"
-    "2. Do not include meta-commentary or thinking process.\n"
-    "3. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
-    "4. Retain a compacted initial request and any follow ups from user in the summary.\n"
-    "5. Existing summary is just for reference, focus on summarizing the events after that.\n\n"
+    "1. Output ONLY the summary — no intro/outro remarks, no meta-commentary, no thinking process.\n"
+    "2. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
+    "3. Retain a compacted initial request and any follow ups from user in the summary.\n"
+    "4. Existing summary is just for reference, focus on summarizing the events after that.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
     "Present the summary below.{end_instruction}"
 )
@@ -128,15 +127,12 @@ CONSOLIDATION_PROMPT = (
     "3. Drops redundant details, minor steps, and intermediate reasoning that is no longer actionable.\n"
     "4. Is significantly shorter than the total input — you are going one level higher in abstraction.\n\n"
     "CRITICAL RULES:\n"
-    "- Output ONLY the consolidated summary. No intro/outro remarks like 'Here is the summary'.\n"
-    "- Do not include meta-commentary or thinking process.\n"
+    "- Output ONLY the consolidated summary — no intro/outro, no meta-commentary.\n"
     "- Maintain chronological order implicitly (earliest events first).\n"
     "- If conflicting information appears across summaries, prefer the most recent version.\n\n"
     "--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n"
     "Present the consolidated summary below.{end_instruction}"
 )
-
-COMPRESSION_NOTICE_TEMPLATE = ""  # Unused — header is now minimal
 
 # --- Security Advisor ---
 SECURITY_ADVISOR_PROMPT = (
@@ -222,8 +218,7 @@ TOOL_METADATA = {
             'Always use this instead of write_file for modifying parts of a file, '
             'as it is safer and preserves the rest of the content. '
             'Requires user approval if you do not own the file. '
-            'Always read the file content before attempting an edit.\n'
-            'Include at least 3 lines of context matching whitespace and indentation precisely when content matching.'
+            'Always read the file content before attempting an edit.'
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
@@ -308,15 +303,11 @@ TOOL_METADATA = {
     
     'code_interpreter': {
         'description': (
-            'Python code sandbox (Docker-based). The workspace directory is mounted into the container. '
-            'Use this to test small snippets of code, for anything larger than a few lines write and edit py files that you can import here. DONT waste tokens writing the same code over and over in the prompt. Use the file tools to manage your code files efficiently. '
-            'PATH MAPPING: Any path used with file tools (read_file, write_file, etc.) outside this tool '
-            'maps to "/workspace/<path>" inside the container. For example, "src/main.py" becomes '
-            '"/workspace/src/main.py". The container working directory is /workspace, so relative paths '
-            '"src/main.py" also work directly in your code. Use system_info tool to find exact folder mapping for extra paths. '
-            'To access services on the host machine (like local APIs), use "host.docker.internal" instead of "localhost". '
-            'Absolute Windows style paths mapped to extra workspaces (e.g., N:\\work\\...) are auto-translated to container paths by default. '
-            'Set fix_paths=false to disable this behavior.'
+            'Python code sandbox (Docker-based). The workspace is mounted at /workspace; relative paths work directly. '
+            'Use for quick snippets; for longer code, write .py files via file tools and import them here. '
+            'To reach host services, use "host.docker.internal" instead of "localhost". '
+            'Windows-style extra-workspace paths are auto-translated to container paths (disable with fix_paths=false). '
+            'Use system_info to find exact path mappings for extra workspaces.'
         ),
         'parameters': {
             'code': 'The Python code to execute.',
@@ -326,17 +317,13 @@ TOOL_METADATA = {
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. This requires explicit security approval so it is a very expensive operation. DO NOT use if other tools can accomplish the same task.'
-            'Commands run with the workspace directory as the default working directory.\n\n'
-            '**SYNC vs ASYNC — READ THIS FIRST:**\n'
-            '- **Default is SYNC (blocking).** Use this for fast running commands. The call blocks until the command finishes and returns its full output.\n'
-            '- **WARNING — auto-backgrounding:** any `timeout > 60` is AUTOMATICALLY treated as async_mode=true, if you did not set it explicitly to false. If you want true sync behavior for a long command, set async_mode=false OR accept async mode and manage it correctly.\n'
-            '- **Async Mode** Set async_mode=true and the tool returns immediately with a tool_id and PID. DO NOT use with file redirection (>, >>, <) or piped filters, the tool already does truncation with spillover files.\n\n'
-            '- In this mode the command will deliver a FINAL result message automatically when done (and periodic heartbeats if heartbeat_interval > 0). PREFER waiting for that final message over actively polling.\n'
-            '- To check on it, use the tool_id parameter with __status (status + recent output), __kill, __heartbeat=N, or __ctrl_c. Send any other text as stdin input (that is NOT a shell command).\n'
-            '- **Do not spin:** never issue more than ~2 status checks for the same tool_id without new information. If you have nothing else to do, wait for the automatic completion message instead of polling in a tight loop and wasting tokens. Consider increasing heartbeat interval if the updates are slow.\n'
-            '- Max 5 concurrent async shells per agent.\n\n'
-            '**Limitations**: Windows CMD Shell does not support tail, but piped filters are unnecessary as the tool already produces output with mid point truncation.'
+            'Execute a shell command on the host system. Requires explicit security approval — only use when no other tool can accomplish the task. '
+            'Default working directory is the workspace root.\n\n'
+            '**SYNC (default):** Blocks until completion, returns full output. Use for fast commands.\n'
+            '**ASYNC:** Set async_mode=true (or timeout>60 auto-triggers it) for long-running commands. '
+            'Returns immediately with a tool_id; final result delivered automatically when done. '
+            'Use tool_id with __status/__kill/__ctrl_c to manage. Do NOT poll more than ~2 times without new info.\n\n'
+            'Max 5 concurrent async shells per agent.'
         ),
         'parameters': {
             'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
@@ -506,12 +493,9 @@ TOOL_METADATA = {
     },
     'send_message': {
         'description': (
-            'Sends an asynchronous message to another running agent or to the user. '
-            'The message is queued and delivered on the recipient\'s next turn without '
-            'interrupting either party\'s current workflow. Returns success only if the '
-            'destination is actively running; otherwise returns a failure reason. Use this '
-            'for coordination between agents, parent-to-child guidance, or notifying the '
-            'user of important updates.'
+            'Send an async message to another running agent or the user. '
+            'Delivered on the recipient\'s next turn without interrupting either party. '
+            'Fails if the destination is not actively running.'
         ),
         'parameters': {
             'destination': (
@@ -627,6 +611,10 @@ TOOL_METADATA = {
 }
 
 # --- Function Calling Templates ---
+# NOTE: These templates are for the legacy 'nous' fncall_prompt_type. The default is 'native'
+# (tools passed via API parameter, no prompt injection). If reviving the nous path, add a
+# {tool_descs} placeholder to FN_CALL_TEMPLATE — it is currently missing, causing tool
+# descriptions to be silently dropped by str.format().
 FN_CALL_TEMPLATE = """# Tools
 
 You have access to a set of provided tools. You can call these tools natively to assist with the user's query.
@@ -642,4 +630,5 @@ When you need to call a tool, use your native function calling schema to emit th
 Do not try to output <tool_call> or <tools> XML tags manually; the system handles the tool schemas and execution natively via the API.
 """
 
-FN_CALL_TEMPLATE_WITH_CI = FN_CALL_TEMPLATE # Now included in main template
+# Alias kept for backward compat with nous_fncall_prompt.py import.
+FN_CALL_TEMPLATE_WITH_CI = FN_CALL_TEMPLATE

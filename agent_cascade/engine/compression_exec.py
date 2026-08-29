@@ -435,7 +435,7 @@ class CompressionExecMixin:
         if comp_agent and hasattr(comp_agent, 'system_message'):
             sys_prompt_tokens = len(str(comp_agent.system_message)) // CHARS_PER_TOKEN_ESTIMATE
 
-        prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text=""))
+        prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text="", end_instruction=""))
         prompt_overhead_tokens = sys_prompt_tokens + (prompt_template_chars // CHARS_PER_TOKEN_ESTIMATE)
 
         # Halve fraction iteratively until slice fits or we hit the minimum.

@@ -474,7 +474,7 @@ def compress_context(
 
             # Actual COMPRESSION_PROMPT template size (with {history_text} replaced by empty string)
             # since the history_text portion maps to target_messages which we already counted.
-            prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text=""))
+            prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text="", end_instruction=""))
             prompt_template_tokens = prompt_template_chars // CHARS_PER_TOKEN_ESTIMATE
 
             prompt_overhead_tokens = sys_prompt_tokens + prompt_template_tokens
