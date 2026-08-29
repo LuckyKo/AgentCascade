@@ -152,6 +152,73 @@ def _set_generating_true(session: dict) -> None:
         session['generating'] = True
 
 
+# Display length cap for the /api/sessions caption fallback (first USER message). A first
+# user message can be a long prompt or a pasted file, so it is never returned raw.
+_SESSION_CAPTION_MAX_LEN = 120
+
+
+def _truncate_caption(text: str) -> str:
+    """Collapse whitespace and truncate ``text`` to _SESSION_CAPTION_MAX_LEN chars.
+
+    Appends an ellipsis (``…``) when the text was cut. Returns "" for empty/None input.
+    """
+    if not text:
+        return ""
+    # Collapse internal whitespace/newlines so a multi-line prompt becomes one line.
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= _SESSION_CAPTION_MAX_LEN:
+        return collapsed
+    return collapsed[:_SESSION_CAPTION_MAX_LEN].rstrip() + "…"
+
+
+def _read_session_caption(path, max_scan_lines: int = 200) -> str:
+    """Read a session log's display caption without loading the whole file.
+
+    Semantics (single "caption" field for the UI):
+      1. ``metadata.caption`` from line 1, if non-empty (the compressor-generated caption).
+      2. Otherwise, the first USER message's text (scanned forward from line 2, stopping
+         early — at most ``max_scan_lines`` lines) truncated to ~120 chars with an ellipsis.
+      3. Otherwise "" (no caption and no user message found / unreadable file).
+
+    Only leading lines are read; the rest of the file is never touched. All errors are
+    swallowed (returning "") so a malformed/empty/partial log can't break the listing.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            # Line 1: metadata header → caption field (if present and non-empty).
+            first_line = f.readline()
+            if first_line:
+                try:
+                    meta = json.loads(first_line)
+                    cap = (meta.get('metadata') or {}).get('caption', '')
+                    if isinstance(cap, str) and cap.strip():
+                        return _truncate_caption(cap)
+                except (json.JSONDecodeError, AttributeError):
+                    pass  # malformed/missing metadata → fall through to user-message fallback
+
+            # Fallback: first USER message text, scanning forward from line 2 (stop early).
+            for _ in range(max_scan_lines):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict) and item.get('role') == USER:
+                    # Pass the whole message so multimodal (list) content is handled;
+                    # extract_text_from_message accepts a dict and returns "" for empty.
+                    text = extract_text_from_message(item, add_upload_info=False)
+                    if text and text.strip():
+                        return _truncate_caption(text)
+    except Exception as e:
+        logger.debug(f"Failed to read session caption for {path}: {e}")
+    return ""
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     from agent_cascade.log import logger
 
@@ -896,10 +963,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             log_dir = agent_pool.operation_manager.base_dir / 'logs'
         else:
             log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
-            
+
         if not log_dir.exists():
             return {"sessions": []}
-        
+
         sessions = []
         for p in log_dir.glob('*.jsonl'):
             try:
@@ -913,19 +980,23 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     agent_class = "Unknown"
                     instance_name = p.stem
                     timestamp = "Unknown"
-                
+
                 sessions.append({
                     "path": str(p),
                     "name": instance_name,
                     "agent": agent_class,
                     "timestamp": timestamp,
                     "size": p.stat().st_size,
-                    "mtime": p.stat().st_mtime
+                    "mtime": p.stat().st_mtime,
+                    # Session caption: metadata.caption if set, else truncated first USER
+                    # message (fallback), else "". Read cheaply — line 1 for the caption,
+                    # and only enough leading lines to find the first user message.
+                    "caption": _read_session_caption(p),
                 })
             except Exception as e:
                 logger.debug(f"Failed to parse session log file info: {e}")
                 continue
-        
+
         # Sort by mtime descending
         sessions.sort(key=lambda x: x['mtime'], reverse=True)
         return {"sessions": sessions}

@@ -126,7 +126,6 @@ COMPRESSION_SECURITY_CHECK_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_SECURITY_CHECK_TIMEOUT', 120.0))  # Max seconds for security advisor during compression
 COMPRESSION_MAX_RETRIES: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_MAX_RETRIES', 3))  # Max retry attempts for compression agent invocation on marker validation failure
-COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
 
 # Hierarchical memory consolidation settings
 COMPRESSION_CONSOLIDATION_THRESHOLD: int = int(os.getenv(

@@ -3,7 +3,6 @@
 # -*- coding: utf-8 -*-
 
 from typing import Dict, List, Set
-from agent_cascade.settings import COMPRESSION_END_MARKER
 
 # ── Available Tools Registry ────────────────────────────────────────────────
 # Master list of ALL tools that agents can use. Toggle True/False to enable/disable
@@ -86,6 +85,7 @@ DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 
 # --- Memory Compression ---
 COMPRESSION_MARKER = "--- CONTEXT COMPRESSED"
+COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
 
 COMPRESSION_PROMPT = (
     "Summarize the following conversation history.\n"
@@ -97,7 +97,11 @@ COMPRESSION_PROMPT = (
     "4. Retain a compacted initial request and any follow ups from user in the summary.\n"
     "5. Existing summary is just for reference, focus on summarizing the events after that.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
-    f"Present summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end of the summary. It will NOT be validated without this marker."
+    f"Present the summary below. The VERY LAST line of your entire output MUST be exactly this single line: "
+    f"`{COMPRESSION_END_MARKER} CAPTION: <one short sentence describing what this session was about>` — "
+    f"i.e. the marker `{COMPRESSION_END_MARKER}` followed on the SAME line (no newline) by `CAPTION:` and a one-line caption. "
+    "Do NOT emit the marker anywhere else and do NOT put a bare marker line without the caption. It will NOT be validated without this final line. "
+    "The caption must be a single line only (≤ ~120 characters, no newlines) and describe the session's topic/goal — not the summary itself."
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
@@ -122,7 +126,11 @@ CONSOLIDATION_PROMPT = (
     "- Maintain chronological order implicitly (earliest events first).\n"
     "- If conflicting information appears across summaries, prefer the most recent version.\n\n"
     "--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n"
-    f"Present your consolidated summary below and always terminate it with last line `{COMPRESSION_END_MARKER}` to indicate the end. It will NOT be validated without this marker."
+    f"Present the consolidated summary below. The VERY LAST line of your entire output MUST be exactly this single line: "
+    f"`{COMPRESSION_END_MARKER} CAPTION: <one short sentence describing what this session was about>` — "
+    f"i.e. the marker `{COMPRESSION_END_MARKER}` followed on the SAME line (no newline) by `CAPTION:` and a one-line caption. "
+    "Do NOT emit the marker anywhere else and do NOT put a bare marker line without the caption. It will NOT be validated without this final line. "
+    "The caption must be a single line only (≤ ~120 characters, no newlines) and describe the session's topic/goal — not the summary itself."
 )
 
 COMPRESSION_NOTICE_TEMPLATE = ""  # Unused — header is now minimal

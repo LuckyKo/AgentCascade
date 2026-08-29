@@ -314,7 +314,7 @@ class TestCompressContextToolPairsIntegration:
         initial_len = len(pool.get_conversation("TestAgent"))
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary of tool calls"
+            mock_invoke.return_value = ("Summary of tool calls", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -351,7 +351,7 @@ class TestCompressContextToolPairsIntegration:
         pool = MockAgentPool(history)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -394,7 +394,7 @@ class TestCompressContextToolPairsIntegration:
         initial_len = len(pool.get_conversation("TestAgent"))
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary of mixed conversation"
+            mock_invoke.return_value = ("Summary of mixed conversation", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -434,7 +434,7 @@ class TestParallelToolCallsPattern:
         initial_len = len(pool.get_conversation("TestAgent"))
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
             result = compress_context(
                 agent_pool=pool, target_agent_name="TestAgent",
                 fraction=0.5, mode="auto", force=False,

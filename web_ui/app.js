@@ -955,18 +955,26 @@ function renderSessions() {
     return;
   }
 
-  sessionsList.innerHTML = filtered.map(s => `
+  sessionsList.innerHTML = filtered.map(s => {
+    // Read-only session caption (compressor-generated, else truncated first user message).
+    // Only rendered when non-empty so uncaptioned sessions look unchanged.
+    const captionRow = s.caption
+      ? `<div class="session-item-caption" title="${escapeHtml(s.caption)}">${escapeHtml(s.caption)}</div>`
+      : '';
+    return `
     <div class="session-item" data-path="${escapeHtml(s.path.replace(/\\/g, '/'))}">
       <div class="session-item-header">
         <span class="session-item-name">${escapeHtml(s.name)}</span>
         <span class="session-item-agent">${escapeHtml(s.agent)}</span>
       </div>
+      ${captionRow}
       <div class="session-item-meta">
         <span>${formatDate(s.mtime * 1000)}</span>
         <span>${formatSize(s.size)}</span>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   // Add click listeners scoped to sessionsList (old DOM is replaced each render, so no leak)
   sessionsList.querySelectorAll('.session-item').forEach(item => {

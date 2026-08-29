@@ -2064,6 +2064,14 @@ body {
   flex-shrink: 0;
 }
 
+.session-item-caption {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .session-item-meta {
   display: flex;
   justify-content: space-between;
@@ -2279,6 +2287,14 @@ body {
   background: var(--accent-glow);
   padding: 1px 6px;
   border-radius: 10px;
+}
+
+.session-item-caption {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-item-meta {

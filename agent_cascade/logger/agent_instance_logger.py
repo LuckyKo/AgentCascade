@@ -84,6 +84,7 @@ class AgentInstanceLogger:
                 "current_log_path": self.log_path,
                 "working_dir": os.getcwd(),  # Default to current CWD
                 "supervisor": "System",      # Default supervisor
+                "caption": "",               # Session caption (set by compressor; first meaningful one wins)
             },
             "history": []
         }
@@ -113,6 +114,24 @@ class AgentInstanceLogger:
         data["metadata"]["supervisor"] gets the current value.
         """
         self.data["metadata"]["supervisor"] = value
+
+    def set_caption(self, caption: str) -> None:
+        """Set the session caption in logger metadata (in-memory only, first-wins).
+
+        Mirrors update_supervisor(): updates data["metadata"]["caption"] in memory so
+        that a subsequent compression rewrite (reset_history(rewrite=True) →
+        _sync_marker_single_write) re-emits line 1 with it. No dedicated full-file
+        rewrite is triggered here.
+
+        First-meaningful-caption-wins: the field is only set if it is not already
+        present/non-empty, so a later compression (or a user-edited value on disk that
+        was merged into base_metadata) never clobbers an earlier caption.
+        """
+        current = self.data["metadata"].get("caption")
+        if current:  # already set to a non-empty value — do not clobber
+            return
+        if caption:
+            self.data["metadata"]["caption"] = caption
 
     @classmethod
     def copy_session_file(cls, source_path: str, log_dir: str, agent_class: str, instance_name: str) -> str:

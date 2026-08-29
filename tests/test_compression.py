@@ -254,7 +254,7 @@ class TestCompressContextCleanTrim:
         pool, initial_len = _build_pool_with_history(num_user_msgs=10)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary of the conversation"
+            mock_invoke.return_value = ("Summary of the conversation", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -275,7 +275,7 @@ class TestCompressContextCleanTrim:
         pool, _ = _build_pool_with_history(num_user_msgs=10)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             compress_context(
                 agent_pool=pool,
@@ -301,7 +301,7 @@ class TestCompressContextCleanTrim:
         pool, initial_len = _build_pool_with_history(num_user_msgs=10)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary 1"
+            mock_invoke.return_value = ("Summary 1", "")
 
             result1 = compress_context(
                 agent_pool=pool,
@@ -315,7 +315,7 @@ class TestCompressContextCleanTrim:
         after_first = len(pool.get_conversation("TestAgent"))
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary 2"
+            mock_invoke.return_value = ("Summary 2", "")
 
             # Second compression on the now-smaller pool
             result2 = compress_context(
@@ -354,7 +354,7 @@ class TestCompressContextTargetMessages:
         captured_target_messages = []
         def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None):
             captured_target_messages.append(target_messages)
-            return "Summary"
+            return ("Summary", "")
 
         with patch("agent_cascade.compression.core.invoke_compression_agent", side_effect=capture_invoke):
             compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
@@ -398,7 +398,7 @@ class TestCompressContextTargetMessages:
         captured_target_messages = []
         def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None):
             captured_target_messages.append((target_messages, existing_summary))
-            return "Compound summary"
+            return ("Compound summary", "")
 
         with patch("agent_cascade.compression.core.invoke_compression_agent", side_effect=capture_invoke):
             compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
@@ -432,7 +432,7 @@ class TestCompressContextForceMode:
         pool, _ = _build_pool_with_history(num_user_msgs=3)  # 6 active msgs
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -503,7 +503,7 @@ class TestCompressContextDryRun:
         pool, initial_len = _build_pool_with_history(num_user_msgs=10)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -522,7 +522,7 @@ class TestCompressContextDryRun:
         pool, _ = _build_pool_with_history(num_user_msgs=10)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -653,7 +653,7 @@ class TestFractionValidation:
         pool, _ = _build_pool_with_history(num_user_msgs=5)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -960,7 +960,7 @@ class TestCompressContextEmptySummary:
         pool, initial_len = _build_pool_with_history(num_user_msgs=5)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = ""  # Empty summary
+            mock_invoke.return_value = ("", "")  # Empty summary
 
             result = compress_context(
                 agent_pool=pool,
@@ -975,11 +975,11 @@ class TestCompressContextEmptySummary:
         assert len(pool.get_conversation("TestAgent")) == initial_len
 
     def test_none_summary_from_agent_fails(self):
-        """If invoke_compression_agent returns None, compression fails gracefully."""
+        """If invoke_compression_agent returns an empty summary, compression fails gracefully."""
         pool, initial_len = _build_pool_with_history(num_user_msgs=5)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = None
+            mock_invoke.return_value = ("", "")  # Empty summary (2-tuple contract)
 
             result = compress_context(
                 agent_pool=pool,
@@ -1033,7 +1033,7 @@ class TestCompressContextPoolMutationFailure:
         failing_pool = FailingPool(pool)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             result = compress_context(
                 agent_pool=failing_pool,
@@ -1065,7 +1065,7 @@ class TestCompressContextDictMessages:
         pool = MockAgentPool(history)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary of dict messages"
+            mock_invoke.return_value = ("Summary of dict messages", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -1131,7 +1131,7 @@ class TestTokenGuard:
             mock_count.return_value = 150  # Each msg counts as 150 tokens
 
             with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-                mock_invoke.return_value = "Summary"
+                mock_invoke.return_value = ("Summary", "")
 
                 result = compress_context(
                     agent_pool=pool,
@@ -1156,7 +1156,7 @@ class TestCompressContextDryRunWithForce:
         pool, initial_len = _build_pool_with_history(num_user_msgs=2)  # Small set
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             result = compress_context(
                 agent_pool=pool,
@@ -1421,7 +1421,7 @@ class TestCompressionRetryReuse:
 
             with patch(
                 "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
-                return_value="Valid summary text",
+                return_value=("Valid summary text", ""),
             ):
                 result = invoke_compression_agent(
                     agent_pool=pool,
@@ -1429,7 +1429,7 @@ class TestCompressionRetryReuse:
                     caller_name="TestCaller",
                 )
 
-        assert result == "Valid summary text"
+        assert result == ("Valid summary text", "")
         mock_instance.rebuild_conversation.assert_not_called()
         mock_engine._create_system_agent.assert_called_once()
 
@@ -1450,7 +1450,7 @@ class TestCompressionRetryReuse:
                     "Compression output missing end marker '--- END SUMMARY ---' — "
                     "compressor may have hallucinated or continued the task"
                 )
-            return "Good summary on second try"
+            return ("Good summary on second try", "")
 
         initial_conv = [
             {"role": "system", "content": "sys"},
@@ -1479,7 +1479,7 @@ class TestCompressionRetryReuse:
                     caller_name="TestCaller",
                 )
 
-        assert result == "Good summary on second try"
+        assert result == ("Good summary on second try", "")
         # Both attempts used the same instance
         assert len(executed_instances) == 2
         assert executed_instances[0] is mock_instance

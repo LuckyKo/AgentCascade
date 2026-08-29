@@ -5,11 +5,12 @@ This provides full AgentInstance lifecycle (state tracking, WebUI visibility, AP
 """
 import copy
 import logging
+import re
 import threading
 import time as _time
-from typing import Any, List
-from agent_cascade.prompts.dna import COMPRESSION_PROMPT, CONSOLIDATION_PROMPT
-from agent_cascade.settings import COMPRESSION_END_MARKER, COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES
+from typing import Any, List, Tuple
+from agent_cascade.prompts.dna import COMPRESSION_PROMPT, CONSOLIDATION_PROMPT, COMPRESSION_END_MARKER
+from agent_cascade.settings import COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
@@ -42,6 +43,80 @@ _SUMMARY_PREFIXES = [
     "here is a summary", "here is the summary", "summary:",
     "in summary,", "here's a summary", "**summary**:",
 ]
+
+# Regex for the optional caption that rides on the SAME line right after the end marker:
+#   --- END SUMMARY --- CAPTION: <one short sentence>
+# `CAPTION:` is anchored to the start of the tail (after only whitespace), so stray text
+# before it is treated as malformed. `[^\n]*` captures a single line only — any trailing
+# newline would fail the `\s*$` anchor and be flagged malformed.
+_CAPTION_TAIL_RE = re.compile(r'^\s*CAPTION:\s*(?P<caption>[^\n]*)\s*$')
+
+
+def _parse_compression_output(raw: str) -> Tuple[str, str]:
+    """Split raw compressor output into (summary_body, caption).
+
+    The compressor is instructed to terminate its summary with the end marker
+    ``COMPRESSION_END_MARKER`` and, on the SAME line right after it, an optional
+    one-line caption of the form `` CAPTION: <text>``. This helper parses that tail
+    out so the caption can be stored in metadata WITHOUT leaking into the summary
+    body (which is what goes back into model context).
+
+    Rules:
+      - The summary body is everything BEFORE the LAST occurrence of the end marker,
+        stripped. Safe whether or not a caption was present.
+      - An empty summary body (nothing before the marker) raises RuntimeError so the
+        existing retry/validation path still fires.
+      - A missing end marker raises RuntimeError (same as the old ``endswith`` check).
+      - The tail after the marker:
+          * `` CAPTION: <text>``  -> caption = <text>.strip() (single line; multi-line
+            input is rejected and treated as malformed, never leaked into the body).
+          * empty/whitespace-only -> caption = "" (backward compatible with old output).
+          * anything else (stray text) -> warning + caption = "" (never leaks into body).
+
+    Returns:
+        (summary_body, caption) where both are stripped strings.
+
+    Raises:
+        RuntimeError: If the end marker is missing or the summary body is empty.
+    """
+    raw_stripped = raw.strip()
+    marker_idx = raw_stripped.rfind(COMPRESSION_END_MARKER)
+    if marker_idx == -1:
+        raise RuntimeError(
+            f"output missing end marker '{COMPRESSION_END_MARKER}' — "
+            f"compressor may have hallucinated or continued the task"
+        )
+
+    summary_body = raw_stripped[:marker_idx].strip()
+    # Defensive fallback: if the LAST marker leaves another marker in the body (the model
+    # emitted a spurious second marker, e.g. inside a caption), use the FIRST marker as the
+    # boundary instead so the body is guaranteed marker-free. This never degrades the
+    # normal single-marker case and keeps the caption/marker out of model context.
+    if COMPRESSION_END_MARKER in summary_body:
+        first_idx = raw_stripped.find(COMPRESSION_END_MARKER)
+        alt_body = raw_stripped[:first_idx].strip()
+        if alt_body and COMPRESSION_END_MARKER not in alt_body:
+            marker_idx = first_idx
+            summary_body = alt_body
+
+    if not summary_body:
+        raise RuntimeError("Agent returned an empty summary")
+
+    tail = raw_stripped[marker_idx + len(COMPRESSION_END_MARKER):]
+    m = _CAPTION_TAIL_RE.match(tail)
+    if m is not None:
+        caption = m.group('caption').strip()
+    elif tail.strip():
+        # Non-empty trailing text that is not a well-formed CAPTION: line.
+        logger.warning(
+            f"Malformed caption after end marker (ignored, not leaked into summary): "
+            f"'{tail.strip()[:80]}'"
+        )
+        caption = ""
+    else:
+        caption = ""
+
+    return summary_body, caption
 
 
 def _is_content_empty(val):
@@ -191,7 +266,7 @@ def _execute_compressor_and_extract_summary(
     comp_state_key: str,
     caller_name: str,
     timeout_label: str = "Compression",
-) -> str:
+) -> Tuple[str, str]:
     """Execute compressor via engine.run() with slot bypass and extract summary.
 
     Shared logic for both compression and consolidation invocations.
@@ -205,7 +280,8 @@ def _execute_compressor_and_extract_summary(
         timeout_label: Label for timeout error messages ("Compression" or "Consolidation").
 
     Returns:
-        The raw summary string (with thinking blocks and marker stripped).
+        A 2-tuple ``(summary, caption)`` — summary with thinking blocks and end marker
+        stripped (safe for model context), plus the optional same-line caption.
 
     Raises:
         RuntimeError: If execution fails, times out, or returns invalid output.
@@ -365,18 +441,14 @@ def _execute_compressor_and_extract_summary(
     if not summary.strip():
         raise RuntimeError(f"{timeout_label} Agent returned an empty summary")
 
-    # Validate compression marker — ensures compressor didn't hallucinate or continue agentic task
-    if not summary.strip().endswith(COMPRESSION_END_MARKER):
-        raise RuntimeError(
-            f"{timeout_label} output missing end marker '{COMPRESSION_END_MARKER}' — "
-            f"compressor may have hallucinated or continued the task"
-        )
+    # Parse + strip the end marker (and optional same-line caption) in one pass.
+    # This ensures compressor didn't hallucinate or continue agentic task, and that the
+    # caption — which must NEVER appear in the <context_summary> body sent back to the
+    # model — is captured separately for metadata storage. Raises RuntimeError on a
+    # missing marker / empty summary so the retry path still fires.
+    summary_body, caption = _parse_compression_output(summary)
 
-    # Strip the marker from the returned summary (validated above)
-    summary = summary.strip()
-    summary = summary[:-len(COMPRESSION_END_MARKER)].strip()
-
-    return summary.strip()
+    return summary_body, caption
 
 
 def _generate_compressor_instance_name() -> str:
@@ -421,7 +493,7 @@ def invoke_compression_agent(
     target_messages: List[Any],
     existing_summary: str | None = None,
     caller_name: str | None = None,
-) -> str:
+) -> Tuple[str, str]:
     """
     Invoke the Compression Agent to generate a summary of target messages.
 
@@ -441,7 +513,10 @@ def invoke_compression_agent(
                      reads agent_pool.session_name (falls back to 'Orchestrator').
 
     Returns:
-        The raw summary string (with thinking blocks stripped).
+        A 2-tuple ``(summary, caption)`` where ``summary`` is the cleaned summary body
+        (thinking blocks stripped, end marker removed — safe to put back into model
+        context) and ``caption`` is the optional one-line session caption parsed from
+        the same line after the end marker ("" if absent/malformed).
 
     Raises:
         RuntimeError: If the compression agent fails or returns an empty summary
@@ -514,11 +589,11 @@ def invoke_compression_agent(
                 raise AgentTerminatedError(comp_state_key)
 
             try:
-                summary = _execute_compressor_and_extract_summary(
+                summary, caption = _execute_compressor_and_extract_summary(
                     agent_pool, engine, comp_instance, comp_state_key, caller_name,
                     timeout_label="Compression",
                 )
-                return summary
+                return summary, caption
 
             except RuntimeError as e:
                 # Only RuntimeError with validation-specific messages are retryable.
@@ -569,7 +644,7 @@ def invoke_consolidation_agent(
     agent_pool: Any,
     marker_summaries: List[str],
     caller_name: str | None = None,
-) -> str:
+) -> Tuple[str, str]:
     """Invoke Compressor to consolidate multiple existing summaries into one.
 
     Same pattern as invoke_compression_agent() but uses CONSOLIDATION_PROMPT with
@@ -582,7 +657,7 @@ def invoke_consolidation_agent(
                      reads agent_pool.session_name (falls back to 'Orchestrator').
 
     Returns:
-        The raw consolidated summary string (with thinking blocks stripped).
+        A 2-tuple ``(summary, caption)`` — same contract as invoke_compression_agent().
 
     Raises:
         RuntimeError: If the consolidation agent fails or returns an empty/invalid summary.
@@ -623,12 +698,12 @@ def invoke_consolidation_agent(
 
         _configure_compressor_instance(agent_pool, comp_instance, caller_name)
 
-        summary = _execute_compressor_and_extract_summary(
+        summary, caption = _execute_compressor_and_extract_summary(
             agent_pool, engine, comp_instance, comp_state_key, caller_name,
             timeout_label="Consolidation",
         )
 
-        return summary
+        return summary, caption
 
     except Exception as e:
         raise RuntimeError(f"Consolidation failed: {e}") from e

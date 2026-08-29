@@ -435,7 +435,7 @@ class TestConsolidateMarkersUnit:
                 with patch(
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
-                    mock_invoke.return_value = "Consolidated summary"
+                    mock_invoke.return_value = ("Consolidated summary", "")
 
                     _consolidate_markers(mock_pool, "TestAgent")
 
@@ -486,7 +486,7 @@ class TestConsolidateMarkersUnit:
                 with patch(
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
-                    mock_invoke.return_value = "Consolidated"
+                    mock_invoke.return_value = ("Consolidated", "")
 
                     _consolidate_markers(mock_pool, "TestAgent")
 
@@ -647,7 +647,7 @@ class TestConsolidationIntegration:
         pool.get_instance = lambda name: pool.instances.get(name)
 
         with patch("agent_cascade.compression.agent_invoker.invoke_consolidation_agent") as mock_invoke:
-            mock_invoke.return_value = "Fully consolidated summary of all cycles"
+            mock_invoke.return_value = ("Fully consolidated summary of all cycles", "")
 
             _consolidate_markers(pool, "TestAgent")
 
@@ -694,7 +694,7 @@ class TestConsolidationIntegration:
             pool.get_instance = lambda name: pool.instances.get(name)
 
             with patch("agent_cascade.compression.agent_invoker.invoke_consolidation_agent") as mock_invoke:
-                mock_invoke.return_value = "Consolidated"
+                mock_invoke.return_value = ("Consolidated", "")
 
                 _consolidate_markers(pool, "TestAgent")
 
@@ -782,7 +782,7 @@ class TestSettingsDrivenBehavior:
                 with patch(
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
-                    mock_invoke.return_value = "Consolidated"
+                    mock_invoke.return_value = ("Consolidated", "")
 
                     _consolidate_markers(mock_pool, "TestAgent")
 
@@ -897,7 +897,7 @@ class TestCompressContextConsolidationTrigger:
 
         # Patch invoke_compression_agent at the point where core.py uses it (module-level import)
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Fresh compression summary"
+            mock_invoke.return_value = ("Fresh compression summary", "")
 
             # Patch _consolidate_markers to track if it was called
             with patch("agent_cascade.compression.core._consolidate_markers") as mock_consolidate:
@@ -948,7 +948,7 @@ class TestCompressContextConsolidationTrigger:
 
         # Patch invoke_compression_agent at the point where core.py uses it (module-level import)
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = "Summary"
+            mock_invoke.return_value = ("Summary", "")
 
             with patch("agent_cascade.compression.core._consolidate_markers") as mock_consolidate:
                 result = compress_context(
@@ -1147,7 +1147,7 @@ class TestConsolidateMarkersFailureModes:
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
                     # Return empty string
-                    mock_invoke.return_value = ""
+                    mock_invoke.return_value = ("", "")
 
                     _consolidate_markers(mock_pool, "TestAgent")
 
@@ -1178,7 +1178,7 @@ class TestConsolidateMarkersFailureModes:
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
                     # Return whitespace only
-                    mock_invoke.return_value = "   \n\n   "
+                    mock_invoke.return_value = ("   \n\n   ", "")
 
                     _consolidate_markers(mock_pool, "TestAgent")
 
@@ -1207,7 +1207,7 @@ class TestConsolidateMarkersFailureModes:
                 with patch(
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
-                    mock_invoke.return_value = "Consolidated summary"
+                    mock_invoke.return_value = ("Consolidated summary", "")
 
                     # Should not raise — exception is caught internally
                     _consolidate_markers(mock_pool, "TestAgent")
@@ -1261,7 +1261,7 @@ class TestConsolidateMarkersFailureModes:
                 with patch(
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
-                    mock_invoke.return_value = "Consolidated"
+                    mock_invoke.return_value = ("Consolidated", "")
 
                     _consolidate_markers(mock_pool, "TestAgent")
 
@@ -1297,7 +1297,7 @@ class TestConsolidateMarkersFailureModes:
                 with patch(
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
-                    mock_invoke.return_value = "Consolidated"
+                    mock_invoke.return_value = ("Consolidated", "")
 
                     _consolidate_markers(mock_pool, "TestAgent")
 
@@ -1332,7 +1332,7 @@ class TestConsolidateMarkersFailureModes:
                 with patch(
                     "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
                 ) as mock_invoke:
-                    mock_invoke.return_value = "Consolidated"
+                    mock_invoke.return_value = ("Consolidated", "")
 
                     # Should not raise — logger failure is non-fatal
                     _consolidate_markers(mock_pool, "TestAgent")
@@ -1504,7 +1504,7 @@ class TestConsolidationJsonlSyncRegression:
         # Pin the threshold explicitly so the test doesn't depend on the default.
         with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 8), \
              patch("agent_cascade.compression.agent_invoker.invoke_consolidation_agent") as mock_invoke:
-            mock_invoke.return_value = "REGRESSION-CONSOLIDATED-SUMMARY"
+            mock_invoke.return_value = ("REGRESSION-CONSOLIDATED-SUMMARY", "")
             _consolidate_markers(pool, self.AGENT_NAME)
 
         # Consolidation actually ran (LLM was invoked).
@@ -1691,7 +1691,7 @@ class TestConsolidationJsonlSyncRegression:
         # Pin the threshold explicitly so the test doesn't depend on the default.
         with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 8), \
              patch("agent_cascade.compression.agent_invoker.invoke_consolidation_agent") as mock_invoke:
-            mock_invoke.return_value = "TIMING-CONSOLIDATED-SUMMARY"
+            mock_invoke.return_value = ("TIMING-CONSOLIDATED-SUMMARY", "")
             _consolidate_markers(pool, self.AGENT_NAME)
 
         # Consolidation actually ran (LLM was invoked).

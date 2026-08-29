@@ -146,7 +146,7 @@ def _consolidate_markers(
         # ── Phase 2: LLM call OUTSIDE lock (long-running) ──
         from agent_cascade.compression.agent_invoker import invoke_consolidation_agent
         try:
-            consolidated_summary = invoke_consolidation_agent(
+            consolidated_summary, _consolidation_caption = invoke_consolidation_agent(
                 agent_pool=agent_pool,
                 marker_summaries=summaries_to_consolidate,
                 caller_name=target_agent_name,
@@ -520,7 +520,11 @@ def compress_context(
             except (IndexError, AttributeError):
                 pass
 
-    # ── 8. Generate or obtain summary ──
+    # ── 8. Generate or obtain summary (+ optional session caption) ──
+    # The caption is parsed out of the compressor output (never placed in the marker
+    # body) and stored in log metadata for UI display. Manual/precomputed paths have
+    # no caption — they produce a plain summary with an empty caption.
+    generated_caption = ""
     if precomputed_summary:
         # Use a pre-generated summary (e.g., from /compress command after user approval)
         generated_summary = precomputed_summary.strip()
@@ -530,7 +534,7 @@ def compress_context(
         try:
             # invoke_compression_agent() handles retries internally (reuses the same
             # compressor instance and resends the prompt on retryable validation failures).
-            generated_summary = invoke_compression_agent(
+            generated_summary, generated_caption = invoke_compression_agent(
                 agent_pool=agent_pool,
                 target_messages=target_messages,
                 existing_summary=existing_summary,
@@ -552,7 +556,24 @@ def compress_context(
         )
 
     # ── 9. Build the marker message ──
+    # NOTE: the marker body contains ONLY the clean summary — the caption is parsed out
+    # of the compressor output above and must NEVER leak into this <context_summary>
+    # body (it would otherwise re-enter model context on future turns).
     marker_message = build_marker_message(generated_summary, fraction)
+
+    # ── 9b. Persist the session caption to log metadata (first meaningful one wins) ──
+    # In-memory only: set_caption() updates data["metadata"]["caption"] and the existing
+    # compression rewrite path (reset_history(rewrite=True) → _sync_marker_single_write,
+    # triggered by handler._sync_logger_after_compression) re-emits line 1 with it. No new
+    # full-file rewrite is added here. Skipped for dry-run (no pool/logger mutation).
+    if generated_caption and not dry_run:
+        try:
+            _cap_inst = agent_pool.get_instance(target_agent_name)
+            _agent_class = getattr(_cap_inst, 'agent_class', None) or target_agent_name
+            _log_inst = agent_pool.get_logger(target_agent_name, _agent_class)
+            _log_inst.set_caption(generated_caption)
+        except Exception as e:
+            logger.debug(f"Failed to set session caption in metadata (non-fatal): {e}")
 
     # ── Dry run: return early with summary but don't mutate pool ──
     if dry_run:

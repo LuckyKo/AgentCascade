@@ -382,9 +382,11 @@ class TestInvokerGeneratorCloseOnStop:
                 if comp_instance.state in (AgentState.COMPLETING, AgentState.SLEEPING, AgentState.RUNNING):
                     comp_instance._transition(AgentState.IDLE)
 
-        summary = self._invoke(pool, fake_inst, fake_run)
+        result = self._invoke(pool, fake_inst, fake_run)
 
-        assert summary.strip() == "Compressed context notes."
+        # invoke_compression_agent now returns (summary, caption).
+        assert result[0].strip() == "Compressed context notes."
+        assert result[1] == ""
         assert fake_inst.state is AgentState.IDLE
 
 
