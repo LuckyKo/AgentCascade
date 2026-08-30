@@ -319,20 +319,16 @@ TOOL_METADATA = {
         'description': (
             'Execute a shell command on the host system. Requires explicit security approval — only use when no other tool can accomplish the task. '
             'Default working directory is the workspace root.\n\n'
-            '**SYNC:** Blocks until completion, returns full output. Use for fast commands.\n'
-            '**ASYNC:** Run in background; returns immediately with a tool_id and final result is delivered automatically when done. '
-            'Use tool_id with __status/__kill/__ctrl_c to manage. Do NOT poll more than ~2 times without new info.\n\n'
-            '**Execution mode (execution_mode):** "sync" forces blocking/synchronous execution regardless of timeout (use for long commands you must wait on); '
-            '"async" forces background execution regardless of timeout; OMIT the parameter (or send null) for auto behavior — async if timeout>60, else sync. '
-            'There is no "auto" value.\n\n'
+            '**Execution mode:** "auto" (default) = background if timeout>60s, else blocking; "sync" = always blocking; "async" = always background. '
+            'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
             'Max 5 concurrent async shells per agent.'
         ),
         'parameters': {
             'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
             'justification': 'Why you need to execute this command.',
             'cwd': 'Optional working directory, absolute or relative to workspace root.',
-            'timeout': 'Optional timeout in seconds. Use a higher value for long-running commands. With execution_mode omitted (auto), values over 60s run async; with execution_mode="sync" the command blocks regardless of timeout. Default: 30s.',
-            'execution_mode': 'Execution mode: "sync" = force blocking/synchronous execution even for long timeouts; "async" = force background execution (returns tool_id + PID immediately, heartbeats injected as user messages); OMIT this parameter or set it to null for auto behavior (async if timeout>60, else sync). There is no "auto" value — do not send the string "auto".',
+            'timeout': 'Timeout in seconds. With default auto mode, values over 60s run in the background. Default: 30s.',
+            'execution_mode': '"auto" (default) = background if timeout>60s else blocking; "sync" = always blocking; "async" = always background. null ≡ auto.',
             'heartbeat_interval': 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective in async execution. Default: -1.',
             'tool_id': 'Reference an existing running shell by its tool_id to send input, update settings, or kill it. Returned in the initial response when launching in async mode.'
         }

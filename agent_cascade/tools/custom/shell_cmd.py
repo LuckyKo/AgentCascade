@@ -143,7 +143,8 @@ class ShellCmd(BaseTool):
             },
             'execution_mode': {
                 'type': ['string', 'null'],
-                'enum': ['sync', 'async', None],
+                'enum': ['auto', 'sync', 'async', None],
+                'default': 'auto',
                 'description': TOOL_METADATA['shell_cmd']['parameters']['execution_mode']
             },
             'heartbeat_interval': {
@@ -212,18 +213,19 @@ class ShellCmd(BaseTool):
         timeout = params.get('timeout')  # None means use default (30s sync / 3600s async)
 
         # ── Parse execution parameters ──────────────────────────────
-        # execution_mode is a tri-state parameter ('sync'/'async'/auto). Auto is expressed by
-        # ABSENCE/null (jsonschema default does not inject, so omission arrives as None):
-        #   None/absent/null → auto: async iff timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD
-        #   'sync'           → force blocking, never auto-async (even for long timeouts)
-        #   'async'          → force background regardless of timeout
-        mode = params.get('execution_mode')
-        run_async = (mode == 'async') or (mode is None and timeout is not None and timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD)
+        # execution_mode is a tri-state parameter ('auto'/'sync'/'async'). 'auto' is the default and
+        # is also what omission/null maps to (jsonschema default does not inject, so absence arrives as None):
+        #   auto/None/absent → async iff timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD
+        #   sync             → force blocking, never auto-async (even for long timeouts)
+        #   async            → force background regardless of timeout
+        mode = params.get('execution_mode') or 'auto'   # None/absent → 'auto'
+        is_auto = (mode == 'auto')
+        run_async = (mode == 'async') or (is_auto and timeout is not None and timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD)
         heartbeat_interval = float(params.get('heartbeat_interval', -1))
         tool_id = params.get('tool_id')
 
-        # Auto-async mode: only when execution_mode omitted and timeout exceeds threshold
-        if run_async and mode is None:
+        # Auto-async mode: only when execution_mode is auto/omitted/null AND timeout exceeds threshold
+        if run_async and is_auto:
             logger.info(f"Auto-async mode triggered for shell_cmd: timeout={timeout}s")
             # Default heartbeat for auto-async unless explicitly set
             if 'heartbeat_interval' not in params:

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import importlib.util as _util
 import os as _os
 
+import jsonschema
 import pytest
 
 from agent_cascade.async_shell import AsyncShellTracker, AsyncShellTask
@@ -886,6 +887,54 @@ class TestAutoAsyncMode:
         call_kwargs = tracker.launch.call_args
         assert call_kwargs.kwargs.get('heartbeat_interval') == 60, \
             f"Expected heartbeat_interval=60 (explicit), got {call_kwargs.kwargs.get('heartbeat_interval')}"
+
+    def test_explicit_auto_with_large_timeout_auto_async(self, shell_cmd_tool, mock_tracker):
+        """Explicit execution_mode='auto' + timeout>60 behaves identically to omission → AUTO-ASYNC."""
+        tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
+        result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "execution_mode": "auto", "justification": "test"}')
+        tracker.launch.assert_called_once()
+        assert '⟨shell_cmd launched⟩' in result
+
+    def test_explicit_auto_defaults_heartbeat_to_30(self, shell_cmd_tool, mock_tracker):
+        """Explicit execution_mode='auto' auto-async should default heartbeat_interval to 30s when not set."""
+        tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
+        # No heartbeat_interval specified; explicit 'auto' + timeout>60 → auto-async
+        shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "execution_mode": "auto", "justification": "test"}')
+        tracker.launch.assert_called_once()
+        call_kwargs = tracker.launch.call_args
+        assert call_kwargs.kwargs.get('heartbeat_interval') == 30, \
+            f"Expected heartbeat_interval=30 for explicit-auto auto-async, got {call_kwargs.kwargs.get('heartbeat_interval')}"
+
+    def test_explicit_auto_with_small_timeout_stays_sync(self, shell_cmd_tool):
+        """Explicit execution_mode='auto' + timeout<=60 must stay sync (no forced async)."""
+        tracker = self._tool_with_tracker(shell_cmd_tool)
+        with patch.object(shell_cmd_tool, '_execute_sync', return_value='output') as mock_exec:
+            result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 30, "execution_mode": "auto", "justification": "sync"}')
+            mock_exec.assert_called_once()
+            tracker.launch.assert_not_called()
+            assert 'output' in result
+
+    def test_explicit_auto_without_timeout_stays_sync(self, shell_cmd_tool):
+        """Explicit execution_mode='auto' with no timeout must stay sync (guards the `timeout is not None` condition).
+
+        The schema types 'timeout' as integer (no null), so a JSON string or dict carrying "timeout": null is
+        rejected by jsonschema before dispatch — an explicit null can never reach line 213. The only way
+        `params.get('timeout')` yields None through the real tool path is by OMITTING the key, which is what
+        this test exercises: auto mode + absent timeout → run_async stays False (the `timeout is not None`
+        clause at line 223 short-circuits) → sync.
+        """
+        tracker = self._tool_with_tracker(shell_cmd_tool)
+        with patch.object(shell_cmd_tool, '_execute_sync', return_value='output') as mock_exec:
+            result = shell_cmd_tool.call('{"command": "echo hello", "execution_mode": "auto", "justification": "test"}')
+            mock_exec.assert_called_once()
+            tracker.launch.assert_not_called()
+            assert 'output' in result
+
+    def test_invalid_execution_mode_rejected_by_schema(self, shell_cmd_tool):
+        """An execution_mode value outside the enum ('auto'/'sync'/'async'/null) must be rejected by schema validation."""
+        self._tool_with_tracker(shell_cmd_tool)
+        with pytest.raises(jsonschema.exceptions.ValidationError):
+            shell_cmd_tool.call('{"command": "echo hello", "execution_mode": "bogus", "justification": "test"}')
 
 
 # ============================================================================
