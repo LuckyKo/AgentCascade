@@ -177,7 +177,7 @@ def run_skill_advisor(
 
     Follows the SAME rules as the Security advisor (security_handler.py):
     - Agent class ``'Security'`` (same template, same soul/prompt base)
-    - Turn limit ``SECURITY_AGENT_MAX_TURNS`` (20)
+    - Turn limit ``SECURITY_AGENT_MAX_TURNS``
     - Tool restrictions via ``DEFAULT_SECURITY_DISABLED_TOOLS`` + merge helper
     - Instance naming ``f'Security_op_{uuid4().hex[:8]}'``
 

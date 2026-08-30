@@ -72,8 +72,6 @@ def run_lightweight_advisor(
     """
     from agent_cascade.log import logger
 
-    # Imports resolved lazily to avoid a circular import at module load time and to
-    # mirror the defensive-import style used in security_handler.py._execute_check().
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.constants import NON_LLM_KEYS, DEFAULT_SECURITY_DISABLED_TOOLS
     from agent_cascade.utils import merge_disabled_tools_for_auto_agent
@@ -112,7 +110,7 @@ def run_lightweight_advisor(
         else:
             instance.max_turns = int(max_turns)
 
-        # ── 4. Tool-filtering config (SAME as security_handler.py:445-464) ───
+        # ── 4. Tool-filtering config ─────────────────────────────────────────
         ui_cfg = copy.deepcopy(generate_cfg or {})
         llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
         if 'disabled_tools' in ui_cfg:
@@ -157,7 +155,7 @@ def run_lightweight_advisor(
                     try:
                         first_yield_timer.cancel()
                     except Exception:
-                        pass  # Timer may have already fired
+                        pass
 
                     if first_yield_event.is_set():
                         result.was_timeout = True
@@ -167,8 +165,7 @@ def run_lightweight_advisor(
                         )
                         break
 
-                # Streaming: broadcast per-tick updates to the UI (same pattern as
-                # security_handler.py). Safe from this thread — uses run_coroutine_threadsafe.
+                # Streaming: broadcast per-tick updates to the UI.
                 now_sec = time.monotonic()
                 if isinstance(resp, tuple) and len(resp) == 2:
                     turn_output, is_streaming_tick = resp
