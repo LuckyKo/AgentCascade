@@ -1846,6 +1846,9 @@ function handleServerMessage(data) {
       if (data.max_tokens !== undefined) state.maxTokens = data.max_tokens;
       if (data.summary !== undefined) state.summary = data.summary;
       if (data.instance_halted !== undefined) { state.instance_halted = data.instance_halted; state._serverHaltConfirmed = true; }
+      // Global tool-boundary hold (distinct from per-instance is_halted). Drives the
+      // "⏸ Paused" status indicator and the pause/resume button label.
+      if (data.paused !== undefined) state.paused = data.paused;
 
       // Sync auto-security mode from server state (set via --auto_security CLI flag or WS toggle)
       if ('auto-security' in data && autoSecurityToggle) {
@@ -2115,6 +2118,10 @@ function handleServerMessage(data) {
       if (data.total_tokens !== undefined) state.totalTokens = data.total_tokens;
       if (data.total_words !== undefined) state.totalWords = data.total_words;
       if (data.max_tokens !== undefined) state.maxTokens = data.max_tokens;
+      // Global tool-boundary hold — the backend sends `paused` on every stream_update, so keep
+      // state.paused fresh here too (not just in the full-state handler). Drives the pause/resume
+      // button label and "⏸ Paused" status without waiting for the next full-state refresh.
+      if (data.paused !== undefined) state.paused = data.paused;
       if (data.current_model && statusModel) statusModel.textContent = data.current_model;
       if (data.telemetry) {
         state.pendingTelemetry = data.telemetry;
@@ -4532,15 +4539,19 @@ function updateControls() {
   const activeAgentData = state.subAgents[activeInstance];
   const isHalted = !!activeAgentData?.is_halted;
 
-  // Check if ANY active agent is halted (not just the current one) for accurate status display
+  // Check if ANY agent is genuinely halted (per-instance compression/stop, not global pause)
   const anyHalted = Object.values(state.subAgents).some(a => a?.is_halted);
 
-  // Show halt status even during generation — prevents misleading "Generating..." when something is stuck
-  statusText.textContent = anyHalted ? '⏸ Paused' : (state.generating ? 'Generating...' : '');
-  
-  // Sync pause button to current active agent's halted state
+  // Global tool-boundary hold — distinct from per-instance halt. The pause/resume button
+  // reflects this; genuine halt is surfaced in the status line instead.
+  const isPaused = !!state.paused;
+
+  // Show genuine halt first, then global pause, else generation — prevents misleading "Generating..." when stuck
+  statusText.textContent = anyHalted ? '⏸ Halted' : (isPaused ? '⏸ Paused' : (state.generating ? 'Generating...' : ''));
+
+  // Pause/resume button is the GLOBAL tool-hold control: driven purely by pause state.
   if (pauseBtn) {
-    pauseBtn.textContent = isHalted ? '▶️ Resume' : '⏸ Pause';
+    pauseBtn.textContent = isPaused ? '▶️ Resume' : '⏸ Pause';
   }
 
   // Sync terminate button visibility — unified active check
@@ -5175,27 +5186,15 @@ function createPauseButton(btn, instanceSource) {
   btn.addEventListener('click', async () => {
     const sessionName = instanceSource();
     if (btn.textContent.includes('Pause')) {
-      // Send WebSocket 'pause' message to halt ALL instances (orchestrator + all sub-agents)
+      // Send WebSocket 'pause' message to hold ALL instances at the tool boundary.
+      // Do NOT touch per-instance is_halted locally — global pause is a separate concept
+      // and the backend state (data.paused) is the source of truth for the button/status.
       send({ type: 'pause' });
       btn.textContent = '▶️ Resume';
-      // Update local state for all ACTIVE agents only
-      Object.keys(state.subAgents).forEach(name => {
-        const agent = state.subAgents[name];
-        if (agent && agent.active) {
-          agent.is_halted = true;
-        }
-      });
     } else {
-      // Send WebSocket 'resume_all' message to resume ALL halted instances
+      // Send WebSocket 'resume_all' message to release ALL held instances.
       send({ type: 'resume_all' });
       btn.textContent = '⏸ Pause';
-      // Update local state for all ACTIVE agents only
-      Object.keys(state.subAgents).forEach(name => {
-        const agent = state.subAgents[name];
-        if (agent && agent.active) {
-          agent.is_halted = false;
-        }
-      });
     }
   });
 }

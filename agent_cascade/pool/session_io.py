@@ -173,8 +173,11 @@ class SessionIOMixin:
         # Step 1: Set stopped event to signal threads to halt (use property setter for side effects)
         self.stopped = True
 
-        # Also clear pause flag so agents don't hang in pause wait loops
+        # Also clear pause flag so agents don't hang in pause wait loops. Setting _paused
+        # directly (not via resume()) would otherwise skip stream-cache invalidation, so
+        # force it here to keep the frontend's is_halted/paused state fresh.
         self._paused.set()
+        self._invalidate_stream_cache_on_pause_change()
 
         # ── Step 2: Release concurrency slots for all active instances ──────────────
         # This ensures API endpoints are freed immediately, even if execution threads

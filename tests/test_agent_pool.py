@@ -239,6 +239,160 @@ class TestHaltLifecycle:
         assert isinstance(agent_pool._execution._state_lock, type(threading.RLock()))
 
 
+class TestPauseHaltDecoupling:
+    """Global pause must NOT contribute to per-instance is_instance_halted().
+
+    Regression guard for the "pause stops streaming" bug (todo.md:140): the UI stream
+    gate breaks on the active agent's is_halted, so a genuine halt must keep freezing
+    the stream while a global pause must not. is_instance_halted() must therefore
+    reflect ONLY per-instance halt (compression/manual stop), never global pause.
+    """
+
+    def test_is_instance_halted_excludes_global_pause(self, agent_pool):
+        """pause() alone must not mark any instance halted; genuine halt persists past resume()."""
+        assert agent_pool.is_paused() is False
+        assert agent_pool.is_instance_halted("w1") is False
+
+        # Global pause — w1 is NOT in _halted_instances, so it must stay non-halted.
+        agent_pool.pause()
+        try:
+            assert agent_pool.is_paused() is True
+            assert agent_pool.is_instance_halted("w1") is False
+
+            # A genuine per-instance halt IS reflected, even while globally paused.
+            agent_pool.halt_instance("w1")
+            assert agent_pool.is_instance_halted("w1") is True
+
+            # resume() clears the global pause but must NOT clear a genuine halt.
+            agent_pool.resume()
+            assert agent_pool.is_paused() is False
+            assert agent_pool.is_instance_halted("w1") is True  # genuine halt persists after resume
+        finally:
+            # Leave the pool in a clean, non-paused state for other tests.
+            agent_pool.resume()
+            agent_pool.resume_instance("w1")
+
+    def test_global_pause_does_not_set_is_halted(self, agent_pool):
+        """After pause(), every (running) instance reports is_instance_halted False."""
+        from agent_cascade.agent_instance import AgentInstance
+        import time
+        for name in ("w1", "w2"):
+            inst = AgentInstance(
+                instance_name=name, agent_class="researcher", conversation=[],
+                max_turns=None, parent_instance=None,
+                created_at=time.monotonic(), last_activity=time.monotonic(),
+                compression_summary=None, latest_marker_index=-1,
+            )
+            agent_pool.instances[name] = inst
+
+        agent_pool.pause()
+        try:
+            for name in ("w1", "w2"):
+                assert agent_pool.is_instance_halted(name) is False
+        finally:
+            agent_pool.resume()
+
+    def test_genuine_halt_still_freezes_stream_path(self, agent_pool):
+        """Invariant pin: a genuine halt serializes is_halted=True (UI stream gate breaks)."""
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.api_integration_pkg.state_builder import _serialize_instance
+        import time
+
+        inst = AgentInstance(
+            instance_name="w1", agent_class="researcher", conversation=[],
+            max_turns=None, parent_instance=None,
+            created_at=time.monotonic(), last_activity=time.monotonic(),
+            compression_summary=None, latest_marker_index=-1,
+        )
+        agent_pool.instances["w1"] = inst
+
+        # No halt -> is_halted False (stream would continue).
+        assert agent_pool.is_instance_halted("w1") is False
+        assert _serialize_instance(inst, agent_pool)["is_halted"] is False
+
+        # Genuine per-instance halt -> is_halted True (stream gate freezes).
+        agent_pool.halt_instance("w1")
+        try:
+            assert agent_pool.is_instance_halted("w1") is True
+            assert _serialize_instance(inst, agent_pool)["is_halted"] is True
+        finally:
+            agent_pool.resume_instance("w1")
+
+    def test_pause_resume_invalidates_stream_cache(self, agent_pool):
+        """pause()/resume() must evict the per-instance stream-serialization cache.
+
+        A pause/resume does not change any instance's message version, so without
+        eviction the incremental serializer would keep serving a stale cached dict
+        (including is_halted) for up to ~100 ticks. This pins the centralized
+        invalidation added to SlotsMixin.pause()/resume() via
+        _invalidate_stream_cache_on_pause_change().
+        """
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.api_integration_pkg.cache import _cache_mgr
+        import time
+
+        inst = AgentInstance(
+            instance_name="w1", agent_class="researcher", conversation=[],
+            max_turns=None, parent_instance=None,
+            created_at=time.monotonic(), last_activity=time.monotonic(),
+            compression_summary=None, latest_marker_index=-1,
+        )
+        agent_pool.instances["w1"] = inst
+
+        # Seed the incremental cache as if a prior broadcast had serialized w1.
+        _cache_mgr.stream_versions["w1"] = (0, None, 0, 0)
+        _cache_mgr.cached_instances["w1"] = {"instance_name": "w1", "is_halted": False}
+        assert "w1" in _cache_mgr.stream_versions
+        assert "w1" in _cache_mgr.cached_instances
+
+        # pause() must evict w1's cache entry.
+        agent_pool.pause()
+        try:
+            assert "w1" not in _cache_mgr.stream_versions, "pause() did not evict stream_versions"
+            assert "w1" not in _cache_mgr.cached_instances, "pause() did not evict cached_instances"
+
+            # resume() must also evict (re-seed first to prove the transition clears it).
+            _cache_mgr.stream_versions["w1"] = (0, None, 0, 0)
+            _cache_mgr.cached_instances["w1"] = {"instance_name": "w1", "is_halted": False}
+            agent_pool.resume()
+            assert "w1" not in _cache_mgr.stream_versions, "resume() did not evict stream_versions"
+            assert "w1" not in _cache_mgr.cached_instances, "resume() did not evict cached_instances"
+        finally:
+            # Leave a clean, non-paused pool and clear any cache residue.
+            agent_pool.resume()
+            _cache_mgr.evict_instance("w1")
+
+    def test_stop_session_invalidates_stream_cache(self, agent_pool):
+        """stop_session() sets _paused directly (not via resume()), so it must still evict the
+        per-instance stream-serialization cache — otherwise a stale is_halted could linger for
+        up to ~100 ticks after a Stop. This pins the invalidation added at session_io.stop_session().
+        """
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.api_integration_pkg.cache import _cache_mgr
+        import time
+
+        inst = AgentInstance(
+            instance_name="w1", agent_class="researcher", conversation=[],
+            max_turns=None, parent_instance=None,
+            created_at=time.monotonic(), last_activity=time.monotonic(),
+            compression_summary=None, latest_marker_index=-1,
+        )
+        agent_pool.instances["w1"] = inst
+
+        # Seed the incremental cache as if a prior broadcast had serialized w1.
+        _cache_mgr.stream_versions["w1"] = (0, None, 0, 0)
+        _cache_mgr.cached_instances["w1"] = {"instance_name": "w1", "is_halted": False}
+
+        try:
+            agent_pool.stop_session()
+            assert "w1" not in _cache_mgr.stream_versions, "stop_session() did not evict stream_versions"
+            assert "w1" not in _cache_mgr.cached_instances, "stop_session() did not evict cached_instances"
+        finally:
+            # Restore a clean, non-stopped pool and clear any cache residue.
+            agent_pool.stopped = False
+            _cache_mgr.evict_instance("w1")
+
+
 # ===========================================================================
 # Conversation snapshots and rollback
 # ===========================================================================

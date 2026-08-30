@@ -149,12 +149,48 @@ class SlotsMixin:
         Clears _paused Event so all agents block in wait_if_paused() until resumed.
         Unlike stop(), this does NOT trigger idle.stop() or async_registry.shutdown() —
         those are side effects of pool.stopped=True (the stop path), not pause.
+
+        Also invalidates the incremental stream-serialization cache so the next
+        broadcast re-serializes instances with the new pause state (a pause/resume
+        does not change any instance's message version, so the cache would otherwise
+        keep serving a stale per-instance dict — including is_halted — for ~100 ticks).
         """
         self._paused.clear()
+        self._invalidate_stream_cache_on_pause_change()
 
     def resume(self):
-        """Resume all paused instances by setting the global pause flag."""
+        """Resume all paused instances by setting the global pause flag.
+
+        Also invalidates the stream cache (see :meth:`pause`) so the frontend sees
+        the cleared pause state promptly instead of waiting for the periodic refresh.
+        """
         self._paused.set()
+        self._invalidate_stream_cache_on_pause_change()
+
+    def _invalidate_stream_cache_on_pause_change(self) -> None:
+        """Evict per-instance stream-serialization caches whenever the global pause state changes.
+
+        The incremental serializer (state_builder._serialize_instances_incremental) only
+        re-serializes an instance when its message version changes or on a forced full
+        refresh (~every 100 ticks). Changing the pause state does not change any
+        instance's message version, so without this eviction the frontend could keep
+        seeing a stale is_halted / paused value for up to ~100 ticks. Evicting forces
+        the next broadcast to re-serialize every instance.
+
+        Called from EVERY path that flips ``_paused``: :meth:`pause`, :meth:`resume`,
+        and the stop()/reset() paths (session_io.stop, lifecycle.reset) which set
+        ``_paused.set()`` directly rather than going through resume(). This keeps the
+        frontend in sync regardless of how the pause state changes.
+
+        Lazy import avoids any module-level circular dependency; best-effort — a failure
+        here must not break the pause/resume/stop/reset transition itself.
+        """
+        try:
+            from agent_cascade.api_integration_pkg.cache import _cache_mgr
+            for name in list(self.instances.keys()):
+                _cache_mgr.evict_instance(name)
+        except Exception as e:  # pragma: no cover - defensive, never break pause/resume
+            logger.debug(f"[PAUSE_CACHE_EVICT] non-critical cache eviction failed: {e}")
 
     def is_paused(self) -> bool:
         """Check if the pool is currently paused."""
@@ -164,13 +200,16 @@ class SlotsMixin:
         """Block until resumed or timeout expires. Used by execution loop to wait efficiently on pause."""
         self._paused.wait(timeout=timeout)
 
-    # ── Instance halt check (checks both global pause + per-instance halt) ───
+    # ── Instance halt check (per-instance halt ONLY — NOT global pause) ─────
 
     def is_instance_halted(self, instance_name: str) -> bool:
-        """Check if an instance is halted. Returns True if globally paused or per-instance halted.
-        
-        Note: resume_instance() only clears per-instance halt; call resume() first to clear _paused."""
-        return self.is_paused() or instance_name in self._halted_instances
+        """Check if an instance is genuinely halted.
+
+        Returns True ONLY when the instance is in ``_halted_instances`` — a genuine
+        per-instance halt (compression-halt or manual stop). This checks ONLY
+        per-instance halt; it does NOT reflect global pause. Global pause state is
+        separate and queried via :meth:`is_paused`, and never affects this return value."""
+        return instance_name in self._halted_instances
     
     # (internal helpers used by compression handler and REST endpoints)
 

@@ -530,6 +530,10 @@ class LifecycleMixin:
 
         # ── Step 5: Clear per-instance state ────────────────────────────────
         self._paused.set()  # reset to resumed state
+        # Setting _paused directly (not via resume()) would skip stream-cache invalidation,
+        # so force it here — a full reset also clears _halted_instances, and the frontend
+        # must see fresh is_halted/paused state on the next broadcast.
+        self._invalidate_stream_cache_on_pause_change()
         with self._pool_lock:
             self.terminated_instances.clear()
         with self._children_lock:

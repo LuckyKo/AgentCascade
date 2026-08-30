@@ -352,6 +352,8 @@ class WsMessageHandler:
         """
         if self.agent_pool:
             inst_names = list(self.agent_pool.instances.keys())
+            # pool.pause() itself invalidates the stream cache (SlotsMixin) so the frontend sees
+            # the new pause state promptly.
             self.agent_pool.pause()  # Sets _paused Event — backend blocks Phase 4 tool execution
             from agent_cascade.log import logger
             logger.info(f"Paused all instances: {inst_names}")
@@ -359,6 +361,7 @@ class WsMessageHandler:
     async def handle_resume_all(self, data: dict) -> None:
         """Handle 'resume_all' — resume ALL paused instances."""
         if self.agent_pool:
+            # pool.resume() itself invalidates the stream cache (SlotsMixin).
             self.agent_pool.resume()  # Clears _paused Event — backend unblocks Phase 4 tool execution
             from agent_cascade.log import logger
             logger.info("Cleared global pause flag — all agents will resume naturally")
