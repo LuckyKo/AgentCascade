@@ -1,18 +1,11 @@
 """Shared lightweight advisor runner.
 
-Encapsulates the common launch pattern used by system-invoked advisory agents:
-create a fresh ExecutionEngine, create an instance via ``_create_system_agent``,
-apply the Security turn budget + tool-filtering config, run ``engine.run()`` with
-a first-yield timeout guard, extract the final output, record telemetry, and clean
-up the instance state.
-
-This is intentionally *lightweight* compared to :mod:`agent_cascade.security_handler`:
-it runs **synchronously in the caller's thread** and does NOT handle WebSocket
-streaming, slot yielding/reacquiring, global serialization locks, approval/verdict
-infrastructure, warning-timer injection, or active-checks tracking. Those concerns
-remain the responsibility of the Security handler (which runs in a daemon thread).
-
-The Skill Advisor (:mod:`agent_cascade.skills.advisor`) is the primary consumer.
+Launches a fresh ExecutionEngine + system agent, runs it synchronously in the
+caller's thread with a first-yield timeout guard, and returns structured output.
+Intentionally separate from :mod:`agent_cascade.security_handler` (which handles
+streaming, slot management, and locks in a daemon thread). Key constraint: no lock
+is held during the LLM call — callers must release state locks before invoking.
+Primary consumer: the Skill Advisor (:mod:`agent_cascade.skills.advisor`).
 """
 
 from __future__ import annotations

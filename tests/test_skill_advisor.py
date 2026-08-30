@@ -241,12 +241,6 @@ class TestFallbackBehavior:
             r = run_skill_advisor(pool, sm, "task", "ctx", "coder", "Maine")
         assert r.verdict == "ambiguous"
 
-    def test_is_usable_true_for_approve_deny(self):
-        assert SkillAdvisorResult(verdict="approve").is_usable is True
-        assert SkillAdvisorResult(verdict="deny").is_usable is True
-        assert SkillAdvisorResult(verdict="ambiguous").is_usable is False
-
-
 # ===========================================================================
 # 5. Deny path — engine returns error string, no child instance created
 # ===========================================================================
@@ -285,63 +279,45 @@ class TestDenyPath:
         ))
         assert not msg.content.strip().startswith("[SYSTEM ERROR")
 
+    @pytest.mark.parametrize("verdict,expected", [
+        ("approve", True),
+        ("deny", True),
+        ("ambiguous", False),
+    ])
+    def test_is_usable_property(self, verdict, expected):
+        """is_usable drives the fallback mechanism in engine/core.py."""
+        assert SkillAdvisorResult(verdict=verdict).is_usable is expected
+
 
 # ===========================================================================
-# 6. Zero skills registered → advisor skipped (gate condition)
+# 6. Advisor gate condition (should_run_advisor)
 # ===========================================================================
 
-class TestZeroSkillsSkipped:
-    def test_should_run_advisor_false_when_no_skills(self):
-        """The engine gate's should_run_advisor expression must be False with zero skills."""
-        # Replicate the exact condition from engine/core.py.
-        load_skill_mode_upper = "AUTO"
-        auto_skill_mode = "advanced"
-        force_fresh = False
-        log_file = None
-        skill_manager = MockSkillManager([])  # zero registered skills
+class TestAdvisorGateCondition:
+    """Replicates the exact should_run_advisor expression from engine/core.py."""
 
+    @pytest.mark.parametrize(
+        "load_skill_mode,auto_skill_mode,force_fresh,log_file,n_skills,expected",
+        [
+            ("AUTO", "advanced", False, None, 0, False),   # zero skills → skip
+            ("AUTO", "advanced", False, None, 1, True),    # all conditions met
+            ("AUTO", "basic",    False, None, 1, False),   # basic mode never runs advisor
+            ("NONE", "advanced", False, None, 1, False),   # not AUTO mode
+            ("AUTO", "advanced", True,  None, 1, False),   # force_fresh → skip
+            ("AUTO", "advanced", False, "x.jsonl", 1, False),  # external load → skip
+        ],
+    )
+    def test_should_run_advisor(self, load_skill_mode, auto_skill_mode, force_fresh, log_file, n_skills, expected):
+        sm = MockSkillManager([f"s{i}" for i in range(n_skills)])
         should_run_advisor = (
-            load_skill_mode_upper == "AUTO"
+            load_skill_mode == "AUTO"
             and auto_skill_mode == "advanced"
             and not force_fresh
             and log_file is None
-            and skill_manager is not None
-            and len(skill_manager.get_skill_names()) > 0
+            and sm is not None
+            and len(sm.get_skill_names()) > 0
         )
-        assert should_run_advisor is False
-
-    def test_should_run_advisor_true_when_conditions_met(self):
-        load_skill_mode_upper = "AUTO"
-        auto_skill_mode = "advanced"
-        force_fresh = False
-        log_file = None
-        skill_manager = MockSkillManager(["a"])
-
-        should_run_advisor = (
-            load_skill_mode_upper == "AUTO"
-            and auto_skill_mode == "advanced"
-            and not force_fresh
-            and log_file is None
-            and skill_manager is not None
-            and len(skill_manager.get_skill_names()) > 0
-        )
-        assert should_run_advisor is True
-
-    def test_should_run_advisor_false_for_basic_mode(self):
-        """Basic mode (default) never runs the advisor — no extra LLM call."""
-        load_skill_mode_upper = "AUTO"
-        auto_skill_mode = "basic"
-        skill_manager = MockSkillManager(["a"])
-
-        should_run_advisor = (
-            load_skill_mode_upper == "AUTO"
-            and auto_skill_mode == "advanced"
-            and not False
-            and None is None
-            and skill_manager is not None
-            and len(skill_manager.get_skill_names()) > 0
-        )
-        assert should_run_advisor is False
+        assert should_run_advisor is expected
 
 
 # ===========================================================================

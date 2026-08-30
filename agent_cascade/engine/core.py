@@ -2796,9 +2796,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         # ── Skill Advisor gate (AUTO Skill Helper — Advanced mode) ───────────
         # Runs BEFORE find_or_create_instance() so a DENY never allocates a child.
-        # Only fires for fresh instances (not recall / external load / force_fresh).
-        # On APPROVE the advisor's recommended skills + notes are used by the skill
-        # resolution step below; on timeout/error it falls back to basic keyword match.
         _advisor_recommended_skills: Optional[List[str]] = None  # names, or None → use resolve_load_skill
         _advisor_task_notes: str = ""
 
@@ -2821,14 +2818,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         )
 
         if should_run_advisor:
-            # Recall exclusion is a two-stage check (deliberate, not an oversight):
-            #   stage 1 = should_run_advisor above (cheap, no instance-state access)
-            #   stage 2 = the early recall check below. It replicates the _is_recall logic
-            #             further down WITHOUT calling find_or_create_instance(), because
-            #             that would allocate a child before we know whether to deny.
-            # Locks are held briefly and released BEFORE the advisor runs (no lock is
-            # held during the LLM call). If this check fails we treat it as "new" —
-            # worst case the advisor runs once for a recall, which is harmless.
+            # Early recall check replicates _is_recall below WITHOUT calling
+            # find_or_create_instance(), since that would allocate a child before
+            # we know whether to deny. Locks are released BEFORE the advisor's LLM
+            # call. On failure we treat it as "new" — worst case the advisor runs
+            # once for a recall, which is harmless.
             _is_early_recall = False
             try:
                 with self.pool._execution._state_lock:

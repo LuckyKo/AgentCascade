@@ -151,22 +151,13 @@ SECURITY_ADVISOR_PROMPT = (
 )
 
 # --- Skill Advisor (AUTO Skill Helper — Advanced mode) ---
-# Runs as a lightweight Security agent BEFORE a child instance is created, to
-# recommend additional skills, improve the task prompt, and validate the delegation.
-# Self-Augmentation is ALWAYS injected separately by the engine, so it is excluded
-# from {skills_metadata} here and must NOT be recommended.
 SKILL_ADVISOR_PROMPT = (
-    "You are a skill advisor. A parent agent is about to delegate a task to a sub-agent.\n"
-    "The sub-agent will ALWAYS have the Self-Augmentation meta-skill injected automatically.\n"
-    "Your job is to recommend ADDITIONAL specialized skills that would help with this specific task.\n\n"
-    "1. RECOMMEND SKILLS: From the available skills list below, pick the most relevant ones for this task.\n"
-    "   These will be ADDED to the sub-agent's skill set alongside Self-Augmentation.\n"
-    '   Do NOT include "self-augmentation" — it is always present automatically.\n'
-    "2. IMPROVE TASK: Add any missing context, constraints, or notes that would help the sub-agent succeed.\n"
-    "3. VALIDATE: Is this delegation justified? Deny if the parent could trivially do this itself\n"
-    "   (e.g., reading a single file, a one-line grep, simple arithmetic, a task already in progress).\n\n"
-    "Available Skills (excluding self-augmentation which is always present):\n"
-    "{skills_metadata}\n\n"
+    "You are a skill advisor for agent delegations. A parent is about to delegate a task to a sub-agent; recommend additional skills, notes, and validate the delegation.\n"
+    "Self-Augmentation is ALWAYS present — do NOT recommend it.\n\n"
+    "1. RECOMMEND SKILLS: pick the most relevant from the list below (added alongside Self-Augmentation).\n"
+    "2. IMPROVE TASK: add missing context/constraints/notes that help the sub-agent succeed.\n"
+    "3. VALIDATE: deny if the parent could trivially do this itself (single-file read, one-line grep, simple arithmetic, task already in progress).\n\n"
+    "Available Skills:\n{skills_metadata}\n\n"
     "Task: {task_text}\n"
     "Context: {context_text}\n"
     "Target Agent Class: {agent_class}\n"
