@@ -74,10 +74,17 @@ def build_skill_advisor_prompt(
 
     skills_metadata = "\n".join(metadata_lines) if metadata_lines else "(none)"
 
+    # Escape braces in user-provided content to prevent .format() injection.
+    # Task text like "Create {filename}.py" would otherwise raise KeyError.
+    # Note: pre-existing doubled braces ({{x}}) become tripled ({{{x}}}) but
+    # still render as literal {x} after .format() — safe, just visually odd.
+    def _esc(text: str) -> str:
+        return text.replace('{', '{{').replace('}', '}}')
+
     return SKILL_ADVISOR_PROMPT.format(
         skills_metadata=skills_metadata,
-        task_text=task_text or "(no task text provided)",
-        context_text=context_text or "(no additional context)",
+        task_text=_esc(task_text or "(no task text provided)"),
+        context_text=_esc(context_text or "(no additional context)"),
         agent_class=agent_class,
         caller_name=caller_name or "unknown",
     )

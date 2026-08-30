@@ -170,6 +170,23 @@ class TestBuildSkillAdvisorPrompt:
         prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
         assert "(none)" in prompt
 
+    def test_braces_in_task_text_do_not_crash(self):
+        """Regression: task text with {braces} must not raise KeyError from .format()."""
+        sm = MockSkillManager(["a"])
+        prompt = build_skill_advisor_prompt(
+            sm, "Create {filename}.py with {config}", "use {var} here", "coder", "Maine"
+        )
+        assert "{filename}" in prompt
+        assert "{config}" in prompt
+        assert "{var}" in prompt
+
+    def test_braces_in_context_text_do_not_crash(self):
+        sm = MockSkillManager(["a"])
+        prompt = build_skill_advisor_prompt(
+            sm, "task", "Context with {placeholder} and }braces{", "coder", "Maine"
+        )
+        assert "{placeholder}" in prompt
+
 
 # ===========================================================================
 # 3. Registry validation — recommended skill names checked against registry

@@ -2816,6 +2816,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             _single = str(load_skill_value[0]).strip().upper()
             if _single in (LOAD_SKILL_AUTO, LOAD_SKILL_NONE):
                 load_skill_value = _single
+        # Multi-element lists (e.g. ["AUTO", "docker"]) default to AUTO — the
+        # presence of explicit skill names alongside AUTO means "auto + extras".
         load_skill_mode_upper = (
             load_skill_value.strip().upper() if isinstance(load_skill_value, str) else "AUTO"
         )
@@ -3017,10 +3019,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # loaded_skills stays empty → nothing is injected.
             _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
 
-        # Write augmented context (with advisor notes) back into args so
-        # build_task_message picks it up. Only on fresh instances — recall
-        # preserves the original task message verbatim.
+        # Write augmented context (with advisor notes) into a COPY of args so
+        # build_task_message picks it up without mutating the caller's dict.
+        # Only on fresh instances — recall preserves the original task message verbatim.
         if _advisor_task_notes and not _is_recall:
+            args = dict(args)
             args['context'] = context_text
 
         # Build task message using lifecycle manager

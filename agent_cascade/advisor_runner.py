@@ -138,41 +138,85 @@ def run_lightweight_advisor(
         first_yield_timer.daemon = True
         first_yield_timer.start()
 
-        # ── 6. Run engine with a simplified loop (no streaming ticks) ────────
+        # ── 6. Run engine with streaming + early-exit on verdict ─────────────
+        from agent_cascade.api_integration import broadcast_stream_update
+
         got_first_yield = False
-        for resp in engine.run(instance):
-            if pool.stopped:
-                break
+        _last_send = 0.0
+        _tick_num = 0
+        _last_resp_len = 0
 
-            if not got_first_yield:
-                got_first_yield = True
+        _engine_gen = engine.run(instance)
+        try:
+            for resp in _engine_gen:
+                if pool.stopped:
+                    break
+
+                if not got_first_yield:
+                    got_first_yield = True
+                    try:
+                        first_yield_timer.cancel()
+                    except Exception:
+                        pass  # Timer may have already fired
+
+                    if first_yield_event.is_set():
+                        result.was_timeout = True
+                        logger.warning(
+                            "[ADVISOR] First-yield timeout after %.0fs for '%s'. Generator did not yield in time.",
+                            time.monotonic() - start_time, instance_name,
+                        )
+                        break
+
+                # Streaming: broadcast per-tick updates to the UI (same pattern as
+                # security_handler.py). Safe from this thread — uses run_coroutine_threadsafe.
+                now_sec = time.monotonic()
+                if isinstance(resp, tuple) and len(resp) == 2:
+                    turn_output, is_streaming_tick = resp
+                else:
+                    turn_output, is_streaming_tick = resp, False
+
+                _last_send, _last_resp_len = broadcast_stream_update(
+                    pool=pool,
+                    instance_name=instance_name,
+                    turn_output=turn_output,
+                    is_streaming_tick=is_streaming_tick,
+                    tick_num=_tick_num,
+                    now_sec=now_sec,
+                    last_send=_last_send,
+                    last_resp_len=_last_resp_len,
+                )
+                _tick_num += 1
+
+                # Keep instance_state fresh for UI (message_count)
                 try:
-                    first_yield_timer.cancel()
+                    if hasattr(pool, '_execution') and hasattr(pool._execution, '_state_lock'):
+                        with pool._execution._state_lock:
+                            if instance_name in pool.instance_state:
+                                pool.instance_state[instance_name]['message_count'] = len(instance.conversation)
                 except Exception:
-                    pass  # Timer may have already fired
+                    pass  # non-critical — never break the advisor over UI bookkeeping
 
-                if first_yield_event.is_set():
-                    result.was_timeout = True
-                    logger.warning(
-                        "[ADVISOR] First-yield timeout after %.0fs for '%s'. Generator did not yield in time.",
-                        time.monotonic() - start_time, instance_name,
-                    )
-                    break
-
-            # Early-exit: stop as soon as the verdict is present in the last
-            # assistant message. Prevents the LLM from continuing to execute
-            # tool calls after it has already produced its structured answer.
-            _conv = instance.conversation
-            if _conv:
-                _last = _conv[-1]
-                if getattr(_last, 'role', '') == 'assistant' and _VERDICT_RE.search(
-                    getattr(_last, 'content', '') or ''
-                ):
-                    logger.debug(
-                        "[ADVISOR] Verdict detected in output — stopping early for '%s'",
-                        instance_name,
-                    )
-                    break
+                # Early-exit: stop as soon as the verdict is present in the last
+                # assistant message. Prevents the LLM from continuing to execute
+                # tool calls after it has already produced its structured answer.
+                _conv = instance.conversation
+                if _conv:
+                    _last = _conv[-1]
+                    if getattr(_last, 'role', '') == 'assistant' and _VERDICT_RE.search(
+                        getattr(_last, 'content', '') or ''
+                    ):
+                        logger.debug(
+                            "[ADVISOR] Verdict detected in output — stopping early for '%s'",
+                            instance_name,
+                        )
+                        break
+        finally:
+            # Ensure the generator is properly closed on any exit path (break,
+            # exception, timeout) to release resources and allow clean GC.
+            try:
+                _engine_gen.close()
+            except Exception:
+                pass
 
         # ── 7. Extract output ────────────────────────────────────────────────
         if not result.was_timeout:
