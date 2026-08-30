@@ -144,9 +144,10 @@ class SlotsMixin:
     # ── Pause/Resume state management ───────────────────────────────────────
 
     def pause(self):
-        """Pause ALL instances by clearing the global pause flag.
-        
-        Clears _paused Event so all agents block in wait_if_paused() until resumed.
+        """Pause ALL instances by clearing the internal ``_paused`` Event.
+
+        Note the inverted semantics: ``_paused.clear()`` means PAUSED (Event set =
+        resumed). While cleared, agents block in wait_if_paused() until :meth:`resume`.
         Unlike stop(), this does NOT trigger idle.stop() or async_registry.shutdown() —
         those are side effects of pool.stopped=True (the stop path), not pause.
 
@@ -159,7 +160,8 @@ class SlotsMixin:
         self._invalidate_stream_cache_on_pause_change()
 
     def resume(self):
-        """Resume all paused instances by setting the global pause flag.
+        """Resume all paused instances by setting the internal ``_paused`` Event
+        (inverted semantics: Event set = resumed, so agents unblock from wait_if_paused()).
 
         Also invalidates the stream cache (see :meth:`pause`) so the frontend sees
         the cleared pause state promptly instead of waiting for the periodic refresh.
@@ -184,13 +186,16 @@ class SlotsMixin:
 
         Lazy import avoids any module-level circular dependency; best-effort — a failure
         here must not break the pause/resume/stop/reset transition itself.
+
+        NOTE: O(n) over instances, but only ever called on user-initiated
+        pause/resume/stop/reset transitions (never in hot loops), so the cost is negligible.
         """
         try:
             from agent_cascade.api_integration_pkg.cache import _cache_mgr
             for name in list(self.instances.keys()):
                 _cache_mgr.evict_instance(name)
         except Exception as e:  # pragma: no cover - defensive, never break pause/resume
-            logger.debug(f"[PAUSE_CACHE_EVICT] non-critical cache eviction failed: {e}")
+            logger.warning(f"[PAUSE_CACHE_EVICT] non-critical cache eviction failed: {e}")
 
     def is_paused(self) -> bool:
         """Check if the pool is currently paused."""
