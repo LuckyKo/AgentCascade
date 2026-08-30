@@ -1135,6 +1135,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
   if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
+  if ($('#setting-auto-skill-mode')) s['auto-skill-mode'] = $('#setting-auto-skill-mode').value;
   if ($('#setting-auto-skill-gen')) s['auto-skill-gen'] = $('#setting-auto-skill-gen').checked;
   if ($('#setting-inner-loop-detect')) s['inner-loop-detect'] = $('#setting-inner-loop-detect').checked;
   // Save Agent Budgeting toggle state
@@ -1282,6 +1283,7 @@ function loadSettings() {
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
     if (s['enable-skills'] !== undefined) $('#setting-enable-skills').checked = s['enable-skills'];
+    if (s['auto-skill-mode'] !== undefined) $('#setting-auto-skill-mode').value = s['auto-skill-mode'];
     if (s['auto-skill-gen'] !== undefined) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
     if (s['inner-loop-detect'] !== undefined) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state

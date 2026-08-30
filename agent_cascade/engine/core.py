@@ -2802,6 +2802,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         load_skill_value = args.get('load_skill')
         if load_skill_value is None:
             load_skill_value = getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
+        # Normalize: LLM may pass a JSON-encoded list string like '["AUTO"]' or an actual list.
+        # For the gate we only care whether it's AUTO vs NONE vs explicit-skill-names.
+        if isinstance(load_skill_value, str) and load_skill_value.strip().startswith('['):
+            try:
+                import json as _json_gate
+                _decoded = _json_gate.loads(load_skill_value)
+                if isinstance(_decoded, list) and len(_decoded) == 1 and str(_decoded[0]).upper() in (LOAD_SKILL_AUTO, LOAD_SKILL_NONE):
+                    load_skill_value = str(_decoded[0])
+            except (ValueError, TypeError):
+                pass  # not valid JSON — treat as literal string below
+        elif isinstance(load_skill_value, list) and len(load_skill_value) == 1:
+            _single = str(load_skill_value[0]).strip().upper()
+            if _single in (LOAD_SKILL_AUTO, LOAD_SKILL_NONE):
+                load_skill_value = _single
         load_skill_mode_upper = (
             load_skill_value.strip().upper() if isinstance(load_skill_value, str) else "AUTO"
         )
@@ -2815,6 +2829,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             and log_file is None          # external load → skip advisor (needs fresh skills)
             and _skill_mgr_gate is not None
             and len(_skill_mgr_gate.get_skill_names()) > 0  # nothing to recommend
+        )
+        logger.debug(
+            "[SKILL-ADVISOR] gate check: mode=%s, auto_skill_mode=%s, force_fresh=%s, "
+            "log_file=%s, skill_mgr=%s, skills_count=%d → should_run=%s",
+            load_skill_mode_upper, auto_skill_mode, force_fresh, log_file,
+            _skill_mgr_gate is not None,
+            len(_skill_mgr_gate.get_skill_names()) if _skill_mgr_gate else 0,
+            should_run_advisor,
         )
 
         if should_run_advisor:
@@ -2871,8 +2893,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         instance_name, _advisor_result.reason,
                     )
                     # No child instance is created — return an error the caller can surface.
-                    return None, [Message(role=FUNCTION, content=(
-                        f"Error: Skill Advisor denied this delegation — {_advisor_result.reason}. "
+                    # Use ASSISTANT role so extract_instance_output() picks up the text
+                    # (FUNCTION role triggers the "terminated with tool result" guard).
+                    return None, [Message(role=ASSISTANT, content=(
+                        f"[SKILL-ADVISOR DENIED] {_advisor_result.reason} "
                         f"Consider handling this task yourself or rephrasing with more specific context."
                     ))]
 

@@ -35,8 +35,13 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent_cascade.agent_instance import AgentState
 from agent_cascade.engine.core import ExecutionEngine
-from agent_cascade.llm.schema import SYSTEM, FUNCTION, Message
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, FUNCTION, Message
 from agent_cascade.skills.advisor import SkillAdvisorResult
+
+
+# Sentinel for _run_gate(load_skill_value=...) meaning "omit the key from args"
+# so the gate falls back to pool.settings.default_load_skill_mode.
+_OMIT_LOAD_SKILL = object()
 
 
 # ── Test doubles ──────────────────────────────────────────────────────────────
@@ -168,12 +173,16 @@ def _build_engine(pool, lifecycle):
 
 def _run_gate(advisor_result, auto_skill_mode="advanced", default_load_skill_mode="AUTO",
               skill_names=("docker-best-practices", "httpx-connection-pooling"),
-              pre_existing_instance=None, advisor_raises=False):
+              pre_existing_instance=None, advisor_raises=False, load_skill_value="AUTO"):
     """Drive the real gate block and return (engine, pool, lifecycle, result).
 
     ``advisor_result`` is returned by the patched run_skill_advisor unless
     ``advisor_raises`` is True (then it raises RuntimeError to exercise the
     exception → ambiguous fallback path).
+
+    ``load_skill_value`` is placed in args["load_skill"]. Pass the sentinel
+    ``_OMIT_LOAD_SKILL`` to omit the key entirely, so the gate falls back to
+    ``pool.settings.default_load_skill_mode`` (exercises the None branch).
     """
     sm = FakeSkillManager(skill_names)
     pool = FakePool(sm, auto_skill_mode=auto_skill_mode, default_load_skill_mode=default_load_skill_mode)
@@ -186,8 +195,9 @@ def _run_gate(advisor_result, auto_skill_mode="advanced", default_load_skill_mod
     args = {
         "task": "Set up a Docker deployment",
         "context": "Use the docker skill",
-        "load_skill": "AUTO",
     }
+    if load_skill_value is not _OMIT_LOAD_SKILL:
+        args["load_skill"] = load_skill_value
 
     def _fake_advisor(**kwargs):
         pool.order.append("advisor")  # record advisor run for order assertions
@@ -269,9 +279,9 @@ class TestAdvisorDeny:
         inst, msgs = result
         assert inst is None
         assert len(msgs) == 1
-        assert msgs[0].role == FUNCTION
-        assert "Skill Advisor" in msgs[0].content
-        assert "denied" in msgs[0].content.lower()
+        # ASSISTANT role (not FUNCTION) so extract_instance_output surfaces the text
+        assert msgs[0].role == ASSISTANT
+        assert "[SKILL-ADVISOR DENIED]" in msgs[0].content
         assert "trivial task" in msgs[0].content
 
 
@@ -386,3 +396,99 @@ class TestRecallSkipsAdvisor:
         sys_msg = lifecycle.initialize_conversation.call_args.args[1]
         assert sys_msg is existing.conversation[0]
         assert sys_msg.content == "ORIGINAL SYS"
+
+
+# ===========================================================================
+# 6. load_skill value normalization (regression: LLM passes '["AUTO"]' string)
+# ===========================================================================
+
+class TestLoadSkillNormalization:
+    """The gate must normalize the many shapes an LLM can emit for load_skill
+    into a plain "AUTO"/"NONE" before comparing modes. The bug: a JSON-encoded
+    list string like '["AUTO"]' failed the old ``== "AUTO"`` comparison, so the
+    advisor silently never ran. Each scenario asserts only whether the advisor
+    was invoked (the single observable that distinguishes AUTO vs NONE mode)."""
+
+    def _approve(self):
+        return SkillAdvisorResult(
+            verdict="approve", reason="ok", recommended_skills=[], task_notes=""
+        )
+
+    # ── AUTO variants → advisor runs ────────────────────────────────────────
+
+    def test_plain_auto_string_runs_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value="AUTO"
+        )
+        assert mock_advisor.call_count == 1
+
+    def test_json_encoded_auto_list_string_runs_advisor(self):
+        # The actual bug: LLM emitted the JSON string '["AUTO"]'.
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value='["AUTO"]'
+        )
+        assert mock_advisor.call_count == 1
+
+    def test_python_auto_list_runs_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value=["AUTO"]
+        )
+        assert mock_advisor.call_count == 1
+
+    def test_multi_element_explicit_skills_still_runs_advisor(self):
+        # Multi-element list is NOT a mode — normalization skips it (len != 1),
+        # final fallback treats non-str as "AUTO" → advisor still runs so it can
+        # validate/recommend against the explicit skill names.
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(),
+            load_skill_value=["docker-best-practices", "httpx-connection-pooling"],
+        )
+        assert mock_advisor.call_count == 1
+
+    # ── NONE variants → advisor does NOT run ────────────────────────────────
+
+    def test_plain_none_string_skips_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value="NONE"
+        )
+        assert mock_advisor.call_count == 0
+
+    def test_json_encoded_none_list_string_skips_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value='["NONE"]'
+        )
+        assert mock_advisor.call_count == 0
+
+    def test_python_none_list_skips_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value=["NONE"]
+        )
+        assert mock_advisor.call_count == 0
+
+
+# ===========================================================================
+# 7. load_skill omitted → falls back to default_load_skill_mode
+# ===========================================================================
+
+class TestLoadSkillDefaultFallback:
+    """When args has no 'load_skill' key, the gate uses
+    pool.settings.default_load_skill_mode as the value."""
+
+    def _approve(self):
+        return SkillAdvisorResult(
+            verdict="approve", reason="ok", recommended_skills=[], task_notes=""
+        )
+
+    def test_default_auto_runs_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), default_load_skill_mode="AUTO",
+            load_skill_value=_OMIT_LOAD_SKILL,
+        )
+        assert mock_advisor.call_count == 1
+
+    def test_default_none_skips_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), default_load_skill_mode="NONE",
+            load_skill_value=_OMIT_LOAD_SKILL,
+        )
+        assert mock_advisor.call_count == 0
