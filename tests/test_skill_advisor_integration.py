@@ -251,6 +251,25 @@ class TestAdvisorApprove:
         assert "# basic-keyword-match-skill" not in sys_msg.content
         pool.skill_manager.resolve_load_skill.assert_not_called()
 
+    def test_advisor_notes_propagated_to_task_message(self):
+        """Advisor task_notes must be appended to args['context'] so
+        build_task_message includes them in the child's task message."""
+        advisor_result = SkillAdvisorResult(
+            verdict="approve",
+            reason="docker task",
+            recommended_skills=["docker-best-practices"],
+            task_notes="Prefer compose over raw docker run; check .env first.",
+        )
+        _, pool, lifecycle, mock_advisor, result = _run_gate(advisor_result)
+
+        # build_task_message received the augmented context
+        btm_call = lifecycle.build_task_message.call_args
+        args_passed = btm_call.args[0]  # first positional arg is `args`
+        assert "[Skill Advisor notes]" in args_passed["context"]
+        assert "Prefer compose over raw docker run" in args_passed["context"]
+        # Original context preserved
+        assert "Use the docker skill" in args_passed["context"]
+
 
 # ===========================================================================
 # 2. Advanced mode + DENY → no instance created, error returned

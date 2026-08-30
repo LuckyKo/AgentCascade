@@ -3017,6 +3017,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # loaded_skills stays empty → nothing is injected.
             _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
 
+        # Write augmented context (with advisor notes) back into args so
+        # build_task_message picks it up. Only on fresh instances — recall
+        # preserves the original task message verbatim.
+        if _advisor_task_notes and not _is_recall:
+            args['context'] = context_text
+
         # Build task message using lifecycle manager
         task_msg = self.lifecycle.build_task_message(args, caller, agent_class=inst.agent_class)
 
