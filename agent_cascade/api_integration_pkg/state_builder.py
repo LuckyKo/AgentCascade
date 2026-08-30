@@ -483,8 +483,8 @@ def build_stream_update_from_pool(
     current_model = _get_current_model(pool, instance)
     telemetry_data = _safe_get_telemetry(pool, instance_name)
 
-    # Get pending approvals (only include if non-empty to prevent UI flickering)
-    pending_approvals = _get_approvals(pool)
+    # NOTE: pending approvals are intentionally NOT computed/included in stream updates.
+    # See the return-dict comment below for why the 'approvals' field is omitted here.
 
     # Extract pool settings for frontend sync (ALL non-cosmetic persistent settings)
     pool_settings = {}
@@ -559,7 +559,10 @@ def build_stream_update_from_pool(
         'instances': all_instances,
         'agent_instances': all_instances,
         'active_stack': active_stack,
-        'approvals': pending_approvals,
+        # Intentionally NO 'approvals' key here. Approvals are delivered exclusively via
+        # the dedicated {'type':'approvals'} WS message broadcast by _approval_loop; a
+        # stream tick built before an approval is registered would carry a stale [] and,
+        # if included, clobber live approval state on the client (banner disappears).
         'generating': True,
         'total_tokens': h_stats['tokens'] + r_stats['tokens'],
         'total_words': h_stats['words'] + r_stats['words'],
