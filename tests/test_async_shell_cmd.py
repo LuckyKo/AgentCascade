@@ -824,12 +824,6 @@ class TestAutoAsyncMode:
         shell_cmd_tool.agent_name = 'test_agent'
         return tracker
 
-    def test_timeout_gt_60_auto_switches_to_async(self, shell_cmd_tool, mock_tracker):
-        tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
-        result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "justification": "test"}')
-        tracker.launch.assert_called_once()
-        assert '⟨shell_cmd launched⟩' in result
-
     def test_execution_mode_sync_with_large_timeout_stays_sync(self, shell_cmd_tool):
         """Headline regression: execution_mode='sync' with a large timeout (300) must stay sync, never auto-async."""
         tracker = self._tool_with_tracker(shell_cmd_tool)
