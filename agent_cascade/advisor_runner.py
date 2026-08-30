@@ -11,10 +11,16 @@ Primary consumer: the Skill Advisor (:mod:`agent_cascade.skills.advisor`).
 from __future__ import annotations
 
 import copy
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
+# Pre-compiled: matches a [VERDICT] line in the advisor's structured output.
+# Used for early-exit so the engine stops as soon as the verdict is produced,
+# preventing the LLM from continuing to execute tool calls after its answer.
+_VERDICT_RE = re.compile(r'\[VERDICT\]\s*(APPROVE|DENY)', re.IGNORECASE)
 
 
 @dataclass
@@ -150,6 +156,21 @@ def run_lightweight_advisor(
                     logger.warning(
                         "[ADVISOR] First-yield timeout after %.0fs for '%s'. Generator did not yield in time.",
                         time.monotonic() - start_time, instance_name,
+                    )
+                    break
+
+            # Early-exit: stop as soon as the verdict is present in the last
+            # assistant message. Prevents the LLM from continuing to execute
+            # tool calls after it has already produced its structured answer.
+            _conv = instance.conversation
+            if _conv:
+                _last = _conv[-1]
+                if getattr(_last, 'role', '') == 'assistant' and _VERDICT_RE.search(
+                    getattr(_last, 'content', '') or ''
+                ):
+                    logger.debug(
+                        "[ADVISOR] Verdict detected in output — stopping early for '%s'",
+                        instance_name,
                     )
                     break
 

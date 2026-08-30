@@ -368,3 +368,47 @@ class TestAdvisorRunner:
         assert result.was_timeout is False
         assert result.output_text == "OUTPUT"
         assert result.ok is True
+
+    def test_early_exit_on_verdict(self):
+        """Engine loop must stop as soon as [VERDICT] appears in the last
+        assistant message, even if more yields are available."""
+        from agent_cascade.advisor_runner import run_lightweight_advisor
+        from agent_cascade.llm.schema import Message, ASSISTANT
+
+        pool = _make_pool()
+        # Generator that would yield 3 turns if not stopped early.
+        # After the first turn, the conversation contains a verdict message.
+        call_count = {"n": 0}
+
+        def _gen(inst):
+            # Turn 1: assistant produces verdict + (hypothetical) tool calls
+            inst.conversation.append(
+                Message(role=ASSISTANT, content="[SKILLS] none\n[NOTES] ok\n[VERDICT] APPROVE — fine")
+            )
+            call_count["n"] += 1
+            yield [["turn1"]]
+            # Turns 2-3: should NEVER be reached if early-exit works
+            inst.conversation.append(Message(role=ASSISTANT, content="continuing work..."))
+            call_count["n"] += 1
+            yield [["turn2"]]
+            call_count["n"] += 1
+            yield [["turn3"]]
+
+        fake_inst = MagicMock()
+        fake_inst.conversation = []
+        fake_engine = MagicMock()
+        fake_engine._create_system_agent.return_value = fake_inst
+        fake_engine.run.side_effect = _gen
+        fake_engine._telemetry.return_value = None
+
+        import agent_cascade.execution_engine as ee_mod
+        import agent_cascade.compression.helpers as ch_mod
+        with patch.object(ee_mod, "ExecutionEngine", return_value=fake_engine), \
+             patch.object(ch_mod, "extract_instance_output", return_value="VERDICT OUTPUT"):
+            result = run_lightweight_advisor(
+                pool, "Security", "Security_op_early01", "task", "caller"
+            )
+        # Only 1 turn should have been consumed (early exit on verdict)
+        assert call_count["n"] == 1, f"Expected 1 turn, got {call_count['n']}"
+        assert result.was_error is False
+        assert result.ok is True
