@@ -115,7 +115,10 @@ ALLOWED_LLM_PARAMS = {
     'presence_penalty', 'frequency_penalty', 'logit_bias', 'user',
     'response_format', 'tools', 'tool_choice', 'parallel_tool_calls',
     'min_p', 'repeat_penalty', 'repetition_penalty', 'extra_body',
-    'timeout', 'request_timeout', 'api_base', 'api_key'
+    'timeout', 'request_timeout', 'api_base', 'api_key',
+    # Standard OpenAI API param (o1/o3 reasoning models). Set per-endpoint via
+    # the "Reasoning Effort" pulldown; backends that don't support it 400 → fatal.
+    'reasoning_effort'
 }
 
 

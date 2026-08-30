@@ -563,6 +563,13 @@
                       <span title="When enabled, agents auto-load relevant skill instructions based on task context. When disabled, no skills are loaded (saves tokens).">Enable Skills</span>
                       <input type="checkbox" id="setting-enable-skills" checked />
                     </label>
+                    <label class="setting-field">
+                      <span title="How AUTO skill loading resolves skills. Basic = fast keyword match on task/context. Advanced = a lightweight Security agent semantically recommends skills, improves the prompt, and can deny trivial delegations (adds one LLM call per delegation).">AUTO Skill Mode</span>
+                      <select id="setting-auto-skill-mode">
+                        <option value="basic" selected>Basic</option>
+                        <option value="advanced">Advanced</option>
+                      </select>
+                    </label>
                     <label class="setting-field toggle-field">
                       <span title="When enabled, agents can automatically propose and generate new skills based on task context. Requires 'Enable Skills' to be active.">Enable Auto-Skill Generation</span>
                       <input type="checkbox" id="setting-auto-skill-gen" checked />

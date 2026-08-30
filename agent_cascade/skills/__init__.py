@@ -11,6 +11,12 @@ from .parser import parse_skill_file, parse_frontmatter
 from .matcher import SkillMatcher
 from .manager import SkillManager
 from .validator import validate_skill
+from .advisor import (
+    SkillAdvisorResult,
+    build_skill_advisor_prompt,
+    parse_advisor_output,
+    run_skill_advisor,
+)
 
 __all__ = [
     'parse_skill_file',
@@ -18,4 +24,8 @@ __all__ = [
     'SkillMatcher',
     'SkillManager',
     'validate_skill',
+    'SkillAdvisorResult',
+    'build_skill_advisor_prompt',
+    'parse_advisor_output',
+    'run_skill_advisor',
 ]

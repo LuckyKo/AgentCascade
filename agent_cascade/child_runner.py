@@ -108,8 +108,19 @@ def run_child_core(
         # Never swallow user interrupts or explicit exits
         raise
 
-    # Check for null results before doing anything else
+    # Check for null results before doing anything else.
+    # When inst is None but conv has content, it's a structured rejection
+    # (e.g., Skill Advisor DENY) — surface the message instead of a generic error.
     if inst is None or not conv:
+        if inst is None and conv:
+            # Structured rejection: the engine returned an explanatory message
+            # without creating an instance (e.g., advisor denied the delegation).
+            rejection_msg = extract_instance_output(conv, instance_name) or ""
+            if rejection_msg:
+                logger.warning(
+                    f"{prefix} path REJECTED - {instance_name}: {rejection_msg[:200]}"
+                )
+                return f"[{prefix} '{instance_name}' Rejected]: {rejection_msg}"
         logger.warning(
             f"{prefix} path FAILED - {instance_name} "
             f"creation returned inst={inst}, conv={bool(conv)}"

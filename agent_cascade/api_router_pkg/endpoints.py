@@ -101,6 +101,12 @@ class APIEndpoint:
     use_custom_sampling: bool = False  # Master toggle — if False, all sampler params above are ignored
     state_save_enabled: bool = False   # Enable KV cache state save/restore (autoloader only)
 
+    # Per-endpoint reasoning effort. One of REASONING_EFFORT_VALUES
+    # ("none"/"low"/"medium"/"high"/"xhigh"). "none" (default) = param not sent,
+    # so the model uses its default behavior. Only meaningful for backends that
+    # support `reasoning_effort` (e.g., OpenAI o1/o3); others ignore it or 400.
+    reasoning_effort: str = "none"
+
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())
@@ -128,6 +134,13 @@ class APIEndpoint:
         # When disabled, the merge should strip stale sampling params from lower layers
         # (template defaults / UI overrides) so they don't leak into the LLM call.
         cfg['_use_custom_sampling'] = self.use_custom_sampling
+
+        # Per-endpoint reasoning effort (independent of custom sampling).
+        # "none"/invalid → param omitted; "xhigh" maps to "high" at the API level.
+        from agent_cascade.settings import REASONING_EFFORT_VALUES
+        effort = str(self.reasoning_effort or 'none')
+        if effort in REASONING_EFFORT_VALUES and effort != 'none':
+            cfg['reasoning_effort'] = 'high' if effort == 'xhigh' else effort
 
         if self.use_custom_sampling:
             # Only include non-zero sampler params (zero = "use default")

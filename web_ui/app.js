@@ -160,6 +160,7 @@ const POOL_SETTINGS_MAP = [
   // Skills system
   { id: '#setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
+  { id: '#setting-auto-skill-mode', prop: 'value', key: 'auto_skill_mode', localKey: 'auto-skill-mode' },
   { id: '#setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
   // Retry policy settings (Phase 6)
   { id: '#setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts', localKey: 'retry-max-attempts' },
@@ -5321,6 +5322,7 @@ function getGenerateCfg() {
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-enable-skills')) cfg.default_load_skill_mode = $('#setting-enable-skills').checked ? 'AUTO' : 'NONE';
+  if ($('#setting-auto-skill-mode')) cfg.auto_skill_mode = $('#setting-auto-skill-mode').value;
   if ($('#setting-auto-skill-gen')) cfg.auto_skill_enabled = $('#setting-auto-skill-gen').checked;
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;
   // Loop detection tuning settings
@@ -5797,8 +5799,21 @@ function renderApiEndpoints() {
                <span>💾 State Save</span>
                <input type="checkbox" class="ep-input-state-save" ${epStateSave ? 'checked' : ''}>
              </label>
-             
-             <!-- Collapsible Sampling Parameters section (shown/hidden based on custom sampling toggle) -->
+              <!-- Per-endpoint reasoning effort pulldown -->
+              <div style="display:flex;gap:8px;margin-top:6px;">
+                <label class="setting-field" style="flex:1;" title="Controls how much reasoning/thinking the LLM does for calls routed to this endpoint. 'None' = default behavior (param not sent). Only works with models that support reasoning_effort (e.g., OpenAI o1/o3).">
+                  <span>Reasoning Effort</span>
+                  <select class="ep-input-reasoning-effort" style="width:100%;">
+                    <option value="none" ${!ep.reasoning_effort ? 'selected' : ''}>None (default)</option>
+                    <option value="low" ${ep.reasoning_effort === 'low' ? 'selected' : ''}>Low</option>
+                    <option value="medium" ${ep.reasoning_effort === 'medium' ? 'selected' : ''}>Medium</option>
+                    <option value="high" ${ep.reasoning_effort === 'high' ? 'selected' : ''}>High</option>
+                    <option value="xhigh" ${ep.reasoning_effort === 'xhigh' ? 'selected' : ''}>X-High</option>
+                  </select>
+                </label>
+              </div>
+
+              <!-- Collapsible Sampling Parameters section (shown/hidden based on custom sampling toggle) -->
              <div class="ep-sampling-section ${epCustomSampling ? '' : 'ep-sampling-hidden'}">
                <div class="ep-sampling-header">Sampling Parameters</div>
                <div style="display:flex;gap:8px;margin-top:4px;">
@@ -5975,6 +5990,18 @@ function handleApiEndpointToggle(e) {
       sendApiRouterUpdate();
     }
   }
+
+  // Reasoning effort pulldown — save state immediately on change
+  const reasoningEffortSel = e.target.closest('.ep-input-reasoning-effort');
+  if (reasoningEffortSel) {
+    const card = reasoningEffortSel.closest('.api-endpoint-card');
+    const endpoints = state.api_router?.endpoints || [];
+    const ep = endpoints.find(ep => ep.id === card.dataset.id);
+    if (ep) {
+      ep.reasoning_effort = e.target.value;
+      sendApiRouterUpdate();
+    }
+  }
 }
 
 // Helper: safely read a numeric value from an input element within a card.
@@ -6017,6 +6044,8 @@ function handleApiEndpointBlur(e) {
   if (customSamplingCb) ep.use_custom_sampling = customSamplingCb.checked;
   const stateSaveCb = card.querySelector('.ep-input-state-save');
   if (stateSaveCb) ep.state_save_enabled = stateSaveCb.checked;
+  const reasoningEffortSel = card.querySelector('.ep-input-reasoning-effort');
+  if (reasoningEffortSel) ep.reasoning_effort = reasoningEffortSel.value || 'none';
 
   // Sampler parameters (NaN-safe, zero means "use default")
   ep.temperature = _epVal(card, '.ep-input-temperature', parseFloat, 0);
@@ -6228,7 +6257,8 @@ if (btnAddEndpoint) {
       model: '',
       enabled: true,
       max_retries: 2,
-      rate_limit_rpm: 0
+      rate_limit_rpm: 0,
+      reasoning_effort: 'none'
     });
     
     sendApiRouterUpdate();

@@ -28,7 +28,7 @@ from agent_cascade.settings import (
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
     CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
     CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
-    DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_TURNS,
+    DEFAULT_LOAD_SKILL_MODE, DEFAULT_AUTO_SKILL_MODE, DEFAULT_MAX_TURNS,
     STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
     DISMISS_THREAD_JOIN_TIMEOUT,
 )
@@ -795,6 +795,10 @@ class PoolSettings:
     # Skills system settings
     default_load_skill_mode: str = DEFAULT_LOAD_SKILL_MODE  # "AUTO" (default) or "NONE" — controls whether skills auto-load on call_agent
     auto_skill_enabled: bool = False                        # Controls whether auto-skill generation/proposal is allowed
+    # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == "AUTO"):
+    #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior)
+    #   "advanced" — invokes the Skill Advisor (Security agent) for semantic matching + validation
+    auto_skill_mode: str = DEFAULT_AUTO_SKILL_MODE          # "basic" (default) or "advanced"
 
     # Agent budgeting settings
     enable_agent_budgeting: bool = False                    # Enable max_turns propagation/budgeting for agent calls

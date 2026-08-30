@@ -2794,6 +2794,107 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # chain
         log_file = args.get('log_file')
 
+        # ── Skill Advisor gate (AUTO Skill Helper — Advanced mode) ───────────
+        # Runs BEFORE find_or_create_instance() so a DENY never allocates a child.
+        # Only fires for fresh instances (not recall / external load / force_fresh).
+        # On APPROVE the advisor's recommended skills + notes are used by the skill
+        # resolution step below; on timeout/error it falls back to basic keyword match.
+        _advisor_recommended_skills: Optional[List[str]] = None  # names, or None → use resolve_load_skill
+        _advisor_task_notes: str = ""
+
+        load_skill_value = args.get('load_skill')
+        if load_skill_value is None:
+            load_skill_value = getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
+        load_skill_mode_upper = (
+            load_skill_value.strip().upper() if isinstance(load_skill_value, str) else "AUTO"
+        )
+        auto_skill_mode = getattr(self.pool.settings, 'auto_skill_mode', 'basic')
+        _skill_mgr_gate = getattr(self.pool, 'skill_manager', None)
+
+        should_run_advisor = (
+            load_skill_mode_upper == LOAD_SKILL_AUTO
+            and auto_skill_mode == "advanced"
+            and not force_fresh
+            and log_file is None          # external load → skip advisor (needs fresh skills)
+            and _skill_mgr_gate is not None
+            and len(_skill_mgr_gate.get_skill_names()) > 0  # nothing to recommend
+        )
+
+        if should_run_advisor:
+            # Recall exclusion is a two-stage check (deliberate, not an oversight):
+            #   stage 1 = should_run_advisor above (cheap, no instance-state access)
+            #   stage 2 = the early recall check below. It replicates the _is_recall logic
+            #             further down WITHOUT calling find_or_create_instance(), because
+            #             that would allocate a child before we know whether to deny.
+            # Locks are held briefly and released BEFORE the advisor runs (no lock is
+            # held during the LLM call). If this check fails we treat it as "new" —
+            # worst case the advisor runs once for a recall, which is harmless.
+            _is_early_recall = False
+            try:
+                with self.pool._execution._state_lock:
+                    _existing_inst = self.pool.instances.get(instance_name)
+                if _existing_inst is not None:
+                    with _existing_inst._state_lock:
+                        _early_state = _existing_inst.state
+                    if _early_state in (AgentState.IDLE, AgentState.TERMINATED):
+                        if _existing_inst.conversation and len(_existing_inst.conversation) > 0 \
+                                and getattr(_existing_inst.conversation[0], 'role', None) == SYSTEM:
+                            _is_early_recall = True
+            except Exception as e:  # noqa: BLE001 — never block delegation on a check failure
+                logger.debug("[SKILL-ADVISOR] Early recall check failed (treating as new): %s", e)
+
+            if not _is_early_recall:
+                from agent_cascade.skills.advisor import run_skill_advisor, SkillAdvisorResult
+                _task_text = args.get('task', '')
+                _context_text = args.get('context', '')
+                try:
+                    _advisor_result = run_skill_advisor(
+                        pool=self.pool, skill_manager=_skill_mgr_gate,
+                        task_text=_task_text, context_text=_context_text,
+                        agent_class=agent_class, caller_name=caller,
+                    )
+                except Exception as e:  # noqa: BLE001 — advisor must never break delegation
+                    logger.error("[SKILL-ADVISOR] Unexpected error; falling back to basic match: %s", e)
+                    _advisor_result = SkillAdvisorResult(verdict="ambiguous", reason=f"unexpected: {e}")
+
+                # Telemetry (best-effort, non-blocking)
+                try:
+                    tel = self._telemetry()
+                    if tel is not None and hasattr(tel, 'record_skill_advisor_decision'):
+                        tel.record_skill_advisor_decision(
+                            instance_name=instance_name,
+                            verdict=_advisor_result.verdict,
+                            skill_count=len(_advisor_result.recommended_skills),
+                            latency_ms=_advisor_result.latency_ms,
+                            was_fallback=not _advisor_result.is_usable,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+
+                if _advisor_result.verdict == "deny":
+                    logger.warning(
+                        "[SKILL-ADVISOR] DENIED delegation to %s: %s",
+                        instance_name, _advisor_result.reason,
+                    )
+                    # No child instance is created — return an error the caller can surface.
+                    return None, [Message(role=FUNCTION, content=(
+                        f"Error: Skill Advisor denied this delegation — {_advisor_result.reason}. "
+                        f"Consider handling this task yourself or rephrasing with more specific context."
+                    ))]
+
+                if _advisor_result.verdict == "approve":
+                    _advisor_recommended_skills = list(_advisor_result.recommended_skills)
+                    _advisor_task_notes = _advisor_result.task_notes or ""
+                    logger.info(
+                        "[SKILL-ADVISOR] APPROVED delegation to %s (skills=%s, notes=%d chars)",
+                        instance_name, _advisor_recommended_skills, len(_advisor_task_notes),
+                    )
+                else:  # "ambiguous" → fall back to basic keyword match below
+                    logger.warning(
+                        "[SKILL-ADVISOR] Ambiguous result for %s (%s) — falling back to basic match",
+                        instance_name, _advisor_result.reason,
+                    )
+
         # Phase 4.1: Delegate to lifecycle manager for instance creation/reuse
         inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(
             agent_class, instance_name, caller, nest_depth, force_fresh, log_file=log_file
@@ -2810,6 +2911,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         task_text = args.get('task', '')
         skill_manager = getattr(self.pool, 'skill_manager', None)
         context_text = args.get('context', '')   # only used in else branch for resolve_load_skill
+        # Skill Advisor (Advanced mode): append its improved notes to the context so
+        # they reach the child agent via build_task_message. Only on fresh instances —
+        # recall preserves conversation[0] verbatim and never rebuilds the task message.
+        if _advisor_task_notes and not _is_recall:
+            context_text = f"{context_text}\n\n[Skill Advisor notes] {_advisor_task_notes}".strip()
         if _is_recall:
             # Reuse path: preserve existing system message byte-for-byte. Pass the
             # EXISTING conversation[0] as sys_msg so initialize_conversation's
@@ -2854,13 +2960,29 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 else:
                     load_skill_mode_upper = "AUTO"
                 if load_skill_mode_upper != LOAD_SKILL_NONE:
-                    try:
-                        loaded_skills = skill_manager.resolve_load_skill(
-                            load_skill_value, task_text, context_text
-                        )
-                    except Exception as e:
-                        logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
-                        loaded_skills = []
+                    if _advisor_recommended_skills is not None:
+                        # Skill Advisor (Advanced mode) APPROVED — use its semantic
+                        # recommendations instead of basic keyword matching. Names were
+                        # already validated against the registry by the advisor.
+                        for _name in _advisor_recommended_skills:
+                            _body = skill_manager.load_full_instructions(_name)
+                            if _body is None:
+                                # Skill was removed from the registry between the advisor
+                                # run and injection — skip it (Self-Augmentation still loads).
+                                logger.warning(
+                                    "[SKILL-ADVISOR] Recommended skill '%s' no longer available; skipping",
+                                    _name,
+                                )
+                            elif _body not in loaded_skills:
+                                loaded_skills.append(_body)
+                    else:
+                        try:
+                            loaded_skills = skill_manager.resolve_load_skill(
+                                load_skill_value, task_text, context_text
+                            )
+                        except Exception as e:
+                            logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
+                            loaded_skills = []
 
                 # (2) Self-Augmentation — gated by the GLOBAL "Enable skills" toggle
                 #     (global_skills_enabled), INDEPENDENT of the per-call load_skill arg.

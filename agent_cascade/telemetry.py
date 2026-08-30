@@ -97,6 +97,10 @@ class TelemetryCollector:
             "tool_latency_by_name": defaultdict(float),
             "llm_calls_by_model": defaultdict(int),
             "agent_instance_calls": 0,
+            # Skill Advisor (AUTO Skill Helper — Advanced mode) counters
+            "skill_advisor_calls": 0,
+            "skill_advisor_denials": 0,
+            "skill_advisor_fallbacks": 0,
         }
 
         # Per-config aggregates for A/B comparison
@@ -634,6 +638,38 @@ class TelemetryCollector:
                 "timestamp": _now_iso(),
             }
             self._session_stats["total_auto_continues"] += 1
+
+        self._write_event(event)
+
+    def record_skill_advisor_decision(
+        self,
+        instance_name: str,
+        verdict: str,
+        skill_count: int = 0,
+        latency_ms: float = 0.0,
+        was_fallback: bool = False,
+    ):
+        """Record a Skill Advisor (AUTO Skill Helper — Advanced) decision.
+
+        Session-level counters (skill_advisor_calls / _denials / _fallbacks) are
+        surfaced via get_session_summary(). ``verdict`` is one of
+        "approve" | "deny" | "ambiguous".
+        """
+        with _telemetry_lock:
+            event = {
+                "type": "skill_advisor_decision",
+                "instance": instance_name,
+                "verdict": verdict,
+                "skill_count": skill_count,
+                "latency_ms": round(latency_ms, 1),
+                "was_fallback": was_fallback,
+                "timestamp": _now_iso(),
+            }
+            self._session_stats["skill_advisor_calls"] += 1
+            if verdict == "deny":
+                self._session_stats["skill_advisor_denials"] += 1
+            elif was_fallback:
+                self._session_stats["skill_advisor_fallbacks"] += 1
 
         self._write_event(event)
 

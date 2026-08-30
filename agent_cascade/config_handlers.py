@@ -40,7 +40,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'loop_two_phase_enabled', 'loop_suspicion_threshold',
     'loop_confirm_required', 'loop_cooldown_feeds',
     # Skills system
-    'default_load_skill_mode', 'auto_skill_enabled',
+    'default_load_skill_mode', 'auto_skill_enabled', 'auto_skill_mode',
     # Retry policy
     'retry_max_attempts', 'endpoint_max_retries', 'retry_base_delay', 'retry_max_delay',
     # Code interpreter
@@ -356,6 +356,21 @@ def _handle_auto_skill_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: 
     """Toggle auto-skill generation/proposal on/off."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.auto_skill_enabled = bool(ui_cfg.get('auto_skill_enabled', True))
+
+
+@register_config_handler('auto_skill_mode')
+def _handle_auto_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update AUTO Skill Helper sub-mode (basic or advanced).
+
+    Only meaningful when default_load_skill_mode == "AUTO". Invalid values fall
+    back to the default ("basic") so a bad UI payload can never break skill loading.
+    """
+    from agent_cascade.settings import DEFAULT_AUTO_SKILL_MODE, AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = str(ui_cfg.get('auto_skill_mode', DEFAULT_AUTO_SKILL_MODE)).strip().lower()
+        if val not in (AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED):
+            val = DEFAULT_AUTO_SKILL_MODE
+        agent_pool.settings.auto_skill_mode = val
 
 
 @register_config_handler('loop_min_chars')

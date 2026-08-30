@@ -185,6 +185,11 @@ DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT: int = int(os.getenv(
 ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
     'QWEN_AGENT_ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 30))  # Timeout in seconds for acquiring endpoint scheduling slots
 
+# Per-endpoint reasoning effort values (UI pulldown → LLM API `reasoning_effort`).
+# "none" means the param is NOT sent (model uses default behavior).
+# "xhigh" maps to "high" at the API level (future-proofing for extended levels).
+REASONING_EFFORT_VALUES: tuple = ("none", "low", "medium", "high", "xhigh")
+
 # Settings for endpoint cooldown (time-based skip of failed endpoints)
 def _parse_endpoint_cooldown():
     """Parse AGENT_CASCADE_ENDPOINT_COOLDOWN with safe defaults."""
@@ -407,6 +412,12 @@ WAIT_CMD_POLL_INTERVAL: float = 0.5           # Seconds between state polls insi
 LOAD_SKILL_AUTO: str = "AUTO"     # Auto-match relevant skills from task context
 LOAD_SKILL_NONE: str = "NONE"     # No skill loading (saves tokens)
 DEFAULT_LOAD_SKILL_MODE: str = os.getenv('QWEN_AGENT_DEFAULT_LOAD_SKILL', 'AUTO')  # Default load_skill mode: AUTO or NONE
+# AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == AUTO):
+#   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior, no extra LLM call)
+#   "advanced" — invokes the Skill Advisor (Security agent) for semantic matching + delegation validation
+DEFAULT_AUTO_SKILL_MODE: str = os.getenv('QWEN_AGENT_DEFAULT_AUTO_SKILL_MODE', 'basic')
+AUTO_SKILL_MODE_BASIC: str = "basic"
+AUTO_SKILL_MODE_ADVANCED: str = "advanced"
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_SKILL_MATCH_THRESHOLD', '0.15'))  # Minimum relevance score for AUTO mode skill loading
 SKILL_CACHE_TTL_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_SKILL_CACHE_TTL', 30.0))  # Cache TTL for mtime-based discovery cache

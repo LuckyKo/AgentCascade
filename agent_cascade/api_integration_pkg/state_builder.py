@@ -326,6 +326,7 @@ def build_state_from_pool(
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
+            'auto_skill_mode': getattr(ps, 'auto_skill_mode', 'basic'),
             # Retry policy settings (Phase 6)
             'retry_max_attempts': getattr(ps, 'retry_max_attempts', 3),
             'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),
@@ -511,6 +512,7 @@ def build_stream_update_from_pool(
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
+            'auto_skill_mode': getattr(ps, 'auto_skill_mode', 'basic'),
             # Retry policy settings (Phase 6)
             'retry_max_attempts': getattr(ps, 'retry_max_attempts', 3),
             'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),

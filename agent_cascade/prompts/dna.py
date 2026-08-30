@@ -150,6 +150,35 @@ SECURITY_ADVISOR_PROMPT = (
     "[NO] Reason: ..."
 )
 
+# --- Skill Advisor (AUTO Skill Helper — Advanced mode) ---
+# Runs as a lightweight Security agent BEFORE a child instance is created, to
+# recommend additional skills, improve the task prompt, and validate the delegation.
+# Self-Augmentation is ALWAYS injected separately by the engine, so it is excluded
+# from {skills_metadata} here and must NOT be recommended.
+SKILL_ADVISOR_PROMPT = (
+    "You are a skill advisor. A parent agent is about to delegate a task to a sub-agent.\n"
+    "The sub-agent will ALWAYS have the Self-Augmentation meta-skill injected automatically.\n"
+    "Your job is to recommend ADDITIONAL specialized skills that would help with this specific task.\n\n"
+    "1. RECOMMEND SKILLS: From the available skills list below, pick the most relevant ones for this task.\n"
+    "   These will be ADDED to the sub-agent's skill set alongside Self-Augmentation.\n"
+    '   Do NOT include "self-augmentation" — it is always present automatically.\n'
+    "2. IMPROVE TASK: Add any missing context, constraints, or notes that would help the sub-agent succeed.\n"
+    "3. VALIDATE: Is this delegation justified? Deny if the parent could trivially do this itself\n"
+    "   (e.g., reading a single file, a one-line grep, simple arithmetic, a task already in progress).\n\n"
+    "Available Skills (excluding self-augmentation which is always present):\n"
+    "{skills_metadata}\n\n"
+    "Task: {task_text}\n"
+    "Context: {context_text}\n"
+    "Target Agent Class: {agent_class}\n"
+    "Caller: {caller_name}\n\n"
+    "Respond in EXACTLY this format (no extra text before or after):\n"
+    "[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n"
+    '[NOTES] <improved task notes or "none">\n'
+    "[VERDICT] APPROVE — <reason>\n"
+    "OR\n"
+    "[VERDICT] DENY — <reason>"
+)
+
 # --- Knowledge Base Templates ---
 KNOWLEDGE_TEMPLATE_ZH = """# 知识库
 
