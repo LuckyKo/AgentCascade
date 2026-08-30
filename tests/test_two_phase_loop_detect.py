@@ -503,3 +503,52 @@ class TestMemoryBoundedness:
         for ngram, positions in d.ngram_positions.items():
             assert len(positions) <= 8, \
                 f"Ngram {ngram} has {len(positions)} positions, exceeds limit of 8"
+
+
+class TestReturnDictContract:
+    """Regression tests: the return dict must contain all keys expected by callers.
+
+    Bug (2026-08-30): two_phase_loop_detect.py returned a dict without 'score',
+    causing KeyError in llm_call.py which silently disabled loop detection.
+    """
+
+    def test_detection_result_contains_score(self):
+        """When a loop is detected, the result dict MUST contain 'score'."""
+        d = make_detector()
+        repeating = "The quick brown fox jumps over the lazy dog again and again\n"
+        result = None
+        for i in range(20):
+            r = d.feed(repeating)
+            if r is not None:
+                result = r
+                break
+        assert result is not None, "Expected loop detection but got None"
+        assert "score" in result, f"Missing 'score' key in detection result: {result.keys()}"
+        assert result["score"] == 100
+
+    def test_detection_result_contains_reason(self):
+        """When a loop is detected, the result dict MUST contain 'reason'."""
+        d = make_detector()
+        repeating = "The quick brown fox jumps over the lazy dog again and again\n"
+        result = None
+        for i in range(20):
+            r = d.feed(repeating)
+            if r is not None:
+                result = r
+                break
+        assert result is not None, "Expected loop detection but got None"
+        assert "reason" in result, f"Missing 'reason' key in detection result: {result.keys()}"
+        assert isinstance(result["reason"], str) and len(result["reason"]) > 0
+
+    def test_detection_result_contains_loop_flag(self):
+        """When a loop is detected, the result dict MUST contain loop=True."""
+        d = make_detector()
+        repeating = "The quick brown fox jumps over the lazy dog again and again\n"
+        result = None
+        for i in range(20):
+            r = d.feed(repeating)
+            if r is not None:
+                result = r
+                break
+        assert result is not None, "Expected loop detection but got None"
+        assert result.get("loop") is True

@@ -672,7 +672,7 @@ class LLMCallMixin:
                                         _token_guard_triggered = True
                                         raise MaxTokenExceeded(f"max_tokens: ~{_est_tokens} tokens")
                         except Exception as e:
-                            logger.debug(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
+                            logger.warning(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
                             # Re-raise if this is an explicit inner-loop or
                             # max-tokens detection exception
                             if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):

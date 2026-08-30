@@ -382,6 +382,7 @@ class TwoPhaseLoopDetector:
                     "loop": True,
                     "reason": f"semantic loop ({suspicion.interval_length} chars repeating)",
                     "confirmed_repetitions": confirmed_count,
+                    "score": 100,
                 }
             else:
                 self._apply_cooldown()

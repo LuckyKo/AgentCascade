@@ -386,3 +386,87 @@ class TestIntegrationScenarios:
         assert result is not None, "Two-phase should detect exact semantic repetition"
         assert "semantic loop" in result["reason"].lower()
 
+
+# ===================================================================
+# 9. Return format validation (promised by module docstring)
+# ===================================================================
+
+class TestReturnFormat:
+    """Every detection path must return a well-formed event dict.
+
+    The consumer (llm_call.py) accesses ``result['reason']`` and
+    ``result['score']`` via direct indexing, so both keys are mandatory.
+    A missing key raises KeyError, which is swallowed by the broad
+    ``except Exception`` in llm_call.py — silently disabling loop detection.
+    """
+
+    def test_char_run_path_return_format(self):
+        """Char-run path (inner_loop_detect.py:104-110) must return a valid dict."""
+        det = make_detector()
+        result = det.feed(_FILLER + "a" * 150)  # >130 limit → char-run fires
+        assert result is not None, "Char run should be detected"
+        assert result["loop"] is True
+        assert isinstance(result["reason"], str) and len(result["reason"]) > 0
+        assert result["score"] == 100
+
+    def test_max_chars_guard_path_return_format(self):
+        """Max-chars guard path (inner_loop_detect.py:89-94) must return a valid dict."""
+        det = make_detector(max_chars=100)
+        result = det.feed("x" * 100)  # reaches max_chars → guard fires
+        assert result is not None, "Max chars guard should be detected"
+        assert result["loop"] is True
+        assert isinstance(result["reason"], str) and len(result["reason"]) > 0
+        assert result["score"] == 100
+
+
+# ===================================================================
+# 10. Integration boundary: detector ↔ llm_call.py consumer contract
+# ===================================================================
+
+class TestConsumerContract:
+    """Verify the two-phase result passes through InnerLoopDetector and satisfies
+    llm_call.py's direct-indexing access pattern (``_ev['reason']``, ``_ev['score']``).
+
+    Char-run and max-chars paths are covered by TestReturnFormat above; this class
+    focuses on the two-phase pass-through (the path that actually broke) and a
+    negative case documenting the original bug.
+    """
+
+    @staticmethod
+    def _consume(ev):
+        """Mirror llm_call.py:632-640 — direct indexing of reason and score."""
+        return f"inner_loop ({ev['reason']}, score={ev['score']})"
+
+    def test_two_phase_result_satisfies_consumer_contract(self):
+        """Two-phase result passed through InnerLoopDetector must be indexable by the consumer."""
+        det = make_detector()
+        block = (
+            "The system needs to validate the input parameters and ensure they are correct. "
+            "After validation, we process the request through the pipeline and generate output."
+        )
+        result = None
+        for _ in range(30):
+            r = det.feed(block)
+            if r is not None:
+                result = r
+                break
+
+        assert result is not None, "Two-phase loop was not detected"
+        # Must not raise KeyError — this is the exact access llm_call.py performs.
+        self._consume(result)
+        assert result["loop"] is True
+
+    def test_missing_score_key_raises_keyerror(self):
+        """Negative: a dict without 'score' breaks the consumer (the original bug).
+
+        Documents WHY the contract matters — two_phase_loop_detect.py once omitted
+        'score', and this KeyError was swallowed by llm_call.py's broad except.
+        """
+        class _BrokenDetector:
+            def feed(self, chunk):
+                return {"loop": True, "reason": "semantic loop (fake)"}
+
+        broken = _BrokenDetector().feed("anything")
+        with pytest.raises(KeyError):
+            self._consume(broken)
+
