@@ -214,6 +214,22 @@ class TestRegistryValidation:
         assert r.verdict == "approve"
         assert r.recommended_skills == ["docker-best-practices"]  # bogus filtered
 
+    def test_passes_dedicated_turn_budget(self):
+        """run_skill_advisor must pass SKILL_ADVISOR_MAX_TURNS explicitly (decoupled from SECURITY_AGENT_MAX_TURNS)."""
+        sm = MockSkillManager(["a"])
+        pool = _make_pool(skill_manager=sm)
+        fake_result = MagicMock()
+        fake_result.was_timeout = False
+        fake_result.was_error = False
+        fake_result.output_text = ""
+        fake_result.latency_ms = 1.0
+
+        with patch("agent_cascade.advisor_runner.run_lightweight_advisor", return_value=fake_result) as m:
+            run_skill_advisor(pool, sm, "task", "ctx", "coder", "Maine")
+
+        from agent_cascade.settings import SKILL_ADVISOR_MAX_TURNS
+        assert m.call_args.kwargs.get("max_turns") == SKILL_ADVISOR_MAX_TURNS
+
 
 # ===========================================================================
 # 4. Fallback on timeout / error → ambiguous (caller uses basic keyword match)

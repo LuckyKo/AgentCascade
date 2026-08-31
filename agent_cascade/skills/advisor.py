@@ -177,7 +177,7 @@ def run_skill_advisor(
 
     Follows the SAME rules as the Security advisor (security_handler.py):
     - Agent class ``'Security'`` (same template, same soul/prompt base)
-    - Turn limit ``SECURITY_AGENT_MAX_TURNS``
+    - Turn limit ``SKILL_ADVISOR_MAX_TURNS`` (explicit; reuses only the Security template/tool-restriction base, not its budget)
     - Tool restrictions via ``DEFAULT_SECURITY_DISABLED_TOOLS`` + merge helper
     - Instance naming ``f'Security_op_{uuid4().hex[:8]}'``
 
@@ -186,6 +186,7 @@ def run_skill_advisor(
     """
     from agent_cascade.log import logger
     from agent_cascade.advisor_runner import run_lightweight_advisor
+    from agent_cascade.settings import SKILL_ADVISOR_MAX_TURNS
 
     instance_name = f'Security_op_{uuid.uuid4().hex[:8]}'
 
@@ -204,6 +205,7 @@ def run_skill_advisor(
             instance_name=instance_name,
             task=prompt,
             caller=caller_name or "unknown",
+            max_turns=SKILL_ADVISOR_MAX_TURNS,   # Decoupled budget: Skill Advisor uses its own turn limit (not SECURITY_AGENT_MAX_TURNS)
         )
     except Exception as e:  # noqa: BLE001 — runner already catches, but be defensive
         logger.error("[SKILL-ADVISOR] run_lightweight_advisor raised for '%s': %s", instance_name, e)

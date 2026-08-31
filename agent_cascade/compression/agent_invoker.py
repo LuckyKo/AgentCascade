@@ -576,6 +576,10 @@ def invoke_compression_agent(
 
     _configure_compressor_instance(agent_pool, comp_instance, caller_name)
 
+    # Bound the system-launched Compressor with its own turn budget (decoupled from the caller's limit).
+    from agent_cascade.settings import COMPRESSOR_AGENT_MAX_TURNS
+    comp_instance.max_turns = COMPRESSOR_AGENT_MAX_TURNS
+
     # Capture the initial conversation state ([system_msg, task_msg]) for retry resets.
     # After engine.run() completes, the conversation will contain the assistant's
     # (bad) response. On retry we reset back to this initial state so the LLM sees
@@ -713,6 +717,10 @@ def invoke_consolidation_agent(
         )
 
         _configure_compressor_instance(agent_pool, comp_instance, caller_name)
+
+        # Bound the system-launched Compressor with its own turn budget (decoupled from the caller's limit).
+        from agent_cascade.settings import COMPRESSOR_AGENT_MAX_TURNS
+        comp_instance.max_turns = COMPRESSOR_AGENT_MAX_TURNS
 
         summary, caption = _execute_compressor_and_extract_summary(
             agent_pool, engine, comp_instance, comp_state_key, caller_name,

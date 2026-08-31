@@ -55,6 +55,27 @@ class TestSecurityTurnBudget:
         )
 
 
+class TestDecoupledTurnBudgets:
+    """The Skill Advisor and system-launched Compressor each have their own turn budget,
+    decoupled from SECURITY_AGENT_MAX_TURNS. Both are plain env-overridable settings."""
+
+    def test_skill_advisor_turn_budget_is_reasonable(self):
+        """SKILL_ADVISOR_MAX_TURNS should be a small positive integer (single semantic-match decision)."""
+        from agent_cascade.settings import SKILL_ADVISOR_MAX_TURNS
+        assert isinstance(SKILL_ADVISOR_MAX_TURNS, int)
+        assert 1 <= SKILL_ADVISOR_MAX_TURNS <= 200, (
+            f"Skill Advisor turn budget ({SKILL_ADVISOR_MAX_TURNS}) should be between 1-200"
+        )
+
+    def test_compressor_turn_budget_is_reasonable(self):
+        """COMPRESSOR_AGENT_MAX_TURNS should be a positive integer (roomier than an advisor, still bounded)."""
+        from agent_cascade.settings import COMPRESSOR_AGENT_MAX_TURNS
+        assert isinstance(COMPRESSOR_AGENT_MAX_TURNS, int)
+        assert 1 <= COMPRESSOR_AGENT_MAX_TURNS <= 200, (
+            f"Compressor turn budget ({COMPRESSOR_AGENT_MAX_TURNS}) should be between 1-200"
+        )
+
+
 class TestReentrantSecurityLock:
     """Test that RLock allows reentrant acquisition by the same thread."""
 

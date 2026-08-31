@@ -1544,6 +1544,57 @@ class TestCompressionRetryReuse:
             # Verify it's a deep copy (not the same list object as initial_conv)
             assert reset_conv is not initial_conv
 
+    def test_compressor_bounded_by_dedicated_turn_budget(self):
+        """invoke_compression_agent must set comp_instance.max_turns = COMPRESSOR_AGENT_MAX_TURNS.
+
+        Behavioral: we patch ExecutionEngine to return a fake instance and assert the
+        dedicated budget is applied to it at the launch site (decoupled from the caller's limit).
+        """
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+        from agent_cascade.settings import COMPRESSOR_AGENT_MAX_TURNS
+
+        pool = self._make_mock_pool()
+
+        executed_instances = []
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            executed_instances.append(comp_instance)
+            raise RuntimeError(
+                "Compression output missing end marker '--- END SUMMARY ---' — "
+                "compressor may have hallucinated or continued the task"
+            )
+
+        mock_instance = MagicMock()
+        mock_instance._compression_lock = MagicMock()
+        mock_instance._compression_lock.__enter__ = lambda s: None
+        mock_instance._compression_lock.__exit__ = lambda s, *a: None
+        mock_instance.conversation = [
+            {"role": "system", "content": "You are a compressor."},
+            {"role": "user", "content": "Summarize this..."},
+        ]
+        mock_instance.rebuild_conversation = MagicMock()
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = mock_instance
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        # The dedicated budget was applied to the instance actually used by the compressor.
+        assert executed_instances, "compressor should have been invoked at least once"
+        for inst in executed_instances:
+            assert inst.max_turns == COMPRESSOR_AGENT_MAX_TURNS
+
 
 if __name__ == '__main__':
     import pytest
