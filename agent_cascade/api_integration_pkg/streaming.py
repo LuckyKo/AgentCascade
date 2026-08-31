@@ -13,13 +13,6 @@ from agent_cascade.llm.schema import Message
 from agent_cascade.api_integration_pkg.cache import _cache_mgr, _STREAM_TOKEN_STATS_CACHE_MAXSIZE
 from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
 
-# Broadcast throttle intervals (see broadcast_stream_update).
-# MIN_STREAM_BROADCAST_INTERVAL: floor for streaming ticks (~5x/sec) so a burst of SSE
-#   chunks no longer triggers one full-payload build+send per chunk.
-# PERIODIC_BROADCAST_INTERVAL: non-streaming periodic broadcast cadence (100ms), unchanged.
-MIN_STREAM_BROADCAST_INTERVAL = 0.2
-PERIODIC_BROADCAST_INTERVAL = 0.1
-
 async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
     """Put a stream_update event onto the queue, dropping it if full.
 
@@ -99,10 +92,11 @@ def broadcast_stream_update(
     # of SSE chunks no longer triggers one full-payload build+send per chunk; committed
     # messages (len_changed) and non-streaming metadata updates still pass through on the
     # original 100ms cadence.
+    MIN_STREAM_BROADCAST_INTERVAL = 0.2
     should_broadcast = (
         len_changed
         or (is_streaming_tick and (now_sec - last_send >= MIN_STREAM_BROADCAST_INTERVAL))
-        or (not is_streaming_tick and (now_sec - last_send > PERIODIC_BROADCAST_INTERVAL))
+        or (not is_streaming_tick and (now_sec - last_send > 0.1))  # 100ms throttle
     )
 
     if not should_broadcast:
