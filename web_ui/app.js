@@ -119,6 +119,26 @@ const state = {
   agentMessages: [], // Populated via loadAgentMessages() on init
 };
 
+// ── TEMP: streaming background-throttle probe (DIAGNOSIS ONLY) ───────────────
+// Master flag for a zero-behavior-change instrumentation probe that empirically
+// confirms/refutes the "background-tab event-loop throttling" hypothesis behind the
+// streaming burstiness bug. See reports/streaming_probe_HOWTO.md for how to read the
+// console output and reports/streaming_frontend_background_throttle_INVESTIGATION.md §4.5.
+//
+// HOW TO REMOVE: set STREAM_DEBUG = false below (or delete this entire TEMP block plus
+// the three small gated snippets it references — one at the top of the 'stream_update' case,
+// and one init-time block that starts the 1Hz reference timer + visibilitychange listener).
+// When false, no listeners are added, no interval is started, and nothing is logged: the app
+// behaves exactly as before.
+const STREAM_DEBUG = false; // diagnosis complete (streaming stall root-caused + fixed, see reports/streaming_probe_HOWTO.md); re-enable only when re-investigating a frontend streaming/background-throttle issue
+
+// Module-scope probe state (only ever touched when STREAM_DEBUG is true):
+let _dbgLastTick = 0;   // performance.now() of previous stream_update tick
+let _dbgTickCount = 0;  // running count of stream_update ticks
+let _dbgRefTimerId = null;      // id of the 1Hz reference setInterval (A/B probe)
+let _dbgRefLastFire = 0;        // performance.now() of previous reference-timer fire
+let _dbgRefTickCount = 0;       // running count of reference-timer fires
+
 let ws = null;
 let reconnectTimer = null;
 // Root agent rendering state is now managed per-panel via panel.dataset.lastRenderedCount (same as sub-agents)
@@ -1985,6 +2005,14 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
+      // TEMP: streaming background-throttle probe (gated on STREAM_DEBUG) — read-only, logs only.
+      if (STREAM_DEBUG) {
+        const _dbgNow = performance.now();
+        const _dbgDelta = _dbgLastTick ? (_dbgNow - _dbgLastTick) : 0;
+        _dbgLastTick = _dbgNow;
+        _dbgTickCount++;
+        console.log(`[stream-probe] tick#${_dbgTickCount} Δ=${_dbgDelta.toFixed(1)}ms vis=${document.visibilityState} wsReady=${ws ? ws.readyState : 'null'}`);
+      }
       // Only block stream updates when the ACTIVE agent itself is halted
       const activeName = getActiveAgentName();
       if (state.subAgents[activeName]?.is_halted) break;
@@ -5541,6 +5569,52 @@ function retryGeneration() {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 ActivityBar.init();
+// TEMP: streaming background-throttle probe (gated on STREAM_DEBUG) — start the 1Hz reference
+// timer (A/B probe) and a visibilitychange logger ONCE at init. Read-only, logs only.
+if (STREAM_DEBUG) {
+  _dbgRefLastFire = performance.now();
+  _dbgRefTimerId = setInterval(() => {
+    const _dbgNow = performance.now();
+    const _dbgRefDelta = _dbgNow - _dbgRefLastFire;
+    _dbgRefLastFire = _dbgNow;
+    _dbgRefTickCount++;
+    console.log(`[stream-probe] ref#${_dbgRefTickCount} Δ=${_dbgRefDelta.toFixed(1)}ms vis=${document.visibilityState} wsReady=${ws ? ws.readyState : 'null'}`);
+  }, 1000);
+  document.addEventListener('visibilitychange', () => {
+    console.log(`[stream-probe] visibilitychange -> ${document.visibilityState} @${performance.now().toFixed(1)}ms wsReady=${ws ? ws.readyState : 'null'}`);
+  });
+}
+
+// ── Visibility catch-up ──────────────────────────────────────────────────────
+// Chrome starves a background/occluded tab's JS event loop, so ws.onmessage stops
+// firing while hidden and no state is merged / rendered. On return to the foreground
+// all buffered frames fire at once and the first one dumps the whole backlog. This
+// handler makes the UI catch up INSTANTLY on visibilitychange → visible: it resets
+// the render-throttle timestamps (so the next render isn't gated behind a stale
+// "last rendered" time), invalidates panel caches, and forces an immediate
+// renderSubAgents().
+// ORDERING NOTE: on return to foreground, the browser flushes buffered ws.onmessage frames
+// and dispatches this visibilitychange event; the spec doesn't guarantee which runs first.
+// If this handler runs before all buffered frames have merged, renderSubAgents() might
+// paint a slightly stale frame — but the very next onmessage tick (~250ms) re-renders
+// with full catch-up, so correctness is preserved either way.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return; // only catch up on return to foreground
+  try {
+    // Only act when the WS is live and there's something to render.
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!state.subAgents || Object.keys(state.subAgents).length === 0) return;
+    // Reset the render-throttle timers so the next render fires immediately, not after a stale interval.
+    state.genStats.lastSubAgentRender = 0;
+    state.genStats.lastSubAgentRenderDuration = 0;
+    // Force panels to re-render (bypass lastRenderedCount/contentKey cache) and paint now.
+    invalidateAllPanelCaches();
+    renderSubAgents();
+  } catch (err) {
+    console.error('[visibility] catch-up failed:', err);
+  }
+});
+
 connect();
 initAgentMessagesTab(); // NEW: initialize Agent Messages tab
 if ($('#apply-mcp-btn')) {
