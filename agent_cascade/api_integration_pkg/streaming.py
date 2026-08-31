@@ -5,6 +5,9 @@ Phase 3b pure-move refactor. ``broadcast_stream_update`` calls
 """
 
 import asyncio
+import threading
+import time
+from pathlib import Path
 from typing import List, Optional
 
 from agent_cascade.log import logger
@@ -12,6 +15,100 @@ from agent_cascade.agent_pool import AgentPool
 from agent_cascade.llm.schema import Message
 from agent_cascade.api_integration_pkg.cache import _cache_mgr, _STREAM_TOKEN_STATS_CACHE_MAXSIZE
 from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
+
+# ────────────────────────────────────────────────────────────────────────────
+# STREAMING BACKLOG PROBE — TEMPORARY DIAGNOSTIC (evidence-gathering only)
+# Set False / remove after diagnosis. When False, nothing below is logged and
+# there is no measurable overhead. See reports/streaming_backend_probe_HOWTO.md
+# ────────────────────────────────────────────────────────────────────────────
+STREAM_BACKEND_DEBUG = False  # streaming backlog probe — diagnosis complete (Fix A+B verified); re-enable only when re-investigating a WS send-path stall. See reports/streaming_backend_probe_HOWTO.md
+
+_PROBE_LOCK = threading.Lock()
+_PROBE_STATE: dict = {}
+
+
+def _probe_get_logger():
+    """Lazily build a dedicated logger that writes ONLY to the probe file.
+
+    Kept separate from the app's main ``logger`` so probe lines never pollute
+    console.log. Safe to call from any thread (idempotent, lock-guarded).
+    """
+    global _PROBE_LOCK
+    if not STREAM_BACKEND_DEBUG:
+        return None
+    try:
+        import logging
+        # streaming.py is at <root>/agent_cascade/api_integration_pkg/streaming.py
+        project_root = Path(__file__).resolve().parent.parent.parent
+        log_dir = project_root / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        probe_logger = logging.getLogger('stream_probe_backend')
+        if not probe_logger.handlers:  # idempotent
+            probe_logger.setLevel(logging.INFO)
+            fh = logging.FileHandler(str(log_dir / 'stream_probe_backend.log'), encoding='utf-8', delay=True)
+            fh.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(message)s', datefmt='%H:%M:%S'))
+            probe_logger.addHandler(fh)
+            probe_logger.propagate = False  # never leak into the root/main logger
+        return probe_logger
+    except Exception:
+        return None
+
+
+def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
+                  is_streaming_tick: bool, len_changed: bool, qsize) -> None:
+    """Record one broadcast timing sample. NON-SPAMMY by design:
+
+      * logs a line only when yield_to_enqueue_ms > 100 (meaningful backend delay),
+        OR every 50th broadcast as a heartbeat with running max/avg;
+      * logs a single "BACKLOG DETECTED" line on a <50ms -> >500ms jump;
+      * hard-caps output at ~1 line/sec per instance so a pathological case
+        can never flood the file.
+
+    This function only READS and LOGS — it must never raise into the caller.
+    """
+    if not STREAM_BACKEND_DEBUG or t_yield is None:
+        return
+    try:
+        delay_ms = (t_enqueue - t_yield) * 1000.0
+        now_wall = time.time()
+        with _PROBE_LOCK:
+            st = _PROBE_STATE.get(instance_name)
+            if st is None:
+                st = {'count': 0, 'sum_ms': 0.0, 'max_ms': 0.0,
+                      'prev_delay_ms': None, 'last_log_wall': 0.0}
+                _PROBE_STATE[instance_name] = st
+            st['count'] += 1
+            st['sum_ms'] += delay_ms
+            if delay_ms > st['max_ms']:
+                st['max_ms'] = delay_ms
+
+            # Backlog detection: a sharp jump from <50ms to >500ms → one line.
+            backlog = (st['prev_delay_ms'] is not None
+                       and st['prev_delay_ms'] < 50.0 and delay_ms > 500.0)
+
+            # Sampling / threshold gating.
+            heartbeat = (st['count'] % 50 == 0)
+            over_thresh = (delay_ms > 100.0)
+            should_log = backlog or heartbeat or over_thresh
+
+            if should_log:
+                avg_ms = st['sum_ms'] / st['count']
+                # Rate cap: ~1 line/sec per instance (backlog lines bypass the cap).
+                if not backlog and (now_wall - st['last_log_wall']) < 1.0:
+                    pass  # suppress this sample to keep output non-spammy
+                else:
+                    _probe_get_logger().info(
+                        f"{'BACKLOG ' if backlog else ''}inst={instance_name} "
+                        f"yield_to_enqueue_ms={delay_ms:.1f} avg={avg_ms:.1f} max={st['max_ms']:.1f} "
+                        f"n={st['count']} resp_len={resp_len} tick={int(is_streaming_tick)} "
+                        f"len_chg={int(len_changed)} qsize={qsize}"
+                    )
+                    st['last_log_wall'] = now_wall
+
+            st['prev_delay_ms'] = delay_ms
+    except Exception:
+        pass  # probe must never break the broadcast path
+
 
 async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
     """Put a stream_update event onto the queue, dropping it if full.
@@ -42,6 +139,7 @@ def broadcast_stream_update(
     last_resp_len: int,
     send_queue=None,       # Explicit queue (preferred) or None to use pool._ws_send_queue
     loop=None,             # Explicit loop (preferred) or None to use pool._ws_loop
+    yield_time: Optional[float] = None,  # PROBE: time.monotonic() captured at the call site right after engine yielded; ignored when STREAM_BACKEND_DEBUG is False
 ) -> tuple[float, int]:
     """Build and push a stream_update event for an agent instance.
 
@@ -122,6 +220,20 @@ def broadcast_stream_update(
         )
 
         if stream_update is not None:
+            # ── PROBE: capture t_enqueue right before dispatch ──────────────
+            # yield_to_enqueue_ms = (t_enqueue - t_yield)*1000 is THE key number.
+            # Gated on STREAM_BACKEND_DEBUG; no-op when disabled or yield_time absent.
+            if STREAM_BACKEND_DEBUG and yield_time is not None:
+                _probe_record(
+                    instance_name=instance_name,
+                    t_yield=yield_time,
+                    t_enqueue=time.monotonic(),
+                    resp_len=resp_len,
+                    is_streaming_tick=is_streaming_tick,
+                    len_changed=len_changed,
+                    qsize=(ws_queue.qsize() if hasattr(ws_queue, 'qsize') else -1),
+                )
+
             asyncio.run_coroutine_threadsafe(
                 _put_stream_update(
                     ws_queue,
