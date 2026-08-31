@@ -89,6 +89,12 @@ LLM_CONFIG_KEYS = frozenset({
     'presence_penalty', 'stop', 'timeout', 'model_type'
 })
 
+# Per-client WebSocket send timeout (seconds). Bounds each client's send in
+# broadcast() so one slow/wedged client (e.g. a backgrounded tab or a full TCP
+# buffer) cannot block the shared _sender_loop drain loop and stall every other
+# client. On timeout the offending connection is closed and discarded.
+WS_SEND_TIMEOUT = 5.0
+
 
 def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
     """Validate disabled_tools in a generate_cfg dict against the tool registry.
@@ -609,21 +615,55 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     async def broadcast(data):
         """Send JSON to all connected WebSocket clients.
-        
-        Uses a snapshot (frozenset) of ws_connections to avoid RuntimeError
-        from set-size-changed-during-iteration when a client disconnects
-        mid-broadcast.
+
+        Sends to every client concurrently (asyncio.gather) with a per-send
+        timeout so one slow/wedged client cannot stall the shared drain loop.
+        Per-client FIFO ordering is preserved: each client gets exactly one send
+        task per frame and _sender_loop processes frames serially — concurrency
+        is only *across* clients, never within a single client's stream.
+
+        Uses a snapshot (frozenset) of ws_connections to avoid RuntimeError from
+        set-size-changed-during-iteration when a client disconnects mid-broadcast.
+        Dead/slow connections are reaped *after* the gather (iterating results),
+        never during, so no live send is disturbed.
         """
         nonlocal ws_connections
         text = json.dumps(data, ensure_ascii=False, default=str)
         # Snapshot the set so concurrent add/discard from other coroutines
         # (e.g. a new client connecting) won't raise RuntimeError.
         snapshot = frozenset(ws_connections)
-        for conn in snapshot:
+
+        async def _send_with_timeout(conn):
+            """Send ``text`` to one client, bounded by WS_SEND_TIMEOUT.
+
+            Returns ``(conn, None)`` on success or ``(conn, err)`` on any failure
+            (TimeoutError, WebSocketException, ConnectionResetError, OSError, ...).
+            A failing connection is best-effort closed so it is not left half-open.
+            """
             try:
-                await conn.send_text(text)
+                await asyncio.wait_for(conn.send_text(text), timeout=WS_SEND_TIMEOUT)
+                return conn, None
             except Exception as e:
-                logger.debug(f"WebSocket send failed, removing connection: {e}")
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+                return conn, e
+
+        # return_exceptions=True keeps one failing client from cancelling the rest.
+        results = await asyncio.gather(
+            *[_send_with_timeout(c) for c in snapshot], return_exceptions=True
+        )
+        for result in results:
+            # _send_with_timeout catches all exceptions internally and always
+            # returns a (conn, err) tuple, so `result` is never a bare Exception.
+            # The guard below is defensive: if it ever did surface, there'd be no
+            # conn reference to discard anyway.
+            if isinstance(result, Exception):
+                continue
+            conn, err = result
+            if err is not None:
+                logger.debug(f"WebSocket send failed, removing connection: {err}")
                 ws_connections.discard(conn)
 
     # ── Agent execution thread ────────────────────────────────────────────
