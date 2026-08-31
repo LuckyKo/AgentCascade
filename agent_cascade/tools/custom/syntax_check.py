@@ -254,6 +254,9 @@ def _check_c_family(content: str, _path: str) -> str:
                 # (they cannot terminate the template — only an unescaped ` can).
                 # Ignoring them prevents the state machine from getting stuck when a
                 # multi-line template contains HTML/text with apostrophes or quotes.
+                # Best-effort: this is not a full template-literal parser, so nested
+                # templates inside ${...} interpolations are not modeled (escaped `
+                # IS handled by the backslash count below); exotic cases may still misparse.
                 if in_string and string_char == '`' and ch != '`':
                     prev_ch = ch
                     i += 1
