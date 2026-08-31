@@ -119,26 +119,6 @@ const state = {
   agentMessages: [], // Populated via loadAgentMessages() on init
 };
 
-// ── TEMP: streaming background-throttle probe (DIAGNOSIS ONLY) ───────────────
-// Master flag for a zero-behavior-change instrumentation probe that empirically
-// confirms/refutes the "background-tab event-loop throttling" hypothesis behind the
-// streaming burstiness bug. See reports/streaming_probe_HOWTO.md for how to read the
-// console output and reports/streaming_frontend_background_throttle_INVESTIGATION.md §4.5.
-//
-// HOW TO REMOVE: set STREAM_DEBUG = false below (or delete this entire TEMP block plus
-// the three small gated snippets it references — one at the top of the 'stream_update' case,
-// and one init-time block that starts the 1Hz reference timer + visibilitychange listener).
-// When false, no listeners are added, no interval is started, and nothing is logged: the app
-// behaves exactly as before.
-const STREAM_DEBUG = false; // diagnosis complete (streaming stall root-caused + fixed, see reports/streaming_probe_HOWTO.md); re-enable only when re-investigating a frontend streaming/background-throttle issue
-
-// Module-scope probe state (only ever touched when STREAM_DEBUG is true):
-let _dbgLastTick = 0;   // performance.now() of previous stream_update tick
-let _dbgTickCount = 0;  // running count of stream_update ticks
-let _dbgRefTimerId = null;      // id of the 1Hz reference setInterval (A/B probe)
-let _dbgRefLastFire = 0;        // performance.now() of previous reference-timer fire
-let _dbgRefTickCount = 0;       // running count of reference-timer fires
-
 let ws = null;
 let reconnectTimer = null;
 // Root agent rendering state is now managed per-panel via panel.dataset.lastRenderedCount (same as sub-agents)
@@ -2005,14 +1985,6 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
-      // TEMP: streaming background-throttle probe (gated on STREAM_DEBUG) — read-only, logs only.
-      if (STREAM_DEBUG) {
-        const _dbgNow = performance.now();
-        const _dbgDelta = _dbgLastTick ? (_dbgNow - _dbgLastTick) : 0;
-        _dbgLastTick = _dbgNow;
-        _dbgTickCount++;
-        console.log(`[stream-probe] tick#${_dbgTickCount} Δ=${_dbgDelta.toFixed(1)}ms vis=${document.visibilityState} wsReady=${ws ? ws.readyState : 'null'}`);
-      }
       // Only block stream updates when the ACTIVE agent itself is halted
       const activeName = getActiveAgentName();
       if (state.subAgents[activeName]?.is_halted) break;
@@ -5569,21 +5541,6 @@ function retryGeneration() {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 ActivityBar.init();
-// TEMP: streaming background-throttle probe (gated on STREAM_DEBUG) — start the 1Hz reference
-// timer (A/B probe) and a visibilitychange logger ONCE at init. Read-only, logs only.
-if (STREAM_DEBUG) {
-  _dbgRefLastFire = performance.now();
-  _dbgRefTimerId = setInterval(() => {
-    const _dbgNow = performance.now();
-    const _dbgRefDelta = _dbgNow - _dbgRefLastFire;
-    _dbgRefLastFire = _dbgNow;
-    _dbgRefTickCount++;
-    console.log(`[stream-probe] ref#${_dbgRefTickCount} Δ=${_dbgRefDelta.toFixed(1)}ms vis=${document.visibilityState} wsReady=${ws ? ws.readyState : 'null'}`);
-  }, 1000);
-  document.addEventListener('visibilitychange', () => {
-    console.log(`[stream-probe] visibilitychange -> ${document.visibilityState} @${performance.now().toFixed(1)}ms wsReady=${ws ? ws.readyState : 'null'}`);
-  });
-}
 
 // ── Visibility catch-up ──────────────────────────────────────────────────────
 // Chrome starves a background/occluded tab's JS event loop, so ws.onmessage stops
