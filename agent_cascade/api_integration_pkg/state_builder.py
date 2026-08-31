@@ -19,6 +19,11 @@ from agent_cascade.api_integration_pkg.cache import (
 )
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
 
+# Streaming tail optimization: only send a proportional tail (last K messages) when the
+# confirmed history is longer than this. Short histories and non-streaming updates keep a
+# full send (initial load / refresh depend on it). See _serialize_instance.
+TAIL_THRESHOLD = 50
+
 def _serialize_loop_settings(ps):
     """Serialize loop detection settings from PoolSettings instance."""
     return {
@@ -847,7 +852,6 @@ def _serialize_instance(
     # (web_ui/app.js: startIdx = history_count - sa.messages.length) merges a partial array
     # correctly and keeps indices aligned with `history_count`. Full sends are preserved for
     # non-streaming updates and short histories (initial load / refresh depend on them).
-    TAIL_THRESHOLD = 50          # only tail when history is long
     if streaming and original_history_count > TAIL_THRESHOLD:
         k = max(5, original_history_count // 10)   # ~10% tail, min 5
         start_idx = max(0, original_history_count - k)
