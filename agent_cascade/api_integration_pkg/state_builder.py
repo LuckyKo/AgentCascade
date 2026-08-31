@@ -131,8 +131,22 @@ def _get_default_workspace(pool: AgentPool) -> str:
     return default_workspace
 
 def _build_active_stack(pool: AgentPool) -> list:
-    """Get the active execution stack from the pool."""
-    return list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
+    """Get the active execution stack from the pool.
+
+    Thread-safe: uses the locked pool.active_stack property (which reads under
+    _execution._state_lock and returns a defensive copy). This may run in a
+    worker thread (build_state offloaded via run_in_executor) while execution
+    threads mutate active_stack concurrently.
+    """
+    if hasattr(pool, 'active_stack'):
+        return list(pool.active_stack)
+    if hasattr(pool, '_execution'):
+        lock = getattr(pool._execution, '_state_lock', None)
+        if lock is not None:
+            with lock:
+                return list(pool._execution.active_stack)
+        return list(pool._execution.active_stack)
+    return []
 
 def _get_msg_content(m):
     """Get content from a Message object or dict."""
@@ -953,8 +967,17 @@ def _build_agents_list(pool: AgentPool) -> list:
     Orchestrator is always placed at index 0 to match the handler's agent
     lookup order (api_server.py and ws_handlers.py).
     """
-    # Collect all templates, ensuring orchestrator is first
-    template_items = list(pool.templates.items())
+    # Collect all templates, ensuring orchestrator is first.
+    # Snapshot under the pool lock if available: this may run in a worker thread
+    # (build_state offloaded via run_in_executor) while refresh_agents()/load_agent()
+    # mutate pool.templates concurrently. NOTE: no dedicated lock guards templates
+    # today (see report); _pool_lock is the closest existing pool-level lock.
+    _tpl_lock = getattr(pool, '_pool_lock', None)
+    if _tpl_lock is not None:
+        with _tpl_lock:
+            template_items = list(pool.templates.items())
+    else:
+        template_items = list(pool.templates.items())
     if template_items:
         # Find orchestrator and move it to front
         orch_item = None

@@ -105,8 +105,13 @@ class WsMessageHandler:
         Sends a full state snapshot via the broadcast function. The build_state_fn
         is called with optional generating override; it reads from pool.instances
         and includes all fields needed by the frontend (messages, instances, telemetry).
+
+        The expensive O(N) build_state_fn call runs in a thread executor so it
+        does not block the event loop (e.g. _sender_loop) during saturated send.
         """
-        await self.broadcast_fn({'type': ws_type, **self.build_state_fn(generating=generating)})
+        loop = asyncio.get_running_loop()
+        state = await loop.run_in_executor(None, lambda: self.build_state_fn(generating=generating))
+        await self.broadcast_fn({'type': ws_type, **state})
 
     def _is_paused(self) -> bool:
         """Check if agent pool is currently paused."""
