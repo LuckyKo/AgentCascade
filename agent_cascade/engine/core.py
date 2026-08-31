@@ -84,6 +84,26 @@ SLEEPING_LOOP_BACKOFF = 0.1              # Seconds to sleep when re-entering loo
 _COMPRESSION_WAIT_TIMEOUT = 1.0          # Seconds to wait per iteration when suspended by compression
 REACQUIRE_TIMEOUT = 30.0                 # Bounded FAST re-acquire window (post-yield fast path); on timeout the instance re-enters FIFO at tail (unbounded)
 
+
+def _is_explicit_skill_list(load_skill_value) -> bool:
+    """Return True when a per-call load_skill value is an EXPLICIT skill list.
+
+    Covers the two shapes callers/LLMs use to name specific skills:
+      - a native Python list, e.g. ["docker", "httpx-connection-pooling"]
+      - a JSON-encoded list string, e.g. '["docker"]' (LLMs sometimes emit this)
+    Bare "AUTO"/"NONE"/None and any non-list string are NOT explicit lists —
+    they fall through to auto-matching / no-skill handling instead.
+    """
+    if isinstance(load_skill_value, list):
+        return True
+    if isinstance(load_skill_value, str) and load_skill_value.strip().startswith("["):
+        try:
+            import json as _json_list_check
+            return isinstance(_json_list_check.loads(load_skill_value), list)
+        except (ValueError, TypeError):
+            return False  # not valid JSON — treat as a plain string, not a list
+    return False
+
 # MAX_TEXT_LENGTH_FOR_REGEX / MIN_OUTPUT_LENGTH now live in helpers.py (their true
 # home — used by the helper functions there); re-imported below alongside helpers.
 # SAMPLING_AND_LIMIT_KEYS lives in llm_call.py (used by _build_merged_cfg).
@@ -3011,13 +3031,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         except Exception as e:
                             logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
                             loaded_skills = []
-                elif auto_skill_mode == AUTO_SKILL_MODE_NONE and isinstance(load_skill_value, list):
+                elif auto_skill_mode == AUTO_SKILL_MODE_NONE and _is_explicit_skill_list(load_skill_value):
                     # "none" mode: skip system auto-matching entirely (no Basic keyword
                     # match, no Advanced advisor). Caller-explicit skill lists are still
-                    # honored — resolve each name literally. A literal "AUTO" token inside
-                    # such a list is resolved by name and silently skipped (it won't match
-                    # a real skill) — this is the existing resolve_load_skill behavior for
-                    # explicit lists, preserved here so it isn't surprising later.
+                    # honored. We delegate to resolve_load_skill() so it handles every
+                    # explicit form consistently with the Basic path — native lists AND
+                    # JSON-encoded list strings like '["docker"]' (which LLMs sometimes
+                    # emit). _is_explicit_skill_list() is True only for those two shapes,
+                    # so a bare "AUTO"/"NONE"/None never reaches here and no auto-matching
+                    # leaks. A literal "AUTO" token inside an explicit list is resolved by
+                    # name and silently skipped (it won't match a real skill) — existing
+                    # resolve_load_skill behavior, preserved so it isn't surprising later.
                     try:
                         loaded_skills = skill_manager.resolve_load_skill(
                             load_skill_value, task_text, context_text

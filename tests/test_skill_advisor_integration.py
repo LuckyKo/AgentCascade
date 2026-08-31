@@ -415,6 +415,28 @@ class TestNoneMode:
         # The resolved skill body was injected into the system message.
         assert "# basic-keyword-match-skill" in sys_msg.content
 
+    def test_none_json_string_list_still_resolves(self):
+        # "none" + JSON-encoded list string (e.g. '["docker"]', which LLMs sometimes
+        # emit) → must be treated as an explicit list and resolved, NOT dropped. This
+        # is the regression guard for the isinstance(list)-only bug: the value is a
+        # str here, so only _is_explicit_skill_list() (JSON-decode check) can catch it.
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), auto_skill_mode="none",
+            load_skill_value='["docker-best-practices"]',
+        )
+
+        # Advisor never runs in none mode.
+        assert mock_advisor.call_count == 0
+        # The JSON-string list is resolved (passed through to resolve_load_skill, which
+        # decodes it internally — same as the Basic path).
+        pool.skill_manager.resolve_load_skill.assert_called_once()
+        call_args = pool.skill_manager.resolve_load_skill.call_args.args
+        assert call_args[0] == '["docker-best-practices"]'
+
+        sys_msg = lifecycle.build_system_message.return_value
+        # The resolved skill body was injected into the system message.
+        assert "# basic-keyword-match-skill" in sys_msg.content
+
 
 # ===========================================================================
 # 5. Recall path → advisor skipped, existing system message preserved
