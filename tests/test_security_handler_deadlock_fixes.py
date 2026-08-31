@@ -60,19 +60,25 @@ class TestDecoupledTurnBudgets:
     decoupled from SECURITY_AGENT_MAX_TURNS. Both are plain env-overridable settings."""
 
     def test_skill_advisor_turn_budget_is_reasonable(self):
-        """SKILL_ADVISOR_MAX_TURNS should be a small positive integer (single semantic-match decision)."""
+        """SKILL_ADVISOR_MAX_TURNS should be a small positive integer (single semantic-match decision).
+
+        Tight bound: it does less work than the Security advisor (1-50), so a value above 30
+        would defeat the purpose of giving it its own (tighter) budget."""
         from agent_cascade.settings import SKILL_ADVISOR_MAX_TURNS
         assert isinstance(SKILL_ADVISOR_MAX_TURNS, int)
-        assert 1 <= SKILL_ADVISOR_MAX_TURNS <= 200, (
-            f"Skill Advisor turn budget ({SKILL_ADVISOR_MAX_TURNS}) should be between 1-200"
+        assert 1 <= SKILL_ADVISOR_MAX_TURNS <= 30, (
+            f"Skill Advisor turn budget ({SKILL_ADVISOR_MAX_TURNS}) should be between 1-30"
         )
 
     def test_compressor_turn_budget_is_reasonable(self):
-        """COMPRESSOR_AGENT_MAX_TURNS should be a positive integer (roomier than an advisor, still bounded)."""
+        """COMPRESSOR_AGENT_MAX_TURNS should be a positive integer (roomier than an advisor, still bounded).
+
+        Upper bound of 60 keeps it meaningfully below DEFAULT_MAX_TURNS (250) — a value near
+        the default would indicate the decoupling accidentally fell back to the general budget."""
         from agent_cascade.settings import COMPRESSOR_AGENT_MAX_TURNS
         assert isinstance(COMPRESSOR_AGENT_MAX_TURNS, int)
-        assert 1 <= COMPRESSOR_AGENT_MAX_TURNS <= 200, (
-            f"Compressor turn budget ({COMPRESSOR_AGENT_MAX_TURNS}) should be between 1-200"
+        assert 1 <= COMPRESSOR_AGENT_MAX_TURNS <= 60, (
+            f"Compressor turn budget ({COMPRESSOR_AGENT_MAX_TURNS}) should be between 1-60"
         )
 
 

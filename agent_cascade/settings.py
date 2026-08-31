@@ -26,7 +26,9 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(os.getenv(
 MAX_LLM_CALL_PER_RUN: int = int(os.getenv('QWEN_AGENT_MAX_LLM_CALL_PER_RUN', 250))
 DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 250))  # Default turn limit per agent execution
 SECURITY_AGENT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_SECURITY_AGENT_MAX_TURNS', 20))  # Turn limit for system-launched Security advisor
+# Skill Advisor: single semantic-match decision (read skill list + emit JSON verdict) — tight budget.
 SKILL_ADVISOR_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_SKILL_ADVISOR_MAX_TURNS', 15))  # Turn limit for the system-launched Skill Advisor (semantic skill matcher)
+# Compressor: summarizes long histories and may use tools to read spilled content — roomier, still bounded.
 COMPRESSOR_AGENT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_COMPRESSOR_AGENT_MAX_TURNS', 30))  # Turn limit for the system-launched Compressor agent
 MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue attempts per episode before giving up (each attempt consumes one real turn)
 # Reasoning-only soft "continue" (pure-resend) attempts before falling back to a full retry.
