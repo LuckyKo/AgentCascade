@@ -319,6 +319,7 @@ class TestAdvisorGateCondition:
             ("AUTO", "advanced", False, None, 0, False),   # zero skills → skip
             ("AUTO", "advanced", False, None, 1, True),    # all conditions met
             ("AUTO", "basic",    False, None, 1, False),   # basic mode never runs advisor
+            ("AUTO", "none",     False, None, 1, False),   # none mode never runs advisor
             ("NONE", "advanced", False, None, 1, False),   # not AUTO mode
             ("AUTO", "advanced", True,  None, 1, False),   # force_fresh → skip
             ("AUTO", "advanced", False, "x.jsonl", 1, False),  # external load → skip

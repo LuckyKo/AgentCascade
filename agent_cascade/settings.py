@@ -415,9 +415,13 @@ DEFAULT_LOAD_SKILL_MODE: str = os.getenv('QWEN_AGENT_DEFAULT_LOAD_SKILL', 'AUTO'
 # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == AUTO):
 #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior, no extra LLM call)
 #   "advanced" — invokes the Skill Advisor (Security agent) for semantic matching + delegation validation
+#   "none"     — disables system-injected auto-matched skills entirely (no Basic keyword match,
+#                no Advanced advisor). Self-Augmentation (global toggle) and caller-explicit
+#                load_skill lists are still preserved.
 DEFAULT_AUTO_SKILL_MODE: str = os.getenv('QWEN_AGENT_DEFAULT_AUTO_SKILL_MODE', 'basic')
 AUTO_SKILL_MODE_BASIC: str = "basic"
 AUTO_SKILL_MODE_ADVANCED: str = "advanced"
+AUTO_SKILL_MODE_NONE: str = "none"
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_SKILL_MATCH_THRESHOLD', '0.15'))  # Minimum relevance score for AUTO mode skill loading
 SKILL_CACHE_TTL_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_SKILL_CACHE_TTL', 30.0))  # Cache TTL for mtime-based discovery cache

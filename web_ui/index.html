@@ -564,10 +564,11 @@
                       <input type="checkbox" id="setting-enable-skills" checked />
                     </label>
                     <label class="setting-field">
-                      <span title="How AUTO skill loading resolves skills. Basic = fast keyword match on task/context. Advanced = a lightweight Security agent semantically recommends skills, improves the prompt, and can deny trivial delegations (adds one LLM call per delegation).">AUTO Skill Mode</span>
+                      <span title="How AUTO skill loading resolves skills. Basic = fast keyword match on task/context. Advanced = a lightweight Security agent semantically recommends skills, improves the prompt, and can deny trivial delegations (adds one LLM call per delegation). None = disables system auto-matched skills entirely (no Basic keyword match, no Advanced advisor); Self-Augmentation and caller-explicit load_skill lists are still preserved.">AUTO Skill Mode</span>
                       <select id="setting-auto-skill-mode">
                         <option value="basic" selected>Basic</option>
                         <option value="advanced">Advanced</option>
+                        <option value="none">None</option>
                       </select>
                     </label>
                     <label class="setting-field toggle-field">

@@ -360,15 +360,20 @@ def _handle_auto_skill_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: 
 
 @register_config_handler('auto_skill_mode')
 def _handle_auto_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update AUTO Skill Helper sub-mode (basic or advanced).
+    """Update AUTO Skill Helper sub-mode (basic, advanced, or none).
 
     Only meaningful when default_load_skill_mode == "AUTO". Invalid values fall
     back to the default ("basic") so a bad UI payload can never break skill loading.
+    "none" disables system-injected auto-matched skills while preserving
+    Self-Augmentation and caller-explicit load_skill lists.
     """
-    from agent_cascade.settings import DEFAULT_AUTO_SKILL_MODE, AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED
+    from agent_cascade.settings import (
+        DEFAULT_AUTO_SKILL_MODE, AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED,
+        AUTO_SKILL_MODE_NONE,
+    )
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = str(ui_cfg.get('auto_skill_mode', DEFAULT_AUTO_SKILL_MODE)).strip().lower()
-        if val not in (AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED):
+        if val not in (AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED, AUTO_SKILL_MODE_NONE):
             val = DEFAULT_AUTO_SKILL_MODE
         agent_pool.settings.auto_skill_mode = val
 

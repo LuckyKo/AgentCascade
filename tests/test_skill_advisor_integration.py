@@ -366,6 +366,57 @@ class TestBasicModeSkipsAdvisor:
 
 
 # ===========================================================================
+# 4b. None mode → no auto-matched skills; Self-Augmentation + explicit lists preserved
+# ===========================================================================
+
+class TestNoneMode:
+    """auto_skill_mode == "none" disables system-injected auto-matched skills:
+    no Basic keyword match, no Advanced advisor — while preserving the
+    Self-Augmentation meta-skill (global toggle) and caller-explicit skill lists."""
+
+    def _approve(self):
+        return SkillAdvisorResult(
+            verdict="approve", reason="ok", recommended_skills=["docker-best-practices"], task_notes=""
+        )
+
+    def test_none_auto_no_matched_skills(self):
+        # "none" + AUTO (default) → no auto-matched skills at all.
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), auto_skill_mode="none", load_skill_value="AUTO"
+        )
+
+        # Advisor never runs in none mode.
+        assert mock_advisor.call_count == 0
+        # Basic keyword match (resolve_load_skill) must NOT run for AUTO under none mode —
+        # that is the observable distinguishing "none" from "basic".
+        pool.skill_manager.resolve_load_skill.assert_not_called()
+
+        sys_msg = lifecycle.build_system_message.return_value
+        # No matched/auto skill body injected (neither advisor nor basic fallback).
+        assert "# basic-keyword-match-skill" not in sys_msg.content
+
+    def test_none_explicit_list_still_resolves(self):
+        # "none" + explicit list → caller-set skills are still resolved (preserved),
+        # unlike the AUTO case above. The FakeSkillManager's resolve_load_skill is a
+        # MagicMock returning a fixed body, so we assert it was invoked with the list.
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), auto_skill_mode="none",
+            load_skill_value=["docker-best-practices"],
+        )
+
+        # Advisor never runs in none mode.
+        assert mock_advisor.call_count == 0
+        # The explicit list is resolved literally by name (caller skills preserved).
+        pool.skill_manager.resolve_load_skill.assert_called_once()
+        call_args = pool.skill_manager.resolve_load_skill.call_args.args
+        assert call_args[0] == ["docker-best-practices"]
+
+        sys_msg = lifecycle.build_system_message.return_value
+        # The resolved skill body was injected into the system message.
+        assert "# basic-keyword-match-skill" in sys_msg.content
+
+
+# ===========================================================================
 # 5. Recall path → advisor skipped, existing system message preserved
 # ===========================================================================
 

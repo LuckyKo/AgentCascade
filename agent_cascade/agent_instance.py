@@ -798,7 +798,9 @@ class PoolSettings:
     # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == "AUTO"):
     #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior)
     #   "advanced" — invokes the Skill Advisor (Security agent) for semantic matching + validation
-    auto_skill_mode: str = DEFAULT_AUTO_SKILL_MODE          # "basic" (default) or "advanced"
+    #   "none"     — disables system-injected auto-matched skills (no Basic match, no Advanced
+    #                advisor); Self-Augmentation and caller-explicit load_skill lists still apply
+    auto_skill_mode: str = DEFAULT_AUTO_SKILL_MODE          # "basic" (default), "advanced", or "none"
 
     # Agent budgeting settings
     enable_agent_budgeting: bool = False                    # Enable max_turns propagation/budgeting for agent calls

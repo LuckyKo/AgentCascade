@@ -28,6 +28,7 @@ from agent_cascade.settings import (
     AGENT_SLEEPING_MAX_WAIT_SECONDS,
     AUTO_SKILL_ENABLED,
     AUTO_SKILL_EXTRA_TURNS,
+    AUTO_SKILL_MODE_NONE,
     CHARS_PER_TOKEN_ESTIMATE,
     COMPRESSION_DEFAULT_FRACTION,
     COMPRESSION_RECOUNT_THRESHOLD,
@@ -2827,6 +2828,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         auto_skill_mode = getattr(self.pool.settings, 'auto_skill_mode', 'basic')
         _skill_mgr_gate = getattr(self.pool, 'skill_manager', None)
 
+        # NOTE: auto_skill_mode == "none" never runs the advisor. The `== "advanced"`
+        # check below already excludes it (only "advanced" passes), so no extra guard
+        # is required — this comment documents that intent explicitly.
         should_run_advisor = (
             load_skill_mode_upper == LOAD_SKILL_AUTO
             and auto_skill_mode == "advanced"
@@ -2982,7 +2986,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     load_skill_mode_upper = load_skill_value.strip().upper()
                 else:
                     load_skill_mode_upper = "AUTO"
-                if load_skill_mode_upper != LOAD_SKILL_NONE:
+                if load_skill_mode_upper != LOAD_SKILL_NONE and auto_skill_mode != AUTO_SKILL_MODE_NONE:
+                    # Basic ("basic") / Advanced ("advanced") behavior — unchanged.
                     if _advisor_recommended_skills is not None:
                         # Skill Advisor (Advanced mode) APPROVED — use its semantic
                         # recommendations instead of basic keyword matching. Names were
@@ -3006,6 +3011,21 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         except Exception as e:
                             logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
                             loaded_skills = []
+                elif auto_skill_mode == AUTO_SKILL_MODE_NONE and isinstance(load_skill_value, list):
+                    # "none" mode: skip system auto-matching entirely (no Basic keyword
+                    # match, no Advanced advisor). Caller-explicit skill lists are still
+                    # honored — resolve each name literally. A literal "AUTO" token inside
+                    # such a list is resolved by name and silently skipped (it won't match
+                    # a real skill) — this is the existing resolve_load_skill behavior for
+                    # explicit lists, preserved here so it isn't surprising later.
+                    try:
+                        loaded_skills = skill_manager.resolve_load_skill(
+                            load_skill_value, task_text, context_text
+                        )
+                    except Exception as e:
+                        logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
+                        loaded_skills = []
+                # else: "none" mode + AUTO/default → no auto-matched skills (loaded_skills stays [])
 
                 # (2) Self-Augmentation — gated by the GLOBAL "Enable skills" toggle
                 #     (global_skills_enabled), INDEPENDENT of the per-call load_skill arg.
