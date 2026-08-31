@@ -440,15 +440,11 @@ def build_stream_update_from_pool(
     # Version uses msg count, last msg id, streaming response count, and content length —
     # including content_len so that growing streaming content invalidates the cache
     # and fresh token stats are computed (total_tokens grows during active streaming).
-    raw_stream_len = sum(
+    stream_content_len = sum(
         len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
         for m in stream_resp_snapshot
     ) if stream_resp_snapshot else 0
-    # Quantize the streaming-content length into ~256-char buckets so the version
-    # (and thus the token-stats cache) is NOT invalidated on every single SSE chunk.
-    # Stats refresh at most once per ~256 chars of growth instead of per chunk.
-    stream_content_len = raw_stream_len // 256
-
+    
     current_version = (
         len(conv_snapshot),
         id(conv_snapshot[-1]) if conv_snapshot else None,
@@ -841,19 +837,11 @@ def _serialize_instance(
 
     msgs = full_msgs_snapshot
     original_history_count = len(msgs)
-
-    # Tail optimization (streaming only): during active streaming the client already holds
-    # the confirmed history, so send only the last K messages. The frontend splice
-    # (web_ui/app.js: startIdx = history_count - sa.messages.length) merges a partial array
-    # correctly and keeps indices aligned with `history_count`. Full sends are preserved for
-    # non-streaming updates and short histories (initial load / refresh depend on them).
-    TAIL_THRESHOLD = 50          # only tail when history is long
-    if streaming and original_history_count > TAIL_THRESHOLD:
-        k = max(5, original_history_count // 10)   # ~10% tail, min 5
-        start_idx = max(0, original_history_count - k)
-    else:
-        start_idx = 0
-    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[start_idx:], start_idx)]
+    
+    # Always send all messages — no tail optimization. The client properly merges partials,
+    # and removing the tail cut avoids any risk of losing early context during streaming.
+    start_idx = 0
+    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
     
     # Set is_partial=True when there are active streaming responses so the frontend uses
     # the partial merge path (smart splice with history_count), which properly handles
@@ -900,13 +888,10 @@ def _serialize_instance(
     # length in cache key so that growing streaming content causes cache miss and
     # fresh token stats computation (total_tokens grows during active streaming).
     stream_resp_len = len(stream_responses) if stream_responses else 0
-    raw_per_agent_len = sum(
+    per_agent_stream_content_len = sum(
         len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
         for m in (stream_responses or [])
     )
-    # Quantize into ~256-char buckets so the cache key is stable across small per-chunk
-    # content growth (avoids a full-history recompute on every SSE chunk).
-    per_agent_stream_content_len = raw_per_agent_len // 256
     cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len, per_agent_stream_content_len)
     
     # Streaming UI Content Update Fix: Compute token stats from combined messages (conversation + streaming_responses)

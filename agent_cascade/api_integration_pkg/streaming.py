@@ -87,16 +87,11 @@ def broadcast_stream_update(
     resp_len = len(turn_output) if turn_output else 0
     len_changed = (resp_len != last_resp_len)
 
-    # Throttle: broadcast only on meaningful events or periodic interval.
-    # Streaming ticks are floored at MIN_STREAM_BROADCAST_INTERVAL (~5x/sec) so a burst
-    # of SSE chunks no longer triggers one full-payload build+send per chunk; committed
-    # messages (len_changed) and non-streaming metadata updates still pass through on the
-    # original 100ms cadence.
-    MIN_STREAM_BROADCAST_INTERVAL = 0.2
+    # Throttle: broadcast only on meaningful events or periodic interval
     should_broadcast = (
-        len_changed
-        or (is_streaming_tick and (now_sec - last_send >= MIN_STREAM_BROADCAST_INTERVAL))
-        or (not is_streaming_tick and (now_sec - last_send > 0.1))  # 100ms throttle
+        is_streaming_tick
+        or len_changed
+        or (now_sec - last_send > 0.1)  # 100ms throttle
     )
 
     if not should_broadcast:
