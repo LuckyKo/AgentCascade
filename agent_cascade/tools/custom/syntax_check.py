@@ -250,6 +250,14 @@ def _check_c_family(content: str, _path: str) -> str:
 
             # Check for string start/close (handles ", ', `)
             if ch in ('"', "'", '`'):
+                # Inside a backtick template literal, ' and " are plain characters
+                # (they cannot terminate the template — only an unescaped ` can).
+                # Ignoring them prevents the state machine from getting stuck when a
+                # multi-line template contains HTML/text with apostrophes or quotes.
+                if in_string and string_char == '`' and ch != '`':
+                    prev_ch = ch
+                    i += 1
+                    continue
                 if not in_string:
                     in_string = True
                     string_char = ch
