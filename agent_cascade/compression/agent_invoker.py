@@ -354,6 +354,9 @@ def _execute_compressor_and_extract_summary(
                 else:
                     comp_turn_output, comp_is_streaming_tick = resp, False
 
+                # PROBE: capture the moment the engine yielded this tick (yield→enqueue timing).
+                _comp_t_yield = _time.monotonic()
+
                 # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
                 _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
                     pool=agent_pool,
@@ -364,6 +367,7 @@ def _execute_compressor_and_extract_summary(
                     now_sec=now_comp,
                     last_send=_last_comp_send,
                     last_resp_len=_comp_last_resp_len,
+                    yield_time=_comp_t_yield,  # PROBE: ignored when STREAM_BACKEND_DEBUG is False
                 )
 
                 _comp_tick_num += 1

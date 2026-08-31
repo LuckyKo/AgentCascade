@@ -106,6 +106,21 @@ class _CapturingStream:
         except Exception:
             return False
 
+    def fileno(self):
+        """Delegate to the original stream's fileno, falling back gracefully.
+
+        Some third-party libraries (e.g., the MCP SDK stdio transport) call
+        fileno() on sys.stdout/sys.stderr. The real underlying stream is a
+        file object that supports it; if for any reason it does not, raise
+        io.UnsupportedOperation so callers handle it the same way they would
+        for a non-socket stream (rather than crashing with AttributeError).
+        """
+        try:
+            return self._original.fileno()
+        except Exception:
+            import io
+            raise io.UnsupportedOperation('fileno') from None
+
 
 def setup_logger(level=None):
     if level is None:

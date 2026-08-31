@@ -172,6 +172,9 @@ def run_lightweight_advisor(
                 else:
                     turn_output, is_streaming_tick = resp, False
 
+                # PROBE: capture the moment the engine yielded this tick (yield→enqueue timing).
+                _t_yield = time.monotonic()
+
                 _last_send, _last_resp_len = broadcast_stream_update(
                     pool=pool,
                     instance_name=instance_name,
@@ -181,6 +184,7 @@ def run_lightweight_advisor(
                     now_sec=now_sec,
                     last_send=_last_send,
                     last_resp_len=_last_resp_len,
+                    yield_time=_t_yield,  # PROBE: ignored when STREAM_BACKEND_DEBUG is False
                 )
                 _tick_num += 1
 

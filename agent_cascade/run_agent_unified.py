@@ -156,6 +156,9 @@ def run_agent_thread_unified(
             else:
                 turn_output, is_streaming_tick = turn_output_raw, False
 
+            # PROBE: capture the moment the engine yielded this tick (for yield→enqueue timing).
+            t_yield = time.monotonic()
+
             # FIX TODO #41: Check all stop conditions including per-instance halt and termination
             if is_stopped():
                 break
@@ -208,6 +211,7 @@ def run_agent_thread_unified(
                 now_sec=now,
                 last_send=last_send,
                 last_resp_len=exec_state['last_resp_len'],
+                yield_time=t_yield,  # PROBE: ignored when STREAM_BACKEND_DEBUG is False
             )
 
             tick_num += 1

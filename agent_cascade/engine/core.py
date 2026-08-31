@@ -637,15 +637,18 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     llm_messages.append(warn_user)
                 if turns_available == 1:
                     # Final turn warning: insert as a separate user message
-                    # (not inline)
-                    # so it's treated as a distinct conversational turn, not
-                    # appended to the last message
-                    final_msg = self._make_user_message(
-                        f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
-                        f"Wrap up and deliver your results now.]"
-                    )
-                    self._append_and_log(instance, final_msg)
-                    llm_messages.append(final_msg)
+                    # (not inline) so it's treated as a distinct conversational
+                    # turn, not appended to the last message.
+                    # Muted for max_turns=1 agents: this is their only turn and
+                    # tools are being disabled below regardless, so the warning
+                    # adds no information — just noise in the transcript.
+                    if max_turns != 1:
+                        final_msg = self._make_user_message(
+                            f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
+                            f"Wrap up and deliver your results now.]"
+                        )
+                        self._append_and_log(instance, final_msg)
+                        llm_messages.append(final_msg)
 
                     # Disable ALL tools on the last turn so agent is forced to
                     # return a final answer

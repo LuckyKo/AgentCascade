@@ -163,7 +163,7 @@ SKILL_ADVISOR_PROMPT = (
     "Task: {task_text}\n"
     "Context: {context_text}\n\n"
     "## AVAILABLE SKILLS:\n{skills_metadata}\n\n"
-    "## RESPOND IN EXACTLY THIS FORMAT (text only, no tools):\n"
+    "## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n"
     "[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n"
     '[NOTES] <improved task notes or "none">\n'
     "[VERDICT] APPROVE — <reason>\n"

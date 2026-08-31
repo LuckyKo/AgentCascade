@@ -629,6 +629,9 @@ class SecurityAdvisorHandler:
                     else:
                         sec_turn_output, sec_is_streaming_tick = resp, False
 
+                    # PROBE: capture the moment the engine yielded this tick (yield→enqueue timing).
+                    _sec_t_yield = time.monotonic()
+
                     # WebSocket broadcast for Security agent (shared helper)
                     _last_sec_send, _sec_last_resp_len = broadcast_stream_update(
                         pool=self.agent_pool,
@@ -639,6 +642,7 @@ class SecurityAdvisorHandler:
                         now_sec=now_sec,
                         last_send=_last_sec_send,
                         last_resp_len=_sec_last_resp_len,
+                        yield_time=_sec_t_yield,  # PROBE: ignored when STREAM_BACKEND_DEBUG is False
                     )
 
                     _sec_tick_num += 1
