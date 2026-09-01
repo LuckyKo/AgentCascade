@@ -7,6 +7,7 @@ Uses real SKILL.md files from .qwen/skills/ as test data where possible.
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -307,6 +308,71 @@ class TestSkillManager:
         tmp.mkdir(exist_ok=True)
         self.manager.discover([tmp])
         assert len(self.manager._skills_registry) == 0
+
+    # -- Cache signature (regression: in-place edit of nested SKILL.md not detected) --
+
+    def test_scan_signature_detects_nested_skillmd_edit(self, tmp_path):
+        """Regression: editing <root>/<skill>/SKILL.md must change the scan signature.
+
+        Bug: compute_scan_signature only stat'd TOP-LEVEL entries of each scan root.
+        Skills live one level deeper (root/<name>/SKILL.md), and editing that file
+        updates the file's mtime but NOT the parent dir's mtime — so the signature
+        never changed, discover() short-circuited as a cache hit, and agents kept
+        serving stale skill content after an in-place edit.
+
+        Uses a temp dir (deterministic) rather than the real skills dir.
+        """
+        from agent_cascade.skills.cache_helper import compute_scan_signature
+
+        root = tmp_path / "skills"
+        skill_dir = root / "demo-skill"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "---\nname: demo-skill\ndescription: x\n---\n# Body v1\n", encoding="utf-8"
+        )
+
+        sig_before = compute_scan_signature([root], frozenset())
+
+        # In-place edit of the nested SKILL.md (content change -> new mtime).
+        time.sleep(0.02)  # ensure the mtime actually advances on coarse filesystems
+        skill_file.write_text(
+            "---\nname: demo-skill\ndescription: x\n---\n# Body v2 (edited)\n", encoding="utf-8"
+        )
+
+        sig_after = compute_scan_signature([root], frozenset())
+        assert sig_before != sig_after, (
+            "Editing a nested <skill>/SKILL.md must change the scan signature so that "
+            "discover() re-reads from disk instead of serving a stale cache hit."
+        )
+
+    def test_discover_picks_up_nested_skillmd_edit(self, tmp_path):
+        """End-to-end: after an in-place edit, discover() re-loads the new body."""
+        root = tmp_path / "skills"
+        skill_dir = root / "demo-skill"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "---\nname: demo-skill\ndescription: x\n---\n# Body v1\n", encoding="utf-8"
+        )
+
+        sm = self.manager
+        sm._cache_ttl = 0.0  # force the TTL branch to age out immediately (no sleeping)
+        sm.discover([root])
+        body1 = sm.load_full_instructions("demo-skill")
+        assert "Body v1" in body1
+
+        time.sleep(0.02)
+        skill_file.write_text(
+            "---\nname: demo-skill\ndescription: x\n---\n# Body v2 (edited)\n", encoding="utf-8"
+        )
+
+        sm._ensure_discovered()  # same path scan_skills / load_skill use
+        body2 = sm.load_full_instructions("demo-skill")
+        assert "Body v2" in body2, (
+            "After an in-place edit of a nested SKILL.md, discover() must re-read the "
+            "file so the updated body is served (regression for stale-cache bug)."
+        )
 
     # -- Cache invalidation (regression: stale discovery cache after NONE-mode clear) --
 
