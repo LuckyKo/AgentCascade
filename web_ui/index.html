@@ -551,9 +551,13 @@
                     </label>
                     <label class="setting-field">
                       <span title="Workflow used when the agent does not specify one">Default Workflow</span>
-                      <select id="ig-default-workflow" style="width:100%;">
-                        <option value="">— none —</option>
-                      </select>
+                      <div style="display:flex;gap:6px;align-items:center;">
+                        <select id="ig-default-workflow" style="flex:1;">
+                          <option value="">— none —</option>
+                        </select>
+                        <button id="ig-refresh-workflows" class="btn-small" title="Re-scan workflow directory for new files"
+                          style="padding:4px 8px;font-size:13px;flex-shrink:0;">⟳</button>
+                      </div>
                     </label>
                     <div style="display:flex;gap:8px;">
                       <label class="setting-field" style="flex:1;">

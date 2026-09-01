@@ -6431,6 +6431,17 @@ function initImageGenSettings() {
       igWorkflowsTimer = setTimeout(() => loadImageGenWorkflows(), 400);
     });
   }
+
+  // Manual refresh button — re-scans the directory on demand.
+  const igRefresh = document.getElementById('ig-refresh-workflows');
+  if (igRefresh) {
+    igRefresh.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't collapse the settings section
+      loadImageGenWorkflows(
+        document.getElementById('ig-default-workflow')?.value || ''
+      );
+    });
+  }
 }
 
 // Reload config whenever the Agent & Tools → System sub-tab is shown so edits

@@ -1237,7 +1237,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         cfg = _get_image_gen_config()
         wf_dir = cfg.get('workflow_dir', '')
         if not wf_dir:
-            return []
+            # Fall back to the default workflows directory so the UI pulldown
+            # is populated even before the user has saved any settings.
+            wf_dir = str(Path(__file__).resolve().parent.parent / "config" / "workflows")
         return _list_workflows(wf_dir)
 
     # ── start_gen wrapper: spawns run_agent_thread in a daemon thread ─────
