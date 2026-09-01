@@ -119,11 +119,11 @@ def _seed_pool_settings(config_dir):
 def _reset_logging_state():
     """api_server.py's __main__ block calls init_logging(), which raises RuntimeError if the
     logging system was already initialized by an earlier test in the same worker process.
-    Reset before AND after each test so the three runpy-driven boots are independent."""
+    Reset only BEFORE each test (never after) so we don't leak an uninitialized state to
+    other tests that may run later in the same xdist worker."""
     from agent_cascade.log import reset_logging
     reset_logging()
     yield
-    reset_logging()
 
 
 def _run_api_server_main(tmp_path, cli_kwargs):
