@@ -652,3 +652,75 @@ class TestReturnFormat:
         assert "Generated image" in result[1].text
         assert "a cat" in result[1].text
         assert "512x512" in result[1].text
+
+    def test_vram_save_succeeds_unload_fails_still_restores(self):
+        """When save_instance_state succeeds but unload_all_models fails,
+        the finally block must still attempt restore."""
+        tool = ImageGen()
+        mock_instance = MagicMock()
+        mock_instance._last_endpoint_config = {
+            'state_save_enabled': True,
+            'api_base': 'http://localhost:1234',
+            'model': 'test-model',
+        }
+
+        with patch.object(tool, '_get_instance', return_value=mock_instance), \
+             patch("agent_cascade.tools.image_gen._get_image_gen_config",
+                   return_value={'url': 'http://comfyui:8188', 'timeout': 60,
+                                 'default_workflow': '/wf/test.json'}), \
+             patch("agent_cascade.tools.image_gen._load_workflow",
+                   return_value={"1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}}}), \
+             patch("agent_cascade.tools.image_gen._inject_params",
+                   side_effect=lambda wf, **kw: (wf, ["prompt → 1"])), \
+             patch("agent_cascade.tools.image_gen._comfyui_generate",
+                   return_value=(b"fake_png", {"seed": 1})), \
+             patch("agent_cascade.tools.image_gen.save_image_to_media",
+                   return_value="/tmp/media/vram_test.png"), \
+             patch("agent_cascade.state_ops.is_autoloader_endpoint", return_value=True), \
+             patch("agent_cascade.state_ops.save_instance_state", return_value=True) as mock_save, \
+             patch("agent_cascade.state_ops.unload_all_models", return_value=False), \
+             patch("agent_cascade.state_ops.restore_instance_state") as mock_restore:
+
+            result = tool.call({"prompt": "vram test"})
+
+        # Save was called
+        mock_save.assert_called_once_with(mock_instance)
+        # Restore was still attempted despite unload failure
+        mock_restore.assert_called_once()
+        # Tool still returned the image successfully
+        assert isinstance(result, list)
+        assert result[0].image == "/tmp/media/vram_test.png"
+
+    def test_vram_save_fails_no_restore_attempted(self):
+        """When save_instance_state returns False (failure), restore must NOT be called."""
+        tool = ImageGen()
+        mock_instance = MagicMock()
+        mock_instance._last_endpoint_config = {
+            'state_save_enabled': True,
+            'api_base': 'http://localhost:1234',
+            'model': 'test-model',
+        }
+
+        with patch.object(tool, '_get_instance', return_value=mock_instance), \
+             patch("agent_cascade.tools.image_gen._get_image_gen_config",
+                   return_value={'url': 'http://comfyui:8188', 'timeout': 60,
+                                 'default_workflow': '/wf/test.json'}), \
+             patch("agent_cascade.tools.image_gen._load_workflow",
+                   return_value={"1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}}}), \
+             patch("agent_cascade.tools.image_gen._inject_params",
+                   side_effect=lambda wf, **kw: (wf, ["prompt → 1"])), \
+             patch("agent_cascade.tools.image_gen._comfyui_generate",
+                   return_value=(b"fake_png", {"seed": 1})), \
+             patch("agent_cascade.tools.image_gen.save_image_to_media",
+                   return_value="/tmp/media/vram_test2.png"), \
+             patch("agent_cascade.state_ops.is_autoloader_endpoint", return_value=True), \
+             patch("agent_cascade.state_ops.save_instance_state", return_value=False), \
+             patch("agent_cascade.state_ops.restore_instance_state") as mock_restore:
+
+            result = tool.call({"prompt": "no vram save"})
+
+        # Restore must NOT be called when save failed
+        mock_restore.assert_not_called()
+        # Tool still returned the image
+        assert isinstance(result, list)
+        assert result[0].image == "/tmp/media/vram_test2.png"
