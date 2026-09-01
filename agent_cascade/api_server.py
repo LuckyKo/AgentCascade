@@ -1391,21 +1391,31 @@ if __name__ == "__main__":
     # Uses handlers directly for validation and consistency with runtime updates.
     from agent_cascade.config_handlers import CONFIG_HANDLERS
 
-    startup_cfg = {
-        'idle_timeout_seconds': idle_timeout,
-        'system_agent_idle_timeout_seconds': system_idle_timeout,
-        'idle_check_interval': idle_check_interval,
-    }
-    for key, value in startup_cfg.items():
-        handler = CONFIG_HANDLERS.get(key)
-        if handler:
-            try:
-                handler(startup_cfg, agent_pool, [])
-            except Exception as e:
-                logger.warning(f"[INIT] Config update failed for '{key}': {e}")
+    # Only apply + persist a key when it was EXPLICITLY overridden (CLI arg not None, or the
+    # env var is present). When nothing was overridden we must NOT touch pool.settings nor
+    # re-save: the values loaded from pool_settings.json in AgentPool.__init__ are the user's
+    # persisted preferences and would otherwise be clobbered by the hardcoded defaults on every boot.
+    startup_cfg = {}
+    if args.idle_timeout is not None or os.getenv('QWEN_AGENT_IDLE_TIMEOUT') is not None:
+        startup_cfg['idle_timeout_seconds'] = idle_timeout
+    if (args.system_agent_idle_timeout is not None
+            or os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT') is not None):
+        startup_cfg['system_agent_idle_timeout_seconds'] = system_idle_timeout
+    if (args.idle_check_interval is not None
+            or os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL') is not None):
+        startup_cfg['idle_check_interval'] = idle_check_interval
 
-    if hasattr(agent_pool, '_save_pool_settings'):
-        agent_pool._save_pool_settings()  # Persist startup-effective values
+    if startup_cfg:
+        for key in startup_cfg:
+            handler = CONFIG_HANDLERS.get(key)
+            if handler:
+                try:
+                    handler(startup_cfg, agent_pool, [])
+                except Exception as e:
+                    logger.warning(f"[INIT] Config update failed for '{key}': {e}")
+
+        if hasattr(agent_pool, '_save_pool_settings'):
+            agent_pool._save_pool_settings()  # Persist the explicitly-overridden values
 
     # Create the root orchestrator instance in the new pool (use lowercase to match template key)
     try:

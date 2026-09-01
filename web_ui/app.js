@@ -140,7 +140,7 @@ function clearAutoSecurityTimers() {
 const POOL_SETTINGS_MAP = [
   // Core agent settings
   { id: '#setting-max-turns', prop: 'value', key: 'max_turns', localKey: 'max-turns' },
-  { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max-rollbacks' },
+  { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max_auto_rollbacks' },
   { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
   // Inner-loop detection (master toggle)
@@ -1133,6 +1133,9 @@ function saveSettings(sendToServer) {
   });
 
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
+  // Store the raw value under the underscore key so the respect-local guard in syncPoolSettings()
+  // (POOL_SETTINGS_MAP localKey='max_auto_rollbacks') has data to protect against server stomps.
+  if ($('#setting-max-rollbacks')) s['max_auto_rollbacks'] = $('#setting-max-rollbacks').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
   if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
   if ($('#setting-auto-skill-mode')) s['auto-skill-mode'] = $('#setting-auto-skill-mode').value;
@@ -1209,216 +1212,226 @@ function loadSettings() {
     if (!raw) return;
     const s = JSON.parse(raw);
 
+    // Only restore a numeric slider when the stored value is a finite number (or non-empty numeric
+    // string). Legacy/corrupted localStorage blobs may hold `null` for these element-id keys, and
+    // `null !== undefined` is true — without this guard we'd assign null into the input.
+    const _isFiniteRestore = (v) =>
+      (typeof v === 'number' && Number.isFinite(v)) ||
+      (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
+    // Non-numeric restores (toggles, colors, strings): only restore when the value is present
+    // (neither null nor undefined) so a null-poisoned blob doesn't clobber the HTML default.
+    const _present = (v) => v !== null && v !== undefined;
+
     ranges.forEach(r => {
-      if (r.input && s[r.input.id] !== undefined) {
+      if (r.input && _isFiniteRestore(s[r.input.id])) {
         r.input.value = s[r.input.id];
         r.input.dispatchEvent(new Event('input'));
       }
     });
 
-    if (settingFontSize && s['setting-font-size'] !== undefined) {
+    if (settingFontSize && _isFiniteRestore(s['setting-font-size'])) {
       settingFontSize.value = s['setting-font-size'];
       settingFontSize.dispatchEvent(new Event('input'));
     }
 
-    if (settingMaxTokens && s['max_tokens'] !== undefined) {
+    if (settingMaxTokens && _isFiniteRestore(s['max_tokens'])) {
       settingMaxTokens.value = s['max_tokens'];
       settingMaxTokens.dispatchEvent(new Event('input'));
     }
 
-    if (settingMaxContext && s['setting-max-context'] !== undefined) {
+    if (settingMaxContext && _isFiniteRestore(s['setting-max-context'])) {
       settingMaxContext.value = s['setting-max-context'];
       settingMaxContext.dispatchEvent(new Event('input'));
     }
 
-    if (settingLinesEnabled && s['setting-lines-enabled'] !== undefined) {
+    if (settingLinesEnabled && _present(s['setting-lines-enabled'])) {
       settingLinesEnabled.checked = s['setting-lines-enabled'];
       settingLinesEnabled.dispatchEvent(new Event('change'));
     }
 
     // Default OFF when absent — no dispatch needed, createMessageEl reads the checkbox live
-    if (settingMsgMeta && s['setting-msg-meta'] !== undefined) {
+    if (settingMsgMeta && _present(s['setting-msg-meta'])) {
       settingMsgMeta.checked = !!s['setting-msg-meta'];
     }
 
-    if (settingSoundIntervention && s['setting-sound-intervention'] !== undefined) {
+    if (settingSoundIntervention && _present(s['setting-sound-intervention'])) {
       settingSoundIntervention.checked = s['setting-sound-intervention'];
     }
 
-    if (settingSoundCompleted && s['setting-sound-completed'] !== undefined) {
+    if (settingSoundCompleted && _present(s['setting-sound-completed'])) {
       settingSoundCompleted.checked = s['setting-sound-completed'];
     }
 
-    if (settingSoundNotification && s['setting-sound-notification'] !== undefined) {
+    if (settingSoundNotification && _present(s['setting-sound-notification'])) {
       settingSoundNotification.checked = s['setting-sound-notification'];
     }
 
-    if (settingTruncateTools && s['truncate-tools'] !== undefined) {
+    if (settingTruncateTools && _present(s['truncate-tools'])) {
       settingTruncateTools.checked = s['truncate-tools'];
     }
 
     // Load Auto Agent Tab Focus toggle state
-    if (settingAutoTabFocus && s['auto-tab-focus'] !== undefined) {
+    if (settingAutoTabFocus && _present(s['auto-tab-focus'])) {
       settingAutoTabFocus.checked = s['auto-tab-focus'];
     }
 
-    if (settingUserColor && s['setting-user-color'] !== undefined) {
+    if (settingUserColor && _present(s['setting-user-color'])) {
       settingUserColor.value = s['setting-user-color'];
       settingUserColor.dispatchEvent(new Event('input'));
     }
-    if (settingAssistantColor && s['setting-assistant-color'] !== undefined) {
+    if (settingAssistantColor && _present(s['setting-assistant-color'])) {
       settingAssistantColor.value = s['setting-assistant-color'];
       settingAssistantColor.dispatchEvent(new Event('input'));
     }
-    if (settingRawEditColor && s['setting-raw-edit-color'] !== undefined) {
+    if (settingRawEditColor && _present(s['setting-raw-edit-color'])) {
       settingRawEditColor.value = s['setting-raw-edit-color'];
       settingRawEditColor.dispatchEvent(new Event('input'));
     }
 
-    if (s['api_base'] !== undefined) $('#setting-endpoint').value = s['api_base'];
-    if (s['api_key'] !== undefined) $('#setting-api-key').value = s['api_key'];
-    if (s['model'] !== undefined) $('#setting-model').value = s['model'];
+    if (_present(s['api_base'])) $('#setting-endpoint').value = s['api_base'];
+    if (_present(s['api_key'])) $('#setting-api-key').value = s['api_key'];
+    if (_present(s['model'])) $('#setting-model').value = s['model'];
 
-    if (s['vision-enabled'] !== undefined) $('#setting-vision-enabled').checked = s['vision-enabled'];
-    if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
-    if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
-    if (s['enable-skills'] !== undefined) $('#setting-enable-skills').checked = s['enable-skills'];
-    if (s['auto-skill-mode'] !== undefined) $('#setting-auto-skill-mode').value = s['auto-skill-mode'];
-    if (s['auto-skill-gen'] !== undefined) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
-    if (s['inner-loop-detect'] !== undefined) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
+    if (_present(s['vision-enabled'])) $('#setting-vision-enabled').checked = s['vision-enabled'];
+    if (_isFiniteRestore(s['max-turns'])) $('#setting-max-turns').value = s['max-turns'];
+    if (_present(s['auto-continue'])) $('#setting-auto-continue').checked = s['auto-continue'];
+    if (_present(s['enable-skills'])) $('#setting-enable-skills').checked = s['enable-skills'];
+    if (_present(s['auto-skill-mode'])) $('#setting-auto-skill-mode').value = s['auto-skill-mode'];
+    if (_present(s['auto-skill-gen'])) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
+    if (_present(s['inner-loop-detect'])) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state
-    if (s['enable_agent_budgeting'] !== undefined) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
+    if (_present(s['enable_agent_budgeting'])) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
     // Restore Log API POST Dump toggle (use consistent key; support old key for migration)
-    const logApiPost = s['log-api-post'] !== undefined ? s['log-api-post'] : s['log_api_post'];
-    if (logApiPost !== undefined) $('#setting-log-api-post').checked = logApiPost;
+    const logApiPost = _present(s['log-api-post']) ? s['log-api-post'] : s['log_api_post'];
+    if (_present(logApiPost)) $('#setting-log-api-post').checked = logApiPost;
     // Restore Max Auto-Rollbacks value
-    if (s['max_auto_rollbacks'] !== undefined) $('#setting-max-rollbacks').value = s['max_auto_rollbacks'];
+    if (_isFiniteRestore(s['max_auto_rollbacks'])) $('#setting-max-rollbacks').value = s['max_auto_rollbacks'];
     // Restore Max Parallel Agents value
-    if (s['max_parallel_agents'] !== undefined) $('#setting-max-parallel').value = s['max_parallel_agents'];
+    if (_isFiniteRestore(s['max_parallel_agents'])) $('#setting-max-parallel').value = s['max_parallel_agents'];
     // Restore Auto-Rollback on Loop toggle
-    if (s['auto_rollback_on_loop'] !== undefined) $('#setting-auto-rollback').checked = s['auto_rollback_on_loop'];
+    if (_present(s['auto_rollback_on_loop'])) $('#setting-auto-rollback').checked = s['auto_rollback_on_loop'];
     // Loop detection tuning settings restore
-    if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
-    if (s['loop-max-chars'] !== undefined) $('#setting-loop-max-chars').value = s['loop-max-chars'];
-    if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
-    if (s['loop-char-run-limit'] !== undefined) $('#setting-loop-char-run-limit').value = s['loop-char-run-limit'];
-    if (s['loop-max-chars-enabled'] !== undefined) $('#setting-loop-max-chars-enabled').checked = s['loop-max-chars-enabled'];
-    if (s['loop-two-phase-enabled'] !== undefined) $('#setting-loop-two-phase').checked = s['loop-two-phase-enabled'];
-    if (s['loop-suspicion-threshold'] !== undefined) $('#setting-loop-suspicion-threshold').value = s['loop-suspicion-threshold'];
-    if (s['loop-confirm-required'] !== undefined) $('#setting-loop-confirm-required').value = s['loop-confirm-required'];
-    if (s['loop-cooldown-feeds'] !== undefined) $('#setting-loop-cooldown-feeds').value = s['loop-cooldown-feeds'];
+    if (_isFiniteRestore(s['loop-min-chars'])) $('#setting-loop-min-chars').value = s['loop-min-chars'];
+    if (_isFiniteRestore(s['loop-max-chars'])) $('#setting-loop-max-chars').value = s['loop-max-chars'];
+    if (_present(s['loop-char-run-enabled'])) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
+    if (_isFiniteRestore(s['loop-char-run-limit'])) $('#setting-loop-char-run-limit').value = s['loop-char-run-limit'];
+    if (_present(s['loop-max-chars-enabled'])) $('#setting-loop-max-chars-enabled').checked = s['loop-max-chars-enabled'];
+    if (_present(s['loop-two-phase-enabled'])) $('#setting-loop-two-phase').checked = s['loop-two-phase-enabled'];
+    if (_isFiniteRestore(s['loop-suspicion-threshold'])) $('#setting-loop-suspicion-threshold').value = s['loop-suspicion-threshold'];
+    if (_isFiniteRestore(s['loop-confirm-required'])) $('#setting-loop-confirm-required').value = s['loop-confirm-required'];
+    if (_isFiniteRestore(s['loop-cooldown-feeds'])) $('#setting-loop-cooldown-feeds').value = s['loop-cooldown-feeds'];
 
     // Update two-phase input enabled state based on toggle
     updateTwoPhaseInputsEnabled();
 
-    if (s['tool-result-max-chars'] !== undefined) {
+    if (_isFiniteRestore(s['tool-result-max-chars'])) {
     $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
     }
-    if (s['idle-timeout'] !== undefined) {
+    if (_isFiniteRestore(s['idle-timeout'])) {
       $('#setting-idle-timeout').value = s['idle-timeout'];
     }
-    if (s['system-idle-timeout'] !== undefined) {
+    if (_isFiniteRestore(s['system-idle-timeout'])) {
       $('#setting-system-idle-timeout').value = s['system-idle-timeout'];
     }
     // Grep settings: prefer underscore keys from generate_cfg, fall back to legacy hyphenated keys
-    if (s['grep_char_limit'] !== undefined || s['grep-char-limit'] !== undefined) {
+    if (_isFiniteRestore(s['grep_char_limit']) || _isFiniteRestore(s['grep-char-limit'])) {
       $('#setting-grep-char-limit').value = s['grep_char_limit'] ?? s['grep-char-limit'];
     }
-    if (s['grep_spillover'] !== undefined || s['grep-spillover'] !== undefined) {
+    if (_present(s['grep_spillover']) || _present(s['grep-spillover'])) {
       $('#setting-grep-spillover').checked = s['grep_spillover'] ?? s['grep-spillover'];
     }
 
     // Shell, code, and list_dir char limits: prefer underscore keys from generate_cfg, fall back to legacy hyphenated keys
-    if (s['shell_char_limit'] !== undefined || s['shell-char-limit'] !== undefined) {
+    if (_isFiniteRestore(s['shell_char_limit']) || _isFiniteRestore(s['shell-char-limit'])) {
       $('#setting-shell-char-limit').value = s['shell_char_limit'] ?? s['shell-char-limit'];
     }
-    if (s['code_char_limit'] !== undefined || s['code-char-limit'] !== undefined) {
+    if (_isFiniteRestore(s['code_char_limit']) || _isFiniteRestore(s['code-char-limit'])) {
       $('#setting-code-char-limit').value = s['code_char_limit'] ?? s['code-char-limit'];
     }
-    if (s['list_dir_char_limit'] !== undefined || s['list-dir-char-limit'] !== undefined) {
+    if (_isFiniteRestore(s['list_dir_char_limit']) || _isFiniteRestore(s['list-dir-char-limit'])) {
       $('#setting-list-dir-char-limit').value = s['list_dir_char_limit'] ?? s['list-dir-char-limit'];
     }
 
-    if (settingImageDetail && s['setting-image-detail'] !== undefined) {
+    if (settingImageDetail && _present(s['setting-image-detail'])) {
       settingImageDetail.value = s['setting-image-detail'];
     }
-    if (settingMaxImageSize && s['setting-max-image-size'] !== undefined) {
+    if (settingMaxImageSize && _isFiniteRestore(s['setting-max-image-size'])) {
       settingMaxImageSize.value = s['setting-max-image-size'];
     }
-    if (settingMaxImagesForLlm && s['max_images_for_llm'] !== undefined) {
+    if (settingMaxImagesForLlm && _isFiniteRestore(s['max_images_for_llm'])) {
       settingMaxImagesForLlm.value = s['max_images_for_llm'];
     }
 
-    if ($('#setting-mcp-enabled') && s['setting-mcp-enabled'] !== undefined) {
+    if ($('#setting-mcp-enabled') && _present(s['setting-mcp-enabled'])) {
       $('#setting-mcp-enabled').checked = s['setting-mcp-enabled'];
     }
 
-    if (settingMcpServers && s['setting-mcp-servers'] !== undefined) {
+    if (settingMcpServers && _present(s['setting-mcp-servers'])) {
       settingMcpServers.value = s['setting-mcp-servers'];
     }
 
     // Approval timeout settings
-    if (approvalTimeoutEnabled && s['approval-timeout-enabled'] !== undefined) {
+    if (approvalTimeoutEnabled && _present(s['approval-timeout-enabled'])) {
       approvalTimeoutEnabled.checked = !!s['approval-timeout-enabled'];
     }
-    if (approvalTimeoutSeconds && s['approval-timeout-seconds'] !== undefined) {
+    if (approvalTimeoutSeconds && _isFiniteRestore(s['approval-timeout-seconds'])) {
       approvalTimeoutSeconds.value = s['approval-timeout-seconds'];
     }
 
     // Cache pool settings
-    if ($('#setting-cache-pool-enabled') && s['cache-pool-enabled'] !== undefined) {
+    if ($('#setting-cache-pool-enabled') && _present(s['cache-pool-enabled'])) {
       $('#setting-cache-pool-enabled').checked = !!s['cache-pool-enabled'];
     }
-    if ($('#setting-cache-pool-size') && s['cache-pool-size'] !== undefined) {
+    if ($('#setting-cache-pool-size') && _isFiniteRestore(s['cache-pool-size'])) {
       $('#setting-cache-pool-size').value = s['cache-pool-size'];
     }
-    if ($('#setting-cache-threshold-chars') && s['cache-threshold-chars'] !== undefined) {
+    if ($('#setting-cache-threshold-chars') && _isFiniteRestore(s['cache-threshold-chars'])) {
       $('#setting-cache-threshold-chars').value = s['cache-threshold-chars'];
     }
 
     // Retry policy settings (Phase 6)
-    if ($('#setting-retry-max-attempts') && s['retry-max-attempts'] !== undefined) {
+    if ($('#setting-retry-max-attempts') && _isFiniteRestore(s['retry-max-attempts'])) {
       $('#setting-retry-max-attempts').value = s['retry-max-attempts'];
     }
-    if ($('#setting-endpoint-max-retries') && s['endpoint-max-retries'] !== undefined) {
+    if ($('#setting-endpoint-max-retries') && _isFiniteRestore(s['endpoint-max-retries'])) {
       $('#setting-endpoint-max-retries').value = s['endpoint-max-retries'];
     }
-    if ($('#setting-retry-base-delay') && s['retry-base-delay'] !== undefined) {
+    if ($('#setting-retry-base-delay') && _isFiniteRestore(s['retry-base-delay'])) {
       $('#setting-retry-base-delay').value = s['retry-base-delay'];
     }
-    if ($('#setting-retry-max-delay') && s['retry-max-delay'] !== undefined) {
+    if ($('#setting-retry-max-delay') && _isFiniteRestore(s['retry-max-delay'])) {
       $('#setting-retry-max-delay').value = s['retry-max-delay'];
     }
 
     // Compression threshold settings
-    if ($('#setting-compression-warning-threshold') && s['compression-warning-threshold'] !== undefined) {
+    if ($('#setting-compression-warning-threshold') && _isFiniteRestore(s['compression-warning-threshold'])) {
       $('#setting-compression-warning-threshold').value = s['compression-warning-threshold'];
     }
-    if ($('#setting-compression-force-threshold') && s['compression-force-threshold'] !== undefined) {
+    if ($('#setting-compression-force-threshold') && _isFiniteRestore(s['compression-force-threshold'])) {
       $('#setting-compression-force-threshold').value = s['compression-force-threshold'];
     }
-    if ($('#setting-compression-proactive-threshold') && s['compression-proactive-threshold'] !== undefined) {
+    if ($('#setting-compression-proactive-threshold') && _isFiniteRestore(s['compression-proactive-threshold'])) {
       $('#setting-compression-proactive-threshold').value = s['compression-proactive-threshold'];
     }
-    if ($('#setting-compression-context-reserve-tokens') && s['compression-context-reserve-tokens'] !== undefined) {
+    if ($('#setting-compression-context-reserve-tokens') && _isFiniteRestore(s['compression-context-reserve-tokens'])) {
       $('#setting-compression-context-reserve-tokens').value = s['compression-context-reserve-tokens'];
     }
-    if ($('#setting-compression-fraction') && s['compression-fraction'] !== undefined) {
+    if ($('#setting-compression-fraction') && _isFiniteRestore(s['compression-fraction'])) {
       $('#setting-compression-fraction').value = s['compression-fraction'];
     }
 
     // MCP settings restore (workAccessFoldersRW block follows below)
     if (workAccessFoldersRW) {
-      if (s['work-access-folders-rw'] !== undefined) {
+      if (_present(s['work-access-folders-rw'])) {
         workAccessFoldersRW.value = s['work-access-folders-rw'];
       }
     }
-    if (workAccessFoldersRO && s['work-access-folders-ro'] !== undefined) {
+    if (workAccessFoldersRO && _present(s['work-access-folders-ro'])) {
       workAccessFoldersRO.value = s['work-access-folders-ro'];
     }
 
-    if (defaultWorkspace && s['default-workspace'] !== undefined) {
+    if (defaultWorkspace && _present(s['default-workspace'])) {
       defaultWorkspace.textContent = s['default-workspace'];
       defaultWorkspace.title = s['default-workspace'];
     }
@@ -1445,19 +1458,19 @@ function loadSettings() {
       });
     }
 
-    if (afkToggle && s['afk-enabled'] !== undefined) {
+    if (afkToggle && _present(s['afk-enabled'])) {
       afkToggle.checked = s['afk-enabled'];
     }
-    if (settingAfkMessage && s['afk-message'] !== undefined) {
+    if (settingAfkMessage && _present(s['afk-message'])) {
       settingAfkMessage.value = s['afk-message'];
     }
-    if (autoSecurityToggle && s['auto-security'] !== undefined) {
+    if (autoSecurityToggle && _present(s['auto-security'])) {
       autoSecurityToggle.checked = s['auto-security'];
       state.autoSecurity = s['auto-security'];
     }
 
     // Async shell console window toggle
-    if (settingAsyncShellConsoleWindow && s['async-shell-console-window'] !== undefined) {
+    if (settingAsyncShellConsoleWindow && _present(s['async-shell-console-window'])) {
       settingAsyncShellConsoleWindow.checked = s['async-shell-console-window'];
     }
 
@@ -5307,13 +5320,15 @@ function getGenerateCfg() {
   if ($('#setting-api-key') && $('#setting-api-key').value.trim()) cfg.api_key = $('#setting-api-key').value.trim();
   if ($('#setting-model') && $('#setting-model').value.trim()) cfg.model = $('#setting-model').value.trim();
 
-  if ($('#setting-temperature')) cfg.temperature = parseFloat($('#setting-temperature').value);
-  if ($('#setting-top-p')) cfg.top_p = parseFloat($('#setting-top-p').value);
-  if ($('#setting-top-k')) cfg.top_k = parseInt($('#setting-top-k').value);
-  if ($('#setting-min-p')) cfg.min_p = parseFloat($('#setting-min-p').value);
-  if ($('#setting-repeat-penalty')) cfg.repeat_penalty = parseFloat($('#setting-repeat-penalty').value);
-  if ($('#setting-presence-penalty')) cfg.presence_penalty = parseFloat($('#setting-presence-penalty').value);
-  if ($('#setting-frequency-penalty')) cfg.frequency_penalty = parseFloat($('#setting-frequency-penalty').value);
+  // Only assign when the parsed value is finite — empty/invalid input would otherwise produce
+  // NaN → JSON null, which gets stored in localStorage and pushed to the server on connect.
+  const _t = parseFloat($('#setting-temperature') ? $('#setting-temperature').value : ''); if (Number.isFinite(_t)) cfg.temperature = _t;
+  const _tp = parseFloat($('#setting-top-p') ? $('#setting-top-p').value : ''); if (Number.isFinite(_tp)) cfg.top_p = _tp;
+  const _tk = parseInt($('#setting-top-k') ? $('#setting-top-k').value : '', 10); if (Number.isFinite(_tk)) cfg.top_k = _tk;
+  const _mp = parseFloat($('#setting-min-p') ? $('#setting-min-p').value : ''); if (Number.isFinite(_mp)) cfg.min_p = _mp;
+  const _rp = parseFloat($('#setting-repeat-penalty') ? $('#setting-repeat-penalty').value : ''); if (Number.isFinite(_rp)) cfg.repeat_penalty = _rp;
+  const _pp = parseFloat($('#setting-presence-penalty') ? $('#setting-presence-penalty').value : ''); if (Number.isFinite(_pp)) cfg.presence_penalty = _pp;
+  const _fp = parseFloat($('#setting-frequency-penalty') ? $('#setting-frequency-penalty').value : ''); if (Number.isFinite(_fp)) cfg.frequency_penalty = _fp;
   if ($('#setting-max-tokens')) cfg.max_tokens = parseInt($('#setting-max-tokens').value) || 8192;
   if ($('#setting-max-context')) cfg.max_input_tokens = parseInt($('#setting-max-context').value) || 32768;
 
@@ -5337,7 +5352,9 @@ function getGenerateCfg() {
   if ($('#setting-loop-confirm-required')) cfg.loop_confirm_required = parseInt($('#setting-loop-confirm-required').value) || 3;
   if ($('#setting-loop-cooldown-feeds')) cfg.loop_cooldown_feeds = parseInt($('#setting-loop-cooldown-feeds').value) || 50;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
-  if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
+  // Empty input → NaN; fall back to the HTML default (3). Use an explicit NaN check (NOT `|| 3`)
+  // so a legitimate `0` (no rollbacks) is preserved — `0 || 3` would wrongly coerce it to 3. `-1` (unlimited) also survives.
+  if ($('#setting-max-rollbacks')) { const _mar = parseInt($('#setting-max-rollbacks').value); cfg.max_auto_rollbacks = Number.isNaN(_mar) ? 3 : _mar; }
   if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value) || 900;
   if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value) || 900;
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
