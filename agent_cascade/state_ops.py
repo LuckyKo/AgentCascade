@@ -190,6 +190,31 @@ def restore_state(api_base: str, model: str, label: str) -> bool:
         return False
 
 
+def unload_all_models(api_base: str) -> bool:
+    """POST /v1/unload_all on the llama-autoloader to free VRAM.
+
+    Used by image_gen before running ComfyUI so the LLM's resident model is
+    evicted and its VRAM is available for the diffusion model. Best-effort:
+    failures are logged (warning) and reported via the return value, never raised.
+
+    Args:
+        api_base: The autoloader's API base URL (e.g., "http://localhost:8080/v1").
+
+    Returns:
+        True if unload succeeded (HTTP 200), False otherwise.
+    """
+    try:
+        base = _normalize_api_base(api_base)
+        resp = httpx.post(f"{base}/v1/unload_all", timeout=60)
+        if resp.status_code != 200:
+            logger.warning("[state_ops] unload_all returned status %d", resp.status_code)
+            return False
+        return True
+    except Exception as e:
+        logger.warning("[state_ops] unload_all failed for %s: %s", api_base, e)
+        return False
+
+
 def is_autoloader_endpoint(api_base: str) -> bool:
     """Check if endpoint points to llama-autoloader."""
     return ':1234/' in api_base or ':9123/' in api_base

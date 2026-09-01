@@ -1172,6 +1172,74 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         await _broadcast_state()
         return {"status": "ok"}
 
+    # ── Image Gen Config Endpoints ─────────────────────────────────────────
+    # Config lives at <AgentCascade_root>/config/image_gen.json. api_server.py is
+    # inside agent_cascade/, so the project root is one level up (parent.parent).
+    _image_gen_config_path = Path(__file__).resolve().parent.parent / "config" / "image_gen.json"
+
+    @app.get("/api/image_gen")
+    async def get_image_gen_config():
+        """Return current image gen config."""
+        from agent_cascade.tools.image_gen import _get_image_gen_config
+        return _get_image_gen_config()
+
+    @app.post("/api/image_gen")
+    async def save_image_gen_config(request: Request):
+        """Save image gen config. Validates URL format and timeout range."""
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"message": "Invalid JSON body"})
+
+        if not isinstance(data, dict):
+            return JSONResponse(status_code=400, content={"message": "Body must be a JSON object"})
+
+        # Validate URL (must start with http:// or https://)
+        url = data.get('url', '')
+        if not isinstance(url, str) or not (url.startswith('http://') or url.startswith('https://')):
+            return JSONResponse(status_code=400, content={"message": "url must start with http:// or https://"})
+
+        # Validate timeout (30-600 seconds). Accept int or numeric string; reject
+        # floats (int() would silently truncate e.g. 180.5 → 180) and bools.
+        timeout = data.get('timeout', 180)
+        if isinstance(timeout, float):
+            return JSONResponse(status_code=400, content={"message": "timeout must be an integer"})
+        try:
+            timeout = int(timeout)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"message": "timeout must be an integer"})
+        if not (30 <= timeout <= 600):
+            return JSONResponse(status_code=400, content={"message": "timeout must be between 30 and 600 seconds"})
+
+        config = {
+            'type': data.get('type', 'comfyui'),
+            'url': url,
+            'workflow_dir': data.get('workflow_dir', ''),
+            'timeout': timeout,
+            'default_workflow': data.get('default_workflow', ''),
+        }
+
+        try:
+            _image_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(_image_gen_config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2)
+        except OSError as e:
+            return JSONResponse(status_code=500, content={"message": f"Failed to write config: {e}"})
+
+        from agent_cascade.tools.image_gen import _invalidate_image_gen_config
+        _invalidate_image_gen_config()
+        return {"status": "ok"}
+
+    @app.get("/api/image_gen/workflows")
+    async def list_image_gen_workflows():
+        """List available workflow files from the configured workflow_dir."""
+        from agent_cascade.tools.image_gen import _get_image_gen_config, _list_workflows
+        cfg = _get_image_gen_config()
+        wf_dir = cfg.get('workflow_dir', '')
+        if not wf_dir:
+            return []
+        return _list_workflows(wf_dir)
+
     # ── start_gen wrapper: spawns run_agent_thread in a daemon thread ─────
     def start_gen(history, runner, gen_id, loop, target=None):
         threading.Thread(target=run_agent_thread, args=(history, runner, gen_id, loop, target), daemon=True).start()

@@ -6277,6 +6277,175 @@ function renderAgentApiAssignments() {
   });
 }
 
+// ── Image Generation Settings (separate REST resource, not per-endpoint) ─────
+// Config lives server-side at <AgentCascade_root>/config/image_gen.json and is
+// read/written via /api/image_gen — independent of the localStorage settings blob.
+
+// Fallback directory used only to seed the workflow pulldown on the very first
+// load when no config exists yet (the backend has no server-side default). Once
+// a config is saved, the real path always comes from GET /api/image_gen.
+const IG_DEFAULT_WORKFLOW_DIR = 'N:/work/WD/AgentCascade/config/workflows';
+let igWorkflowsTimer = null;  // debounce handle for workflow-dir → re-fetch
+let igWorkflowsSeq = 0;       // discard stale async responses (rapid dir changes)
+
+function _igSetStatus(msg, type) {
+  const el = document.getElementById('ig-status');
+  if (!el) return;
+  const colors = { ok: 'var(--accent)', error: '#ff6b6b', info: 'var(--text-muted)' };
+  el.style.color = colors[type] || colors.info;
+  el.textContent = msg || '';
+}
+
+function _igShowSaved() {
+  _igSetStatus('✓ Saved', 'ok');
+  clearTimeout(_igShowSaved._t);
+  _igShowSaved._t = setTimeout(() => _igSetStatus('', 'info'), 2500);
+}
+
+// Populate the Default Workflow pulldown from GET /api/image_gen/workflows.
+// Each option's value is the full path; display text is just the filename (stem).
+async function loadImageGenWorkflows(selectWorkflow) {
+  const sel = document.getElementById('ig-default-workflow');
+  if (!sel) return;
+  // Bump the sequence so a stale response from an earlier (now-superseded)
+  // fetch can't overwrite a newer one after rapid directory changes.
+  const seq = ++igWorkflowsSeq;
+  let workflows = [];
+  try {
+    const res = await fetch('/api/image_gen/workflows');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) workflows = data;
+    }
+  } catch (err) {
+    console.warn('Failed to fetch image gen workflows:', err);
+  }
+  if (seq !== igWorkflowsSeq) return; // a newer request superseded this one
+
+  sel.innerHTML = '<option value="">— none —</option>' + workflows.map(w =>
+    `<option value="${escapeHtml(w.path)}">${escapeHtml(w.name)}</option>`
+  ).join('');
+
+  // Restore the saved selection if it is still present in the list.
+  if (selectWorkflow) {
+    const match = [...sel.options].some(o => o.value === selectWorkflow);
+    sel.value = match ? selectWorkflow : '';
+  } else {
+    sel.value = '';
+  }
+}
+
+// Load current config from GET /api/image_gen and populate the fields.
+async function loadImageGenSettings() {
+  const igType = document.getElementById('ig-type');
+  const igUrl = document.getElementById('ig-url');
+  const igDir = document.getElementById('ig-workflow-dir');
+  const igTimeout = document.getElementById('ig-timeout');
+  if (!igType || !igUrl || !igDir || !igTimeout) return;
+
+  let cfg = {};
+  try {
+    const res = await fetch('/api/image_gen');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === 'object') cfg = data;
+    }
+  } catch (err) {
+    console.warn('Failed to load image gen settings:', err);
+  }
+
+  igType.value = cfg.type || 'comfyui';
+  igUrl.value = cfg.url || '';
+  igDir.value = cfg.workflow_dir || IG_DEFAULT_WORKFLOW_DIR;
+  igTimeout.value = (cfg.timeout != null) ? cfg.timeout : 180;
+
+  await loadImageGenWorkflows(cfg.default_workflow);
+}
+
+// Save via POST /api/image_gen. Handles both {status:"ok"} and {ok:true},
+// and surfaces server errors ({message}/{error}).
+async function saveImageGenSettings() {
+  const igType = document.getElementById('ig-type');
+  const igUrl = document.getElementById('ig-url');
+  const igDir = document.getElementById('ig-workflow-dir');
+  const igWf = document.getElementById('ig-default-workflow');
+  const igTimeout = document.getElementById('ig-timeout');
+  if (!igType || !igUrl || !igDir || !igWf || !igTimeout) return;
+
+  // Clamp timeout to the allowed range so we don't rely solely on server validation.
+  let timeout = parseInt(igTimeout.value, 10);
+  if (isNaN(timeout)) timeout = 180;
+  timeout = Math.min(600, Math.max(30, timeout));
+  igTimeout.value = String(timeout);
+
+  const url = igUrl.value.trim();
+  // Cheap client-side check mirrors the backend rule (must be http/https) so a
+  // bad URL is caught before the round-trip.
+  if (!/^https?:\/\//i.test(url)) {
+    _igSetStatus('✕ Server URL must start with http:// or https://', 'error');
+    return;
+  }
+
+  const body = {
+    type: igType.value,
+    url: url,
+    workflow_dir: igDir.value.trim(),
+    default_workflow: igWf.value,
+    timeout: timeout
+  };
+
+  try {
+    const res = await fetch('/api/image_gen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+
+    if (res.ok && (data.status === 'ok' || data.ok === true)) {
+      _igShowSaved();
+    } else {
+      const msg = data.message || data.error || `Save failed (${res.status})`;
+      _igSetStatus('✕ ' + msg, 'error');
+    }
+  } catch (err) {
+    _igSetStatus('✕ Save failed: ' + err.message, 'error');
+  }
+}
+
+function initImageGenSettings() {
+  const igSave = document.getElementById('ig-save');
+  if (igSave) {
+    igSave.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't collapse the settings section
+      saveImageGenSettings();
+    });
+  }
+
+  // Debounced re-fetch of the workflow pulldown when the directory changes.
+  const igDir = document.getElementById('ig-workflow-dir');
+  if (igDir) {
+    igDir.addEventListener('change', () => {
+      clearTimeout(igWorkflowsTimer);
+      igWorkflowsTimer = setTimeout(() => loadImageGenWorkflows(), 400);
+    });
+  }
+}
+
+// Reload config whenever the Agent & Tools → System sub-tab is shown so edits
+// made elsewhere (another agent, a direct file edit) are always reflected. The
+// GET is cheap and idempotent, so re-fetching on every tab switch is fine.
+document.querySelectorAll('.settings-sub-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.target === 'subtab-system') {
+      loadImageGenSettings();
+    }
+  });
+});
+
+initImageGenSettings();
+
 function sendApiRouterUpdate() {
   if (!state.api_router) return;
   // Send the bulk update via WebSocket

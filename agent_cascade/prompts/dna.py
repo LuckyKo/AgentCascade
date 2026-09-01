@@ -50,10 +50,12 @@ AVAILABLE_TOOLS: List[str] = [
     'scan_skills',      # Scan registered skills and return matching skills with relevance scores
     'propose_skill',    # Propose a new reusable skill for future tasks
     'load_skill',       # Load registered skill instructions into current context at runtime
+
+    # Image generation (ComfyUI text-to-image / SVG rendering)
+    'image_gen',        # Generate an image from a text prompt or render SVG code
 ]
 
 # Tools NOT in AVAILABLE_TOOLS (hidden from agents, used internally only):
-#   image_gen      — Image generation service
 #   storage        — Internal storage tool
 #   retrieval      — RAG retrieval engine
 #   doc_parser     — Document parser
@@ -383,14 +385,18 @@ TOOL_METADATA = {
     },
     'image_gen': {
         'description': (
-            'An image generation service that takes text descriptions as input and returns a URL of the image.'
+            "Generate an image from a text prompt via ComfyUI, or render SVG code to an image. "
+            "Returns the image with a caption, same format as view_image. "
+            "For text prompts: describe what you want to see. For SVG: provide the full SVG markup. "
+            "Use the 'workflow' parameter (full path to JSON) to select which saved workflow to use."
         ),
         'parameters': {
-            'prompt': (
-                'Detailed description of the desired content of the generated image. '
-                'Please keep the specific requirements such as text from the original request fully intact. '
-                'Omission is prohibited.'
-            )
+            'prompt': 'Text description for image generation, or SVG code to render',
+            'negative_prompt': 'Elements to exclude from the generated image (API only)',
+            'workflow': 'Full path to a ComfyUI workflow JSON file. Omit to use the default from settings.',
+            'width': 'Output width in pixels (overrides workflow default)',
+            'height': 'Output height in pixels (overrides workflow default)',
+            'seed': 'Random seed for reproducibility (random if omitted)'
         }
     },
     'web_search': {
