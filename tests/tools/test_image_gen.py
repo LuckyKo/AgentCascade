@@ -538,13 +538,47 @@ class TestReturnFormat:
         assert isinstance(result[0], ContentItem)
         assert result[0].image == "/tmp/media/imggen_test.png"
         assert result[0].text is None
-        # Image item left uncaptioned so the return path captions it.
-        assert not getattr(result[0], 'caption', None)
+        # The descriptive line is attached as the image item's caption so the return-path
+        # guard (_has_uncaptioned_images) skips re-captioning a fully-local SVG render.
+        assert getattr(result[0], 'caption', None) == result[1].text
         assert isinstance(result[1], ContentItem)
         assert "Generated image" in result[1].text
         assert "/tmp/media/imggen_test.png" in result[1].text
         assert "200x100" in result[1].text
         assert "source=svg" in result[1].text
+
+    def test_svg_image_item_captions_so_return_path_skips_recaptioning(self):
+        """Regression: the SVG path attaches a caption to the image item, so the router's
+        return-path guard (_has_uncaptioned_images) returns False — no second vision call.
+        This is the core of the redundant re-captioning fix (Option A)."""
+        from agent_cascade.api_router_pkg.router import APIRouter
+
+        tool = ImageGen()
+        svg = '<svg width="200" height="100"><rect width="200" height="100"/></svg>'
+        with patch("agent_cascade.tools.image_gen._render_svg_to_png_bytes",
+                   return_value=b"fake_png_bytes"), \
+             patch("agent_cascade.tools.image_gen.save_image_to_media",
+                   return_value="/tmp/media/imggen_test.png"):
+            result = tool.call({"prompt": svg})
+
+        # Wrap the tool result in a FUNCTION message (as _assemble_tool_result does) and
+        # confirm the guard no longer flags it as needing captioning.
+        from agent_cascade.llm.schema import Message, FUNCTION
+        fn_msg = Message(role=FUNCTION, name="image_gen", content=list(result))
+        assert APIRouter._has_uncaptioned_images([fn_msg]) is False
+
+    def test_comfyui_image_item_always_captioned(self):
+        """Regression: the ComfyUI path always attaches a caption (vision alt-text when
+        available, descriptive line as fallback), so _has_uncaptioned_images is False in
+        BOTH cases — no redundant re-caption even when vision captioning fails."""
+        from agent_cascade.api_router_pkg.router import APIRouter
+        from agent_cascade.llm.schema import Message, FUNCTION
+
+        for caption_return in ("A cat sitting on a mat.", None):
+            tool = ImageGen()
+            result = self._run_text_prompt_with_caption(tool, caption_return)
+            fn_msg = Message(role=FUNCTION, name="image_gen", content=list(result))
+            assert APIRouter._has_uncaptioned_images([fn_msg]) is False
 
     def test_missing_prompt_raises_validation_error(self):
         """jsonschema validation rejects missing required 'prompt' field."""
@@ -696,9 +730,10 @@ class TestReturnFormat:
         assert result[0].image == "/tmp/media/out.png"
         assert result[0].caption == "A cat sitting on a mat."
 
-    def test_feedback_no_caption_when_captioning_fails(self):
-        """When captioning yields nothing (no vision endpoint / failure), feedback is
-        just the generated-image line and the image item has no caption — no crash."""
+    def test_feedback_falls_back_to_descriptive_caption_when_captioning_fails(self):
+        """When captioning yields nothing (no vision endpoint / failure), the descriptive
+        line is attached as the image item's caption so the return-path guard
+        (_has_uncaptioned_images) never re-captions an already-described image — no crash."""
         tool = ImageGen()
         result = self._run_text_prompt_with_caption(tool, None)
 
@@ -706,8 +741,8 @@ class TestReturnFormat:
         text = result[1].text
         assert "Caption:" not in text
         assert text.startswith("Generated image: /tmp/media/out.png (512x512, workflow=")
-        # No caption metadata on the image item.
-        assert not getattr(result[0], 'caption', None)
+        # The descriptive line is used as the caption fallback so re-captioning is skipped.
+        assert getattr(result[0], 'caption', None) == text
 
     def test_vram_save_succeeds_unload_fails_still_restores(self):
         """When save_instance_state succeeds but unload_all_models fails,

@@ -577,10 +577,13 @@ class ImageGen(BaseTool):
             return [ContentItem(text=f"ERROR: Failed to save rendered image: {e}")]
 
         w, h = _svg_dimensions(svg_text)
-        # Match the ComfyUI path's feedback shape (absolute path + dimensions). The image
-        # item is left uncaptioned so the return path captions it like any other image.
+        # Match the ComfyUI path's feedback shape (absolute path + dimensions). Attach the
+        # descriptive line as the image item's caption so the return-path guard
+        # (_has_uncaptioned_images) skips re-captioning — the SVG render is fully local and
+        # already described, so a second vision call would be pure waste. The separate text
+        # item is kept for text-only agents; the caption does not strip image pixels.
         feedback = f"Generated image: {media_path} ({w}x{h}, source=svg)"
-        return [ContentItem(image=media_path), ContentItem(text=feedback)]
+        return [ContentItem(image=media_path, caption=feedback), ContentItem(text=feedback)]
 
     # ------------------------------------------------------------------ #
     #  Text prompt path (ComfyUI)                                        #
@@ -706,7 +709,11 @@ class ImageGen(BaseTool):
             self._restore_vram_state(instance, held)
 
         feedback = f"Generated image: {media_path} ({width}x{height}, workflow={wf_name})"
-        return [ContentItem(image=media_path, caption=img_caption), ContentItem(text=feedback)]
+        # Prefer the vision-generated alt-text; if none was produced (no vision endpoint /
+        # captioning failed → img_caption is None), fall back to the descriptive line so the
+        # return-path guard (_has_uncaptioned_images) never re-captions an already-described
+        # image. The separate text item is kept for text-only agents.
+        return [ContentItem(image=media_path, caption=img_caption or feedback), ContentItem(text=feedback)]
 
     @staticmethod
     def _restore_vram_state(instance, held: dict) -> None:

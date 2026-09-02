@@ -678,7 +678,12 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     max_short_side=1080,
                 )
                 return [
-                    ContentItem(image=media_path),
+                    # Attach the descriptive line as the image item's caption so the
+                    # return-path guard (_has_uncaptioned_images) skips re-captioning.
+                    # The separate text item is kept so text-only agents still get the
+                    # description; the caption does NOT strip the image data (vision path
+                    # still sends pixels via get_type_and_value, which ignores caption).
+                    ContentItem(image=media_path, caption=caption),
                     ContentItem(text=caption)
                 ]
             except MediaStorageError as e:
@@ -693,7 +698,8 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     base64_data_url = str(fallback_path.as_uri())
 
                 return [
-                    ContentItem(image=base64_data_url),
+                    # Same caption-attachment rationale as the media-path branch above.
+                    ContentItem(image=base64_data_url, caption=caption),
                     ContentItem(text=caption)
                 ]
         except (ValueError, TypeError) as e:
