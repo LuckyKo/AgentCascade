@@ -1334,9 +1334,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             logger.error(f"Failed to find file: {e}")
             return JSONResponse(status_code=500, content={"message": str(e)})
 
+    # Dev tool: serve the frontend with no-cache so JS/CSS edits take effect on a
+    # normal page refresh instead of being served from the browser's memory/disk cache.
+    _NO_CACHE_HEADERS = {"Cache-Control": "no-store, max-age=0, must-revalidate"}
+
     @app.get("/")
     async def serve_index():
-        return FileResponse(os.path.join(web_ui_dir, 'index.html'))
+        return FileResponse(os.path.join(web_ui_dir, 'index.html'), headers=_NO_CACHE_HEADERS)
 
     @app.get("/{path:path}")
     async def serve_static(path: str):
@@ -1345,9 +1349,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if not (file_path.startswith(web_ui_dir + os.sep) or file_path == web_ui_dir):
             return JSONResponse(status_code=403, content={"message": "Forbidden"})
         if os.path.isfile(file_path):
-            return FileResponse(file_path)
+            return FileResponse(file_path, headers=_NO_CACHE_HEADERS)
         # SPA fallback
-        return FileResponse(os.path.join(web_ui_dir, 'index.html'))
+        return FileResponse(os.path.join(web_ui_dir, 'index.html'), headers=_NO_CACHE_HEADERS)
 
     @app.post("/api/parse")
     async def parse_document(file: UploadFile = File(...)):
