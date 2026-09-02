@@ -2377,6 +2377,9 @@ class APIRouter:
             Modified message list with captions attached to images.
         """
         if not self._has_uncaptioned_images(messages):
+            # Observability: make the "already captioned → skip" path visible so a
+            # redundant re-caption (or its absence) is diagnosable from the console.
+            logger.debug("[APIRouter] Captioning skipped — no uncaptioned images present")
             return messages
 
         from agent_cascade.llm.schema import ContentItem, Message
@@ -2412,6 +2415,14 @@ class APIRouter:
 
         if not uncaptioned_items:
             return messages
+
+        # Observability: unambiguous "caption triggered" marker — fires only when a real
+        # vision caption call is about to be made (i.e. NOT the already-captioned skip path).
+        _cap_model = vision_cfg.get('model', 'unknown')
+        logger.info(
+            f"[APIRouter] Captioning {len(uncaptioned_items)} image(s) via vision endpoint "
+            f"model='{_cap_model}' instance={instance_name or '-'}"
+        )
 
         # ── Side-call slot sync (plan §3.10): acquire-or-keep, NEVER drop. ──
         # When the vision endpoint is conc=0 and the owning instance does not already
