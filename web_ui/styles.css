@@ -1136,6 +1136,7 @@ body {
 }
 
 .setting-field input[type="text"],
+.setting-field input[type="url"],
 .setting-field input[type="password"],
 .setting-field input[type="number"],
 .setting-field select {

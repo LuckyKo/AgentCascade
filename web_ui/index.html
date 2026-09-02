@@ -530,46 +530,6 @@
                   </div>
                 </div>
 
-                <!-- Image Generation Section (separate REST resource, not per-endpoint) -->
-                <div class="settings-section" id="image-gen-section" style="border:1px solid var(--accent-dim);border-radius:6px;margin:0 8px 12px;overflow:hidden;">
-                  <h3 class="settings-section-title">🎨 Image Generation</h3>
-                  <div class="settings-section-body" id="image-gen-body">
-                    <label class="setting-field">
-                      <span>Type</span>
-                      <select id="ig-type" style="width:100%;">
-                        <option value="comfyui">ComfyUI</option>
-                      </select>
-                    </label>
-                    <label class="setting-field">
-                      <span title="Base URL of the running ComfyUI server">Server URL</span>
-                      <input type="url" id="ig-url" placeholder="http://localhost:8188"
-                        style="width:100%;padding:7px 10px;border:1px solid var(--bg-elevated);border-radius:var(--radius-sm);background:var(--bg-tertiary);color:var(--text-primary);font-size:13px;font-family:var(--font-sans);outline:none;transition:all 120ms ease;">
-                    </label>
-                    <label class="setting-field">
-                      <span title="Directory scanned for ComfyUI workflow JSON files">Workflow Directory</span>
-                      <input type="text" id="ig-workflow-dir" placeholder="<AgentCascade_root>/config/workflows">
-                    </label>
-                    <label class="setting-field">
-                      <span title="Workflow used when the agent does not specify one">Default Workflow</span>
-                      <div style="display:flex;gap:6px;align-items:center;">
-                        <select id="ig-default-workflow" style="flex:1;">
-                          <option value="">— none —</option>
-                        </select>
-                        <button id="ig-refresh-workflows" class="btn-small" title="Re-scan workflow directory for new files"
-                          style="padding:4px 8px;font-size:13px;flex-shrink:0;">⟳</button>
-                      </div>
-                    </label>
-                    <div style="display:flex;gap:8px;">
-                      <label class="setting-field" style="flex:1;">
-                        <span title="Max seconds to wait for a generation before giving up">Timeout (s)</span>
-                        <input type="number" id="ig-timeout" min="30" max="600" step="5" value="180">
-                      </label>
-                      <button id="ig-save" class="btn-small" style="align-self:flex-end;margin-bottom:2px;">Save</button>
-                    </div>
-                    <div id="ig-status" style="font-size:11px;min-height:14px;"></div>
-                  </div>
-                </div>
-
                 <!-- Multi-Agent Control Section (all global settings) -->
                 <div class="settings-section">
                   <h3 class="settings-section-title">Multi-Agent Control</h3>
@@ -725,6 +685,44 @@
                       <span>List Dir Char Limit</span>
                       <input type="number" id="setting-list-dir-char-limit" min="-1" max="8000" step="100" value="3000" />
                     </label>
+                  </div>
+                </div>
+
+                <!-- Image Generation Section (separate REST resource, not per-endpoint) -->
+                <div class="settings-section" id="image-gen-section">
+                  <h3 class="settings-section-title">🎨 Image Generation</h3>
+                  <div class="settings-section-body" id="image-gen-body">
+                    <label class="setting-field">
+                      <span>Type</span>
+                      <select id="ig-type">
+                        <option value="comfyui">ComfyUI</option>
+                      </select>
+                    </label>
+                    <label class="setting-field">
+                      <span title="Base URL of the running ComfyUI server">Server URL</span>
+                      <input type="url" id="ig-url" placeholder="http://localhost:8188">
+                    </label>
+                    <label class="setting-field">
+                      <span title="Directory scanned for ComfyUI workflow JSON files">Workflow Directory</span>
+                      <input type="text" id="ig-workflow-dir" placeholder="<AgentCascade_root>/config/workflows">
+                    </label>
+                    <label class="setting-field">
+                      <span title="Workflow used when the agent does not specify one">Default Workflow</span>
+                      <div style="display:flex;gap:6px;align-items:center;">
+                        <select id="ig-default-workflow" style="flex:1;">
+                          <option value="">— none —</option>
+                        </select>
+                        <button id="ig-refresh-workflows" class="btn-small" title="Re-scan workflow directory for new files">⟳</button>
+                      </div>
+                    </label>
+                    <div style="display:flex;gap:8px;">
+                      <label class="setting-field" style="flex:1;">
+                        <span title="Max seconds to wait for a generation before giving up">Timeout (s)</span>
+                        <input type="number" id="ig-timeout" min="30" max="600" step="5" value="180">
+                      </label>
+                      <button id="ig-save" class="btn-small">Save</button>
+                    </div>
+                    <div id="ig-status" style="font-size:11px;min-height:14px;"></div>
                   </div>
                 </div>
               </div>
