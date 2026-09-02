@@ -17,11 +17,14 @@ from agent_cascade.api_integration_pkg.cache import _cache_mgr, _STREAM_TOKEN_ST
 from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
 
 # ────────────────────────────────────────────────────────────────────────────
-# STREAMING BACKLOG PROBE — TEMPORARY DIAGNOSTIC (evidence-gathering only)
-# Set False / remove after diagnosis. When False, nothing below is logged and
-# there is no measurable overhead. See reports/streaming_backend_probe_HOWTO.md
+# STREAMING BACKLOG PROBE — DIAGNOSTIC (evidence-gathering only)
+# Off by default; enable with env var STREAM_BACKEND_DEBUG=1 to capture a
+# per-instance trace (qsize, yield→enqueue latency, GAPSTALL events) to
+# logs/stream_probe_backend.log. When off, nothing below is logged and there is
+# no measurable overhead. See reports/streaming_backend_probe_HOWTO.md
 # ────────────────────────────────────────────────────────────────────────────
-STREAM_BACKEND_DEBUG = False  # streaming backlog probe — code retained for per-instance "weird mode" diagnosis; set True to re-enable (see reports/streaming_backend_probe_HOWTO.md). Probe state is self-cleaning and a no-op when False.
+import os as _os
+STREAM_BACKEND_DEBUG = _os.environ.get("STREAM_BACKEND_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
 
 _PROBE_LOCK = threading.Lock()
 _PROBE_STATE: dict = {}
@@ -315,11 +318,18 @@ def broadcast_stream_update(
     resp_len = len(turn_output) if turn_output else 0
     len_changed = (resp_len != last_resp_len)
 
-    # Throttle: broadcast only on meaningful events or periodic interval
+    # Throttle: broadcast only on meaningful events or periodic interval.
+    # Streaming ticks are floored at MIN_STREAM_BROADCAST_INTERVAL (~5x/sec) so a burst
+    # of SSE chunks no longer triggers one full-payload build+send per chunk. Without this
+    # floor, the producer thread spent ~100% of its time building full-history payloads
+    # faster than the LLM produced tokens, starving new-token delivery ("weird mode").
+    # Committed messages (len_changed) and non-streaming metadata updates still pass
+    # through on the original 100ms cadence.
+    MIN_STREAM_BROADCAST_INTERVAL = 0.2
     should_broadcast = (
-        is_streaming_tick
-        or len_changed
-        or (now_sec - last_send > 0.1)  # 100ms throttle
+        len_changed
+        or (is_streaming_tick and (now_sec - last_send >= MIN_STREAM_BROADCAST_INTERVAL))
+        or (not is_streaming_tick and (now_sec - last_send > 0.1))  # 100ms throttle
     )
 
     if not should_broadcast:
