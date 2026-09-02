@@ -102,7 +102,7 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                         url = item.get('image_url', {}).get('url', '')
                         has_base64 = url.startswith('data:')
                         image_count += 1
-                        logger.debug(f'Vision payload: role={msg.get("role")}, image_url starts with data:={has_base64}, url_prefix={url[:50]}...')
+                        # logger.debug(f'Vision payload: role={msg.get("role")}, image_url starts with data:={has_base64}, url_prefix={url[:50]}...')
         if image_count > 0 and logger.isEnabledFor(logging.DEBUG):
             lite_messages = copy.deepcopy(new_messages)
             for msg in lite_messages:

@@ -434,6 +434,11 @@ class TextChatAtOAI(BaseFnCallModel):
         # if self.dynamic_model:
         #     logger.debug(f"LLM model selection: self.model={self.model!r}, original_model={self.original_model!r}, local_model={local_model!r}, request_model={request_model!r}")
 
+        # PROBE (gated on STREAM_BACKEND_DEBUG): per-stream token so concurrent
+        # streams on the SAME model don't interleave/corrupt chunk-cadence state.
+        import uuid as _uuid_probe
+        _probe_stream_id = _uuid_probe.uuid4().hex[:8]
+
         log_api_post = generate_cfg.pop('log_api_post', False)
 
         # Update local infrastructure state if changed in UI
@@ -521,6 +526,16 @@ class TextChatAtOAI(BaseFnCallModel):
                     if sse.data == "[DONE]":
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
+
+                    # ── PROBE (gated on STREAM_BACKEND_DEBUG): LLM SSE chunk cadence ──
+                    # Records when each real chunk arrives so we can distinguish
+                    # "LLM not streaming incrementally" (one burst at the end) from
+                    # "streaming fine but broadcast delayed". No-op when disabled.
+                    try:
+                        from agent_cascade.api_integration_pkg.streaming import _probe_llm_chunk
+                        _probe_llm_chunk(_probe_stream_id, request_model)
+                    except Exception:
+                        pass
 
                     # Update local model info if returned by the server
                     # NOTE: self.model is updated here for context window detection, but original_model
@@ -626,6 +641,13 @@ class TextChatAtOAI(BaseFnCallModel):
                                 tc.extra.update(extra)
                             res += full_tool_calls
                         yield res
+
+                # ── PROBE (gated on STREAM_BACKEND_DEBUG): flush LLM chunk-cadence summary ──
+                try:
+                    from agent_cascade.api_integration_pkg.streaming import _probe_llm_flush
+                    _probe_llm_flush(_probe_stream_id, request_model)
+                except Exception:
+                    pass
 
                 # If usage arrived after the last choices chunk (usage-only final chunk),
                 # emit it now so telemetry can pick it up

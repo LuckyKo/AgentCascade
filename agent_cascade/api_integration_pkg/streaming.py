@@ -21,10 +21,23 @@ from agent_cascade.api_integration_pkg.state_builder import build_stream_update_
 # Set False / remove after diagnosis. When False, nothing below is logged and
 # there is no measurable overhead. See reports/streaming_backend_probe_HOWTO.md
 # ────────────────────────────────────────────────────────────────────────────
-STREAM_BACKEND_DEBUG = False  # streaming backlog probe — diagnosis complete (Fix A+B verified); re-enable only when re-investigating a WS send-path stall. See reports/streaming_backend_probe_HOWTO.md
+STREAM_BACKEND_DEBUG = False  # streaming backlog probe — code retained for per-instance "weird mode" diagnosis; set True to re-enable (see reports/streaming_backend_probe_HOWTO.md). Probe state is self-cleaning and a no-op when False.
 
 _PROBE_LOCK = threading.Lock()
 _PROBE_STATE: dict = {}
+# Wall-clock of the most recent probe record per instance, used to detect
+# inter-tick GAPS (a "weird mode" stall shows up as a large gap between two
+# broadcast calls for the SAME instance while other instances keep streaming).
+_PROBE_LAST_WALL: dict = {}
+# Stale-entry eviction so _PROBE_STATE/_PROBE_LAST_WALL don't grow unbounded
+# over long runs with many agent instances. An instance not seen for more than
+# _PROBE_STALE_SECS is considered dead and removed from BOTH dicts. Cleanup is
+# opportunistic (see _probe_record): only when the dict grows past a small
+# threshold OR at most once per ~_PROBE_CLEANUP_INTERVAL_SECS wall-clock.
+_PROBE_STALE_SECS = 60.0
+_PROBE_CLEANUP_INTERVAL_SECS = 30.0
+_PROBE_CLEANUP_SIZE_THRESHOLD = 64
+_probe_last_cleanup_wall: float = 0.0
 
 
 def _probe_get_logger():
@@ -71,12 +84,34 @@ def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
     try:
         delay_ms = (t_enqueue - t_yield) * 1000.0
         now_wall = time.time()
+        # Producer thread identity — each instance should have its OWN producer
+        # thread; if a "weird" instance shares/loses its thread that's a clue.
+        tid = threading.get_ident()
         with _PROBE_LOCK:
             st = _PROBE_STATE.get(instance_name)
             if st is None:
                 st = {'count': 0, 'sum_ms': 0.0, 'max_ms': 0.0,
-                      'prev_delay_ms': None, 'last_log_wall': 0.0}
+                      'prev_delay_ms': None, 'last_log_wall': 0.0,
+                      'max_gap_ms': 0.0, 'tid': tid}
                 _PROBE_STATE[instance_name] = st
+
+            # ── Inter-tick GAP detection (KEY for "weird mode") ──────────────
+            # gap_ms = wall-clock since this instance's PREVIOUS broadcast call.
+            # A healthy streaming instance ticks every ~100ms; a stalled one
+            # shows a multi-second gap while OTHER instances keep ticking.
+            prev_wall = _PROBE_LAST_WALL.get(instance_name)
+            # First tick: no previous wall-clock to measure a gap against. The
+            # -1 sentinel is "not yet measurable" — skip the max update so it
+            # can't poison max_gap_ms, and log 0 instead of a negative value.
+            if prev_wall is None:
+                gap_ms = -1.0
+            else:
+                gap_ms = (now_wall - prev_wall) * 1000.0
+                if gap_ms > st['max_gap_ms']:
+                    st['max_gap_ms'] = gap_ms
+            # Flag a large inter-tick gap (>1.5s) as a potential stall event.
+            gap_stall = (gap_ms >= 1500.0)
+
             st['count'] += 1
             st['sum_ms'] += delay_ms
             if delay_ms > st['max_ms']:
@@ -89,25 +124,120 @@ def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
             # Sampling / threshold gating.
             heartbeat = (st['count'] % 50 == 0)
             over_thresh = (delay_ms > 100.0)
-            should_log = backlog or heartbeat or over_thresh
+            should_log = backlog or heartbeat or over_thresh or gap_stall
 
             if should_log:
                 avg_ms = st['sum_ms'] / st['count']
-                # Rate cap: ~1 line/sec per instance (backlog lines bypass the cap).
-                if not backlog and (now_wall - st['last_log_wall']) < 1.0:
+                # Rate cap: ~1 line/sec per instance (backlog/gap-stall bypass).
+                if not (backlog or gap_stall) and (now_wall - st['last_log_wall']) < 1.0:
                     pass  # suppress this sample to keep output non-spammy
                 else:
-                    _probe_get_logger().info(
-                        f"{'BACKLOG ' if backlog else ''}inst={instance_name} "
+                    tag = ('BACKLOG ' if backlog else '') + ('GAPSTALL ' if gap_stall else '')
+                    _log_probe(
+                        f"{tag}inst={instance_name} tid={tid % 100000} "
                         f"yield_to_enqueue_ms={delay_ms:.1f} avg={avg_ms:.1f} max={st['max_ms']:.1f} "
+                        f"gap_ms={max(0.0, gap_ms):.0f} max_gap_ms={st['max_gap_ms']:.0f} "
                         f"n={st['count']} resp_len={resp_len} tick={int(is_streaming_tick)} "
                         f"len_chg={int(len_changed)} qsize={qsize}"
                     )
                     st['last_log_wall'] = now_wall
 
             st['prev_delay_ms'] = delay_ms
+            _PROBE_LAST_WALL[instance_name] = now_wall
+
+            # Opportunistic stale-entry eviction (see _PROBE_STALE_SECS). Runs
+            # here while already holding _PROBE_LOCK; kept cheap — only when the
+            # dict has grown past a small threshold OR at most once per ~30s.
+            global _probe_last_cleanup_wall
+            if (len(_PROBE_STATE) > _PROBE_CLEANUP_SIZE_THRESHOLD
+                    or (now_wall - _probe_last_cleanup_wall) >= _PROBE_CLEANUP_INTERVAL_SECS):
+                _probe_last_cleanup_wall = now_wall
+                stale_cutoff = now_wall - _PROBE_STALE_SECS
+                # Evict instances whose most recent activity is older than the
+                # cutoff. Remove from BOTH dicts to keep them consistent.
+                for name in list(_PROBE_STATE.keys()):
+                    last_activity = max(
+                        _PROBE_LAST_WALL.get(name, 0.0),
+                        _PROBE_STATE[name].get('last_log_wall', 0.0),
+                    )
+                    if last_activity < stale_cutoff:
+                        del _PROBE_STATE[name]
+                        _PROBE_LAST_WALL.pop(name, None)
     except Exception:
         pass  # probe must never break the broadcast path
+
+
+# ── LLM SSE chunk-cadence probe (gated on STREAM_BACKEND_DEBUG) ──────────────
+# Keyed by a PER-STREAM token (uuid) passed from oai._chat_stream, so concurrent
+# streams on the SAME model don't interleave/corrupt state. Tracks the
+# inter-arrival gap of real SSE chunks so we can tell "LLM not streaming
+# incrementally" (one big burst at the end → huge final gap) from "streaming
+# fine but broadcast delayed" (steady small gaps). Non-spammy: logs on a large
+# gap (>1.5s, bypasses rate cap), every 20th chunk (rate-capped ~1 line/sec),
+# and once at stream end via _probe_llm_flush.
+_PROBE_LLM_STATE: dict = {}
+
+
+def _probe_llm_chunk(stream_id: str, model_name: str) -> None:
+    """Record one real SSE chunk arrival for the given stream. No-op when disabled."""
+    if not STREAM_BACKEND_DEBUG or not stream_id:
+        return
+    try:
+        now_wall = time.time()
+        with _PROBE_LOCK:
+            st = _PROBE_LLM_STATE.get(stream_id)
+            if st is None:
+                st = {'count': 0, 'last_wall': None, 'max_gap_ms': 0.0,
+                      'sum_gap_ms': 0.0, 'last_log_wall': 0.0, 'model': model_name}
+                _PROBE_LLM_STATE[stream_id] = st
+            gap_ms = (now_wall - st['last_wall']) * 1000.0 if st['last_wall'] is not None else -1.0
+            st['last_wall'] = now_wall
+            st['count'] += 1
+            if gap_ms > 0:
+                st['sum_gap_ms'] += gap_ms
+                if gap_ms > st['max_gap_ms']:
+                    st['max_gap_ms'] = gap_ms
+
+            big_gap = (gap_ms >= 1500.0)
+            periodic = (st['count'] % 20 == 0)
+            # Big-gap events are critical signal → always log (bypass rate cap).
+            # Periodic heartbeats are rate-capped to ~1 line/sec.
+            if big_gap or (periodic and (now_wall - st['last_log_wall']) >= 1.0):
+                avg_gap = st['sum_gap_ms'] / max(1, st['count'] - 1)
+                _log_probe(
+                    f"{'LLMGAP ' if big_gap else ''}llm_chunk stream={stream_id} model={model_name} "
+                    f"gap_ms={gap_ms:.0f} avg_gap_ms={avg_gap:.0f} max_gap_ms={st['max_gap_ms']:.0f} "
+                    f"chunks={st['count']}"
+                )
+                st['last_log_wall'] = now_wall
+    except Exception:
+        pass  # probe must never break the LLM stream path
+
+
+def _probe_llm_flush(stream_id: str, model_name: str) -> None:
+    """Log a final summary for one completed LLM stream, then reset its state."""
+    if not STREAM_BACKEND_DEBUG or not stream_id:
+        return
+    try:
+        with _PROBE_LOCK:
+            st = _PROBE_LLM_STATE.pop(stream_id, None)
+            if st is not None and st['count'] > 0:
+                avg_gap = st['sum_gap_ms'] / max(1, st['count'] - 1)
+                # A healthy stream has small steady gaps; a burst-at-end shows a
+                # huge max_gap with low chunk count. This line is the summary.
+                _log_probe(
+                    f"LLMDONE stream={stream_id} model={model_name} chunks={st['count']} "
+                    f"avg_gap_ms={avg_gap:.0f} max_gap_ms={st['max_gap_ms']:.0f}"
+                )
+    except Exception:
+        pass
+
+
+def _log_probe(msg: str) -> None:
+    """Emit one probe line, guarding against a failed logger (returns None)."""
+    lg = _probe_get_logger()
+    if lg is not None:
+        lg.info(msg)
 
 
 async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:

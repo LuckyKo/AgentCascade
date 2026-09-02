@@ -678,12 +678,12 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     max_short_side=1080,
                 )
                 return [
-                    # Attach the descriptive line as the image item's caption so the
-                    # return-path guard (_has_uncaptioned_images) skips re-captioning.
-                    # The separate text item is kept so text-only agents still get the
-                    # description; the caption does NOT strip the image data (vision path
-                    # still sends pixels via get_type_and_value, which ignores caption).
-                    ContentItem(image=media_path, caption=caption),
+                    # Leave the image item UNCAPTIONED so the return-path guard
+                    # (_has_uncaptioned_images) triggers a genuine vision/LLM caption via
+                    # caption_images(). The separate text item carries the descriptive line
+                    # for text-only agents; it does NOT count as an image caption, so it
+                    # cannot suppress real captioning. (Reverts 5089a51's pre-filled caption.)
+                    ContentItem(image=media_path),
                     ContentItem(text=caption)
                 ]
             except MediaStorageError as e:
@@ -698,8 +698,9 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     base64_data_url = str(fallback_path.as_uri())
 
                 return [
-                    # Same caption-attachment rationale as the media-path branch above.
-                    ContentItem(image=base64_data_url, caption=caption),
+                    # Leave uncaptioned so the return path generates a real vision/LLM
+                    # caption (same rationale as the media-path branch above).
+                    ContentItem(image=base64_data_url),
                     ContentItem(text=caption)
                 ]
         except (ValueError, TypeError) as e:

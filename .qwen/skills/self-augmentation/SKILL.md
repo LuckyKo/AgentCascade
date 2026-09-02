@@ -16,12 +16,12 @@ Agents must discover and load specialized skills when working on tasks that requ
 ## WHEN TO ACT (Concrete Triggers)
 
 - **When task mentions any technology, framework, library, or tool** (Docker, React, TensorFlow, etc.) → invoke the `scan_skills` tool with query='that technology' immediately
-- **When delegating to sub-agents** → ALWAYS include `load_skill=[...]` parameter in call_agent
-- **When you notice a recurring pattern worth capturing as a skill** (multi-step procedure, domain-specific knowledge not covered by existing skills, at least 5 tool calls with coherent workflow) → invoke `load_skill` with `skill_names=['skill-creator']` to get instructions, then create the new skill.
+- **When delegating to sub-agents** → include `load_skill=[...]` parameter in call_agent with appropriate skills or set it on `AUTO` (set on `NONE` only for simple tasks)
+- **When you notice a recurring pattern worth capturing as a skill** (multi-step procedure, domain-specific knowledge not covered by existing skills, at least 5 tool calls with coherent workflow) → invoke `load_skill` with `skill_names=['skill-creator']` to get instructions, then create the new skill using `propose_skill`.
 
 ## TOOL REFERENCE
 
-- **`load_skill` tool**: Loads skills into YOUR context. Accepts either a list of skill names (e.g., `["docker-best-practices"]`), the string `"AUTO"`, or the string `"NONE"`.
+- **`load_skill` tool**: Loads skills into YOUR context. Accepts either a list of skill names (e.g., `["docker-best-practices"]`).
 - **`call_agent` with `load_skill` parameter**: Loads skills into SUB-AGENT context. Use same format as above.
 
 Example call_agent usage:
@@ -31,32 +31,11 @@ call_agent(agent_class="coder", task="Set up Dockerfile", load_skill=["docker-be
 
 ## REQUIRED WORKFLOW
 
-1. **Scan**: Invoke the `scan_skills` tool with a query matching the technology name
+1. **Scan**: Invoke the `scan_skills` tool with a query matching the requirements
 2. **Load**: Invoke the `load_skill` tool to inject expertise
 3. **Execute**: Follow loaded guidelines in your task
-4. **Delegate**: Pass `load_skill=[...]` to sub-agents when needed
-
-## EXAMPLE PATTERNS
-
-**INCORRECT**
-Agent receives "Set up Kubernetes deployment" and proceeds without skill discovery. Result: Generic, potentially flawed guidance.
-
-**CORRECT**
-Invoke the `scan_skills` tool with query="kubernetes", then invoke the `load_skill` tool with skill_names=["kubernetes-best-practices"] before executing task.
-
-## EDGE CASES
-
-- **No relevant skills found**: Proceed with caution, explicitly note limitations in output
-- **Multiple skills match**: Choose based on relevance score from scan_skills results
-
-## OUTPUT QUALITY RISK
-
-Failing to load appropriate skills results in:
-- Generic or inaccurate guidance
-- Potential best practice violations requiring rework
-- Inefficient problem-solving approaches
-
-Proactively load skills to guarantee expert-level results.
+4. **Delegate**: Pass relevant skills to sub-agents when needed
+5. **Improve**: After using a skill and you notice issues with it or areas where it could be improved/polished, submit a new version under the same name using `propose_skill`
 
 ## PROJECT MEMORIES
 
