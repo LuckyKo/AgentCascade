@@ -588,6 +588,43 @@ class TestParseMultimodalContent:
             assert Path(img_val).exists(), f"Image {i+1} media file should exist: {img_val}"
             self._track(img_val)
 
+    def test_saved_to_notice_after_image(self):
+        """A single-image message yields an image item AND a 'Saved to:' text notice."""
+        from agent_cascade.api_server import _parse_multimodal_content
+
+        # Create a small image and encode as data URI
+        img = Image.new("RGB", (30, 30), color="green")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        data_uri = f"data:image/png;base64,{b64}"
+
+        input_text = f"![test]({data_uri})"
+
+        result = _parse_multimodal_content(input_text)
+
+        assert isinstance(result, list), f"Expected list for multimodal content, got {type(result)}"
+
+        image_items = [item for item in result if "image" in item]
+        text_items = [item for item in result if "text" in item]
+
+        assert len(image_items) == 1, f"Expected 1 image item, got {len(image_items)}: {result}"
+        image_value = image_items[0]["image"]
+        self._track(image_value)
+
+        # A 'Saved to:' notice must be present and match the saved path exactly.
+        expected_notice = f"Saved to: {image_value}"
+        assert any(item["text"] == expected_notice for item in text_items), \
+            f"Expected a 'Saved to:' notice for {image_value}, got text items: {text_items}"
+
+        # The pure-image input has no surrounding prose, so the ONLY text item must be
+        # the notice, and it must come immediately AFTER the image (order: image, note).
+        assert len(text_items) == 1, f"Expected exactly 1 text item (the notice), got {len(text_items)}: {result}"
+        img_idx = next(i for i, it in enumerate(result) if "image" in it)
+        note_idx = next(i for i, it in enumerate(result) if it.get("text") == expected_notice)
+        assert note_idx == img_idx + 1, \
+            f"'Saved to:' notice must immediately follow the image; got image@{img_idx}, note@{note_idx}: {result}"
+
 
 class TestViewImageIntegration:
     """Integration test for view_image tool returning path-based ContentItems."""

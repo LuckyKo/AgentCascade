@@ -43,6 +43,7 @@ def _parse_multimodal_content(text):
         try:
             media_path = save_image_from_data_uri(url)
             parts.append({'image': media_path})  # Path instead of base64
+            parts.append({'text': f"Saved to: {media_path}"})
         except MediaStorageError as e:
             # Fallback to inline base64 if media storage fails
             logger.warning(f"Media storage failed for user image, keeping inline base64: {e}")

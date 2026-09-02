@@ -684,7 +684,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     # for text-only agents; it does NOT count as an image caption, so it
                     # cannot suppress real captioning. (Reverts 5089a51's pre-filled caption.)
                     ContentItem(image=media_path),
-                    ContentItem(text=caption)
+                    ContentItem(text=f"{caption} Saved to: {media_path}")
                 ]
             except MediaStorageError as e:
                 # Fallback to base64 if media storage fails (disk full, permissions, etc.)
@@ -701,7 +701,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     # Leave uncaptioned so the return path generates a real vision/LLM
                     # caption (same rationale as the media-path branch above).
                     ContentItem(image=base64_data_url),
-                    ContentItem(text=caption)
+                    ContentItem(text=f"{caption} Media storage failed; served inline (base64). Source: {source_path}")
                 ]
         except (ValueError, TypeError) as e:
             # SVG parse errors from cairosvg come through as ValueError/TypeError
