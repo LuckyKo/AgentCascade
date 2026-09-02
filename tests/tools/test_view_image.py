@@ -1,17 +1,23 @@
 """Unit tests for the view_image tool (agent_cascade/tools/custom/file_ops.py::ViewImage).
 
-Focus: the redundant re-captioning fix (Option A).
+Focus: the image item is deliberately left UNCAPTIONED so the router's return-path guard
+(``_has_uncaptioned_images``) triggers a GENUINE vision/LLM caption via ``caption_images()``.
 
-view_image returns ``[ContentItem(image=...), ContentItem(text=caption)]``. Before the fix
-the image item's ``caption`` field was left empty, so the router's return-path guard
-(``_has_uncaptioned_images``) fired a SECOND vision caption LLM call on an image that had
-already been described. The fix attaches the descriptive line as the image item's caption
-so the guard skips it — while keeping the separate text item (text-only agents still get
-the description) and NOT stripping image pixels (vision path still sends them).
+view_image returns ``[ContentItem(image=...), ContentItem(text=caption)]`` where:
+  * the image item carries NO ``caption`` (``caption=None``) — this is intentional so the
+    guard fires a real vision caption rather than reusing a pre-filled descriptive line;
+  * the separate text item carries the descriptive line ("Viewing image: <path> (WxH) ...")
+    for text-only agents. It does NOT count as an image caption, so it cannot suppress
+    real captioning.
+
+This is the POST-REVERT behavior. An earlier fix (5089a51) pre-filled the image item's
+``caption`` with the descriptive line to make the guard skip a second vision call; that was
+reverted in 9440a15 because it suppressed genuine captioning. These tests pin the current
+intended contract so a regression back to pre-filling (or to dropping the text item) fails.
 
 File placement: existing view_image coverage lives in ``tests/test_media_storage.py``
 (TestViewImageCropRegion), which sits at the tests/ root rather than tests/tools/. This new
-file groups the captioning regression with the other tool-level tests under tests/tools/,
+file groups the captioning behavior with the other tool-level tests under tests/tools/,
 mirroring tests/tools/test_image_gen.py. It reuses the same fixture pattern (patched
 _resolve_path + real PIL image) so it stays hermetic.
 
@@ -72,96 +78,107 @@ def _guard_flags(items):
 # Media-path branch (save_image_to_media succeeds)
 # ---------------------------------------------------------------------------
 
-class TestViewImageMediaPathCaption:
-    def test_media_path_attaches_caption_to_image_item(self, view_image_tool, test_image_200x150, tmp_path):
-        """The descriptive line is attached as the image item's caption AND kept as a text
-        item — so both vision (pixels) and text-only (description) agents are served."""
-        from agent_cascade.tools.custom.file_ops import save_image_to_media
-
+class TestViewImageMediaPathUncaptioned:
+    def test_media_path_leaves_image_uncaptioned(self, view_image_tool, test_image_200x150, tmp_path):
+        """The image item is left UNCAPTIONED (caption=None) by design so the return-path
+        guard triggers a genuine vision caption. The descriptive line lives in the separate
+        text item for text-only agents."""
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
             mock_save.return_value = str(tmp_path / "media_result.png")
             result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
         assert isinstance(result, list)
         assert len(result) == 2
-        # Image item carries the caption metadata.
+        # Image item points at the saved media path.
         assert result[0].image == str(tmp_path / "media_result.png")
-        assert result[0].caption is not None
-        assert "Viewing image" in result[0].caption
-        assert "200x150" in result[0].caption
-        # The separate descriptive text item is preserved (not deleted).
+        # Image item is deliberately NOT pre-filled with a caption (post-revert behavior).
+        assert result[0].caption is None
+        # The separate descriptive text item carries the "Viewing image ... (WxH)" line.
         assert isinstance(result[1], ContentItem)
-        assert result[1].text == result[0].caption
+        assert result[1].text is not None
+        assert "Viewing image" in result[1].text
+        assert "200x150" in result[1].text
 
-    def test_media_path_guard_skips_recaptioning(self, view_image_tool, test_image_200x150, tmp_path):
-        """Regression: after the fix, _has_uncaptioned_images returns False for a media-path
-        view_image result — no second vision caption call on the return path."""
+    def test_media_path_guard_fires_for_genuine_caption(self, view_image_tool, test_image_200x150, tmp_path):
+        """The return-path guard MUST report the image as uncaptioned so the router generates
+        a genuine vision/LLM caption. A pre-filled caption (the reverted behavior) would make
+        this False and suppress real captioning — that is the regression we must not reintroduce."""
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
             mock_save.return_value = str(tmp_path / "media_result.png")
             result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
-        assert _guard_flags(result) is False
+        assert _guard_flags(result) is True
 
-    def test_caption_survives_dump_round_trip(self, view_image_tool, test_image_200x150, tmp_path):
-        """The caption must survive model_dump (exclude_none) and a JSON round-trip so it is
-        not silently stripped at persistence time — otherwise the guard would re-fire after
-        a session restore."""
+    def test_uncaptioned_state_survives_dump_round_trip(self, view_image_tool, test_image_200x150, tmp_path):
+        """The uncaptioned image item must survive model_dump (exclude_none) and a JSON
+        round-trip so the guard STILL fires after a session restore — i.e. caption=None is not
+        accidentally dropped into a pre-filled state by serialization."""
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
             mock_save.return_value = str(tmp_path / "media_result.png")
             result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
         fn_msg = Message(role=FUNCTION, name="view_image", content=list(result))
         dumped = json.loads(fn_msg.model_dump_json())
-        # Re-parse the persisted form (dict items) and confirm the guard still skips it.
+        # The image item must NOT carry a caption key after serialization (exclude_none
+        # drops the None), so it is unambiguously uncaptioned on restore.
+        assert not dumped["content"][0].get("caption"), (
+            "image item unexpectedly carried a caption through serialization; "
+            "this would suppress genuine vision captioning on session restore"
+        )
+        # Re-parse the persisted form (dict items) and confirm the guard still fires.
         restored = Message(**dumped)
-        assert _guard_flags(restored.content) is False
+        assert _guard_flags(restored.content) is True
 
 
 # ---------------------------------------------------------------------------
 # Base64 fallback branch (save_image_to_media raises MediaStorageError)
 # ---------------------------------------------------------------------------
 
-class TestViewImageBase64FallbackCaption:
-    def test_base64_fallback_attaches_caption(self, view_image_tool, test_image_200x150):
-        """When media storage fails, the base64 fallback path ALSO attaches the caption to
-        the image item — otherwise the guard would re-caption on that branch too."""
+class TestViewImageBase64FallbackUncaptioned:
+    def test_base64_fallback_leaves_image_uncaptioned(self, view_image_tool, test_image_200x150):
+        """When media storage fails, the base64 fallback path ALSO leaves the image item
+        uncaptioned (caption=None) — so the guard fires a genuine vision caption on that
+        branch too. The descriptive line stays in the separate text item."""
         from agent_cascade.utils.media_utils import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
-                   side_effect=MediaStorageError("disk full")), \
-             patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
-                   return_value="data:image/png;base64,AAAA") as mock_b64:
+                    side_effect=MediaStorageError("disk full")), \
+              patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
+                    return_value="data:image/png;base64,AAAA") as mock_b64:
             result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
         assert isinstance(result, list)
         assert len(result) == 2
         assert result[0].image == "data:image/png;base64,AAAA"
         assert mock_b64.called
-        # Caption attached on the fallback branch as well.
-        assert result[0].caption is not None
-        assert "Viewing image" in result[0].caption
-        assert result[1].text == result[0].caption
+        # Image item left uncaptioned on the fallback branch as well (post-revert behavior).
+        assert result[0].caption is None
+        # Descriptive line carried by the separate text item.
+        assert isinstance(result[1], ContentItem)
+        assert "Viewing image" in result[1].text
 
-    def test_base64_fallback_guard_skips_recaptioning(self, view_image_tool, test_image_200x150):
-        """Regression: the base64 fallback result also passes the guard (no re-caption)."""
+    def test_base64_fallback_guard_fires_for_genuine_caption(self, view_image_tool, test_image_200x150):
+        """The base64 fallback result must ALSO be reported as uncaptioned by the guard so a
+        genuine vision caption is generated (not suppressed by a pre-filled caption)."""
         from agent_cascade.utils.media_utils import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
-                   side_effect=MediaStorageError("disk full")), \
-             patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
-                   return_value="data:image/png;base64,AAAA"):
+                    side_effect=MediaStorageError("disk full")), \
+              patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
+                    return_value="data:image/png;base64,AAAA"):
             result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
-        assert _guard_flags(result) is False
+        assert _guard_flags(result) is True
 
 
 # ---------------------------------------------------------------------------
 # Crop region branch (caption includes crop info; still captioned)
 # ---------------------------------------------------------------------------
 
-class TestViewImageCropRegionCaption:
-    def test_crop_region_result_still_captioned(self, view_image_tool, test_image_200x150, tmp_path):
-        """A cropped view carries the crop region in its caption and still passes the guard."""
+class TestViewImageCropRegionUncaptioned:
+    def test_crop_region_result_still_uncaptioned(self, view_image_tool, test_image_200x150, tmp_path):
+        """A cropped view carries the crop region in its descriptive text item AND is left
+        uncaptioned (caption=None) so the guard still fires a genuine vision caption."""
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
             mock_save.return_value = str(tmp_path / "crop_result.png")
             result = view_image_tool.call(json.dumps({
@@ -170,7 +187,11 @@ class TestViewImageCropRegionCaption:
             }))
 
         assert isinstance(result, list) and len(result) == 2
-        caption = result[0].caption
-        assert "200x150" in caption
-        assert "cropped region x=10,y=20,w=100,h=80" in caption
-        assert _guard_flags(result) is False
+        # Image item left uncaptioned (post-revert behavior).
+        assert result[0].caption is None
+        # Descriptive text item carries the size AND the crop region.
+        text = result[1].text
+        assert "200x150" in text
+        assert "cropped region x=10,y=20,w=100,h=80" in text
+        # Guard still fires for genuine captioning.
+        assert _guard_flags(result) is True
