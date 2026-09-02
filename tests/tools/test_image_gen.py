@@ -532,15 +532,19 @@ class TestReturnFormat:
         # Verify save was called with the rendered bytes
         mock_save.assert_called_once_with(image_source=b"fake_png_bytes", source_name="svg_render")
 
-        # Verify return shape
+        # Verify return shape (feedback matches the ComfyUI path: absolute path + dims).
         assert isinstance(result, list)
         assert len(result) == 2
         assert isinstance(result[0], ContentItem)
         assert result[0].image == "/tmp/media/imggen_test.png"
         assert result[0].text is None
+        # Image item left uncaptioned so the return path captions it.
+        assert not getattr(result[0], 'caption', None)
         assert isinstance(result[1], ContentItem)
-        assert "SVG rendered to image" in result[1].text
+        assert "Generated image" in result[1].text
+        assert "/tmp/media/imggen_test.png" in result[1].text
         assert "200x100" in result[1].text
+        assert "source=svg" in result[1].text
 
     def test_missing_prompt_raises_validation_error(self):
         """jsonschema validation rejects missing required 'prompt' field."""
@@ -649,13 +653,65 @@ class TestReturnFormat:
         assert isinstance(result, list)
         assert len(result) == 2
         assert result[0].image == "/tmp/media/imggen_comfy.png"
+        # New feedback format: "Generated image: <path> (WxH, workflow=...)" — no prompt echo.
         assert "Generated image" in result[1].text
-        assert "a cat" in result[1].text
+        assert "/tmp/media/imggen_comfy.png" in result[1].text
         assert "512x512" in result[1].text
+        # The prompt must NOT be echoed into the feedback (tool call already carries it).
+        assert "a cat" not in result[1].text
+
+    def _run_text_prompt_with_caption(self, tool, caption_return):
+        """Drive the full text-prompt path with ComfyUI/media/captioning mocked.
+
+        ``caption_return`` is what the patched ``_caption_image`` returns (str or None)."""
+        wf_file = "/wf/test.json"
+        with patch("agent_cascade.tools.image_gen._get_image_gen_config",
+                   return_value={'url': 'http://comfyui:8188', 'timeout': 60,
+                                 'default_workflow': wf_file}), \
+             patch("agent_cascade.tools.image_gen._load_workflow",
+                   return_value={"1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}}}), \
+             patch("agent_cascade.tools.image_gen._inject_params",
+                   side_effect=lambda wf, **kw: (wf, ["prompt → 1"])), \
+             patch("agent_cascade.tools.image_gen._comfyui_generate",
+                   return_value=(b"fake_png", {"seed": 1})), \
+             patch("agent_cascade.tools.image_gen.save_image_to_media",
+                   return_value="/tmp/media/out.png"), \
+             patch.object(tool, '_caption_image', return_value=caption_return):
+            return tool.call({"prompt": "a cat", "width": 512, "height": 512})
+
+    def test_feedback_uses_caption_field_not_text_line(self):
+        """When captioning succeeds, the caption is attached to the image ContentItem
+        (the system renders it and skips re-captioning). The text feedback must NOT
+        duplicate it with its own 'Caption:' line — that would show up twice."""
+        tool = ImageGen()
+        result = self._run_text_prompt_with_caption(
+            tool, "A cat sitting on a mat.")
+
+        assert len(result) == 2
+        # Text feedback is just the generated-image line (no Caption: line).
+        text = result[1].text
+        assert "Caption:" not in text
+        assert text.startswith("Generated image: /tmp/media/out.png (512x512, workflow=")
+        # The caption lives on the image item so downstream captioning is skipped.
+        assert result[0].image == "/tmp/media/out.png"
+        assert result[0].caption == "A cat sitting on a mat."
+
+    def test_feedback_no_caption_when_captioning_fails(self):
+        """When captioning yields nothing (no vision endpoint / failure), feedback is
+        just the generated-image line and the image item has no caption — no crash."""
+        tool = ImageGen()
+        result = self._run_text_prompt_with_caption(tool, None)
+
+        assert len(result) == 2
+        text = result[1].text
+        assert "Caption:" not in text
+        assert text.startswith("Generated image: /tmp/media/out.png (512x512, workflow=")
+        # No caption metadata on the image item.
+        assert not getattr(result[0], 'caption', None)
 
     def test_vram_save_succeeds_unload_fails_still_restores(self):
         """When save_instance_state succeeds but unload_all_models fails,
-        the finally block must still attempt restore."""
+        the explicit final restore (called after captioning) must still run."""
         tool = ImageGen()
         mock_instance = MagicMock()
         mock_instance._last_endpoint_config = {
@@ -724,3 +780,83 @@ class TestReturnFormat:
         # Tool still returned the image
         assert isinstance(result, list)
         assert result[0].image == "/tmp/media/vram_test2.png"
+
+    def test_vram_media_save_fails_still_restores(self):
+        """When save_image_to_media raises after state was saved, the error path must
+        still restore so the agent's KV is not left dangling."""
+        tool = ImageGen()
+        mock_instance = MagicMock()
+        mock_instance._last_endpoint_config = {
+            'state_save_enabled': True,
+            'api_base': 'http://localhost:1234',
+            'model': 'test-model',
+        }
+
+        with patch.object(tool, '_get_instance', return_value=mock_instance), \
+             patch("agent_cascade.tools.image_gen._get_image_gen_config",
+                   return_value={'url': 'http://comfyui:8188', 'timeout': 60,
+                                 'default_workflow': '/wf/test.json'}), \
+             patch("agent_cascade.tools.image_gen._load_workflow",
+                   return_value={"1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}}}), \
+             patch("agent_cascade.tools.image_gen._inject_params",
+                   side_effect=lambda wf, **kw: (wf, ["prompt → 1"])), \
+             patch("agent_cascade.tools.image_gen._comfyui_generate",
+                   return_value=(b"fake_png", {"seed": 1})), \
+             patch("agent_cascade.tools.image_gen.save_image_to_media",
+                   side_effect=OSError("disk full")), \
+             patch("agent_cascade.state_ops.is_autoloader_endpoint", return_value=True), \
+             patch("agent_cascade.state_ops.save_instance_state", return_value=True), \
+             patch("agent_cascade.state_ops.unload_all_models", return_value=True), \
+             patch("agent_cascade.state_ops.restore_instance_state") as mock_restore:
+
+            result = tool.call({"prompt": "media save fail"})
+
+        # Restore was attempted on the media-save error path
+        mock_restore.assert_called_once()
+        # Tool returned an error (not a crash)
+        assert isinstance(result, list)
+        assert "ERROR" in result[0].text
+
+    def test_caption_runs_before_final_restore(self):
+        """Captioning must happen BEFORE the final restore so all LLM-side work is done
+        ahead of the last state-restore call (ordering invariant)."""
+        tool = ImageGen()
+        mock_instance = MagicMock()
+        mock_instance._last_endpoint_config = {
+            'state_save_enabled': True,
+            'api_base': 'http://localhost:1234',
+            'model': 'test-model',
+        }
+
+        order = []
+
+        def _caption_side_effect(path, kwargs):
+            order.append('caption')
+            return "a caption"
+
+        with patch.object(tool, '_get_instance', return_value=mock_instance), \
+             patch("agent_cascade.tools.image_gen._get_image_gen_config",
+                   return_value={'url': 'http://comfyui:8188', 'timeout': 60,
+                                 'default_workflow': '/wf/test.json'}), \
+             patch("agent_cascade.tools.image_gen._load_workflow",
+                   return_value={"1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}}}), \
+             patch("agent_cascade.tools.image_gen._inject_params",
+                   side_effect=lambda wf, **kw: (wf, ["prompt → 1"])), \
+             patch("agent_cascade.tools.image_gen._comfyui_generate",
+                   return_value=(b"fake_png", {"seed": 1})), \
+             patch("agent_cascade.tools.image_gen.save_image_to_media",
+                   return_value="/tmp/media/order_test.png"), \
+             patch.object(tool, '_caption_image', side_effect=_caption_side_effect), \
+             patch("agent_cascade.state_ops.is_autoloader_endpoint", return_value=True), \
+             patch("agent_cascade.state_ops.save_instance_state", return_value=True), \
+             patch("agent_cascade.state_ops.unload_all_models", return_value=True), \
+             patch("agent_cascade.state_ops.restore_instance_state",
+                   side_effect=lambda *a, **k: order.append('restore')):
+
+            result = tool.call({"prompt": "order test"})
+
+        # Caption must be recorded before the final restore.
+        assert 'caption' in order and 'restore' in order
+        assert order.index('caption') < order.index('restore')
+        # The caption was attached to the image item.
+        assert result[0].caption == "a caption"
