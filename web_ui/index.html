@@ -534,157 +534,186 @@
                 <div class="settings-section">
                   <h3 class="settings-section-title">Multi-Agent Control</h3>
                   <div class="settings-section-body">
-                    <label class="setting-field" style="flex-direction: column; align-items: stretch; gap: 4px;">
-                      <span>AFK Auto-Reply Message</span>
-                      <textarea id="setting-afk-message" rows="3"
-                        style="width: 100%; font-family: inherit; padding: 6px; border-radius: 4px; border: 1px solid var(--bg-elevated); background: var(--bg-tertiary); color: var(--text-primary); resize: vertical;">User is AFK, continue working on given task or polish/verify your work if there are things to improve...</textarea>
-                    </label>
-                    <label class="setting-field">
-                      <span>Max Turns per Run</span>
-                      <input type="number" id="setting-max-turns" min="1" max="500" value="50" />
-                    </label>
-                    <label class="setting-field toggle-field">
-                      <span title="When disabled, all agents use the Max Turns setting regardless of call_agent max_turns args">Enable Agent Budgeting</span>
-                      <input type="checkbox" id="setting-agent-budgeting" checked />
-                    </label>
-                    <label class="setting-field">
-                      <span>Max Parallel Agents</span>
-                      <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
-                    </label>
-                    <label class="setting-field toggle-field">
-                      <span title="Auto-detects three cases: reasoning-only blocks (no output text), broken tool calls (malformed JSON args), and empty output. When detected, sends a continue signal and resets the turn counter. Capped at 3 consecutive resets to prevent infinite loops.">Auto-Continue & Recovery</span>
-                      <input type="checkbox" id="setting-auto-continue" checked />
-                    </label>
-                    <label class="setting-field toggle-field">
-                      <span>Auto-Rollback on Loop</span>
-                      <input type="checkbox" id="setting-auto-rollback" checked />
-                    </label>
-                    <label class="setting-field toggle-field">
-                      <span title="When enabled, agents auto-load relevant skill instructions based on task context. When disabled, no skills are loaded (saves tokens).">Enable Skills</span>
-                      <input type="checkbox" id="setting-enable-skills" checked />
-                    </label>
-                    <label class="setting-field">
-                      <span title="How AUTO skill loading resolves skills. Basic = fast keyword match on task/context. Advanced = a lightweight Security agent semantically recommends skills, improves the prompt, and can deny trivial delegations (adds one LLM call per delegation). None = disables system auto-matched skills entirely (no Basic keyword match, no Advanced advisor); Self-Augmentation and caller-explicit load_skill lists are still preserved.">AUTO Skill Mode</span>
-                      <select id="setting-auto-skill-mode">
-                        <option value="basic" selected>Basic</option>
-                        <option value="advanced">Advanced</option>
-                        <option value="none">None</option>
-                      </select>
-                    </label>
-                    <label class="setting-field toggle-field">
-                      <span title="When enabled, agents can automatically propose and generate new skills based on task context. Requires 'Enable Skills' to be active.">Enable Auto-Skill Generation</span>
-                      <input type="checkbox" id="setting-auto-skill-gen" checked />
-                    </label>
-                    <label class="setting-field toggle-field">
-                      <span title="Detect LLM generation loops mid-stream (can cause false positives)">Inner Loop Detection</span>
-                      <input type="checkbox" id="setting-inner-loop-detect" />
-                    </label>
-                    <!-- Inner Loop Tuning Controls -->
-                    <div class="settings-section-body" style="margin: 4px 0 8px 12px; padding: 8px; border-left: 2px solid #555; background: rgba(255,255,255,0.03);">
-                      <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:6px;">Loop Detection Tuning</div>
+                    <!-- Execution -->
+                    <details class="settings-section" open>
+                      <summary class="settings-section-title">Execution</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field" style="flex-direction: column; align-items: stretch; gap: 4px;">
+                          <span>AFK Auto-Reply Message</span>
+                          <textarea id="setting-afk-message" rows="3"
+                            style="width: 100%; font-family: inherit; padding: 6px; border-radius: 4px; border: 1px solid var(--bg-elevated); background: var(--bg-tertiary); color: var(--text-primary); resize: vertical;">User is AFK, continue working on given task or polish/verify your work if there are things to improve...</textarea>
+                        </label>
+                        <label class="setting-field">
+                          <span>Max Turns per Run</span>
+                          <input type="number" id="setting-max-turns" min="1" max="500" value="50" />
+                        </label>
+                        <label class="setting-field toggle-field">
+                          <span title="When disabled, all agents use the Max Turns setting regardless of call_agent max_turns args">Enable Agent Budgeting</span>
+                          <input type="checkbox" id="setting-agent-budgeting" checked />
+                        </label>
+                        <label class="setting-field">
+                          <span>Max Parallel Agents</span>
+                          <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
+                        </label>
+                      </div>
+                    </details>
 
-                      <!-- Thresholds -->
-                      <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:4px;">Thresholds</div>
-                      <label class="setting-field">
-                        <span title="Minimum characters before heavy checks activate">Min Chars</span>
-                        <input type="number" id="setting-loop-min-chars" min="500" max="20000" step="500" value="4000" />
-                      </label>
-                      <label class="setting-field">
-                        <span title="Hard character limit — force-trigger detection if exceeded (~8K tokens)">Max Chars</span>
-                        <input type="number" id="setting-loop-max-chars" min="1000" max="100000" step="1000" value="40960" />
-                      </label>
-                      <label class="setting-field toggle-field">
-                        <span title="Hard character limit guard — force-trigger detection if exceeded">Max Chars Guard</span>
-                        <input type="checkbox" id="setting-loop-max-chars-enabled" checked />
-                      </label>
+                    <!-- Recovery & Continuity -->
+                    <details class="settings-section" open>
+                      <summary class="settings-section-title">Recovery &amp; Continuity</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span title="Auto-detects three cases: reasoning-only blocks (no output text), broken tool calls (malformed JSON args), and empty output. When detected, sends a continue signal and resets the turn counter. Capped at 3 consecutive resets to prevent infinite loops.">Auto-Continue &amp; Recovery</span>
+                          <input type="checkbox" id="setting-auto-continue" checked />
+                        </label>
+                        <label class="setting-field toggle-field">
+                          <span>Auto-Rollback on Loop</span>
+                          <input type="checkbox" id="setting-auto-rollback" checked />
+                        </label>
+                        <label class="setting-field">
+                          <span>Max Auto-Rollbacks (-1=∞)</span>
+                          <input type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
+                        </label>
+                      </div>
+                    </details>
 
-                      <!-- Detection Modes -->
-                      <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Detection Modes</div>
-                      <label class="setting-field toggle-field">
-                        <span title="Detect consecutive identical characters">Char Run</span>
-                        <input type="checkbox" id="setting-loop-char-run" checked />
-                      </label>
-                      <label class="setting-field">
-                        <span title="Number of consecutive identical characters to trigger detection">Char Run Limit</span>
-                        <input type="number" id="setting-loop-char-run-limit" min="10" max="500" step="1" value="129" />
-                      </label>
-                      <label class="setting-field toggle-field">
-                        <span title="Two-phase semantic loop detection (ngram suspicion + exact confirmation)">Semantic Loop Detection</span>
-                        <input type="checkbox" id="setting-loop-two-phase" />
-                      </label>
+                    <!-- Skills -->
+                    <details class="settings-section" open>
+                      <summary class="settings-section-title">Skills</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span title="When enabled, agents auto-load relevant skill instructions based on task context. When disabled, no skills are loaded (saves tokens).">Enable Skills</span>
+                          <input type="checkbox" id="setting-enable-skills" checked />
+                        </label>
+                        <label class="setting-field">
+                          <span title="How AUTO skill loading resolves skills. Basic = fast keyword match on task/context. Advanced = a lightweight Security agent semantically recommends skills, improves the prompt, and can deny trivial delegations (adds one LLM call per delegation). None = disables system auto-matched skills entirely (no Basic keyword match, no Advanced advisor); Self-Augmentation and caller-explicit load_skill lists are still preserved.">AUTO Skill Mode</span>
+                          <select id="setting-auto-skill-mode">
+                            <option value="basic" selected>Basic</option>
+                            <option value="advanced">Advanced</option>
+                            <option value="none">None</option>
+                          </select>
+                        </label>
+                        <label class="setting-field toggle-field">
+                          <span title="When enabled, agents can automatically propose and generate new skills based on task context. Requires 'Enable Skills' to be active.">Enable Auto-Skill Generation</span>
+                          <input type="checkbox" id="setting-auto-skill-gen" checked />
+                        </label>
+                      </div>
+                    </details>
 
-                      <!-- Semantic Parameters -->
-                      <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Semantic Parameters</div>
-                      <label class="setting-field">
-                        <span title="N-gram occurrence count to trigger suspicion [5-15]">Suspicion Threshold</span>
-                        <input type="number" id="setting-loop-suspicion-threshold" min="5" max="15" step="1" value="7" />
-                      </label>
-                      <label class="setting-field">
-                        <span title="Exact matches required for confirmation [2-6]">Confirm Required</span>
-                        <input type="number" id="setting-loop-confirm-required" min="2" max="6" step="1" value="3" />
-                      </label>
-                      <label class="setting-field">
-                        <span title="Feeds to suppress after failed confirmation [10-200]">Cooldown Feeds</span>
-                        <input type="number" id="setting-loop-cooldown-feeds" min="10" max="200" step="10" value="50" />
-                      </label>
-                    </div>
-                    <!-- End Loop Tuning -->
+                    <!-- Loop Detection -->
+                    <details class="settings-section">
+                      <summary class="settings-section-title">Loop Detection</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span title="Detect LLM generation loops mid-stream (can cause false positives)">Inner Loop Detection</span>
+                          <input type="checkbox" id="setting-inner-loop-detect" />
+                        </label>
+
+                        <!-- Thresholds -->
+                        <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:4px;">Thresholds</div>
+                        <label class="setting-field">
+                          <span title="Minimum characters before heavy checks activate">Min Chars</span>
+                          <input type="number" id="setting-loop-min-chars" min="500" max="20000" step="500" value="4000" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Hard character limit — force-trigger detection if exceeded (~8K tokens)">Max Chars</span>
+                          <input type="number" id="setting-loop-max-chars" min="1000" max="100000" step="1000" value="40960" />
+                        </label>
+                        <label class="setting-field toggle-field">
+                          <span title="Hard character limit guard — force-trigger detection if exceeded">Max Chars Guard</span>
+                          <input type="checkbox" id="setting-loop-max-chars-enabled" checked />
+                        </label>
+
+                        <!-- Detection Modes -->
+                        <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Detection Modes</div>
+                        <label class="setting-field toggle-field">
+                          <span title="Detect consecutive identical characters">Char Run</span>
+                          <input type="checkbox" id="setting-loop-char-run" checked />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Number of consecutive identical characters to trigger detection">Char Run Limit</span>
+                          <input type="number" id="setting-loop-char-run-limit" min="10" max="500" step="1" value="129" />
+                        </label>
+                        <label class="setting-field toggle-field">
+                          <span title="Two-phase semantic loop detection (ngram suspicion + exact confirmation)">Semantic Loop Detection</span>
+                          <input type="checkbox" id="setting-loop-two-phase" />
+                        </label>
+
+                        <!-- Semantic Parameters -->
+                        <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Semantic Parameters</div>
+                        <label class="setting-field">
+                          <span title="N-gram occurrence count to trigger suspicion [5-15]">Suspicion Threshold</span>
+                          <input type="number" id="setting-loop-suspicion-threshold" min="5" max="15" step="1" value="7" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Exact matches required for confirmation [2-6]">Confirm Required</span>
+                          <input type="number" id="setting-loop-confirm-required" min="2" max="6" step="1" value="3" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Feeds to suppress after failed confirmation [10-200]">Cooldown Feeds</span>
+                          <input type="number" id="setting-loop-cooldown-feeds" min="10" max="200" step="10" value="50" />
+                        </label>
+                      </div>
+                    </details>
+
                     <!-- Retry Policy Settings (Phase 6) -->
                     <details class="settings-section">
-                    <summary class="settings-section-title">Retry Policy</summary>
-                    <div class="settings-section-body" style="margin: 4px 0 8px 12px; padding: 8px; border-left: 2px solid #555; background: rgba(255,255,255,0.03);">
-                    <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:6px;">LLM Retry Configuration</div>
-                    <label class="setting-field">
-                    <span title="Total outer retry attempts across all layers and endpoints [1-6]">Max Attempts</span>
-                    <input type="number" id="setting-retry-max-attempts" min="1" max="6" step="1" value="3" />
-                    </label>
-                    <label class="setting-field">
-                    <span title="Retries per endpoint before failover to next [0-2]. 0=failover immediately, 2=max retries on single endpoint">Endpoint Retries</span>
-                    <input type="number" id="setting-endpoint-max-retries" min="0" max="2" step="1" value="1" />
-                    </label>
-                    <label class="setting-field">
-                    <span title="Initial backoff delay in seconds [≥0.1]">Base Delay (s)</span>
-                    <input type="number" id="setting-retry-base-delay" min="0.1" max="30" step="0.1" value="1.0" />
-                    </label>
-                    <label class="setting-field">
-                    <span title="Maximum backoff cap in seconds [≥1.0]">Max Delay (s)</span>
-                    <input type="number" id="setting-retry-max-delay" min="1.0" max="60" step="0.5" value="8.0" />
-                    </label>
-                    </div>
+                      <summary class="settings-section-title">Retry Policy</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:6px;">LLM Retry Configuration</div>
+                        <label class="setting-field">
+                          <span title="Total outer retry attempts across all layers and endpoints [1-6]">Max Attempts</span>
+                          <input type="number" id="setting-retry-max-attempts" min="1" max="6" step="1" value="3" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Retries per endpoint before failover to next [0-2]. 0=failover immediately, 2=max retries on single endpoint">Endpoint Retries</span>
+                          <input type="number" id="setting-endpoint-max-retries" min="0" max="2" step="1" value="1" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Initial backoff delay in seconds [≥0.1]">Base Delay (s)</span>
+                          <input type="number" id="setting-retry-base-delay" min="0.1" max="30" step="0.1" value="1.0" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Maximum backoff cap in seconds [≥1.0]">Max Delay (s)</span>
+                          <input type="number" id="setting-retry-max-delay" min="1.0" max="60" step="0.5" value="8.0" />
+                        </label>
+                      </div>
                     </details>
-                    <!-- End Retry Policy -->
-                    <label class="setting-field toggle-field">
-                      <span>Log API POST Dump</span>
-                      <input type="checkbox" id="setting-log-api-post" />
-                    </label>
-                    <label class="setting-field">
-                      <span>Max Auto-Rollbacks (-1=∞)</span>
-                      <input type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
-                    </label>
-                    <label class="setting-field">
-                      <span>Wild Read Threshold (Chars)</span>
-                      <input type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
-                    </label>
-                    <label class="setting-field toggle-field">
-                      <span>Grep Spillover</span>
-                      <input type="checkbox" id="setting-grep-spillover" checked />
-                    </label>
-                    <label class="setting-field">
-                      <span>Grep Char Limit</span>
-                      <input type="number" id="setting-grep-char-limit" min="-1" max="100000" step="100" value="2000" />
-                    </label>
-                    <label class="setting-field">
-                      <span>Shell Output Char Limit</span>
-                      <input type="number" id="setting-shell-char-limit" min="-1" max="8000" step="100" value="2000" />
-                    </label>
-                    <label class="setting-field">
-                      <span>Code Output Char Limit</span>
-                      <input type="number" id="setting-code-char-limit" min="-1" max="8000" step="100" value="2000" />
-                    </label>
-                    <label class="setting-field">
-                      <span>List Dir Char Limit</span>
-                      <input type="number" id="setting-list-dir-char-limit" min="-1" max="8000" step="100" value="3000" />
-                    </label>
+
+                    <!-- Output & Logging Limits -->
+                    <details class="settings-section">
+                      <summary class="settings-section-title">Output &amp; Logging Limits</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span>Log API POST Dump</span>
+                          <input type="checkbox" id="setting-log-api-post" />
+                        </label>
+                        <label class="setting-field">
+                          <span>Wild Read Threshold (Chars)</span>
+                          <input type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
+                        </label>
+                        <label class="setting-field toggle-field">
+                          <span>Grep Spillover</span>
+                          <input type="checkbox" id="setting-grep-spillover" checked />
+                        </label>
+                        <label class="setting-field">
+                          <span>Grep Char Limit</span>
+                          <input type="number" id="setting-grep-char-limit" min="-1" max="100000" step="100" value="2000" />
+                        </label>
+                        <label class="setting-field">
+                          <span>Shell Output Char Limit</span>
+                          <input type="number" id="setting-shell-char-limit" min="-1" max="8000" step="100" value="2000" />
+                        </label>
+                        <label class="setting-field">
+                          <span>Code Output Char Limit</span>
+                          <input type="number" id="setting-code-char-limit" min="-1" max="8000" step="100" value="2000" />
+                        </label>
+                        <label class="setting-field">
+                          <span>List Dir Char Limit</span>
+                          <input type="number" id="setting-list-dir-char-limit" min="-1" max="8000" step="100" value="3000" />
+                        </label>
+                      </div>
+                    </details>
                   </div>
                 </div>
 
