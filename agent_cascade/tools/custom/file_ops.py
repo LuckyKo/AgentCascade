@@ -672,6 +672,29 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 caption_parts.append(f"[cropped region x={crop_x},y={crop_y},w={crop_w},h={crop_h}]")
             caption = " ".join(caption_parts)
 
+            # Only TRANSIENT inserts (screen/window capture, SVG->PNG conversion, or a
+            # crop) have no stable on-disk file to reuse — they MUST be saved so the agent
+            # can re-view them later. When neither temp_png nor crop_tmp is set we are
+            # viewing an existing plain image file directly, so reusing its path avoids
+            # writing a redundant duplicate copy (save_image_to_media always mints a new
+            # filename and never reuses an existing one).
+            needs_save = bool(temp_png) or bool(crop_tmp)
+
+            if not needs_save:
+                # Existing on-disk file: reuse the already-resolved absolute path as the
+                # media path. Normalize to forward slashes to match save_image_to_media's
+                # return format so downstream consumers see a consistent path shape.
+                media_path = str(resolved).replace("\\", "/")
+                return [
+                    # Leave the image item UNCAPTIONED so the return-path guard
+                    # (_has_uncaptioned_images) triggers a genuine vision/LLM caption via
+                    # caption_images(). The separate text item carries the descriptive line
+                    # for text-only agents; it does NOT count as an image caption, so it
+                    # cannot suppress real captioning. (Reverts 5089a51's pre-filled caption.)
+                    ContentItem(image=media_path),
+                    ContentItem(text=f"{caption} (existing file, no copy saved)")
+                ]
+
             try:
                 media_path = save_image_to_media(
                     image_source=source_path,
