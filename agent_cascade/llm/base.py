@@ -697,12 +697,17 @@ class BaseChatModel(ABC):
                 elif 'content' not in new_messages[-1]:
                     # Ensure assistant messages always have a 'content' field (Grok/OpenAI require it)
                     new_messages[-1]['content'] = ''
-                # Always include reasoning_content for assistant messages (required by some models like grok-4.1-fast)
-                # Preserve original value if present, else default to empty string
-                if 'reasoning_content' in msg and msg['reasoning_content'] is not None:
-                    new_messages[-1]['reasoning_content'] = msg['reasoning_content']
-                else:
+                # Always include reasoning_content for assistant messages (required by some models like grok-4.1-fast).
+                # When merging consecutive assistant messages, a tool-call message carries no reasoning and must NOT
+                # clobber the reasoning already merged from a prior content+reasoning message in the same turn.
+                incoming_rc = msg.get('reasoning_content')
+                if incoming_rc:
+                    # Non-empty reasoning on this message -> use it (the real value).
+                    new_messages[-1]['reasoning_content'] = incoming_rc
+                elif 'reasoning_content' not in new_messages[-1] or not new_messages[-1].get('reasoning_content'):
+                    # No reasoning merged yet and none incoming -> ensure the field exists (empty) for models that require it.
                     new_messages[-1]['reasoning_content'] = ''
+                # else: a prior merged message already supplied non-empty reasoning; leave it untouched.
                 if msg.get('function_call'):
                     if not new_messages[-1].get('tool_calls'):
                         new_messages[-1]['tool_calls'] = []
