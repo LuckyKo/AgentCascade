@@ -538,19 +538,22 @@ class TestReturnFormat:
         assert isinstance(result[0], ContentItem)
         assert result[0].image == "/tmp/media/imggen_test.png"
         assert result[0].text is None
-        # The descriptive line is attached as the image item's caption so the return-path
-        # guard (_has_uncaptioned_images) skips re-captioning a fully-local SVG render.
-        assert getattr(result[0], 'caption', None) == result[1].text
+        # The SVG render is fully local (no LLM produced a real description), so the image
+        # item is left UNCAPTIONED — the return path generates a genuine vision caption for
+        # it, same as any other image. Only the separate text item carries the descriptive line.
+        assert getattr(result[0], 'caption', None) is None
         assert isinstance(result[1], ContentItem)
         assert "Generated image" in result[1].text
         assert "/tmp/media/imggen_test.png" in result[1].text
         assert "200x100" in result[1].text
         assert "source=svg" in result[1].text
 
-    def test_svg_image_item_captions_so_return_path_skips_recaptioning(self):
-        """Regression: the SVG path attaches a caption to the image item, so the router's
-        return-path guard (_has_uncaptioned_images) returns False — no second vision call.
-        This is the core of the redundant re-captioning fix (Option A)."""
+    def test_svg_image_item_uncaptioned_so_return_path_captions_it(self):
+        """The SVG render is fully local (no LLM produced a real description), so the image
+        item is left uncaptioned. The router's return-path guard (_has_uncaptioned_images)
+        therefore returns True and caption_images() generates a genuine vision caption for it
+        — same treatment as any other image. (Per product requirement: SVG output still needs
+        a real caption, not just the descriptive line.)"""
         from agent_cascade.api_router_pkg.router import APIRouter
 
         tool = ImageGen()
@@ -562,10 +565,10 @@ class TestReturnFormat:
             result = tool.call({"prompt": svg})
 
         # Wrap the tool result in a FUNCTION message (as _assemble_tool_result does) and
-        # confirm the guard no longer flags it as needing captioning.
+        # confirm the guard STILL flags it as needing captioning (return path will caption).
         from agent_cascade.llm.schema import Message, FUNCTION
         fn_msg = Message(role=FUNCTION, name="image_gen", content=list(result))
-        assert APIRouter._has_uncaptioned_images([fn_msg]) is False
+        assert APIRouter._has_uncaptioned_images([fn_msg]) is True
 
     def test_comfyui_image_item_always_captioned(self):
         """Regression: the ComfyUI path always attaches a caption (vision alt-text when

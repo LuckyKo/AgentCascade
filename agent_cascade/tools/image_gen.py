@@ -577,13 +577,13 @@ class ImageGen(BaseTool):
             return [ContentItem(text=f"ERROR: Failed to save rendered image: {e}")]
 
         w, h = _svg_dimensions(svg_text)
-        # Match the ComfyUI path's feedback shape (absolute path + dimensions). Attach the
-        # descriptive line as the image item's caption so the return-path guard
-        # (_has_uncaptioned_images) skips re-captioning — the SVG render is fully local and
-        # already described, so a second vision call would be pure waste. The separate text
-        # item is kept for text-only agents; the caption does not strip image pixels.
+        # Match the ComfyUI path's feedback shape (absolute path + dimensions). The SVG
+        # render is fully local (no LLM call produced a real description), so the image item
+        # is left UNCAPTIONED: the return path (_has_uncaptioned_images → caption_images)
+        # generates a genuine vision caption for it, same as any other image. The separate
+        # text item carries the descriptive line for text-only agents.
         feedback = f"Generated image: {media_path} ({w}x{h}, source=svg)"
-        return [ContentItem(image=media_path, caption=feedback), ContentItem(text=feedback)]
+        return [ContentItem(image=media_path), ContentItem(text=feedback)]
 
     # ------------------------------------------------------------------ #
     #  Text prompt path (ComfyUI)                                        #
