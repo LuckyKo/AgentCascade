@@ -2305,17 +2305,45 @@ class APIRouter:
         return None
 
     def _get_vision_endpoint_for_agent(self, agent_type: str, instance_name: Optional[str] = None) -> Optional[dict]:
-        """Return the first vision-capable endpoint from the agent's own endpoint chain.
+        """Return a vision-capable endpoint for captioning.
 
-        Falls back to any vision endpoint if none in the chain has vision.
+        Preference order:
+          1. The instance's CURRENTLY-allocated endpoint, if it is itself
+             vision-capable — so we never hop off the launcher endpoint that is
+             already serving (and can serve) this conversation.
+          2. The first vision-capable endpoint in the agent's rotated chain.
+          3. Any enabled vision endpoint as a last resort.
+
         When ``instance_name`` is given, the per-instance cursor rotates the chain so
         the resolved vision endpoint matches the agent's current allocation.
         """
+        # (1) Prefer the instance's own current endpoint when it already has vision —
+        # avoids an unnecessary switch to a different endpoint just for captioning.
+        # Note: _last_endpoint_config does not store vision_enabled, so we resolve the
+        # flag from the live endpoint registry by matching api_base + model.
+        if instance_name and self._pool is not None:
+            inst = self._pool.get_instance(instance_name)
+            cur_cfg = getattr(inst, '_last_endpoint_config', None) if inst is not None else None
+            if isinstance(cur_cfg, dict):
+                cur_base = normalize_api_base(
+                    cur_cfg.get('api_base') or cur_cfg.get('model_server', '')
+                )
+                cur_model = cur_cfg.get('model', '')
+                with self._lock:
+                    for ep in self.endpoints.values():
+                        if not ep.enabled:
+                            continue
+                        if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
+                            if getattr(ep, 'vision_enabled', True):
+                                return ep.to_llm_cfg()
+                            break  # current endpoint found but text-only → fall through
+
+        # (2) First vision-capable endpoint in the agent's rotated chain.
         chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
         for cfg in chain:
             if cfg.get('vision_enabled', True):
                 return cfg
-        # Fallback: any vision endpoint
+        # (3) Fallback: any vision endpoint
         return self._get_any_vision_endpoint()
 
     def caption_images(

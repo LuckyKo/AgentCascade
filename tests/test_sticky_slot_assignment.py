@@ -1595,6 +1595,61 @@ def _mock_caption_chat_model():
     return cm
 
 
+class TestVisionEndpointPrefersCurrentInstanceEndpoint:
+    """When the instance's currently-allocated endpoint already supports vision,
+    captioning must resolve to THAT endpoint — it must not hop to a different one.
+
+    This locks in the fix for the 'launcher endpoint has vision but captioning
+    switched to another endpoint' regression (see console.log 2026-09-02 ~03:03)."""
+
+    def test_current_vision_endpoint_is_preferred(self, sticky_harness):
+        h = sticky_harness
+        router, pool = h["router"], h["pool"]
+
+        # Two vision-capable endpoints. The instance is currently on the launcher (ep_launch).
+        _add_endpoint(router, "launch", SEQ_BASE, model="launch-model",
+                      concurrency_limit=0, vision_enabled=True)
+        _add_endpoint(router, "other", "http://127.0.0.1:99/v1", model="other-model",
+                      concurrency_limit=5, vision_enabled=True)
+
+        inst = _make_instance(pool, "agent1", "coder")
+        # Simulate the instance having last used the launcher endpoint (vision).
+        with inst._state_lock:
+            inst._last_endpoint_config = {
+                'api_base': SEQ_BASE, 'model': 'launch-model',
+                'state_save_enabled': False,
+            }
+
+        resolved = router._get_vision_endpoint_for_agent("coder", instance_name="agent1")
+        assert resolved is not None
+        # Must be the launcher endpoint the instance is currently on — NOT the other one.
+        assert resolved.get('model') == 'launch-model'
+
+    def test_current_text_only_endpoint_falls_through_to_chain(self, sticky_harness):
+        h = sticky_harness
+        router, pool = h["router"], h["pool"]
+
+        # Launcher is text-only; a separate vision endpoint exists. Captioning must
+        # fall through to the chain and pick the vision-capable one (no regression).
+        _add_endpoint(router, "launch", SEQ_BASE, model="launch-model",
+                      concurrency_limit=0, vision_enabled=False)
+        id_v = _add_endpoint(router, "vision", "http://127.0.0.1:99/v1", model="v-model",
+                             concurrency_limit=5, vision_enabled=True)
+
+        inst = _make_instance(pool, "agent1", "coder")
+        with inst._state_lock:
+            inst._last_endpoint_config = {
+                'api_base': SEQ_BASE, 'model': 'launch-model',
+                'state_save_enabled': False,
+            }
+
+        resolved = router._get_vision_endpoint_for_agent("coder", instance_name="agent1")
+        assert resolved is not None
+        # Current endpoint is text-only → the preference step must NOT return it;
+        # resolution must fall through to a vision-capable endpoint in the chain.
+        assert resolved.get('model') != 'launch-model'
+
+
 class TestN15CaptionWithHeldSlotNoSwap:
     """Agent holds the shared slot (conc=0); its message has an uncaptioned image and the
     vision endpoint resolves to the SAME conc=0 model. caption_images must take the
