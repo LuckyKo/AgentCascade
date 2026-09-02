@@ -908,6 +908,12 @@ if (sidebarResizer && appSidebar) {
 // Collapsible sub-sections
 document.querySelectorAll('.sidebar-label, .settings-section-title').forEach(el => {
   el.addEventListener('click', (e) => {
+    // Native <details>/<summary> groups manage their own open/close state. Their
+    // <summary> also carries the settings-section-title class, so without this guard a
+    // single click would toggle BOTH the native details AND the .collapsed class — and
+    // the CSS `.settings-section.collapsed .settings-section-body { display:none !important }`
+    // rule would hide the body even when <details> is open. Skip them here.
+    if (el.closest('details')) return;
     const section = e.target.closest('.sidebar-section') ||
       e.target.closest('.sessions-section') ||
       e.target.closest('.settings-section');
