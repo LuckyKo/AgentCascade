@@ -6287,6 +6287,7 @@ function renderAgentApiAssignments() {
 const IG_DEFAULT_WORKFLOW_DIR = 'N:/work/WD/AgentCascade/config/workflows';
 let igWorkflowsTimer = null;  // debounce handle for workflow-dir → re-fetch
 let igWorkflowsSeq = 0;       // discard stale async responses (rapid dir changes)
+let igInitialLoadDone = false; // one-shot guard: populate fields on first load only
 
 function _igSetStatus(msg, type) {
   const el = document.getElementById('ig-status');
@@ -6415,6 +6416,16 @@ async function saveImageGenSettings() {
 }
 
 function initImageGenSettings() {
+  // Populate fields + workflow pulldown on initial page load. The System sub-tab is
+  // active by default, but its click handler only fires on an explicit click — so after a
+  // restart the pulldown/fields stayed empty until the user clicked or hit refresh. This
+  // one-shot guard fixes that; later state pushes are handled by the sub-tab click handler
+  // (which re-syncs) and must not clobber in-progress edits here.
+  if (!igInitialLoadDone && document.getElementById('ig-default-workflow')) {
+    igInitialLoadDone = true;
+    loadImageGenSettings();
+  }
+
   const igSave = document.getElementById('ig-save');
   if (igSave) {
     igSave.addEventListener('click', (e) => {
