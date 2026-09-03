@@ -3074,7 +3074,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             args['context'] = context_text
 
         # Build task message using lifecycle manager
-        task_msg = self.lifecycle.build_task_message(args, caller, agent_class=inst.agent_class)
+        task_msg = self.lifecycle.build_task_message(args, caller)
 
         # Phase 4.1: Delegate to lifecycle manager for conversation
         # initialization

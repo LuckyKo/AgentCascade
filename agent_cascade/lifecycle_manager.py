@@ -263,8 +263,7 @@ class AgentLifecycleManager:
     def build_task_message(
         self,
         args: dict,
-        caller: str,
-        agent_class: Optional[str] = None
+        caller: str
     ) -> Message:
         """Build a plain-text task message from the explicit task and context arguments.
 

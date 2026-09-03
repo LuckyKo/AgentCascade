@@ -1,3 +1,5 @@
+> **DEPRECATED (2026-09-03):** Image auto-propagation in `call_agent` was removed entirely in commit `4a04fc7`. Sub-agent task messages are now built solely from the explicit `task`/`context` arguments; if a child needs to view an image, the caller includes the file path in the task text. The fixes proposed below are no longer applicable. Kept for historical reference only.
+
 # Fix: Image Base64 Propagation in call_agent Task Messages
 
 ## Problem Statement

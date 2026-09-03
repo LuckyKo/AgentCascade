@@ -10,7 +10,7 @@
 
 Currently:
 - `view_image` tool encodes images as base64 data URLs and returns them in `ContentItem(image=base64_data_url)`.
-- These base64 blobs are stored in conversation history, persisted to JSONL logs, propagated via WebSocket on every streaming tick, and copied into child agent task messages via `build_task_message()`.
+- These base64 blobs are stored in conversation history, persisted to JSONL logs, and propagated via WebSocket on every streaming tick (NOTE: as of commit 4a04fc7, `call_agent` NO LONGER copies images into child task messages — propagation was removed).
 - A single 1.5MB image is re-sent over WS ~10x/sec during streaming (~15MB/s), parsed by the browser each tick, and re-decoded as DOM images—causing severe UI lag.
 - `call_agent` propagates base64 data into child agent conversations even when irrelevant (basename collision bug with constant `data_image.png`).
 
