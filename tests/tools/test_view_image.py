@@ -75,47 +75,51 @@ def _guard_flags(items):
 
 
 # ---------------------------------------------------------------------------
-# Media-path branch (save_image_to_media succeeds)
+# Existing-file branch (plain on-disk file, no crop/capture/SVG → served in place)
 # ---------------------------------------------------------------------------
 
-class TestViewImageMediaPathUncaptioned:
-    def test_media_path_leaves_image_uncaptioned(self, view_image_tool, test_image_200x150, tmp_path):
-        """The image item is left UNCAPTIONED (caption=None) by design so the return-path
+class TestViewImageExistingFileUncaptioned:
+    def test_existing_file_served_in_place_no_copy(self, view_image_tool, test_image_200x150):
+        """Viewing a PLAIN EXISTING image file (no crop/capture/SVG) is served IN PLACE: the
+        tool reuses the already-resolved original path (forward-slash normalized), does NOT
+        call save_image_to_media, and appends "(existing file, no copy saved)" to the text.
+
+        The image item is still left UNCAPTIONED (caption=None) by design so the return-path
         guard triggers a genuine vision caption. The descriptive line lives in the separate
-        text item for text-only agents."""
-        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
-            mock_save.return_value = str(tmp_path / "media_result.png")
-            result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
+        text item for text-only agents.
+
+        save_image_to_media is NOT patched here: it must not be reached for an existing plain
+        file, and any accidental call would write to real media storage (a test smell)."""
+        result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
         assert isinstance(result, list)
         assert len(result) == 2
-        # Image item points at the saved media path.
-        assert result[0].image == str(tmp_path / "media_result.png")
+        # Image item points at the ORIGINAL resolved path (forward-slash normalized),
+        # NOT a newly-minted media path.
+        assert result[0].image == test_image_200x150.replace("\\", "/")
         # Image item is deliberately NOT pre-filled with a caption (post-revert behavior).
         assert result[0].caption is None
-        # The separate descriptive text item carries the "Viewing image ... (WxH)" line.
+        # The separate descriptive text item carries the "Viewing image ... (WxH)" line
+        # plus the in-place marker.
         assert isinstance(result[1], ContentItem)
         assert result[1].text is not None
         assert "Viewing image" in result[1].text
         assert "200x150" in result[1].text
+        assert "(existing file, no copy saved)" in result[1].text
 
-    def test_media_path_guard_fires_for_genuine_caption(self, view_image_tool, test_image_200x150, tmp_path):
+    def test_guard_fires_for_genuine_caption(self, view_image_tool, test_image_200x150):
         """The return-path guard MUST report the image as uncaptioned so the router generates
         a genuine vision/LLM caption. A pre-filled caption (the reverted behavior) would make
         this False and suppress real captioning — that is the regression we must not reintroduce."""
-        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
-            mock_save.return_value = str(tmp_path / "media_result.png")
-            result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
+        result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
         assert _guard_flags(result) is True
 
-    def test_uncaptioned_state_survives_dump_round_trip(self, view_image_tool, test_image_200x150, tmp_path):
+    def test_uncaptioned_state_survives_dump_round_trip(self, view_image_tool, test_image_200x150):
         """The uncaptioned image item must survive model_dump (exclude_none) and a JSON
         round-trip so the guard STILL fires after a session restore — i.e. caption=None is not
         accidentally dropped into a pre-filled state by serialization."""
-        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
-            mock_save.return_value = str(tmp_path / "media_result.png")
-            result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
+        result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
         fn_msg = Message(role=FUNCTION, name="view_image", content=list(result))
         dumped = json.loads(fn_msg.model_dump_json())
@@ -136,19 +140,28 @@ class TestViewImageMediaPathUncaptioned:
 
 class TestViewImageBase64FallbackUncaptioned:
     def test_base64_fallback_leaves_image_uncaptioned(self, view_image_tool, test_image_200x150):
-        """When media storage fails, the base64 fallback path ALSO leaves the image item
-        uncaptioned (caption=None) — so the guard fires a genuine vision caption on that
-        branch too. The descriptive line stays in the separate text item."""
+        """When media storage fails on a TRANSIENT insert, the base64 fallback path ALSO leaves
+        the image item uncaptioned (caption=None) — so the guard fires a genuine vision caption
+        on that branch too. The descriptive line stays in the separate text item.
+
+        NOTE: the base64 fallback is only reachable for transient inserts (capture/SVG/crop),
+        because plain existing files are now served in place and never attempt a media save.
+        We therefore drive it with a CROP (crop_tmp set → needs_save=True) so the save is
+        actually attempted and its failure falls through to base64."""
         from agent_cascade.utils.media_utils import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
                     side_effect=MediaStorageError("disk full")), \
               patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
                     return_value="data:image/png;base64,AAAA") as mock_b64:
-            result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
+            result = view_image_tool.call(json.dumps({
+                'path': test_image_200x150,
+                'crop_region': "0,0,100,75",
+            }))
 
         assert isinstance(result, list)
         assert len(result) == 2
+        # The fallback actually ran (save was attempted and raised).
         assert result[0].image == "data:image/png;base64,AAAA"
         assert mock_b64.called
         # Image item left uncaptioned on the fallback branch as well (post-revert behavior).
@@ -159,14 +172,20 @@ class TestViewImageBase64FallbackUncaptioned:
 
     def test_base64_fallback_guard_fires_for_genuine_caption(self, view_image_tool, test_image_200x150):
         """The base64 fallback result must ALSO be reported as uncaptioned by the guard so a
-        genuine vision caption is generated (not suppressed by a pre-filled caption)."""
+        genuine vision caption is generated (not suppressed by a pre-filled caption).
+
+        Driven with a CROP because the base64 fallback is only reachable for transient
+        inserts — plain existing files are served in place and never attempt a media save."""
         from agent_cascade.utils.media_utils import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
                     side_effect=MediaStorageError("disk full")), \
               patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
                     return_value="data:image/png;base64,AAAA"):
-            result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
+            result = view_image_tool.call(json.dumps({
+                'path': test_image_200x150,
+                'crop_region': "0,0,100,75",
+            }))
 
         assert _guard_flags(result) is True
 
