@@ -589,7 +589,7 @@ class TestParseMultimodalContent:
             self._track(img_val)
 
     def test_saved_to_notice_after_image(self):
-        """A single-image message yields an image item AND a 'Saved to:' text notice."""
+        """A single-image message yields an image item AND a '[NOTE: Saved as ...]' text notice."""
         from agent_cascade.api_server import _parse_multimodal_content
 
         # Create a small image and encode as data URI
@@ -612,10 +612,10 @@ class TestParseMultimodalContent:
         image_value = image_items[0]["image"]
         self._track(image_value)
 
-        # A 'Saved to:' notice must be present and match the saved path exactly.
-        expected_notice = f"Saved to: {image_value}"
+        # A '[NOTE: Saved as ...]' notice must be present and match the saved path exactly.
+        expected_notice = f"[NOTE: Saved as {image_value}]"
         assert any(item["text"] == expected_notice for item in text_items), \
-            f"Expected a 'Saved to:' notice for {image_value}, got text items: {text_items}"
+            f"Expected a '[NOTE: Saved as ...]' notice for {image_value}, got text items: {text_items}"
 
         # The pure-image input has no surrounding prose, so the ONLY text item must be
         # the notice, and it must come immediately AFTER the image (order: image, note).
@@ -623,7 +623,7 @@ class TestParseMultimodalContent:
         img_idx = next(i for i, it in enumerate(result) if "image" in it)
         note_idx = next(i for i, it in enumerate(result) if it.get("text") == expected_notice)
         assert note_idx == img_idx + 1, \
-            f"'Saved to:' notice must immediately follow the image; got image@{img_idx}, note@{note_idx}: {result}"
+            f"'[NOTE: Saved as ...]' notice must immediately follow the image; got image@{img_idx}, note@{note_idx}: {result}"
 
 
 class TestViewImageIntegration:
