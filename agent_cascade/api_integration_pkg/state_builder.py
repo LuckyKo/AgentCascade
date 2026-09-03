@@ -454,17 +454,11 @@ def build_stream_update_from_pool(
     # Version uses msg count, last msg id, streaming response count, and content length —
     # including content_len so that growing streaming content invalidates the cache
     # and fresh token stats are computed (total_tokens grows during active streaming).
-    raw_stream_len = sum(
+    stream_content_len = sum(
         len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
         for m in stream_resp_snapshot
     ) if stream_resp_snapshot else 0
-    # Quantize the streaming-content length into ~256-char buckets so the version
-    # (and thus the token-stats cache) is NOT invalidated on every single SSE chunk.
-    # Stats refresh at most once per ~256 chars of growth instead of per chunk, which
-    # eliminates the O(full-history) recompute storm that starved the producer thread
-    # ("weird mode": no stream during generation, pours in after completion).
-    stream_content_len = raw_stream_len // 256
-
+    
     current_version = (
         len(conv_snapshot),
         id(conv_snapshot[-1]) if conv_snapshot else None,
@@ -908,14 +902,10 @@ def _serialize_instance(
     # length in cache key so that growing streaming content causes cache miss and
     # fresh token stats computation (total_tokens grows during active streaming).
     stream_resp_len = len(stream_responses) if stream_responses else 0
-    raw_per_agent_len = sum(
+    per_agent_stream_content_len = sum(
         len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
         for m in (stream_responses or [])
     )
-    # Quantize into ~256-char buckets so the cache key is stable across small per-chunk
-    # content growth (avoids a full-history recompute on every SSE chunk). Mirrors the
-    # quantization in build_stream_update_from_pool — both must use the same bucket size.
-    per_agent_stream_content_len = raw_per_agent_len // 256
     cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len, per_agent_stream_content_len)
     
     # Streaming UI Content Update Fix: Compute token stats from combined messages (conversation + streaming_responses)
