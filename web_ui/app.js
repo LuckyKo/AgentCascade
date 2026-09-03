@@ -3105,6 +3105,38 @@ function updateBubbleContent(bubble, msg, config) {
         }
     }
 
+    // FIX 4: Incremental append for REASONING deltas — mirrors the plain-text path above so a
+    // thinking message does NOT trigger a full renderMarkdown()+innerHTML rebuild on every tick.
+    // Without this, any msg.reasoning_content forces an O(N) re-parse of all accumulated thinking
+    // text per tick, which (combined with the adaptive throttle at L2174) collapses streaming to
+    // ~once/turn. The backend sends cumulative reasoning_content each tick, so the new delta is
+    // exactly curReasoning.slice(prevReasoning.length). Full re-render still runs at completion and
+    // periodically (forceInterval) to correct raw-append drift in markdown/code blocks.
+    if (isGenerating && prevReasoning !== undefined && prevContent === curContent
+            && !msg.function_call && msg.role !== 'function') {
+        const newReasoning = curReasoning.slice(prevReasoning.length);
+        if (newReasoning) {
+            const thinkingContent = contentDiv.querySelector('.thinking-block .thinking-content');
+            if (thinkingContent) {
+                try {
+                    appendStreamingDelta(thinkingContent, newReasoning);
+                    // Drift correction: periodically fall through to a full re-render so raw-appended
+                    // markdown/code in the thinking block gets properly rendered (mirrors FIX 2 above).
+                    const forceInterval = 6;
+                    const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
+                    if (incrementCount + 1 >= forceInterval) {
+                        bubble.dataset.incrementCount = '0'; // reset, then fall through to full re-render
+                    } else {
+                        bubble.dataset.incrementCount = String(incrementCount + 1);
+                        return; // Success - skip full re-render this tick
+                    }
+                } catch (e) {
+                    console.warn('Incremental reasoning append failed, falling back to full render:', e);
+                }
+            }
+        }
+    }
+
     let html = '';
     if (msg.reasoning_content) {
         html += renderThinkingBlock(msg.reasoning_content, isGenerating);
