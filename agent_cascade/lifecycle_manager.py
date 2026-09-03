@@ -15,9 +15,8 @@ from typing import Tuple, Optional, TYPE_CHECKING
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.settings import DEFAULT_MAX_TURNS
-from agent_cascade.llm.schema import Message, SYSTEM, USER, IMAGE
+from agent_cascade.llm.schema import Message, SYSTEM, USER
 from agent_cascade.log import logger
-from agent_cascade.utils.utils import get_basename_from_url, msg_field
 
 
 if TYPE_CHECKING:
@@ -261,144 +260,27 @@ class AgentLifecycleManager:
 
         return Message(role=SYSTEM, content="\n".join(lines))
 
-    @staticmethod
-    def _is_image_referenced_in_task(
-        img_url: str,
-        task_text: str,
-        seen_images: dict
-    ) -> bool:
-        """Check if an image is referenced in task text by basename or alias.
-
-        Args:
-            img_url: The image URL to check
-            task_text: The task text to search in
-            seen_images: Dict mapping basenames/aliases to image URLs
-
-        Returns:
-            True if the image's basename or any of its aliases appear in task_text
-        """
-        basename = get_basename_from_url(img_url)
-        if basename in task_text:
-            return True
-        # Check if any alias for this image appears in task text
-        for alias, url in seen_images.items():
-            if url == img_url and alias in task_text:
-                return True
-        return False
-
-    def _collect_images_from_caller(
-        self,
-        caller: str,
-    ) -> dict:
-        """Scan caller's conversation for images and build basename/alias mapping.
-
-        Args:
-            caller: Parent instance name to scan
-
-        Returns:
-            Dict mapping basenames and aliases (e.g., 'image_0') to image URLs
-        """
-        seen_images = {}
-        alias_counter = 0
-        caller_conv = self.pool.get_conversation(caller)
-        if not caller_conv:
-            return seen_images
-
-        for msg in caller_conv:
-            content = msg_field(msg, 'content')
-            if isinstance(content, list):
-                for item in content:
-                    item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
-                    item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                    if item_type == IMAGE:
-                        img_url = item_value
-                        basename = get_basename_from_url(img_url)
-                        seen_images[basename] = img_url
-                        seen_images[f"image_{alias_counter}"] = img_url
-                        alias_counter += 1
-
-        return seen_images
-
-    def _propagate_images_to_task(
-        self,
-        task_text: str,
-        caller: str,
-        max_images_for_llm: int
-    ) -> list:
-        """Build multimodal content list by propagating relevant images from caller.
-
-        Only includes images that are explicitly referenced in task text by basename
-        or alias, respecting the max_images_for_llm limit.
-
-        Args:
-            task_text: The formatted task text (includes context and task labels)
-            caller: Parent instance name to scan for images
-            max_images_for_llm: Max images with base64 to propagate (-1 = keep all)
-
-        Returns:
-            List of content items: [{'text': task_text}, {IMAGE: url}, ...] or just
-            [{'text': task_text}] if no images should be propagated.
-        """
-        agent_msg_content = [{'text': task_text}]
-
-        seen_images = self._collect_images_from_caller(caller)
-        propagated_image_urls = set()
-
-        def _can_add_more() -> bool:
-            return max_images_for_llm == -1 or len(propagated_image_urls) < max_images_for_llm
-
-        # Include images referenced in task text (by basename or alias)
-        for img_url in seen_images.values():
-            if not _can_add_more():
-                break
-            if self._is_image_referenced_in_task(img_url, task_text, seen_images) and img_url not in propagated_image_urls:
-                agent_msg_content.append({IMAGE: img_url})
-                propagated_image_urls.add(img_url)
-
-        # Also check last user message for images referenced in task text
-        if _can_add_more():
-            caller_conv = self.pool.get_conversation(caller)
-            if caller_conv:
-                last_user_msg = None
-                for m in reversed(caller_conv):
-                    if msg_field(m, 'role') == USER:
-                        last_user_msg = m
-                        break
-                if last_user_msg:
-                    content = msg_field(last_user_msg, 'content')
-                    if isinstance(content, list):
-                        for item in content:
-                            if not _can_add_more():
-                                break
-                            item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
-                            item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                            if item_type == IMAGE and item_value not in propagated_image_urls:
-                                if self._is_image_referenced_in_task(item_value, task_text, seen_images):
-                                    agent_msg_content.append({IMAGE: item_value})
-                                    propagated_image_urls.add(item_value)
-
-        return agent_msg_content
-
     def build_task_message(
         self,
         args: dict,
         caller: str,
         agent_class: Optional[str] = None
     ) -> Message:
-        """Build task message with multimodal image propagation.
+        """Build a plain-text task message from the explicit task and context arguments.
 
-        Scans caller's conversation for images and includes them as multimodal content
-        if referenced in the task text or present in the last user message.
+        No images are automatically forwarded from the parent conversation. If the
+        caller needs the sub-agent to view an image, it should include the file path
+        in the task text; the sub-agent can then call view_image on it.
 
         Matches main AC branch formatting: always wraps context and task with labeled sections,
         adds caller prefix to context section, and includes a closing instruction.
 
         Args:
             args: Tool arguments (task, context)
-            caller: Parent instance name to scan for images
+            caller: Parent instance name (used for the "This is a message from {caller}." prefix)
 
         Returns:
-            Task Message object (possibly with multimodal content)
+            Task Message object with plain-text content
         """
         task_text = args.get('task', '')
         context_text = args.get('context', '')
@@ -419,28 +301,11 @@ class AgentLifecycleManager:
 
         task_text = f'Context: {context_text}{max_turns_info}\n\nTask: {task_text}\n\nPlease help with this task.'
 
-        # Read max_images_for_llm from pool config to limit image propagation
-        # -1 = keep all, 0 = no images, N >= 1 = max N images
-        raw_max = self.pool.llm_cfg.get('max_images_for_llm', 2)
-        if isinstance(raw_max, int):
-            max_images_for_llm = raw_max if raw_max >= -1 else 2
-        else:
-            max_images_for_llm = 2
-
-        # Delegate image propagation to helper method (uses _collect_images_from_caller,
-        # _is_image_referenced_in_task internally)
-        agent_msg_content = self._propagate_images_to_task(task_text, caller, max_images_for_llm)
-
         # Fallback for empty message (match main AC branch behavior)
         if not task_text.strip():
             task_text = "Please proceed with your task."
-            agent_msg_content[0]['text'] = task_text
 
-        # Use multimodal content list if images found, otherwise plain text
-        if len(agent_msg_content) > 1:
-            return Message(role=USER, content=agent_msg_content)
-        else:
-            return Message(role=USER, content=task_text)
+        return Message(role=USER, content=task_text)
 
     def initialize_conversation(  # FIX #3 (reviewer): Renamed from initialize_instance_conversation
         self,
