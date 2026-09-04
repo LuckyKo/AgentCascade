@@ -340,11 +340,10 @@ TOOL_METADATA = {
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. Requires explicit security approval — only use when no other tool can accomplish the task. '
-            'Default working directory is the workspace root.\n\n'
+            'Execute a shell command on the host system. Requires explicit security approval — only use when no other tool can accomplish the task.\n\n'
+            '**Notice:** DO NOT use with file redirects, pipes or filters. The tool already truncates middle and saves output.\n\n'
             '**Execution mode:** "auto" (default) = background if timeout>60s, else blocking; "sync" = always blocking; "async" = always background. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
-            'Max 5 concurrent async shells per agent.'
         ),
         'parameters': {
             'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
@@ -371,7 +370,7 @@ TOOL_METADATA = {
             'Read a JSON/JSONL log file (agent logs, JSON arrays, single objects, or files with mixed/malformed lines). '
             'Large message contents are truncated in the middle to prevent context overflow while '
             'retaining the beginning and end of each message. Handles other types of text files as well with the same middle truncation applied for each line, '
-            'and nested extra fields. Use the `range` parameter to select specific entries (e.g., "1:10", "5:", ":20"). '
+            'and nested extra fields. Use the `range` parameter to select specific entries (e.g., "1:10", "5:", ":20" or "-15:" for tail end). '
             'Use the `mode` parameter to control truncation behavior. '
             'Use the `format` parameter to choose output style: "simple" (default, human-readable summary) or "raw" (original JSON lines).'
         ),
