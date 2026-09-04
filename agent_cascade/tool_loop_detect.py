@@ -6,8 +6,11 @@ exact contiguous pattern matcher) with a trailing-run scan over
 
 * **Layer 1** — ≥5 trailing same-action pairs with byte-identical or
   terminal-error outputs (async-shell polling loops).
-* **Layer 2** — ≥6 trailing same-tool failing pairs with near-duplicate core
-  commands, identical targets and failure class (pytest fixup churn).
+* **Layer 2** — ≥6 trailing same-tool failing pairs with near-duplicate cores
+  and an identical failure class. Covers ALL tools: shell_cmd compares its
+  pipe-stripped core command plus an identical-target-set gate; every other tool
+  compares its canonical args JSON (volatile keys dropped) with no target gate
+  (e.g. repeated near-identical failing code_interpreter probes).
 
 FUNCTION output normalization: raw tool replies carry per-call system-injected
 noise (verdict banners, elapsed markers, justification prose, truncation
@@ -59,6 +62,10 @@ _EXIT_CODE_RE = re.compile(r"Command exited with return code (\d+)")
 
 #: pytest FAILED banner (a line like "FAILED path::Test::test_x").
 _FAILED_BANNER_RE = re.compile(r"(?m)^\s*FAILED\s+\S+::\S+")
+
+#: Python traceback header — a failing output for any tool that raises an
+#: exception (code_interpreter, etc.) but prints no exit code / FAILED banner.
+_TRACEBACK_RE = re.compile(r"\bTraceback \(most recent call last\)")
 
 #: Output patterns that indicate a *failing* tool result (used to exclude
 #: successful stable-output streaks from Layer 1). A pair whose output matches
@@ -338,7 +345,10 @@ def _targets(args_json: str) -> frozenset:
 def _fail_class(content: str) -> Optional[str]:
     """Classify a tool output as a failure, or None if not a classifiable failure.
 
-    Returns one of ``EXIT:<n>`` (n≠0), ``NOOUT``, ``TESTFAIL``.
+    Returns one of ``EXIT:<n>`` (n≠0), ``NOOUT``, ``TESTFAIL``, ``TRACEBACK``.
+    The TRACEBACK class covers tools that raise an exception without printing an
+    exit code or FAILED banner (e.g. code_interpreter) — the key guard for the
+    generic Layer 2 path, which must only chain on genuinely failing outputs.
     """
     m = _EXIT_CODE_RE.search(content)
     if m and int(m.group(1)) != 0:
@@ -347,6 +357,8 @@ def _fail_class(content: str) -> Optional[str]:
         return "NOOUT"
     if _FAILED_BANNER_RE.search(content):
         return "TESTFAIL"
+    if _TRACEBACK_RE.search(content):
+        return "TRACEBACK"
     return None
 
 
@@ -420,23 +432,42 @@ def _layer1_trailing_run(
 def _layer2_trailing_run(
     pairs: List[Tuple[int, int, str, str, str]], min_fuzzy: int = 6, sim_threshold: float = 0.85
 ) -> Optional[Tuple[str, int]]:
-    """Layer 2: trailing run of ≥min_fuzzy same-tool failing pairs with
-    core-command similarity ≥sim_threshold, identical target set and identical
-    failure class. Any pair from a different tool (or unclassifiable output)
-    breaks the run. Returns (reason, pair_start_index_in_pairs) or None.
+    """Layer 2: trailing run of ≥min_fuzzy same-tool failing pairs whose cores are
+    near-duplicate (similarity ≥sim_threshold) and share an identical failure class.
+    Any pair from a different tool (or with an unclassifiable / differently-classed
+    output) breaks the run. Returns (reason, pair_start_index_in_pairs) or None.
 
-    SCOPE: shell_cmd only — ``_core_command``/``_targets`` parse the
-    ``command`` arg, so non-shell tools never form a Layer 2 run by design
-    (near-duplicate failing calls from other tools are out of scope)."""
+    SCOPE: ALL tools. The "core" of a call is what we compare for near-duplication:
+      * shell_cmd — the pipe-stripped core command (``_core_command``), plus an
+        ADDITIONAL identical-target-set gate (``_targets``). This is the original,
+        byte-for-byte behavior and is preserved exactly.
+      * every other tool — the canonical args JSON with volatile keys dropped
+        (the same cleaning ``_norm_action`` applies). No target gate: for non-shell
+        tools the near-duplicate core + identical failure class are sufficient, and
+        a legitimate multi-target run (e.g. iterating over distinct files) is
+        protected because its cores differ enough to fall below sim_threshold.
+
+    The similarity gate, failure-class gate and same-tool gate apply to BOTH paths;
+    only the core derivation and the target-set gate differ."""
     if len(pairs) < min_fuzzy:
         return None
 
     last = pairs[-1]
+    is_shell = last[2] == "shell_cmd"
     fail_cls = _fail_class(last[4])
-    core = _core_command(last[3])
-    tgts = _targets(last[3])
-    if fail_cls is None or core is None:
+    if fail_cls is None:
         return None
+    # Derive the comparable core (and, for shell_cmd only, its target set).
+    if is_shell:
+        core = _core_command(last[3])
+        tgts = _targets(last[3])
+        if core is None:
+            return None
+    else:
+        core = _norm_action(last[2], last[3])
+        tgts = None
+        if core is None:
+            return None
 
     run_end = len(pairs) - 1
     run_start = run_end
@@ -446,10 +477,17 @@ def _layer2_trailing_run(
         if name != last[2]:
             break
         fc = _fail_class(out)
-        c = _core_command(args_json)
-        t = _targets(args_json)
-        if fc is None or fc != fail_cls or c is None or t != tgts:
+        if fc is None or fc != fail_cls:
             break
+        if is_shell:
+            c = _core_command(args_json)
+            t = _targets(args_json)
+            if c is None or t != tgts:
+                break
+        else:
+            c = _norm_action(name, args_json)
+            if c is None:
+                break
         sim = SequenceMatcher(None, c, core).ratio()
         if sim < sim_threshold:
             break
@@ -460,10 +498,16 @@ def _layer2_trailing_run(
     if run_len < min_fuzzy:
         return None
 
-    reason = (
-        f"tool-call loop: near-duplicate failing command — tool '{last[2]}' invoked "
-        f"{run_len} times with similar commands, identical targets and failure class {fail_cls}"
-    )
+    if is_shell:
+        reason = (
+            f"tool-call loop: near-duplicate failing command — tool '{last[2]}' invoked "
+            f"{run_len} times with similar commands, identical targets and failure class {fail_cls}"
+        )
+    else:
+        reason = (
+            f"tool-call loop: near-duplicate failing call — tool '{last[2]}' invoked "
+            f"{run_len} times with similar arguments and failure class {fail_cls}"
+        )
     return reason, run_start
 
 
@@ -491,7 +535,9 @@ def detect_tool_loop(
         FUNCTION output plus any interleaved prose belonging to that iteration
         — and drop everything after).
 
-    Scope: Layer 1 covers any tool; Layer 2 is shell_cmd-only by design.
+    Scope: both layers cover all tools. Layer 2 uses a shell_cmd-specific core +
+    target-set gate for shell commands, and a generic canonical-args core (no
+    target gate) for every other tool.
 
     Example:
         info = detect_tool_loop(messages)

@@ -165,6 +165,10 @@ TOOL_LOOP_FUZZY_ROLLBACK_ENABLED: bool = os.getenv(
 # DEPRECATED (2026-08): legacy kill switch only — can DISABLE Tier 2 (LOOP_FUZZY_WARNING_ENABLED AND this flag) but never enable it. Removed in a later cleanup release.
 TOOL_LOOP_DETECTION_ENABLED: bool = os.getenv(
     'QWEN_AGENT_TOOL_LOOP_DETECTION', '1') == '1'  # Legacy kill switch for the fuzzy tier
+# Tier 2 (fuzzy) similarity floor: minimum difflib SequenceMatcher.ratio() between
+# consecutive near-duplicate cores for a Layer 2 run to chain. Applies to all tools.
+TOOL_LOOP_SIM_THRESHOLD: float = float(os.getenv(
+    'QWEN_AGENT_TOOL_LOOP_SIM_THRESHOLD', '0.85'))  # Default 0.85 (unchanged behavior unless opted in)
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv(
     'QWEN_AGENT_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
 AGENT_MAX_WORKERS: int = int(os.getenv(

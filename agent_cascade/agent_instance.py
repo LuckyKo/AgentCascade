@@ -24,7 +24,7 @@ from agent_cascade.settings import (
     COMPRESSION_SECURITY_CHECK_TIMEOUT,
     AGENT_IDLE_TIMEOUT, SYSTEM_AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
     AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
-    TOOL_LOOP_DETECTION_ENABLED,
+    TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
     CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
     CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
@@ -749,6 +749,7 @@ class PoolSettings:
     # settings.loop_fuzzy_warning_enabled AND tool_loop_detection_enabled,
     # evaluated in _pre_llm_checks. Removed in a later cleanup release.
     tool_loop_detection_enabled: bool = TOOL_LOOP_DETECTION_ENABLED   # Legacy kill switch for the fuzzy tier
+    tool_loop_sim_threshold: float = TOOL_LOOP_SIM_THRESHOLD          # Tier 2 (fuzzy) similarity floor for near-duplicate cores (default 0.85)
 
     # Inner-loop detection toggle (enabled by default for loop prevention)
     inner_loop_detect_enabled: bool = True    # Enable in-message loop detection during streaming

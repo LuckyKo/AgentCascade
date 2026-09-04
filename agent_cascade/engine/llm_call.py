@@ -240,7 +240,10 @@ class LLMCallMixin:
             # kill switch (plan §5.3).
             if (getattr(self.pool.settings, 'loop_fuzzy_warning_enabled', True)
                     and getattr(self.pool.settings, 'tool_loop_detection_enabled', True)):
-                info = _detect_tool_loop(messages)
+                info = _detect_tool_loop(
+                    messages,
+                    sim_threshold=getattr(self.pool.settings, 'tool_loop_sim_threshold', 0.85),
+                )
                 if info is None:
                     # Pattern not matching → run broken / no loop: re-arm the
                     # warning, cancel any pending escalation countdown, and

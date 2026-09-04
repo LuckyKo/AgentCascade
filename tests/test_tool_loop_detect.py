@@ -159,6 +159,20 @@ class TestFixtures:
         _, pop_count = detect_tool_loop(msgs)
         assert pop_count == 15, f"trigger point shifted: {pop_count} != 15"
 
+    def test_sample3_codeinterp_tail_layer2_fires_generic(self):
+        # REGRESSION (coverage gap fix): an agent re-running near-identical
+        # code_interpreter probes (probe66.py..probe72.py) that each return the SAME
+        # traceback. 7 pairs > min_fuzzy=6, cores ~99% similar, identical TRACEBACK
+        # failure class. The OLD shell_cmd-only Layer 2 returned None here; the
+        # generalized path must now fire via the generic (non-shell) core.
+        msgs = _load_fixture("tool_loop_sample3_codeinterp_tail.jsonl")
+        result = detect_tool_loop(msgs)
+        assert result is not None, "generic Layer 2 should fire on near-duplicate code_interpreter probes"
+        reason, pop_count = result
+        assert "near-duplicate" in reason, f"reason should mention near-duplicate, got: {reason}"
+        assert "code_interpreter" in reason
+        assert pop_count > 0
+
     def test_layer2_still_fires_on_synthetic_churn(self):
         # GENUINE content differences (varying line numbers) survive normalization;
         # only fuzzy matching can chain them.
@@ -396,6 +410,20 @@ class TestFalsePositiveBattery:
         out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
         msgs = identical_pytest_pairs(5, out)
         msgs += _pytest_pair(PYTEST_CMD, "APPROVED: Command completed successfully.")
+        assert detect_tool_loop(msgs) is None
+
+    def test_non_shell_multi_target_failing_survey(self):
+        # FP GUARD for the generic (non-shell) Layer 2 path: an agent iterating over
+        # DISTINCT files with read_file, each failing. The cores are near-identical in
+        # shape but differ in the path argument, and none of the outputs carry a
+        # traceback/exit-code/FAILED banner (fail class is None), so no run forms —
+        # legitimate multi-target work must not be flagged.
+        msgs = [Message(role=USER, content="survey the module tree")]
+        for i in range(8):
+            path = f"src/module_{i:02d}/component.py"
+            err = f"FileNotFoundError: [Errno 2] No such file or directory: '{path}'"
+            msgs.append(_fc_msg("read_file", {"path": path}))
+            msgs.append(_fn_msg("read_file", err))
         assert detect_tool_loop(msgs) is None
 
 
