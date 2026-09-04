@@ -1,6 +1,7 @@
 """File operations — directory listing, read, write, edit, re-indent, delete, copy, move, backup cleanup."""
 
 import fnmatch
+import os
 import re
 import shutil
 import time
@@ -294,8 +295,9 @@ class FileOpsMixin:
         """
         if ctx.include_fn and not ctx.include_fn(name):
             return False
-        # Exclude drops any name that MATCHES the pattern (BUG_0008: this was
-        # inverted, which kept only excluded names and dropped everything else).
+        # Exclude drops any name that MATCHES the pattern. (This direction is easy
+        # to get backwards: an inverted check would keep only the excluded names
+        # and drop everything else.)
         if ctx.exclude_fn and ctx.exclude_fn(name):
             return False
 
@@ -353,7 +355,6 @@ class FileOpsMixin:
         self, resolved: Path, ctx: 'FilterContext', sort_by: str, max_entries: int
     ) -> Tuple[str, int, int, int]:
         """Flat directory listing via os.scandir. Returns (output_str, dirs, files, size)."""
-        import os
         dirs = []
         files = []
 
@@ -368,7 +369,7 @@ class FileOpsMixin:
                 # Fetch stat BEFORE filter (needed for size/date checks)
                 try:
                     stat_info = entry.stat()
-                except Exception:
+                except OSError:
                     stat_info = None
                 # Full filter (name + size + date) via context
                 if not self._matches_filters(
@@ -423,7 +424,6 @@ class FileOpsMixin:
         self, path: str, resolved: Path, ctx: 'FilterContext', sort_by: str, max_depth: int, max_entries: int
     ) -> Tuple[str, int, int, int]:
         """Recursive directory listing via os.walk. Returns (output_str, dirs, files, size)."""
-        import os
         entries_by_dir: dict = OrderedDict()
         visited_dirs: set = set()
         entry_count = 0
@@ -440,15 +440,15 @@ class FileOpsMixin:
 
             current_depth = len(abs_path.parts) - root_depth
 
-            # BUG_0008: decouple directory TRAVERSAL from file filtering. We always
-            # descend into every subdirectory (os.walk is never pruned by the
-            # include/exclude filter), so a matching file at any depth is found even
-            # when its parent's own name fails the *file* filter (e.g.
-            # include="*.txt" must still reveal a/inner.txt).
+            # Directory traversal is decoupled from file filtering: we always descend
+            # into every subdirectory (os.walk is never pruned by the include/exclude
+            # filter), so a matching file at any depth is found even when its parent's
+            # own name fails the *file* filter (e.g. include="*.txt" must still reveal
+            # a/inner.txt).
             #
             # Every walked subdir is stored as a [DIR] entry in its parent group so
-            # that render_dir() descends into it (BUG_0006's tree structure depends
-            # on this). Whether the dir line is actually PRINTED is decided later by
+            # that render_dir() descends into it -- the tree structure depends on this.
+            # Whether the dir line is actually PRINTED is decided later by
             # displayed_dirs: a dir header prints iff it passes the filter on its own
             # name. A dir that fails the name filter is omitted as a header, but we
             # still descend into it so its matching files are rendered (indented under
@@ -462,7 +462,7 @@ class FileOpsMixin:
                     continue
                 try:
                     stat_info = (current_dir / d_name).stat()
-                except Exception:
+                except OSError:
                     stat_info = None
                 dir_entries.append(self._make_entry(d_name, True, stat_info))
 
@@ -475,7 +475,7 @@ class FileOpsMixin:
                     continue
                 try:
                     stat_info = (current_dir / f_name).stat()
-                except Exception:
+                except OSError:
                     stat_info = None
                 # Full filter (name + size + date) via context, after stat is available.
                 if not self._matches_filters(
@@ -489,7 +489,7 @@ class FileOpsMixin:
                 entry_count += 1
 
             # Record every walked directory (even with no displayable files) so the
-            # tree structure and empty-dir markers are preserved (BUG_0006).
+            # tree structure and empty-dir markers are preserved.
             entries_by_dir[dirpath] = self._sort_entries(dir_entries + file_entries, sort_by)
 
             if entry_count >= max_entries:
@@ -498,7 +498,7 @@ class FileOpsMixin:
             if max_depth != -1 and current_depth >= max_depth - 1:
                 subdirs.clear()
 
-        # Decide which directories are actually displayed (BUG_0008 design decision):
+        # Decide which directories are actually displayed:
         # a dir's HEADER line is printed only when it passes the filter on its own
         # name. The traversal still always descends into every subdir regardless, so
         # matching files beneath a name-filter-failing dir are found and rendered --
@@ -508,23 +508,23 @@ class FileOpsMixin:
         # always shown. "displayable descendant" here means a descendant whose own
         # header would print -- not merely any file, so we do NOT promote a failing
         # parent just because it holds a matching file.
+        # A directory's HEADER line prints iff it passes the filter on its own name.
+        # (The traversal always descends into every subdir regardless, so files beneath
+        # a name-filter-failing dir are still rendered -- just without a [DIR] header.)
+        # This is exactly the previous recursive behavior: _dir_displayed() returned
+        # False immediately for any dir failing its own name filter (making the child
+        # promotion branch inert), and returned True for the root WITHOUT adding it to
+        # displayed_dirs. A single O(n) pass over entries_by_dir reproduces both --
+        # the old recursion rescanned all of entries_by_dir per directory -> O(n^2).
+        root_str = str(resolved)
         displayed_dirs = set()
-        def _dir_displayed(dirpath: str) -> bool:
-            if dirpath == str(resolved):
-                return True
-            if not self._matches_filters(
+        for dirpath in entries_by_dir:
+            if dirpath == root_str:
+                continue  # root is never recorded (matches _dir_displayed's no-add branch)
+            if self._matches_filters(
                 Path(dirpath).name, True, None, None, ctx=ctx
             ):
-                return False
-            for child in entries_by_dir:
-                if os.path.dirname(child) == dirpath and _dir_displayed(child):
-                    displayed_dirs.add(dirpath)
-                    return True
-            displayed_dirs.add(dirpath)
-            return True
-
-        for d in list(entries_by_dir):
-            _dir_displayed(d)
+                displayed_dirs.add(dirpath)
 
         # Totals count only what is actually displayed. Dirs are counted from the
         # displayable set; files/size are accumulated in render_dir below so they
@@ -546,9 +546,9 @@ class FileOpsMixin:
             for e in group:
                 if e['is_dir']:
                     child = os.path.join(dirpath, e['name'])
-                    # Print the dir line only when displayable (passes its name filter
-                    # or has displayable content); a non-displayable dir is skipped but
-                    # we still descend below so matching files are not lost (BUG_0008).
+                    # Print the dir line only when it passed its own name filter (it is
+                    # in displayed_dirs); a non-displayable dir is skipped but we still
+                    # descend below so matching files are not lost.
                     if child in displayed_dirs:
                         is_empty = not entries_by_dir.get(child)
                         marker = " (empty)" if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
@@ -569,7 +569,7 @@ class FileOpsMixin:
         total_size = rendered_size
 
         if entry_count >= max_entries and entries_by_dir:
-            output += f"\n  ... (listing stopped at {max_entries} entries; use include/exclude or size/date filters to narrow)\n"
+            output += f"\n  ... (listing stopped at {max_entries} files; use include/exclude or size/date filters to narrow)\n"
 
         return output, total_dirs, total_files, total_size
 

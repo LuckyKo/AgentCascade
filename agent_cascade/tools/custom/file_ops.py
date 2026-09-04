@@ -58,6 +58,9 @@ HEX_DUMP_BYTES = 1024                     # Bytes to show in hex view for binary
 CONTEXT_FRACTION = 0.25                   # Fraction of context window reserved for tool output
 MIN_TRUNCATED_LINE_CHARS = 200            # Minimum characters to keep when truncating a single line
 
+# list_dir default output truncation limit (chars) before spillover is applied.
+DEFAULT_LIST_DIR_CHAR_LIMIT = 3000
+
 
 def _is_binary_file(path: Path) -> bool:
     """Check if a file is binary by reading its first 1 KiB and looking for null bytes."""
@@ -1051,7 +1054,7 @@ class ListDir(BaseTool):
             return "Error: files_only and dirs_only are mutually exclusive. Use only one."
 
         # Get the truncation limit from agent/tool options
-        char_limit = 3000
+        char_limit = DEFAULT_LIST_DIR_CHAR_LIMIT
         if self.agent_pool:
             llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
             if isinstance(llm_cfg, dict):
