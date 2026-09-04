@@ -75,7 +75,7 @@ _FAILURE_OUTPUT_RES = (
     re.compile(r"No running shell found"),
     re.compile(r"is not recognized as an internal or external command"),
     re.compile(r"(?m)^\s*FAILED\s+\S+::\S+"),
-    re.compile(r"\bTraceback \(most recent call last\)"),
+    _TRACEBACK_RE,
     re.compile(r"^\s*(Error|Exception)\s*:", re.M),
 )
 
@@ -303,7 +303,7 @@ def _is_terminal_output(content: str) -> bool:
 #: High-precision forms only: bare words like "Error" in prose must NOT trigger
 #: this, or detection would be suppressed on benign stable outputs.
 _NOISY_OUTPUT_MARKERS = (
-    re.compile(r"\bTraceback \(most recent call last\)"),
+    _TRACEBACK_RE,
     re.compile(r"(?m)^\s*(Error|Exception)\s*:\s*\S"),
 )
 
