@@ -992,6 +992,32 @@ class ListDir(BaseTool):
                 'type': 'integer',
                 'default': 500,
                 'description': TOOL_METADATA['list_dir']['parameters']['max_entries']
+            },
+            'min_size': {
+                'type': 'string',
+                'description': TOOL_METADATA['list_dir']['parameters']['min_size']
+            },
+            'max_size': {
+                'type': 'string',
+                'description': TOOL_METADATA['list_dir']['parameters']['max_size']
+            },
+            'modified_after': {
+                'type': 'string',
+                'description': TOOL_METADATA['list_dir']['parameters']['modified_after']
+            },
+            'modified_before': {
+                'type': 'string',
+                'description': TOOL_METADATA['list_dir']['parameters']['modified_before']
+            },
+            'files_only': {
+                'type': 'boolean',
+                'default': False,
+                'description': TOOL_METADATA['list_dir']['parameters']['files_only']
+            },
+            'dirs_only': {
+                'type': 'boolean',
+                'default': False,
+                'description': TOOL_METADATA['list_dir']['parameters']['dirs_only']
             }
         },
         'required': ['path'],
@@ -1014,6 +1040,15 @@ class ListDir(BaseTool):
         sort_by = params.get('sort_by', 'name')
         show_summary = params.get('show_summary', False)
         max_entries = params.get('max_entries', 500)
+        min_size = params.get('min_size')
+        max_size = params.get('max_size')
+        modified_after = params.get('modified_after')
+        modified_before = params.get('modified_before')
+        files_only = bool(params.get('files_only', False))
+        dirs_only = bool(params.get('dirs_only', False))
+
+        if files_only and dirs_only:
+            return "Error: files_only and dirs_only are mutually exclusive. Use only one."
 
         # Get the truncation limit from agent/tool options
         char_limit = 3000
@@ -1039,7 +1074,10 @@ class ListDir(BaseTool):
             path, recursive=recursive, max_depth=max_depth,
             include=include, exclude=exclude, sort_by=sort_by,
             show_summary=show_summary, max_entries=max_entries,
-            char_limit=char_limit, agent_name=agent_name
+            char_limit=char_limit, agent_name=agent_name,
+            min_size=min_size, max_size=max_size,
+            modified_after=modified_after, modified_before=modified_before,
+            files_only=files_only, dirs_only=dirs_only,
         )
 
 

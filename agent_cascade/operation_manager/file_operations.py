@@ -6,11 +6,114 @@ import shutil
 import time
 import zipfile
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from agent_cascade.tool_utils import truncate_with_spillover
+
+
+# ─── list_dir filter helpers ──────────────────────────────────────────────
+
+_SIZE_RE = re.compile(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)?$', re.IGNORECASE)
+_SIZE_UNITS = {'B': 1, 'KB': 1024, 'MB': 1024 ** 2, 'GB': 1024 ** 3, 'TB': 1024 ** 4}
+
+
+def _parse_size(s: Optional[str]) -> Optional[int]:
+    """Parse human-readable size string to bytes. Returns None if invalid/empty.
+
+    No isdigit() fast-path: the regex handles bare numbers uniformly so a
+    decimal like "1.5" is not truncated by an int cast on a fast path.
+    """
+    if not s or not s.strip():
+        return None
+    m = _SIZE_RE.match(s.strip())
+    if not m:
+        return None
+    value = float(m.group(1))
+    unit = (m.group(2) or 'B').upper()
+    return int(value * _SIZE_UNITS[unit])
+
+
+_RELATIVE_RE = re.compile(
+    r'^(\d+(?:\.\d+)?)\s*(second|minute|hour|day|week|month|year)s?\s+ago$',
+    re.IGNORECASE,
+)
+# Compact unit aliases: "2h", "90min", "1d", "2.5w"
+_COMPACT_RE = re.compile(r'^(\d+(?:\.\d+)?)\s*([a-zA-Z]+)$')
+_UNIT_ALIASES = {
+    's': 1, 'sec': 1, 'second': 1, 'seconds': 1,
+    'm': 60, 'min': 60, 'mins': 60, 'minute': 60, 'minutes': 60,
+    'h': 3600, 'hr': 3600, 'hrs': 3600, 'hour': 3600, 'hours': 3600,
+    'd': 86400, 'day': 86400, 'days': 86400,
+    'w': 604800, 'wk': 604800, 'week': 604800, 'weeks': 604800,
+    # Approximate: 1mo=30d, 1y=365d (leap years / variable month lengths ignored)
+    'mo': 2592000, 'month': 2592000, 'months': 2592000,
+    'y': 31536000, 'yr': 31536000, 'year': 31536000, 'years': 31536000,
+}
+
+
+def _parse_time(s: Optional[str]) -> Optional[float]:
+    """Parse a time string to epoch seconds. Returns None if invalid/empty."""
+    if not s or not s.strip():
+        return None
+    s = s.strip()
+
+    # 1. Pure digits → epoch seconds (UTC)
+    if s.isdigit():
+        return float(s)
+
+    # 2. Relative expression: "N unit(s) ago" (full words, case-insensitive)
+    m = _RELATIVE_RE.match(s)
+    if m:
+        value = float(m.group(1))
+        unit = m.group(2).lower()
+        return time.time() - value * _UNIT_ALIASES[unit]
+
+    # 3. Compact form: "2h", "90min", "1d", "2.5w" (no "ago" suffix)
+    m = _COMPACT_RE.match(s)
+    if m:
+        value = float(m.group(1))
+        unit = m.group(2).lower()
+        if unit in _UNIT_ALIASES:
+            return time.time() - value * _UNIT_ALIASES[unit]
+
+    # 4. ISO date/datetime (local timezone)
+    try:
+        # Normalize space separator to 'T' for fromisoformat compat (Py < 3.11)
+        s_norm = s.replace(' ', 'T', 1) if re.match(r'^\d{4}-\d{2}-\d{2}\s', s) else s
+        # Handle date-only by appending midnight
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_norm):
+            dt = datetime.strptime(s_norm, '%Y-%m-%d')
+        else:
+            dt = datetime.fromisoformat(s_norm)
+        return dt.timestamp()  # local timezone (tz-aware if suffix present)
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_pattern_fn(patterns_str: Optional[str]) -> Optional[Callable]:
+    """Build a name-matching callable from a comma-separated glob string."""
+    if not patterns_str or not patterns_str.strip():
+        return None
+    patterns = [p.strip() for p in patterns_str.split(',') if p.strip()]
+    if not patterns:
+        return None  # empty after splitting → no filter
+    return lambda name: any(fnmatch.fnmatch(name, p) for p in patterns)
+
+
+@dataclass
+class FilterContext:
+    """Bundle of all list_dir filters threaded through the listing call chain."""
+    include_fn: Optional[Callable] = None
+    exclude_fn: Optional[Callable] = None
+    min_size: Optional[int] = None          # bytes, or None
+    max_size: Optional[int] = None          # bytes, or None
+    modified_after: Optional[float] = None  # epoch, or None
+    modified_before: Optional[float] = None  # epoch, or None
+    files_only: bool = False
+    dirs_only: bool = False
 
 # ─── Mixin: File operations for OperationManager ─────────────────────────
 
@@ -175,11 +278,37 @@ class FileOpsMixin:
             return f"(file, binary, {size_str})"
 
     @staticmethod
-    def _matches_filters(name: str, include_fn, exclude_fn) -> bool:
-        """Check if a name passes both include and exclude filters."""
-        if include_fn and not include_fn(name):
+    def _matches_filters(
+        name: str,
+        is_dir: bool,
+        size: Optional[int],
+        mtime: Optional[float],
+        ctx: 'FilterContext',
+    ) -> bool:
+        """Check if an entry passes all filters in *ctx*.
+
+        Name filter (include/exclude) applies to every entry. Size and date
+        filters apply ONLY to files (directories are unaffected). Files whose
+        stat failed (size/mtime = None) are excluded when a size or date
+        filter is active, since we cannot verify they meet the criteria.
+        """
+        if ctx.include_fn and not ctx.include_fn(name):
             return False
-        if exclude_fn and not exclude_fn(name):
+        # Exclude drops any name that MATCHES the pattern (BUG_0008: this was
+        # inverted, which kept only excluded names and dropped everything else).
+        if ctx.exclude_fn and ctx.exclude_fn(name):
+            return False
+
+        if is_dir:
+            return True  # size/date filters never apply to directories
+
+        if ctx.min_size is not None and (size is None or size < ctx.min_size):
+            return False
+        if ctx.max_size is not None and (size is None or size > ctx.max_size):
+            return False
+        if ctx.modified_after is not None and (mtime is None or mtime <= ctx.modified_after):
+            return False
+        if ctx.modified_before is not None and (mtime is None or mtime >= ctx.modified_before):
             return False
         return True
 
@@ -221,7 +350,7 @@ class FileOpsMixin:
     # ─── Directory listing helpers ────────────────────────────────────────
 
     def _list_flat(
-        self, resolved: Path, include_fn, exclude_fn, sort_by: str, max_entries: int
+        self, resolved: Path, ctx: 'FilterContext', sort_by: str, max_entries: int
     ) -> Tuple[str, int, int, int]:
         """Flat directory listing via os.scandir. Returns (output_str, dirs, files, size)."""
         import os
@@ -230,16 +359,34 @@ class FileOpsMixin:
 
         with os.scandir(str(resolved)) as it:
             for entry in it:
-                if not self._matches_filters(entry.name, include_fn, exclude_fn):
+                is_dir = entry.is_dir()
+                # Early exit for files_only/dirs_only (no stat needed)
+                if ctx.files_only and is_dir:
                     continue
+                if ctx.dirs_only and not is_dir:
+                    continue
+                # Fetch stat BEFORE filter (needed for size/date checks)
                 try:
                     stat_info = entry.stat()
                 except Exception:
                     stat_info = None
-                is_dir = entry.is_dir()
-                (dirs if is_dir else files).append(
-                    self._make_entry(entry.name, is_dir, stat_info)
-                )
+                # Full filter (name + size + date) via context
+                if not self._matches_filters(
+                    entry.name, is_dir,
+                    size=stat_info.st_size if stat_info else None,
+                    mtime=stat_info.st_mtime if stat_info else None,
+                    ctx=ctx,
+                ):
+                    continue
+                e = self._make_entry(entry.name, is_dir, stat_info)
+                # Cheaply mark empty directories so readers know they exist.
+                if is_dir:
+                    try:
+                        with os.scandir(str(resolved / entry.name)) as sub_it:
+                            e['is_empty'] = next(sub_it, None) is None
+                    except Exception:
+                        pass
+                (dirs if is_dir else files).append(e)
 
         sorted_dirs = self._sort_entries(dirs, sort_by)
         sorted_files = self._sort_entries(files, sort_by)
@@ -261,18 +408,19 @@ class FileOpsMixin:
         if sorted_dirs:
             output += "Directories:\n"
             for e in sorted_dirs:
-                output += f"  {e['name']}/ (modified: {self._format_mtime(e['mtime'])})\n"
+                marker = " (empty)" if e.get('is_empty') else f" (modified: {self._format_mtime(e['mtime'])})"
+                output += f"  {e['name']}/{marker}\n"
         if sorted_files:
             output += "\nFiles:\n"
             for e in sorted_files:
                 output += f"  {e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
         if overflow_count > 0:
-            output += f"  ... and {overflow_count} more entries (output limited to {max_entries}); use include/exclude to narrow\n"
+            output += f"  ... and {overflow_count} more entries (output limited to {max_entries}); use include/exclude or size/date filters to narrow\n"
 
         return output, total_dirs, total_files, total_size
 
     def _list_recursive(
-        self, path: str, resolved: Path, include_fn, exclude_fn, sort_by: str, max_depth: int, max_entries: int
+        self, path: str, resolved: Path, ctx: 'FilterContext', sort_by: str, max_depth: int, max_entries: int
     ) -> Tuple[str, int, int, int]:
         """Recursive directory listing via os.walk. Returns (output_str, dirs, files, size)."""
         import os
@@ -291,34 +439,58 @@ class FileOpsMixin:
             visited_dirs.add(abs_path)
 
             current_depth = len(abs_path.parts) - root_depth
-            dir_entries = []
 
+            # BUG_0008: decouple directory TRAVERSAL from file filtering. We always
+            # descend into every subdirectory (os.walk is never pruned by the
+            # include/exclude filter), so a matching file at any depth is found even
+            # when its parent's own name fails the *file* filter (e.g.
+            # include="*.txt" must still reveal a/inner.txt).
+            #
+            # Every walked subdir is stored as a [DIR] entry in its parent group so
+            # that render_dir() descends into it (BUG_0006's tree structure depends
+            # on this). Whether the dir line is actually PRINTED is decided later by
+            # displayed_dirs: a dir header prints iff it passes the filter on its own
+            # name. A dir that fails the name filter is omitted as a header, but we
+            # still descend into it so its matching files are rendered (indented under
+            # the omitted parent). An empty/leaf dir whose name passes renders as
+            # "[DIR] name/ (empty)".
+
+            dir_entries = []
             for d_name in sorted(subdirs):
-                if entry_count >= max_entries:
-                    break
+                # Early exit for files_only (no stat needed) — dirs are never files.
+                if ctx.files_only:
+                    continue
                 try:
                     stat_info = (current_dir / d_name).stat()
                 except Exception:
                     stat_info = None
-                if not self._matches_filters(d_name, include_fn, exclude_fn):
-                    continue
                 dir_entries.append(self._make_entry(d_name, True, stat_info))
-                entry_count += 1
 
+            file_entries = []
             for f_name in sorted(filenames):
                 if entry_count >= max_entries:
                     break
+                # Early exit for dirs_only (no stat needed) — files are never dirs here.
+                if ctx.dirs_only:
+                    continue
                 try:
                     stat_info = (current_dir / f_name).stat()
                 except Exception:
                     stat_info = None
-                if not self._matches_filters(f_name, include_fn, exclude_fn):
+                # Full filter (name + size + date) via context, after stat is available.
+                if not self._matches_filters(
+                    f_name, False,
+                    size=stat_info.st_size if stat_info else None,
+                    mtime=stat_info.st_mtime if stat_info else None,
+                    ctx=ctx,
+                ):
                     continue
-                dir_entries.append(self._make_entry(f_name, False, stat_info))
+                file_entries.append(self._make_entry(f_name, False, stat_info))
                 entry_count += 1
 
-            if dir_entries:
-                entries_by_dir[dirpath] = self._sort_entries(dir_entries, sort_by)
+            # Record every walked directory (even with no displayable files) so the
+            # tree structure and empty-dir markers are preserved (BUG_0006).
+            entries_by_dir[dirpath] = self._sort_entries(dir_entries + file_entries, sort_by)
 
             if entry_count >= max_entries:
                 subdirs.clear()
@@ -326,22 +498,78 @@ class FileOpsMixin:
             if max_depth != -1 and current_depth >= max_depth - 1:
                 subdirs.clear()
 
-        total_dirs = sum(1 for g in entries_by_dir.values() for e in g if e['is_dir'])
-        total_files = sum(1 for g in entries_by_dir.values() for e in g if not e['is_dir'])
-        total_size = sum(e['size'] or 0 for g in entries_by_dir.values() for e in g if not e['is_dir'])
+        # Decide which directories are actually displayed (BUG_0008 design decision):
+        # a dir's HEADER line is printed only when it passes the filter on its own
+        # name. The traversal still always descends into every subdir regardless, so
+        # matching files beneath a name-filter-failing dir are found and rendered --
+        # they simply appear indented under their (omitted) parent without a [DIR]
+        # header. A dir that fails the name filter is therefore omitted entirely
+        # (documented in the task spec); only its displayable files show. The root is
+        # always shown. "displayable descendant" here means a descendant whose own
+        # header would print -- not merely any file, so we do NOT promote a failing
+        # parent just because it holds a matching file.
+        displayed_dirs = set()
+        def _dir_displayed(dirpath: str) -> bool:
+            if dirpath == str(resolved):
+                return True
+            if not self._matches_filters(
+                Path(dirpath).name, True, None, None, ctx=ctx
+            ):
+                return False
+            for child in entries_by_dir:
+                if os.path.dirname(child) == dirpath and _dir_displayed(child):
+                    displayed_dirs.add(dirpath)
+                    return True
+            displayed_dirs.add(dirpath)
+            return True
 
-        output = ""
-        for dir_path, group in entries_by_dir.items():
-            rel_label = str(Path(dir_path).relative_to(resolved)) if Path(dir_path) != resolved else path + "/"
-            output += f"\n[{rel_label}]\n" if rel_label != path + "/" else f"[{rel_label}]\n"
+        for d in list(entries_by_dir):
+            _dir_displayed(d)
+
+        # Totals count only what is actually displayed. Dirs are counted from the
+        # displayable set; files/size are accumulated in render_dir below so they
+        # stay consistent even under max_entries truncation (which drops some
+        # entries). This mirrors flat mode and keeps the top-level "empty directory"
+        # message accurate.
+        total_dirs = len(displayed_dirs)
+        rendered_files = 0
+        rendered_size = 0
+
+        # Render as a depth-indented tree (2 spaces per level). Every directory
+        # appears even when empty (marked "(empty)"), and each directory's own
+        # contents are indented relative to the listed root so parentage is
+        # unambiguous. Root-level entries render at indent level 0.
+        def render_dir(dirpath: str, depth: int):
+            nonlocal output, rendered_files, rendered_size
+            group = entries_by_dir.get(dirpath, [])
+            prefix = "  " * depth
             for e in group:
                 if e['is_dir']:
-                    output += f"[DIR] {e['name']}/ (modified: {self._format_mtime(e['mtime'])})\n"
+                    child = os.path.join(dirpath, e['name'])
+                    # Print the dir line only when displayable (passes its name filter
+                    # or has displayable content); a non-displayable dir is skipped but
+                    # we still descend below so matching files are not lost (BUG_0008).
+                    if child in displayed_dirs:
+                        is_empty = not entries_by_dir.get(child)
+                        marker = " (empty)" if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
+                        output += f"{prefix}[DIR] {e['name']}/{marker}\n"
+                    render_dir(child, depth + 1)
                 else:
-                    output += f"  {e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
+                    output += f"{prefix}{e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
+                    rendered_files += 1
+                    rendered_size += e['size'] or 0
+
+        output = ""
+        render_dir(dirpath=str(resolved), depth=0)
+
+        # total_files/total_size are accumulated in render_dir (rendered_files /
+        # rendered_size) so they reflect exactly the file lines actually printed,
+        # staying consistent with the output even under max_entries truncation.
+        total_files = rendered_files
+        total_size = rendered_size
 
         if entry_count >= max_entries and entries_by_dir:
-            output += f"\n  ... (listing stopped at {max_entries} entries; use include/exclude to narrow)\n"
+            output += f"\n  ... (listing stopped at {max_entries} entries; use include/exclude or size/date filters to narrow)\n"
 
         return output, total_dirs, total_files, total_size
 
@@ -359,9 +587,15 @@ class FileOpsMixin:
         max_entries: int = 500,
         char_limit: int = 3000,
         agent_name: str = "unknown",
+        min_size: Optional[str] = None,
+        max_size: Optional[str] = None,
+        modified_after: Optional[str] = None,
+        modified_before: Optional[str] = None,
+        files_only: bool = False,
+        dirs_only: bool = False,
     ) -> str:
         """List contents of a directory with optional recursive traversal, filtering, sorting, and summary.
-        
+
         Truncates output to *char_limit* characters via spillover files for the given *agent_name*.
         """
         try:
@@ -378,19 +612,42 @@ class FileOpsMixin:
             if sort_by not in valid_sort_keys:
                 sort_by = "name"
 
-            include_fn = (lambda name: fnmatch.fnmatch(name, include)) if include else None
-            exclude_fn = (lambda name: fnmatch.fnmatch(name, exclude)) if exclude else None
+            # Build the filter context (single object threaded through the call chain).
+            warnings = []
+            ctx_min_size = _parse_size(min_size)
+            if min_size and ctx_min_size is None:
+                warnings.append(f"[warning] min_size='{min_size}' not recognized; no size filter applied.")
+            ctx_max_size = _parse_size(max_size)
+            if max_size and ctx_max_size is None:
+                warnings.append(f"[warning] max_size='{max_size}' not recognized; no size filter applied.")
+            ctx_modified_after = _parse_time(modified_after)
+            if modified_after and ctx_modified_after is None:
+                warnings.append(f"[warning] modified_after='{modified_after}' not recognized; no date filter applied.")
+            ctx_modified_before = _parse_time(modified_before)
+            if modified_before and ctx_modified_before is None:
+                warnings.append(f"[warning] modified_before='{modified_before}' not recognized; no date filter applied.")
+
+            ctx = FilterContext(
+                include_fn=_build_pattern_fn(include),
+                exclude_fn=_build_pattern_fn(exclude),
+                min_size=ctx_min_size,
+                max_size=ctx_max_size,
+                modified_after=ctx_modified_after,
+                modified_before=ctx_modified_before,
+                files_only=files_only,
+                dirs_only=dirs_only,
+            )
 
             header = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
 
             if recursive:
                 output, total_dirs, total_files, total_size = self._list_recursive(
-                    path, resolved, include_fn, exclude_fn, sort_by, max_depth, max_entries
+                    path, resolved, ctx, sort_by, max_depth, max_entries
                 )
                 is_empty = not (total_dirs or total_files)
             else:
                 output, total_dirs, total_files, total_size = self._list_flat(
-                    resolved, include_fn, exclude_fn, sort_by, max_entries
+                    resolved, ctx, sort_by, max_entries
                 )
                 is_empty = not (total_dirs or total_files)
 
@@ -402,6 +659,11 @@ class FileOpsMixin:
                 output += f"  Total directories: {total_dirs}\n"
                 output += f"  Total files:       {total_files}\n"
                 output += f"  Total size:        {self._format_size(total_size)}\n"
+
+            # Surface unrecognized size/date filter values so the agent knows a
+            # filter was silently ignored (prevents silent no-op confusion).
+            if warnings:
+                output += "\n" + "".join(f"  {w}\n" for w in warnings)
 
             result = header + output
             return truncate_with_spillover(

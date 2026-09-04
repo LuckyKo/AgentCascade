@@ -268,18 +268,26 @@ TOOL_METADATA = {
     'list_dir': {
         'description': (
             'Lists files and subdirectories within a specified directory path. '
-            'Supports recursive traversal, glob-based filtering, sorting by name/size/date/type, '
-            'and optional summary statistics.'
+            'Supports recursive traversal, glob-based filtering (single or comma-separated patterns), '
+            'file-size and modification-date filters, sorting by name/size/date/type, '
+            'and optional summary statistics. In recursive mode, subdirectories are shown as a tree '
+            'with indentation reflecting depth, and empty directories are marked (empty).'
         ),
         'parameters': {
             'path': "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')",
             'recursive': "When true, recurse into subdirectories. Default: false.",
             'max_depth': "Maximum recursion depth when recursive=true. -1 means unlimited, 0 or negative behaves like non-recursive. Default: -1.",
-            'include': "Optional glob pattern to include only matching files (e.g., '*.py', 'test_*'). Simple globs only; '**' patterns are not supported.",
-            'exclude': "Optional glob pattern to exclude matching entries (e.g., '__pycache__/*', '*.pyc').",
+            'include': "Optional glob pattern(s) to include only matching files. Single pattern ('*.py') or comma-separated list ('*.py,*.js,test_*'). Simple globs only; '**' patterns are not supported. Note: a pattern cannot itself contain a comma.",
+            'exclude': "Optional glob pattern(s) to exclude matching entries. Single or comma-separated (e.g., '__pycache__/*,*.pyc,node_modules/*').",
             'sort_by': 'Sorting order. Options: "name" (default), "size" (largest first), "date" (newest first), "type" (extension). For size and date, descending order is used.',
             'show_summary': "When true, append summary statistics (total files/dirs, total size) at the end. Default: false.",
-            'max_entries': "Maximum number of entries to display before truncating output. Helps control verbosity in large directories. Default: 500."
+            'max_entries': "Maximum number of entries to display before truncating output. Helps control verbosity in large directories. Default: 500.",
+            'min_size': "Minimum file size filter. Accepts human-readable sizes: '500B', '1.5KB', '5MB', '2.5GB' or raw bytes as string ('1048576'). Only files at or above this size are shown; directories are unaffected. Default: no limit.",
+            'max_size': "Maximum file size filter. Same format as min_size (e.g., '10KB', '1.5MB'). Only files at or below this size are shown. Default: no limit.",
+            'modified_after': "Only show files modified after this time. Accepts: ISO date ('2026-09-01'), ISO datetime ('2026-09-01T14:30:00'), relative expressions ('2 days ago', '1 week ago', '3 hours ago'), compact forms ('2h', '90min', '1d', '2.5w'), or epoch seconds as string ('1725187200'). All non-epoch times use the server's local timezone; comparisons are done on raw epoch seconds. Default: no limit.",
+            'modified_before': "Only show files modified before this time. Same formats as modified_after (ISO, relative, compact, epoch). Default: no limit.",
+            'files_only': "When true, show only files (suppress all directory entries). Useful for pure file-finding to reduce noise. Mutually exclusive with dirs_only. Default: false.",
+            'dirs_only': "When true, show only directories (suppress all file entries). Mutually exclusive with files_only. Default: false."
         }
     },
     'grep': {
@@ -303,8 +311,7 @@ TOOL_METADATA = {
     },
     'delete_file': {
         'description': (
-            'Delete a file. Before deletion, the file is moved to a backup folder '
-            '(similar to edit_file backups), so it can be restored if needed. '
+            'Delete a file. The file is actually moved to a backup folder so it can be restored if needed. '
             'Requires user approval before deletion for any files not owned by the current agent. '
             'Deleting files you created in this session is auto-approved.'
         ),
@@ -340,8 +347,8 @@ TOOL_METADATA = {
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. Requires explicit security approval — only use when no other tool can accomplish the task.\n\n'
-            '**Notice:** DO NOT use with file redirects, pipes or filters. The tool already truncates middle and saves output.\n\n'
+            'Execute a shell command on the host system. Requires explicit security approval, very expensive and slow — only use when no other tool can accomplish the task.\n\n'
+            '**Notice:** DO NOT use shell_cmd with file redirects, pipes or filters. The tool already truncates middle and saves output.\n\n'
             '**Execution mode:** "auto" (default) = background if timeout>60s, else blocking; "sync" = always blocking; "async" = always background. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
         ),
