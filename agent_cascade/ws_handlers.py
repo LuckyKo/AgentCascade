@@ -1078,10 +1078,27 @@ class WsMessageHandler:
                             applied = True
                         edited_full.append(fmsg)
 
-                    # If the file was empty/unreadable, fall back to the (already-edited) pool.
-                    logger_inst.rewrite_log_with_history(
-                        edited_full if full_history else history, caller="ws_edit"
-                    )
+                    # Fix BUG_0007 (#1): if the file is non-empty but the target identity was
+                    # NOT found (pool/file content drift), we must NOT write `edited_full` — it
+                    # would silently persist a full-history file LACKING an edit the UI already
+                    # shows as applied. Safer choice for data integrity: fall back to writing
+                    # `history` (the pool, which HAS the edit at lines above). That persists the
+                    # user's edit to the working set and keeps the on-disk file consistent with
+                    # what the UI claims; aborting instead would lose the edit entirely.
+                    if full_history and not applied:
+                        from agent_cascade.log import logger as _edit_logger
+                        _edit_logger.error(
+                            f"[ws_edit] Edit target not found in full on-disk history for "
+                            f"'{target_name}' (identity drift). Falling back to pool working set "
+                            f"so the edit is persisted rather than silently lost."
+                        )
+                        logger_inst.rewrite_log_with_history(history, caller="ws_edit")
+                    else:
+                        # File empty/unreadable → fall back to the (already-edited) pool;
+                        # otherwise write the full history with the edit applied in place.
+                        logger_inst.rewrite_log_with_history(
+                            edited_full if full_history else history, caller="ws_edit"
+                        )
 
                 # Sync instance_state so build_state() sees the edit
                     self.agent_pool.instance_state[target_name]['messages'] = list(history)
@@ -1138,6 +1155,16 @@ class WsMessageHandler:
                 remaining_keys.discard(key)  # remove one file message per displayed deletion
                 continue
             new_full.append(msg)
+
+        # Fix BUG_0007 (#4): a requested identity that was never matched means the pool and
+        # on-disk file have drifted (e.g. content edited elsewhere). Behavior is unchanged, but
+        # surface the desync so it's visible instead of silently dropped.
+        if remaining_keys:
+            from agent_cascade.log import logger as _del_logger
+            _del_logger.warning(
+                f"[ws_delete] {len(remaining_keys)} requested deletion(s) for '{target_name}' "
+                f"were not found in the on-disk history (pool/file identity drift)."
+            )
 
         # Keep the trimmed pool working set in sync: drop the same message(s) by identity.
         new_pool = [m for m in history if _msg_identity(m) not in target_keys]

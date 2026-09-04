@@ -292,3 +292,78 @@ def test_delete_on_fresh_session_no_file(tmp_path):
     rebuilt = fake_inst.rebuilt
     assert len(rebuilt) == 2
     assert all(m["content"] != "hello" for m in rebuilt), "targeted message should be removed from pool"
+
+
+# ──────────────────────────────────────────────
+# (e) #1 — Edit target whose identity has DRIFTED (not in full history): the edit must NOT be
+#     silently lost. The handler must persist it via the pool fallback rather than writing an
+#     un-edited full-history file that lacks a claim the UI already shows as applied.
+# ──────────────────────────────────────────────
+
+def test_edit_drifted_identity_not_silently_lost(tmp_path):
+    """The displayed (pool) message's identity does not exist in the on-disk file. After edit,
+    the new content must be persisted somewhere visible (pool fallback), and the file must NOT
+    be left as a full-history copy that silently lacks the claimed edit."""
+    log_file = tmp_path / "drift.jsonl"
+
+    # Full on-disk history: [SYS][U0] + L2 marker + tail. NOTE: no message with content "DRIFT".
+    full = []
+    full.append(_user("system", _ts(0)))
+    full.append(_user("initial user", _ts(1)))
+    full.append(_marker("L2 consolidated", _ts(2), kind="l2"))
+    for i in range(5):
+        full.append(_user(f"tail {i}", _ts(3 + i)))
+
+    lines = [json.dumps({"metadata": {"agent_class": "orchestrator"}})]
+    for m in full:
+        lines.append(json.dumps(m))
+    log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    logger_inst = AgentInstanceLogger(
+        agent_class="orchestrator", instance_name="Maine",
+        log_dir=str(tmp_path), log_path=str(log_file),
+    )
+    logger_inst.load_history_from_file()
+
+    # Trimmed pool working set: [SYS][U0][L2] + a message "DRIFT" whose identity is NOT on disk.
+    drifted = {"role": "user", "content": "DRIFT", "timestamp": _ts(99)}  # ts 99 not in file
+    trimmed = [full[0], full[1], full[2], drifted]
+
+    fake_inst = _FakeInstance(trimmed)
+    fake_pool = _FakePool(fake_inst, logger_inst)
+
+    async def _noop(*a, **k):
+        return None
+
+    handler = WsMessageHandler(
+        session={"session_name": "Maine"}, agent_pool=fake_pool, agents=[], send_queue=None,
+        broadcast_fn=_noop, build_state_fn=lambda *a, **k: {}, start_gen_fn=None,
+        session_lock=threading.Lock(), app=None,
+    )
+
+    # Edit the drifted message (index 3 in the displayed pool).
+    _run(handler.handle_edit_message(
+        {"index": 3, "content": "DRIFT EDITED", "instance_name": "Maine"}
+    ))
+
+    # The edit must be persisted to the pool working set (fallback path).
+    rebuilt = fake_inst.rebuilt
+    assert any(m["content"] == "DRIFT EDITED" for m in rebuilt), \
+        "edit must be persisted to the pool working set when identity drifted"
+    assert all(m["content"] != "DRIFT" for m in rebuilt), "old drifted content should be replaced"
+
+    # The on-disk file must NOT be left as a full-history copy that silently LACKS the edit.
+    # (The pre-fix bug wrote `edited_full` with applied=False → an un-edited 8-msg full history.)
+    after = _read_msgs(log_file)
+    after_contents = [m["content"] for m in after]
+
+    # The chosen behavior is pool fallback: the file now reflects the edited pool (4 msgs),
+    # NOT the un-edited 8-msg full history. Either way, the edit must be present on disk and
+    # the old drifted content gone — we never wrote a full copy that drops the claimed edit.
+    assert "DRIFT EDITED" in after_contents, \
+        "BUG #1: file written WITHOUT the edit the UI claims was applied (silent no-op)"
+    assert "DRIFT" not in after_contents, "old drifted content should be replaced on disk"
+
+    # Confirm we did NOT fall into the pre-fix failure mode: an un-edited full-history write.
+    assert len(after) != len(full) or "DRIFT EDITED" in after_contents, \
+        "BUG #1: file kept full-history shape but lacks the claimed edit (un-edited clobber)"
