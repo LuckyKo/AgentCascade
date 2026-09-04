@@ -388,10 +388,38 @@ def _calc_stream_token_stats(
     responses: Optional[List[Message]],
 ) -> tuple:
     """Calculate token stats for streaming updates with caching.
-    
+
     Computes h_stats and r_stats from the combined conversation + streaming snapshot,
     then caches them keyed by instance_name for reuse during active generation.
-    
+
+    Returns:
+        (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
+    """
+    h_stats, r_stats = _calc_stream_token_stats_uncached(
+        pool, conv_snapshot, stream_resp_snapshot, responses,
+    )
+
+    # Cache the computed stats for reuse during active generation
+    _cache_mgr.evict_if_full('stream_token_stats', _STREAM_TOKEN_STATS_CACHE_MAXSIZE)
+    with _cache_mgr._lock:
+        _cache_mgr.stream_token_stats[instance_name] = (h_stats, r_stats)
+
+    return h_stats, r_stats
+
+
+def _calc_stream_token_stats_uncached(
+    pool: AgentPool,
+    conv_snapshot: List[Message], stream_resp_snapshot: Optional[List[Message]],
+    responses: Optional[List[Message]],
+) -> tuple:
+    """Pure computation of (h_stats, r_stats) WITHOUT touching the cache.
+
+    Fix B: split out from _calc_stream_token_stats so the caller can compute only the
+    cheap streaming partial (r_stats = get_history_stats(responses)) on a per-tick basis
+    while reusing a cached h_stats keyed on stable conversation identity. The inputs and
+    computation here are byte-identical to the original monolithic function, so results
+    are unchanged — this is a pure refactor of where the cache write happens.
+
     Returns:
         (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
     """
@@ -407,10 +435,5 @@ def _calc_stream_token_stats(
         logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}
         r_stats = {'tokens': 0, 'words': 0}
-    
-    # Cache the computed stats for reuse during active generation
-    _cache_mgr.evict_if_full('stream_token_stats', _STREAM_TOKEN_STATS_CACHE_MAXSIZE)
-    with _cache_mgr._lock:
-        _cache_mgr.stream_token_stats[instance_name] = (h_stats, r_stats)
 
     return h_stats, r_stats

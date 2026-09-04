@@ -69,6 +69,26 @@ def _calc_token_stats(pool: AgentPool, full_conversation: List[Message],
         r_stats = {'tokens': 0, 'words': 0}
     return h_stats, r_stats
 
+def _calc_stream_r_stats(partial_responses: Optional[List[Message]]) -> dict:
+    """Compute token stats for ONLY the streaming partial (r_stats).
+
+    Fix B helper: during a turn's streaming the committed conversation is unchanged, so
+    the expensive history stats (h_stats) are cached and reused across ticks. Only this
+    small in-flight partial changes each tick — computing it fresh keeps total_tokens
+    live at O(tail) cost without touching the full conversation.
+
+    Returns:
+        dict with 'tokens' and 'words' keys ({0, 0} when there is no partial).
+    """
+    if not partial_responses:
+        return {'tokens': 0, 'words': 0}
+    try:
+        from agent_cascade.utils.utils import get_history_stats
+        return get_history_stats(partial_responses)
+    except Exception as e:
+        logger.debug(f"Token stats calculation failed for streaming partial (using estimate): {e}")
+        return {'tokens': len(partial_responses) * 4, 'words': 0}
+
 def _serialize_all_instances(pool: AgentPool, instance_snapshot: Dict[str, Any],
                               streaming: bool = False) -> Dict[str, dict]:
     """Serialize all instances in a pool snapshot.
@@ -450,30 +470,30 @@ def build_stream_update_from_pool(
         conv_snapshot = list(instance.conversation)
         stream_resp_snapshot = list(instance._streaming_responses) if instance._streaming_responses else None
     
-    # BUG31 Fix #4: Skip expensive stats computation when conversation hasn't changed.
-    # Version uses msg count, last msg id, streaming response count, and content length —
-    # including content_len so that growing streaming content invalidates the cache
-    # and fresh token stats are computed (total_tokens grows during active streaming).
-    stream_content_len = sum(
-        len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
-        for m in stream_resp_snapshot
-    ) if stream_resp_snapshot else 0
-    
+    # Fix B: key token-stats caching on STABLE conversation identity only.
+    # The version uses (msg_count, id_of_last_msg, streaming_response_COUNT) — deliberately
+    # NOT the growing content length. During a turn's streaming the committed conversation
+    # is unchanged, so h_stats (stats over the full stable history) can be cached and reused
+    # across ticks instead of recomputing two full get_history_stats() passes per tick
+    # (the O(N)-per-tick cost that made streaming latency grow with turn count).
     current_version = (
         len(conv_snapshot),
         id(conv_snapshot[-1]) if conv_snapshot else None,
         len(stream_resp_snapshot) if stream_resp_snapshot else 0,
-        stream_content_len,
     )
-    
+
     # Thread-safe read of cached token stats and last version via CacheManager
     with _cache_mgr._lock:
         cached_stats = _cache_mgr.stream_token_stats.get(instance_name)
         last_version = _cache_mgr.stream_versions.get(instance_name)
-    
+
     if cached_stats is not None and current_version == last_version:
-        # Conversation unchanged — reuse previously computed token stats
-        h_stats, r_stats = cached_stats
+        # Conversation unchanged — reuse the cached STABLE history stats (h_stats).
+        h_stats = cached_stats[0]
+        # Recompute ONLY the streaming partial (r_stats) fresh each tick so total_tokens
+        # stays live as the partial grows. This is cheap/O(tail): it only touches the small
+        # in-flight response, never the full conversation.
+        r_stats = _calc_stream_r_stats(responses)
     else:
         # Lazy import to avoid a module-level circular dependency: streaming.py
         # imports build_stream_update_from_pool from this module (state_builder).
@@ -893,44 +913,42 @@ def _serialize_instance(
                 existing_fingerprints.add(fingerprint)
                 num_streaming += 1
 
-    # ── Token stats (Fix #1: cached by conversation identity) ─────────────
-    # Cache key: (message_count, id_of_last_message). During LLM streaming,
-    # the conversation doesn't change — only partial streamed content changes.
-    # So stats are only recalculated when a new message is appended.
-    
-    # Streaming UI Content Update Fix: Include streaming_responses length AND content
-    # length in cache key so that growing streaming content causes cache miss and
-    # fresh token stats computation (total_tokens grows during active streaming).
+    # ── Token stats (Fix B: split stable history from streaming partial) ────
+    # Cache key uses STABLE conversation identity only — deliberately NOT the growing
+    # streaming content length. During a turn's streaming the committed conversation is
+    # unchanged, so the expensive full-history stats are cached and reused across ticks
+    # instead of recomputing get_history_stats() over the whole conversation per tick
+    # (the O(N)-per-tick cost that made streaming latency grow with turn count).
     stream_resp_len = len(stream_responses) if stream_responses else 0
-    per_agent_stream_content_len = sum(
-        len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
-        for m in (stream_responses or [])
-    )
-    cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len, per_agent_stream_content_len)
-    
-    # Streaming UI Content Update Fix: Compute token stats from combined messages (conversation + streaming_responses)
-    # Use full_msgs_snapshot (persisted history) to ensure stats reflect total usage, not just the tail.
-    all_msgs_for_stats = list(full_msgs_snapshot)
-    if stream_responses:
-        all_msgs_for_stats.extend(stream_responses)
-    
-    # Thread-safe check and read of token stats cache via CacheManager
+    # Hardening: include instance identity so two distinct instances that happen to share
+    # (history_count, last_msg_id, stream_resp_len) never collide in the global token_stats cache.
+    # (The pre-fix key also omitted this; adding it is a safe no-op for correctly-unique instances.)
+    cache_key = (inst.instance_name, original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len)
+
+    # Thread-safe check and read of the cached HISTORY-ONLY stats via CacheManager.
+    # We cache get_history_stats(full_msgs_snapshot) — the stable committed history — NOT
+    # the combined history+partial, so the value is identical across all ticks of a turn.
     with _cache_mgr._lock:
         if cache_key not in _cache_mgr.token_stats:
-            active_msgs = pool.slice_history_for_llm(all_msgs_for_stats) if all_msgs_for_stats else all_msgs_for_stats
+            active_msgs = pool.slice_history_for_llm(full_msgs_snapshot) if full_msgs_snapshot else full_msgs_snapshot
             try:
                 from agent_cascade.utils.utils import get_history_stats
-                stats = get_history_stats(active_msgs)
+                h_stats = get_history_stats(active_msgs)
             except Exception as e:
                 logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
-                stats = {'tokens': len(all_msgs_for_stats) * 4, 'words': 0}
+                h_stats = {'tokens': len(full_msgs_snapshot) * 4, 'words': 0}
             # BUG31 Fix #1: Evict oldest entry if cache is full (increased from 100 to 5000)
             if len(_cache_mgr.token_stats) >= _TOKEN_STATS_CACHE_MAXSIZE:
                 oldest_key = next(iter(_cache_mgr.token_stats))
                 del _cache_mgr.token_stats[oldest_key]
-            _cache_mgr.token_stats[cache_key] = stats
+            _cache_mgr.token_stats[cache_key] = h_stats
         else:
-            stats = _cache_mgr.token_stats[cache_key]
+            h_stats = _cache_mgr.token_stats[cache_key]
+
+    # Recompute ONLY the streaming partial (r_stats) fresh each tick so total_tokens stays
+    # live as the partial grows. Cheap/O(tail): touches only the small in-flight response,
+    # never the full conversation. Added on top of the cached history stats.
+    r_stats = _calc_stream_r_stats(stream_responses)
 
     # Get max tokens via direct call to avoid staleness when endpoints change at runtime
     max_tokens = _get_max_tokens_for_instance(pool, inst)
@@ -941,8 +959,8 @@ def _serialize_instance(
     result.update({
         'messages': serialized_msgs,
         'history_count': original_history_count + num_streaming,
-        'total_tokens': stats['tokens'],
-        'total_words': stats['words'],
+        'total_tokens': h_stats['tokens'] + r_stats['tokens'],
+        'total_words': h_stats['words'] + r_stats['words'],
         'max_tokens': max_tokens,
     })
 
