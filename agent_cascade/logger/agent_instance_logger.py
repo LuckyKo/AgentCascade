@@ -12,6 +12,7 @@ import itertools
 import json
 import os
 import shutil
+import time
 import datetime
 import threading
 from typing import Any, Dict, List, Optional, Union
@@ -243,14 +244,22 @@ class AgentInstanceLogger:
     # ── File I/O ──────────────────────────────────────────────────────────
 
     def _append_line(self, data: Dict):
-        """Append a single JSON line to the log file (uses cached file handle)."""
-        try:
-            self._ensure_file()
-            self._file_handle.write(json.dumps(data, ensure_ascii=False) + '\n')
-            self._file_handle.flush()  # Flush for durability — prevents data loss on crash
-        except Exception as e:
-            logger.error(f"Failed to append to agent log {self.log_path}: {e}")
-            self._file_handle = None  # Invalidate so _ensure_file reopens clean next time
+        """Append a single JSON line to the log file (uses cached file handle).
+
+        Thread-safety: acquires _write_lock so appends serialize with the rewrite paths
+        (_sync_marker_single_write / _consolidate_markers_in_jsonl / rewrite_log_with_history),
+        which close the cached handle and atomically replace the file. Without this lock an
+        in-flight append can hit a closed handle ("write to closed file") or race the
+        os.replace, silently dropping messages (BUG_0007).
+        """
+        with self._write_lock:
+            try:
+                self._ensure_file()
+                self._file_handle.write(json.dumps(data, ensure_ascii=False) + '\n')
+                self._file_handle.flush()  # Flush for durability — prevents data loss on crash
+            except Exception as e:
+                logger.error(f"Failed to append to agent log {self.log_path}: {e}")
+                self._file_handle = None  # Invalidate so _ensure_file reopens clean next time
 
     def _atomic_write_lines(self, lines: List[str]) -> bool:
         """Atomically replace the log file with `lines`.
@@ -267,8 +276,18 @@ class AgentInstanceLogger:
                 f.writelines(lines)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, self.log_path)
-            return True
+            # Retry os.replace: on Windows a transient lock (e.g. the just-closed handle not
+            # fully released, or an antivirus scan) makes replace raise WinError 5/32.
+            # A short bounded retry avoids aborting the rewrite and leaving stale state.
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, self.log_path)
+                    return True
+                except OSError as e:
+                    if attempt < 4:
+                        time.sleep(0.02 * (attempt + 1))
+                        continue
+                    raise
         except Exception as e:
             logger.error(f"Atomic write failed for {self.log_path}: {e}")
             try:
@@ -372,6 +391,44 @@ class AgentInstanceLogger:
             logger.warning(f"Could not read log file {self.log_path} during sync: {e}. "
                            "History may be out of sync, potentially causing duplicate appends.")
             pass  # File disappeared or unreadable — stay with empty history
+
+    def get_full_history(self) -> List[Dict]:
+        """Return a fresh copy of ALL messages currently on disk (full history).
+
+        Design doc §5.2: the JSONL file retains FULL history, including raw messages the
+        trimmed pool working set has already summarized away. This accessor reads that full
+        on-disk list WITHOUT mutating data["history"] (unlike load_history_from_file), so
+        callers such as the UI delete/edit handlers can operate on the complete record and
+        rewrite from it — instead of clobbering the file with the smaller trimmed pool.
+
+        Returns:
+            A new list of message dicts in file order (metadata/event lines excluded).
+            Empty list if the file is missing or unreadable.
+        """
+        result: List[Dict] = []
+        if not self.log_path or not os.path.exists(self.log_path):
+            return result
+
+        with self._write_lock:  # consistent read with rewrite paths (Fix BUG_0007)
+            try:
+                with open(self.log_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+            except OSError as e:
+                logger.warning(f"Could not read log file {self.log_path} in get_full_history: {e}")
+                return result
+
+        for line in lines[1:]:  # Skip metadata line
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg_dict = json.loads(line)
+                if isinstance(msg_dict, dict) and "metadata" not in msg_dict and "event" not in msg_dict:
+                    result.append(msg_dict)
+            except json.JSONDecodeError:
+                logger.warning(f"Skipping malformed JSON line in {self.log_path} — data may be incomplete")
+                continue
+        return result
 
     # ── Compression marker insertion ───────────────────────────────────────────────
 

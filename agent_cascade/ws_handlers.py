@@ -13,6 +13,21 @@ from typing import Any, Callable, Dict, Optional
 # Re-exports for backward compatibility (Phase 4b refactor)
 from agent_cascade.ws_helpers import _clear_caches_safely, _validate_disabled_tools
 
+
+def _msg_identity(msg) -> tuple:
+    """Stable identity key for a message (timestamp + content), used to map a displayed
+    (trimmed-pool) message to its counterpart in the FULL on-disk history (Fix BUG_0007).
+
+    Handles both dict and Message-object forms. Falls back to ('', '') when either field is
+    missing so identity comparison degrades gracefully rather than crashing."""
+    from agent_cascade.utils.utils import msg_field
+    ts = msg_field(msg, 'timestamp', '') or ''
+    content = msg_field(msg, 'content', '')
+    if content is None:
+        content = ''
+    return (str(ts), str(content))
+
+
 class WsMessageHandler:
     """Dispatches WebSocket messages to appropriate handler methods.
 
@@ -987,7 +1002,12 @@ class WsMessageHandler:
         await self._broadcast()
 
     async def handle_edit_message(self, data: dict) -> None:
-        """Handle 'edit_message' — edit a message in conversation history."""
+        """Handle 'edit_message' — edit a message in conversation history.
+
+        Fix BUG_0007: apply the edit by identity to BOTH the trimmed pool and the FULL on-disk
+        history (design §5.2), then rewrite the file from the full list. The old code rewrote
+        the whole file from the trimmed pool, destroying pre-marker raw history.
+        """
         idx = data.get('index')
         content = data.get('content', '')
         target_name = data.get('instance_name') or self.session['session_name']
@@ -1006,6 +1026,9 @@ class WsMessageHandler:
 
         if idx is not None and 0 <= idx < len(history):
             msg = history[idx]
+            # Identity of the message being edited (timestamp + ORIGINAL content) — used to
+            # locate its counterpart in the full on-disk history.
+            edit_key = _msg_identity(msg)
             old_content = msg_field(msg, CONTENT, "")
             new_parsed_content = _parse_multimodal_content(content)
 
@@ -1021,7 +1044,7 @@ class WsMessageHandler:
                 if match and self.agent_pool:
                     self.agent_pool.instance_summaries[target_name] = match.group(1).strip()
 
-            # Apply edit — handle both dict and Message object types
+            # Apply edit to the pool message — handle both dict and Message object types
             if isinstance(msg, dict):
                 msg[CONTENT] = new_parsed_content
                 if '_ui_cache' in msg:
@@ -1038,7 +1061,27 @@ class WsMessageHandler:
                         target_name,
                         'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
                     )
-                    logger_inst.rewrite_log_with_history(history, caller="ws_edit")
+
+                    # Rewrite the FULL on-disk history with the edit applied by identity, so
+                    # pre-marker raw messages are preserved (design §5.2). Shrink guard stays
+                    # armed — an edit must never drop messages.
+                    full_history = logger_inst.get_full_history()
+                    edited_full = []
+                    applied = False
+                    for fmsg in full_history:
+                        if not applied and _msg_identity(fmsg) == edit_key:
+                            if isinstance(fmsg, dict):
+                                fmsg[CONTENT] = new_parsed_content
+                                fmsg.pop('_ui_cache', None)
+                            elif hasattr(fmsg, 'content'):
+                                fmsg.content = new_parsed_content
+                            applied = True
+                        edited_full.append(fmsg)
+
+                    # If the file was empty/unreadable, fall back to the (already-edited) pool.
+                    logger_inst.rewrite_log_with_history(
+                        edited_full if full_history else history, caller="ws_edit"
+                    )
 
                 # Sync instance_state so build_state() sees the edit
                     self.agent_pool.instance_state[target_name]['messages'] = list(history)
@@ -1047,7 +1090,15 @@ class WsMessageHandler:
         await self._broadcast()
 
     async def handle_delete_messages(self, data: dict) -> None:
-        """Handle 'delete_messages' — prune messages from conversation."""
+        """Handle 'delete_messages' — prune messages from conversation.
+
+        Fix BUG_0007: operate on the FULL on-disk history (design §5.2), not the trimmed
+        pool working set. The UI's `indices` refer to the DISPLAYED (trimmed) list, so each
+        is resolved to its file message by identity (timestamp + content), then removed from
+        the full list. The file is rewritten from that full list with the shrink guard ARMED —
+        a normal delete of 1–few messages must never be allowed to drop thousands of
+        pre-marker raw messages.
+        """
         target_name = data.get('instance_name') or self.session['session_name']
 
         history = []
@@ -1057,25 +1108,53 @@ class WsMessageHandler:
                 with inst._compression_lock:
                     history = list(inst.conversation)
 
-        indices = sorted(data.get('indices', []), reverse=True)
+        indices = data.get('indices', [])
+
+        # Resolve displayed indices → identity keys. The file may hold many more messages than
+        # the trimmed pool, so positional mapping would be wrong — match by identity instead.
+        target_keys = set()
         for idx in indices:
-            if 0 <= idx < len(history):
-                history.pop(idx)
+            if isinstance(idx, int) and 0 <= idx < len(history):
+                target_keys.add(_msg_identity(history[idx]))
+
+        logger_inst = None
+        if self.agent_pool:
+            logger_inst = self.agent_pool.get_logger(
+                target_name,
+                'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
+            )
+
+        full_history = logger_inst.get_full_history() if logger_inst is not None else []
+
+        # If the file couldn't be read (fresh/empty session), fall back to the pool view so a
+        # delete on an uncompressed session still works. In that case pool == file, no loss.
+        base = full_history if full_history else [dict(m) for m in history]
+
+        remaining_keys = set(target_keys)
+        new_full = []
+        for msg in base:
+            key = _msg_identity(msg)
+            if key in remaining_keys:
+                remaining_keys.discard(key)  # remove one file message per displayed deletion
+                continue
+            new_full.append(msg)
+
+        # Keep the trimmed pool working set in sync: drop the same message(s) by identity.
+        new_pool = [m for m in history if _msg_identity(m) not in target_keys]
 
         if self.agent_pool:
             inst = self.agent_pool.get_instance(target_name)
             if inst is not None:
-                inst.rebuild_conversation(history)
+                inst.rebuild_conversation(new_pool)
 
-                logger_inst = self.agent_pool.get_logger(
-                    target_name,
-                    'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
-                )
-                # Intentional shrink — user explicitly deleted messages.
-                logger_inst.rewrite_log_with_history(history, allow_shrink=True, caller="ws_delete")
+                # Shrink guard stays ARMED (no allow_shrink): a single-message delete must not be
+                # able to collapse a full-history file. If the rewrite would drop far more than
+                # requested, rewrite_log_with_history logs CRITICAL and aborts, leaving the file
+                # unchanged — fail safe rather than silently destroy history.
+                logger_inst.rewrite_log_with_history(new_full, caller="ws_delete")
 
                 if target_name != self.session['session_name'] and target_name in self.agent_pool.instance_state:
-                    self.agent_pool.instance_state[target_name]['messages'] = list(history)
+                    self.agent_pool.instance_state[target_name]['messages'] = list(new_pool)
 
         _clear_caches_safely()
         await self._broadcast()
