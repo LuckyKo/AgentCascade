@@ -12,7 +12,21 @@ Provenance / design authority:
     Lesson:    .agent_lessons/loop_detector_two_tier_redesign.md
 
 Per-message feature (plan §2, compared byte-for-byte):
-    ASSISTANT + function_call : ``{role}|fc|{name}|{raw_args}``   — args raw
+    ASSISTANT + function_call : ``{role}|fc|{name}|{raw_args}|{combined[:3000]}``
+                                — args raw; combined = reasoning+content capped at
+                                _FEATURE_TEXT_LIMIT using the SAME combination rule as
+                                the prose branch (so a genuinely-distinct turn that only
+                                differs in its reasoning/content produces a DISTINCT
+                                feature and is NOT flagged as a loop). When the FC message
+                                carries no content/reasoning of its OWN, combined falls
+                                back to the text of the most recent preceding non-SYSTEM
+                                ASSISTANT-without-FC sibling (which, in the real engine, is
+                                the immediately-preceding reasoning/prose message) — because
+                                oai.py splits a reasoning+tool-call turn into TWO assistant
+                                messages (the bare FC message follows the reasoning/prose
+                                message). Only when there is NO own-text AND no such sibling
+                                does combined stay empty → the feature is byte-identical to
+                                the legacy bare-FC form ``{role}|fc|{name}|{raw_args}``.
     FUNCTION                  : ``{role}|{name}|{stripped_output}``
                                 stripped = _normalize_output (wrapper noise)
                                 + [TOOL RESPONSE TRUNCATED] marker
@@ -103,19 +117,56 @@ def _fc_feature(role: str, fc) -> Optional[str]:
     return f"{role}|fc|{name}|{args}"
 
 
-def _get_feature(m) -> str:
-    """Extract the byte-comparison feature string for one message."""
+def _combined_text(d: dict, content: str) -> str:
+    """Combine a message's reasoning_content/thought with its content.
+
+    Shared by the FC and prose branches so both apply the SAME rule (pinned
+    t11/t11b): when reasoning is present AND content is not a leaked `` block,
+    combine as ``reasoning\\ncontent``; otherwise use whichever is non-empty.
+    """
+    reasoning = d.get('reasoning_content') or d.get('thought') or ''
+    if isinstance(reasoning, list):
+        reasoning = " ".join(_text_of(item) for item in reasoning)
+    else:
+        reasoning = str(reasoning or '')
+    if reasoning and not content.startswith('<think'):
+        return f"{reasoning}\n{content}"
+    return content or reasoning
+
+
+def _get_feature(m, sibling_text: str = '') -> str:
+    """Extract the byte-comparison feature string for one message.
+
+    ``sibling_text`` (optional) is the capped combined text of the immediately
+    preceding non-SYSTEM ASSISTANT-without-FC message — the reasoning/prose
+    sibling that the engine (oai.py) emits as a SEPARATE message right before a
+    bare tool-call message. Used only to disambiguate an otherwise-bare FC
+    feature; ignored when the FC message carries its own text.
+    """
     d = _as_dict(m)
     role = d.get(ROLE) or ''
     content = _text_of(d.get('content', ''))
 
-    # function_call takes precedence over content (matches old behavior;
-    # pinned test_function_call_feature: same FC + different prose still loops).
+    # function_call takes precedence over content, but the assistant's own
+    # content/reasoning are STILL folded into the feature (capped at
+    # _FEATURE_TEXT_LIMIT) so a genuinely-distinct turn — same tool call but
+    # different reasoning — produces a DISTINCT feature and is NOT flagged as a
+    # loop. A truly identical call with identical surrounding text still matches.
     fc = d.get('function_call')
     if fc:
         feat = _fc_feature(role, fc)
         if feat is not None:
-            return feat
+            combined = _combined_text(d, content)[:_FEATURE_TEXT_LIMIT]
+            if not combined:
+                # The engine (oai.py) splits a reasoning+tool-call turn into TWO
+                # assistant messages: a bare FC message (content='', no
+                # reasoning) preceded by the sibling reasoning/prose message.
+                # Fold in that sibling's text so distinct turns produce distinct
+                # features instead of an identical bare-FC feature (false loop).
+                combined = sibling_text[:_FEATURE_TEXT_LIMIT]
+            # Bare FC with NO own-text AND no sibling stays byte-identical to the
+            # legacy ``{role}|fc|{name}|{args}`` form so bare-FC matching is preserved.
+            return f"{feat}|{combined}" if combined else feat
 
     if role == FUNCTION:
         stripped = _TOOL_RESP_TRUNC_RE.sub('[TOOL RESPONSE TRUNCATED]', content)
@@ -124,17 +175,8 @@ def _get_feature(m) -> str:
         return f"{role}|{tool_name}|{stripped}"
 
     # Prose (USER / ASSISTANT without FC): raw, capped. reasoning+content are
-    # combined when both present and content is not a leaked <think> block —
-    # same rule as the old detector (pinned t11/t11b).
-    reasoning = d.get('reasoning_content') or d.get('thought') or ''
-    if isinstance(reasoning, list):
-        reasoning = " ".join(_text_of(item) for item in reasoning)
-    else:
-        reasoning = str(reasoning or '')
-    if reasoning and not content.startswith('<think'):
-        combined = f"{reasoning}\n{content}"
-    else:
-        combined = content or reasoning
+    # combined via the shared rule above (pinned t11/t11b).
+    combined = _combined_text(d, content)
     return f"{role}|{combined[:_FEATURE_TEXT_LIMIT]}"
 
 
@@ -155,15 +197,26 @@ def _build_window(
     Returns (features, abs_idx) oldest→newest.
     """
     start = max(0, len(messages) - EXACT_WINDOW)
+    # Precompute each message's own combined text once (used both for the FC
+    # own-text branch and to feed a preceding sibling into a bare FC feature).
+    pre: List[Tuple[dict, str]] = []
+    for m in messages[start:]:
+        d = _as_dict(m)
+        pre.append((d, _combined_text(d, _text_of(d.get('content', '')))))
     feats: List[str] = []
     abs_idx: List[int] = []
-    for i in range(start, len(messages)):
-        m = messages[i]
-        role = m.get(ROLE) if isinstance(m, dict) else getattr(m, 'role', '')
+    prev_sib: str = ''  # combined text of the last collected ASSISTANT-without-FC msg
+    for j, (d, own) in enumerate(pre):
+        role = d.get(ROLE) or ''
         if role == SYSTEM:
             continue
-        feats.append(_get_feature(m))
-        abs_idx.append(i)
+        sibling = prev_sib if d.get('function_call') else ''
+        feats.append(_get_feature(messages[start + j], sibling))
+        abs_idx.append(start + j)
+        # A bare FC message (no own text) does NOT refresh the sibling pointer,
+        # so a later FC can still borrow the reasoning that preceded it.
+        if role == ASSISTANT and not d.get('function_call'):
+            prev_sib = own
     return feats, abs_idx
 
 

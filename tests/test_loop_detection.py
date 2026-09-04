@@ -857,20 +857,109 @@ class TestFeatureExtraction:
     """Test the internal feature extraction logic indirectly via detect_exact_loop."""
 
     def test_function_call_feature(self):
-        # Same FC (name+args) with differing prose → still loops (content is ignored).
-        msgs = [
-            _msg(ASSISTANT, "different_content_1", 
+        # FC features now fold in the assistant's content/reasoning (the old
+        # detector discarded them — that was a false-positive bug). Two behaviors:
+        #   (a) SAME FC + SAME/NO surrounding text across repeats → STILL a loop.
+        #   (b) SAME FC + DIFFERENT reasoning/content per repeat → NO loop.
+
+        # (a) Identical FC with identical (empty) content/reasoning → real loop.
+        msgs_same = [
+            _msg(ASSISTANT, "", function_call=FunctionCall("tool_a", '{"arg":"val"}')),
+            _msg(FUNCTION, "result"),
+            _msg(ASSISTANT, "", function_call=FunctionCall("tool_a", '{"arg":"val"}')),
+            _msg(FUNCTION, "result"),
+            _msg(ASSISTANT, "", function_call=FunctionCall("tool_a", '{"arg":"val"}')),
+            _msg(FUNCTION, "result"),
+        ]
+        result_same = detect_exact_loop(msgs_same)
+        assert result_same is not None, \
+            "Same FC + same/NO surrounding text must still be detected as a loop"
+
+        # (a') Identical FC with identical NON-empty content/reasoning → real loop.
+        msgs_same_prose = [
+            _msg(ASSISTANT, "same prose", reasoning_content="same reason",
                  function_call=FunctionCall("tool_a", '{"arg":"val"}')),
             _msg(FUNCTION, "result"),
-            _msg(ASSISTANT, "different_content_2",
+            _msg(ASSISTANT, "same prose", reasoning_content="same reason",
                  function_call=FunctionCall("tool_a", '{"arg":"val"}')),
             _msg(FUNCTION, "result"),
-            _msg(ASSISTANT, "different_content_3",
+            _msg(ASSISTANT, "same prose", reasoning_content="same reason",
                  function_call=FunctionCall("tool_a", '{"arg":"val"}')),
             _msg(FUNCTION, "result"),
         ]
+        result_same_prose = detect_exact_loop(msgs_same_prose)
+        assert result_same_prose is not None, \
+            "Same FC + identical surrounding text must still be detected as a loop"
+
+        # (b) SAME FC but DIFFERENT reasoning/content each repeat → NOT a loop.
+        msgs_diff = [
+            _msg(ASSISTANT, "different_content_1", reasoning_content="reason_1",
+                 function_call=FunctionCall("tool_a", '{"arg":"val"}')),
+            _msg(FUNCTION, "result"),
+            _msg(ASSISTANT, "different_content_2", reasoning_content="reason_2",
+                 function_call=FunctionCall("tool_a", '{"arg":"val"}')),
+            _msg(FUNCTION, "result"),
+            _msg(ASSISTANT, "different_content_3", reasoning_content="reason_3",
+                 function_call=FunctionCall("tool_a", '{"arg":"val"}')),
+            _msg(FUNCTION, "result"),
+        ]
+        result_diff = detect_exact_loop(msgs_diff)
+        assert result_diff is None, \
+            "Same FC with DIFFERENT reasoning/content per turn must NOT be a loop"
+
+    def test_fc_distinct_reasoning_and_args_no_loop_regression(self):
+        # Regression (live streaming e2e false-positive): an agent that calls the
+        # SAME tool with slightly different args but DIFFERENT reasoning each turn
+        # must NOT be flagged as a stuck loop. 3+ repeats of
+        # assistant(reasoning=unique_i, function_call=calculate{arg_i}) + function(result).
+        msgs = [
+            _msg(USER, "solve it"),
+        ]
+        for i in range(4):
+            expr = f"{i} + {i * 2}"
+            args = '{"expression": "%s"}' % expr
+            msgs.append(_msg(
+                ASSISTANT, f"computing step {i}",
+                reasoning_content=f"unique reasoning turn {i} — different approach",
+                function_call=FunctionCall("calculate", args),
+            ))
+            msgs.append(_msg(FUNCTION, f"result_{i}"))
         result = detect_exact_loop(msgs)
-        assert result is not None, "Same function call should match regardless of content"
+        assert result is None, \
+            "Distinct reasoning AND distinct args per turn must NOT be detected as a loop"
+
+    def test_split_message_fc_reasoning_sibling_no_loop(self):
+        # Regression (live streaming e2e, REAL engine shape): oai.py splits a
+        # reasoning+tool-call turn into TWO assistant messages — a bare FC message
+        # (content='', no reasoning) PRECEDED by the sibling reasoning/prose message.
+        # The FC feature must fold in that sibling's text so distinct turns produce
+        # DISTINCT features → NOT flagged as a stuck loop.
+        msgs = [_msg(USER, "solve it")]
+        for i in range(4):
+            expr = f"{i} + {i * 2}"
+            args = '{"expression": "%s"}' % expr
+            # (1) sibling reasoning/prose message — has the distinguishing text, NO FC.
+            msgs.append(_msg(ASSISTANT, "", reasoning_content=f"unique reasoning turn {i} — different approach"))
+            # (2) bare tool-call message — content='', no reasoning (engine shape).
+            msgs.append(_msg(ASSISTANT, "", function_call=FunctionCall("calculate", args)))
+            # (3) tool output.
+            msgs.append(_msg(FUNCTION, f"result_{i}"))
+        result = detect_exact_loop(msgs)
+        assert result is None, \
+            "Split-message turns with distinct sibling reasoning AND distinct args must NOT be a loop"
+
+    def test_split_message_fc_identical_sibling_still_loops(self):
+        # Control for the split-message shape: IDENTICAL sibling reasoning + identical
+        # FC args across turns → the features ARE identical → STILL detected as a loop.
+        msgs = [_msg(USER, "solve it")]
+        for _ in range(4):
+            args = '{"expression": "2 + 3"}'
+            msgs.append(_msg(ASSISTANT, "", reasoning_content="same reasoning every turn"))
+            msgs.append(_msg(ASSISTANT, "", function_call=FunctionCall("calculate", args)))
+            msgs.append(_msg(FUNCTION, "result"))
+        result = detect_exact_loop(msgs)
+        assert result is not None, \
+            "Identical sibling reasoning + identical FC args must STILL be detected as a loop"
 
     def test_reasoning_content_feature(self):
         # Different reasoning → different features → no loop.
