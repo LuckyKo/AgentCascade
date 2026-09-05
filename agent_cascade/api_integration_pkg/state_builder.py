@@ -489,8 +489,8 @@ def build_state_from_pool(
         instance_name: Name of the primary instance (main agent) for this state.
         responses: Optional current partial response messages to include.
         generating: Whether the agent is currently generating.
-        streaming: Deprecated — previously controlled tail optimization for large conversations.
-            Now all messages are always included regardless of this parameter.
+        streaming: If True, includes in-flight streaming responses (partial LLM content)
+            in the serialized state. If False, only committed messages are included.
 
     Returns:
         Dictionary with full state snapshot, or None if instance not found.
@@ -1137,6 +1137,10 @@ def _serialize_instance(
         if _est_bytes > _STREAM_TAIL_BYTE_BUDGET:
             # Binary-search for the largest suffix that fits within budget.
             # Always keep at least 1 message (the most recent).
+            # NOTE: the size estimate above is a best-effort heuristic (sums
+            # content+reasoning char lengths); actual JSON-serialized size may be
+            # 30-50% larger due to structural overhead. This is acceptable as a soft
+            # cap because the binary search always keeps at least 1 message.
             lo, hi = 1, len(msgs)
             while lo < hi:
                 mid = (lo + hi + 1) // 2
