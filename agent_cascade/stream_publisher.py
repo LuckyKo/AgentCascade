@@ -112,6 +112,7 @@ class StreamPublisher:
                 pool=self.pool,
                 instance_name=caller,  # Root instance for header stats
                 responses=None,        # Reads full conversations from pool
+                force_full=True,       # BUG C: new sub-agent's first frame must be full
             )
             if su is not None:
                 asyncio.run_coroutine_threadsafe(

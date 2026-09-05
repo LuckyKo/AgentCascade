@@ -2038,23 +2038,41 @@ function handleServerMessage(data) {
             if (existing && existing.messages) {
               const hCount = sa.history_count || 0;
               
-              // Skip stale updates that would truncate newer messages.
-              // Use strict < so that updates with the same history_count are still processed —
-              // during content streaming, history_count stays constant while message content grows.
-              if (hCount < (existing._lastHistoryCount || 0)) {
+               // If we're in resync-pending state (a delta splice was skipped), skip this agent.
+               // Delta splices are unsafe until a force_full snapshot re-establishes the baseline.
+               // Full frames (non-partial) replace the entire object below, clearing _needsResync.
+               if (existing._needsResync) {
+                 continue; // skip delta splices until full frame arrives
+               }
+               // Skip stale updates that would truncate newer messages.
+               // Use strict < so that updates with the same history_count are still processed —
+               // during content streaming, history_count stays constant while message content grows.
+               if (hCount < (existing._lastHistoryCount || 0)) {
                  // Stale: only sync metadata fields explicitly, don't touch message array.
                  const metaFields = ['active', 'is_halted', 'agent_class', 'has_queued_messages', 'queued_messages', 'is_waiting'];
                  for (const f of metaFields) {
                    if (sa[f] !== undefined) existing[f] = sa[f];
                  }
-                existing._lastHistoryCount = hCount;
+                 // Anchor is NOT updated here — hCount < _lastHistoryCount in this branch,
+                 // so updating would downgrade it. The anchor only moves forward on newer frames.
               } else {
                 const startIdx = hCount - sa.messages.length;
                 if (startIdx >= 0) {
                 // Avoid holes: replace entirely if server is ahead, otherwise splice in
                   if (startIdx > existing.messages.length) {
-                    existing.messages = [...sa.messages];
+                    // Server is ahead — we missed frames. Don't truncate our prefix.
+                    // Wait for next force_full to resync. Mark so we skip delta splices.
+                    existing._needsResync = true;
+                    continue;
                   } else {
+                    // Verify splice point using backend-provided absolute index
+                    if (sa.messages.length > 0 && sa.messages[0].index !== undefined) {
+                      if (sa.messages[0].index !== startIdx) {
+                        console.error(`[stream] Index mismatch at ${startIdx}, got ${sa.messages[0].index} — resync`);
+                        existing._needsResync = true;
+                        continue;
+                      }
+                    }
                     existing.messages.length = startIdx;
                     existing.messages.push(...sa.messages);
                   }

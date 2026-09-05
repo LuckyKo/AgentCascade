@@ -141,7 +141,7 @@ COMPRESSION_EXPERIMENT = _os.environ.get("FULLSTACK_E2E_COMPRESSION", "0") == "1
 #   AGENT_CASCADE_STREAM_DELTA=0 python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540
 #   AGENT_CASCADE_STREAM_DELTA=1 python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540
 DELTA_MODE = _os.environ.get("AGENT_CASCADE_STREAM_DELTA") == "1"
-TAIL_COMMITTED = int(_os.environ.get("AGENT_CASCADE_STREAM_TAIL", "1"))  # must match state_builder.TAIL_COMMITTED
+TAIL_COMMITTED = 1  # must match state_builder.TAIL_COMMITTED (hardcoded for phase 1)
 MAX_STREAMING_PARTIALS = 2          # observed max of len(_streaming_responses); raise if it changes
 # Force-compression threshold (% of effective window) at which the gate fires.
 # With a 45k limit and ~8k seed + ~2k tokens/turn, this trips around turn ~19.
