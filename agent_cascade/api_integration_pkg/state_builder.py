@@ -19,6 +19,66 @@ from agent_cascade.api_integration_pkg.cache import (
 )
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
 
+# ────────────────────────────────────────────────────────────────────────────
+# Per-op streaming tick timing — env-gated diagnostic (AGENT_CASCADE_STREAM_TIMING=1).
+# Zero overhead when off: _stream_time() early-returns and the `_t0 = perf_counter() if ENABLED`
+# guards mean no counter calls in the disabled path. Used for latency regression
+# detection in CI and production debugging.
+# ────────────────────────────────────────────────────────────────────────────
+import os as _os_stream_timing
+import time as _time_stream_timing
+
+_STREAM_TIMING_ENABLED = _os_stream_timing.environ.get("AGENT_CASCADE_STREAM_TIMING") == "1"
+_stream_op_timings: dict = {}   # op -> [count, total_seconds]
+_stream_turn_timings: dict = {}  # turn -> {op: [count, total_s]}
+
+
+def _stream_time(op: str, dt: float, turn: int = -1) -> None:
+    """Accumulate one sample for `op`. No-op (early return) when timing is disabled."""
+    if not _STREAM_TIMING_ENABLED:
+        return
+    try:
+        rec = _stream_op_timings.get(op)
+        if rec is None:
+            _stream_op_timings[op] = [1, dt]
+        else:
+            rec[0] += 1
+            rec[1] += dt
+        if turn >= 0:
+            t_rec = _stream_turn_timings.setdefault(turn, {})
+            op_rec = t_rec.get(op)
+            if op_rec is None:
+                t_rec[op] = [1, dt]
+            else:
+                op_rec[0] += 1
+                op_rec[1] += dt
+    except Exception:
+        pass
+
+
+def dump_stream_timings() -> dict:
+    """Return {op: (count, total_s, avg_ms)} sorted by total descending."""
+    if not _STREAM_TIMING_ENABLED:
+        return {}
+    out = {}
+    for op, (cnt, tot) in _stream_op_timings.items():
+        out[op] = (cnt, round(tot, 6), round(tot / cnt * 1000, 3) if cnt else 0)
+    return dict(sorted(out.items(), key=lambda x: -x[1][1]))
+
+
+def dump_stream_turn_timings() -> dict:
+    """Return per-turn breakdown {turn: {op: (count, total_s, avg_ms)}}."""
+    if not _STREAM_TIMING_ENABLED:
+        return {}
+    out = {}
+    for turn, ops in sorted(_stream_turn_timings.items()):
+        out[turn] = {
+            op: (cnt, round(tot, 6), round(tot / cnt * 1000, 3) if cnt else 0)
+            for op, (cnt, tot) in ops.items()
+        }
+    return out
+
+
 def _serialize_loop_settings(ps):
     """Serialize loop detection settings from PoolSettings instance."""
     return {
@@ -482,10 +542,14 @@ def build_stream_update_from_pool(
         len(stream_resp_snapshot) if stream_resp_snapshot else 0,
     )
 
-    # Thread-safe read of cached token stats and last version via CacheManager
+    # Thread-safe read of cached token stats and last version via CacheManager.
+    # BUG_0005 follow-up: Use a SEPARATE version dict for token-stats caching, because
+    # _serialize_instances_incremental writes stream_versions with a 4-tuple (including
+    # stream_content_len) while build_stream_update_from_pool uses a 3-tuple (without it).
+    # Sharing the same dict caused permanent cache misses → O(N) recompute every tick.
     with _cache_mgr._lock:
         cached_stats = _cache_mgr.stream_token_stats.get(instance_name)
-        last_version = _cache_mgr.stream_versions.get(instance_name)
+        last_version = _cache_mgr.stream_token_stats_versions.get(instance_name)
 
     if cached_stats is not None and current_version == last_version:
         # Conversation unchanged — reuse the cached STABLE history stats (h_stats).
@@ -501,6 +565,10 @@ def build_stream_update_from_pool(
         h_stats, r_stats = _calc_stream_token_stats(
             pool, instance_name, conv_snapshot, stream_resp_snapshot, responses,
         )
+        # BUG_0005 follow-up: Store the version in the separate token-stats version dict
+        # so subsequent ticks with the same conversation identity can hit the cache.
+        with _cache_mgr._lock:
+            _cache_mgr.stream_token_stats_versions[instance_name] = current_version
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
     max_tokens = _get_max_tokens_for_instance(pool, instance)
@@ -805,7 +873,10 @@ def serialize_message(
 
     # M1: Store in module-level cache keyed by id(msg), never mutate the input dict.
     # Only cache for persistent history dicts (skip index=0 latest turn messages).
-    if msg_id is not None and for_ui and isinstance(msg, dict) and index is not None and index > 0:
+    # BUG_0005: Also cache Pydantic Message objects — committed-conversation Messages
+    # are appended once and never mutated in-place, so id(msg) is a stable key. This
+    # avoids re-running model_dump() on every streaming tick for unchanged history.
+    if msg_id is not None and for_ui and (isinstance(msg, dict) or hasattr(msg, 'model_dump')) and index is not None and index > 0:
         _store_ui_cache(msg_id, d)
 
     if index is not None:

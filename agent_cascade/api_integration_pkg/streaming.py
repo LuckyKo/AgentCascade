@@ -423,14 +423,17 @@ def _calc_stream_token_stats_uncached(
     Returns:
         (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
     """
-    # Include streaming responses in combined snapshot for accurate stats
-    combined_snapshot = conv_snapshot + (stream_resp_snapshot if stream_resp_snapshot else [])
-    active_h = pool.slice_history_for_llm(combined_snapshot) if combined_snapshot else conv_snapshot
+    # BUG_0004 fix: h_stats must be computed over the COMMITTED conversation ONLY.
+    # The streaming partial is counted separately in r_stats — including it in both
+    # would double-count its tokens in the displayed total.
+    active_h = pool.slice_history_for_llm(conv_snapshot) if conv_snapshot else []
 
     try:
         from agent_cascade.utils.utils import get_history_stats
         h_stats = get_history_stats(active_h)
-        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
+        # r_stats: use responses if provided, otherwise fall back to stream_resp_snapshot
+        _r_source = responses if responses else stream_resp_snapshot
+        r_stats = get_history_stats(_r_source) if _r_source else {'tokens': 0, 'words': 0}
     except Exception as e:
         logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}
