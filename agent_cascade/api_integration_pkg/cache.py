@@ -39,6 +39,12 @@ class CacheManager:
         
         # Stream token stats: instance_name -> (h_stats, r_stats) tuple of dicts
         self.stream_token_stats: Dict[str, tuple] = {}
+        
+        # BUG_0005 follow-up: Separate version tracking for token-stats caching.
+        # build_stream_update_from_pool uses a 3-tuple key (no stream_content_len) while
+        # _serialize_instances_incremental uses a 4-tuple (with stream_content_len).
+        # They must NOT share stream_versions or the mismatch causes permanent cache misses.
+        self.stream_token_stats_versions: Dict[str, tuple] = {}
     
     def clear_all(self) -> None:
         """Clear all caches. Called during session reset."""
@@ -48,6 +54,7 @@ class CacheManager:
             self.cached_instances.clear()
             self.ui_serialization.clear()
             self.stream_token_stats.clear()
+            self.stream_token_stats_versions.clear()
     
     def evict_if_full(self, cache_name: str, maxsize: int) -> None:
         """Evict oldest entry if cache exceeds max size (FIFO).
