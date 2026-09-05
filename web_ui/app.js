@@ -2099,23 +2099,13 @@ function handleServerMessage(data) {
               state.subAgents[name] = sa;
             }
           } else {
-          // Non-partial. A tail-only frame (fewer messages than history_count) must NOT
-          // wipe the full history — merge by absolute index into the existing array instead.
-          // Full-history frames (len >= history_count) or first-contact are safe to replace.
+          // Non-partial (settled) frame: always full-replace the agent's message array.
+          // Non-partial frames arrive on turn completion or periodic resync — they represent
+          // the final committed state. A clean replace avoids index-misalignment artifacts
+          // (flipping, duplicates) that can occur when merging tail-only data into an
+          // existing array whose indices may have shifted between frames.
           const hCount = sa.history_count || 0;
-          const isTailOnly = hCount > 0 && sa.messages.length < hCount;
-          if (existing && existing.messages && isTailOnly) {
-          mergeTailMessages(existing.messages, sa.messages);
-          // Sync metadata but NOT messages (we just merged those in place).
-          const saCopy = { ...sa };
-          delete saCopy.messages;
-          Object.assign(existing, saCopy);
-          existing._lastHistoryCount = Math.max(existing._lastHistoryCount || 0, hCount);
-          } else {
-          // Full frame or first-contact: replace entire agent state. Read from the
-          // updated state, NOT from `existing` which still points to the OLD object.
-          state.subAgents[name] = { ...sa, _lastHistoryCount: hCount };
-          }
+          state.subAgents[name] = { ...sa, _lastHistoryCount: Math.max(hCount, existing?._lastHistoryCount || 0) };
           }
           
           // Detect changes to decide render urgency:
