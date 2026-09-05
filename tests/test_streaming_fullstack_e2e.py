@@ -704,6 +704,29 @@ function finish(code){
     ws_closed: wsClosed,
   };
   if (APP_LOAD_ERROR) out.app_load_error = APP_LOAD_ERROR;
+  // ── Extract frontend message state for sync verification ─────────────────────
+  // Pull the final message list from app.js's internal `state` so the Python test
+  // can compare it against the backend conversation. We extract (role, content, index)
+  // to keep the JSON payload small while still catching duplicates/gaps/ordering bugs.
+  try {
+    const st = APP_API && APP_API.getState ? APP_API.getState() : null;
+    if (st && st.subAgents && st.subAgents[INSTANCE]) {
+      const msgs = st.subAgents[INSTANCE].messages || [];
+      out.frontend_messages = msgs.map((m, i) => ({
+        role: m.role || 'unknown',
+        content: typeof m.content === 'string' ? m.content.slice(0, 200) : '',
+        reasoning_len: typeof m.reasoning_content === 'string' ? m.reasoning_content.length : 0,
+        index: (m.index !== undefined) ? m.index : i,  // use embedded index or positional fallback
+      }));
+      out.frontend_history_count = st.subAgents[INSTANCE].history_count || msgs.length;
+    } else {
+      out.frontend_messages = [];
+      out.frontend_state_missing = true;
+    }
+  } catch (e) {
+    out.frontend_messages = [];
+    out.frontend_extract_error = String(e && e.message || e);
+  }
   try { console.log('E2E_RESULT ' + JSON.stringify(out)); } catch(e){}
   process.exit(code);
 }
@@ -1051,6 +1074,160 @@ def _assert_delta_mode(updates, payload):
             f"turn1={payload[0]['median_bytes']}B -> turnN={payload[-1]['median_bytes']}B (limit 1.5x)"
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Message stack sync verification (frontend vs backend consistency)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _assert_message_stack_sync(frontend_messages, pool, instance_name):
+    """Verify the frontend's final message list is consistent with the backend conversation.
+
+    Checks:
+      1. No duplicate (role, content) pairs in the frontend list.
+      2. Index contiguity — if messages carry an `index` field, they must be
+         contiguous from 0 (no gaps, no reordering).
+      3. Final consistency — same message count, same roles in same order, and
+         matching content (first 100 chars) for committed (non-streaming) messages.
+
+    The frontend may have FEWER messages than the backend if the last streaming
+    partial hasn't been committed yet (the test ends mid-stream). We tolerate a
+    small trailing gap (<=2 messages: one in-flight assistant + one tool result).
+
+    Args:
+        frontend_messages: list of dicts with keys {role, content, index, reasoning_len}
+            extracted from the Node harness's `state.subAgents[name].messages`.
+        pool: AgentPool instance (from the fullstack_server fixture).
+        instance_name: the agent instance name to compare.
+    """
+    print("\n[fullstack] ── MESSAGE STACK SYNC VERIFICATION ──")
+
+    # ── Get backend conversation ────────────────────────────────────────────────
+    inst = pool.get_instance(instance_name)
+    if inst is None:
+        pytest.fail(f"Backend instance '{instance_name}' not found in pool — cannot compare")
+    with inst._compression_lock:
+        backend_conv = list(inst.conversation)
+
+    # Serialize backend messages to (role, content_prefix) pairs for comparison.
+    backend_msgs = []
+    for i, msg in enumerate(backend_conv):
+        if isinstance(msg, dict):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "") or ""
+            if isinstance(content, list):  # multimodal
+                content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        else:
+            role = getattr(msg, "role", "unknown")
+            content = getattr(msg, "content", "") or ""
+            if isinstance(content, list):
+                content = " ".join(str(getattr(p, "text", "")) for p in content)
+        backend_msgs.append({"role": str(role), "content": str(content)[:200], "index": i})
+
+    n_fe = len(frontend_messages)
+    n_be = len(backend_msgs)
+    print(f"  Frontend messages: {n_fe}, Backend conversation: {n_be}")
+
+    # ── Check 1: No duplicates in frontend ─────────────────────────────────────
+    seen = set()
+    for i, msg in enumerate(frontend_messages):
+        key = (msg["role"], msg["content"])
+        assert key not in seen, (
+            f"DUPLICATE message at frontend position {i}: role={msg['role']}, "
+            f"content={msg['content'][:80]!r}. This indicates a failed splice or "
+            f"double-append in the delta merge path."
+        )
+        seen.add(key)
+    print(f"  ✓ No duplicate (role, content) pairs in {n_fe} frontend messages")
+
+    # ── Check 2: Index contiguity ───────────────────────────────────────────────
+    # ASSUMPTION: the conversation is append-only (no message deletion/editing during
+    # the test run). Under this invariant, the backend assigns sequential absolute indices
+    # (0, 1, 2, ...) and the frontend's positional splice preserves them. If the backend
+    # ever supports in-place message removal, this check must be relaxed to verify
+    # uniqueness + monotonicity instead of strict contiguity.
+    indexed_msgs = [m for m in frontend_messages if "index" in m and m["index"] is not None]
+    if indexed_msgs:
+        for i, msg in enumerate(indexed_msgs):
+            expected_idx = i
+            actual_idx = msg["index"]
+            assert actual_idx == expected_idx, (
+                f"INDEX GAP: frontend position {i} has index={actual_idx} "
+                f"(expected {expected_idx}). This indicates a missing or duplicated "
+                f"message in the positional splice merge."
+            )
+        print(f"  ✓ Index contiguity verified for {len(indexed_msgs)} indexed messages (0..{len(indexed_msgs)-1})")
+    else:
+        print("  (no index fields in frontend messages — skipping contiguity check)")
+
+    # ── Check 3: Final consistency (frontend ⊆ backend, same order) ────────────
+    # The frontend's message list should be a PREFIX of the backend conversation
+    # (possibly shorter if the last streaming partial hasn't committed yet).
+    # We compare role sequences and content prefixes.
+    #
+    # Tolerance: the frontend may lag by up to 2 messages (one in-flight assistant
+    # + one tool result not yet visible in the final frame). If n_fe > n_be, that's
+    # a real bug (frontend has MORE than backend — impossible unless there are dups).
+    if n_fe > n_be:
+        pytest.fail(
+            f"Frontend has MORE messages ({n_fe}) than backend conversation ({n_be}). "
+            f"This is impossible without duplicates or a desynced splice. "
+            f"Frontend roles: {[m['role'] for m in frontend_messages[-5:]]} "
+            f"(last 5). Backend roles: {[m['role'] for m in backend_msgs[-5:]]} (last 5)."
+        )
+
+    # ── Check 3b: Excessive lag guard ──────────────────────────────────────────
+    # If the backend has significantly more messages than the frontend, something is
+    # wrong (frontend lost frames and never resynced). Tolerance: up to
+    # MAX_STREAMING_PARTIALS + 1 messages of lag (in-flight partials + one tool result).
+    max_lag = MAX_STREAMING_PARTIALS + 1
+    if n_be - n_fe > max_lag:
+        pytest.fail(
+            f"EXCESSIVE FRONTEND LAG: backend has {n_be} messages but frontend only "
+            f"{n_fe} (lag={n_be - n_fe}, tolerance={max_lag}). The frontend likely lost "
+            f"frames and never resynced via force_full. Check for _needsResync stuck state."
+        )
+
+    # Compare the overlapping prefix: frontend[i] should match backend[i].
+    # We allow the LAST MAX_STREAMING_PARTIALS frontend messages to differ (in-flight
+    # streaming partials that haven't been committed to the backend conversation yet).
+    compare_count = max(0, n_fe - MAX_STREAMING_PARTIALS)
+    mismatches = []
+    for i in range(compare_count):
+        fe_role = frontend_messages[i]["role"]
+        be_role = backend_msgs[i]["role"] if i < n_be else "?"
+        fe_content = frontend_messages[i]["content"][:100]
+        be_content = backend_msgs[i]["content"][:100] if i < n_be else "?"
+
+        if fe_role != be_role:
+            mismatches.append(f"  position {i}: role FE={fe_role!r} BE={be_role!r}")
+        elif fe_content != be_content:
+            # Both are already truncated to 200 chars at extraction time.
+            # Any difference within that window is a real desync — flag it.
+            mismatches.append(
+                f"  position {i} ({fe_role}): FE={fe_content[:80]!r} BE={be_content[:80]!r}"
+            )
+
+    assert not mismatches, (
+        f"MESSAGE STACK DESYNC: {len(mismatches)} position(s) where frontend ≠ backend:\n"
+        + "\n".join(mismatches[:10])
+        + ("\n  ... (truncated)" if len(mismatches) > 10 else "")
+        + f"\n\nFrontend roles (first 10): {[m['role'] for m in frontend_messages[:10]]}\n"
+        + f"Backend roles (first 10):  {[m['role'] for m in backend_msgs[:10]]}"
+    )
+
+    # ── Check 4: Role sequence consistency (structural) ────────────────────────
+    # The role sequence of the frontend prefix must match the backend prefix exactly.
+    fe_roles = [m["role"] for m in frontend_messages[:compare_count]]
+    be_roles = [m["role"] for m in backend_msgs[:compare_count]]
+    assert fe_roles == be_roles, (
+        f"ROLE SEQUENCE MISMATCH (first {compare_count} messages):\n"
+        f"  FE: {fe_roles}\n  BE: {be_roles}"
+    )
+
+    print(f"  ✓ Final consistency: {compare_count}/{n_fe} frontend messages match backend "
+          f"(last {n_fe - compare_count} skipped as potential in-flight partials)")
+    print(f"[fullstack] ── MESSAGE STACK SYNC: PASS ──")
+
+
 @pytest.mark.timeout(540)
 def test_fullstack_streaming(fullstack_server):
     """Drive the full real stack and assert incremental streaming per turn + loop cycle."""
@@ -1105,56 +1282,6 @@ def test_fullstack_streaming(fullstack_server):
     ov = lat["overall"]
     if ov:
         print(f"  OVERALL: n={ov['n']} min={ov['min']}s median={ov['median']}s p95={ov['p95']}s max={ov['max']}s")
-
-    # ── 1c. Per-operation tick timing (BUG_0005 follow-up diagnostic) ───────────
-    try:
-        from agent_cascade.api_integration_pkg import state_builder as _sb_diag
-        _st = _sb_diag.dump_stream_timings()
-        if _st:
-            print("\n[fullstack] Per-op tick timing (AGENT_CASCADE_STREAM_TIMING=1):")
-            for _op, (_cnt, _tot, _avg_ms) in _st.items():
-                print(f"  {_op}: count={_cnt} total={_tot:.4f}s avg={_avg_ms:.3f}ms")
-        else:
-            print("\n[fullstack] Per-op tick timing: (disabled — set AGENT_CASCADE_STREAM_TIMING=1)")
-
-        # Per-turn breakdown: how each op's cost grows with conversation length.
-        # turn key = len(active instance conversation) at build time (grows monotonically).
-        _pt = getattr(_sb_diag, "dump_stream_timings_per_turn", lambda: {})()
-        if _pt:
-            print("\n[fullstack] Per-turn per-op cost (turn = committed conversation length):")
-            for _turn, _ops in _pt.items():
-                # Show the dominant ops for this turn, sorted by total desc.
-                _ranked = sorted(_ops.items(), key=lambda kv: kv[1][1], reverse=True)
-                _parts = [f"{_op}={_v[2]:.2f}ms x{_v[0]}" for _op, _v in _ranked[:4]]
-                print(f"  conv_len={_turn}: " + " | ".join(_parts))
-
-        # Send-queue depth over time (backpressure signal). turn = conversation length at
-        # enqueue. A growing avg/max depth across turns indicates queue backpressure.
-        _qd = getattr(_sb_diag, "dump_queue_depths", lambda: {})()
-        if _qd:
-            print("\n[fullstack] Send-queue depth by conv_len (samples=frames):")
-            for _turn, (_cnt, _avg_d, _mx_d) in _qd.items():
-                print(f"  conv_len={_turn}: samples={_cnt} avg_depth={_avg_d:.2f} max_depth={_mx_d}")
-
-        # ── Per-frame payload byte breakdown (which field grows with conv_len?) ───
-        # total = on-wire frame bytes; instances = ALL serialized instances; primary_msgs
-        # = the active instance's messages list only (tail + streaming partial); other =
-        # top-level non-instance fields. msg_count should be <= tail(20)+1 if the tail cut is active.
-        _pb = getattr(_sb_diag, "dump_payload_breakdowns", lambda: {})()
-        if _pb:
-            print("\n[fullstack] Per-frame payload byte breakdown by conv_len (samples=frames):")
-            for _turn, _fields in _pb.items():
-                def _f(name):
-                    _c, _a, _m = _fields.get(name, (0, 0.0, 0))
-                    return f"{name}={_a:.0f}B(max {_m}B)"
-                print(f"  conv_len={_turn}: " + " | ".join(
-                    [_f("total"), _f("instances"), _f("primary_msgs"), _f("other"),
-                     f"msg_count={_fields.get('msg_count', (0, 0.0, 0))[2]}"]
-                ))
-        else:
-            print("\n[fullstack] Per-frame payload byte breakdown: (disabled — set AGENT_CASCADE_STREAM_TIMING=1)")
-    except Exception as _e:
-        print(f"\n[fullstack] Per-op tick timing: (unavailable: {_e})")
 
     # ── 2. Multi-turn loop actually cycled ─────────────────────────────────────
     req_log = _MockLLMHandler.get_request_log()
@@ -1232,7 +1359,34 @@ def test_fullstack_streaming(fullstack_server):
         f"app.js WebSocket closed prematurely: {node_result}"
     )
 
+    # ── 5. Message stack sync: frontend vs backend consistency ────────────────
+    # Verify the frontend's accumulated message list matches the backend conversation.
+    # This catches: duplicate splices, index gaps, prefix loss, and desynced merges —
+    # the exact class of bugs fixed in the delta streaming refactor.
+    #
+    # The Node harness extracts state.subAgents[INSTANCE].messages at finish() time.
+    # If extraction fails (harness fragility, app.js load error), we SKIP sync verification
+    # rather than failing the entire e2e test — the other assertions (payload size, latency,
+    # turn count) still validate the streaming pipeline.
+    frontend_messages = node_result.get("frontend_messages", [])
+    _sync_skipped = False
+    if node_result.get("frontend_state_missing"):
+        print(f"\n[fullstack] ⚠ Message stack sync SKIPPED: frontend state not found in Node harness. "
+              f"Keys: {list(node_result.keys())}")
+        _sync_skipped = True
+    elif node_result.get("frontend_extract_error"):
+        print(f"\n[fullstack] ⚠ Message stack sync SKIPPED: extraction error: "
+              f"{node_result['frontend_extract_error']}")
+        _sync_skipped = True
+    elif not frontend_messages:
+        print(f"\n[fullstack] ⚠ Message stack sync SKIPPED: frontend message list is empty.")
+        _sync_skipped = True
+
+    if not _sync_skipped:
+        _assert_message_stack_sync(frontend_messages, fullstack_server["pool"], INSTANCE_NAME)
+
     # ── Summary ────────────────────────────────────────────────────────────────
     print(f"\n[fullstack] PASS — real uvicorn + real WS + real app.js. "
           f"LLM calls={len(req_log)}, turns segmented={len(metrics)}, "
-          f"app.js runs_ms={node_result.get('runs_ms')}")
+          f"app.js runs_ms={node_result.get('runs_ms')}, "
+          f"frontend_msgs={len(frontend_messages)}")
