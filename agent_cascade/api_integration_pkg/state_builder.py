@@ -863,8 +863,11 @@ def serialize_message(
     d.pop('extra', None)
 
     # M1: Store in module-level cache keyed by id(msg), never mutate the input dict.
-    # Only cache for persistent history dicts (skip index=0 latest turn messages).
-    if msg_id is not None and for_ui and isinstance(msg, dict) and index is not None and index > 0:
+    # Only cache for persistent history messages (skip index=0 latest turn messages).
+    # BUG_0005 fix: cache both dicts AND Pydantic Message objects — committed conversation
+    # messages are stable within a turn, so re-serializing them every tick was the dominant
+    # per-tick latency cost. The id(msg) key is stable for the object's lifetime.
+    if msg_id is not None and for_ui and index is not None and index > 0:
         _store_ui_cache(msg_id, d)
 
     if index is not None:

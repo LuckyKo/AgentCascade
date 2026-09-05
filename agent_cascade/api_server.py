@@ -1324,8 +1324,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                             search_dir(item)
                         elif item.is_file() and item.name == filename:
                             matches.append(str(item.absolute()))
-                except PermissionError as e:
-                    logger.debug(f"Permission denied searching directory (skipping): {e}")
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Cannot access directory during search (skipping): {e}")
                     
             search_dir(base_dir)
             
