@@ -2082,7 +2082,7 @@ function handleServerMessage(data) {
               // next force_full (<=10s). Full frames (startIdx <= 0) adopt as before.
               const startIdx = (sa.history_count || 0) - (sa.messages?.length || 0);
               if (startIdx > 0) {
-                console.warn(`[WS] ${name}: delta without prefix (startIdx=${startIdx}), dropping`);
+                console.error(`[WS] ${name}: delta without prefix (startIdx=${startIdx}) — protocol violation, dropping frame`);
               } else {
                 state.subAgents[name] = sa;
                 sa._lastHistoryCount = sa.history_count || 0;

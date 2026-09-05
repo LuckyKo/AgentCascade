@@ -3,7 +3,7 @@
 Phase 3b pure-move refactor. Imports the SAME ``_cache_mgr`` singleton from cache.py.
 """
 
-import os as _os_delta
+import os
 import copy as _copy
 from typing import Any, Dict, List, Optional
 
@@ -25,7 +25,7 @@ from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instanc
 # full. Read at import time (no runtime toggling in phase 1). Default OFF => byte-identical to
 # legacy full-send behavior. TAIL_COMMITTED is hardcoded for phase 1; add an env var later if
 # tail-size tuning becomes necessary.
-STREAM_DELTA_ENABLED = _os_delta.environ.get("AGENT_CASCADE_STREAM_DELTA") == "1"
+STREAM_DELTA_ENABLED = os.environ.get("AGENT_CASCADE_STREAM_DELTA") == "1"
 TAIL_COMMITTED = 1
 
 def _serialize_loop_settings(ps):
@@ -937,10 +937,12 @@ def _serialize_instance(
     # stream is non-partial (is_partial=False), and the frontend would replace the entire
     # message list with just the tail, losing all prefix messages.
     use_delta = (
-        STREAM_DELTA_ENABLED
-        and streaming
-        and original_history_count > 0
-        and len(stream_responses or []) > 0
+        STREAM_DELTA_ENABLED                    # feature flag (env var, default OFF)
+        and streaming                           # not a force_full / connect-time frame
+        and original_history_count > 0          # something to cut
+        and len(stream_responses or []) > 0     # CRITICAL: only partial frames get a tail;
+                                                # a non-partial frame with just a tail would
+                                                # make the frontend replace ALL history
     )
     start_idx = _safe_tail_start_index(msgs) if use_delta else 0
 

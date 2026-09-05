@@ -1015,6 +1015,42 @@ def _measure_payload_sizes(updates):
 # The test
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _assert_delta_mode(updates, payload):
+    """Delta-mode assertions: (a) tail stays bounded; (b) payload stays flat.
+
+    force_full frames (~1% of ticks) and prefix_shrank frames carry the full list
+    while still being is_partial=True — they are expected and accounted for.
+    """
+    print("\n[fullstack] DELTA MODE assertions enabled")
+    TAIL_LIMIT = TAIL_COMMITTED + MAX_STREAMING_PARTIALS + 1
+    bounded_partial_frames = 0
+    full_partial_frames = 0
+    for _a, ev, _b in updates:
+        inst = (ev.get("agent_instances") or ev.get("instances") or {}).get(INSTANCE_NAME)
+        if isinstance(inst, dict) and inst.get("is_partial"):
+            assert inst["history_count"] - len(inst["messages"]) >= 0, \
+                f"history_count < messages.length (startIdx would be negative): " \
+                f"hCount={inst['history_count']} msgs={len(inst['messages'])}"
+            if len(inst["messages"]) <= TAIL_LIMIT:
+                bounded_partial_frames += 1
+            else:
+                full_partial_frames += 1
+    assert bounded_partial_frames > 0, \
+        "DELTA MODE: no bounded partial frames captured — delta tail cut not working"
+    total_partial = bounded_partial_frames + full_partial_frames
+    if total_partial > 0:
+        delta_ratio = bounded_partial_frames / total_partial
+        print(f"  [DELTA] {bounded_partial_frames}/{total_partial} partial frames bounded "
+              f"({delta_ratio:.1%}), {full_partial_frames} full (force_full/shrink)")
+        assert delta_ratio > 0.95, \
+            f"DELTA MODE: only {delta_ratio:.1%} of partial frames are bounded tails " \
+            f"(expected >95% — force_full is ~1% of ticks)"
+    if len(payload) >= 2:
+        assert payload[-1]["median_bytes"] < 1.5 * payload[0]["median_bytes"], \
+            f"Payload grew with conversation (delta mode should keep it flat): " \
+            f"turn1={payload[0]['median_bytes']}B -> turnN={payload[-1]['median_bytes']}B (limit 1.5x)"
+
+
 @pytest.mark.timeout(540)
 def test_fullstack_streaming(fullstack_server):
     """Drive the full real stack and assert incremental streaming per turn + loop cycle."""
@@ -1056,40 +1092,8 @@ def test_fullstack_streaming(fullstack_server):
         print("\n[fullstack] Per-turn payload size: (no streaming turns captured)")
 
     # ── 1a-delta. Delta-mode assertions (only when AGENT_CASCADE_STREAM_DELTA=1) ───
-    # (a) tail stays bounded while history_count grows; (b) on-wire payload stays flat
-    # across turns (the acceptance criterion for the refactor — full-send payloads grow
-    # linearly with conversation length, delta tails do not).
     if DELTA_MODE:
-        print("\n[fullstack] DELTA MODE assertions enabled")
-        TAIL_LIMIT = TAIL_COMMITTED + MAX_STREAMING_PARTIALS + 1
-        bounded_partial_frames = 0
-        full_partial_frames = 0  # force_full / prefix_shrank frames (is_partial=True but full list)
-        for _a, ev, _b in updates:
-            inst = (ev.get("agent_instances") or ev.get("instances") or {}).get(INSTANCE_NAME)
-            if isinstance(inst, dict) and inst.get("is_partial"):
-                assert inst["history_count"] - len(inst["messages"]) >= 0, \
-                    f"history_count < messages.length (startIdx would be negative): " \
-                    f"hCount={inst['history_count']} msgs={len(inst['messages'])}"
-                if len(inst["messages"]) <= TAIL_LIMIT:
-                    bounded_partial_frames += 1
-                else:
-                    full_partial_frames += 1
-        assert bounded_partial_frames > 0, \
-            "DELTA MODE: no bounded partial frames captured — delta tail cut not working"
-        # Most partial frames should be bounded tails; force_full (every ~100 ticks) and
-        # prefix_shrank frames carry the full list but are a small fraction.
-        total_partial = bounded_partial_frames + full_partial_frames
-        if total_partial > 0:
-            delta_ratio = bounded_partial_frames / total_partial
-            print(f"  [DELTA] {bounded_partial_frames}/{total_partial} partial frames bounded "
-                  f"({delta_ratio:.1%}), {full_partial_frames} full (force_full/shrink)")
-            assert delta_ratio > 0.95, \
-                f"DELTA MODE: only {delta_ratio:.1%} of partial frames are bounded tails " \
-                f"(expected >95% — force_full is ~1% of ticks)"
-        if len(payload) >= 2:
-            assert payload[-1]["median_bytes"] < 1.5 * payload[0]["median_bytes"], \
-                f"Payload grew with conversation (delta mode should keep it flat): " \
-                f"turn1={payload[0]['median_bytes']}B -> turnN={payload[-1]['median_bytes']}B (limit 1.5x)"
+        _assert_delta_mode(updates, payload)
 
     # ── 1b. End-to-end latency: mock-generator -> final WS output ───────────────
     emit_log = _MockLLMHandler.get_emit_log()
