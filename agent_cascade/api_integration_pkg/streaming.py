@@ -14,12 +14,7 @@ from agent_cascade.log import logger
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.llm.schema import Message
 from agent_cascade.api_integration_pkg.cache import _cache_mgr, _STREAM_TOKEN_STATS_CACHE_MAXSIZE
-from agent_cascade.api_integration_pkg.state_builder import (
-    build_stream_update_from_pool,
-    _stream_time as _st_timing_record,
-    _STREAM_TIMING_ENABLED as _ST_TIMING_ON,
-)
-import time as _time_streaming
+from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
 
 # ────────────────────────────────────────────────────────────────────────────
 # STREAMING BACKLOG PROBE — TEMPORARY DIAGNOSTIC (evidence-gathering only)
@@ -347,43 +342,14 @@ def broadcast_stream_update(
         # were lost due to queue-full conditions.
         force_full = (tick_num % 100 == 0)
 
-        # Turn index for per-turn breakdown = committed conversation length (grows
-        # monotonically across the agent loop). Only computed when timing is on.
-        _turn_idx = -1
-        if _ST_TIMING_ON:
-            try:
-                _inst = pool.get_instance(instance_name)
-                if _inst is not None:
-                    with _inst._compression_lock:
-                        _turn_idx = len(_inst.conversation)
-            except Exception:
-                _turn_idx = -1
-
-        _t0 = _time_streaming.perf_counter() if _ST_TIMING_ON else 0.0
         stream_update = build_stream_update_from_pool(
             pool=pool,
             instance_name=instance_name,
             responses=turn_output,
             force_full=force_full,
         )
-        if _ST_TIMING_ON:
-            _st_timing_record("broadcast.build", _time_streaming.perf_counter() - _t0, _turn_idx)
 
         if stream_update is not None:
-            # ── TIMING (env-gated): json.dumps proxy + enqueue ───────────────
-            # The real json.dumps of this exact dict happens later in api_server's
-            # _sender_loop/broadcast; we can't instrument that without editing it, so we
-            # time a faithful proxy here (same object, same size) to attribute the
-            # serialization cost. Zero overhead when AGENT_CASCADE_STREAM_TIMING is off.
-            if _ST_TIMING_ON:
-                import json as _json_timing
-                _t1 = _time_streaming.perf_counter()
-                try:
-                    _json_timing.dumps({'type': 'stream_update', **stream_update}, default=str)
-                except Exception:
-                    pass
-                _st_timing_record("broadcast.json_dumps", _time_streaming.perf_counter() - _t1, _turn_idx)
-
             # ── PROBE: capture t_enqueue right before dispatch ──────────────
             # yield_to_enqueue_ms = (t_enqueue - t_yield)*1000 is THE key number.
             # Gated on STREAM_BACKEND_DEBUG; no-op when disabled or yield_time absent.
@@ -398,7 +364,6 @@ def broadcast_stream_update(
                     qsize=(ws_queue.qsize() if hasattr(ws_queue, 'qsize') else -1),
                 )
 
-            _t2 = _time_streaming.perf_counter() if _ST_TIMING_ON else 0.0
             asyncio.run_coroutine_threadsafe(
                 _put_stream_update(
                     ws_queue,
@@ -406,8 +371,6 @@ def broadcast_stream_update(
                 ),
                 ws_loop,
             )
-            if _ST_TIMING_ON:
-                _st_timing_record("broadcast.enqueue", _time_streaming.perf_counter() - _t2, _turn_idx)
 
         return (now_sec, resp_len)
 
@@ -426,10 +389,8 @@ def _calc_stream_token_stats(
 ) -> tuple:
     """Calculate token stats for streaming updates with caching.
 
-    Computes h_stats over the committed conversation (no streaming partial) and r_stats
-    over the in-flight streaming partial — two DISJOINT sets, so their sum is an exact,
-    non-double-counted total_tokens. Results are cached keyed by instance_name for reuse
-    during active generation (the caller recomputes only the cheap r_stats per tick).
+    Computes h_stats and r_stats from the combined conversation + streaming snapshot,
+    then caches them keyed by instance_name for reuse during active generation.
 
     Returns:
         (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
@@ -453,31 +414,23 @@ def _calc_stream_token_stats_uncached(
 ) -> tuple:
     """Pure computation of (h_stats, r_stats) WITHOUT touching the cache.
 
-    Split out from _calc_stream_token_stats so the caller can recompute only the cheap
-    streaming partial (r_stats = get_history_stats(stream_resp_snapshot)) on a per-tick
-    basis while reusing a cached h_stats keyed on stable conversation identity.
-
-    BUG_0004 / O(N)-per-tick: h_stats is computed over `conv_snapshot` ONLY (committed
-    history, no streaming partial) and r_stats over `stream_resp_snapshot` ONLY (the small
-    in-flight partial). The two sets are disjoint, so total_tokens = h + r is exact with no
-    double-counting, and r_stats stays O(tail) rather than O(full-conversation).
+    Fix B: split out from _calc_stream_token_stats so the caller can compute only the
+    cheap streaming partial (r_stats = get_history_stats(responses)) on a per-tick basis
+    while reusing a cached h_stats keyed on stable conversation identity. The inputs and
+    computation here are byte-identical to the original monolithic function, so results
+    are unchanged — this is a pure refactor of where the cache write happens.
 
     Returns:
         (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
     """
-    # BUG_0004 / O(N)-per-tick fix: compute h_stats and r_stats over DISJOINT sets so that
-    # total_tokens = h_stats + r_stats is exact with no double-counting of the streaming partial.
-    #   - h_stats  = committed history ONLY (no streaming partial) — stable within a turn, cacheable
-    #   - r_stats  = in-flight streaming partial ONLY — small, O(tail), recomputed fresh each tick
-    # Previously h_stats was computed over `conv + stream_partial` and r_stats over the same
-    # partial (via `responses`, which is the engine's full "current view"), so the partial was
-    # counted twice AND r_stats ran at O(full-conversation) every tick.
-    active_h = pool.slice_history_for_llm(conv_snapshot) if conv_snapshot else []
+    # Include streaming responses in combined snapshot for accurate stats
+    combined_snapshot = conv_snapshot + (stream_resp_snapshot if stream_resp_snapshot else [])
+    active_h = pool.slice_history_for_llm(combined_snapshot) if combined_snapshot else conv_snapshot
 
     try:
         from agent_cascade.utils.utils import get_history_stats
         h_stats = get_history_stats(active_h)
-        r_stats = get_history_stats(stream_resp_snapshot) if stream_resp_snapshot else {'tokens': 0, 'words': 0}
+        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
     except Exception as e:
         logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}
