@@ -464,7 +464,9 @@ class FileOpsMixin:
                     stat_info = (current_dir / d_name).stat()
                 except OSError:
                     stat_info = None
-                dir_entries.append(self._make_entry(d_name, True, stat_info))
+                d_entry = self._make_entry(d_name, True, stat_info)
+                d_entry['dirpath'] = dirpath  # parent dir, for relative-path rendering
+                dir_entries.append(d_entry)
 
             file_entries = []
             for f_name in sorted(filenames):
@@ -485,7 +487,9 @@ class FileOpsMixin:
                     ctx=ctx,
                 ):
                     continue
-                file_entries.append(self._make_entry(f_name, False, stat_info))
+                f_entry = self._make_entry(f_name, False, stat_info)
+                f_entry['dirpath'] = dirpath  # parent dir, for relative-path rendering
+                file_entries.append(f_entry)
                 entry_count += 1
 
             # Record every walked directory (even with no displayable files) so the
@@ -536,13 +540,24 @@ class FileOpsMixin:
         rendered_size = 0
 
         # Render as a depth-indented tree (2 spaces per level). Every directory
-        # appears even when empty (marked "(empty)"), and each directory's own
-        # contents are indented relative to the listed root so parentage is
-        # unambiguous. Root-level entries render at indent level 0.
+        # appears even when empty (marked "(empty)"). Each entry is labelled with its
+        # path RELATIVE to the listed root so parentage is unambiguous -- a file in a
+        # subdirectory shows "fixed/BUG_0004.md" rather than a bare indented name.
+        # Root-level entries render as just their own name (empty relative dir).
+        def rel_of(dirpath: str) -> str:
+            """Relative path of *dirpath* with respect to the listed root ('' for root)."""
+            if dirpath == root_str:
+                return ""
+            try:
+                return os.path.relpath(dirpath, root_str)
+            except ValueError:  # cross-drive on Windows (shouldn't happen under walk)
+                return Path(dirpath).name
+
         def render_dir(dirpath: str, depth: int):
             nonlocal output, rendered_files, rendered_size
             group = entries_by_dir.get(dirpath, [])
             prefix = "  " * depth
+            base_rel = rel_of(dirpath)
             for e in group:
                 if e['is_dir']:
                     child = os.path.join(dirpath, e['name'])
@@ -552,10 +567,12 @@ class FileOpsMixin:
                     if child in displayed_dirs:
                         is_empty = not entries_by_dir.get(child)
                         marker = " (empty)" if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
-                        output += f"{prefix}[DIR] {e['name']}/{marker}\n"
+                        rel_name = e['name'] if not base_rel else f"{base_rel}/{e['name']}"
+                        output += f"{prefix}[DIR] {rel_name}/{marker}\n"
                     render_dir(child, depth + 1)
                 else:
-                    output += f"{prefix}{e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
+                    rel_name = e['name'] if not base_rel else f"{base_rel}/{e['name']}"
+                    output += f"{prefix}{rel_name} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
                     rendered_files += 1
                     rendered_size += e['size'] or 0
 
