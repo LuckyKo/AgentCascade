@@ -510,3 +510,9 @@ class TestInstanceConversations:
         """Instances can be added to the map."""
         agent_pool.instance_conversations["scope1"] = object()
         assert "scope1" in agent_pool.instance_conversations
+
+
+# NOTE: The old TestTailOnlySerialization class (max_messages parameter) was removed.
+# It tested the previous tail-only approach that has been replaced by the additive/delta
+# streaming implementation (AGENT_CASCADE_STREAM_DELTA=1). See tests/test_state_builder_tail_cut.py
+# for the current delta-mode unit tests.
