@@ -250,3 +250,89 @@ def test_serialize_message_does_not_cache_latest_turn():
         with state_builder._cache_mgr._lock:
             state_builder._cache_mgr.ui_serialization.clear()
             state_builder._cache_mgr.ui_serialization.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# BUG_0004: total_tokens must NOT double-count the streaming partial.
+# ---------------------------------------------------------------------------
+
+def test_stream_token_stats_no_double_count_of_partial():
+    """BUG_0004 regression: h_stats and r_stats must be computed over DISJOINT sets.
+
+    Background: ``total_tokens = h_stats['tokens'] + r_stats['tokens']``. Before the fix,
+    ``h_stats`` was computed over ``conv_snapshot + stream_resp_snapshot`` (committed
+    history PLUS the in-flight streaming partial) while ``r_stats`` was computed over the
+    same partial — so the partial's tokens were counted twice. The displayed counter was
+    inflated by exactly the streaming-partial token count during active reasoning streaming.
+
+    The fix computes h_stats over the committed conversation ONLY and r_stats over the
+    in-flight partial ONLY. Because ``get_history_stats`` is additive per message, for a
+    conversation with committed messages C and a streaming partial P:
+
+        total_tokens == get_history_stats(C)['tokens'] + get_history_stats(P)['tokens']
+
+    i.e. the sum equals stats over (C + P) with NO overlap. Under the old code this test
+    fails by exactly ``get_history_stats(P)['tokens']`` — making it a real regression guard.
+    """
+    from agent_cascade.api_integration_pkg import streaming
+    from agent_cascade.utils.utils import get_history_stats
+
+    # Committed history C (stable within the turn) and in-flight streaming partial P.
+    c1 = {'role': 'user', 'content': 'committed question one with several words'}
+    c2 = {'role': 'assistant', 'content': 'committed answer two with a different length of text here'}
+    p1 = {'role': 'assistant', 'content': 'in-flight partial reasoning that is still being streamed out token by token'}
+
+    committed = [c1, c2]
+    partial = [p1]
+
+    # A pool whose slice_history_for_llm is the identity (no truncation), so active_h == C.
+    pool = MagicMock()
+    pool.slice_history_for_llm.side_effect = lambda msgs: list(msgs)
+
+    h_stats, r_stats = streaming._calc_stream_token_stats_uncached(
+        pool, committed, partial, responses=None,
+    )
+
+    # h_stats must equal stats over the COMMITTED history only (no partial).
+    assert h_stats['tokens'] == get_history_stats(committed)['tokens'], (
+        "BUG_0004 regression: h_stats must be computed over the committed conversation ONLY "
+        "(no streaming partial); got %d, expected %d"
+        % (h_stats['tokens'], get_history_stats(committed)['tokens'])
+    )
+
+    # r_stats must equal stats over the IN-FLIGHT PARTIAL only.
+    assert r_stats['tokens'] == get_history_stats(partial)['tokens'], (
+        "BUG_0004 regression: r_stats must be computed over the streaming partial ONLY; "
+        "got %d, expected %d"
+        % (r_stats['tokens'], get_history_stats(partial)['tokens'])
+    )
+
+    # The invariant required by the task: total_tokens == stats(C) + stats(P), no overlap.
+    total = h_stats['tokens'] + r_stats['tokens']
+    expected_total = get_history_stats(committed)['tokens'] + get_history_stats(partial)['tokens']
+    assert total == expected_total, (
+        "BUG_0004 regression: total_tokens (%d) must equal stats(C)+stats(P) (%d) with no "
+        "double-counting of the streaming partial" % (total, expected_total)
+    )
+
+    # Sanity: the partial is non-trivial so a double-count would actually be visible.
+    assert get_history_stats(partial)['tokens'] > 0
+
+
+def test_stream_token_stats_empty_partial_is_zero():
+    """With no in-flight streaming partial, r_stats must be {0, 0} and total == stats(C)."""
+    from agent_cascade.api_integration_pkg import streaming
+    from agent_cascade.utils.utils import get_history_stats
+
+    committed = [{'role': 'user', 'content': 'only committed history here'}]
+    pool = MagicMock()
+    pool.slice_history_for_llm.side_effect = lambda msgs: list(msgs)
+
+    h_stats, r_stats = streaming._calc_stream_token_stats_uncached(
+        pool, committed, None, responses=None,
+    )
+
+    assert r_stats == {'tokens': 0, 'words': 0}, (
+        "r_stats must be zero when there is no streaming partial; got %r" % r_stats
+    )
+    assert h_stats['tokens'] + r_stats['tokens'] == get_history_stats(committed)['tokens']

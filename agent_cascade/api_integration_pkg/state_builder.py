@@ -19,6 +19,80 @@ from agent_cascade.api_integration_pkg.cache import (
 )
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
 
+# ────────────────────────────────────────────────────────────────────────────
+# Per-op streaming tick timing — TEMPORARY DIAGNOSTIC (REVERT-AFTER-MEASURE)
+# Env-gated by AGENT_CASCADE_STREAM_TIMING=1 (read ONCE at import). Zero overhead
+# when off: _stream_time() early-returns and the `_t0 = perf_counter() if ENABLED`
+# guards mean no counter calls in the disabled path. See
+# .agent_lessons/streaming-per-tick-timing-instrumentation.md. Do NOT commit.
+# ────────────────────────────────────────────────────────────────────────────
+import os as _os_stream_timing
+import time as _time_stream_timing
+
+_STREAM_TIMING_ENABLED = _os_stream_timing.environ.get("AGENT_CASCADE_STREAM_TIMING") == "1"
+_stream_op_timings: dict = {}   # op -> [count, total_seconds]
+# Per-turn breakdown (turn index = len(active instance conversation), which grows
+# monotonically across the agent loop). Lets us see how each op's cost scales with
+# conversation length. turn -> {op: [count, total_s]}.
+_stream_turn_timings: dict = {}
+
+
+def _stream_time(op: str, dt: float, turn: int = -1) -> None:
+    """Accumulate one sample for `op`. No-op (early return) when timing is disabled.
+
+    When `turn >= 0`, also bucket the sample into a per-turn breakdown so the test can
+    report how each op's cost grows with conversation length (the O(N) question).
+    """
+    if not _STREAM_TIMING_ENABLED:
+        return
+    try:
+        rec = _stream_op_timings.get(op)
+        if rec is None:
+            _stream_op_timings[op] = [1, dt]
+        else:
+            rec[0] += 1
+            rec[1] += dt
+        if turn >= 0:
+            tb = _stream_turn_timings.setdefault(turn, {})
+            trec = tb.get(op)
+            if trec is None:
+                tb[op] = [1, dt]
+            else:
+                trec[0] += 1
+                trec[1] += dt
+    except Exception:
+        pass
+
+
+def dump_stream_timings() -> dict:
+    """Return {op: (count, total_s, avg_ms)} sorted by total descending.
+
+    Returns {} when AGENT_CASCADE_STREAM_TIMING is unset (the test hook at
+    tests/test_streaming_fullstack_e2e.py:903 prints a "(disabled...)" note then).
+    """
+    if not _STREAM_TIMING_ENABLED:
+        return {}
+    out = {}
+    for op, (cnt, tot) in _stream_op_timings.items():
+        avg_ms = (tot / cnt * 1000.0) if cnt else 0.0
+        out[op] = (cnt, tot, avg_ms)
+    return dict(sorted(out.items(), key=lambda kv: kv[1][1], reverse=True))
+
+
+def dump_stream_timings_per_turn() -> dict:
+    """Return {turn: {op: (count, total_s, avg_ms)}} for the per-turn breakdown.
+
+    Returns {} when timing is disabled. turn = len(active instance conversation) at the
+    time of each build (grows monotonically across the agent loop).
+    """
+    if not _STREAM_TIMING_ENABLED:
+        return {}
+    out = {}
+    for turn, ops in _stream_turn_timings.items():
+        out[turn] = {op: (cnt, tot, (tot / cnt * 1000.0) if cnt else 0.0) for op, (cnt, tot) in ops.items()}
+    return dict(sorted(out.items()))
+
+
 def _serialize_loop_settings(ps):
     """Serialize loop detection settings from PoolSettings instance."""
     return {
@@ -491,20 +565,36 @@ def build_stream_update_from_pool(
         cached_stats = _cache_mgr.stream_token_stats.get(instance_name)
         last_version = _cache_mgr.stream_token_stats_versions.get(instance_name)
 
+    # Turn index for per-turn timing breakdown = committed conversation length (grows
+    # monotonically across the agent loop, so it tracks turn count). Only computed when
+    # timing is on; zero overhead otherwise.
+    _turn_idx = len(conv_snapshot) if _STREAM_TIMING_ENABLED else -1
+
     if cached_stats is not None and current_version == last_version:
         # Conversation unchanged — reuse the cached STABLE history stats (h_stats).
         h_stats = cached_stats[0]
         # Recompute ONLY the streaming partial (r_stats) fresh each tick so total_tokens
         # stays live as the partial grows. This is cheap/O(tail): it only touches the small
         # in-flight response, never the full conversation.
-        r_stats = _calc_stream_r_stats(responses)
+        #
+        # BUG_0004 / O(N)-per-tick fix: use `stream_resp_snapshot` (the actual in-flight
+        # streaming partial read from the instance) instead of `responses`. The engine yields
+        # `response + turn_output + partial_msgs` as the "current view", so `responses` is the
+        # FULL conversation — passing it here made r_stats O(full-conversation) every tick.
+        _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
+        r_stats = _calc_stream_r_stats(stream_resp_snapshot)
+        if _STREAM_TIMING_ENABLED:
+            _stream_time("build.token_stats_r", _time_stream_timing.perf_counter() - _t0, _turn_idx)
     else:
         # Lazy import to avoid a module-level circular dependency: streaming.py
         # imports build_stream_update_from_pool from this module (state_builder).
         from agent_cascade.api_integration_pkg.streaming import _calc_stream_token_stats
+        _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
         h_stats, r_stats = _calc_stream_token_stats(
             pool, instance_name, conv_snapshot, stream_resp_snapshot, responses,
         )
+        if _STREAM_TIMING_ENABLED:
+            _stream_time("build.token_stats_h", _time_stream_timing.perf_counter() - _t0, _turn_idx)
         # BUG_0005 follow-up: Store the version in the separate token-stats version dict
         # so subsequent ticks with the same conversation identity can hit the cache.
         with _cache_mgr._lock:
@@ -517,9 +607,12 @@ def build_stream_update_from_pool(
     active_stack = _build_active_stack(pool)
 
     # Build ALL instances snapshot with incremental serialization (Fix #3)
+    _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
     all_instances = _serialize_instances_incremental(
         pool, instance_name, force_full,
     )
+    if _STREAM_TIMING_ENABLED:
+        _stream_time("build.serialize_all", _time_stream_timing.perf_counter() - _t0, _turn_idx)
 
     # Get current model and telemetry via shared helpers
     current_model = _get_current_model(pool, instance)
@@ -886,8 +979,11 @@ def _serialize_instance(
     # Always send all messages — no tail optimization. The client properly merges partials,
     # and removing the tail cut avoids any risk of losing early context during streaming.
     start_idx = 0
+    _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
     serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
-    
+    if _STREAM_TIMING_ENABLED:
+        _stream_time("instance.serialize_loop", _time_stream_timing.perf_counter() - _t0)
+
     # Set is_partial=True when there are active streaming responses so the frontend uses
     # the partial merge path (smart splice with history_count), which properly handles
     # growing content with same message count and avoids stale reference bugs.
@@ -897,6 +993,7 @@ def _serialize_instance(
     num_streaming = 0
     if stream_responses and len(stream_responses) > 0:
         # Build fingerprint set from existing serialized messages for dedup
+        _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
         existing_fingerprints = set()
         for msg in serialized_msgs:
             content = msg.get(CONTENT, '') or ''
@@ -906,6 +1003,8 @@ def _serialize_instance(
             fingerprint = (content, reasoning, func_call, name)
             if fingerprint != ('', '', 'None', None):
                 existing_fingerprints.add(fingerprint)
+        if _STREAM_TIMING_ENABLED:
+            _stream_time("instance.fingerprint_set", _time_stream_timing.perf_counter() - _t0)
         
         # Append streaming responses that aren't already in serialized_msgs
         for j, stream_msg in enumerate(stream_responses):
@@ -941,6 +1040,7 @@ def _serialize_instance(
     # the combined history+partial, so the value is identical across all ticks of a turn.
     with _cache_mgr._lock:
         if cache_key not in _cache_mgr.token_stats:
+            _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
             active_msgs = pool.slice_history_for_llm(full_msgs_snapshot) if full_msgs_snapshot else full_msgs_snapshot
             try:
                 from agent_cascade.utils.utils import get_history_stats
@@ -948,6 +1048,8 @@ def _serialize_instance(
             except Exception as e:
                 logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
                 h_stats = {'tokens': len(full_msgs_snapshot) * 4, 'words': 0}
+            if _STREAM_TIMING_ENABLED:
+                _stream_time("instance.token_stats_h", _time_stream_timing.perf_counter() - _t0)
             # BUG31 Fix #1: Evict oldest entry if cache is full (increased from 100 to 5000)
             if len(_cache_mgr.token_stats) >= _TOKEN_STATS_CACHE_MAXSIZE:
                 oldest_key = next(iter(_cache_mgr.token_stats))
@@ -959,7 +1061,10 @@ def _serialize_instance(
     # Recompute ONLY the streaming partial (r_stats) fresh each tick so total_tokens stays
     # live as the partial grows. Cheap/O(tail): touches only the small in-flight response,
     # never the full conversation. Added on top of the cached history stats.
+    _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
     r_stats = _calc_stream_r_stats(stream_responses)
+    if _STREAM_TIMING_ENABLED:
+        _stream_time("instance.token_stats_r", _time_stream_timing.perf_counter() - _t0)
 
     # Get max tokens via direct call to avoid staleness when endpoints change at runtime
     max_tokens = _get_max_tokens_for_instance(pool, inst)
