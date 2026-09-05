@@ -159,3 +159,94 @@ def test_stream_and_full_state_diverge_on_approvals():
     assert isinstance(stream_update, dict) and isinstance(full_state, dict)
     assert 'approvals' not in stream_update
     assert 'approvals' in full_state
+
+
+# ---------------------------------------------------------------------------
+# BUG_0005: UI serialization cache must cover Pydantic Message objects, not just dicts.
+# ---------------------------------------------------------------------------
+
+def test_serialize_message_caches_pydantic_message_object():
+    """Serializing a stable Pydantic Message twice must hit the UI cache on tick 2.
+
+    Regression (BUG_0005): the UI serialization cache was gated on
+    ``isinstance(msg, dict)`` at the store site, so committed-conversation
+    ``Message`` objects were NEVER cached. Every streaming tick therefore re-ran
+    ``model_dump()`` + normalization for every unchanged history message — the
+    dominant per-tick latency cost.
+
+    This test serializes the SAME Message object (stable identity, never mutated
+    in-place) at index>0 twice and asserts the second call is served from the cache.
+    Under the old dict-only gate the store branch is skipped for a Message object,
+    so ``ui_serialization`` stays empty and this assertion fails — making it a real
+    regression guard for the fix, not just a happy-path smoke test.
+    """
+    from agent_cascade.api_integration_pkg import state_builder
+    from agent_cascade.llm.schema import Message
+
+    msg = Message(role='user', content='stable committed history turn')
+    msg_id = id(msg)
+
+    # Isolate the UI cache so this test is self-contained and order-independent.
+    saved = dict(state_builder._cache_mgr.ui_serialization)
+    try:
+        with state_builder._cache_mgr._lock:
+            state_builder._cache_mgr.ui_serialization.clear()
+
+        # Tick 1: cold serialize (index>0 => eligible for caching).
+        first = state_builder.serialize_message(msg, index=5, for_ui=True)
+        assert isinstance(first, dict)
+        assert first['role'] == 'user'
+        assert first['content'] == 'stable committed history turn'
+        # The store branch must have populated the cache keyed by id(msg).
+        with state_builder._cache_mgr._lock:
+            cached_after_tick1 = msg_id in state_builder._cache_mgr.ui_serialization
+        assert cached_after_tick1, (
+            "BUG_0005 regression: serialize_message() did not store a Pydantic "
+            "Message object in the UI cache on tick 1 — the dict-only gate is back."
+        )
+
+        # Tick 2: same stable object. Force the fresh path to differ from the cached
+        # copy so we can prove the returned dict came from the cache, not a re-dump.
+        with state_builder._cache_mgr._lock:
+            state_builder._cache_mgr.ui_serialization[msg_id]['content'] = '__CACHED_SENTINEL__'
+
+        second = state_builder.serialize_message(msg, index=5, for_ui=True)
+        assert second['content'] == '__CACHED_SENTINEL__', (
+            "BUG_0005 regression: tick 2 did not hit the UI cache — it re-serialized "
+            "the Message object instead of serving the cached dict."
+        )
+    finally:
+        with state_builder._cache_mgr._lock:
+            state_builder._cache_mgr.ui_serialization.clear()
+            state_builder._cache_mgr.ui_serialization.update(saved)
+
+
+def test_serialize_message_does_not_cache_latest_turn():
+    """The index>0 guard must be preserved: the latest turn (index=0) is never cached.
+
+    Complements BUG_0005 — extending the cache to Message objects must NOT let the
+    latest-turn message (index=0, still mutating during streaming) leak into the cache.
+    """
+    from agent_cascade.api_integration_pkg import state_builder
+    from agent_cascade.llm.schema import Message
+
+    msg = Message(role='assistant', content='latest in-flight turn')
+    msg_id = id(msg)
+
+    saved = dict(state_builder._cache_mgr.ui_serialization)
+    try:
+        with state_builder._cache_mgr._lock:
+            state_builder._cache_mgr.ui_serialization.clear()
+
+        result = state_builder.serialize_message(msg, index=0, for_ui=True)
+        assert result['content'] == 'latest in-flight turn'
+        with state_builder._cache_mgr._lock:
+            cached = msg_id in state_builder._cache_mgr.ui_serialization
+        assert not cached, (
+            "BUG_0005 guard violated: index=0 (latest turn) message was cached — it "
+            "is still mutating during streaming and must always be serialized fresh."
+        )
+    finally:
+        with state_builder._cache_mgr._lock:
+            state_builder._cache_mgr.ui_serialization.clear()
+            state_builder._cache_mgr.ui_serialization.update(saved)

@@ -805,7 +805,10 @@ def serialize_message(
 
     # M1: Store in module-level cache keyed by id(msg), never mutate the input dict.
     # Only cache for persistent history dicts (skip index=0 latest turn messages).
-    if msg_id is not None and for_ui and isinstance(msg, dict) and index is not None and index > 0:
+    # BUG_0005: Also cache Pydantic Message objects — committed-conversation Messages
+    # are appended once and never mutated in-place, so id(msg) is a stable key. This
+    # avoids re-running model_dump() on every streaming tick for unchanged history.
+    if msg_id is not None and for_ui and (isinstance(msg, dict) or hasattr(msg, 'model_dump')) and index is not None and index > 0:
         _store_ui_cache(msg_id, d)
 
     if index is not None:
