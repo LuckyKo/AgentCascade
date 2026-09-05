@@ -1824,6 +1824,7 @@ function handleServerMessage(data) {
       // Merge ALL agent_instances including root — single source of truth, no legacy fallbacks
       if (data.agent_instances) {
         for (const [name, sa] of Object.entries(data.agent_instances)) {
+          sa._lastHistoryCount = sa.history_count || 0;   // R2: anchor staleness gate on full frames
           state.subAgents[name] = sa;
         }
         // Remove agents that no longer exist on the server (e.g., dismissed agents)
@@ -2074,8 +2075,18 @@ function handleServerMessage(data) {
                 // It gets correctly set by Object.assign(existing, saCopy) above from the server's is_partial field.
               }
             } else {
-              // Fallback: if we don't have existing state, we can't merge partials
-              state.subAgents[name] = sa;
+              // Fallback: if we don't have existing state, we can't merge partials.
+              // R1 guard: a delta frame (startIdx > 0) adopted here would become the ENTIRE
+              // message list and lose the prefix. The connect-time `state` frame is sent first
+              // so this shouldn't happen — but drop such frames anyway; they self-heal at the
+              // next force_full (<=10s). Full frames (startIdx <= 0) adopt as before.
+              const startIdx = (sa.history_count || 0) - (sa.messages?.length || 0);
+              if (startIdx > 0) {
+                console.warn(`[WS] ${name}: delta without prefix (startIdx=${startIdx}), dropping`);
+              } else {
+                state.subAgents[name] = sa;
+                sa._lastHistoryCount = sa.history_count || 0;
+              }
             }
           } else {
           // Non-partial: replace entire agent state. Read from the updated state,

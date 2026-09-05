@@ -3,6 +3,7 @@
 Phase 3b pure-move refactor. Imports the SAME ``_cache_mgr`` singleton from cache.py.
 """
 
+import os as _os_delta
 import copy as _copy
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,14 @@ from agent_cascade.api_integration_pkg.cache import (
     _store_ui_cache,
 )
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
+
+# Additive/delta streaming (phase 1). When enabled, partial (streaming) frames send only a
+# small safe tail instead of the full committed history; force_full / connect-time frames stay
+# full. Read at import time (no runtime toggling in phase 1). Default OFF => byte-identical to
+# legacy full-send behavior. TAIL_COMMITTED is hardcoded for phase 1; add an env var later if
+# tail-size tuning becomes necessary.
+STREAM_DELTA_ENABLED = _os_delta.environ.get("AGENT_CASCADE_STREAM_DELTA") == "1"
+TAIL_COMMITTED = 1
 
 def _serialize_loop_settings(ps):
     """Serialize loop detection settings from PoolSettings instance."""
@@ -229,9 +238,19 @@ def _serialize_instances_incremental(
             
             # Serialize if: active instance OR version changed OR forced full refresh
             if name == instance_name or current_version != prev_version or force_full:
+                # Prefix-shrink detection (replaces a per-instance _conv_version counter):
+                # compression/rollback SHRINK the conversation, so if the message count dropped
+                # since the last frame we must emit a FULL frame (no tail cut) — the client no
+                # longer holds a valid prefix. Same-length rewrites are an accepted gap: the
+                # 100-tick force_full self-heals within ~10s.
+                prefix_shrank = (
+                    prev_version is not None
+                    and current_version[0] < prev_version[0]  # message count decreased
+                )
+                full_this_frame = force_full or prefix_shrank
                 all_instances[name] = _serialize_instance(
                     inst, pool, include_messages=True,
-                    streaming=(not force_full),
+                    streaming=(not full_this_frame),          # False => no tail cut + is_partial from responses
                     streaming_responses=inst_streaming_responses,
                 )
                 _cache_mgr.stream_versions[name] = current_version
@@ -677,6 +696,46 @@ def _find_user_message_insertion_point(conversation: list) -> int:
     # Insert at the beginning
     return 0
 
+def _safe_tail_start_index(msgs: list) -> int:
+    """Index of the first message to include in a delta tail (R6-safe).
+
+    Walks backwards from the end over tool/function responses and assistant
+    messages carrying tool_calls/function_call, stopping at the start of the
+    last tool-call chain (`boundary`) or just after a plain user/assistant
+    message. The desired cut `c = len(msgs) - TAIL_COMMITTED` is safe only if it
+    does not fall strictly INSIDE the last tool chain, i.e. only when
+    `c <= boundary`. Otherwise we must widen the tail to include the whole
+    chain (`start_idx = boundary`) so no call/response pair is split.
+
+    Returns 0 (full send) when the entire conversation is one unbroken chain,
+    or when there is nothing to cut (len <= TAIL_COMMITTED).
+
+    NOTE: this is intentionally NOT ``_find_user_message_insertion_point`` — that
+    helper stops at the first *user* message, which can sit inside the last
+    tool-call chain and would split a call/response pair.
+    """
+    if TAIL_COMMITTED <= 0:
+        return 0                                      # misconfig: always send full
+    if not msgs or len(msgs) <= TAIL_COMMITTED:
+        return 0                                      # guard: never a negative start_idx
+    i = len(msgs) - 1
+    while i >= 0:
+        msg = msgs[i]
+        role = (msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '') or '').lower()
+        if role in ('tool', 'function'):
+            i -= 1                                   # tool response: walk to its call
+            continue
+        if role == 'assistant':
+            fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+            tc = msg.get('tool_calls') if isinstance(msg, dict) else getattr(msg, 'tool_calls', None)
+            if (fc is not None) or (isinstance(tc, list) and len(tc) > 0):
+                i -= 1                               # assistant with calls: part of the chain
+                continue
+        break                                         # user / plain assistant / unknown: safe stop
+    boundary = i + 1                                  # first index of last tool chain (or after a safe msg)
+    c = len(msgs) - TAIL_COMMITTED                    # desired cut (tail of exactly T committed msgs)
+    return c if c <= boundary else boundary           # never cut inside the chain
+
 def serialize_message(
     msg: Any,
     index: Optional[int] = None,
@@ -871,12 +930,31 @@ def _serialize_instance(
 
     msgs = full_msgs_snapshot
     original_history_count = len(msgs)
-    
-    # Always send all messages — no tail optimization. The client properly merges partials,
-    # and removing the tail cut avoids any risk of losing early context during streaming.
-    start_idx = 0
-    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
-    
+
+    # Delta streaming (AGENT_CASCADE_STREAM_DELTA=1): on partial frames send only a
+    # safe tail instead of the full history. force_full / connect-time frames stay full.
+    # CRITICAL: only apply when there ARE streaming responses — a frame with no active
+    # stream is non-partial (is_partial=False), and the frontend would replace the entire
+    # message list with just the tail, losing all prefix messages.
+    use_delta = (
+        STREAM_DELTA_ENABLED
+        and streaming
+        and original_history_count > 0
+        and len(stream_responses or []) > 0
+    )
+    start_idx = _safe_tail_start_index(msgs) if use_delta else 0
+
+    # NOTE: absolute indices! The frontend's merge is purely positional via
+    # `history_count - messages.length`, so a tail frame's first message must carry
+    # `index == start_idx`. Passing relative indices would silently break the splice
+    # AND change what serialize_message caches (it only caches index > 0).
+    serialized_msgs = [
+        serialize_message(m, i)
+        for i, m in enumerate(msgs[start_idx:], start=start_idx)
+    ]
+    if use_delta:
+        logger.debug(f"[DELTA] {inst.instance_name}: tail={len(serialized_msgs)}/{original_history_count}, start_idx={start_idx}")
+
     # Set is_partial=True when there are active streaming responses so the frontend uses
     # the partial merge path (smart splice with history_count), which properly handles
     # growing content with same message count and avoids stale reference bugs.
@@ -885,7 +963,13 @@ def _serialize_instance(
     # ── Streaming UI Content Update Fix: Append partial LLM content ────────
     num_streaming = 0
     if stream_responses and len(stream_responses) > 0:
-        # Build fingerprint set from existing serialized messages for dedup
+        # Dedup invariant (delta mode): `existing_fingerprints` is built from the TAIL only,
+        # not the full history. A streaming partial whose fingerprint matches a message in the
+        # PREFIX would therefore no longer be deduped and could be appended as a duplicate.
+        # This cannot happen: `_streaming_responses` holds only the CURRENT turn's in-flight
+        # messages, and that turn's assistant message is by definition the last committed
+        # message — always inside the tail (TAIL_COMMITTED >= 1). Do NOT "optimize" the tail
+        # to exclude the last committed message; doing so would break this dedup guarantee.
         existing_fingerprints = set()
         for msg in serialized_msgs:
             content = msg.get(CONTENT, '') or ''
