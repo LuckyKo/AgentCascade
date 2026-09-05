@@ -2078,9 +2078,33 @@ function handleServerMessage(data) {
               state.subAgents[name] = sa;
             }
           } else {
-          // Non-partial: replace entire agent state. Read from the updated state,
-          // NOT from `existing` which still points to the OLD object after replacement.
+          // Non-partial frame (streaming ended or no active partial).
+          // If we already have the same message count (or one fewer — the just-committed
+          // streaming message), merge in place to avoid a visible "rollback flicker"
+          // from full-replace. Only do a true full-replace when the message count
+          // changed significantly (new agent, history reset, etc.).
+          if (existing && existing.messages && sa.messages) {
+          const prevLen = existing.messages.length;
+          const newLen = sa.messages.length;
+          if (newLen === prevLen || newLen === prevLen + 1) {
+          // Same count: replace all in place (avoids DOM teardown).
+          // +1 count: keep existing messages, append the new one.
+          if (newLen === prevLen) {
+          existing.messages.length = 0;
+          existing.messages.push(...sa.messages);
+          } else {
+          existing.messages.push(...sa.messages.slice(prevLen));
+          }
+          const saCopy = { ...sa };
+          delete saCopy.messages;
+          Object.assign(existing, saCopy);
+          existing._lastHistoryCount = sa.history_count || 0;
+          } else {
             state.subAgents[name] = { ...sa, _lastHistoryCount: sa.history_count || 0 };
+          }
+          } else {
+          state.subAgents[name] = { ...sa, _lastHistoryCount: sa.history_count || 0 };
+          }
           }
           
           // Detect changes to decide render urgency:
