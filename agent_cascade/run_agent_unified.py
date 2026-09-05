@@ -254,10 +254,16 @@ def run_agent_thread_unified(
             )
 
         # ── Final state broadcast ────────────────────────────────────────
+        # Use tail-only serialization: the frontend already received all streaming
+        # deltas during the turn, so only the last N committed messages are needed.
+        # This prevents bloated 480KB frames from saturating the WS send queue.
+        import os as _os_final
+        _final_tail = int(_os_final.environ.get("AGENT_CASCADE_STREAM_TAIL", "20"))
         final_state = build_state_from_pool(
             pool=pool,
             instance_name=instance_name,
             generating=False,
+            max_messages=_final_tail,
         )
         if final_state is not None:
             # Match old api_server behavior: type='done' + instance_halted field
