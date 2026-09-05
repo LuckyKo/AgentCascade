@@ -2004,22 +2004,6 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
-      // Merge a tail-only frame (messages carry absolute `index` fields) into an existing
-      // message array in place, preserving the invariant that array position == absolute
-      // index. Messages without an `index` field (legacy frames) fall back to positional
-      // append. Gaps are left as null placeholders — the render loop renders them as a
-      // "[... missed messages ...]" placeholder, so we must NOT trim trailing nulls here.
-      const mergeTailMessages = (targetArr, incomingMsgs) => {
-        for (const m of incomingMsgs) {
-          if (m && m.index !== undefined && m.index !== null) {
-            while (targetArr.length <= m.index) targetArr.push(null);
-            targetArr[m.index] = m;
-          } else {
-            targetArr.push(m);
-          }
-        }
-      };
-
       // Only block stream updates when the ACTIVE agent itself is halted
       const activeName = getActiveAgentName();
       if (state.subAgents[activeName]?.is_halted) break;
@@ -2062,24 +2046,20 @@ function handleServerMessage(data) {
                  for (const f of metaFields) {
                    if (sa[f] !== undefined) existing[f] = sa[f];
                  }
-                 // Never let the high-water mark decrease, even on a stale frame.
-                 existing._lastHistoryCount = Math.max(existing._lastHistoryCount || 0, hCount);
+                existing._lastHistoryCount = hCount;
               } else {
                 const startIdx = hCount - sa.messages.length;
                 if (startIdx >= 0) {
-                // Tail-only frame: messages carry absolute `index` fields. Merge in place by
-                // index so array position stays == absolute index (no duplicates, no variant
-                // swapping). The growing streaming partial lands at its own index and is
-                // replaced in-place on each tick. Legacy frames (no `index`) append positionally.
-                  mergeTailMessages(existing.messages, sa.messages);
-                } else {
-                // Server rolled back (fewer messages than client). If the frame still carries
-                // absolute indices, merge by index; otherwise full-replace.
-                  if (sa.messages.some(m => m && m.index !== undefined && m.index !== null)) {
-                    mergeTailMessages(existing.messages, sa.messages);
-                  } else {
+                // Avoid holes: replace entirely if server is ahead, otherwise splice in
+                  if (startIdx > existing.messages.length) {
                     existing.messages = [...sa.messages];
+                  } else {
+                    existing.messages.length = startIdx;
+                    existing.messages.push(...sa.messages);
                   }
+                } else {
+                // Server rolled back (fewer messages than client). Replace entirely.
+                  existing.messages = [...sa.messages];
                 }
                 // Sync other metadata fields — but NOT messages (we just merged those above).
                 // Object.assign would overwrite our merged array with the partial sa.messages.
@@ -2089,8 +2069,7 @@ function handleServerMessage(data) {
                 // Defensive fallback: existing.messages is always set by the merge above,
                 // but guard against malformed server data where Object.assign overwrites it.
                 existing.messages = existing.messages || sa.messages || [];
-                // Never let the high-water mark decrease.
-                existing._lastHistoryCount = Math.max(existing._lastHistoryCount || 0, hCount);
+                existing._lastHistoryCount = hCount;
                 // NOTE: Do NOT delete is_partial here — it indicates the last message is still streaming.
                 // It gets correctly set by Object.assign(existing, saCopy) above from the server's is_partial field.
               }
@@ -2099,13 +2078,9 @@ function handleServerMessage(data) {
               state.subAgents[name] = sa;
             }
           } else {
-          // Non-partial (settled) frame: always full-replace the agent's message array.
-          // Non-partial frames arrive on turn completion or periodic resync — they represent
-          // the final committed state. A clean replace avoids index-misalignment artifacts
-          // (flipping, duplicates) that can occur when merging tail-only data into an
-          // existing array whose indices may have shifted between frames.
-          const hCount = sa.history_count || 0;
-          state.subAgents[name] = { ...sa, _lastHistoryCount: Math.max(hCount, existing?._lastHistoryCount || 0) };
+          // Non-partial: replace entire agent state. Read from the updated state,
+          // NOT from `existing` which still points to the OLD object after replacement.
+            state.subAgents[name] = { ...sa, _lastHistoryCount: sa.history_count || 0 };
           }
           
           // Detect changes to decide render urgency:
@@ -4783,7 +4758,6 @@ function updateGenStats(msgs, isFinal = false) {
   const startIdx = state.genStats.startMsgCount || 0;
   for (let i = startIdx; i < msgs.length; i++) {
     const m = msgs[i];
-    if (!m) continue; // skip null gap placeholders from tail-only merges
     if (m.role !== 'user' && m.role !== 'function') {
       currentGenLength += (m.content || '').length + (m.reasoning_content || '').length;
       if (m.function_call) {
@@ -4801,7 +4775,6 @@ function updateGenStats(msgs, isFinal = false) {
       const saStart = (state.genStats.saStartCounts && state.genStats.saStartCounts[name]) || 0;
       for (let i = saStart; i < saMsgs.length; i++) {
         const m = saMsgs[i];
-        if (!m) continue; // skip null gap placeholders from tail-only merges
         if (m.role !== 'user' && m.role !== 'function') {
           currentGenLength += (m.content || '').length + (m.reasoning_content || '').length;
           if (m.function_call) {

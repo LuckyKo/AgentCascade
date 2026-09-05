@@ -20,36 +20,16 @@ from agent_cascade.api_integration_pkg.cache import (
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
 
 # ────────────────────────────────────────────────────────────────────────────
-# Per-op streaming tick timing — env-gated diagnostic (AGENT_CASCADE_STREAM_TIMING=1).
-# Zero overhead when off: _stream_time() early-returns and the `_t0 = perf_counter() if ENABLED`
-# guards mean no counter calls in the disabled path. Used for latency regression
-# detection in CI and production debugging. See
-# .agent_lessons/streaming-per-tick-timing-instrumentation.md.
+# Per-op streaming tick timing — TEMPORARY DIAGNOSTIC (REVERT-AFTER-MEASURE)
+# Env-gated by AGENT_CASCADE_STREAM_TIMING=1 (read ONCE at import). Zero overhead
+# when off: _stream_time() early-returns and the `_t0 = perf_counter() if ENABLED`
+# guards mean no counter calls in the disabled path. See
+# .agent_lessons/streaming-per-tick-timing-instrumentation.md. Do NOT commit.
 # ────────────────────────────────────────────────────────────────────────────
 import os as _os_stream_timing
 import time as _time_stream_timing
 
 _STREAM_TIMING_ENABLED = _os_stream_timing.environ.get("AGENT_CASCADE_STREAM_TIMING") == "1"
-
-# ────────────────────────────────────────────────────────────────────────────
-# Tail-only streaming serialization (WS send-queue backpressure fix).
-#
-# Re-sending the whole conversation every tick made per-frame payload bytes grow
-# linearly with history, which slowed `broadcast.send_text` (17ms→121ms as the
-# frame grew 64KB→480KB) and saturated the bounded WS send queue (maxsize=128),
-# so frames waited 9-15s to drain. For normal ticks we now serialize only the
-# last _STREAM_TAIL_SIZE committed messages + the in-flight streaming partial;
-# every ~100th tick (force_full) still sends the FULL state as a resync safety net.
-# The frontend already splices the tail via startIdx = history_count - len(messages).
-# Env-overridable for tuning (e.g. larger if UI context is too short).
-# ────────────────────────────────────────────────────────────────────────────
-_STREAM_TAIL_SIZE = int(_os_stream_timing.environ.get("AGENT_CASCADE_STREAM_TAIL", "20"))
-# Byte budget for the serialized committed-message tail (excluding streaming partial).
-# If the last _STREAM_TAIL_SIZE messages exceed this, reduce to fewer messages until
-# under budget. This guarantees bounded per-frame WS payload regardless of content growth,
-# preventing send-queue backpressure. 15KB → ~3ms send_text on localhost; leaves room
-# for the streaming partial + metadata within a ~20KB total frame target.
-_STREAM_TAIL_BYTE_BUDGET = int(_os_stream_timing.environ.get("AGENT_CASCADE_STREAM_TAIL_BYTES", "15360"))
 _stream_op_timings: dict = {}   # op -> [count, total_seconds]
 # Per-turn breakdown (turn index = len(active instance conversation), which grows
 # monotonically across the agent loop). Lets us see how each op's cost scales with
@@ -110,108 +90,6 @@ def dump_stream_timings_per_turn() -> dict:
     out = {}
     for turn, ops in _stream_turn_timings.items():
         out[turn] = {op: (cnt, tot, (tot / cnt * 1000.0) if cnt else 0.0) for op, (cnt, tot) in ops.items()}
-    return dict(sorted(out.items()))
-
-
-# Per-turn send-queue depth samples (diagnostic): turn -> [count, sum, max]. Lets the
-# test report whether the bounded send_queue (maxsize=128) is building up backpressure.
-_stream_qdepth_turns: dict = {}
-
-
-def record_send_queue_depth(depth: int, turn: int = -1) -> None:
-    """Record one send-queue depth sample, bucketed by turn. No-op when timing is off."""
-    if not _STREAM_TIMING_ENABLED:
-        return
-    try:
-        # Opportunistic bound so a long-running server doesn't grow this dict unbounded.
-        if len(_stream_qdepth_turns) > 512:
-            for _k in list(_stream_qdepth_turns):
-                del _stream_qdepth_turns[_k]
-        rec = _stream_qdepth_turns.get(turn)
-        if rec is None:
-            _stream_qdepth_turns[turn] = [1, depth, depth]
-        else:
-            rec[0] += 1
-            rec[1] += depth
-            if depth > rec[2]:
-                rec[2] = depth
-    except Exception:
-        pass
-
-
-def dump_queue_depths() -> dict:
-    """Return {turn: (count, avg_depth, max_depth)}. {} when timing is disabled."""
-    if not _STREAM_TIMING_ENABLED:
-        return {}
-    out = {}
-    for turn, (cnt, tot, mx) in _stream_qdepth_turns.items():
-        out[turn] = (cnt, (tot / cnt if cnt else 0.0), mx)
-    return dict(sorted(out.items()))
-
-
-# Per-turn payload byte breakdown (diagnostic): turn -> {field: [count, sum_bytes, max_bytes]}.
-# Lets the e2e test answer "which field of the stream_update frame is growing with conv_len?"
-# after the tail-only serialization fix. Recorded in api_server.broadcast() right after json.dumps.
-_stream_payload_turns: dict = {}
-
-
-def record_payload_breakdown(turn: int, total: int, instances: int,
-                             primary_msgs: int, msg_count: int) -> None:
-    """Record one frame's byte breakdown, bucketed by turn (conv_len). No-op when timing is off.
-
-    Fields recorded per turn (each [count, sum_bytes, max_bytes]):
-      - total        : len(json.dumps(full frame)) — the on-wire payload size.
-      - instances    : bytes of json.dumps(data['instances']) (ALL serialized instances).
-      - primary_msgs : bytes of the PRIMARY instance's messages list only (tail + streaming partial).
-      - other        : max(0, total - instances) — everything NOT in the 'instances' sub-dict:
-                       top-level non-instance fields (active_stack, pool_settings, telemetry, generating,
-                       tokens, current_model, ...) PLUS JSON structural overhead (the 'agent_instances'
-                       alias key name, separators, braces). It is a residual, not an exact field sum.
-    msg_count is the number of serialized messages in the primary instance (should be <= tail+1 if
-    the tail cut is active; == conv_len+1 means FULL history was sent — the cut is inert for that frame).
-    """
-    if not _STREAM_TIMING_ENABLED:
-        return
-    try:
-        # Opportunistic bound (same pattern as record_send_queue_depth above): wipe-all once past
-        # 512 buckets rather than FIFO-evict. Intentional — this diagnostic is read+dumped at the end
-        # of a test run, and we want to KEEP the early low-conv_len buckets (the trend-line baseline),
-        # so evicting oldest would drop exactly the data we need. A long-running server that exceeds
-        # 512 distinct conv_len values is out of scope for this throwaway measurement.
-        if len(_stream_payload_turns) > 512:
-            for _k in list(_stream_payload_turns):
-                del _stream_payload_turns[_k]
-        tb = _stream_payload_turns.setdefault(turn, {})
-
-        def _rec(field, val):
-            r = tb.get(field)
-            if r is None:
-                tb[field] = [1, val, val]
-            else:
-                r[0] += 1
-                r[1] += val
-                if val > r[2]:
-                    r[2] = val
-
-        _rec("total", total)
-        _rec("instances", instances)
-        _rec("primary_msgs", primary_msgs)
-        _rec("other", max(0, total - instances))
-        _rec("msg_count", msg_count)
-    except Exception:
-        pass
-
-
-def dump_payload_breakdowns() -> dict:
-    """Return {turn: {field: (count, avg_bytes, max_bytes)}}. {} when timing is disabled."""
-    if not _STREAM_TIMING_ENABLED:
-        return {}
-    out = {}
-    for turn, fields in _stream_payload_turns.items():
-        out[turn] = {
-            f: (cnt, (tot / cnt if cnt else 0.0), mx)
-            for f, (cnt, tot, mx) in fields.items()
-        }
     return dict(sorted(out.items()))
 
 
@@ -286,8 +164,7 @@ def _calc_stream_r_stats(partial_responses: Optional[List[Message]]) -> dict:
         return {'tokens': len(partial_responses) * 4, 'words': 0}
 
 def _serialize_all_instances(pool: AgentPool, instance_snapshot: Dict[str, Any],
-                              streaming: bool = False,
-                              max_messages: Optional[int] = None) -> Dict[str, dict]:
+                              streaming: bool = False) -> Dict[str, dict]:
     """Serialize all instances in a pool snapshot.
     
     Args:
@@ -295,8 +172,6 @@ def _serialize_all_instances(pool: AgentPool, instance_snapshot: Dict[str, Any],
         instance_snapshot: Snapshot of pool.instances for safe iteration.
         streaming: If True, uses tail optimization within each instance's 
             _serialize_instance call (partial messages only).
-        max_messages: When set, limits committed messages per instance to the last N
-            (tail-only). None = full history (backward-compatible default).
     """
     all_instances = {}
     for name, inst in instance_snapshot.items():
@@ -305,7 +180,6 @@ def _serialize_all_instances(pool: AgentPool, instance_snapshot: Dict[str, Any],
         all_instances[name] = _serialize_instance(
             inst, pool, include_messages=True, streaming=streaming,
             streaming_responses=inst_streaming,
-            max_messages=max_messages,
         )
     return all_instances
 
@@ -428,14 +302,11 @@ def _serialize_instances_incremental(
             prev_version = _cache_mgr.stream_versions.get(name)
             
             # Serialize if: active instance OR version changed OR forced full refresh
-            # Tail-only for normal ticks; FULL state on the periodic resync (force_full).
-            _tail = None if force_full else _STREAM_TAIL_SIZE
             if name == instance_name or current_version != prev_version or force_full:
                 all_instances[name] = _serialize_instance(
                     inst, pool, include_messages=True,
                     streaming=(not force_full),
                     streaming_responses=inst_streaming_responses,
-                    max_messages=_tail,
                 )
                 _cache_mgr.stream_versions[name] = current_version
                 _cache_mgr.cached_instances[name] = all_instances[name]
@@ -447,7 +318,6 @@ def _serialize_instances_incremental(
                         inst, pool, include_messages=True,
                         streaming=(not force_full),
                         streaming_responses=inst_streaming_responses,
-                        max_messages=_tail,
                     )
                     _cache_mgr.stream_versions[name] = current_version
                     _cache_mgr.cached_instances[name] = all_instances[name]
@@ -474,7 +344,6 @@ def build_state_from_pool(
     responses: Optional[List[Message]] = None,
     generating: bool = False,
     streaming: bool = False,  # Controls tail optimization for large conversations
-    max_messages: Optional[int] = None,  # Tail-only limit (None = full history)
 ) -> Optional[Dict[str, Any]]:
     """Build a full state snapshot for the frontend directly from the pool.
 
@@ -489,8 +358,8 @@ def build_state_from_pool(
         instance_name: Name of the primary instance (main agent) for this state.
         responses: Optional current partial response messages to include.
         generating: Whether the agent is currently generating.
-        streaming: If True, includes in-flight streaming responses (partial LLM content)
-            in the serialized state. If False, only committed messages are included.
+        streaming: Deprecated — previously controlled tail optimization for large conversations.
+            Now all messages are always included regardless of this parameter.
 
     Returns:
         Dictionary with full state snapshot, or None if instance not found.
@@ -516,7 +385,7 @@ def build_state_from_pool(
 
     # Build sub-agent state snapshot (C3: take snapshot before iterating)
     instance_snapshot = dict(pool.instances)
-    all_instances = _serialize_all_instances(pool, instance_snapshot, streaming=streaming, max_messages=max_messages)
+    all_instances = _serialize_all_instances(pool, instance_snapshot, streaming=streaming)
 
     # Derive session name from root instance
     session_name = _get_session_name(instance_snapshot, instance_name)
@@ -1062,21 +931,16 @@ def _serialize_instance(
     inst: AgentInstance, pool: AgentPool,
     include_messages: bool = False, streaming: bool = False,
     streaming_responses: Optional[List[Message]] = None,
-    max_messages: Optional[int] = None,
 ) -> dict:
     """Serialize an AgentInstance for UI state display.
 
-    When *include_messages* is True, the conversation (or just its tail when
-    *max_messages* is set) is appended to the result dict along with token stats
+    When *include_messages* is True, the full conversation (or just the tail
+    during streaming) is appended to the result dict along with token stats
     and max_tokens — matching the legacy API server path.
 
-    ``max_messages``: when not None, only the last ``max_messages`` committed
-    messages are serialized (tail-only). The in-flight streaming partial is still
-    appended after them, and ``history_count`` stays the TOTAL count so the client
-    splices the tail at ``startIdx = history_count - len(messages)``. This keeps
-    per-frame WS payload small and constant (send-queue backpressure fix); pass
-    None to send the full conversation (backward-compatible default).
-
+    All messages are always sent — no tail optimization applied. The client merges
+    partials correctly so there is no risk of losing early context during streaming.
+    
     Streaming UI Content Update Fix (Step 3): When streaming_responses is provided, 
     append partial LLM content after persisted messages with fingerprint-based dedup.
     Fingerprint includes (content, reasoning_content, function_call, name) to prevent
@@ -1111,52 +975,12 @@ def _serialize_instance(
 
     msgs = full_msgs_snapshot
     original_history_count = len(msgs)
-
-    # Tail-only serialization (WS send-queue backpressure fix): when max_messages is set,
-    # serialize only the last `max_messages` committed messages. The client splices this
-    # tail into its existing history via startIdx = history_count - len(messages), so we
-    # must keep original_history_count as the TOTAL count and give each serialized message
-    # its ABSOLUTE index (start_idx + i) to stay consistent with the streaming partials.
-    if max_messages is not None:
-        start_idx = max(0, original_history_count - max_messages)
-        msgs = full_msgs_snapshot[start_idx:]
-    else:
-        start_idx = 0
-
-    # ── Byte-budget tail reduction ────────────────────────────────────────────
-    # Even with a message-count cap, the CONTENT of recent messages can be very large
-    # (long reasoning chains, tool outputs). If the serialized tail exceeds _STREAM_TAIL_BYTE_BUDGET,
-    # reduce to fewer messages until under budget. This guarantees bounded per-frame WS
-    # payload size and prevents send-queue saturation regardless of content growth.
-    if max_messages is not None and len(msgs) > 1:
-        # Quick estimate: serialize the tail and check size. Use a cheap heuristic first
-        # (sum of content+reasoning lengths) to avoid serializing unnecessarily.
-        _est_bytes = sum(
-            len(_get_msg_content(m)) + len(_get_msg_reasoning(m)) for m in msgs
-        )
-        if _est_bytes > _STREAM_TAIL_BYTE_BUDGET:
-            # Binary-search for the largest suffix that fits within budget.
-            # Always keep at least 1 message (the most recent).
-            # NOTE: the size estimate above is a best-effort heuristic (sums
-            # content+reasoning char lengths); actual JSON-serialized size may be
-            # 30-50% larger due to structural overhead. This is acceptable as a soft
-            # cap because the binary search always keeps at least 1 message.
-            lo, hi = 1, len(msgs)
-            while lo < hi:
-                mid = (lo + hi + 1) // 2
-                _sub_est = sum(
-                    len(_get_msg_content(m)) + len(_get_msg_reasoning(m)) for m in msgs[-mid:]
-                )
-                if _sub_est <= _STREAM_TAIL_BYTE_BUDGET:
-                    lo = mid
-                else:
-                    hi = mid - 1
-            # Reduce to `lo` most recent messages
-            start_idx = original_history_count - lo
-            msgs = full_msgs_snapshot[start_idx:]
-
+    
+    # Always send all messages — no tail optimization. The client properly merges partials,
+    # and removing the tail cut avoids any risk of losing early context during streaming.
+    start_idx = 0
     _t0 = _time_stream_timing.perf_counter() if _STREAM_TIMING_ENABLED else 0.0
-    serialized_msgs = [serialize_message(m, start_idx + i) for i, m in enumerate(msgs)]
+    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
     if _STREAM_TIMING_ENABLED:
         _stream_time("instance.serialize_loop", _time_stream_timing.perf_counter() - _t0)
 
