@@ -73,6 +73,9 @@ class FakeSkillManager:
                 return f"# {n}\ninstructions for {n}"
         return None
 
+    def _ensure_discovered(self):
+        pass  # no-op for tests; real SkillManager refreshes registry here
+
 
 class FakeSettings:
     def __init__(self, auto_skill_mode="advanced", default_load_skill_mode="AUTO"):
