@@ -97,6 +97,17 @@ def _clear_performance_caches():
     _cache_mgr.clear_all()
 
 
+def _clear_ui_serialization_cache() -> None:
+    """Clear the id()-keyed UI serialization cache.
+
+    Must be called whenever message objects are replaced (e.g., compression)
+    because old objects are GC'd and their memory addresses can be reused by
+    new objects, causing stale cache hits that return wrong content.
+    """
+    with _cache_mgr._lock:
+        _cache_mgr.ui_serialization.clear()
+
+
 def _store_ui_cache(msg_id: int, cached_data: dict) -> None:
     """Store serialized message data in the CacheManager UI cache with bounded size.
     

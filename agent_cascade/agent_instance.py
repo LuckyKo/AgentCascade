@@ -556,6 +556,15 @@ class AgentInstance:
             self._last_actual_token_count = 0
             self._pending_notifications = []
             self._last_config_version = -1
+            # Invalidate id()-keyed UI serialization cache while holding the lock:
+            # old Message objects are now GC-eligible and their memory addresses may
+            # be reused by the new objects, causing stale cache hits. Clearing inside
+            # the lock ensures no concurrent serialization observes a half-replaced state.
+            try:
+                from agent_cascade.api_integration_pkg.cache import _clear_ui_serialization_cache
+                _clear_ui_serialization_cache()
+            except Exception:
+                pass  # Cache module not loaded yet (e.g., during early init)
 
     def reset_conversation(self) -> None:
         """Clear everything. Full cache invalidation.
@@ -586,6 +595,12 @@ class AgentInstance:
             self._pending_notifications = []
             self._tool_warnings = []
             self._cache_notifications = []
+            # Invalidate id()-keyed UI serialization cache (same rationale as rebuild_conversation)
+            try:
+                from agent_cascade.api_integration_pkg.cache import _clear_ui_serialization_cache
+                _clear_ui_serialization_cache()
+            except Exception:
+                pass
 
     def clear_working_set_cache(self) -> None:
         """Clear working set cache without touching conversation.
