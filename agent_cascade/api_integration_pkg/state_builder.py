@@ -426,7 +426,6 @@ def build_state_from_pool(
     return {
         # Kept for backward compat — frontend fallback reads data.messages if root not in agent_instances
         'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
-        'instances': all_instances,
         'agent_instances': all_instances,
         'active_stack': active_stack,
         'approvals': pending_approvals,
@@ -609,7 +608,6 @@ def build_stream_update_from_pool(
         pool_settings['default_workspace'] = str(om.base_dir)
 
     return {
-        'instances': all_instances,
         'agent_instances': all_instances,
         'active_stack': active_stack,
         # Intentionally NO 'approvals' key here. Approvals are delivered exclusively via

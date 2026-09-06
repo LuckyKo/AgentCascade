@@ -522,7 +522,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             
             return {
                 'messages': [],
-                'instances': {},
                 'agent_instances': {},
                 'active_stack': [],
                 'approvals': approvals,
@@ -597,7 +596,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             }
 
             return {
-                'instances': {instance_name: root_state},
                 'agent_instances': {instance_name: root_state},
                 'active_stack': [],
                 'approvals': approvals,
@@ -947,7 +945,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return build_state()
         except Exception as e:
             logger.warning("State build failed: %s", e, exc_info=True)
-            return {"agents": [], "messages": [], "agent_instances": {}, "instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 8192, "summary": "", "has_queued_messages": False, "queued_messages": [], "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
+            return {"agents": [], "messages": [], "agent_instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 8192, "summary": "", "has_queued_messages": False, "queued_messages": [], "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
 
     @app.post("/api/reset")
     async def api_reset():

@@ -321,6 +321,13 @@ def _measure_events(events, diag, label):
     """
     stream_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get("type") == "stream_update"]
 
+    # Content may arrive via a stream_update OR the trailing type='done' frame. Under the
+    # 100ms broadcast throttle the last content chunk is throttled away as a stream_update;
+    # production delivers it via the separate done frame (run_agent_unified.py L256-272),
+    # which _drive_pipeline now emits. So we fold the done frame's committed content into
+    # content_lens (but NOT into arrivals/gaps/reasoning — those measure live streaming).
+    done_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get("type") == "done"]
+
     arrivals = []  # (arrival_time, reasoning_len, content_len)
     for arrival, ev in events:
         if not (isinstance(ev, dict) and ev.get("type") == "stream_update"):
@@ -333,6 +340,8 @@ def _measure_events(events, diag, label):
 
     reasoning_lens = [r for (_t, r, _c) in arrivals]
     content_lens = [c for (_t, _r, c) in arrivals]
+    # Append the final committed content from the done frame(s), if any.
+    content_lens += [_content_len(_extract_live_assistant(ev)) for ev in done_events]
     distinct_reasoning = len(set(reasoning_lens))
 
     summary = (
@@ -425,6 +434,25 @@ def _drive_pipeline(pool, engine, instance):
                     last_resp_len=exec_state["last_resp_len"],
                 )
                 tick_num += 1
+
+            # ── Final state broadcast — mirrors run_agent_unified.py L256-272 ──
+            # After the streaming loop exhausts, the real caller sends a separate
+            # type='done' frame via build_state_from_pool(generating=False). The last
+            # content chunk is often throttled away as a stream_update (100ms throttle),
+            # so this done frame is how the frontend receives the final committed answer.
+            # Emitting it here keeps the harness faithful to the real pipeline.
+            from agent_cascade.api_integration_pkg.state_builder import build_state_from_pool
+            final_state = build_state_from_pool(
+                pool=pool,
+                instance_name=INSTANCE_NAME,
+                generating=False,
+            )
+            if final_state is not None:
+                send_queue.put_nowait({
+                    'type': 'done',
+                    **final_state,
+                    'instance_halted': False,
+                })
         except Exception as e:  # surface generator errors to the test
             import traceback
             gen_error["exc"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
@@ -792,7 +820,10 @@ def test_streaming_e2e_chunked(streaming_harness):
     assert max(m["reasoning_lens"]) > min(m["reasoning_lens"]), (
         f"CHUNKED reasoning never grew across batches: {m['reasoning_lens']}\n{m['summary']}"
     )
-    # Content arrives in the final batch.
+    # Content arrives in the final batch. Under the 100ms broadcast throttle the last
+    # content chunk is throttled away as a stream_update; production delivers it via the
+    # trailing type='done' frame (run_agent_unified.py L256-272), which _drive_pipeline now
+    # emits and _measure_events folds into content_lens. So this reads from either source.
     assert max(m["content_lens"]) > 0, (
         f"CHUNKED content was never surfaced: {m['content_lens']}\n{m['summary']}"
     )

@@ -334,22 +334,23 @@ def broadcast_stream_update(
     Algorithm:
         1. Detect if response length changed (new committed messages)
         2. Broadcast if any of these conditions are true:
-           - is_streaming_tick (explicit signal from ExecutionEngine or tool event)
-           - len_changed (new message added to conversation)
-           - 100ms elapsed since last send (throttle interval)
+           - len_changed (new message added to conversation — immediate, no throttle)
+           - 100ms elapsed since last send (throttle interval for streaming ticks)
         3. Force full state serialization every ~60s (time-based, per-instance)
            to recover from sync gaps where individual stream_update messages
            may have been dropped due to queue-full conditions.
 
-    NOTE on tool events: The main agent has an extra condition (has_tool_event).
-    Pass is_streaming_tick=True when a tool event occurs — the helper treats it
-    identically to a streaming tick and will bypass the throttle immediately.
+    NOTE on tool events: Tool events (function_call, FUNCTION results) always
+    change len(turn_output), so len_changed=True fires and they bypass the
+    throttle immediately. No separate is_streaming_tick bypass is needed.
 
     Args:
         pool: The AgentPool managing all instances.
         instance_name: Name of the active instance (e.g., "Maine", "Security_op_abc").
         turn_output: Current partial response messages from engine.run() yield.
         is_streaming_tick: True if this tick carries streaming content updates or tool events.
+            Retained for probe/debug logging (STREAM_BACKEND_DEBUG). No longer gates the
+            broadcast decision — the 100ms throttle applies uniformly to all non-structural ticks.
         tick_num: Monotonically increasing tick counter (kept for backward compat;
                   no longer used for force_full scheduling).
         now_sec: Current monotonic time (from time.monotonic()).
@@ -368,11 +369,20 @@ def broadcast_stream_update(
     resp_len = len(turn_output) if turn_output else 0
     len_changed = (resp_len != last_resp_len)
 
-    # Throttle: broadcast only on meaningful events or periodic interval
+    # Throttle: structural changes (new committed messages) broadcast immediately;
+    # all other events (streaming ticks, periodic heartbeats) are rate-limited to
+    # 10fps to prevent WS queue saturation at high LLM throughput (~70+ chunks/sec).
+    #
+    # Tool events (function_call, FUNCTION results) always change len(turn_output)
+    # by +1, so len_changed=True fires and they bypass the throttle immediately.
+    # No separate is_streaming_tick bypass is needed.
+    #
+    # First-token edge case: turn_output goes from [] (len=0) to [Message] (len=1),
+    # so len_changed=True on the first chunk of each stream → immediate "streaming
+    # started" signal. Subsequent chunks in the same stream have stable len → 10fps.
     should_broadcast = (
-        is_streaming_tick
-        or len_changed
-        or (now_sec - last_send > 0.1)  # 100ms throttle
+        len_changed
+        or (now_sec - last_send > 0.1)  # 100ms throttle for streaming ticks
     )
 
     if not should_broadcast:
