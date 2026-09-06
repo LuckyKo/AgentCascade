@@ -1,8 +1,10 @@
 import sys
 import os
+import json
 import platform
 import datetime
 import logging
+from pathlib import Path
 from typing import Dict, Any
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_TURNS
 from agent_cascade.utils.utils import get_history_stats
@@ -12,6 +14,15 @@ from agent_cascade.prompts.dna import TOOL_METADATA
 
 logger = logging.getLogger(__name__)
 
+
+def _help_file_path() -> Path:
+    """Return the resolved path to the help YAML file (config/ac_system_help.yaml).
+
+    Exposed at module level so tests can monkeypatch it.
+    """
+    return Path(__file__).resolve().parents[3] / "config" / "ac_system_help.yaml"
+
+
 @register_tool('system_info', allow_overwrite=True)
 class SystemInfo(BaseTool):
     """Tool to get the current system information including OS, time, date, cwd, python version, and session stats."""
@@ -20,7 +31,12 @@ class SystemInfo(BaseTool):
     description = TOOL_METADATA['system_info']['description']
     parameters = {
         'type': 'object',
-        'properties': {},
+        'properties': {
+            'help': {
+                'type': 'string',
+                'description': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Leave empty/omit for normal system information.",
+            },
+        },
         'required': [],
     }
     
@@ -40,7 +56,110 @@ class SystemInfo(BaseTool):
                 continue
         return False
 
+    def _render_help(self, key: str) -> str:
+        """Render a help section from the YAML file. Never raises."""
+        try:
+            import yaml
+            path = _help_file_path()
+            if not path.is_file():
+                return f"system_info help file not found at {path}"
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return f"system_info help unavailable: YAML root is not a mapping\n(Help file: {path})"
+
+            # Available sections = top-level keys NOT starting with '_'
+            sections = [k for k in data if not str(k).startswith('_')]
+
+            # Case-insensitive match
+            matched_key = None
+            for s in sections:
+                if str(s).lower() == key.lower():
+                    matched_key = s
+                    break
+
+            if matched_key is None:
+                lines = [f"Unknown system_info help section: '{key}'.", ""]
+                lines.append('How to use: system_info(help="<section>") fetches one help section; omit `help` for normal system info.')
+                lines.append("")
+                lines.append("Available sections:")
+                for s in sections:
+                    lines.append(f"  - {s}")
+                usage = data.get('_usage')
+                if isinstance(usage, list):
+                    lines.append("")
+                    for bullet in usage:
+                        lines.append(f"  \u2022 {bullet}")
+                return "\n".join(lines)
+
+            # Render the matched section
+            sec = data[matched_key]
+            if not isinstance(sec, dict):
+                return f"--- AC Help: {matched_key} ---\n{sec}"
+
+            out_lines = [f"--- AC Help: {matched_key} ---"]
+
+            # Description first
+            desc = sec.get('description')
+            if desc:
+                out_lines.append(str(desc))
+
+            # Notes (before endpoints)
+            notes = sec.get('notes')
+            if isinstance(notes, list):
+                for n in notes:
+                    out_lines.append(f"- {n}")
+
+            # Endpoints table
+            endpoints = sec.get('endpoints')
+            if isinstance(endpoints, list) and endpoints:
+                # Compute column widths (cap path ~40, method ~7)
+                m_width = max(7, min(max(len(str(e.get('method', ''))) for e in endpoints), 10))
+                p_width = max(20, min(max(len(str(e.get('path', ''))) for e in endpoints), 40))
+                header = f"{'METHOD'.ljust(m_width)}  {'PATH'.ljust(p_width)}  SUMMARY"
+                out_lines.append("")
+                out_lines.append(header)
+                for ep in endpoints:
+                    if not isinstance(ep, dict):
+                        continue
+                    method = str(ep.get('method', ''))
+                    path_str = str(ep.get('path', ''))
+                    summary = str(ep.get('summary', ''))
+                    out_lines.append(f"{method.ljust(m_width)}  {path_str.ljust(p_width)}  {summary}")
+
+            # Notes after endpoints
+            notes_after = sec.get('notes_after')
+            if isinstance(notes_after, list):
+                for n in notes_after:
+                    out_lines.append(f"- {n}")
+
+            # Any other keys as "Key: value"
+            known_keys = {'description', 'endpoints', 'notes', 'notes_after'}
+            for k, v in sec.items():
+                if k not in known_keys:
+                    out_lines.append(f"{k}: {v}")
+
+            return "\n".join(out_lines)
+
+        except Exception as e:
+            logger.warning(f"system_info help render failed: {e}")
+            try:
+                path_str = str(_help_file_path())
+            except Exception:
+                path_str = "<unknown>"
+            return f"system_info help unavailable: {e}\n(Help file: {path_str})"
+
     def call(self, params: str, **kwargs) -> str:
+        # Optional help mode — return an editable reference section instead of system info.
+        try:
+            p = params if isinstance(params, dict) else (json.loads(params) if isinstance(params, str) and params.strip() else {})
+            if not isinstance(p, dict):
+                p = {}
+            help_key = str(p.get('help') or '').strip()
+        except Exception:
+            help_key = ''
+        if help_key:
+            return self._render_help(help_key)
+
         # Just return the information as a string
         now = datetime.datetime.now()
         os_info = f"{platform.system()} {platform.release()} ({platform.version()})"
@@ -248,14 +367,12 @@ class SystemInfo(BaseTool):
             f"Python Version: {py_version}\n"
             f"API Endpoint: {api_base}\n"
             f"Model Used: {model}\n"
-            f"\n--- AC Server ---\n"
+            f"\n--- AgentCascade Server ---\n"
             f"Server Address: {ac_server_str}\n"
             f"\n--- Workspace & Permissions ---\n"
             f"{folders_info}"
             f"\n--- Session Stats ---\n"
             f"{stats_str}\n"
             f"\n--- Cache Pool State ---{cache_state}"
-            f"\n--- Tool Policy ---\n"
-            f"{tools_str}"
         )
         return info

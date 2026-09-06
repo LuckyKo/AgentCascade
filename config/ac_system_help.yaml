@@ -1,0 +1,106 @@
+# =============================================================================
+# AC System Help — editable reference for the `system_info` tool's `help` arg.
+#
+# An agent calls system_info with help="<section>" to pull a targeted chunk of
+# knowledge about how this AgentCascade instance works, instead of dumping
+# everything into context.
+#
+# STRUCTURE
+#   Each top-level key (except the reserved ones below) is a SECTION. Its value
+#   is a dict that may contain:
+#     - description : one-line blurb shown under the section header.
+#     - endpoints   : list of {method, path, summary}  -> rendered as a table.
+#     - notes       : list of free-form bullet strings (rendered as "- ...").
+#     - any other key: rendered as "Key: value" lines.
+#
+#   Reserved top-level keys (NOT exposed as sections):
+#     - _usage : shown when the agent passes an unknown/invalid help value.
+#                Keep it a short list of bullets telling the agent how to use
+#                the tool and what valid section names look like.
+#     - _about : free text about this file (ignored by the renderer).
+#
+# To add a new section: add a top-level key with description/endpoints/notes.
+# The renderer lists available sections automatically, so no code change needed.
+# =============================================================================
+
+_about: >
+  Editable help content for the AgentCascade `system_info` tool. Sections are
+  keyed by their top-level name; pass that name as the `help` argument to fetch
+  just that section.
+
+_usage:
+  - "Usage: system_info(help=\"<section>\") to fetch one help section."
+  - "Available sections are listed in the error you get when you pass a bad value — re-read it and pick a valid one."
+  - "Omit `help` (or leave it empty) to get normal system information instead."
+
+# ---------------------------------------------------------------------------
+rest_api:
+  description: "REST endpoints exposed by this AgentCascade API server."
+  notes:
+    - "Base URL is the Server Address shown in normal system_info output (e.g. http://127.0.0.1:8765)."
+    - "Message injection (/api/message) requires an X25519 handshake first to obtain a session token."
+  endpoints:
+    - {method: GET,    path: /api/keys,                 summary: "Return the server's X25519 public key (Base64) + algorithm."}
+    - {method: POST,   path: /api/handshake,            summary: "Exchange client public key for a session_token (X25519 ECDH)."}
+    - {method: POST,   path: /api/message,              summary: "Inject an AES-GCM-encrypted message into an agent's queue and start generation."}
+    - {method: GET,    path: /api/status,               summary: "Current generating state, active agent, agent list, active stack. Requires session token."}
+    - {method: GET,    path: /api/agents,               summary: "List agents with name, index, description, and active tools."}
+    - {method: GET,    path: /api/state,                summary: "Full UI state snapshot (agents, messages, tokens, api_router, etc.)."}
+    - {method: POST,   path: /api/reset,                summary: "Reset the active session's conversation and start a fresh logger session."}
+    - {method: POST,   path: "/api/approve/{request_id}", summary: "Approve a pending tool-call approval request by id."}
+    - {method: POST,   path: "/api/reject/{request_id}",  summary: "Reject a pending approval request (optional reason query param)."}
+    - {method: POST,   path: /api/resume_all,           summary: "Clear the global pause flag; all paused instances resume."}
+    - {method: GET,    path: /api/sessions,             summary: "List past session logs (*.jsonl) with name, agent, timestamp, caption."}
+    - {method: GET,    path: /api/file,                 summary: "Serve a file by absolute path (restricted to allowed roots)."}
+    - {method: GET,    path: /api/telemetry,            summary: "Session telemetry summary + per-config comparison + recent events."}
+    - {method: GET,    path: /api/telemetry/export,     summary: "Download the raw telemetry JSONL log file."}
+    - {method: GET,    path: /api/endpoints,            summary: "List configured LLM API endpoints and per-agent priorities."}
+    - {method: POST,   path: /api/endpoints,            summary: "Add a new LLM API endpoint (name, api_base, model, ...)."}
+    - {method: PUT,    path: "/api/endpoints/{id}",     summary: "Update an existing endpoint by id."}
+    - {method: DELETE, path: "/api/endpoints/{id}",     summary: "Delete an endpoint by id."}
+    - {method: POST,   path: /api/endpoints/priorities, summary: "Set per-agent-type endpoint priority ordering."}
+    - {method: POST,   path: /api/endpoints/bulk,       summary: "Bulk replace all endpoints + priorities (UI save)."}
+    - {method: GET,    path: /api/image_gen,            summary: "Return the current image-generation (ComfyUI) config."}
+    - {method: POST,   path: /api/image_gen,            summary: "Save image-gen config (url, workflow_dir, timeout 30-600s)."}
+    - {method: GET,    path: /api/image_gen/workflows,  summary: "List available ComfyUI workflow files."}
+    - {method: POST,   path: /api/find_file,            summary: "Recursively find a filename within the workspace; returns matching paths."}
+    - {method: POST,   path: /api/parse,                summary: "Upload a document and return extracted text (multipart file)."}
+
+# ---------------------------------------------------------------------------
+websocket:
+  description: "WebSocket interface used by the web UI for live streaming."
+  notes:
+    - "Connect to ws://<host>:<port>/ws/chat. On connect the server sends an initial {type:'state', ...} snapshot."
+    - "The client then receives a stream of typed frames; the most important types are listed below."
+    - "Message injection over WS is plain (unencrypted) JSON, unlike /api/message which is E2E-encrypted."
+  endpoints:
+    - {method: WS, path: /ws/chat, summary: "Bidirectional chat/stream channel for the UI."}
+  notes_after:
+    - "Inbound client frames: {type:'message', text, target?} to send a user message; {type:'stop'} to halt generation; {type:'pause'}/{type:'resume'} for global pause."
+    - "Outbound server frames: type 'state' (full snapshot), 'stream_update' (incremental tick), 'approvals' (pending tool approvals), 'done' (turn complete)."
+
+# ---------------------------------------------------------------------------
+parallel_instances:
+  description: "How to run and identify multiple AgentCascade instances in parallel."
+  notes:
+    - "Each instance is a separate process bound to its own port. Use the QWEN_AGENT_PORT env var (start_multi_agent.py) or --port (start_api_server.py)."
+    - "Set AGENT_CASCADE_INSTANCE_ID (or --instance-id) to give an instance a stable id; this names its logs and pool_settings_<id>.json."
+    - "An agent can always discover ITS OWN instance's address:port from the normal system_info output (the 'AgentCascade Server' line) — it is set per-process at startup."
+    - "Do not assume a fixed port across instances; read system_info rather than hardcoding one."
+
+# ---------------------------------------------------------------------------
+settings_env:
+  description: "Key environment variables and config files that shape an instance."
+  notes:
+    - "QWEN_AGENT_PORT — API server port for start_multi_agent.py (default 8765)."
+    - "AGENT_CASCADE_INSTANCE_ID — stable id for parallel instances (logs + per-instance pool settings)."
+    - "Config dir: <AgentCascade_root>/config/ holds api_endpoints.json, pool_settings.json, image_gen.json, secrets.json."
+    - "Per-instance pool settings live at config/pool_settings_<instance_id>.json when an instance id is set, else config/pool_settings.json."
+
+# ---------------------------------------------------------------------------
+agent_classes:
+  description: "The built-in agent classes available to call_agent."
+  notes:
+    - "The exact list for THIS instance is shown by the 'Available Tools' / agent listing in normal system_info output and by list_agents."
+    - "Typical built-ins: orchestrator (technical lead / coordinator), coder, researcher, reviewer, writer, security, generalist, compressor, ponytail."
+    - "When call_agent rejects an unknown class, the error lists the valid classes for this instance — use that as the source of truth."
