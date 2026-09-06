@@ -23,6 +23,7 @@ from agent_cascade.compression.helpers import (
     rebuild_working_set,
 )
 from agent_cascade.compression.core import compress_context
+from agent_cascade.agent_instance import AgentState
 from agent_cascade.settings import COMPRESSION_MAX_RETRIES
 
 # Shared mock pool from conftest — no need to redefine locally
@@ -1642,7 +1643,6 @@ class TestTerminatedCompressorRetryReset:
     def _make_terminated_instance(self):
         """A compressor instance in the loop-terminated state (what terminate_instance leaves)."""
         import threading
-        from agent_cascade.agent_instance import AgentState
         inst = MagicMock()
         inst.state = AgentState.TERMINATED
         inst.is_terminated = True
@@ -1659,7 +1659,6 @@ class TestTerminatedCompressorRetryReset:
     def test_terminated_compressor_reset_before_retry(self):
         """A TERMINATED compressor is reset to IDLE (flag cleared, removed from pool) before retry."""
         import threading
-        from agent_cascade.agent_instance import AgentState
         from agent_cascade.compression.agent_invoker import invoke_compression_agent
 
         pool = self._make_mock_pool()
@@ -1704,7 +1703,6 @@ class TestTerminatedCompressorRetryReset:
     def test_reset_removes_instance_from_terminated_set(self):
         """Direct unit test: the reset helper removes the key from pool.terminated_instances."""
         import threading
-        from agent_cascade.agent_instance import AgentState
         from agent_cascade.compression.agent_invoker import _reset_terminated_compressor_for_retry
 
         pool = self._make_mock_pool()
@@ -1721,7 +1719,6 @@ class TestTerminatedCompressorRetryReset:
     def test_non_terminated_compressor_left_untouched(self):
         """A compressor that failed validation but was NOT terminated (still IDLE) is left as-is."""
         import threading
-        from agent_cascade.agent_instance import AgentState
         from agent_cascade.compression.agent_invoker import invoke_compression_agent
 
         pool = self._make_mock_pool()

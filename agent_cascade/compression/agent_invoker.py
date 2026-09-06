@@ -12,6 +12,7 @@ from typing import Any, List, Tuple
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT, CONSOLIDATION_PROMPT, COMPRESSION_END_MARKER
 from agent_cascade.settings import COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS
 from agent_cascade.exceptions import AgentTerminatedError
+from agent_cascade.agent_instance import AgentState
 from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text, _msg_field_or_extra
@@ -285,8 +286,6 @@ def _reset_terminated_compressor_for_retry(agent_pool: Any, comp_instance: Any, 
         comp_instance: The compressor AgentInstance to reset.
         comp_state_key: Instance name for logging and pool bookkeeping.
     """
-    from agent_cascade.agent_instance import AgentState
-
     with comp_instance._state_lock:
         if comp_instance.state != AgentState.TERMINATED:
             return  # Only the loop-terminated case needs recovery; leave everything else alone.
