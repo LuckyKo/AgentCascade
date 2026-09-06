@@ -565,10 +565,14 @@ def _handle_tool_result_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agent
 
 @register_config_handler('wild_read_truncation_chars')
 def _handle_wild_read_truncation_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update the lower truncation cut for wild reads when the trip threshold is exceeded."""
+    """Update the lower truncation cut for wild reads when the trip threshold is exceeded.
+
+    Clamped to [500, tool_result_max_chars] — must never exceed the trip threshold.
+    """
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         val = int(ui_cfg.get('wild_read_truncation_chars', 2000))
-        agent_pool.llm_cfg['wild_read_truncation_chars'] = max(500, val)
+        upper = agent_pool.llm_cfg.get('tool_result_max_chars', 25000)
+        agent_pool.llm_cfg['wild_read_truncation_chars'] = min(max(500, val), upper)
 
 
 @register_config_handler('grep_char_limit')

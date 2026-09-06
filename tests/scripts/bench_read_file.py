@@ -157,7 +157,7 @@ def benchmark_step_breakdown(tool: ReadFile, test_file: Path) -> None:
     
     # Step 4: _calculate_char_limit
     t0 = time.perf_counter()
-    char_limit = tool._calculate_char_limit({}, True, 10000)
+    char_limit = tool._calculate_char_limit({}, True, 2000)
     steps.append(("_calculate_char_limit", (time.perf_counter() - t0) * 1000))
     
     # Step 5: _is_binary_file
