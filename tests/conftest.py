@@ -8,6 +8,8 @@ Ollama without external API keys when a server is available, and skip cleanly
 
 import json
 import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pytest
 
@@ -40,6 +42,12 @@ os.environ["AGENT_CASCADE_INSTANCE_ID"] = _derive_test_instance_id()
 # an opt-out override read by agent_cascade/tools/custom/shell_cmd.py; it does
 # NOT change production defaults (which still honor the pool toggle).
 os.environ["QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW"] = "1"
+
+# Ensure the project root is on sys.path so top-level packages like `config`
+# are importable in xdist workers (which don't inherit CWD from the launcher).
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
