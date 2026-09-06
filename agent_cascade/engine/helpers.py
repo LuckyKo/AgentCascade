@@ -711,3 +711,116 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
         The updated m0_content with the resources block replaced.
     """
     return _replace_section(m0_content, "## AVAILABLE AGENTS", new_block)
+
+
+# The skills block contains ### sub-headings, so we cannot use _replace_section
+# (its pattern stops at any \n\n#{1,6} boundary). This matches from the
+# "## Active Skills" heading to the next \n\n## (level-2) heading, --- rule, or EOF.
+_SKILLS_SECTION_RE = re.compile(
+    re.escape("## Active Skills") + r'.*?(?=\n\n##[^\#]|\n\n---|\Z)',
+    flags=re.DOTALL,
+)
+
+
+def _refresh_active_skills_block(pool, instance, skills_to_inject=None) -> bool:
+    """Refresh the '## Active Skills' block in an EXISTING instance's system message.
+
+    Used on recall of an idle agent so that skill edits made since the instance was
+    created are picked up ("next call" semantics). Unlike _inject_skills_to_system_message
+    (which is idempotent and skips when the block already exists), this REPLACES the
+    existing block with freshly-resolved content.
+
+    Uses a dedicated _SKILLS_SECTION_RE pattern (not _replace_section) because the skills
+    block contains ### sub-headings that would break _replace_section's generic level-1-6
+    boundary. The same logical-identity no-op is applied: if the new content is logically
+    identical to the existing block, the function returns False without mutating, so an
+    unchanged skill set preserves byte-identical output and the KV/prefix cache.
+
+    Thread-safety: recall runs single-threaded per instance — the instance was idle and no
+    other thread can access it at this point, so no lock is needed around the mutation.
+
+    Args:
+        pool: AgentPool providing skill_manager and settings.
+        instance: AgentInstance whose conversation[0] is a SYSTEM message.
+        skills_to_inject: List of instruction strings to render into the block.
+            If None/empty, the existing '## Active Skills' block is REMOVED (skills
+            disabled / nothing matched).
+
+    Returns:
+        True if the system-message content was changed, False otherwise.
+    """
+    # Accept any object with a .conversation list whose [0] is a SYSTEM message.
+    # (Duck-typed so test mocks work; mirrors _inject_skills_to_system_message's
+    #  flexibility with AgentInstance vs Message.)
+    conversation = getattr(instance, 'conversation', None)
+    if not conversation:
+        return False
+    sys_msg = conversation[0]
+    if getattr(sys_msg, 'role', None) != SYSTEM:
+        return False
+
+    # Build the fresh block (empty string when no skills).
+    new_block = _build_skills_block(skills_to_inject) if skills_to_inject else ""
+
+    old_content = sys_msg.content
+    if "## Active Skills" in old_content:
+        # Replace existing block. When new_block is empty, drop the section entirely.
+        if new_block:
+            # Byte-identity guard: if the logical content is unchanged, skip mutation
+            # to preserve KV/prefix cache (same semantics as _replace_section).
+            m = _SKILLS_SECTION_RE.search(old_content)
+            if m and m.group(0).strip() == new_block.strip():
+                return False
+            new_content = _SKILLS_SECTION_RE.sub(lambda _: new_block, old_content, count=1)
+        else:
+            new_content = _SKILLS_SECTION_RE.sub("", old_content, count=1).strip()
+    else:
+        # No existing block — insert after AVAILABLE AGENTS if present, else append.
+        if new_block:
+            if "## AVAILABLE AGENTS" in old_content:
+                m = re.search(r'## AVAILABLE AGENTS\s*(.*?)(?=\n\n##|\Z)', old_content, flags=re.DOTALL)
+                if m:
+                    new_content = old_content[:m.end()] + new_block + old_content[m.end():]
+                else:
+                    new_content = old_content + new_block
+            else:
+                new_content = old_content + new_block
+        else:
+            return False  # nothing to add, nothing to remove
+
+    if new_content == old_content:
+        return False
+    sys_msg.content = new_content
+    logger.info("[SKILLS] Refreshed '## Active Skills' block for instance '%s' on recall",
+                getattr(instance, 'instance_name', '?'))
+    return True
+
+
+def _resolve_recall_skills(pool, instance) -> list:
+    """Resolve the skill instruction strings to show for an idle agent being recalled.
+
+    Mirrors the creation-path rules (core.py recall branch) but is recall-specific:
+      * Gated by the GLOBAL 'Enable skills' toggle (default_load_skill_mode != NONE).
+      * Always includes Self-Augmentation when the toggle is ON (the meta-skill must
+        persist across recalls), re-resolved fresh from the current registry.
+    Does NOT run the Skill Advisor and does NOT do AUTO keyword matching against the
+    new task — recall refreshes what the instance ALREADY had, at current content.
+
+    Returns a list of instruction strings (may be empty when skills are disabled).
+    """
+    sm = getattr(pool, 'skill_manager', None)
+    if not sm:
+        return []
+    mode = getattr(pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
+    if isinstance(mode, str) and mode.strip().upper() == LOAD_SKILL_NONE:
+        return []
+
+    # Refresh registry so edited/added skills are current (≤ TTL).
+    sm._ensure_discovered()
+
+    # Self-Augmentation is the one skill that must always be present when skills are ON.
+    skills = []
+    self_aug = sm.load_full_instructions("self-augmentation")
+    if self_aug:
+        skills.append(self_aug)
+    return skills

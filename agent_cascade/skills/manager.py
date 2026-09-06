@@ -47,6 +47,27 @@ _PRIORITY_SYSTEM = 1       # System-level skills (.qwen/skills/)
 _PRIORITY_AGENT = 2        # Agent-specific skills (agents/*/skills/)
 _PRIORITY_USER = 3         # User-defined skills (workspace/skills/)
 
+
+def _priority_for_root(root: Path) -> int:
+    """Map a scan root directory to its skill-tier priority.
+
+    Derives the tier from path components (most specific check first):
+      - .../agents/<name>/skills  → _PRIORITY_AGENT
+      - .../workspace/skills      → _PRIORITY_USER
+      - anything else             → _PRIORITY_SYSTEM (default)
+
+    Matching on path parts (rather than an explicit tier list) keeps
+    ``discover(skill_paths)``'s signature unchanged and degrades gracefully to
+    the system tier for unknown roots.
+    """
+    parts = [p.lower() for p in root.parts]
+    if 'agents' in parts and parts[-1] == 'skills':
+        return _PRIORITY_AGENT
+    if 'workspace' in parts and parts[-1] == 'skills':
+        return _PRIORITY_USER
+    return _PRIORITY_SYSTEM
+
+
 # Platform filtering: maps frontmatter platform names to sys.platform values
 _PLATFORM_MAP = {
     "macos": "darwin",
@@ -241,6 +262,9 @@ class SkillManager:
                 logger.debug("[SKILLS] Skill directory does not exist, skipping: %s", root)
                 continue
 
+            # Derive the tier priority for every skill found under this root.
+            root_priority = _priority_for_root(root)
+
             try:
                 for skill_dir in root.iterdir():
                     if not skill_dir.is_dir():
@@ -271,7 +295,7 @@ class SkillManager:
                         skipped_count += 1
                         continue
 
-                    collected.append((skill_file, parsed))
+                    collected.append((skill_file, parsed, root_priority))
                     found_count += 1
             except OSError as e:
                 logger.warning("[SKILLS] Error scanning %s: %s", root, e)
@@ -281,8 +305,8 @@ class SkillManager:
             self._skills_registry.clear()
             self._matcher._inverted_index.clear()
 
-            for skill_file, parsed in collected:
-                self._register_single(skill_file, priority=_PRIORITY_SYSTEM, parsed=parsed)
+            for skill_file, parsed, priority in collected:
+                self._register_single(skill_file, priority=priority, parsed=parsed)
 
             self._rebuild_index()
 

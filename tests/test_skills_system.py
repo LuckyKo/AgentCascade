@@ -564,6 +564,128 @@ class TestSkillManager:
         )
         assert isinstance(result, list)
 
+    # -- Fix B: Multi-tier discovery with priority resolution --
+
+    def test_discover_picks_up_workspace_tier(self, tmp_path):
+        """Skills in workspace/skills/ are discovered with _PRIORITY_USER."""
+        from agent_cascade.skills.manager import _PRIORITY_USER
+
+        root = tmp_path / "workspace" / "skills" / "ws-skill"
+        root.mkdir(parents=True)
+        (root / "SKILL.md").write_text(
+            "---\nname: ws-skill\ndescription: test\n---\n# Body\n", encoding="utf-8"
+        )
+
+        sm = self.manager
+        sm._cache_ttl = 0.0
+        sm.discover([tmp_path / "workspace" / "skills"])
+
+        assert "ws-skill" in sm._skills_registry
+        assert sm._skills_registry["ws-skill"]["_priority"] == _PRIORITY_USER
+
+    def test_discover_picks_up_agent_tier(self, tmp_path):
+        """Skills in agents/<name>/skills/ are discovered with _PRIORITY_AGENT."""
+        from agent_cascade.skills.manager import _PRIORITY_AGENT
+
+        root = tmp_path / "agents" / "coder" / "skills" / "agent-skill"
+        root.mkdir(parents=True)
+        (root / "SKILL.md").write_text(
+            "---\nname: agent-skill\ndescription: test\n---\n# Body\n", encoding="utf-8"
+        )
+
+        sm = self.manager
+        sm._cache_ttl = 0.0
+        sm.discover([tmp_path / "agents" / "coder" / "skills"])
+
+        assert "agent-skill" in sm._skills_registry
+        assert sm._skills_registry["agent-skill"]["_priority"] == _PRIORITY_AGENT
+
+    def test_priority_resolution_user_overrides_system(self, tmp_path):
+        """When the same skill name exists in system and user tiers, user wins."""
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM, _PRIORITY_USER
+
+        # System tier: .qwen/skills/dup-skill
+        sys_root = tmp_path / ".qwen" / "skills" / "dup-skill"
+        sys_root.mkdir(parents=True)
+        (sys_root / "SKILL.md").write_text(
+            "---\nname: dup-skill\ndescription: system version\n---\n# System body\n",
+            encoding="utf-8",
+        )
+
+        # User tier: workspace/skills/dup-skill
+        user_root = tmp_path / "workspace" / "skills" / "dup-skill"
+        user_root.mkdir(parents=True)
+        (user_root / "SKILL.md").write_text(
+            "---\nname: dup-skill\ndescription: user version\n---\n# User body\n",
+            encoding="utf-8",
+        )
+
+        sm = self.manager
+        sm._cache_ttl = 0.0
+        sm.discover([tmp_path / ".qwen" / "skills", tmp_path / "workspace" / "skills"])
+
+        assert "dup-skill" in sm._skills_registry
+        assert sm._skills_registry["dup-skill"]["_priority"] == _PRIORITY_USER
+        # User version should be the one registered (higher priority wins).
+        assert "user version" in sm._skills_registry["dup-skill"]["description"]
+
+    def test_priority_resolution_agent_overrides_system(self, tmp_path):
+        """Agent-tier skill should override system-tier duplicate."""
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM, _PRIORITY_AGENT
+
+        # System tier: .qwen/skills/dup-skill
+        sys_root = tmp_path / ".qwen" / "skills" / "dup-skill"
+        sys_root.mkdir(parents=True)
+        (sys_root / "SKILL.md").write_text(
+            "---\nname: dup-skill\ndescription: system version\n---\n# System body\n",
+            encoding="utf-8",
+        )
+
+        # Agent tier: agents/coder/skills/dup-skill
+        agent_root = tmp_path / "agents" / "coder" / "skills" / "dup-skill"
+        agent_root.mkdir(parents=True)
+        (agent_root / "SKILL.md").write_text(
+            "---\nname: dup-skill\ndescription: agent version\n---\n# Agent body\n",
+            encoding="utf-8",
+        )
+
+        sm = self.manager
+        sm._cache_ttl = 0.0
+        sm.discover([tmp_path / ".qwen" / "skills", tmp_path / "agents" / "coder" / "skills"])
+
+        assert "dup-skill" in sm._skills_registry
+        assert sm._skills_registry["dup-skill"]["_priority"] == _PRIORITY_AGENT
+        # Agent version should be the one registered (higher priority than system).
+        assert "agent version" in sm._skills_registry["dup-skill"]["description"]
+
+    def test_ensure_discovered_covers_all_tiers(self, tmp_path):
+        """Hot-reload via _ensure_discovered() works for non-system tiers."""
+        user_root = tmp_path / "workspace" / "skills" / "ws-skill"
+        user_root.mkdir(parents=True)
+        skill_file = user_root / "SKILL.md"
+        skill_file.write_text(
+            "---\nname: ws-skill\ndescription: test\n---\n# Body v1\n", encoding="utf-8"
+        )
+
+        sm = self.manager
+        sm._cache_ttl = 0.0
+        sm.discover([tmp_path / "workspace" / "skills"])
+        body1 = sm.load_full_instructions("ws-skill")
+        assert "Body v1" in body1
+
+        # Edit the user-tier skill in place.
+        time.sleep(0.02)
+        skill_file.write_text(
+            "---\nname: ws-skill\ndescription: test\n---\n# Body v2 (edited)\n",
+            encoding="utf-8",
+        )
+
+        sm._ensure_discovered()
+        body2 = sm.load_full_instructions("ws-skill")
+        assert "Body v2" in body2, (
+            "Hot-reload via _ensure_discovered must pick up edits in non-system tiers."
+        )
+
 
 # ===========================================================================
 # 4. Integration Tests — DNA schema and settings wiring

@@ -179,13 +179,32 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         from agent_cascade.skills import SkillManager
         self.skill_manager = SkillManager()
 
-        # Discover skills from .qwen/skills/ directory (relative to project root).
+        # Discover skills from ALL declared tiers (priority: system < agent < user).
         # This file lives in pool/ (one level deeper than the original agent_pool.py),
         # so it needs an extra .parent to reach project root.
         _project_root = Path(__file__).resolve().parent.parent.parent
-        _skills_dir = _project_root / '.qwen' / 'skills'
-        if _skills_dir.exists():
-            self.skill_manager.discover([_skills_dir])
+        _skill_tiers = []
+
+        # Tier 1 — system: .qwen/skills/
+        _system_skills = _project_root / '.qwen' / 'skills'
+        if _system_skills.exists():
+            _skill_tiers.append(_system_skills)
+
+        # Tier 2 — agent-specific: agents/<name>/skills/ (one dir per agent that has skills)
+        _agents_root = Path(agents_dir)
+        if _agents_root.is_dir():
+            for _agent_dir in sorted(_agents_root.iterdir()):
+                _agent_skills = _agent_dir / 'skills'
+                if _agent_skills.is_dir():
+                    _skill_tiers.append(_agent_skills)
+
+        # Tier 3 — user-defined: workspace/skills/
+        _user_skills = _project_root / 'workspace' / 'skills'
+        if _user_skills.exists():
+            _skill_tiers.append(_user_skills)
+
+        if _skill_tiers:
+            self.skill_manager.discover(_skill_tiers)
 
         # ── Agent discovery (unchanged) ──────────────────────────────────────
         self.agents_dir = Path(agents_dir)

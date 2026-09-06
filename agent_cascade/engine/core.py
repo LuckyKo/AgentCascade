@@ -117,6 +117,8 @@ from agent_cascade.engine.helpers import (
     _replace_section,
     _replace_resources_block,
     _inject_skills_to_system_message,
+    _refresh_active_skills_block,
+    _resolve_recall_skills,
     _check_message_truncation,
     _is_incomplete_state,
     _extract_tool_calls_from_text,
@@ -2949,8 +2951,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         # ── System message + skills handling (todo.md:115 fix) ───────────────
         # load_skill applies only to NEW instances / external loads. On recall of an
-        # existing idle agent we keep conversation[0] verbatim and ignore load_skill,
-        # so the system prompt is never mutated on recall (preserves prefix cache).
+        # existing idle agent we keep conversation[0] and ignore the per-call load_skill,
+        # but we DO refresh its '## Active Skills' block (see below) so skill edits made
+        # since creation are picked up on the next call. The rest of the prompt is left
+        # byte-for-byte to preserve prefix cache.
         # A recall must NOT be an external load (log_file restore): that returns
         # is_reuse=True AND session_was_loaded=True and still needs build + skill injection.
         _is_recall = is_reuse and not session_was_loaded and bool(inst.conversation) \
@@ -2964,14 +2968,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         if _advisor_task_notes and not _is_recall:
             context_text = f"{context_text}\n\n[Skill Advisor notes] {_advisor_task_notes}".strip()
         if _is_recall:
-            # Reuse path: preserve existing system message byte-for-byte. Pass the
-            # EXISTING conversation[0] as sys_msg so initialize_conversation's
-            # in-place edit becomes a content no-op (same object/content). No skill
-            # resolution or injection happens here — load_skill is ignored by design.
+            # Reuse path: keep the existing system message, but REFRESH its
+            # '## Active Skills' block so skill edits made since creation are picked up
+            # ("next call" semantics). The rest of the prompt is left byte-for-byte —
+            # only the skills section may change (and only if its content actually
+            # changed, via _replace_section's logical-identity no-op), so prefix-cache
+            # savings for everything else are preserved. load_skill (per-call arg) is
+            # still ignored on recall; only the global toggle + Self-Augmentation are
+            # refreshed. Thread-safety: recall runs single-threaded per instance — it was
+            # idle and no other thread can access it at this point, so no lock is needed.
+            _refresh_active_skills_block(self.pool, inst, _resolve_recall_skills(self.pool, inst))
             sys_msg = inst.conversation[0]
             logger.debug(
-                "[SKILLS] Recall of %s: preserving existing system message; "
-                "skipping rebuild + skill injection (load_skill ignored on recall)",
+                "[SKILLS] Recall of %s: refreshed '## Active Skills' block "
+                "(load_skill ignored on recall)",
                 instance_name,
             )
         else:
