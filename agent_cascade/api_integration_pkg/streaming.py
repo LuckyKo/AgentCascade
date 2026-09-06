@@ -28,7 +28,8 @@ from agent_cascade.api_integration_pkg.state_builder import build_stream_update_
 # ────────────────────────────────────────────────────────────────────────────
 _last_force_full: Dict[str, float] = {}
 _last_force_full_lock = threading.Lock()
-_FORCE_FULL_STALE_SECS = 300.0  # Evict entries not updated in 5 minutes
+_FORCE_FULL_INTERVAL = 60.0       # Seconds between periodic full frames per instance
+_FORCE_FULL_STALE_SECS = 300.0    # Evict entries not updated in 5 minutes
 
 def clear_force_full_timer(instance_name: str) -> None:
     """Remove the force_full timer entry for an instance (call on dismiss/restart).
@@ -49,6 +50,9 @@ def _evict_stale_force_full_entries(now_mono: float) -> None:
 # No lock needed: _put_stream_update runs on the event loop thread (single-threaded).
 _qf_last_warn: float = 0.0
 _qf_drop_count: int = 0
+
+# Last time stale force_full entries were evicted (monotonic)
+_last_force_full_evict_time: float = 0.0
 
 # ────────────────────────────────────────────────────────────────────────────
 # STREAMING BACKLOG PROBE — TEMPORARY DIAGNOSTIC (evidence-gathering only)
@@ -390,12 +394,14 @@ def broadcast_stream_update(
         # periodic full refresh ensures eventual UI consistency even if individual
         # stream_update messages were lost due to queue-full conditions.
         # Frontend can also request an immediate full frame via 'request_state' WS msg.
+        global _last_force_full_evict_time
         _now_mono = time.monotonic()
         with _last_force_full_lock:
-            # Lazy eviction of stale entries (instances not seen for >5 min)
-            if len(_last_force_full) > 20:
+            # Periodic eviction of stale entries (every ~60s)
+            if _now_mono - _last_force_full_evict_time >= 60.0:
                 _evict_stale_force_full_entries(_now_mono)
-            force_full = (_now_mono - _last_force_full.get(instance_name, 0.0)) >= 60.0
+                _last_force_full_evict_time = _now_mono
+            force_full = (_now_mono - _last_force_full.get(instance_name, 0.0)) >= _FORCE_FULL_INTERVAL
             if force_full:
                 _last_force_full[instance_name] = _now_mono
 

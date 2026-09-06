@@ -111,12 +111,13 @@ class StreamPublisher:
             if not (ws_queue and ws_loop and not ws_loop.is_closed()):
                 return
             
-            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
+            from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
+            from agent_cascade.api_integration_pkg.streaming import _put_stream_update
             su = build_stream_update_from_pool(
                 pool=self.pool,
                 instance_name=caller,  # Root instance for header stats
                 responses=None,        # Reads full conversations from pool
-                force_full=True,       # BUG C: new sub-agent's first frame must be full
+                force_full=True,       # New sub-agent's first frame must be full (no delta baseline yet)
             )
             if su is not None:
                 asyncio.run_coroutine_threadsafe(

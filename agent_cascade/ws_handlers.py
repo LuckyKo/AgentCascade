@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -141,9 +142,8 @@ class WsMessageHandler:
             if su is not None and self.send_queue is not None:
                 await _put_stream_update(self.send_queue, {'type': 'stream_update', **su})
                 # Reset the periodic timer so the next automatic force_full is 60s from now
-                import time as _time
                 with _last_force_full_lock:
-                    _last_force_full[instance_name] = _time.monotonic()
+                    _last_force_full[instance_name] = time.monotonic()
         except Exception as e:
             logger.warning(f"request_state failed for {instance_name}: {e}")
 
