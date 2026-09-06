@@ -576,16 +576,14 @@ def compress_context(
     try:
         _ts_list = []
         for _msg in target_messages:
-            _ts = (
-                (_msg.get('ts') if isinstance(_msg, dict) else getattr(_msg, 'ts', None))
-            )
+            _ts = _msg.get('ts') if isinstance(_msg, dict) else getattr(_msg, 'ts', None)
             if _ts is not None:
                 _ts_list.append(float(_ts))
-        first_ts = min(_ts_list) if _ts_list else None
-        last_ts = max(_ts_list) if _ts_list else None
     except Exception as e:
         logger.debug(f"Timestamp extraction for marker header failed (non-fatal): {e}")
-        first_ts, last_ts = None, None
+        _ts_list = []
+    first_ts = min(_ts_list) if _ts_list else None
+    last_ts = max(_ts_list) if _ts_list else None
 
     marker_message = build_marker_message(
         generated_summary,

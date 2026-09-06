@@ -11,6 +11,7 @@ All tests are self-contained — no LLM or API server required.
 """
 
 import datetime
+import re
 
 import pytest
 
@@ -76,7 +77,6 @@ class TestDurationBuckets:
         start = _ts(2026, 9, 6, 10, 14)
         out = _format_timestamp_interval(start, start + int(48 * 60 + 30), n_messages=3)
         # either 48m or 49m is acceptable depending on rounding; just assert a "Nm" form
-        import re
         assert re.search(r", \d+m\b", out)
 
     def test_minutes_zero_falls_back_to_seconds(self):

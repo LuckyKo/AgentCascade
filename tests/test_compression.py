@@ -10,6 +10,7 @@ All tests are self-contained — no LLM or API server required.
 """
 
 import copy
+import datetime
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -177,7 +178,6 @@ class TestBuildMarkerMessage:
 
     def test_timestamp_interval_header(self):
         """Marker header shows the full date+time interval with an arrow."""
-        import datetime
         start = datetime.datetime(2026, 9, 6, 10, 14).timestamp()
         end = datetime.datetime(2026, 9, 6, 10, 30).timestamp()
         msg = build_marker_message("summary", first_ts=start, last_ts=end)
@@ -185,7 +185,6 @@ class TestBuildMarkerMessage:
 
     def test_duration_minutes(self):
         """Duration under an hour renders as whole minutes."""
-        import datetime
         start = datetime.datetime(2026, 9, 6, 10, 14).timestamp()
         end = start + 48 * 60  # 48 minutes
         msg = build_marker_message("summary", first_ts=start, last_ts=end)
@@ -194,7 +193,6 @@ class TestBuildMarkerMessage:
     def test_full_template_format(self):
         """Marker message matches the expected template structure."""
         summary = "Test summary"
-        import datetime
         start = datetime.datetime(2026, 9, 6, 10, 14).timestamp()
         end = datetime.datetime(2026, 9, 7, 8, 30).timestamp()
         msg = build_marker_message(summary, first_ts=start, last_ts=end)

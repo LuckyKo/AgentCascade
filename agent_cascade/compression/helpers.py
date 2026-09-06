@@ -1,5 +1,6 @@
 """Helper functions for the compression system."""
 import copy
+from datetime import datetime
 from typing import Any, List, Tuple
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, Message
@@ -404,9 +405,8 @@ def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
         return f"{n_messages} messages summarized"
 
     try:
-        from datetime import datetime
-        start_str = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M")
-        end_str = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M")
+        start_str = datetime.fromtimestamp(float(start_ts)).strftime("%Y-%m-%d %H:%M")
+        end_str = datetime.fromtimestamp(float(end_ts)).strftime("%Y-%m-%d %H:%M")
     except (ValueError, OverflowError, OSError):
         return f"{n_messages} messages summarized"
 
