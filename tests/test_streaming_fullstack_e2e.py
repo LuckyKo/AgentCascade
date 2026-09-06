@@ -141,6 +141,9 @@ COMPRESSION_EXPERIMENT = _os.environ.get("FULLSTACK_E2E_COMPRESSION", "0") == "1
 #   AGENT_CASCADE_STREAM_DELTA=0 python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540
 #   AGENT_CASCADE_STREAM_DELTA=1 python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540
 DELTA_MODE = _os.environ.get("AGENT_CASCADE_STREAM_DELTA") == "1"
+if _os.environ.get("AGENT_CASCADE_STREAM_DELTA") and not DELTA_MODE:
+    print(f"\n[fullstack] ⚠ AGENT_CASCADE_STREAM_DELTA={_os.environ['AGENT_CASCADE_STREAM_DELTA']!r} "
+          f"but DELTA_MODE=False (env var must be exactly '1'). Running in NON-DELTA mode.")
 TAIL_COMMITTED = 1  # must match state_builder.TAIL_COMMITTED (hardcoded for phase 1)
 MAX_STREAMING_PARTIALS = 2          # observed max of len(_streaming_responses); raise if it changes
 # Force-compression threshold (% of effective window) at which the gate fires.
@@ -1127,16 +1130,19 @@ def _assert_message_stack_sync(frontend_messages, pool, instance_name):
     print(f"  Frontend messages: {n_fe}, Backend conversation: {n_be}")
 
     # ── Check 1: No duplicates in frontend ─────────────────────────────────────
+    # Key on (role, content, index) — two distinct tool results can legitimately
+    # have the same content (e.g., both evaluate to '6') but different indices.
+    # A real splice re-append would produce the SAME index twice.
     seen = set()
     for i, msg in enumerate(frontend_messages):
-        key = (msg["role"], msg["content"])
+        key = (msg["role"], msg["content"], msg.get("index"))
         assert key not in seen, (
             f"DUPLICATE message at frontend position {i}: role={msg['role']}, "
-            f"content={msg['content'][:80]!r}. This indicates a failed splice or "
-            f"double-append in the delta merge path."
+            f"content={msg['content'][:80]!r}, index={msg.get('index')}. "
+            f"This indicates a failed splice or double-append in the delta merge path."
         )
         seen.add(key)
-    print(f"  ✓ No duplicate (role, content) pairs in {n_fe} frontend messages")
+    print(f"  ✓ No duplicate (role, content, index) triples in {n_fe} frontend messages")
 
     # ── Check 2: Index contiguity ───────────────────────────────────────────────
     # ASSUMPTION: the conversation is append-only (no message deletion/editing during
