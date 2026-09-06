@@ -2048,9 +2048,21 @@ function handleServerMessage(data) {
                // If we're in resync-pending state (a delta splice was skipped), skip this agent.
                // Delta splices are unsafe until a force_full snapshot re-establishes the baseline.
                // Full frames (non-partial) replace the entire object below, clearing _needsResync.
-               if (existing._needsResync) {
-                 continue; // skip delta splices until full frame arrives
-               }
+                if (existing._needsResync) {
+                  // Widen the gate: also let FULL-SNAPSHOT partial frames through. A frame is a
+                  // full snapshot when startIdx <= 0 (its messages array starts at index 0 = complete
+                  // history, not a tail). During active streaming even force_full recovery frames are
+                  // still is_partial=True (force_full only disables the tail cut, not the partial flag),
+                  // so gating on "non-partial" alone would freeze the panel for the whole turn after a
+                  // single dropped frame. A full snapshot safely replaces the entire list (no prefix
+                  // truncation risk), so it's safe to clear the gate and splice below. True tail frames
+                  // (startIdx > 0) remain gated — they must still wait for a real baseline resync.
+                  const _resyncStartIdx = hCount - sa.messages.length;
+                  if (_resyncStartIdx > 0) {
+                    continue; // skip true tail deltas until a full snapshot / force_full arrives
+                  }
+                  existing._needsResync = false; // full snapshot re-establishes the baseline
+                }
                // Skip stale updates that would truncate newer messages.
                // Use strict < so that updates with the same history_count are still processed —
                // during content streaming, history_count stays constant while message content grows.
@@ -5568,6 +5580,22 @@ function sendMessage(inputEl) {
     session_name: state.sessionName,
     generate_cfg: getGenerateCfg()
   });
+
+  // Optimistic echo: show the user's message in the active instance's panel immediately.
+  // Otherwise it only appears once the first stream_update frame from the backend arrives —
+  // which can be delayed (or temporarily gated by _needsResync), making the message look
+  // like it "disappeared". The server frame that carries this same message at the same index
+  // reconciles/replaces it via the positional splice in the merge logic, so no duplication.
+  const echoInst = state.subAgents[targetAgent];
+  if (echoInst && Array.isArray(echoInst.messages)) {
+    const lastMsg = echoInst.messages.length > 0 ? echoInst.messages[echoInst.messages.length - 1] : null;
+    // Dedup: skip if the server already echoed this exact user message (e.g. fast re-render).
+    const lastText = lastMsg && typeof lastMsg.content === 'string' ? lastMsg.content : '';
+    if (!(lastMsg && lastMsg.role === 'user' && lastText === messageText)) {
+      const nextIndex = lastMsg && typeof lastMsg.index === 'number' ? lastMsg.index + 1 : (echoInst.messages.length);
+      echoInst.messages.push({ role: 'user', content: messageText, index: nextIndex });
+    }
+  }
 }
 
 function continueMessage() {
