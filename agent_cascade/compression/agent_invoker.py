@@ -261,6 +261,52 @@ def _configure_compressor_instance(
         )
 
 
+def _reset_terminated_compressor_for_retry(agent_pool: Any, comp_instance: Any, comp_state_key: str) -> None:
+    """Reset a loop-terminated compressor back to IDLE so the retry can re-run it.
+
+    When the compressor's loop-detection exhausts its rollback budget it is terminated
+    (state -> TERMINATED, ``is_terminated=True``, added to ``pool.terminated_instances``).
+    The run() exit-finally in engine/core.py does NOT transition a TERMINATED instance
+    back to IDLE — it only logs "already TERMINATED". Reusing that instance on the next
+    retry therefore trips the L1 race guard (engine.run() requires state == IDLE) and
+    aborts, so every subsequent compression operation fails -> outer fallback-compression
+    retry storm.
+
+    This helper clears exactly that stale termination signal — scoped to the compression
+    retry path only (never applied globally). It does NOT touch the L1 race guard, which
+    still protects real races for all other callers. Safe because:
+      - The compressor is a single-shot system agent with no children (its tool set is
+        restricted), so there is no cascade-termination state to unwind.
+      - No engine.run() thread is in flight at call time (we are between attempts), so
+        the TERMINATED->IDLE transition cannot race against an active run.
+
+    Args:
+        agent_pool: The AgentPool instance (provides ``terminated_instances``).
+        comp_instance: The compressor AgentInstance to reset.
+        comp_state_key: Instance name for logging and pool bookkeeping.
+    """
+    from agent_cascade.agent_instance import AgentState
+
+    with comp_instance._state_lock:
+        if comp_instance.state != AgentState.TERMINATED:
+            return  # Only the loop-terminated case needs recovery; leave everything else alone.
+        comp_instance.is_terminated = False
+        # TERMINATED has no valid transitions out in the state matrix (terminal by design),
+        # so set directly under the lock rather than via _transition(). IDLE is a valid
+        # entry state for engine.run(), which then transitions IDLE -> RUNNING.
+        comp_instance.state = AgentState.IDLE
+
+    # Remove the stale termination signal from the pool so status checks / idle-manager
+    # no longer treat this instance as terminated. Scoped to compression path only.
+    with agent_pool._pool_lock:
+        agent_pool.terminated_instances.discard(comp_state_key)
+
+    logger.warning(
+        f"[COMPRESSION] Resetting loop-terminated compressor '{comp_state_key}' "
+        f"TERMINATED->IDLE for retry (BUG_0001)."
+    )
+
+
 def _execute_compressor_and_extract_summary(
     agent_pool: Any,
     engine: Any,
@@ -634,6 +680,12 @@ def invoke_compression_agent(
                     f"Compression attempt {attempt}/{max_retries} failed: {e} — "
                     f"retrying on same compressor instance '{comp_state_key}'."
                 )
+                # BUG_0001 FIX: if the previous attempt loop-terminated the compressor,
+                # it is still TERMINATED (the run() exit-finally does not reset it), and
+                # re-running it would trip the L1 race guard. Reset it to IDLE first so
+                # the retry can actually execute. No-op unless state == TERMINATED.
+                _reset_terminated_compressor_for_retry(agent_pool, comp_instance, comp_state_key)
+
                 # Reset conversation back to initial [system_msg, task_msg] state.
                 # rebuild_conversation() also invalidates message caches so _setup_turn
                 # will rebuild the working set from scratch on the next engine.run().

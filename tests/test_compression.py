@@ -1603,6 +1603,160 @@ class TestCompressionRetryReuse:
             assert inst.max_turns == COMPRESSOR_AGENT_MAX_TURNS
 
 
+# ---------------------------------------------------------------------------
+# BUG_0001 regression: a loop-terminated compressor must be reset before retry
+# ---------------------------------------------------------------------------
+
+class TestTerminatedCompressorRetryReset:
+    """BUG_0001: when the compressor's loop-detection exhausts its rollback budget it is
+    TERMINATED. The compression invoker retries on the SAME instance; without a reset the
+    instance stays TERMINATED (run() exit-finally does not transition it) and the next
+    engine.run() trips the L1 race guard → every compression operation fails → retry storm.
+
+    These tests verify that the retry path resets a TERMINATED compressor back to IDLE
+    (clears is_terminated + removes it from pool.terminated_instances) so the retry can run,
+    and that a non-terminated instance is left untouched.
+    """
+
+    def _make_mock_pool(self):
+        """Minimal mock pool for invoke_compression_agent with real termination bookkeeping."""
+        import threading
+        pool = MagicMock()
+        pool.session_name = "TestCaller"
+        pool.stopped = False
+        comp_agent = MagicMock()
+        comp_agent.llm.generate_cfg = {}
+        pool.get_agent.return_value = comp_agent
+        template = MagicMock()
+        template.llm.generate_cfg = {}
+        pool.get_template.return_value = template
+        pool.get_instance.return_value = None
+        pool._execution = MagicMock()
+        pool.instance_state = {}
+        pool.active_stack_remove = MagicMock()
+        # BUG_0001: the reset helper needs a real terminated_instances set + _pool_lock.
+        pool.terminated_instances = set()
+        pool._pool_lock = threading.Lock()
+        return pool
+
+    def _make_terminated_instance(self):
+        """A compressor instance in the loop-terminated state (what terminate_instance leaves)."""
+        import threading
+        from agent_cascade.agent_instance import AgentState
+        inst = MagicMock()
+        inst.state = AgentState.TERMINATED
+        inst.is_terminated = True
+        inst._state_lock = threading.Lock()
+        # _compression_lock must be a real context manager for the initial-conversation capture.
+        inst._compression_lock = threading.Lock()
+        inst.conversation = [
+            {"role": "system", "content": "You are a compressor."},
+            {"role": "user", "content": "Summarize this conversation..."},
+        ]
+        inst.rebuild_conversation = MagicMock()
+        return inst
+
+    def test_terminated_compressor_reset_before_retry(self):
+        """A TERMINATED compressor is reset to IDLE (flag cleared, removed from pool) before retry."""
+        import threading
+        from agent_cascade.agent_instance import AgentState
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+        inst = self._make_terminated_instance()
+
+        # The generated comp_state_key is non-deterministic under xdist (module-global
+        # counter shared across workers), so capture the REAL key the invoker generates.
+        captured = {}
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            captured.setdefault("key", comp_state_key)
+            raise RuntimeError(
+                "Compression output missing end marker '--- END SUMMARY ---' — "
+                "compressor may have hallucinated or continued the task"
+            )
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = inst
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        comp_key = captured["key"]
+        # Model the loop-termination that occurred during attempt 1: terminate_instance
+        # adds the instance to the terminated set. The retry reset must then clear it.
+        pool.terminated_instances.add(comp_key)
+
+        # The stale termination signal must be cleared for the instance to be re-runnable.
+        assert inst.state == AgentState.IDLE, "TERMINATED compressor must be reset to IDLE before retry"
+        assert inst.is_terminated is False, "is_terminated flag must be cleared before retry"
+
+    def test_reset_removes_instance_from_terminated_set(self):
+        """Direct unit test: the reset helper removes the key from pool.terminated_instances."""
+        import threading
+        from agent_cascade.agent_instance import AgentState
+        from agent_cascade.compression.agent_invoker import _reset_terminated_compressor_for_retry
+
+        pool = self._make_mock_pool()
+        inst = self._make_terminated_instance()
+        comp_key = "Compressor_X"
+        pool.terminated_instances.add(comp_key)
+
+        _reset_terminated_compressor_for_retry(pool, inst, comp_key)
+
+        assert inst.state == AgentState.IDLE
+        assert inst.is_terminated is False
+        assert comp_key not in pool.terminated_instances, "instance must be removed from terminated_instances"
+
+    def test_non_terminated_compressor_left_untouched(self):
+        """A compressor that failed validation but was NOT terminated (still IDLE) is left as-is."""
+        import threading
+        from agent_cascade.agent_instance import AgentState
+        from agent_cascade.compression.agent_invoker import invoke_compression_agent
+
+        pool = self._make_mock_pool()
+        inst = self._make_terminated_instance()
+        # Simulate a normal validation failure: instance is IDLE, not terminated.
+        inst.state = AgentState.IDLE
+        inst.is_terminated = False
+
+        def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label="Compression"):
+            raise RuntimeError(
+                "Compression output missing end marker '--- END SUMMARY ---' — "
+                "compressor may have hallucinated or continued the task"
+            )
+
+        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+            mock_engine = MagicMock()
+            mock_engine_cls.return_value = mock_engine
+            mock_engine._create_system_agent.return_value = inst
+
+            with patch(
+                "agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary",
+                side_effect=fake_execute,
+            ):
+                with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
+                    invoke_compression_agent(
+                        agent_pool=pool,
+                        target_messages=[{"role": "user", "content": "hello"}],
+                        caller_name="TestCaller",
+                    )
+
+        # The reset helper must be a no-op for a non-terminated instance.
+        assert inst.state == AgentState.IDLE
+        assert inst.is_terminated is False
+
+
 if __name__ == '__main__':
     import pytest
     pytest.main([__file__, '-v'])
