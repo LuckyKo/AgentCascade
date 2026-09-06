@@ -1253,6 +1253,7 @@ def _assert_message_stack_sync(frontend_messages, pool, instance_name):
     print(f"[fullstack] ── MESSAGE STACK SYNC: PASS ──")
 
 
+@pytest.mark.fullstack_e2e
 @pytest.mark.timeout(540)
 def test_fullstack_streaming(fullstack_server):
     """Drive the full real stack and assert incremental streaming per turn + loop cycle.
