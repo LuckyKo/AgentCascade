@@ -2227,14 +2227,12 @@ function handleServerMessage(data) {
       const rootThrottleContent = Math.min(THROTTLE.RENDER_ROOT_MAX_MS, THROTTLE.RENDER_ROOT_BASE_MS + Math.round(lastRenderDur * 0.5));
       const subThrottleContent = isSubAgentActive ? THROTTLE.RENDER_SUBAGENT_MS : rootThrottleContent;
       
-      // Force render on: completion detected, stack change, new visible message, 
-      // or if the visible agent's content changed (bypass throttle for visible active agent).
-      const isVisibleActiveAgentContentChanged = !!subAgentContentChanged && (state.activeSubTab === 'sub-' + activeName);
-      
+      // Force render on: completion detected, stack change, new visible message bubble,
+      // or when the adaptive rendering throttle interval has elapsed. Content streaming within
+      // an existing bubble is governed by subThrottleContent to prevent DOM/markdown parsing overload.
       const shouldRender = completionDetected || 
                            stackChanged || 
                            subAgentNewVisibleMessage || 
-                           isVisibleActiveAgentContentChanged ||
                            (now - state.genStats.lastSubAgentRender > subThrottleContent);
       if (shouldRender) {
               // Measure render duration for adaptive throttling; reset timer AFTER to avoid stacking

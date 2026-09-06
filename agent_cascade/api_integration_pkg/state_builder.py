@@ -3,6 +3,7 @@
 Phase 3b pure-move refactor. Imports the SAME ``_cache_mgr`` singleton from cache.py.
 """
 
+import hashlib
 import os
 import copy as _copy
 from typing import Any, Dict, List, Optional
@@ -17,8 +18,23 @@ from agent_cascade.api_integration_pkg.cache import (
     _TOKEN_STATS_CACHE_MAXSIZE,
     _UI_CACHE_MAXSIZE,
     _store_ui_cache,
+    _get_ui_cache,
 )
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
+
+def _msg_fingerprint(msg: Any) -> Optional[tuple]:
+    """Stable fingerprint of a message object for version tracking (immune to id() memory recycling)."""
+    if msg is None:
+        return None
+    role = (msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '') or '').lower()
+    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '') or ''
+    if isinstance(content, list):
+        # Hash the list for collision resistance (length alone is insufficient)
+        content_str = hashlib.md5(repr(content).encode()).hexdigest()[:12]
+    else:
+        content_str = str(content)[:100]
+    ts = msg.get('ts') if isinstance(msg, dict) else getattr(msg, 'ts', None)
+    return (role, content_str, ts)
 
 # Additive/delta streaming (phase 1). When enabled, partial (streaming) frames send only a
 # small safe tail instead of the full committed history; force_full / connect-time frames stay
@@ -223,7 +239,7 @@ def _serialize_instances_incremental(
         
         current_version = (
             len(current_msgs),
-            id(current_msgs[-1]) if current_msgs else None,
+            _msg_fingerprint(current_msgs[-1]) if current_msgs else None,
             len(inst_streaming_responses) if inst_streaming_responses else 0,
             stream_content_len,
         )
@@ -496,7 +512,7 @@ def build_stream_update_from_pool(
     # (the O(N)-per-tick cost that made streaming latency grow with turn count).
     current_version = (
         len(conv_snapshot),
-        id(conv_snapshot[-1]) if conv_snapshot else None,
+        _msg_fingerprint(conv_snapshot[-1]) if conv_snapshot else None,
         len(stream_resp_snapshot) if stream_resp_snapshot else 0,
     )
 
@@ -746,7 +762,7 @@ def serialize_message(
     with role/content attributes.
 
     Features:
-      - UI cache via module-level dict keyed by id(msg) — never mutates input
+      - UI cache via instance-attached _ui_cache attribute (legacy id()-keyed dict maintained for compat)
       - Content list normalization for multimodal messages (text, image, audio, video, file)
       - Large content truncation at 100K characters when for_ui=True
       - function_call normalization (handles objects with .name/.arguments attributes)
@@ -759,27 +775,25 @@ def serialize_message(
         for_ui: If True (default), truncate large content at 100K chars and use
             the serialization cache. Set to False when serializing for agent
             reasoning pipelines where full fidelity is needed.
-        use_cache: If True (default), use the id(msg)-keyed UI serialization
-            cache. Set to False for short-lived objects (e.g., streaming partials)
-            whose memory addresses may be recycled by GC, causing stale cache hits.
+        use_cache: If True (default), use the instance-attached UI serialization
+            cache (_ui_cache attribute on the message object). Set to False for
+            short-lived objects (e.g., streaming partials) that should not be cached.
 
     Returns:
         JSON-serializable dictionary.
     """
-    # M1: Look up in CacheManager (keyed by id(msg)) instead of mutating input.
+    # M1: Look up in CacheManager/instance (_get_ui_cache) instead of mutating input.
     # Cache stores truncated UI versions — only use when for_ui=True AND use_cache=True.
-    # Streaming partials are short-lived objects whose addresses get recycled by GC;
-    # caching them causes stale hits when the next turn's deep copy lands at the same address.
-    msg_id = id(msg)  # Works for both dicts and Message objects
+    # Instance-attached caching prevents id() recycling bugs when objects are GC'd.
     cached = None
-    if use_cache:
-        with _cache_mgr._lock:
-            cached = _cache_mgr.ui_serialization.get(msg_id)
+    if use_cache and for_ui:
+        cached = _get_ui_cache(msg)
     if cached is not None and for_ui:
         res = dict(cached)  # Copy to avoid mutating the cache entry
         # Strip internal keys that might leak from stale cache data
         res.pop('_tokens', None)
         res.pop('_words', None)
+        res.pop('_ui_cache', None)
         # Also strip any None values (defensive against old code versions)
         for key in list(res.keys()):
             if res[key] is None:
@@ -868,14 +882,11 @@ def serialize_message(
 
     d.pop('extra', None)
 
-    # M1: Store in module-level cache keyed by id(msg), never mutate the input dict.
+    # M1: Store directly on message instance (_store_ui_cache), never mutate input dict.
     # Only cache for persistent history messages (skip index=0 latest turn messages).
-    # BUG_0005 fix: cache both dicts AND Pydantic Message objects — committed conversation
-    # messages are stable within a turn, so re-serializing them every tick was the dominant
-    # per-tick latency cost. The id(msg) key is stable for the object's lifetime.
-    # use_cache=False skips both lookup and store (for short-lived streaming partials).
-    if use_cache and msg_id is not None and for_ui and index is not None and index > 0:
-        _store_ui_cache(msg_id, d)
+    # Instance-attached caching eliminates memory-address recycling collisions.
+    if use_cache and for_ui and index is not None and index > 0:
+        _store_ui_cache(msg, d)
 
     if index is not None:
         d['index'] = index
@@ -1020,9 +1031,8 @@ def _serialize_instance(
     # (the O(N)-per-tick cost that made streaming latency grow with turn count).
     stream_resp_len = len(stream_responses) if stream_responses else 0
     # Hardening: include instance identity so two distinct instances that happen to share
-    # (history_count, last_msg_id, stream_resp_len) never collide in the global token_stats cache.
-    # (The pre-fix key also omitted this; adding it is a safe no-op for correctly-unique instances.)
-    cache_key = (inst.instance_name, original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len)
+    # (history_count, last_msg_fingerprint, stream_resp_len) never collide in the global token_stats cache.
+    cache_key = (inst.instance_name, original_history_count, _msg_fingerprint(msgs[-1]) if msgs else None, stream_resp_len)
 
     # Thread-safe check and read of the cached HISTORY-ONLY stats via CacheManager.
     # We cache get_history_stats(full_msgs_snapshot) — the stable committed history — NOT
