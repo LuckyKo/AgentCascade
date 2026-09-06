@@ -2977,7 +2977,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # still ignored on recall; only the global toggle + Self-Augmentation are
             # refreshed. Thread-safety: recall runs single-threaded per instance — it was
             # idle and no other thread can access it at this point, so no lock is needed.
-            _refresh_active_skills_block(self.pool, inst, _resolve_recall_skills(self.pool, inst))
+            _refresh_active_skills_block(self.pool, inst, _resolve_recall_skills(self.pool))
             sys_msg = inst.conversation[0]
             logger.debug(
                 "[SKILLS] Recall of %s: refreshed '## Active Skills' block "

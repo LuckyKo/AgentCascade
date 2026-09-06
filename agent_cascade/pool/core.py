@@ -180,9 +180,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         self.skill_manager = SkillManager()
 
         # Discover skills from ALL declared tiers (priority: system < agent < user).
-        # This file lives in pool/ (one level deeper than the original agent_pool.py),
-        # so it needs an extra .parent to reach project root.
         _project_root = Path(__file__).resolve().parent.parent.parent
+        self.agents_dir = Path(agents_dir)
         _skill_tiers = []
 
         # Tier 1 — system: .qwen/skills/
@@ -190,10 +189,9 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         if _system_skills.exists():
             _skill_tiers.append(_system_skills)
 
-        # Tier 2 — agent-specific: agents/<name>/skills/ (one dir per agent that has skills)
-        _agents_root = Path(agents_dir)
-        if _agents_root.is_dir():
-            for _agent_dir in sorted(_agents_root.iterdir()):
+        # Tier 2 — agent-specific: agents/<name>/skills/
+        if self.agents_dir.is_dir():
+            for _agent_dir in sorted(self.agents_dir.iterdir()):
                 _agent_skills = _agent_dir / 'skills'
                 if _agent_skills.is_dir():
                     _skill_tiers.append(_agent_skills)
@@ -206,8 +204,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         if _skill_tiers:
             self.skill_manager.discover(_skill_tiers)
 
-        # ── Agent discovery (unchanged) ──────────────────────────────────────
-        self.agents_dir = Path(agents_dir)
+        # ── Agent discovery ──────────────────────────────────────────────────
         self._discover_agents(agents_dir)
     def start(self):
         """Start background services (idle checker, etc.). Call after pool initialization."""
