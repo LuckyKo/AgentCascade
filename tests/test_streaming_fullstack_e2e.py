@@ -43,7 +43,12 @@ ISOLATION / NO PRODUCTION EDITS
   * The seed log is COPIED to a temp location before loading; the original is
     never touched. app.js and all backend code are read-only.
 
-Run with:  python -m pytest tests/test_streaming_fullstack_e2e.py -v
+Run with (MUST disable xdist — in-process frame capture doesn't work under -n auto):
+  python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=""
+
+Delta mode (run twice, flag 0 then 1):
+  AGENT_CASCADE_STREAM_DELTA=0 python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=""
+  AGENT_CASCADE_STREAM_DELTA=1 python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=""
 """
 
 # CRITICAL: set BEFORE any agent_cascade import to isolate this run from live sessions.
@@ -1236,7 +1241,20 @@ def _assert_message_stack_sync(frontend_messages, pool, instance_name):
 
 @pytest.mark.timeout(540)
 def test_fullstack_streaming(fullstack_server):
-    """Drive the full real stack and assert incremental streaming per turn + loop cycle."""
+    """Drive the full real stack and assert incremental streaming per turn + loop cycle.
+
+    MUST run single-process (no xdist). The mock LLM handler and stream-update
+    capture rely on in-process state that doesn't survive xdist worker boundaries.
+    Run with:  python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=""
+    """
+    # Guard: fail early if xdist is active (pytest.ini has -n auto by default).
+    import os as _os_guard
+    if _os_guard.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.fail(
+            "This test requires single-process execution (no xdist). "
+            "Run with: python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=\"\""
+        )
+
     ws_url = fullstack_server["ws_url"]
     _MockLLMHandler.reset()
 
