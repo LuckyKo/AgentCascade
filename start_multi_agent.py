@@ -156,6 +156,7 @@ if __name__ == '__main__':
     # Use Config + Server pattern for graceful shutdown support (host 0.0.0.0 allows LAN access)
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)
+    agent_pool.server_info = ("0.0.0.0", port)
 
     def handle_shutdown(signum, frame):
         logger.info("\n[INFO] Initiating graceful shutdown...")

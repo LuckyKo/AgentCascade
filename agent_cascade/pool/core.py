@@ -113,6 +113,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         # ── Simple state (owned directly by pool, no separate manager) ───────
         self._paused = threading.Event()                   # global pause flag; set=resumed, clear=paused
         self._paused.set()                                  # start in resumed state
+        self.server_info = None                            # set by launcher: (host, port) tuple of the AC API server
         self._halted_instances: set = set()                # per-instance halt state (legacy, kept for compat)
         self._compression_halted: set = set()              # halted by forced compression (not manual)
         self.terminated_instances: set = set()             # marked for immediate termination

@@ -167,6 +167,7 @@ if __name__ == '__main__':
     # Create server first so signal handler can reference it
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
+    agent_pool.server_info = ("127.0.0.1", port)
 
     # Use shared signal handler from shared_init (Phase 5B — deduplicated shutdown logic)
     from agent_cascade.shared_init import setup_signal_handler

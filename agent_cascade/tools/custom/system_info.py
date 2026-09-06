@@ -221,6 +221,26 @@ class SystemInfo(BaseTool):
         else:
             cache_state = "  (not initialized)"
 
+        # AC Server address — resolve the API server host:port this tool runs under.
+        # Primary source is agent_pool.server_info set by the launcher; fall back to
+        # QWEN_AGENT_PORT env var, then the multi-agent default port (8765).
+        ac_server_str = "Unknown"
+        try:
+            si = getattr(self.agent_pool, 'server_info', None) if self.agent_pool else None
+            if isinstance(si, (tuple, list)) and len(si) == 2 and si[0] and si[1]:
+                host, port = si[0], si[1]
+            else:
+                env_port = os.getenv('QWEN_AGENT_PORT')
+                try:
+                    port = int(env_port) if env_port is not None else 8765
+                except (ValueError, TypeError):
+                    port = 8765
+                host = "0.0.0.0"
+            ac_server_str = f"http://{host}:{port}" + (" (all interfaces)" if str(host) == "0.0.0.0" else "")
+        except Exception as e:
+            logger.warning(f"Failed to resolve AC server address: {e}")
+            ac_server_str = "Unknown"
+
         info = (
             f"--- System Information ---\n"
             f"OS: {os_info}\n"
@@ -228,6 +248,8 @@ class SystemInfo(BaseTool):
             f"Python Version: {py_version}\n"
             f"API Endpoint: {api_base}\n"
             f"Model Used: {model}\n"
+            f"\n--- AC Server ---\n"
+            f"Server Address: {ac_server_str}\n"
             f"\n--- Workspace & Permissions ---\n"
             f"{folders_info}"
             f"\n--- Session Stats ---\n"
