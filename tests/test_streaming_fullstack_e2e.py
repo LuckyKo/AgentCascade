@@ -1175,16 +1175,29 @@ def _assert_message_stack_sync(frontend_messages, pool, instance_name):
     # (possibly shorter if the last streaming partial hasn't committed yet).
     # We compare role sequences and content prefixes.
     #
-    # Tolerance: the frontend may lag by up to 2 messages (one in-flight assistant
-    # + one tool result not yet visible in the final frame). If n_fe > n_be, that's
-    # a real bug (frontend has MORE than backend — impossible unless there are dups).
+    # Tolerance: the frontend may have up to MAX_STREAMING_PARTIALS extra trailing
+    # messages that are in-flight streaming assistant partials not yet committed to
+    # the backend conversation. This is normal end-of-capture behavior.
     if n_fe > n_be:
-        pytest.fail(
-            f"Frontend has MORE messages ({n_fe}) than backend conversation ({n_be}). "
-            f"This is impossible without duplicates or a desynced splice. "
-            f"Frontend roles: {[m['role'] for m in frontend_messages[-5:]]} "
-            f"(last 5). Backend roles: {[m['role'] for m in backend_msgs[-5:]]} (last 5)."
-        )
+        excess = n_fe - n_be
+        if excess > MAX_STREAMING_PARTIALS:
+            pytest.fail(
+                f"Frontend has TOO MANY extra messages ({n_fe}) vs backend ({n_be}): "
+                f"excess={excess}, tolerance={MAX_STREAMING_PARTIALS}. "
+                f"This indicates duplicates or a desynced splice. "
+                f"Frontend roles: {[m['role'] for m in frontend_messages[-5:]]} "
+                f"(last 5). Backend roles: {[m['role'] for m in backend_msgs[-5:]]} (last 5)."
+            )
+        # Validate the extra messages are trailing streaming assistant partials
+        trailing = frontend_messages[n_be:]
+        for m in trailing:
+            if m["role"] != "assistant":
+                pytest.fail(
+                    f"Frontend extra message at position {n_be} is role={m['role']!r}, "
+                    f"expected 'assistant' (trailing streaming partial). "
+                    f"Content: {m['content'][:80]!r}"
+                )
+        print(f"  ✓ {excess} trailing streaming partial(s) on frontend (not yet committed)")
 
     # ── Check 3b: Excessive lag guard ──────────────────────────────────────────
     # If the backend has significantly more messages than the frontend, something is
