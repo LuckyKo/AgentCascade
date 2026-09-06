@@ -226,7 +226,7 @@ class SystemInfo(BaseTool):
         # QWEN_AGENT_PORT env var, then the multi-agent default port (8765).
         ac_server_str = "Unknown"
         try:
-            si = getattr(self.agent_pool, 'server_info', None) if self.agent_pool else None
+            si = self.agent_pool.server_info if self.agent_pool else None
             if isinstance(si, (tuple, list)) and len(si) == 2 and si[0] and si[1]:
                 host, port = si[0], si[1]
             else:
