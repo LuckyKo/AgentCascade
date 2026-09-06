@@ -14,7 +14,6 @@ from agent_cascade.api_integration_pkg.cache import (  # noqa: F401
     CacheManager,
     _cache_mgr,
     _TOKEN_STATS_CACHE_MAXSIZE,
-    _UI_CACHE_MAXSIZE,
     _STREAM_TOKEN_STATS_CACHE_MAXSIZE,
     _clear_performance_caches,
     _store_ui_cache,
@@ -72,7 +71,7 @@ from agent_cascade.api_integration_pkg.runner import (  # noqa: F401
 
 __all__ = [
     # cache
-    "CacheManager", "_cache_mgr", "_TOKEN_STATS_CACHE_MAXSIZE", "_UI_CACHE_MAXSIZE",
+    "CacheManager", "_cache_mgr", "_TOKEN_STATS_CACHE_MAXSIZE",
     "_STREAM_TOKEN_STATS_CACHE_MAXSIZE", "_clear_performance_caches", "_store_ui_cache",
     # tokens
     "_resolve_max_tokens", "_streaming_content_length", "_get_max_tokens_for_instance",

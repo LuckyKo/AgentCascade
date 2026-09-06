@@ -34,9 +34,6 @@ class CacheManager:
         # Cached serialized instance data: instance_name -> dict
         self.cached_instances: Dict[str, dict] = {}
         
-        # UI serialization cache: msg_id -> serialized dict
-        self.ui_serialization: Dict[int, dict] = {}
-        
         # Stream token stats: instance_name -> (h_stats, r_stats) tuple of dicts
         self.stream_token_stats: Dict[str, tuple] = {}
         
@@ -52,7 +49,6 @@ class CacheManager:
             self.token_stats.clear()
             self.stream_versions.clear()
             self.cached_instances.clear()
-            self.ui_serialization.clear()
             self.stream_token_stats.clear()
             self.stream_token_stats_versions.clear()
     
@@ -89,23 +85,11 @@ class CacheManager:
 _cache_mgr = CacheManager()
 
 _TOKEN_STATS_CACHE_MAXSIZE = 5000
-_UI_CACHE_MAXSIZE = 2000
 _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100
 
 def _clear_performance_caches():
     """Clear all module-level performance caches. Called during session reset."""
     _cache_mgr.clear_all()
-
-
-def _clear_ui_serialization_cache() -> None:
-    """Clear module-level performance caches.
-
-    With instance-attached _ui_cache, individual message caches are automatically
-    freed when the Message object is GC'd. This function remains for interface compatibility
-    and clears the legacy dict if used.
-    """
-    with _cache_mgr._lock:
-        _cache_mgr.ui_serialization.clear()
 
 
 def _get_ui_cache(msg: any) -> dict:
@@ -123,7 +107,6 @@ def _store_ui_cache(msg: any, cached_data: dict) -> None:
     
     Thread-safe and memory-safe: when the Message object is garbage collected,
     its _ui_cache attribute is freed along with it, eliminating address-recycling stale hits.
-    Also updates legacy ui_serialization dict for backwards compatibility.
     """
     import copy as _copy  # Lazy import
     data_copy = _copy.deepcopy(cached_data)
@@ -135,12 +118,4 @@ def _store_ui_cache(msg: any, cached_data: dict) -> None:
             setattr(msg, '_ui_cache', data_copy)
         except (AttributeError, TypeError):
             pass
-
-    # Maintain legacy map for any code or tests checking _cache_mgr.ui_serialization
-    # Use a separate copy to prevent cross-mutation between instance cache and legacy dict.
-    msg_id = id(msg)
-    with _cache_mgr._lock:
-        if len(_cache_mgr.ui_serialization) >= _UI_CACHE_MAXSIZE:
-            _cache_mgr.ui_serialization.pop(next(iter(_cache_mgr.ui_serialization)))
-        _cache_mgr.ui_serialization[msg_id] = _copy.deepcopy(data_copy)
 

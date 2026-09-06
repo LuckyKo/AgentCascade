@@ -16,7 +16,6 @@ from agent_cascade.llm.schema import ASSISTANT, CONTENT, NAME, REASONING_CONTENT
 from agent_cascade.api_integration_pkg.cache import (
     _cache_mgr,
     _TOKEN_STATS_CACHE_MAXSIZE,
-    _UI_CACHE_MAXSIZE,
     _store_ui_cache,
     _get_ui_cache,
 )
