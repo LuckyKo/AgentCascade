@@ -740,6 +740,7 @@ def serialize_message(
     msg: Any,
     index: Optional[int] = None,
     for_ui: bool = True,
+    use_cache: bool = True,
 ) -> dict:
     """Serialize a Message object or dict to a JSON-serializable dict.
 
@@ -760,15 +761,22 @@ def serialize_message(
         for_ui: If True (default), truncate large content at 100K chars and use
             the serialization cache. Set to False when serializing for agent
             reasoning pipelines where full fidelity is needed.
+        use_cache: If True (default), use the id(msg)-keyed UI serialization
+            cache. Set to False for short-lived objects (e.g., streaming partials)
+            whose memory addresses may be recycled by GC, causing stale cache hits.
 
     Returns:
         JSON-serializable dictionary.
     """
     # M1: Look up in CacheManager (keyed by id(msg)) instead of mutating input.
-    # Cache stores truncated UI versions — only use when for_ui=True.
+    # Cache stores truncated UI versions — only use when for_ui=True AND use_cache=True.
+    # Streaming partials are short-lived objects whose addresses get recycled by GC;
+    # caching them causes stale hits when the next turn's deep copy lands at the same address.
     msg_id = id(msg)  # Works for both dicts and Message objects
-    with _cache_mgr._lock:
-        cached = _cache_mgr.ui_serialization.get(msg_id)
+    cached = None
+    if use_cache:
+        with _cache_mgr._lock:
+            cached = _cache_mgr.ui_serialization.get(msg_id)
     if cached is not None and for_ui:
         res = dict(cached)  # Copy to avoid mutating the cache entry
         # Strip internal keys that might leak from stale cache data
@@ -867,7 +875,8 @@ def serialize_message(
     # BUG_0005 fix: cache both dicts AND Pydantic Message objects — committed conversation
     # messages are stable within a turn, so re-serializing them every tick was the dominant
     # per-tick latency cost. The id(msg) key is stable for the object's lifetime.
-    if msg_id is not None and for_ui and index is not None and index > 0:
+    # use_cache=False skips both lookup and store (for short-lived streaming partials).
+    if use_cache and msg_id is not None and for_ui and index is not None and index > 0:
         _store_ui_cache(msg_id, d)
 
     if index is not None:
@@ -998,7 +1007,10 @@ def _serialize_instance(
             
             # Only append if not duplicate and has meaningful content
             if fingerprint not in existing_fingerprints and fingerprint != ('', '', 'None', None):
-                serialized_msgs.append(serialize_message(stream_msg, abs_index))
+                # use_cache=False: streaming partials are short-lived deep copies whose
+                # memory addresses get recycled by GC. Caching them by id() causes stale
+                # hits when the next turn's copy lands at the same address (id collision).
+                serialized_msgs.append(serialize_message(stream_msg, abs_index, use_cache=False))
                 existing_fingerprints.add(fingerprint)
                 num_streaming += 1
 

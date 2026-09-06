@@ -1134,20 +1134,21 @@ def _assert_message_stack_sync(frontend_messages, pool, instance_name):
     n_be = len(backend_msgs)
     print(f"  Frontend messages: {n_fe}, Backend conversation: {n_be}")
 
-    # ── Check 1: No duplicates in frontend ─────────────────────────────────────
-    # Key on (role, content, index) — two distinct tool results can legitimately
-    # have the same content (e.g., both evaluate to '6') but different indices.
-    # A real splice re-append would produce the SAME index twice.
-    seen = set()
+    # ── Check 1: No duplicate indices in frontend ──────────────────────────────
+    # Two distinct tool results can legitimately have the same content (e.g., both
+    # evaluate to '6'), so we check for duplicate INDEX values instead. A real
+    # splice re-append would produce the same index twice in the frontend list.
+    seen_indices = set()
     for i, msg in enumerate(frontend_messages):
-        key = (msg["role"], msg["content"], msg.get("index"))
-        assert key not in seen, (
-            f"DUPLICATE message at frontend position {i}: role={msg['role']}, "
-            f"content={msg['content'][:80]!r}, index={msg.get('index')}. "
-            f"This indicates a failed splice or double-append in the delta merge path."
-        )
-        seen.add(key)
-    print(f"  ✓ No duplicate (role, content, index) triples in {n_fe} frontend messages")
+        idx = msg.get("index")
+        if idx is not None:
+            assert idx not in seen_indices, (
+                f"DUPLICATE index {idx} at frontend position {i}: role={msg['role']}, "
+                f"content={msg['content'][:80]!r}. This indicates a failed splice or "
+                f"double-append in the delta merge path."
+            )
+            seen_indices.add(idx)
+    print(f"  ✓ No duplicate indices in {n_fe} frontend messages")
 
     # ── Check 2: Index contiguity ───────────────────────────────────────────────
     # ASSUMPTION: the conversation is append-only (no message deletion/editing during
