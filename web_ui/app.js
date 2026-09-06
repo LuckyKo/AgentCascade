@@ -2062,6 +2062,7 @@ function handleServerMessage(data) {
                     continue; // skip true tail deltas until a full snapshot / force_full arrives
                   }
                   existing._needsResync = false; // full snapshot re-establishes the baseline
+                  existing._resyncRequestedAt = null; // clear resync timer
                 }
                // Skip stale updates that would truncate newer messages.
                // Use strict < so that updates with the same history_count are still processed —
@@ -2082,6 +2083,7 @@ function handleServerMessage(data) {
                     // Server is ahead — we missed frames. Don't truncate our prefix.
                     // Wait for next force_full to resync. Mark so we skip delta splices.
                     existing._needsResync = true;
+                    _maybeRequestState(name, existing);
                     continue;
                   } else {
                     // Verify splice point using backend-provided absolute index
@@ -2089,6 +2091,7 @@ function handleServerMessage(data) {
                       if (sa.messages[0].index !== startIdx) {
                         console.error(`[stream] Index mismatch at ${startIdx}, got ${sa.messages[0].index} — resync`);
                         existing._needsResync = true;
+                        _maybeRequestState(name, existing);
                         continue;
                       }
                     }
@@ -2115,8 +2118,9 @@ function handleServerMessage(data) {
               // Fallback: if we don't have existing state, we can't merge partials.
               // R1 guard: a delta frame (startIdx > 0) adopted here would become the ENTIRE
               // message list and lose the prefix. The connect-time `state` frame is sent first
-              // so this shouldn't happen — but drop such frames anyway; they self-heal at the
-              // next force_full (<=10s). Full frames (startIdx <= 0) adopt as before.
+              // so this shouldn't happen — but drop such frames anyway.
+              // Self-heal: full frames arrive every ~60s, or immediately via request_state
+              // if the frontend detects a stuck resync (>5s). Tab switches also trigger request_state.
               const startIdx = (sa.history_count || 0) - (sa.messages?.length || 0);
               if (startIdx > 0) {
                 console.error(`[WS] ${name}: delta without prefix (startIdx=${startIdx}) — protocol violation, dropping frame`);
@@ -4394,9 +4398,35 @@ function switchMainTab(tabId) {
   // Re-query in case panel was just created by renderSubAgents() for a new agent
   const finalPanel = document.getElementById('panelSub-' + name);
   if (finalPanel) finalPanel.classList.add('active');
+
+  // Request fresh full state for the newly-visible agent tab so it renders
+  // immediately with complete data (avoids waiting up to 60s for periodic force_full).
+  _sendRequestState(name);
 }
 
 // Root tab is now created dynamically via renderSubAgents() — no static wiring needed
+
+// ── Request-state helper: send request_state WS message with error handling ──
+function _sendRequestState(instanceName) {
+  try {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'request_state', instance: instanceName }));
+    }
+  } catch (e) {
+    console.warn(`[stream] request_state send failed for ${instanceName}:`, e);
+  }
+}
+
+// ── Resync helper: request full state immediately, then rate-limit repeats ───
+function _maybeRequestState(instanceName, agentState) {
+  // Send immediately on first detection (don't wait 5s), then rate-limit to
+  // once per 5s while still stuck. This minimizes recovery latency.
+  const now = Date.now();
+  if (!agentState._resyncRequestedAt || now - agentState._resyncRequestedAt > 5000) {
+    _sendRequestState(instanceName);
+    agentState._resyncRequestedAt = now;
+  }
+}
 
 // ── Agent selector ───────────────────────────────────────────────────────────
 

@@ -94,6 +94,7 @@ class WsMessageHandler:
             'dismiss_queue': self.handle_dismiss_queue,
             'export_settings': self.handle_export_settings,
             'import_settings': self.handle_import_settings,
+            'request_state': self.handle_request_state,
         }
 
     # ── Public dispatch entry point ───────────────────────────────────────
@@ -112,6 +113,39 @@ class WsMessageHandler:
         from agent_cascade.log import logger
         logger.debug(f"Unknown WebSocket message type: {msg_type!r} "
                      f"(data keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'})")
+
+    async def handle_request_state(self, data: dict) -> None:
+        """Handle frontend request for a full state refresh (tab switch, resync recovery).
+
+        Builds a force_full stream_update frame for the requested instance and pushes
+        it through the shared send queue. The frame is broadcast to all clients but only
+        the requesting client's UI panel will render it (instance-scoped rendering).
+        """
+        from agent_cascade.log import logger
+        from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
+        from agent_cascade.api_integration_pkg.streaming import (
+            _put_stream_update, _last_force_full, _last_force_full_lock,
+        )
+
+        instance_name = data.get('instance') or self.session['session_name']
+        if not self.agent_pool:
+            return
+
+        try:
+            su = build_stream_update_from_pool(
+                pool=self.agent_pool,
+                instance_name=instance_name,
+                responses=None,
+                force_full=True,
+            )
+            if su is not None and self.send_queue is not None:
+                await _put_stream_update(self.send_queue, {'type': 'stream_update', **su})
+                # Reset the periodic timer so the next automatic force_full is 60s from now
+                import time as _time
+                with _last_force_full_lock:
+                    _last_force_full[instance_name] = _time.monotonic()
+        except Exception as e:
+            logger.warning(f"request_state failed for {instance_name}: {e}")
 
     # ── Broadcast helper ──────────────────────────────────────────────────
     async def _broadcast(self, ws_type: str = 'state', generating: Optional[bool] = None) -> None:

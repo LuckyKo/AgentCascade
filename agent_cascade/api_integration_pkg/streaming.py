@@ -5,16 +5,50 @@ Phase 3b pure-move refactor. ``broadcast_stream_update`` calls
 """
 
 import asyncio
+import logging
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from agent_cascade.log import logger
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.llm.schema import Message
 from agent_cascade.api_integration_pkg.cache import _cache_mgr, _STREAM_TOKEN_STATS_CACHE_MAXSIZE
 from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
+
+# ────────────────────────────────────────────────────────────────────────────
+# FORCE_FULL time-based tracker (replaces tick_num % 100)
+# Keyed by instance name; value = monotonic timestamp of last force_full push.
+# Module-level so no caller changes are needed — broadcast_stream_update looks
+# up/updates internally. Default 0.0 means "force on first call".
+# Lock protects concurrent access from multiple worker threads + event loop.
+# Stale entries (instance not seen for >5 min) are evicted lazily to prevent
+# unbounded growth with high instance churn (security agents, temp workers).
+# ────────────────────────────────────────────────────────────────────────────
+_last_force_full: Dict[str, float] = {}
+_last_force_full_lock = threading.Lock()
+_FORCE_FULL_STALE_SECS = 300.0  # Evict entries not updated in 5 minutes
+
+def clear_force_full_timer(instance_name: str) -> None:
+    """Remove the force_full timer entry for an instance (call on dismiss/restart).
+    
+    This ensures the next broadcast after a restart gets a force_full immediately
+    instead of waiting up to 60s for the stale timer to expire.
+    """
+    with _last_force_full_lock:
+        _last_force_full.pop(instance_name, None)
+
+def _evict_stale_force_full_entries(now_mono: float) -> None:
+    """Lazily evict entries older than _FORCE_FULL_STALE_SECS. Called under lock."""
+    stale = [k for k, v in _last_force_full.items() if now_mono - v > _FORCE_FULL_STALE_SECS]
+    for k in stale:
+        del _last_force_full[k]
+
+# Rate-limiter for queue-full warnings (warn at most once every 5s).
+# No lock needed: _put_stream_update runs on the event loop thread (single-threaded).
+_qf_last_warn: float = 0.0
+_qf_drop_count: int = 0
 
 # ────────────────────────────────────────────────────────────────────────────
 # STREAMING BACKLOG PROBE — TEMPORARY DIAGNOSTIC (evidence-gathering only)
@@ -251,12 +285,26 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
     NOTE: The function is marked 'async' solely so it can be scheduled via
     run_coroutine_threadsafe from worker threads — that API requires a coroutine.
     QueueFull is caught inside the event loop and never propagated to caller.
+
+    Emits a rate-limited warning (max once per 5s) when events are dropped
+    due to queue saturation, so operators can diagnose stale-UI issues.
     """
-    import asyncio  # Lazy import to avoid module-level dependency
+    global _qf_last_warn, _qf_drop_count
     try:
         queue.put_nowait(event)  # Synchronous, raises QueueFull if full
     except asyncio.QueueFull:
-        pass  # Drop stale event; a newer one will arrive soon
+        # Rate-limited warning (max once per 5s) so operators can diagnose stale-UI issues.
+        # No lock needed: this runs on the event loop thread (single-threaded context).
+        _qf_drop_count += 1
+        now = time.monotonic()
+        if now - _qf_last_warn >= 5.0:
+            logger.warning(
+                "WS send queue FULL (maxsize=%d) — dropped %d event(s) in last %.1fs. "
+                "UI may show stale data until next force_full.",
+                queue.maxsize, _qf_drop_count, now - _qf_last_warn,
+            )
+            _qf_last_warn = now
+            _qf_drop_count = 0
 
 def broadcast_stream_update(
     pool: AgentPool,
@@ -285,7 +333,7 @@ def broadcast_stream_update(
            - is_streaming_tick (explicit signal from ExecutionEngine or tool event)
            - len_changed (new message added to conversation)
            - 100ms elapsed since last send (throttle interval)
-        3. Force full state serialization every 100 ticks (~10s at ~150ms/tick)
+        3. Force full state serialization every ~60s (time-based, per-instance)
            to recover from sync gaps where individual stream_update messages
            may have been dropped due to queue-full conditions.
 
@@ -298,7 +346,8 @@ def broadcast_stream_update(
         instance_name: Name of the active instance (e.g., "Maine", "Security_op_abc").
         turn_output: Current partial response messages from engine.run() yield.
         is_streaming_tick: True if this tick carries streaming content updates or tool events.
-        tick_num: Monotonically increasing tick counter for force_full scheduling.
+        tick_num: Monotonically increasing tick counter (kept for backward compat;
+                  no longer used for force_full scheduling).
         now_sec: Current monotonic time (from time.monotonic()).
         last_send: Monotonic time of the last successful broadcast.
         last_resp_len: Response length from the previous tick (for change detection).
@@ -336,11 +385,19 @@ def broadcast_stream_update(
         if ws_loop.is_closed():
             return (last_send, resp_len)
 
-        # Force full state refresh every 100 ticks (~10s) to recover from sync gaps.
-        # During partial streaming some events may be dropped; periodic full refresh
-        # ensures eventual UI consistency even if individual stream_update messages
-        # were lost due to queue-full conditions.
-        force_full = (tick_num % 100 == 0)
+        # Force full state refresh every ~60s (time-based, per-instance) to recover
+        # from sync gaps. During partial streaming some events may be dropped; the
+        # periodic full refresh ensures eventual UI consistency even if individual
+        # stream_update messages were lost due to queue-full conditions.
+        # Frontend can also request an immediate full frame via 'request_state' WS msg.
+        _now_mono = time.monotonic()
+        with _last_force_full_lock:
+            # Lazy eviction of stale entries (instances not seen for >5 min)
+            if len(_last_force_full) > 20:
+                _evict_stale_force_full_entries(_now_mono)
+            force_full = (_now_mono - _last_force_full.get(instance_name, 0.0)) >= 60.0
+            if force_full:
+                _last_force_full[instance_name] = _now_mono
 
         stream_update = build_stream_update_from_pool(
             pool=pool,

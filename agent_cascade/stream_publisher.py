@@ -102,6 +102,10 @@ class StreamPublisher:
             return
         
         try:
+            # Clear any stale force_full timer so this instance gets an immediate full frame
+            from agent_cascade.api_integration_pkg.streaming import clear_force_full_timer
+            clear_force_full_timer(instance.instance_name)
+
             ws_queue = getattr(self.pool, '_ws_send_queue', None)
             ws_loop = getattr(self.pool, '_ws_loop', None)
             if not (ws_queue and ws_loop and not ws_loop.is_closed()):
