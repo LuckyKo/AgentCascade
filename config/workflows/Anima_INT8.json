@@ -1,0 +1,243 @@
+{
+  "46": {
+    "inputs": {
+      "filename_prefix": "luckyw/Anima/Anim_2026_09_02",
+      "images": [
+        "83",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "83": {
+    "inputs": {
+      "anything": [
+        "60:8",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  },
+  "60:28": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "60:72": {
+    "inputs": {
+      "Number": "1.0"
+    },
+    "class_type": "Float",
+    "_meta": {
+      "title": "Float New"
+    }
+  },
+  "60:74": {
+    "inputs": {
+      "Number": "1"
+    },
+    "class_type": "Float",
+    "_meta": {
+      "title": "Float Load"
+    }
+  },
+  "60:75": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "Use LORA"
+    }
+  },
+  "60:15": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "60:45": {
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "60:80": {
+    "inputs": {
+      "unet_name": "anima-base-v1.0-int8rowwise.safetensors",
+      "weight_dtype": "default",
+      "model_type": "anima",
+      "on_the_fly_quantization": false,
+      "enable_convrot": true,
+      "lora_mode": "None"
+    },
+    "class_type": "OTUNetLoaderW8A8",
+    "_meta": {
+      "title": "Load Diffusion Model INT8 (W8A8)"
+    }
+  },
+  "60:70": {
+    "inputs": {
+      "switch": true,
+      "on_false": [
+        "60:74",
+        0
+      ],
+      "on_true": [
+        "60:72",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "If/Else Switch"
+    }
+  },
+  "60:11": {
+    "inputs": {
+      "text": "diorama of group of cats playing on top of a balding man's head",
+      "clip": [
+        "60:45",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "60:12": {
+    "inputs": {
+      "text": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia, watermark, censored, mosaic",
+      "clip": [
+        "60:45",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "60:81": {
+    "inputs": {
+      "lora_1": "Anima\\anima-turbo-lora-v0.2.safetensors",
+      "strength_1": 0.5,
+      "lora_2": "None",
+      "strength_2": 1,
+      "lora_3": "None",
+      "strength_3": 1,
+      "lora_4": "None",
+      "strength_4": 1,
+      "lora_5": "None",
+      "strength_5": 1,
+      "lora_6": "None",
+      "strength_6": 1,
+      "lora_7": "None",
+      "strength_7": 1,
+      "lora_8": "None",
+      "strength_8": 1,
+      "lora_9": "None",
+      "strength_9": 1,
+      "lora_10": "None",
+      "strength_10": 1,
+      "model": [
+        "60:80",
+        0
+      ]
+    },
+    "class_type": "INT8GroupedLora",
+    "_meta": {
+      "title": "INT8 Grouped LoRA"
+    }
+  },
+  "60:76": {
+    "inputs": {
+      "switch": [
+        "60:75",
+        0
+      ],
+      "on_false": [
+        "60:80",
+        0
+      ],
+      "on_true": [
+        "60:81",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "If/Else Switch"
+    }
+  },
+  "60:19": {
+    "inputs": {
+      "seed": 731877526756387,
+      "steps": 14,
+      "cfg": 3,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": [
+        "60:70",
+        0
+      ],
+      "model": [
+        "60:76",
+        0
+      ],
+      "positive": [
+        "60:11",
+        0
+      ],
+      "negative": [
+        "60:12",
+        0
+      ],
+      "latent_image": [
+        "60:28",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "60:8": {
+    "inputs": {
+      "samples": [
+        "60:19",
+        0
+      ],
+      "vae": [
+        "60:15",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  }
+}

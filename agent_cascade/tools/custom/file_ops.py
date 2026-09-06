@@ -11,6 +11,7 @@ from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.settings import (
     DEFAULT_WORKSPACE, DEFAULT_TOOL_RESULT_MAX_CHARS, CHARS_PER_TOKEN_ESTIMATE,
     DEFAULT_READ_FILE_MAX_LINES, DEFAULT_MAX_INPUT_TOKENS,
+    DEFAULT_WILD_READ_TRUNCATION_CHARS,
 )
 import json
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -182,13 +183,20 @@ class ReadFile(BaseTool, PathResolutionMixin):
     # ------------------------------------------------------------------ #
     #  Helper: calculate character budget for the read                    #
     # ------------------------------------------------------------------ #
-    def _calculate_char_limit(self, kwargs: dict, is_wild_read: bool, wild_limit: int) -> int:
-        """Calculate the character limit based on context window and token estimates."""
+    def _calculate_char_limit(self, kwargs: dict, is_wild_read: bool, wild_limit: int,
+                              wild_truncation: int = DEFAULT_WILD_READ_TRUNCATION_CHARS) -> int:
+        """Calculate the character limit based on context window and token estimates.
+
+        For wild reads (no explicit limit), the actual char budget is capped at the lower
+        truncation cut (`wild_truncation`) rather than the trip threshold (`wild_limit`):
+        once a read trips the threshold, content beyond a small window is probably useless.
+        """
         max_input_tokens = self._get_max_input_tokens(kwargs)
         char_limit = int(max_input_tokens * CONTEXT_FRACTION * CHARS_PER_TOKEN_ESTIMATE)
         char_limit = max(500, char_limit)  # floor at 500 chars
         if is_wild_read:
-            char_limit = min(char_limit, wild_limit)
+            # Use the lower truncation cut for wild reads — content beyond this is probably useless
+            char_limit = min(char_limit, wild_truncation)
         return char_limit
 
     # ------------------------------------------------------------------ #
@@ -348,11 +356,19 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         limit = params.get('limit')
 
-        # Get the character limit from agent/tool options or settings
+        # Get the trip threshold from agent/tool options or settings. This decides whether a
+        # read is "wild" and triggers aggressive capping — it no longer sets the actual cut point.
         wild_limit = DEFAULT_TOOL_RESULT_MAX_CHARS
         if self.agent_pool is not None:
             wild_limit = getattr(self.agent_pool, 'llm_cfg', {}).get(
                 'tool_result_max_chars', wild_limit
+            )
+
+        # Get the lower truncation cut used for the actual char budget when a wild read trips.
+        wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
+        if self.agent_pool is not None:
+            wild_truncation = getattr(self.agent_pool, 'llm_cfg', {}).get(
+                'wild_read_truncation_chars', wild_truncation
             )
 
         # Determine line limit and whether this is a "wild read" (no explicit limit)
@@ -370,7 +386,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 return f"Not a regular file: {path}"
 
             # Determine character budget for this read
-            char_limit = self._calculate_char_limit(kwargs, is_wild_read, wild_limit)
+            char_limit = self._calculate_char_limit(kwargs, is_wild_read, wild_limit, wild_truncation)
 
             # Check for binary content
             if _is_binary_file(resolved):

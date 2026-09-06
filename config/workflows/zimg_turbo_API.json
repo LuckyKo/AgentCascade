@@ -1,0 +1,173 @@
+{
+  "3": {
+    "inputs": {
+      "seed": 112220,
+      "steps": 9,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "40",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "30",
+        5
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "EXECUTIVE FLOOR Interior. Floor-to-ceiling window. Fog rolls in from the San Francisco bay area. City below is busy with traffic. Eli stands at the glass, coffee in hand. The sky is gray. Light is flat. cyberpunk theme. Eli is tall, impeccably groomed, dressed in a tailored smart-suit.",
+      "clip": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "11": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  },
+  "16": {
+    "inputs": {
+      "unet_name": "zimageTurboByStable_2601Fp8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "17": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "28": {
+    "inputs": {
+      "clip_name": "Qwen3-4B-Q6_K.gguf",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "ClipLoaderGGUF",
+    "_meta": {
+      "title": "GGUF CLIP Loader"
+    }
+  },
+  "30": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "aspect_ratio": "SDXL - 5:8 portrait 832x1216",
+      "swap_dimensions": "On",
+      "upscale_factor": 1.5,
+      "prescale_factor": 1,
+      "batch_size": 1
+    },
+    "class_type": "CR Aspect Ratio",
+    "_meta": {
+      "title": "🔳 CR Aspect Ratio"
+    }
+  },
+  "40": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Power Lora Loader (rgthree)"
+    }
+  },
+  "51": {
+    "inputs": {
+      "filename_prefix": "luckyw/Zimage/ZI_iter",
+      "images": [
+        "52",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "52": {
+    "inputs": {
+      "anything": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  }
+}

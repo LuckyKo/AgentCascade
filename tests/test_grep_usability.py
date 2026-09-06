@@ -39,6 +39,119 @@ def test_list_dir_no_emoji():
         assert "test.txt" in result, f"File name should appear: {result}"
     print("[PASS] test_list_dir_no_emoji")
 
+def test_list_recursive_empty_subdir_marked():
+    """BUG_0006: an empty subdir must be shown as (empty) and root files must NOT
+    be indented under it."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Root has 2 files + one EMPTY subdir (the exact BUG_0006 scenario).
+        Path(tmpdir, "fixed").mkdir()
+        Path(tmpdir, "BUG_0001.md").write_text("a")
+        Path(tmpdir, "BUG_0002.md").write_text("b")
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory(".", recursive=True)
+
+        # Empty subdir is present and explicitly marked.
+        assert "[DIR] fixed/ (empty)" in result, f"Empty subdir must be marked (empty): {result}"
+
+        # Root files render at column 0 (no leading indent), so they are not
+        # visually attached to the empty subdir.
+        for fname in ("BUG_0001.md", "BUG_0002.md"):
+            line = next((ln for ln in result.splitlines() if ln.lstrip().startswith(fname)), None)
+            assert line is not None, f"{fname} missing from output: {result}"
+            assert not line.startswith(" "), \
+                f"Root file {fname} must be at column 0 (not indented under a subdir): {line!r}"
+
+        # The root is NOT reported as empty (it contains a dir).
+        assert "(empty directory or all entries filtered out)" not in result, \
+            f"Root with an empty subdir should not print top-level empty message: {result}"
+    print("[PASS] test_list_recursive_empty_subdir_marked")
+
+def test_list_recursive_depth_indentation():
+    """Files inside a nested subdir must be indented more than root files AND labelled
+    with their path relative to the listed root (so parentage is unambiguous)."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "root.txt").write_text("root file")
+        sub = Path(tmpdir, "sub")
+        sub.mkdir()
+        (sub / "nested.txt").write_text("nested file")
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory(".", recursive=True)
+
+        root_line = next(ln for ln in result.splitlines() if ln.lstrip().startswith("root.txt"))
+        # Nested file is now labelled with its relative path "sub/nested.txt".
+        nested_line = next(ln for ln in result.splitlines() if "sub/nested.txt" in ln)
+
+        # Root file at column 0; nested file indented by >= 2 spaces.
+        assert not root_line.startswith(" "), f"Root file should be at column 0: {root_line!r}"
+        assert nested_line.startswith("  "), \
+            f"Nested file should be indented under its subdir: {nested_line!r}"
+
+        # The nested entry carries its parent dir in the label (the actual fix).
+        assert "sub/nested.txt" in nested_line, \
+            f"Nested file must show relative path 'sub/nested.txt': {nested_line!r}"
+        # Root-level file keeps a bare name (no directory prefix).
+        assert root_line.lstrip().startswith("root.txt "), \
+            f"Root file must keep a bare name: {root_line!r}"
+
+        # Subdir contents are more indented than the subdir's own header line.
+        dir_line = next(ln for ln in result.splitlines() if "[DIR] sub/" in ln)
+        assert len(nested_line) - len(nested_line.lstrip()) > len(dir_line) - len(dir_line.lstrip()), \
+            f"Nested file indent must exceed subdir header indent: {nested_line!r} vs {dir_line!r}"
+    print("[PASS] test_list_recursive_depth_indentation")
+
+def test_list_exclude_flat():
+    """BUG_0008 (defect 1): exclude filter must DROP matching names, not keep them.
+    Flat mode: exclude='*.txt' removes drop.txt and keeps keep.py."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "keep.py").write_text("a")
+        Path(tmpdir, "drop.txt").write_text("b")
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory(".", exclude="*.txt")
+        assert "keep.py" in result, f"keep.py should be kept: {result}"
+        assert "drop.txt" not in result, f"drop.txt should be excluded: {result}"
+    print("[PASS] test_list_exclude_flat")
+
+def test_list_exclude_recursive():
+    """BUG_0008 (defect 1): exclude filter in recursive mode drops all matching files
+    at any depth while keeping non-matching ones."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "keep.py").write_text("a")
+        Path(tmpdir, "drop.txt").write_text("b")
+        a = Path(tmpdir, "a"); a.mkdir()
+        (a / "inner.txt").write_text("c")
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory(".", recursive=True, exclude="*.txt")
+        # No .txt file may appear anywhere in the output.
+        assert ".txt" not in result, f"No .txt files should be shown: {result}"
+        assert "drop.txt" not in result, f"drop.txt should be excluded: {result}"
+        assert "inner.txt" not in result, f"inner.txt should be excluded: {result}"
+        # Non-.txt files are kept.
+        assert "keep.py" in result, f"keep.py should be kept: {result}"
+    print("[PASS] test_list_exclude_recursive")
+
+def test_list_include_filtered_dir_subtree():
+    """BUG_0008 (defect 2): a dir that fails the include filter must still be walked
+    so matching files beneath it are found. include='*.txt' must reveal BOTH the root
+    drop.txt AND a/inner.txt even though dir 'a' itself does not match '*.txt'."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "drop.txt").write_text("a")
+        Path(tmpdir, "keep.py").write_text("b")
+        a = Path(tmpdir, "a"); a.mkdir()
+        (a / "inner.txt").write_text("c")
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory(".", recursive=True, include="*.txt")
+        # Both matching .txt files must be present (key regression assertion).
+        assert "drop.txt" in result, f"root drop.txt should be shown: {result}"
+        assert "inner.txt" in result, f"a/inner.txt should be shown (filtered dir still walked): {result}"
+        # Non-matching file is dropped.
+        assert "keep.py" not in result, f"keep.py should be filtered out by include='*.txt': {result}"
+    print("[PASS] test_list_include_filtered_dir_subtree")
+
 def test_grep_path_normalization():
     """Test that grep output uses forward slashes even on Windows."""
     from agent_cascade.operation_manager import OperationManager
@@ -151,6 +264,11 @@ if __name__ == "__main__":
         test_compile_grep_pattern_flags,
         test_smart_case_logic,
         test_list_dir_no_emoji,
+        test_list_recursive_empty_subdir_marked,
+        test_list_recursive_depth_indentation,
+        test_list_exclude_flat,
+        test_list_exclude_recursive,
+        test_list_include_filtered_dir_subtree,
         test_grep_path_normalization,
         test_grep_no_strip,
         test_grep_context_lines,

@@ -87,6 +87,9 @@ config/pool_settings*.json
 # Agent lessons
 .agent_lessons/ 
 
+# Bug tracking
+.bug_tracker/ 
+
 # Local todo list (personal, not shared)
 todo.md
 

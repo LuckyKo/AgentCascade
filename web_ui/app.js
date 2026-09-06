@@ -181,6 +181,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell_char_limit' },
   { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code_char_limit' },
   { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list_dir_char_limit' },
+  { id: '#setting-wild-read-truncation-chars', prop: 'value', key: 'wild_read_truncation_chars', localKey: 'wild_read_truncation_chars' },
   // Approval timeout settings
   { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
   { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
@@ -1150,6 +1151,7 @@ function saveSettings(sendToServer) {
   // Save Agent Budgeting toggle state
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
   if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
+  // wild_read_truncation_chars is persisted via getGenerateCfg() as the underscore key (like grep_char_limit) — no hyphenated duplicate needed here.
   if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
   if ($('#setting-system-idle-timeout')) s['system-idle-timeout'] = $('#setting-system-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
@@ -1334,6 +1336,11 @@ function loadSettings() {
     $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
     }
+    // Wild read truncation: prefer underscore key from generate_cfg, fall back to legacy hyphenated key
+    if (_isFiniteRestore(s['wild_read_truncation_chars']) || _isFiniteRestore(s['wild-read-truncation-chars'])) {
+      $('#setting-wild-read-truncation-chars').value = s['wild_read_truncation_chars'] ?? s['wild-read-truncation-chars'];
+      $('#setting-wild-read-truncation-chars').dispatchEvent(new Event('input'));
+    }
     if (_isFiniteRestore(s['idle-timeout'])) {
       $('#setting-idle-timeout').value = s['idle-timeout'];
     }
@@ -1486,7 +1493,7 @@ function loadSettings() {
 
     // Clean up stale hyphenated keys (now stored via generate_cfg as underscore keys)
     const s2 = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
-    for (const staleKey of ['grep-spillover', 'grep-char-limit', 'shell-char-limit', 'code-char-limit', 'list-dir-char-limit']) {
+    for (const staleKey of ['grep-spillover', 'grep-char-limit', 'shell-char-limit', 'code-char-limit', 'list-dir-char-limit', 'wild-read-truncation-chars']) {
       if (staleKey in s2) {
         delete s2[staleKey];
       }
@@ -5393,6 +5400,7 @@ function getGenerateCfg() {
   if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value) || 900;
   if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value) || 900;
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
+  if ($('#setting-wild-read-truncation-chars')) cfg.wild_read_truncation_chars = parseInt($('#setting-wild-read-truncation-chars').value) || 2000;
 
   // Compression threshold settings (PoolSettings fields) — clamped to match saveSettings() validation
   if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = Math.min(99, Math.max(50, parseFloat($('#setting-compression-warning-threshold').value) || 90));

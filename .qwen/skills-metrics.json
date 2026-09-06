@@ -1,0 +1,125 @@
+{
+  "schema_version": "1.0",
+  "skills": {
+    "self-augmentation": {
+      "total_loads": 2603,
+      "by_version": {
+        "1.0.0": 2603
+      }
+    },
+    "project-memory-writing": {
+      "total_loads": 213,
+      "by_version": {
+        "1.0.0": 40
+      }
+    },
+    "python-codebase-static-analysis": {
+      "total_loads": 125,
+      "by_version": {
+        "1.0.0": 125
+      }
+    },
+    "investigate-streaming-gaps": {
+      "total_loads": 29,
+      "by_version": {
+        "1.0.0": 29
+      }
+    },
+    "version-control": {
+      "total_loads": 22,
+      "by_version": {
+        "1.0.0": 22
+      }
+    },
+    "scheduler-architecture": {
+      "total_loads": 27,
+      "by_version": {
+        "1.0.0": 27
+      }
+    },
+    "skill-creator": {
+      "total_loads": 40,
+      "by_version": {
+        "1.0.0": 40
+      }
+    },
+    "testing-best-practices": {
+      "total_loads": 77,
+      "by_version": {
+        "1.0.0": 77
+      }
+    },
+    "systematic-debugging": {
+      "total_loads": 77,
+      "by_version": {
+        "1.0.0": 77
+      }
+    },
+    "music-caption-rewriter": {
+      "total_loads": 98,
+      "by_version": {
+        "1.0.0": 98
+      }
+    },
+    "agent-cascade-compression-debugging": {
+      "total_loads": 17,
+      "by_version": {
+        "1.0.0": 17
+      }
+    },
+    "slot-yield-refactor-verification": {
+      "total_loads": 29,
+      "by_version": {
+        "1.0.0": 29
+      }
+    },
+    "chrome-devtools": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
+      }
+    },
+    "startup-error-audit": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
+      }
+    },
+    "zmq-resource-management": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
+      }
+    },
+    "shell-window-suppression": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
+      }
+    },
+    "bug-tracker-entry-format": {
+      "total_loads": 9,
+      "by_version": {
+        "1.0.0": 9
+      }
+    },
+    "refinement-code-review": {
+      "total_loads": 4,
+      "by_version": {
+        "1.0.0": 4
+      }
+    },
+    "code-refinement-audit": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
+      }
+    },
+    "httpx-connection-pooling": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
+      }
+    }
+  }
+}

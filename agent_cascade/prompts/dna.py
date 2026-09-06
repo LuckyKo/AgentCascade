@@ -269,9 +269,7 @@ TOOL_METADATA = {
         'description': (
             'Lists files and subdirectories within a specified directory path. '
             'Supports recursive traversal, glob-based filtering (single or comma-separated patterns), '
-            'file-size and modification-date filters, sorting by name/size/date/type, '
-            'and optional summary statistics. In recursive mode, subdirectories are shown as a tree '
-            'with indentation reflecting depth, and empty directories are marked (empty).'
+            'file-size and modification-date filters, sorting by name/size/date/type. Use filters for quick file search.'
         ),
         'parameters': {
             'path': "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')",

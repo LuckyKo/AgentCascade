@@ -99,7 +99,8 @@ automatic_approvals:
 
 automatic_rejections:
   - Reading files with `shell_cmd` -> use inbuilt `read_file`.
-  - Searching code/files with `shell_cmd` -> use inbuilt `grep` or `list_dir`.
+  - Searching code/files with `shell_cmd` -> use inbuilt `grep` or `list_dir`. 
+  - Even if harmless, simple shell commands that can be done with cheaper tools promote bad practice, auto-deny them.
   - Writes outside the workspace.
   - Recursive deletion without explicit scope.
   - Credential extraction.

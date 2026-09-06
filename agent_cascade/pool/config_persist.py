@@ -62,7 +62,7 @@ class ConfigPersistMixin:
 
                 # Persist llm_cfg tool char limits and grep_spillover to pool_settings.json
                 if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
-                    for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+                    for key in ('tool_result_max_chars', 'wild_read_truncation_chars', 'grep_char_limit', 'grep_spillover',
                                 'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
                                 'max_images_for_llm'):
                         if key in self.llm_cfg:
@@ -157,6 +157,12 @@ class ConfigPersistMixin:
                 val = data.pop('tool_result_max_chars', None)
                 if val is not None:
                     try: self.llm_cfg['tool_result_max_chars'] = int(val)
+                    except (ValueError, TypeError): pass
+
+                # wild_read_truncation_chars
+                val = data.pop('wild_read_truncation_chars', None)
+                if val is not None:
+                    try: self.llm_cfg['wild_read_truncation_chars'] = int(val)
                     except (ValueError, TypeError): pass
 
                 # grep_char_limit

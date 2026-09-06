@@ -165,6 +165,7 @@ RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
 # Used by api_integration.py to propagate tool char limits and image settings.
 POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'tool_result_max_chars',
+    'wild_read_truncation_chars',
     'grep_char_limit',
     'grep_spillover',
     'shell_char_limit',

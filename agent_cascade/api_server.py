@@ -49,7 +49,7 @@ import base64
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_WILD_READ_TRUNCATION_CHARS
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX, msg_field, msg_set
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
@@ -1426,6 +1426,7 @@ if __name__ == "__main__":
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
         # Tool output char limits (defaults from user config)
         'tool_result_max_chars': 25000,
+        'wild_read_truncation_chars': DEFAULT_WILD_READ_TRUNCATION_CHARS,
         'grep_char_limit': 12000,
         'grep_spillover': True,
         'shell_char_limit': 8000,

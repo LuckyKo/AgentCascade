@@ -48,7 +48,7 @@ POOL_SETTINGS_KEYS = frozenset({
     # Cache pool
     'cache_pool_enabled', 'cache_pool_size', 'cache_threshold_chars',
     # Tool char limits (stored in pool.llm_cfg but persisted via pool_settings.json)
-    'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+    'tool_result_max_chars', 'wild_read_truncation_chars', 'grep_char_limit', 'grep_spillover',
     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
     # Image base64 management
     'max_images_for_llm',
@@ -561,6 +561,14 @@ def _handle_tool_result_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agent
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         val = int(ui_cfg.get('tool_result_max_chars', 10000))
         agent_pool.llm_cfg['tool_result_max_chars'] = max(1000, val)
+
+
+@register_config_handler('wild_read_truncation_chars')
+def _handle_wild_read_truncation_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the lower truncation cut for wild reads when the trip threshold is exceeded."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        val = int(ui_cfg.get('wild_read_truncation_chars', 2000))
+        agent_pool.llm_cfg['wild_read_truncation_chars'] = max(500, val)
 
 
 @register_config_handler('grep_char_limit')

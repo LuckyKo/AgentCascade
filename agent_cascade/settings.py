@@ -86,6 +86,10 @@ def _resolve_default_workspace() -> str:
 # Settings for tools
 DEFAULT_WORKSPACE: str = _resolve_default_workspace()
 DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_CHARS', 25000))
+# Lower truncation cut for wild reads (no explicit limit) when the trip threshold
+# (tool_result_max_chars) is exceeded. Content beyond this small window is probably useless,
+# so we hand the agent just enough to see what's there rather than a huge block of it.
+DEFAULT_WILD_READ_TRUNCATION_CHARS: int = int(os.getenv('QWEN_AGENT_WILD_READ_TRUNCATION_CHARS', 2000))
 DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 150))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC_MATCH_THRESHOLD', 0.90))
 
@@ -168,7 +172,7 @@ TOOL_LOOP_DETECTION_ENABLED: bool = os.getenv(
 # Tier 2 (fuzzy) similarity floor: minimum difflib SequenceMatcher.ratio() between
 # consecutive near-duplicate cores for a Layer 2 run to chain. Applies to all tools.
 TOOL_LOOP_SIM_THRESHOLD: float = float(os.getenv(
-    'QWEN_AGENT_TOOL_LOOP_SIM_THRESHOLD', '0.85'))  # Default 0.85 (unchanged behavior unless opted in)
+    'QWEN_AGENT_TOOL_LOOP_SIM_THRESHOLD', '0.95'))  # Default 0.85 (unchanged behavior unless opted in)
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv(
     'QWEN_AGENT_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
 AGENT_MAX_WORKERS: int = int(os.getenv(

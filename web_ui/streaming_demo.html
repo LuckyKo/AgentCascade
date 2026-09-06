@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentCascade Streaming Render-Cadence Demo</title>
+<!--
+  STREAMING RENDER-CADENCE DEMO (TEST/DEMO ONLY — does not modify production code)
+
+  This page loads the REAL web_ui/app.js (the same file production uses) with its
+  required DOM present, then drives the real handleServerMessage() with the four
+  arrival patterns using REAL performance.now() timing so the stream plays out in
+  real time. It LIVE-updates the real chat bubble + thinking block exactly as
+  production would, and shows a live "updates arrived vs renders fired" bar chart
+  plus running counters (N updates / R renders / max render gap).
+
+  Open by double-clicking this file (file://) or:
+      cd N:\work\WD\AgentCascade\web_ui && python -m http.server 8000
+      → http://localhost:8000/streaming_demo.html
+
+  NOTE: app.js calls connect() at load, which opens a WebSocket to /ws/chat. On
+  file:// (or with no backend) that connection simply fails and the status shows
+  "Disconnected — reconnecting...". That is EXPECTED and harmless here: we drive
+  handleServerMessage() directly, not through the socket. No console errors should
+  appear from app.js itself; only the benign WebSocket failure.
+
+  Dependency-free: vanilla JS + inline CSS/SVG. No npm, no build step.
+-->
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2330; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --green: #3fb950;
+    --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; color: var(--accent); }
+
+  /* Control panel */
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  label { font-size: 13px; color: var(--muted); }
+  select, button, input[type=range] { background: var(--panel2); color: var(--text);
+        border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 13px; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; cursor: pointer; font-weight: 600; }
+  button.primary:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; }
+  .counters { display: flex; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
+  .stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; min-width: 90px; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .stat .v { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .stat.updates .v { color: var(--accent); }
+  .stat.renders .v { color: var(--green); }
+  .stat.gap .v { color: var(--yellow); }
+  .stat.ratio .v { color: var(--purple); }
+
+  /* Chart */
+  .chart-box { width: 100%; height: 150px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+
+  /* Chat area — the REAL app.js renders into #mainTabPanels */
+  .chat { min-height: 320px; max-height: 460px; overflow-y: auto; background: var(--panel2);
+          border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  /* Minimal styling so the real app.js message/thinking markup is readable. */
+  .chat .msg { margin-bottom: 10px; }
+  .chat .msg-role { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; }
+  .chat .msg-content { white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+  .chat .thinking-block { border-left: 3px solid var(--purple); background: rgba(188,140,255,.06);
+        padding: 6px 10px; margin-bottom: 8px; border-radius: 0 6px 6px 0; }
+  .chat .thinking-block summary { cursor: pointer; color: var(--purple); font-size: 12px; user-select: none; }
+  .chat .thinking-content { font-size: 12px; color: #c9b8ff; white-space: pre-wrap; margin-top: 6px; max-height: 200px; overflow-y: auto; }
+
+  /* app.js grabs these at module load — must exist or top-level code throws. */
+  .hidden-dom { display: none !important; }
+
+  .verdict { margin-top: 14px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .verdict b { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>AgentCascade — Streaming Render-Cadence Demo</h1>
+  <div class="sub">Loads the <b>real</b> web_ui/app.js and drives the real <code>handleServerMessage()</code> with real timing. Watch whether a smooth stream renders incrementally or collapses into a blob.</div>
+
+  <!-- ══ DOM that app.js requires at module load (hidden) ═══════════════════ -->
+  <!-- These are grabbed via $('#id') / querySelector at the top of app.js and in
+       connect(). They must exist so app.js loads without throwing. The demo
+       drives handleServerMessage directly, so most stay hidden/unused. -->
+  <div class="hidden-dom" id="appjs-required-dom">
+    <select id="agentSelect"></select>
+    <input type="text" id="sessionName" value="Maine">
+    <button id="resetBtn"></button>
+    <div class="main-tab-bar" id="mainTabBar"></div>
+    <div class="approval-bar" id="approvalBar" style="display:none;"></div>
+    <div class="main-activity-bar" id="globalActivityBar">
+      <div id="globalActivityFifo"></div>
+      <div id="globalActivityQueued"></div>
+    </div>
+    <textarea id="chatInput" rows="1"></textarea>
+    <button id="sendBtn"></button>
+    <button id="continueBtn"></button>
+    <span class="status-text" id="statusText"></span>
+    <span id="connectionDot"></span>
+    <span id="status-save"></span>
+    <span id="status-words">0 words</span>
+    <span id="status-tokens">0 tokens</span>
+    <span id="status-model">Orchestrator</span>
+  </div>
+
+  <!-- ══ VISIBLE chat area — the REAL app.js renders sub-agent panels here ═══ -->
+  <!-- app.js assigns mainTabPanels = document.querySelector('.main-tab-panels') at load.
+       We give it a visible container so renderSubAgents() paints real markup. -->
+  <div class="grid">
+    <div class="card">
+      <h2>Live chat (real app.js output)</h2>
+      <div class="main-tab-panels" id="livePanels"></div>
+    </div>
+
+    <div class="card">
+      <h2>Control panel</h2>
+      <div class="row">
+        <label for="scenario">Scenario</label>
+        <select id="scenario">
+          <option value="incremental">incremental (smooth ~40ms)</option>
+          <option value="all-burst">all-burst (single blob at end)</option>
+          <option value="chunked">chunked (4 big batches ~600ms)</option>
+          <option value="single-reasoning-blob">single-reasoning-blob</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="speed">Speed</label>
+        <input type="range" id="speed" min="0.25" max="3" step="0.25" value="1">
+        <span id="speedLabel">1×</span>
+      </div>
+      <div class="row">
+        <button class="primary" id="runBtn">▶ Run</button>
+        <button class="ghost" id="resetDemoBtn">Reset</button>
+      </div>
+      <div class="counters">
+        <div class="stat updates"><div class="k">Updates N</div><div class="v" id="cUpd">0</div></div>
+        <div class="stat renders"><div class="k">Renders R</div><div class="v" id="cRnd">0</div></div>
+        <div class="stat gap"><div class="k">Max render gap</div><div class="v" id="cGap">—</div></div>
+        <div class="stat ratio"><div class="k">Collapse N:R</div><div class="v" id="cRatio">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <h2>Timeline — updates arrived vs renders fired</h2>
+    <div class="chart-box"><svg id="timeline" width="100%" height="150" preserveAspectRatio="none"></svg></div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--accent)"></span>update arrived (N)</span>
+      <span><span class="dot" style="background:var(--green)"></span>render fired (R)</span>
+    </div>
+    <div class="verdict" id="verdict">Pick a scenario and press ▶ Run. The blue ticks are every stream_update the backend would send; the green ticks are every time renderSubAgents() actually painted. A big gap between green ticks = a perceived freeze.</div>
+  </div>
+</div>
+
+<!-- ── Minimal offline shims for marked + hljs ────────────────────────────────
+     index.html loads these from a CDN. To keep this demo dependency-free and
+     working over file:// (offline), we provide tiny stand-ins BEFORE app.js loads.
+     app.js calls `marked.setOptions(...)` at module load, so `marked` must exist.
+     renderMarkdown() uses marked.parse + DOMPurify.sanitize; our shim returns the
+     raw text as escaped <pre> blocks — enough for the demo's thinking/content to
+     display readably. This does NOT modify app.js or any production file. -->
+<script>
+  (function () {
+    function esc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    window.marked = {
+      setOptions: function () { /* no-op */ },
+      parse: function (text) { return '<pre style="white-space:pre-wrap">' + esc(text) + '</pre>'; },
+    };
+    window.hljs = {
+      getLanguage: function () { return null; },
+      highlight: function (code) { return { value: esc(code) }; },
+      highlightAuto: function (code) { return { value: esc(code) }; },
+    };
+    // DOMPurify is optional in app.js (guarded by typeof check). Provide a pass-through
+    // so renderMarkdown's sanitize step works.
+    window.DOMPurify = { setConfig: function () {}, sanitize: function (html) { return html; } };
+  })();
+</script>
+
+<!-- Load the REAL production app.js (same file as index.html). -->
+<script src="app.js"></script>
+
+<script>
+// ── Demo driver: feed real handleServerMessage with real timing ───────────────
+(function () {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const sessionName = 'Maine'; // must match state.sessionName (localStorage default)
+
+  // Reasoning/content token generators (same spirit as the Node test).
+  const R = (i) => 'reasoning-token-' + i + '-'.repeat((i % 5) + 1);
+  const C = (i) => 'answer-word-' + i + ' ';
+
+  // Build a real-shaped stream_update payload (matches build_stream_update_from_pool).
+  function makeUpdate({ reasoning, content, historyCount, isPartial }) {
+    return {
+      type: 'stream_update',
+      agent_instances: {
+        [sessionName]: {
+          messages: [
+            { role: 'user', content: 'Explain how the adaptive render throttle works.' },
+            { role: 'assistant', content: '', reasoning_content: 'seed-reasoning-baseline '.repeat(20).trim(), name: sessionName },
+            { role: 'assistant', content: content, reasoning_content: reasoning, name: sessionName },
+          ],
+          history_count: historyCount,
+          is_partial: isPartial,
+          active: true,
+          agent_class: 'orchestrator',
+          agent_state: 'RUNNING',
+        },
+      },
+      active_stack: [],           // empty → root/primary path (root throttle)
+      pool_settings: {},
+      total_tokens: 1234,
+      current_model: 'demo-model',
+      paused: false,
+      approvals: [],
+    };
+  }
+
+  // Build the step list for a scenario: [{delayMs, payload}]. Delays are the REAL
+  // wall-clock gaps between updates (scaled by the speed control at run time).
+  function buildSteps(kind) {
+    const steps = [];
+    let reasoning = '', content = '';
+    if (kind === 'incremental') {
+      for (let i = 1; i <= 45; i++) { reasoning += R(i); steps.push({ delayMs: 40, p: makeUpdate({ reasoning, content: '', historyCount: 3, isPartial: true }) }); }
+      for (let i = 1; i <= 4; i++)  { content += C(i);    steps.push({ delayMs: 40, p: makeUpdate({ reasoning, content, historyCount: 3, isPartial: true }) }); }
+    } else if (kind === 'all-burst') {
+      steps.push({ delayMs: 1200, p: makeUpdate({ reasoning: '', content: '', historyCount: 3, isPartial: true }) }); // tiny early tick
+      for (let i = 1; i <= 45; i++) reasoning += R(i);
+      for (let i = 1; i <= 4; i++)  content += C(i);
+      steps.push({ delayMs: 0, p: makeUpdate({ reasoning, content, historyCount: 3, isPartial: false }) }); // one big blob at end
+    } else if (kind === 'chunked') {
+      for (let b = 1; b <= 4; b++) {
+        for (let i = 0; i < 12; i++) reasoning += R(b * 12 + i);
+        steps.push({ delayMs: 600, p: makeUpdate({ reasoning, content: '', historyCount: 3, isPartial: true }) });
+      }
+      for (let i = 1; i <= 4; i++) content += C(i);
+      steps.push({ delayMs: 200, p: makeUpdate({ reasoning, content, historyCount: 3, isPartial: false }) });
+    } else if (kind === 'single-reasoning-blob') {
+      for (let i = 1; i <= 45; i++) reasoning += R(i);
+      steps.push({ delayMs: 600, p: makeUpdate({ reasoning, content: '', historyCount: 3, isPartial: true }) }); // one big reasoning blob
+      for (let i = 1; i <= 4; i++) content += C(i);
+      steps.push({ delayMs: 400, p: makeUpdate({ reasoning, content, historyCount: 3, isPartial: false }) });
+    }
+    return steps;
+  }
+
+  // ── Instrument renderSubAgents to count fires + record timing ──────────────
+  // Wrap the REAL renderSubAgents (already loaded by app.js). We must wrap it in a
+  // way that the internal call site inside handleServerMessage still hits our wrapper.
+  // app.js declares `function renderSubAgents(){...}` at top level → it's a global,
+  // so reassigning window.renderSubAgents works for subsequent calls.
+  const origRender = window.renderSubAgents;
+  let renderTimes = [];   // performance.now() of each fire
+  let updateTimes = [];   // performance.now() of each update fed
+  let running = false;
+
+  window.renderSubAgents = function instrumented() {
+    renderTimes.push(performance.now());
+    drawChart();
+    updateCounters();
+    return origRender.apply(this, arguments);
+  };
+
+  // ── Counters + verdict ──────────────────────────────────────────────────────
+  function maxGap(times) {
+    let m = 0;
+    for (let i = 1; i < times.length; i++) m = Math.max(m, times[i] - times[i - 1]);
+    return m;
+  }
+  function updateCounters() {
+    $('cUpd').textContent = updateTimes.length;
+    $('cRnd').textContent = renderTimes.length;
+    const g = maxGap(renderTimes);
+    $('cGap').textContent = renderTimes.length > 1 ? Math.round(g) + ' ms' : (renderTimes.length === 1 ? '0 ms' : '—');
+    $('cRatio').textContent = updateTimes.length && renderTimes.length
+      ? (updateTimes.length / renderTimes.length).toFixed(1) + ':1' : '—';
+  }
+
+  // ── SVG timeline: blue ticks = updates, green ticks = renders ───────────────
+  function drawChart() {
+    const svg = $('timeline');
+    const all = [...updateTimes.map(t => ({ t, kind: 'u' })), ...renderTimes.map(t => ({ t, kind: 'r' }))];
+    if (!all.length) { svg.innerHTML = ''; return; }
+    const W = 1000, H = 150, pad = 8;
+    const t0 = Math.min(...all.map(e => e.t));
+    const t1 = Math.max(...all.map(e => e.t)) || (t0 + 1);
+    const span = Math.max(1, t1 - t0);
+    const x = (t) => pad + ((t - t0) / span) * (W - 2 * pad);
+    let bars = '';
+    // updates: thin blue ticks along the bottom
+    for (const t of updateTimes) {
+      const xx = x(t).toFixed(1);
+      bars += `<line x1="${xx}" y1="${H - 4}" x2="${xx}" y2="${H - 26}" stroke="#58a6ff" stroke-width="1.5"/>`;
+    }
+    // renders: taller green ticks from the top, with a connecting "freeze" band
+    let prevX = null;
+    for (const t of renderTimes) {
+      const xx = x(t).toFixed(1);
+      bars += `<line x1="${xx}" y1="6" x2="${xx}" y2="${H - 4}" stroke="#3fb950" stroke-width="2"/>`;
+      if (prevX !== null) {
+        const gapMs = renderTimes[renderTimes.indexOf(t)] - renderTimes[renderTimes.indexOf(t) - 1];
+        // shade the inter-render window; reddish when it's a long freeze (>150ms)
+        const color = gapMs > 150 ? 'rgba(248,81,73,.18)' : 'rgba(63,185,80,.10)';
+        bars += `<rect x="${prevX}" y="6" width="${(xx - prevX).toFixed(1)}" height="${H - 10}" fill="${color}"/>`;
+      }
+      prevX = xx;
+    }
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.innerHTML = bars;
+  }
+
+  // ── Run a scenario with real timing ────────────────────────────────────────
+  function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+  async function run() {
+    if (running) return;
+    running = true;
+    $('runBtn').disabled = true;
+    renderTimes = []; updateTimes = [];
+    $('cUpd').textContent = '0'; $('cRnd').textContent = '0';
+    $('cGap').textContent = '—'; $('cRatio').textContent = '—';
+    $('livePanels').innerHTML = '';   // clear real panels for a clean run
+    drawChart();
+
+    const kind = $('scenario').value;
+    const speed = parseFloat($('speed').value);
+    const steps = buildSteps(kind);
+    const tStart = performance.now();
+
+    for (const step of steps) {
+      await sleep(step.delayMs / speed);
+      updateTimes.push(performance.now());
+      try {
+        handleServerMessage(step.p);   // REAL app.js handler
+      } catch (e) {
+        console.error('handleServerMessage error:', e);
+      }
+    }
+
+    // Small settle delay so the final render is counted, then summarize.
+    await sleep(300 / speed);
+    const n = updateTimes.length, r = renderTimes.length;
+    const gap = Math.round(maxGap(renderTimes));
+    $('verdict').innerHTML =
+      `<b>${kind}</b>: <b>${n}</b> updates → <b>${r}</b> renders (collapse ratio ≈ ${(n / Math.max(1, r)).toFixed(1)}:1), ` +
+      `max render gap <b>${gap} ms</b>. ` +
+      (r > 1 && gap < 120
+        ? 'The stream rendered incrementally — no perceived freeze. The visible-agent content-change bypass is keeping paint cadence in lockstep with updates.'
+        : r <= 1
+          ? 'Only one render fired — the whole thing appeared as a single blob (backend sent it as one accumulated message).'
+          : `Rendered in bursts; the longest gap between paints was ${gap} ms, which is the perceived freeze window.`);
+    running = false;
+    $('runBtn').disabled = false;
+  }
+
+  function resetDemo() {
+    renderTimes = []; updateTimes = [];
+    $('cUpd').textContent = '0'; $('cRnd').textContent = '0';
+    $('cGap').textContent = '—'; $('cRatio').textContent = '—';
+    drawChart();
+    $('verdict').textContent = 'Reset. Pick a scenario and press ▶ Run.';
+  }
+
+  $('runBtn').addEventListener('click', run);
+  $('resetDemoBtn').addEventListener('click', resetDemo);
+  $('speed').addEventListener('input', (e) => { $('speedLabel').textContent = e.target.value + '×'; });
+
+  // Show the app.js load status so the user can confirm it loaded without errors.
+  window.addEventListener('load', () => {
+    const ok = typeof handleServerMessage === 'function' && typeof window.renderSubAgents === 'function';
+    console.log('[demo] app.js loaded:', ok ? 'OK (handleServerMessage + renderSubAgents present)' : 'FAILED');
+  });
+})();
+</script>
+</body>
+</html>
