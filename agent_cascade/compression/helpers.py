@@ -378,19 +378,76 @@ def compute_discard_count(active_set, fraction, force):
     return discard
 
 
-def build_marker_message(summary_text, fraction):
+def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
+    """Build the compression marker header from a timestamp interval + duration.
+
+    Renders as ``"{start} → {end}, {duration}"`` using full local date+time
+    (e.g. ``"2026-09-06 10:14 → 2026-09-07 08:30, 22h 16m"``). The duration is
+    formatted adaptively so it stays short and easy to parse:
+      - < 60s        -> ``"45s"``
+      - < 3600s      -> ``"48m"`` (whole minutes; falls back to seconds if 0)
+      - < 86400s     -> ``"1h 12m"``
+      - >= 86400s    -> ``"2d 3h 16m"`` (days included when present)
+
+    If either timestamp is missing/None, falls back to a neutral
+    ``"{n_messages} messages summarized"`` header so the marker still renders.
+
+    Args:
+        start_ts: Earliest completion timestamp (unix seconds) in the window.
+        end_ts: Latest completion timestamp (unix seconds) in the window.
+        n_messages: Number of compressed messages (used only for the fallback).
+
+    Returns:
+        The header string to embed in the marker template's ``{header}`` slot.
+    """
+    if start_ts is None or end_ts is None:
+        return f"{n_messages} messages summarized"
+
+    try:
+        from datetime import datetime
+        start_str = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M")
+        end_str = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, OverflowError, OSError):
+        return f"{n_messages} messages summarized"
+
+    duration = int(round(max(0.0, float(end_ts) - float(start_ts))))
+    if duration < 60:
+        dur_str = f"{duration}s"
+    elif duration < 3600:
+        minutes = duration // 60
+        dur_str = f"{minutes}m" if minutes > 0 else f"{duration}s"
+    elif duration < 86400:
+        hours, seconds = divmod(duration, 3600)
+        minutes = seconds // 60
+        dur_str = f"{hours}h {minutes}m"
+    else:
+        days, rem = divmod(duration, 86400)
+        hours, seconds = divmod(rem, 3600)
+        minutes = seconds // 60
+        dur_str = f"{days}d {hours}h {minutes}m"
+
+    return f"{start_str} → {end_str}, {dur_str}"
+
+
+def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0):
     """
     Wrap a raw summary in the COMPRESSION_BASELINE_TEMPLATE to create a marker message.
 
+    The header shows the timestamp interval (first → last message compressed) plus
+    an adaptive duration, e.g. ``"2026-09-06 10:14 → 2026-09-07 08:30, 22h 16m"``.
+    When no timestamps are available it falls back to a neutral
+    ``"{n_messages} messages summarized"`` header.
+
     Args:
         summary_text: The raw summary text (before template wrapping).
-        fraction: Fraction of history that was discarded (e.g., 0.5 for 50%).
+        first_ts: Earliest completion timestamp (unix seconds) in the compressed window.
+        last_ts: Latest completion timestamp (unix seconds) in the compressed window.
+        n_messages: Number of messages compressed (used for the no-timestamp fallback).
 
     Returns:
         A Message object (USER role) with the formatted compression marker.
     """
-    pct = int(fraction * 100)
-    header = f"{pct}% of history summarized"
+    header = _format_timestamp_interval(first_ts, last_ts, n_messages)
 
     content = COMPRESSION_BASELINE_TEMPLATE.format(
         header=header,

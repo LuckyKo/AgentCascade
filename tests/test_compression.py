@@ -153,52 +153,61 @@ class TestComputeDiscardCount:
 class TestBuildMarkerMessage:
     """Test marker message construction.
 
-    Current signature: build_marker_message(summary_text, fraction)
-    where fraction is a float (e.g., 0.5 for 50%).
+    Current signature: build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0).
+    The header shows a timestamp interval + adaptive duration, falling back to a neutral
+    "N messages summarized" header when no timestamps are available.
     """
 
     def test_returns_message_object(self):
         """build_marker_message returns a Message with role=USER."""
-        msg = build_marker_message("test summary", 0.5)
+        msg = build_marker_message("test summary")
         assert isinstance(msg, Message)
         assert msg.role == USER
 
     def test_contains_compression_marker(self):
         """Marker message content starts with COMPRESSION_MARKER."""
-        msg = build_marker_message("test summary", 0.6)
+        msg = build_marker_message("test summary", first_ts=1000.0, last_ts=2000.0)
         assert msg.content.startswith(COMPRESSION_MARKER)
 
     def test_contains_summary_text(self):
         """Marker message includes the raw summary text."""
         summary = "The agent was building a web app"
-        msg = build_marker_message(summary, 0.5)
+        msg = build_marker_message(summary, first_ts=1000.0, last_ts=2000.0)
         assert summary in msg.content
 
-    def test_contains_fraction_header(self):
-        """Marker message includes the compression fraction in the header."""
-        msg = build_marker_message("summary", 0.75)
-        assert "75% of history summarized" in msg.content
+    def test_timestamp_interval_header(self):
+        """Marker header shows the full date+time interval with an arrow."""
+        import datetime
+        start = datetime.datetime(2026, 9, 6, 10, 14).timestamp()
+        end = datetime.datetime(2026, 9, 6, 10, 30).timestamp()
+        msg = build_marker_message("summary", first_ts=start, last_ts=end)
+        assert "2026-09-06 10:14 → 2026-09-06 10:30" in msg.content
 
-    def test_small_fraction_rounds_correctly(self):
-        """Fraction is converted to integer percent without decimals."""
-        msg = build_marker_message("summary", 0.33)
-        assert "33% of history summarized" in msg.content
+    def test_duration_minutes(self):
+        """Duration under an hour renders as whole minutes."""
+        import datetime
+        start = datetime.datetime(2026, 9, 6, 10, 14).timestamp()
+        end = start + 48 * 60  # 48 minutes
+        msg = build_marker_message("summary", first_ts=start, last_ts=end)
+        assert "48m" in msg.content
 
     def test_full_template_format(self):
         """Marker message matches the expected template structure."""
         summary = "Test summary"
-        msg = build_marker_message(summary, 0.5)
-        assert "--- CONTEXT COMPRESSED (50% of history summarized) ---" in msg.content
+        import datetime
+        start = datetime.datetime(2026, 9, 6, 10, 14).timestamp()
+        end = datetime.datetime(2026, 9, 7, 8, 30).timestamp()
+        msg = build_marker_message(summary, first_ts=start, last_ts=end)
+        assert "--- CONTEXT COMPRESSED (" in msg.content
+        assert ") ---" in msg.content
         assert "<context_summary>" in msg.content
         assert "</context_summary>" in msg.content
         assert summary in msg.content
 
-    def test_invalid_fraction_is_handled(self):
-        """Fraction > 1.0 produces a percentage > 100% (no ValueError, just unusual output)."""
-        # The function doesn't validate fraction — it just formats it as a percentage.
-        # A fraction of 2.0 would produce "200% of history summarized".
-        msg = build_marker_message("summary", 2.0)
-        assert "200% of history summarized" in msg.content
+    def test_no_timestamp_fallback(self):
+        """Missing timestamps produce a neutral 'N messages summarized' header (no crash)."""
+        msg = build_marker_message("summary", n_messages=5)
+        assert "5 messages summarized" in msg.content
 
 
 # ──────────────────────────────────────────────

@@ -669,7 +669,7 @@ class TestCrashRecovery:
             _msg(ASSISTANT, "Reply 1"),
         ]
 
-        marker_content = build_marker_message("Summary of events", 0.5)
+        marker_content = build_marker_message("Summary of events")
         messages.append(marker_content)
         messages.extend([
             _msg(USER, "Tail user"),
@@ -784,7 +784,7 @@ class TestTailSyncVerification:
             pool_tail_msgs.pop()  # Remove one tail msg to create deficit
 
         jsonl_msgs = list(original_conv[:3])  # [SYS][U0][A0] — before compression cut
-        marker_content = build_marker_message("Summary", 0.5)
+        marker_content = build_marker_message("Summary")
         jsonl_msgs.append(marker_content)
         jsonl_msgs.extend(pool_tail_msgs)
 
@@ -979,7 +979,7 @@ class TestEdgeCases:
 
     def test_marker_role_is_user(self):
         """Compression markers must have role=USER."""
-        marker = build_marker_message("Summary text", 0.5)
+        marker = build_marker_message("Summary text")
         assert marker.role == USER, f"Marker role should be USER, got {marker.role}"
         content = marker.content
         assert COMPRESSION_MARKER in content, "Marker content missing COMPRESSION_MARKER prefix"
@@ -1120,7 +1120,7 @@ class TestTailSyncModule:
         conv = [
             _msg(SYSTEM, "System"),
             _msg(USER, "U0"),
-            build_marker_message("Summary", 0.5),
+            build_marker_message("Summary"),
             _msg(USER, "Tail 1"),
             _msg(ASSISTANT, "Tail 2"),
             _msg(USER, "Tail 3"),
@@ -1153,7 +1153,7 @@ class TestTailSyncModule:
                 _msg(SYSTEM, "System"),
                 _msg(USER, "U0"),
                 _msg(ASSISTANT, "A0"),
-                build_marker_message("Summary", 0.5),
+                build_marker_message("Summary"),
                 _msg(USER, "Tail 1"),
                 _msg(ASSISTANT, "Tail 2"),
             ]
@@ -1265,7 +1265,7 @@ class TestForwardOnlyRecovery:
                 messages.append(_msg(USER if j % 2 == 0 else ASSISTANT,
                                     f"Cycle {cycle} msg {j}"))
             # Create a marker
-            marker = build_marker_message(f"Summary of cycle {cycle}", 0.5)
+            marker = build_marker_message(f"Summary of cycle {cycle}")
             all_markers_content.append(marker.content)
             messages.append(marker)
 

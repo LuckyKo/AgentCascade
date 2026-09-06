@@ -571,7 +571,28 @@ def compress_context(
     # NOTE: the marker body contains ONLY the clean summary — the caption is parsed out
     # of the compressor output above and must NEVER leak into this <context_summary>
     # body (it would otherwise re-enter model context on future turns).
-    marker_message = build_marker_message(generated_summary, fraction)
+    # Extract the timestamp interval from the compressed window for the header.
+    # Non-fatal: any failure falls back to a neutral "N messages summarized" header.
+    try:
+        _ts_list = []
+        for _msg in target_messages:
+            _ts = (
+                (_msg.get('ts') if isinstance(_msg, dict) else getattr(_msg, 'ts', None))
+            )
+            if _ts is not None:
+                _ts_list.append(float(_ts))
+        first_ts = min(_ts_list) if _ts_list else None
+        last_ts = max(_ts_list) if _ts_list else None
+    except Exception as e:
+        logger.debug(f"Timestamp extraction for marker header failed (non-fatal): {e}")
+        first_ts, last_ts = None, None
+
+    marker_message = build_marker_message(
+        generated_summary,
+        first_ts=first_ts,
+        last_ts=last_ts,
+        n_messages=len(target_messages),
+    )
 
     # ── 9b. Persist the session caption to log metadata (first meaningful one wins) ──
     # In-memory only: set_caption() updates data["metadata"]["caption"] and the existing

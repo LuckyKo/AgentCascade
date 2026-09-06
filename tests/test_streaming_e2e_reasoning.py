@@ -233,7 +233,7 @@ def _build_synthetic_session_log(dest: Path) -> Path:
     # A compression marker so the working-set builder takes the [SYS][U0][markers][tail] branch.
     _line(
         "user",
-        "--- CONTEXT COMPRESSED (70% of history summarized) ---\n<context_summary>\n"
+        "--- CONTEXT COMPRESSED (2026-09-06 10:14 → 2026-09-06 11:02, 48m) ---\n<context_summary>\n"
         "- Prior investigation of the streaming pipeline.\n- Confirmed backend path healthy.\n"
         "</context_summary>",
     )
