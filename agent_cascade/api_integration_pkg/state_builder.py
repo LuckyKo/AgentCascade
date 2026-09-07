@@ -39,10 +39,8 @@ from agent_cascade.settings import (
     STREAM_DELTA_TAIL_COMMITTED,
 )
 
-# Additive/delta streaming. When enabled (default ON), partial (streaming) frames send only a
-# small safe tail instead of the full committed history; force_full / connect-time frames stay
-# full. Defined in agent_cascade/settings.py and overridable via AGENT_CASCADE_STREAM_DELTA.
-# TAIL_COMMITTED is aliased to STREAM_DELTA_TAIL_COMMITTED for backward compatibility.
+# Delta-streaming flags live in agent_cascade.settings (default ON, overridable via
+# AGENT_CASCADE_STREAM_DELTA). TAIL_COMMITTED is kept as the internal name used below.
 TAIL_COMMITTED = STREAM_DELTA_TAIL_COMMITTED
 
 def _serialize_loop_settings(ps):

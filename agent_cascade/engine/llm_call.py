@@ -62,6 +62,15 @@ _FUZZY_WARNING_TEMPLATE = (
     "otherwise verify preconditions or use a different tool/approach before retrying."
 )
 
+# ── Streaming UI update throttle (burst-aware) ───────────────────────────────
+#: Time floor between _streaming_responses refreshes. Time alone fails during GPU
+#: bursts after prefill, so it is OR-ed with the chunk/char volume thresholds below.
+STREAM_UPDATE_MIN_INTERVAL_SEC = 0.1
+#: Refresh when this many provider chunks have accumulated since the last update.
+STREAM_UPDATE_MAX_CHUNKS = 25
+#: Refresh when this many characters of new text have accumulated since the last update.
+STREAM_UPDATE_MAX_CHARS = 150
+
 from agent_cascade.engine.compression_exec import (
     FALLBACK_COMPRESSION_MAX_ROUNDS,
     FALLBACK_COMPRESSION_MIN_SLICE_FRACTION,
@@ -718,13 +727,13 @@ class LLMCallMixin:
 
                         _chunks_since_last_update += 1
 
-                        # Update _streaming_responses every ~100ms with deep copy
-                        # of partial content, or on rapid bursts (every 25 chunks or 150 chars)
+                        # Update _streaming_responses on a time floor OR on rapid bursts
+                        # (chunk/char volume thresholds), whichever comes first.
                         current_time = time.monotonic()
                         should_update = (
-                            (current_time - last_streaming_update_time >= 0.1)
-                            or (_chunks_since_last_update >= 25)
-                            or (_chars_since_last_update >= 150)
+                            (current_time - last_streaming_update_time >= STREAM_UPDATE_MIN_INTERVAL_SEC)
+                            or (_chunks_since_last_update >= STREAM_UPDATE_MAX_CHUNKS)
+                            or (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS)
                         )
                         if should_update:
                             with instance._compression_lock:
