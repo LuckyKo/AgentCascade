@@ -72,21 +72,23 @@ def _msg_with_image(image='media/a.png'):
     return Message(role=USER, content=[ContentItem(image=image), ContentItem(text="look")])
 
 
+def _vision_endpoint(router, api_base="http://v:8080/v1", model="vision-model"):
+    """Register a vision-capable endpoint on the router and return it."""
+    ep = APIEndpoint(name="vision", api_base=api_base, model=model, vision_enabled=True)
+    router.add_endpoint(ep)
+    return ep
+
+
 # ── 1. Mode gating in caption_images() ────────────────────────────────────────
 
 class TestCaptionModeGating:
     """Exercise the auto/always/off gate at the top of caption_images()."""
 
-    def _vision_endpoint(self, router, api_base="http://v:8080/v1", model="vision-model"):
-        ep = APIEndpoint(name="vision", api_base=api_base, model=model, vision_enabled=True)
-        router.add_endpoint(ep)
-        return ep
-
     def test_always_captions_even_when_active_endpoint_is_vision(self):
         """always: caption fires even though the active endpoint already has vision."""
         pool = _make_pool(mode='always', instance=_instance_with_endpoint("http://v:8080/v1", "vision-model"))
         router = _make_router(pool)
-        self._vision_endpoint(router)
+        _vision_endpoint(router)
 
         messages = [_msg_with_image()]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
@@ -105,7 +107,7 @@ class TestCaptionModeGating:
         """auto + vision-capable active endpoint: NO caption call, messages unchanged."""
         pool = _make_pool(mode='auto', instance=_instance_with_endpoint("http://v:8080/v1", "vision-model"))
         router = _make_router(pool)
-        self._vision_endpoint(router)
+        _vision_endpoint(router)
 
         messages = [_msg_with_image()]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
@@ -124,7 +126,7 @@ class TestCaptionModeGating:
         pool = _make_pool(mode='auto', instance=_instance_with_endpoint("http://t:8080/v1", "text-model"))
         router = _make_router(pool)
         router.add_endpoint(APIEndpoint(name="text", api_base="http://t:8080/v1", model="text-model", vision_enabled=False))
-        self._vision_endpoint(router, api_base="http://v:8080/v1", model="vision-model")
+        _vision_endpoint(router, api_base="http://v:8080/v1", model="vision-model")
 
         # msg A: image with a placeholder '[Image]' caption (should be re-captioned).
         msg_a = Message(role=USER, content=[ContentItem(image='media/a.png', caption='[Image]')])
@@ -165,7 +167,7 @@ class TestCaptionModeGating:
         # auto + vision active → skip (same as a valid 'auto').
         pool = _make_pool(mode='bogus', instance=_instance_with_endpoint("http://v:8080/v1", "vision-model"))
         router = _make_router(pool)
-        self._vision_endpoint(router)
+        _vision_endpoint(router)
 
         messages = [_msg_with_image()]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
@@ -180,7 +182,7 @@ class TestIsActiveEndpointVision:
     def test_returns_false_for_missing_instance(self):
         pool = _make_pool(mode='auto', instance=None)
         router = _make_router(pool)
-        self._vision_endpoint(router)
+        _vision_endpoint(router)
         assert router._is_active_endpoint_vision('inst1') is False
 
     def test_returns_false_for_missing_last_endpoint_config(self):
@@ -188,7 +190,7 @@ class TestIsActiveEndpointVision:
         inst._last_endpoint_config = None
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
-        self._vision_endpoint(router)
+        _vision_endpoint(router)
         assert router._is_active_endpoint_vision('inst1') is False
 
     def test_returns_false_for_registry_mismatch(self):
@@ -196,7 +198,7 @@ class TestIsActiveEndpointVision:
         inst = _instance_with_endpoint("http://unknown:9999/v1", "ghost-model")
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
-        self._vision_endpoint(router)
+        _vision_endpoint(router)
         assert router._is_active_endpoint_vision('inst1') is False
 
     def test_returns_false_for_disabled_endpoint(self):
@@ -215,7 +217,7 @@ class TestIsActiveEndpointVision:
         inst = _instance_with_endpoint("http://v:8080/v1", "vision-model")
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
-        self._vision_endpoint(router)
+        _vision_endpoint(router)
         assert router._is_active_endpoint_vision('inst1') is True
 
     def test_returns_false_for_matching_text_only_endpoint(self):
@@ -225,12 +227,6 @@ class TestIsActiveEndpointVision:
         router.add_endpoint(APIEndpoint(name="text", api_base="http://t:8080/v1", model="text-model",
                                         vision_enabled=False))
         assert router._is_active_endpoint_vision('inst1') is False
-
-    @staticmethod
-    def _vision_endpoint(router, api_base="http://v:8080/v1", model="vision-model"):
-        ep = APIEndpoint(name="vision", api_base=api_base, model=model, vision_enabled=True)
-        router.add_endpoint(ep)
-        return ep
 
 
 # ── 2. Token estimation for structured image items ────────────────────────────
