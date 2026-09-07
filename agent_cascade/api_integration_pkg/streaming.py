@@ -50,6 +50,7 @@ def _evict_stale_force_full_entries(now_mono: float) -> None:
 # No lock needed: _put_stream_update runs on the event loop thread (single-threaded).
 _qf_last_warn: float = 0.0
 _qf_drop_count: int = 0
+_q_high_watermark_last_warn: float = 0.0
 
 # Last time stale force_full entries were evicted (monotonic)
 _last_force_full_evict_time: float = 0.0
@@ -293,22 +294,83 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
     Emits a rate-limited warning (max once per 5s) when events are dropped
     due to queue saturation, so operators can diagnose stale-UI issues.
     """
-    global _qf_last_warn, _qf_drop_count
+    global _qf_last_warn, _qf_drop_count, _q_high_watermark_last_warn
+    if hasattr(queue, 'maxsize') and queue.maxsize > 0:
+        cur_size = queue.qsize()
+        if cur_size >= int(queue.maxsize * 0.75):
+            now = time.monotonic()
+            if now - _q_high_watermark_last_warn >= 5.0:
+                pct = int((cur_size / queue.maxsize) * 100)
+                logger.warning(
+                    "WS send queue high-watermark reached: %d/%d items buffered (%d%% full). "
+                    "Broadcaster or client connection may be slow.",
+                    cur_size, queue.maxsize, pct,
+                )
+                _q_high_watermark_last_warn = now
+
     try:
         queue.put_nowait(event)  # Synchronous, raises QueueFull if full
     except asyncio.QueueFull:
-        # Rate-limited warning (max once per 5s) so operators can diagnose stale-UI issues.
-        # No lock needed: this runs on the event loop thread (single-threaded context).
         _qf_drop_count += 1
         now = time.monotonic()
+
+        # Self-healing recovery:
+        # Purge stale intermediate stream_update deltas to unclog the queue,
+        # preserving critical structural events (done, dismissal, state, approvals).
+        purged_count = 0
+        purged_instances = set()
+        non_stream_events = []
+        while not queue.empty():
+            try:
+                item = queue.get_nowait()
+                if isinstance(item, dict) and item.get('type') == 'stream_update':
+                    purged_count += 1
+                    inst = item.get('instance')
+                    if inst:
+                        purged_instances.add(inst)
+                else:
+                    non_stream_events.append(item)
+            except asyncio.QueueEmpty:
+                break
+
+        # Re-insert preserved non-stream events (guaranteeing they fit)
+        maxsize = queue.maxsize if hasattr(queue, 'maxsize') and queue.maxsize > 0 else len(non_stream_events) + 1
+        room = maxsize - 1  # reserve 1 slot for the current event
+        if len(non_stream_events) > room:
+            dropped = non_stream_events[:len(non_stream_events) - room]
+            logger.error(
+                "WS send queue recovery: dropped %d oldest structural event(s) to fit preserved events. Types: %s",
+                len(dropped), [e.get('type', '?') if isinstance(e, dict) else type(e).__name__ for e in dropped],
+            )
+            non_stream_events = non_stream_events[len(dropped):]
+
+        for item in non_stream_events:
+            queue.put_nowait(item)
+
+        # Reset force_full timer for any affected instances so the very next broadcast
+        # sends a full authoritative snapshot rather than a broken delta.
+        curr_inst = event.get('instance') if isinstance(event, dict) else None
+        if curr_inst:
+            purged_instances.add(curr_inst)
+
+        for inst in purged_instances:
+            clear_force_full_timer(inst)
+
         if now - _qf_last_warn >= 5.0:
             logger.warning(
-                "WS send queue FULL (maxsize=%d) — dropped %d event(s) in last %.1fs. "
-                "UI may show stale data until next force_full.",
-                queue.maxsize, _qf_drop_count, now - _qf_last_warn,
+                "WS send queue FULL (maxsize=%d) — purged %d stale stream_update delta(s) "
+                "and reset force_full sync for instance(s): %s. UI will resync to latest on next frame.",
+                queue.maxsize, purged_count, list(purged_instances) if purged_instances else 'none',
             )
             _qf_last_warn = now
             _qf_drop_count = 0
+
+        # Try to put current event into the reclaimed queue space
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.error("WS send queue recovery failed: could not re-insert current event (type=%s)",
+                         event.get('type', '?') if isinstance(event, dict) else type(event).__name__)
 
 def broadcast_stream_update(
     pool: AgentPool,

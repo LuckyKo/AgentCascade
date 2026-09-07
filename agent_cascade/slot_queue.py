@@ -186,11 +186,31 @@ class SlotPool:
                 f"[SLOTPOOL] instance={instance_name} pool={self.key} "
                 f"action=acquire-queued waiters={len(self._waiters)}"
             )
+            logger.warning(
+                f"[SLOTPOOL] Slot contention on '{self.key}': agent='{instance_name}' ({agent_class}) "
+                f"queued (position={len(self._waiters)}, waiters={len(self._waiters)}, "
+                f"running={len(self._running)}/{self.capacity}, "
+                f"holders={[h.instance_name for h in self._running.values()]}, timeout={timeout:.0f}s)"
+            )
 
             deadline = ticket.deadline
-            
+            last_wait_warn = ticket.created_at
+            warn_interval = 15.0
+
             while not ticket.cancelled.is_set():
-                remaining = deadline - time.monotonic()
+                now_mono = time.monotonic()
+                if now_mono - last_wait_warn >= warn_interval:
+                    elapsed = now_mono - ticket.created_at
+                    logger.warning(
+                        f"[SLOTPOOL] Agent '{instance_name}' still waiting for slot on '{self.key}' "
+                        f"after {elapsed:.0f}s (waiters={len(self._waiters)}, "
+                        f"running={len(self._running)}/{self.capacity}, "
+                        f"holders={[h.instance_name for h in self._running.values()]})"
+                    )
+                    last_wait_warn = now_mono
+                    warn_interval = min(warn_interval * 2, 60.0)
+
+                remaining = deadline - now_mono
                 
                 if remaining <= 0:
                     _remove_ticket(self, ticket)
@@ -219,6 +239,12 @@ class SlotPool:
                     self._waiters.pop(ticket.ticket_id)
                     holder = _grant(self, instance_name, agent_class, ticket=ticket)
                     ticket.granted.set()
+                    wait_dur = time.monotonic() - ticket.created_at
+                    if wait_dur >= 1.0:
+                        logger.info(
+                            f"[SLOTPOOL] Agent '{instance_name}' acquired slot on '{self.key}' "
+                            f"after {wait_dur:.1f}s wait in queue."
+                        )
                     return _make_release_cb(self, holder)
                 
                 continue

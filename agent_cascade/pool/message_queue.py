@@ -3,8 +3,15 @@ MessageQueueMixin — per-agent message queues and the active execution stack. M
 """
 
 from __future__ import annotations
+import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+_mq_depth_last_warn: float = 0.0
+
+
 class MessageQueueMixin:
     @property
     def _state_lock(self):
@@ -57,12 +64,34 @@ class MessageQueueMixin:
     def send_message(self, from_name: str, to_name: str, text: str):
         """Route a message to an agent."""
         with self._queue_lock:
-            self.message_queues.setdefault(to_name, []).append(text)
+            q = self.message_queues.setdefault(to_name, [])
+            q.append(text)
+            depth = len(q)
+            if depth >= 10 and (depth == 10 or depth % 10 == 0):
+                now_mono = time.monotonic()
+                global _mq_depth_last_warn
+                if now_mono - _mq_depth_last_warn >= 10.0:
+                    logger.warning(
+                        f"[MESSAGE_QUEUE] Instance '{to_name}' message queue depth high: "
+                        f"{depth} messages pending execution (sent from '{from_name}')."
+                    )
+                    _mq_depth_last_warn = now_mono
 
     def enqueue_message(self, instance_name: str, text: str):
         """Push a message into a specific agent's queue (no sender tracking)."""
         with self._queue_lock:
-            self.message_queues.setdefault(instance_name, []).append(text)
+            q = self.message_queues.setdefault(instance_name, [])
+            q.append(text)
+            depth = len(q)
+            if depth >= 10 and (depth == 10 or depth % 10 == 0):
+                now_mono = time.monotonic()
+                global _mq_depth_last_warn
+                if now_mono - _mq_depth_last_warn >= 10.0:
+                    logger.warning(
+                        f"[MESSAGE_QUEUE] Instance '{instance_name}' message queue depth high: "
+                        f"{depth} messages pending execution."
+                    )
+                    _mq_depth_last_warn = now_mono
             self._message_condition.notify_all()  # Wake any __wait callers
         self._mark_activity(instance_name)
 
