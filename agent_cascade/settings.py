@@ -317,6 +317,23 @@ def _parse_stream_tail() -> int:
 
 STREAM_DELTA_TAIL_COMMITTED: int = _parse_stream_tail()
 
+
+def _parse_stream_force_full_interval() -> float:
+    """Defensively parse AGENT_CASCADE_STREAM_FORCE_FULL_INTERVAL; fall back to 60.0 on bad values.
+
+    Seconds between periodic full (force_full) state frames per instance. The full frame is a
+    self-healing safety net that re-syncs the UI if individual delta frames were dropped while
+    the WS send queue was full. Falls back silently (settings.py has no logger).
+    """
+    raw = os.getenv('AGENT_CASCADE_STREAM_FORCE_FULL_INTERVAL', '60')
+    try:
+        return float(str(raw).strip())
+    except (ValueError, TypeError):
+        return 60.0
+
+
+STREAM_FORCE_FULL_INTERVAL: float = _parse_stream_force_full_interval()
+
 # Dismiss thread join timeout (seconds to wait for agent thread to stop cooperatively)
 DISMISS_THREAD_JOIN_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_DISMISS_THREAD_JOIN_TIMEOUT', 2.0))

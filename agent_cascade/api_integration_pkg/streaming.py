@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from agent_cascade.log import logger
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.llm.schema import Message
+from agent_cascade.settings import STREAM_FORCE_FULL_INTERVAL
 from agent_cascade.api_integration_pkg.cache import _cache_mgr, _STREAM_TOKEN_STATS_CACHE_MAXSIZE
 from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
 
@@ -28,7 +29,9 @@ from agent_cascade.api_integration_pkg.state_builder import build_stream_update_
 # ────────────────────────────────────────────────────────────────────────────
 _last_force_full: Dict[str, float] = {}
 _last_force_full_lock = threading.Lock()
-_FORCE_FULL_INTERVAL = 60.0       # Seconds between periodic full frames per instance
+# Seconds between periodic full (force_full) frames per instance — configurable via
+# AGENT_CASCADE_STREAM_FORCE_FULL_INTERVAL (see agent_cascade.settings).
+_FORCE_FULL_INTERVAL = STREAM_FORCE_FULL_INTERVAL
 _FORCE_FULL_STALE_SECS = 300.0    # Evict entries not updated in 5 minutes
 
 def clear_force_full_timer(instance_name: str) -> None:
