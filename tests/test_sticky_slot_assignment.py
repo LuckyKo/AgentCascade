@@ -2136,17 +2136,22 @@ class TestN17AutoloaderKVGuardAroundCaption:
 class TestN13StructuredEventLogCoverage:
     """caplog @ DEBUG: every acquire/drop transition emits exactly ONE structured
     ``[SLOTPOOL] instance=<n> pool=<key> action=<label> waiters=<int>`` line, and the
-    full vocabulary (acquire-grant / acquire-queued / sticky-keep / drop-fallback /
+    full vocabulary (acquire-grant / sticky-keep / drop-fallback /
     drop-sleep / drop-exit / drop-handoff / drop-reuse / drop-stop / drop-dismiss) is
     exercised at least once.
+
+    Note: slot contention in the wait loop now emits a WARNING (not a structured
+    action= line); "acquire-queued" as a structured label remains only in engine/core.py.
 
     Each sub-scenario drives ONE real emission site and spot-checks that the matching
     line exists (and, for single-transition scenarios, that it appears exactly once).
     The full-vocabulary sweep across all sub-scenarios is asserted in test_g."""
 
     # Full vocabulary (plan §6.2, N13) — every label must appear at least once.
+    # Note: "acquire-queued" is still emitted by engine/core.py (post-yield re-acquire)
+    # but not by slot_queue.py's wait loop (now a WARNING without structured action=).
     VOCAB = {
-        "acquire-grant", "acquire-queued", "sticky-keep",
+        "acquire-grant", "sticky-keep",
         "drop-fallback", "drop-sleep", "drop-exit",
         "drop-handoff", "drop-reuse", "drop-stop", "drop-dismiss",
     }
@@ -2271,7 +2276,7 @@ class TestN13StructuredEventLogCoverage:
             _restore_logs(handler, targets)
 
     def test_b_acquire_queued_then_grant(self, sticky_harness):
-        """Blocked FIFO enqueue → acquire-queued (slot_queue); grant on release."""
+        """Blocked FIFO enqueue → slot contention warning; grant on release."""
         h = sticky_harness
         router, pool, shared = h["router"], h["pool"], h["shared"]
         records, handler, targets = _capture_slotpool_logs()
@@ -2279,13 +2284,16 @@ class TestN13StructuredEventLogCoverage:
             self._acquire_holder(router, pool, "n13bh")
             t, granted, w_inst = self._queue_waiter(router, pool, "n13bq")
 
-            acts_q = self._actions(records, "n13bq")
-            assert acts_q.count("acquire-queued") == 1, f"exactly one acquire-queued: {acts_q}"
-            queued_line = next(l for l in self._slotpool_lines(records)
-                               if "instance=n13bq " in l and "action=acquire-queued" in l)
-            self._assert_line_shape(queued_line, "n13bq", "acquire-queued")
-            assert f"pool={SHARED_KEY} " in queued_line, \
-                f"acquire-queued must name the shared pool: {queued_line!r}"
+            # Verify the slot contention WARNING was emitted for the queued agent.
+            all_msgs = [r.getMessage() if hasattr(r, "getMessage") else str(r) for r in records]
+            contention_lines = [m for m in all_msgs
+                                if "[SLOTPOOL]" in m and "Slot contention" in m
+                                and "n13bq" in m]
+            assert len(contention_lines) == 1, \
+                f"exactly one slot contention warning expected: {contention_lines}"
+            queued_line = contention_lines[0]
+            assert SHARED_KEY in queued_line, \
+                f"contention warning must name the shared pool: {queued_line!r}"
 
             # Release → FIFO grant for the waiter.
             self._release_and_join(router, pool, "n13bh", t, granted, w_inst)

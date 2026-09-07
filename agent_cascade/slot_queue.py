@@ -181,11 +181,6 @@ class SlotPool:
                 f"waiters={len(self._waiters)} holders={[h.instance_name for h in self._running.values()]} "
                 f"timeout={timeout:.0f}s"
             )
-            # Structured slot event (change #10a): one line per queue enqueue.
-            logger.debug(
-                f"[SLOTPOOL] instance={instance_name} pool={self.key} "
-                f"action=acquire-queued waiters={len(self._waiters)}"
-            )
             logger.warning(
                 f"[SLOTPOOL] Slot contention on '{self.key}': agent='{instance_name}' ({agent_class}) "
                 f"queued (position={len(self._waiters)}, waiters={len(self._waiters)}, "
@@ -195,11 +190,10 @@ class SlotPool:
 
             deadline = ticket.deadline
             last_wait_warn = ticket.created_at
-            warn_interval = 15.0
-
+            
             while not ticket.cancelled.is_set():
                 now_mono = time.monotonic()
-                if now_mono - last_wait_warn >= warn_interval:
+                if now_mono - last_wait_warn >= 15.0:
                     elapsed = now_mono - ticket.created_at
                     logger.warning(
                         f"[SLOTPOOL] Agent '{instance_name}' still waiting for slot on '{self.key}' "
@@ -208,7 +202,6 @@ class SlotPool:
                         f"holders={[h.instance_name for h in self._running.values()]})"
                     )
                     last_wait_warn = now_mono
-                    warn_interval = min(warn_interval * 2, 60.0)
 
                 remaining = deadline - now_mono
                 

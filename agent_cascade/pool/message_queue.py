@@ -61,21 +61,23 @@ class MessageQueueMixin:
             if 0 <= index < len(self._execution.active_stack):
                 self._execution.active_stack.pop(index)
 
+    def _warn_queue_depth(self, name: str, depth: int, sender: Optional[str] = None):
+        """Rate-limited warning for high message queue depth."""
+        if depth >= 10 and depth % 10 == 0:
+            now_mono = time.monotonic()
+            global _mq_depth_last_warn
+            if now_mono - _mq_depth_last_warn >= 10.0:
+                suffix = f" (from '{sender}')" if sender else ""
+                logger.warning(f"[MESSAGE_QUEUE] Instance '{name}' queue depth high: {depth} pending{suffix}")
+                _mq_depth_last_warn = now_mono
+
     def send_message(self, from_name: str, to_name: str, text: str):
         """Route a message to an agent."""
         with self._queue_lock:
             q = self.message_queues.setdefault(to_name, [])
             q.append(text)
             depth = len(q)
-            if depth >= 10 and (depth == 10 or depth % 10 == 0):
-                now_mono = time.monotonic()
-                global _mq_depth_last_warn
-                if now_mono - _mq_depth_last_warn >= 10.0:
-                    logger.warning(
-                        f"[MESSAGE_QUEUE] Instance '{to_name}' message queue depth high: "
-                        f"{depth} messages pending execution (sent from '{from_name}')."
-                    )
-                    _mq_depth_last_warn = now_mono
+            self._warn_queue_depth(to_name, depth, from_name)
 
     def enqueue_message(self, instance_name: str, text: str):
         """Push a message into a specific agent's queue (no sender tracking)."""
@@ -83,15 +85,7 @@ class MessageQueueMixin:
             q = self.message_queues.setdefault(instance_name, [])
             q.append(text)
             depth = len(q)
-            if depth >= 10 and (depth == 10 or depth % 10 == 0):
-                now_mono = time.monotonic()
-                global _mq_depth_last_warn
-                if now_mono - _mq_depth_last_warn >= 10.0:
-                    logger.warning(
-                        f"[MESSAGE_QUEUE] Instance '{instance_name}' message queue depth high: "
-                        f"{depth} messages pending execution."
-                    )
-                    _mq_depth_last_warn = now_mono
+            self._warn_queue_depth(instance_name, depth)
             self._message_condition.notify_all()  # Wake any __wait callers
         self._mark_activity(instance_name)
 
