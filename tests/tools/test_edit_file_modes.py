@@ -14,7 +14,7 @@ def test_edit_file_modes():
         
         # Test Case 1: Exact Match (Default)
         file_path.write_text("line 1\nline 2\nline 3\n", encoding='utf-8')
-        op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
+        op_mgr._own(file_path.resolve(), "test_agent")
         
         # Exact match edit should succeed
         res = op_mgr.edit_file(
@@ -107,7 +107,7 @@ def test_large_file_performance():
                 lines.append(f"generic_line_{i % 1000}\n")
         
         file_path.write_text("".join(lines), encoding='utf-8')
-        op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
+        op_mgr._own(file_path.resolve(), "test_agent")
         
         # Edit the unique target function with some whitespace discrepancies
         old_content = "def   unique_target_function  (x,  y):\n    return  x  +  y"
@@ -166,7 +166,7 @@ def test_heuristic_indentation_alignment():
             "        y = 2\n",
             encoding='utf-8'
         )
-        op_mgr.file_ownership[str(file_path_py.resolve())] = "test_agent"
+        op_mgr._own(file_path_py.resolve(), "test_agent")
 
         old_content = "def my_func():\n    x = 1\n    y = 2"
         new_content = "def my_func():\n    x = 10\n    y = 20"
@@ -193,7 +193,7 @@ def test_heuristic_indentation_alignment():
             "            x = 1\n",
             encoding='utf-8'
         )
-        op_mgr.file_ownership[str(file_path_single.resolve())] = "test_agent"
+        op_mgr._own(file_path_single.resolve(), "test_agent")
 
         res = op_mgr.edit_file(
             path="single.py",
@@ -213,7 +213,7 @@ def test_heuristic_indentation_alignment():
             "\t\tx = 1\n",
             encoding='utf-8'
         )
-        op_mgr.file_ownership[str(file_path_tabs.resolve())] = "test_agent"
+        op_mgr._own(file_path_tabs.resolve(), "test_agent")
 
         res = op_mgr.edit_file(
             path="tabs.py",
@@ -236,7 +236,7 @@ def test_delete_and_insert_mode():
 
         # ── Test 1: Normal delete+insert ────────────────────────────────
         file_path.write_text("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\n", encoding='utf-8')
-        op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
+        op_mgr._own(file_path.resolve(), "test_agent")
 
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
@@ -490,7 +490,7 @@ def test_re_indent_shift_mode():
             "        baz()\n",      # 8 spaces
             encoding='utf-8'
         )
-        op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
+        op_mgr._own(file_path.resolve(), "test_agent")
 
         res = op_mgr.re_indent(
             path="shift_test.py", agent_name="test_agent",
@@ -655,7 +655,7 @@ def test_delete_and_insert_preserves_whitespace_via_tool_pipeline():
 
         file_path = Path(tmpdir) / "test_indent.py"
         file_path.write_text("class Foo:\n    def bar(self):\n        pass\n", encoding='utf-8')
-        op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
+        op_mgr._own(file_path.resolve(), "test_agent")
 
         # Indented multi-line new_content with leading/trailing whitespace that must be preserved
         indented_code = """\t\tdef baz(self):

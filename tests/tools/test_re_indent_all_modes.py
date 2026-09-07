@@ -30,7 +30,7 @@ class ReIndentTester:
     def _own(self, rel_path):
         """Mark a file as owned by test_agent so no approval is needed."""
         resolved = (Path(self.tmpdir) / rel_path).resolve()
-        self.op_mgr.file_ownership[str(resolved)] = "test_agent"
+        self.op_mgr._own(resolved, "test_agent")
 
     def _write(self, name, content):
         """Write content to a temp file and auto-own it. Return the path object."""
