@@ -12,6 +12,7 @@ Covers:
 
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -94,12 +95,27 @@ def _cleanup_test_artifacts():
         )
 
     def _remove_empty_dir(entry: Path) -> None:
-        """Remove a skill directory if empty after deleting its SKILL.md."""
+        """Remove a skill directory if empty after deleting its SKILL.md.
+
+        Best-effort: on Windows, xdist sibling workers or Defender may briefly
+        hold a lock on the file. Retry with backoff; never raise from cleanup.
+        """
         skill_file = entry / "SKILL.md"
         if skill_file.exists():
-            skill_file.unlink()
-        if not list(entry.iterdir()):
-            entry.rmdir()
+            for attempt in range(3):
+                try:
+                    skill_file.unlink()
+                    break
+                except (PermissionError, OSError):
+                    if attempt < 2:
+                        time.sleep(0.1 * (attempt + 1))
+            else:
+                return  # give up silently; leftover is harmless
+        try:
+            if not list(entry.iterdir()):
+                entry.rmdir()
+        except (PermissionError, OSError):
+            pass
 
     pending_root = Path(".qwen/pending-skills")
     if pending_root.exists():

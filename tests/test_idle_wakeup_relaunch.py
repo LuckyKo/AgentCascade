@@ -339,6 +339,7 @@ class TestAsyncCompletionWiring:
         # deterministic. The fake captures the spawn-attempt args.
         with patch('agent_cascade.utils.wakeup_helpers._drive_instance_run') as mock_drive:
             self._register_and_wait(registry)
+            wait_for(lambda: mock_drive.called)  # bounded wait for background thread to invoke mock
 
         assert not registry.has_pending("Maine")
         # Enqueue happened exactly once with the result.
