@@ -337,6 +337,14 @@
                     <span title="Max images with base64 sent to LLM per request. -1=keep all, N>=0=keep only last N">Max Images for LLM</span>
                     <input type="number" id="setting-max-images-for-llm" min="-1" max="50" value="2" />
                   </label>
+                  <label class="setting-field">
+                    <span title="When to auto-caption images. Auto = skip if the active endpoint already has vision, else caption all images before a text-only call. Always = always caption new images. Off = never caption.">Caption Mode</span>
+                    <select id="setting-image-caption-mode">
+                      <option value="auto" selected>Auto</option>
+                      <option value="always">Always</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </label>
                 </div>
               </div>
 

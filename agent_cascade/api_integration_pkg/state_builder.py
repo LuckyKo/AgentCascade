@@ -410,6 +410,8 @@ def build_state_from_pool(
             # Streaming timeout settings
             'stream_max_silence_seconds': getattr(ps, 'stream_max_silence_seconds', 120.0),
             'stream_max_total_seconds': getattr(ps, 'stream_max_total_seconds', 900.0),
+            # Image caption mode (auto/always/off)
+            'image_caption_mode': getattr(ps, 'image_caption_mode', 'auto'),
         })
 
     # Add tool char limits from pool.llm_cfg if available
@@ -595,6 +597,8 @@ def build_stream_update_from_pool(
             # Streaming timeout settings
             'stream_max_silence_seconds': getattr(ps, 'stream_max_silence_seconds', 120.0),
             'stream_max_total_seconds': getattr(ps, 'stream_max_total_seconds', 900.0),
+            # Image caption mode (auto/always/off)
+            'image_caption_mode': getattr(ps, 'image_caption_mode', 'auto'),
         })
 
     # Add tool char limits from pool.llm_cfg if available

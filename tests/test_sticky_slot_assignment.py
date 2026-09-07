@@ -2036,6 +2036,12 @@ class TestN17AutoloaderKVGuardAroundCaption:
                 "state_save_enabled": True,
             }
 
+        # This test verifies the KV guard (save-before-HTTP / restore-after-loop), which only
+        # runs when captioning actually fires. The new default image_caption_mode='auto' would
+        # skip captioning here because the active endpoint is vision-capable — so force the
+        # legacy unconditional 'always' path these tests were written for.
+        pool.settings.image_caption_mode = 'always'
+
         # Mock the autoloader state HTTP (no real network).
         save_calls, restore_calls = [], []
         events = []  # ordered: 'save' / 'http' / 'restore'
@@ -2097,6 +2103,10 @@ class TestN17AutoloaderKVGuardAroundCaption:
                 "api_base": AUTOLOADER_BASE, "model": "autovision",
                 "state_save_enabled": True,
             }
+
+        # Force the legacy unconditional caption path so the KV guard fires (the new 'auto'
+        # default would skip captioning because the active endpoint is vision-capable).
+        pool.settings.image_caption_mode = 'always'
 
         save_calls, restore_calls = [], []
 

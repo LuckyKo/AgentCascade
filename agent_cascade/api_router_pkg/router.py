@@ -2291,6 +2291,49 @@ class APIRouter:
                             return True
         return False
 
+    @staticmethod
+    def _normalized_caption_mode(pool) -> str:
+        """Return a normalized image caption mode ('auto'/'always'/'off') from pool settings.
+
+        Defensive read: invalid/unknown values fall back to 'auto' (the default).
+        """
+        try:
+            mode = getattr(getattr(pool, 'settings', None), 'image_caption_mode', 'auto')
+        except Exception:
+            return 'auto'
+        if mode in ('auto', 'always', 'off'):
+            return mode
+        return 'auto'
+
+    def _is_active_endpoint_vision(self, instance_name: Optional[str]) -> bool:
+        """Return True if the instance's CURRENTLY-allocated endpoint is vision-capable.
+
+        Reuses the registry-matching logic from ``_get_vision_endpoint_for_agent``: resolve the
+        instance's ``_last_endpoint_config``, match api_base + model in the live registry, and
+        return that endpoint's ``vision_enabled`` flag.
+
+        Conservative (returns False → caption) when: the instance is unknown, it has no current
+        endpoint config, the registry entry does not match, or the matched endpoint is disabled.
+        """
+        if not instance_name or self._pool is None:
+            return False
+        inst = self._pool.get_instance(instance_name)
+        cur_cfg = getattr(inst, '_last_endpoint_config', None) if inst is not None else None
+        if not isinstance(cur_cfg, dict):
+            return False
+        cur_base = normalize_api_base(
+            cur_cfg.get('api_base') or cur_cfg.get('model_server', '')
+        )
+        cur_model = cur_cfg.get('model', '')
+        with self._lock:
+            for ep in self.endpoints.values():
+                if not ep.enabled:
+                    continue
+                if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
+                    return bool(getattr(ep, 'vision_enabled', True))
+        # No matching enabled endpoint → treat as text-only (conservative).
+        return False
+
     def _get_any_vision_endpoint(self) -> Optional[dict]:
         """Return the config of any enabled vision-capable endpoint."""
         with self._lock:
@@ -2376,6 +2419,38 @@ class APIRouter:
         Returns:
             Modified message list with captions attached to images.
         """
+        # ── Image caption mode gate (auto/always/off) ───────────────────────
+        # Runs BEFORE the "no uncaptioned images" early-skip and BEFORE any sticky-slot /
+        # KV-guard machinery so that a skip produces zero slot/KV side effects. All three
+        # caption triggers (pre-LLM, compression, image_gen) funnel through here.
+        mode = self._normalized_caption_mode(self._pool)
+        if mode == 'off':
+            logger.debug("[APIRouter] Image captioning skipped — mode='off'")
+            return messages
+        if mode == 'auto':
+            if self._is_active_endpoint_vision(instance_name):
+                # Active endpoint already has vision → no caption cost.
+                logger.debug(
+                    f"[APIRouter] Image captioning skipped (mode='auto') — active endpoint "
+                    f"for '{instance_name}' is vision-capable"
+                )
+                return messages
+            # Falling back to a text-only endpoint: full-caption ALL images by clearing
+            # placeholder/empty captions so previously-failed ('[Image]') items are re-captioned
+            # with real content. Only touch falsy or '[Image]' captions — never clobber a good one.
+            for msg in messages:
+                items = msg.content if isinstance(msg.content, list) else []
+                for item in items:
+                    img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
+                    if not img_val:
+                        continue
+                    existing_caption = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
+                    if not existing_caption or existing_caption == '[Image]':
+                        if isinstance(item, dict):
+                            item['caption'] = ''
+                        else:
+                            item.caption = ''
+
         if not self._has_uncaptioned_images(messages):
             # Observability: make the "already captioned → skip" path visible so a
             # redundant re-caption (or its absence) is diagnosable from the console.

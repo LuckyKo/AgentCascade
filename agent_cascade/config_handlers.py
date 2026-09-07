@@ -52,6 +52,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
     # Image base64 management
     'max_images_for_llm',
+    # Image caption mode (auto/always/off)
+    'image_caption_mode',
     # Approval timeout settings
     'approval_timeout_seconds', 'enable_approval_timeout',
     # Async shell console window toggle
@@ -626,6 +628,18 @@ def _handle_max_images_for_llm(ui_cfg: dict, agent_pool: Optional[Any], agents: 
             agent_pool.llm_cfg['max_images_for_llm'] = val
         except (ValueError, TypeError):
             pass  # Invalid value — keep existing setting
+
+
+@register_config_handler('image_caption_mode')
+def _handle_image_caption_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the image caption mode (auto/always/off). Invalid values normalize to 'auto'."""
+    if agent_pool is None or not hasattr(agent_pool, 'settings'):
+        return
+    raw = ui_cfg.get('image_caption_mode', 'auto')
+    if raw in ('auto', 'always', 'off'):
+        agent_pool.settings.image_caption_mode = raw
+    else:
+        agent_pool.settings.image_caption_mode = 'auto'
 
 
 @register_config_handler('disabled_tools')

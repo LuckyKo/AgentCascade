@@ -192,6 +192,8 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-compression-proactive-threshold', prop: 'value', key: 'compression_proactive_threshold', localKey: 'compression-proactive-threshold' },
   { id: '#setting-compression-context-reserve-tokens', prop: 'value', key: 'compression_context_reserve_tokens', localKey: 'compression-context-reserve-tokens' },
   { id: '#setting-compression-fraction', prop: 'value', key: 'compression_fraction', localKey: 'compression-fraction' },
+  // Image caption mode (auto/always/off) — localKey matches the underscore key written by saveSettings()/getGenerateCfg()
+  { id: '#setting-image-caption-mode', prop: 'value', key: 'image_caption_mode', localKey: 'image_caption_mode' },
 ];
 
 /** Sync pool settings from server state to UI elements.
@@ -775,6 +777,7 @@ const settingVisionEnabled = $('#setting-vision-enabled');
 const settingImageDetail = $('#setting-image-detail');
 const settingMaxImageSize = $('#setting-max-image-size');
 const settingMaxImagesForLlm = $('#setting-max-images-for-llm');
+const settingImageCaptionMode = $('#setting-image-caption-mode');
 const insertImageBtn = $('#insertImageBtn');
 const imageInput = $('#imageInput');
 const insertDocBtn = $('#insertDocBtn');
@@ -1128,6 +1131,7 @@ function saveSettings(sendToServer) {
   if (settingImageDetail) s['setting-image-detail'] = settingImageDetail.value;
   if (settingMaxImageSize) s['setting-max-image-size'] = settingMaxImageSize.value;
   if (settingMaxImagesForLlm) s['max_images_for_llm'] = parseInt(settingMaxImagesForLlm.value) || 2;
+  if (settingImageCaptionMode) s['image_caption_mode'] = settingImageCaptionMode.value || 'auto';
   if ($('#setting-mcp-enabled')) s['setting-mcp-enabled'] = $('#setting-mcp-enabled').checked;
   if (settingMcpServers) s['setting-mcp-servers'] = settingMcpServers.value;
 
@@ -1373,6 +1377,9 @@ function loadSettings() {
     }
     if (settingMaxImagesForLlm && _isFiniteRestore(s['max_images_for_llm'])) {
       settingMaxImagesForLlm.value = s['max_images_for_llm'];
+    }
+    if (settingImageCaptionMode && _present(s['image_caption_mode']) && ['auto', 'always', 'off'].includes(s['image_caption_mode'])) {
+      settingImageCaptionMode.value = s['image_caption_mode'];
     }
 
     if ($('#setting-mcp-enabled') && _present(s['setting-mcp-enabled'])) {
@@ -5486,6 +5493,7 @@ function getGenerateCfg() {
   if ($('#setting-list-dir-char-limit')) cfg.list_dir_char_limit = parseInt($('#setting-list-dir-char-limit').value) || -1;
 
   if ($('#setting-max-images-for-llm')) cfg.max_images_for_llm = parseInt($('#setting-max-images-for-llm').value) || 2;
+  if (settingImageCaptionMode) cfg.image_caption_mode = settingImageCaptionMode.value || 'auto';
 
   // Approval timeout settings
   if (approvalTimeoutSeconds && approvalTimeoutSeconds.value) cfg.approval_timeout_seconds = parseInt(approvalTimeoutSeconds.value) || 300;

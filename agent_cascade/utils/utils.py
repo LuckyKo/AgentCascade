@@ -1308,8 +1308,12 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     elif isinstance(content, list):
         text_items = [item.text for item in content if hasattr(item, 'text') and item.text]
         full_text = ''.join(text_items)
+        # Fold the image-item count into the key: structured image items are NOT matched by the
+        # text-level IMAGE_REGEX (they render as '[Image]' placeholders), so two messages with
+        # identical text but different image counts would otherwise collide on a stale entry.
+        _img_count = sum(1 for item in content if _get_item_attr(item, 'image'))
         content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
-        content_key = ('multi', content_hash)
+        content_key = ('multi', content_hash, _img_count)
     else:
         full_text = str(content)
         content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
@@ -1346,8 +1350,16 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
             nonlocal image_tokens
             image_tokens += IMAGE_TOKEN_ESTIMATE
             return f"[Image: {match.group(1)}]"
-        
+
         text_for_tokens = IMAGE_REGEX.sub(repl, text)
+
+        # Count EVERY structured image content item (file-path AND base64 data-URI alike).
+        # These render as '[Image]'/'[Image: caption]' placeholders in extract_text_from_message,
+        # which the markdown IMAGE_REGEX above does NOT match → they would otherwise get 0 tokens.
+        # No double counting: structured items never appear as markdown image syntax in `text`.
+        if isinstance(content, list):
+            image_tokens += sum(1 for item in content if _get_item_attr(item, 'image')) * IMAGE_TOKEN_ESTIMATE
+
         tokens = qwen_count(text_for_tokens) + image_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD
 
         # reasoning_content / tool_calls are ALWAYS shipped to the API (base.py), so they

@@ -813,6 +813,15 @@ class PoolSettings:
     # Dismiss thread join timeout (seconds to wait for agent thread to stop cooperatively)
     dismiss_thread_join_timeout: float = DISMISS_THREAD_JOIN_TIMEOUT
 
+    # Image caption mode — controls when images are auto-captioned before an LLM call.
+    #   "auto"   (default) — skip captioning when the instance's active endpoint is already
+    #                        vision-capable; otherwise full-caption all uncaptioned images
+    #                        before running a text-only endpoint.
+    #   "always" — always caption every new (uncaptioned) image, regardless of endpoint.
+    #   "off"    — never caption; images stay uncaptioned (text-only endpoints strip them).
+    # Invalid/unknown values are normalized to "auto" at read time.
+    image_caption_mode: str = 'auto'
+
     def to_dict(self) -> dict:
         """Serialize settings to a JSON-safe dictionary.
         
