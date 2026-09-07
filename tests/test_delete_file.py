@@ -579,3 +579,28 @@ def test_mixed_set_single_aggregate_approval_accept():
         # Ownership entry for the owned file was cleared; foreign had none.
         assert om._get_owner(owned.resolve()) is None, "Owned-file ownership must be cleared after delete"
     print("[PASS] test_mixed_set_single_aggregate_approval_accept")
+
+
+def test_approval_description_marks_capped_size(monkeypatch):
+    """When a dir target exceeds the file-count cap, the approval total is marked '+' (B3).
+
+    ponytail refinement: the size walk is capped for latency; when it trips the total
+    must be flagged approximate so the number the user approves against isn't silently
+    under-reported. We shrink the module-level cap to a tiny value so it trips fast.
+    """
+    import agent_cascade.operation_manager.file_operations as fops
+
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        bigdir = Path(d, "big"); bigdir.mkdir()
+        # 5 real files; shrink the cap to 2 so the walk trips early.
+        for i in range(5):
+            (bigdir / f"f{i}.txt").write_text("x" * 10)
+
+        monkeypatch.setattr(fops, "_SCOPE_INFO_FILE_CAP", 2)
+        desc = om._build_delete_approval_description([bigdir.resolve()], [bigdir.resolve()])
+        # The total must carry the approximate marker because the cap tripped.
+        assert "total" in desc and "+" in desc.split("total")[1].split(")")[0], \
+            f"Capped size must be marked approximate with '+', got: {desc!r}"
+
+    print("[PASS] test_approval_description_marks_capped_size")

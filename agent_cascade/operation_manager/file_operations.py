@@ -1870,8 +1870,9 @@ class FileOpsMixin:
         # COMPACT (count + a short paths_preview, never the full list) so the JSON block
         # stays small even for huge bulk deletes. `description` is still passed for any
         # future/other client that does render it, but we don't rely on it.
-        # _is_auto_approved resolves its argument internally (needs a str); passing the
-        # already-resolved path string is idempotent and avoids re-resolution cost.
+        # _is_auto_approved takes a str and resolves it internally (mode="rw"); passing
+        # the already-resolved path string is idempotent (re-resolution lands on the same
+        # contained path) — safe, though it does re-resolve per target.
         non_owned = [t for t in targets if not self._is_auto_approved(str(t), agent_name)]
         if non_owned:
             # _build_delete_approval_description returns ONLY the scope summary (no
@@ -2022,9 +2023,12 @@ class FileOpsMixin:
         n_dirs = n - n_files
 
         # Cap the walk so a huge directory can't stall the approval prompt (UI lag).
-        # The size is only an informational summary, not used for any decision.
+        # The size is only an informational summary, not used for any decision. When the
+        # cap trips we mark the total as approximate ("+") so the number the user approves
+        # against is honest rather than silently under-reported (mirrors _compute_scope_info).
         total_size = 0
         counted_files = 0
+        capped = False
         for t in targets:
             try:
                 if t.is_file():
@@ -2036,6 +2040,7 @@ class FileOpsMixin:
                             total_size += f.stat().st_size
                             counted_files += 1
                             if counted_files >= _SCOPE_INFO_FILE_CAP:
+                                capped = True
                                 break
             except OSError:
                 pass
@@ -2044,8 +2049,9 @@ class FileOpsMixin:
         sample_str = "\n".join(f"  - {t}" for t in sample)
         more = f"\n  … and {n - len(sample)} more" if n > len(sample) else ""
 
+        size_str = self._format_size(total_size) + ("+" if capped else "")
         desc = (f"Delete {n} entr{'y' if n == 1 else 'ies'} "
-                f"({n_files} file(s), {n_dirs} dir(s), total {self._format_size(total_size)}):")
+                f"({n_files} file(s), {n_dirs} dir(s), total {size_str}):")
         desc += "\n" + sample_str + more
         if non_owned:
             desc += f"\n\n{len(non_owned)} of these are not owned by you and require approval."
@@ -2146,6 +2152,9 @@ class FileOpsMixin:
 
         File count is the primary check (cheap); total size is a lightweight
         spot-check that catches most partial copies without hashing every file.
+        Known v1 limitation: count+size parity is a spot-check, not a content guarantee —
+        two distinct trees with identical file count and total size could pass. This only
+        runs on the cross-volume copy fallback (the same-volume path uses an atomic move).
         """
         if not backup_path.is_dir():
             return False
