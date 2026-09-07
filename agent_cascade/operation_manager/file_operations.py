@@ -1,6 +1,7 @@
 """File operations — directory listing, read, write, edit, re-indent, delete, copy, move, backup cleanup."""
 
 import fnmatch
+import logging
 import os
 import re
 import shutil
@@ -134,91 +135,103 @@ class FileOpsMixin:
         If agent_name is provided, only processes that agent's backup directory.
         Otherwise, performs global cleanup across all agents.
         """
+        # This runs via atexit during interpreter shutdown, where the log handler's
+        # file stream may already be closed. Logging here would otherwise print a noisy
+        # "I/O operation on closed file" traceback from logging's handleError. So every
+        # log call is routed through _safe_log, which swallows I/O errors raised by an
+        # already-closed handler. (Most of these are DEBUG-level no-ops anyway.)
         try:
-            from agent_cascade.log import logger
-            backup_base = self.base_dir / 'logs' / 'backups'
-            if not backup_base.exists():
-                logger.debug("Backup directory does not exist: %s", backup_base)
+            from agent_cascade.log import logger as _logger
+        except Exception:
+            _logger = None
+
+        def _safe_log(level: int, msg: str, *args):
+            if _logger is None:
+                return
+            try:
+                _logger.log(level, msg, *args)
+            except Exception:
+                pass  # handler may be closed during atexit teardown — never surface it
+
+        backup_base = self.base_dir / 'logs' / 'backups'
+        if not backup_base.exists():
+            _safe_log(logging.DEBUG, "Backup directory does not exist: %s", backup_base)
+            return
+
+        if agent_name:
+            safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+            agent_backup_dir = backup_base / safe_agent
+            if not agent_backup_dir.exists():
+                _safe_log(logging.DEBUG, "Agent backup directory does not exist: %s", agent_backup_dir)
                 return
 
-            if agent_name:
-                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-                agent_backup_dir = backup_base / safe_agent
-                if not agent_backup_dir.exists():
-                    logger.debug("Agent backup directory does not exist: %s", agent_backup_dir)
-                    return
+            archive_path = agent_backup_dir / 'backup_archive.zip'
+            bak_files = list(agent_backup_dir.glob('*.bak'))
 
-                archive_path = agent_backup_dir / 'backup_archive.zip'
-                bak_files = list(agent_backup_dir.glob('*.bak'))
-
-                if not bak_files:
-                    logger.debug("No .bak files to archive for agent %s", agent_name)
-                else:
-                    if archive_path.exists():
-                        timestamp = int(time.time())
-                        archive_path.rename(archive_path.with_name(f'backup_archive.{timestamp}.zip'))
-
-                    old_zips = list(agent_backup_dir.glob('backup_archive.*.zip'))
-
-                    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for bak_file in bak_files:
-                            zf.write(bak_file, arcname=bak_file.name)
-                        for old_zip in old_zips:
-                            zf.write(old_zip, arcname=old_zip.name)
-
-                    logger.debug("Archived %d .bak files to %s", len(bak_files), archive_path)
-
-                for old_zip in agent_backup_dir.glob('backup_archive.*.zip'):
-                    try:
-                        old_zip.unlink()
-                    except Exception as e:
-                        logger.warning("Failed to delete old archive %s: %s", old_zip, e)
-
-                if bak_files:
-                    for bak_file in bak_files:
-                        try:
-                            bak_file.unlink()
-                        except Exception as e:
-                            logger.warning("Failed to delete backup file %s: %s", bak_file, e)
-
+            if not bak_files:
+                _safe_log(logging.DEBUG, "No .bak files to archive for agent %s", agent_name)
             else:
-                archive_path = backup_base / 'backup_archive.zip'
-                bak_files = list(backup_base.rglob('*.bak'))
+                if archive_path.exists():
+                    timestamp = int(time.time())
+                    archive_path.rename(archive_path.with_name(f'backup_archive.{timestamp}.zip'))
 
-                if not bak_files:
-                    logger.debug("No .bak files to archive globally")
-                else:
-                    if archive_path.exists():
-                        timestamp = int(time.time())
-                        archive_path.rename(archive_path.with_name(f'backup_archive.{timestamp}.zip'))
+                old_zips = list(agent_backup_dir.glob('backup_archive.*.zip'))
 
-                    old_zips = list(backup_base.glob('backup_archive.*.zip'))
-
-                    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for bak_file in bak_files:
-                            arcname = str(bak_file.relative_to(backup_base))
-                            zf.write(bak_file, arcname=arcname)
-                        for old_zip in old_zips:
-                            zf.write(old_zip, arcname=old_zip.name)
-
-                    logger.debug("Archived %d .bak files globally to %s", len(bak_files), archive_path)
-
-                for old_zip in backup_base.glob('backup_archive.*.zip'):
-                    try:
-                        old_zip.unlink()
-                    except Exception as e:
-                        logger.warning("Failed to delete old archive %s: %s", old_zip, e)
-
-                if bak_files:
+                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for bak_file in bak_files:
-                        try:
-                            bak_file.unlink()
-                        except Exception as e:
-                            logger.warning("Failed to delete backup file %s: %s", bak_file, e)
+                        zf.write(bak_file, arcname=bak_file.name)
+                    for old_zip in old_zips:
+                        zf.write(old_zip, arcname=old_zip.name)
 
-        except Exception as e:
-            from agent_cascade.log import logger
-            logger.warning("Failed to clean up backups: %s", e)
+                _safe_log(logging.DEBUG, "Archived %d .bak files to %s", len(bak_files), archive_path)
+
+            for old_zip in agent_backup_dir.glob('backup_archive.*.zip'):
+                try:
+                    old_zip.unlink()
+                except Exception as e:
+                    _safe_log(logging.WARNING, "Failed to delete old archive %s: %s", old_zip, e)
+
+            if bak_files:
+                for bak_file in bak_files:
+                    try:
+                        bak_file.unlink()
+                    except Exception as e:
+                        _safe_log(logging.WARNING, "Failed to delete backup file %s: %s", bak_file, e)
+
+        else:
+            archive_path = backup_base / 'backup_archive.zip'
+            bak_files = list(backup_base.rglob('*.bak'))
+
+            if not bak_files:
+                _safe_log(logging.DEBUG, "No .bak files to archive globally")
+            else:
+                if archive_path.exists():
+                    timestamp = int(time.time())
+                    archive_path.rename(archive_path.with_name(f'backup_archive.{timestamp}.zip'))
+
+                old_zips = list(backup_base.glob('backup_archive.*.zip'))
+
+                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for bak_file in bak_files:
+                        arcname = str(bak_file.relative_to(backup_base))
+                        zf.write(bak_file, arcname=arcname)
+                    for old_zip in old_zips:
+                        zf.write(old_zip, arcname=old_zip.name)
+
+                _safe_log(logging.DEBUG, "Archived %d .bak files globally to %s", len(bak_files), archive_path)
+
+            for old_zip in backup_base.glob('backup_archive.*.zip'):
+                try:
+                    old_zip.unlink()
+                except Exception as e:
+                    _safe_log(logging.WARNING, "Failed to delete old archive %s: %s", old_zip, e)
+
+            if bak_files:
+                for bak_file in bak_files:
+                    try:
+                        bak_file.unlink()
+                    except Exception as e:
+                        _safe_log(logging.WARNING, "Failed to delete backup file %s: %s", bak_file, e)
 
     # ─── Static helpers for formatting and filtering ─────────────────────
 
