@@ -151,10 +151,12 @@ class SessionIOMixin:
         execution — NOT clear conversations, summaries, or any user-visible session data.
         The user expects to be able to Resume exactly where they left off.
         
-        Order of operations (MINOR-1 FIX - updated docstring):
+        Order of operations:
           1. Set _stopped_event (to halt threads)
-          2. Release concurrency slots for all active instances (NEW — prevents stuck API slots)
-          3. Clear pending approvals (unblocks any threads waiting for user approval)
+          2. Cancel all queue tickets (FIFO scheduler cleanup) — must run BEFORE slot release so a woken waiter is cancelled, not granted the freed slot
+          3. Release concurrency slots for all active instances (NEW — prevents stuck API slots)
+          4. Clear cached message sets / message queues / async results
+          5. Clear pending approvals (unblocks any threads waiting for user approval)
         
         Does NOT:
           - Dismiss sub-agents (they remain in pool with their current state)
@@ -179,7 +181,19 @@ class SessionIOMixin:
         self._paused.set()
         self._invalidate_stream_cache_on_pause_change()
 
-        # ── Step 2: Release concurrency slots for all active instances ──────────────
+        # ── Step 2: Cancel all queue tickets (FIFO scheduler cleanup) ─────────
+        # Clean up any pending waiters to prevent blocked grants on resume.
+        # MUST run before slot release: a woken FIFO waiter must be cancelled, not
+        # granted the slot that is about to be freed (see stop-session race fix).
+        if hasattr(self, 'api_router') and self.api_router:
+            try:
+                cancelled = self.api_router.scheduler.cancel_all()
+                if cancelled > 0:
+                    logger.info(f"[STOP_SESSION] Cancelled {cancelled} pending queue ticket(s)")
+            except Exception as e:
+                logger.debug(f"Queue cancellation during stop_session (non-critical): {e}")
+
+        # ── Step 3: Release concurrency slots for all active instances ──────────────
         # This ensures API endpoints are freed immediately, even if execution threads
         # haven't noticed the stop signal yet. Prevents "stuck slot" issues where
         # agents transitioned to IDLE still hold their semaphores.
@@ -210,17 +224,7 @@ class SessionIOMixin:
             except Exception as e:
                 logger.warning(f"slot_release failed during stop_session (non-critical): {e}")
 
-        # ── Step 2.5: Cancel all queue tickets (FIFO scheduler cleanup) ─────────
-        # Clean up any pending waiters to prevent blocked grants on resume.
-        if hasattr(self, 'api_router') and self.api_router:
-            try:
-                cancelled = self.api_router.scheduler.cancel_all()
-                if cancelled > 0:
-                    logger.info(f"[STOP_SESSION] Cancelled {cancelled} pending queue ticket(s)")
-            except Exception as e:
-                logger.debug(f"Queue cancellation during stop_session (non-critical): {e}")
-
-        # ── Step 3: Clear cached message sets, message queues, and async results ──
+        # ── Step 4: Clear cached message sets, message queues, and async results ──
         # After stop, the cached working sets may be stale (from interrupted turns).
         # Clear them so the next turn rebuilds from current conversation state.
         # Also drain message queues and async results buffers to prevent stale data.
@@ -247,7 +251,7 @@ class SessionIOMixin:
         except Exception as e:
             logger.debug(f"Cache clear during stop_session (non-critical): {e}")
 
-        # ── Step 4: Clear pending approvals ────────────────────────────────────────
+        # ── Step 5: Clear pending approvals ────────────────────────────────────────
         # Prevent dangling threads waiting for user approval.
         approval_count = 0
         if self.operation_manager:
