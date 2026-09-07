@@ -1874,7 +1874,9 @@ class FileOpsMixin:
         # already-resolved path string is idempotent and avoids re-resolution cost.
         non_owned = [t for t in targets if not self._is_auto_approved(str(t), agent_name)]
         if non_owned:
-            description = self._build_delete_approval_description(targets, non_owned, justification)
+            # _build_delete_approval_description returns ONLY the scope summary (no
+            # justification) so we can append the agent's reason exactly once here.
+            description = self._build_delete_approval_description(targets, non_owned)
             # Compose the readable scope summary with the original agent justification so
             # the UI shows both (audit trail preserved). Keep tool_args compact.
             paths_preview = [str(t) for t in targets[:5]]
@@ -2006,14 +2008,14 @@ class FileOpsMixin:
 
         return results
 
-    def _build_delete_approval_description(self, targets: List[Path], non_owned: List[Path],
-                                           justification: str = "") -> str:
+    def _build_delete_approval_description(self, targets: List[Path], non_owned: List[Path]) -> str:
         """Human-readable scope summary for the aggregate approval prompt (B3).
 
-        Carries the readable count, total size and a sample of the paths. Broadcast to
-        the WebUI as `description` (shown by any client that renders it). The full list
-        is passed separately in tool_args for machine consumers. NOTE: the current
-        web_ui/app.js approval card does not render `description`; see delete_file().
+        Carries the readable count, total size and a sample of the paths. The caller is
+        responsible for appending any justification (it composes this into the field the
+        WebUI actually renders) — so this method deliberately does NOT take one, to avoid
+        duplicating it in the prompt. NOTE: web_ui/app.js approval card does not render
+        `description`; see delete_file().
         """
         n = len(targets)
         n_files = sum(1 for t in targets if not t.is_dir())
@@ -2047,8 +2049,6 @@ class FileOpsMixin:
         desc += "\n" + sample_str + more
         if non_owned:
             desc += f"\n\n{len(non_owned)} of these are not owned by you and require approval."
-        if justification:
-            desc += f"\nJustification: {justification}"
         return desc
 
     def _delete_one(self, resolved: Path, agent_name: str, justification: str = "") -> str:

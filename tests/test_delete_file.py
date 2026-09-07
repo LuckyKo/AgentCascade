@@ -479,3 +479,103 @@ def test_filter_cannot_escape_allowed_dirs_or_ro():
             res2 = om.delete_file(".", "coder", include="*.txt", justification="x")
             assert ro_file.exists(), "Filter must not expand scope into the RO extra folder"
     print("[PASS] test_filter_cannot_escape_allowed_dirs_or_ro")
+
+
+# ── Refinement pass: closing 3 coverage gaps from the review ───────────────────
+
+def test_no_path_provided_clear_error():
+    """Neither path nor paths given → clear ERROR, nothing deleted, no prompt (B6a)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, "keep.txt"); f.write_text("x")
+
+        saw_approval = []
+        def _watcher():
+            time.sleep(0.3)
+            if om.list_pending_approvals():
+                saw_approval.append(True)
+        wt = threading.Thread(target=_watcher, daemon=True); wt.start()
+
+        res = om.delete_file(None, "coder", paths=[], justification="x")
+        wt.join(timeout=3)
+
+        assert res.startswith("ERROR: No path(s) provided"), f"Expected clear error, got: {res}"
+        assert not saw_approval, "No-path case must NOT fire an approval prompt"
+        assert f.exists(), "Nothing should be deleted when no path is provided"
+    print("[PASS] test_no_path_provided_clear_error")
+
+
+def test_dir_backup_copy_fallback_integrity_a2(monkeypatch):
+    """Directory delete via copy fallback verifies dir backup integrity before rmtree (A2).
+
+    Force shutil.move to fail so the code takes the copytree path; then make
+    _verify_dir_backup return False. The original directory must remain intact and no
+    partial backup may be left behind.
+    """
+    import shutil as _shutil
+
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        src = Path(d, "victimdir")
+        (src / "sub").mkdir(parents=True)
+        (src / "a.txt").write_text("aaa")
+        (src / "sub" / "b.txt").write_text("bbb")
+
+        # Force the copy fallback, then make the dir-integrity check fail.
+        monkeypatch.setattr(_shutil, "move", lambda *a, **k: (_ for _ in ()).throw(OSError("force fallback")))
+        monkeypatch.setattr(om, "_verify_dir_backup", lambda source, backup_path: False)
+
+        try:
+            om._delete_one(src.resolve(), "coder", justification="x")
+            raise AssertionError("_delete_one should have raised on a dir backup integrity failure")
+        except Exception as e:
+            assert "backup integrity check failed" in str(e), f"Error must name the step: {e}"
+
+        # Original directory must be fully intact (rmtree never ran).
+        assert src.exists() and (src / "a.txt").exists() and (src / "sub" / "b.txt").exists(), \
+            "Original directory must remain intact after a dir backup integrity failure"
+        bdir = _backup_dir(om)
+        partials = list(bdir.glob("victimdir*")) if bdir.exists() else []
+        assert not partials, f"No partial dir backup may remain: {partials}"
+    print("[PASS] test_dir_backup_copy_fallback_integrity_a2")
+
+
+def test_mixed_set_single_aggregate_approval_accept():
+    """Mixed owned + non-owned set → ONE aggregate approval; approve deletes ALL (B3/B4).
+
+    Mirrors the reject test but exercises the acceptance path: every target is deleted,
+    a backup exists for each, and ownership entries are cleared.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        owned = Path(d, "owned.txt"); owned.write_text("o")
+        foreign = Path(d, "foreign.txt"); foreign.write_text("f")
+        om._own(owned.resolve(), "coder")
+
+        prompt_count = {"n": 0}
+        def _count_and_approve():
+            deadline = time.time() + 10
+            seen = set()
+            while time.time() < deadline:
+                for p in om.list_pending_approvals():
+                    if p["request_id"] not in seen:
+                        seen.add(p["request_id"])
+                        prompt_count["n"] += 1
+                        om.user_approve(p["request_id"], "ok go")
+                        return
+                time.sleep(0.02)
+        threading.Thread(target=_count_and_approve, daemon=True).start()
+
+        res = om.delete_file(None, "coder", paths=[str(owned), str(foreign)], justification="cleanup")
+        assert res.startswith("OK: Deleted"), f"Expected OK, got: {res}"
+        assert prompt_count["n"] == 1, f"Exactly ONE aggregate approval must fire, got {prompt_count['n']}"
+        assert not owned.exists() and not foreign.exists(), "Approved bulk delete must remove ALL targets"
+
+        # A backup was created for each deleted target.
+        bdir = _backup_dir(om)
+        backups = list(bdir.glob("*.bak")) if bdir.exists() else []
+        assert len(backups) == 2, f"Expected one backup per target (2), got {backups}"
+
+        # Ownership entry for the owned file was cleared; foreign had none.
+        assert om._get_owner(owned.resolve()) is None, "Owned-file ownership must be cleared after delete"
+    print("[PASS] test_mixed_set_single_aggregate_approval_accept")
