@@ -5,7 +5,6 @@ state_builder (that would create a cycle). ``_cache_mgr`` is instantiated exactl
 here; every consumer imports the SAME object from this module.
 """
 
-import copy as _copy
 import threading
 from typing import Dict
 
@@ -103,14 +102,14 @@ def _get_ui_cache(msg: any) -> dict:
 
 
 def _store_ui_cache(msg: any, cached_data: dict) -> None:
-    """Store serialized message data directly on the Message instance with deep copy safety.
-    
-    Thread-safe and memory-safe: when the Message object is garbage collected,
+    """Store serialized message data directly on the Message instance.
+
+    Memory-safe: when the Message object is garbage collected,
     its _ui_cache attribute is freed along with it, eliminating address-recycling stale hits.
+    Shallow copy suffices — the hit path (serialize_message) only reads top-level keys.
     """
-    import copy as _copy  # Lazy import
-    data_copy = _copy.deepcopy(cached_data)
-    
+    data_copy = dict(cached_data)
+
     if isinstance(msg, dict):
         msg['_ui_cache'] = data_copy
     else:

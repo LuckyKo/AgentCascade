@@ -2020,12 +2020,10 @@ function handleServerMessage(data) {
       
       const oldStackStr = (state.activeStack || []).join(',');
       // Track changes to decide render urgency:
-      //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render)
-      //   subAgentContentChanged   — any agent state changed (content streaming or new messages).
-      //     All agents (including root) contribute to these flags via the unified agent_instances loop.
+      //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render).
+      //     All agents (including root) contribute via the unified agent_instances loop.
 
       let subAgentNewVisibleMessage = false;
-      let subAgentContentChanged = false;
       
             // All agents (including root) flow through agent_instances — no special root path
       if (data.agent_instances) {
@@ -2142,15 +2140,11 @@ function handleServerMessage(data) {
           const hasNewMessage = newMsgCount > prevMsgCount || !prevMsgCount;
           
           if (hasNewMessage) {
-            subAgentContentChanged = true;
             // Only force-render new bubbles for panels that are actually visible —
             // avoid wasting DOM work on hidden panels.
             if (state.activeSubTab === 'sub-' + name) {
               subAgentNewVisibleMessage = true;
             }
-          } else if (sa.is_partial && existing) {
-            // Partial arrived with same message count — content is streaming in an existing bubble
-            subAgentContentChanged = true;
           }
       }
       // Remove agents that no longer exist on the server (e.g., dismissed agents)

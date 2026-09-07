@@ -3,7 +3,6 @@
 Phase 3b pure-move refactor. Imports the SAME ``_cache_mgr`` singleton from cache.py.
 """
 
-import hashlib
 import os
 import copy as _copy
 from typing import Any, Dict, List, Optional
@@ -26,14 +25,14 @@ def _msg_fingerprint(msg: Any) -> Optional[tuple]:
     if msg is None:
         return None
     role = (msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '') or '').lower()
-    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '') or ''
-    if isinstance(content, list):
-        # Hash the list for collision resistance (length alone is insufficient)
-        content_str = hashlib.md5(repr(content).encode()).hexdigest()[:12]
-    else:
-        content_str = str(content)[:100]
     ts = msg.get('ts') if isinstance(msg, dict) else getattr(msg, 'ts', None)
-    return (role, content_str, ts)
+    # ts is unique per committed message (set in append_message); role+ts alone is collision-free.
+    # Fallback to a short content slice only for msgs missing ts (e.g., streaming partials).
+    if ts is not None:
+        return (role, ts)
+    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '') or ''
+    c = len(content) if isinstance(content, list) else str(content)[:64]
+    return (role, c)
 
 # Additive/delta streaming (phase 1). When enabled, partial (streaming) frames send only a
 # small safe tail instead of the full committed history; force_full / connect-time frames stay
@@ -761,7 +760,7 @@ def serialize_message(
     with role/content attributes.
 
     Features:
-      - UI cache via instance-attached _ui_cache attribute (legacy id()-keyed dict maintained for compat)
+      - UI cache via instance-attached _ui_cache attribute
       - Content list normalization for multimodal messages (text, image, audio, video, file)
       - Large content truncation at 100K characters when for_ui=True
       - function_call normalization (handles objects with .name/.arguments attributes)
