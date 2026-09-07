@@ -63,12 +63,12 @@ class MessageQueueMixin:
 
     def _warn_queue_depth(self, name: str, depth: int, sender: Optional[str] = None):
         """Rate-limited warning for high message queue depth."""
-        if depth >= 10 and depth % 10 == 0:
+        if depth >= 5:
             now_mono = time.monotonic()
             global _mq_depth_last_warn
             if now_mono - _mq_depth_last_warn >= 10.0:
                 suffix = f" (from '{sender}')" if sender else ""
-                logger.warning(f"[MESSAGE_QUEUE] Instance '{name}' queue depth high: {depth} pending{suffix}")
+                logger.warning(f"[MESSAGE_QUEUE] Instance '{name}' message queue depth high: {depth} messages pending execution{suffix}")
                 _mq_depth_last_warn = now_mono
 
     def send_message(self, from_name: str, to_name: str, text: str):

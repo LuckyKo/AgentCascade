@@ -277,6 +277,10 @@ def _log_probe(msg: str) -> None:
         lg.info(msg)
 
 
+_qf_last_warn: float = 0.0
+_hw_last_warn: float = 0.0
+
+
 async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
     """Put a stream_update event onto the queue, dropping it if full.
 
@@ -292,7 +296,17 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
     Emits a rate-limited warning (max once per 5s) when events are dropped
     due to queue saturation, so operators can diagnose stale-UI issues.
     """
-    global _qf_last_warn
+    global _qf_last_warn, _hw_last_warn
+    if hasattr(queue, 'maxsize') and queue.maxsize > 0:
+        if queue.qsize() >= int(queue.maxsize * 0.75):
+            now = time.monotonic()
+            if now - _hw_last_warn >= 5.0:
+                logger.warning(
+                    "[STREAM_QUEUE] WS send queue high-watermark reached: %d/%d (>=75%% capacity). Slow client or network backlog suspected.",
+                    queue.qsize(), queue.maxsize,
+                )
+                _hw_last_warn = now
+
     try:
         queue.put_nowait(event)  # Synchronous, raises QueueFull if full
     except asyncio.QueueFull:

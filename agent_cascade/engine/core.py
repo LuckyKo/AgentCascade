@@ -3122,7 +3122,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             final_resp = []
             _update_counter = 0
             _last_sub_send = 0.0
-            _sub_send_interval = 0.15  # Match main loop throttle (run_agent_unified.py line 154)
+            _sub_last_resp_len = 0
+            _tick_num = 0
 
             # Bug
             if self.pool.is_instance_terminated(instance_name):
@@ -3140,9 +3141,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # break (same pattern as core.py:691-692). Without close(), a break
             # on terminal stop leaves run() suspended before its exit finally,
             # so the child stays RUNNING and any re-entry trips the L1 guard.
+            # Hoisted from the loop below: importing at module level would create a
+            # circular dependency (api_integration → api_integration_pkg.runner →
+            # execution_engine facade → engine.core, which is still mid-load).
+            # Importing once here — outside the per-tick loop — avoids re-executing
+            # the import on every iteration while staying cycle-safe.
+            from agent_cascade.api_integration import broadcast_stream_update
+
             _run_gen = self.run(inst)
             try:
                 for resp in _run_gen:
+                    _t_yield = time.monotonic()
                     # Inner run() loop handles compression-halt via cooperative wait at Site 3.
                     # Only break here on terminal stops (which cause run() to yield final state and end).
                     if self._is_terminal_stop(instance_name):
@@ -3153,9 +3162,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # engine.run() yields tuples like (List[Message], bool), but we
                     # only need the message list
                     if isinstance(resp, tuple) and len(resp) == 2:
-                        final_resp = resp[0]  # Extract just the message list
+                        final_resp, is_streaming_tick = resp
                     else:
-                        final_resp = resp
+                        final_resp, is_streaming_tick = resp, False
 
                     # Count tool calls from FUNCTION role messages
                     total_tool_calls += sum(1 for m in final_resp if msg_field(m, 'role', '') == FUNCTION)
@@ -3169,18 +3178,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
                         self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
-                    # ── Push stream_update to frontend during sub-agent execution
-                    # ──
-                    # This is the key fix: without this, the main agent's streaming
-                    # loop
-                    # is blocked and no WebSocket events reach the frontend. The
-                    # frontend
-                    # relies on stream_update to call renderSubAgents() every
-                    # ~200ms.
-                    now = time.time()  # Use time.time() for consistency with run_agent_unified.py:135
-                    if now - _last_sub_send >= _sub_send_interval:
-                        self.stream_publisher.push_periodic_update(caller)
-                        _last_sub_send = now
+                    # ── Push stream_update to frontend during sub-agent execution ──
+                    now_mono = time.monotonic()
+                    _last_sub_send, _sub_last_resp_len = broadcast_stream_update(
+                        pool=self.pool,
+                        instance_name=instance_name,
+                        turn_output=final_resp,
+                        is_streaming_tick=is_streaming_tick,
+                        tick_num=_tick_num,
+                        now_sec=now_mono,
+                        last_send=_last_sub_send,
+                        last_resp_len=_sub_last_resp_len,
+                        yield_time=_t_yield,
+                    )
+                    _tick_num += 1
             finally:
                 # Deterministic generator cleanup: close() forces the suspended
                 # run() generator to unwind its exit finally (RUNNING→IDLE), so
@@ -3228,6 +3239,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
             # ── Push final stream_update after sub-agent completes ──
+            now_mono = time.monotonic()
+            broadcast_stream_update(
+                pool=self.pool,
+                instance_name=instance_name,
+                turn_output=final_resp,
+                is_streaming_tick=False,
+                tick_num=_tick_num,
+                now_sec=now_mono,
+                last_send=0.0,
+                last_resp_len=0,
+            )
             self.stream_publisher.push_final_state(inst, caller)
 
         finally:

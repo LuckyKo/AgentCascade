@@ -2218,8 +2218,8 @@ function handleServerMessage(data) {
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
       // Adaptive: if last render took long, increase throttle to avoid stacking renders.
       const lastRenderDur = Math.max(0, state.genStats.lastSubAgentRenderDuration || 0);
-      const rootThrottleContent = Math.min(THROTTLE.RENDER_ROOT_MAX_MS, THROTTLE.RENDER_ROOT_BASE_MS + Math.round(lastRenderDur * 0.5));
-      const subThrottleContent = isSubAgentActive ? THROTTLE.RENDER_SUBAGENT_MS : rootThrottleContent;
+      const baseThrottle = isSubAgentActive ? THROTTLE.RENDER_SUBAGENT_MS : THROTTLE.RENDER_ROOT_BASE_MS;
+      const subThrottleContent = Math.min(THROTTLE.RENDER_ROOT_MAX_MS, baseThrottle + Math.round(lastRenderDur * 0.5));
       
       // Force render on: completion detected, stack change, new visible message bubble,
       // or when the adaptive rendering throttle interval has elapsed. Content streaming within
@@ -3114,44 +3114,76 @@ function updateBubbleContent(bubble, msg, config) {
     bubble.dataset.prevReasoning = curReasoning;
     bubble.dataset.wasGenerating = String(isGenerating);
 
-    // FIX 2: Restore incremental path for plain-text messages only - prevents UI stuttering during long message streaming
-    // This O(1) append avoids full renderMarkdown() re-parsing on every ~100ms tick for simple text streams.
-    // Only applies to messages without function_call, reasoning_content, or function role (which need full re-render).
-    if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function' && !msg.reasoning_content) {
+    // Fast path 1: incremental append for in-flight reasoning deltas during thinking phase
+    // Avoids running full renderMarkdown() on massive 20k+ token reasoning blocks on every tick.
+    if (isGenerating && prevReasoning !== undefined && msg.reasoning_content && !msg.function_call && msg.role !== 'function' && curContent === (prevContent || '')) {
+        const newReasoning = curReasoning.slice(prevReasoning.length);
+        if (newReasoning) {
+            const thinkingDiv = contentDiv.querySelector('.thinking-content');
+            if (thinkingDiv) {
+                try {
+                    thinkingDiv.insertAdjacentText('beforeend', newReasoning);
+                    return; // Success - O(1) text append
+                } catch(e) {
+                    console.warn('Incremental reasoning append failed, falling back to full render:', e);
+                }
+            }
+        }
+    }
+
+    // Fast path 2: Restore incremental path for plain-text content streaming (after thinking or without thinking).
+    // This O(1) append avoids full renderMarkdown() re-parsing on every ~100ms tick for text streams.
+    const reasoningActive = isGenerating && msg.reasoning_content && (curReasoning !== (prevReasoning || ''));
+    if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function' && !reasoningActive) {
         const newText = curContent.slice(prevContent.length);
         if (newText) {
-            // For image-bearing bubbles, prefer incremental append to avoid destroying cached img nodes.
-            // Increase forced re-render interval for bubbles with images to reduce image re-decode pressure.
-            // Adaptive: shorter interval for very long messages (more drift risk), longer for image-heavy ones.
-            const hasImages = bubbleHasImages(contentDiv);
-            const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
-            const msgLen = curContent.length;
-            let forceInterval = 8; // default for plain text
-            if (hasImages) {
-                // Base interval: 24 ticks (~6s at 250ms throttle), reduced for very long messages (>10k chars)
-                forceInterval = msgLen > 10000 ? 16 : 24;
-            }
-
-            try {
-                appendStreamingDelta(contentDiv, newText);
-                bubble.dataset.incrementCount = String(incrementCount + 1);
-                if (incrementCount + 1 >= forceInterval) {
-                    bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
-                } else {
-                    return;  // Success - skip full re-render (critical for image-bearing bubbles!)
-                    // NOTE: meta line is intentionally NOT refreshed on incremental ticks — it is
-                    // computed at bubble end (see applyMsgMeta call below, gated on !isGenerating).
+            const lastEl = contentDiv.lastElementChild;
+            // Only use incremental append if container already has a content node outside thinking-block
+            if (lastEl && !lastEl.closest('.thinking-block')) {
+                const hasImages = bubbleHasImages(contentDiv);
+                const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
+                const msgLen = curContent.length;
+                let forceInterval = 8; // default for plain text
+                if (hasImages) {
+                    // Base interval: 24 ticks (~6s at 250ms throttle), reduced for very long messages (>10k chars)
+                    forceInterval = msgLen > 10000 ? 16 : 24;
                 }
-            } catch(e) {
-                // If incremental fails for any reason, fall through to full re-render below
-                console.warn('Incremental streaming append failed, falling back to full render:', e);
+
+                try {
+                    appendStreamingDelta(contentDiv, newText);
+                    bubble.dataset.incrementCount = String(incrementCount + 1);
+                    if (incrementCount + 1 >= forceInterval) {
+                        bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
+                    } else {
+                        return;  // Success - skip full re-render (critical for image-bearing bubbles!)
+                        // NOTE: meta line is intentionally NOT refreshed on incremental ticks — it is
+                        // computed at bubble end (see applyMsgMeta call below, gated on !isGenerating).
+                    }
+                } catch(e) {
+                    // If incremental fails for any reason, fall through to full re-render below
+                    console.warn('Incremental streaming append failed, falling back to full render:', e);
+                }
             }
         }
     }
 
     let html = '';
     if (msg.reasoning_content) {
-        html += renderThinkingBlock(msg.reasoning_content, isGenerating);
+        // Cache parsed thinking markdown HTML to avoid re-parsing massive 20k token strings on content ticks
+        if (bubble._cachedReasoning && bubble._cachedReasoning.length === msg.reasoning_content.length && bubble._cachedReasoning === msg.reasoning_content && bubble._cachedThinkingContentHtml) {
+            const isOpen = isGenerating;
+            html += `
+    <details class="thinking-block" ${isOpen ? 'open' : ''}>
+      <summary>💭 Thinking...</summary>
+      <div class="thinking-content">${bubble._cachedThinkingContentHtml}</div>
+    </details>
+  `;
+        } else {
+            const thinkingContentHtml = renderMarkdown(msg.reasoning_content);
+            bubble._cachedReasoning = msg.reasoning_content;
+            bubble._cachedThinkingContentHtml = thinkingContentHtml;
+            html += renderThinkingBlock(msg.reasoning_content, isGenerating);
+        }
     }
 
     if (msg.function_call) {

@@ -8,8 +8,7 @@ See audit_reports/execution_engine_refactor_plan.md §4.4 for design rationale.
 """
 
 import asyncio
-import time
-from typing import List, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from agent_cascade.log import logger
 
@@ -115,7 +114,7 @@ class StreamPublisher:
             from agent_cascade.api_integration_pkg.streaming import _put_stream_update
             su = build_stream_update_from_pool(
                 pool=self.pool,
-                instance_name=caller,  # Root instance for header stats
+                instance_name=instance.instance_name,  # Sub-agent instance
                 responses=None,        # Reads full conversations from pool
                 force_full=True,       # New sub-agent's first frame must be full (no delta baseline yet)
             )
@@ -134,7 +133,7 @@ class StreamPublisher:
     
     def push_periodic_update(
         self,
-        caller: str
+        caller: str,
     ) -> None:
         """Push periodic stream update during execution (throttled).
         
@@ -145,7 +144,7 @@ class StreamPublisher:
         
         Args:
             caller: Root instance name for header stats.
-            
+
         Note:
             Throttling (time-based check) is handled by the caller. This method
             performs the actual WebSocket push if not disabled.
