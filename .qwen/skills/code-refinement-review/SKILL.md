@@ -1,5 +1,5 @@
 ---
-name: refinement-code-review
+name: code-refinement-review
 description: Code review focused exclusively on over-engineering. Finds what to delete, reinvented standard library, unneeded dependencies, speculative abstractions, dead flexibility. One line per finding, location, what to cut, what replaces it. Complements correctness-focused review, this one only hunts complexity.
 triggers:
   - code refinement review

@@ -325,7 +325,7 @@ def _parse_stream_force_full_interval() -> float:
     self-healing safety net that re-syncs the UI if individual delta frames were dropped while
     the WS send queue was full. Falls back silently (settings.py has no logger).
     """
-    raw = os.getenv('AGENT_CASCADE_STREAM_FORCE_FULL_INTERVAL', '60')
+    raw = os.getenv('AGENT_CASCADE_STREAM_FORCE_FULL_INTERVAL', '30')
     try:
         return float(str(raw).strip())
     except (ValueError, TypeError):

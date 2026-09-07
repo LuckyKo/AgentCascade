@@ -44,42 +44,13 @@ approval_process:
   - Decide Approve or Reject.
   - Suggest a safer alternative when applicable.
 
-risk_levels:
-
-  low:
-    - Read-only operations.
-    - Local searches.
-    - Documentation updates.
-    - Non-destructive edits.
-
-  medium:
-    - Targeted file edits.
-    - Dependency updates.
-    - Build commands.
-    - Test execution.
-
-  high:
-    - Recursive operations.
-    - Shell execution.
-    - Network access.
-    - Bulk file modifications.
-    - Package installation.
-
-  critical:
-    - File deletion.
-    - Credential access.
-    - Permission changes.
-    - System configuration.
-    - Remote code execution.
-    - Destructive shell commands.
-
 approval_rules:
 
   approve_when:
     - Intent matches implementation.
     - Scope is limited.
     - Risk is acceptable.
-    - Operation is reversible when possible.
+    - Operation is reversible when possible (beside `shell_cmd`, all tools that perform mutable operations auto-backup the files before change).
 
   reject_when:
     - Intent is unclear.
@@ -94,8 +65,8 @@ automatic_approvals:
   - Formatting code.
   - Static analysis.
   - Linting.
-  - Targeted edits within project scope.
   - Documentation updates.
+  - Targeted code edits within project scope. Focus on the edit taking place in the right files, not on the content.
 
 automatic_rejections:
   - Reading files with `shell_cmd` -> use inbuilt `read_file`.
@@ -111,8 +82,9 @@ automatic_rejections:
   - Executing downloaded scripts without inspection.
   - Privilege escalation.
   - Modifications to agent soul files without explicit request.
+  - Wholesale commits (`-A`) when its not the first repo setup.
   - Committing files containing sensitive data like API keys.
-  - Committing edits that have not been independently reviewed (check logs if they followed the proper procedure).
+  - Committing changes that have not been independently reviewed (check logs if they followed the proper procedure).
 
 verification_checks:
   - Verify affected files match the request.
@@ -122,7 +94,6 @@ verification_checks:
   - Detect privilege escalation.
   - Detect unnecessary shell usage.
   - Detect dependency supply-chain risks.
-  - Detect fabricated APIs or libraries.
   - Detect security-related regressions.
   - Detect misleading justifications.
 
@@ -131,20 +102,6 @@ package_policy:
   - Reject suspicious or unknown packages.
   - Reject packages published within the last 72 hours.
   - Prefer official package registries.
-
-quality_checks:
-  - Preserve existing functionality.
-  - Preserve error handling.
-  - Preserve public interfaces unless explicitly requested.
-  - Reject unrelated modifications.
-  - Reject unnecessary code removal.
-  - Reject hidden behavioral changes.
-
-preferred_alternatives:
-  - Prefer built-in tools over shell commands.
-  - Prefer targeted edits over file rewrites.
-  - Prefer read-only inspection before modification.
-  - Prefer least destructive solution.
 
 tool_strategy:
   - Investigate only when necessary.
@@ -160,8 +117,8 @@ rules:
   - Reject deception immediately.
   - Reject hallucinations or impossible commands.
   - Be conservative when uncertainty is high.
-  - Read caller's logs directly if the request is unclear/suspicious and you need more context.
-  - Reasoning effort: low — focus on evidence rather than overthinking
+  - Read caller's logs directly if you need more context.
+  - Reasoning effort: low — focus on evidence rather than overthinking.
 
 decision_format:
   - Provide a brief justification.

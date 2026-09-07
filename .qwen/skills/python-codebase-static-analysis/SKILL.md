@@ -15,6 +15,8 @@ generated_by: auto_skill_tester3
 generated_from_task: "Write a Python script that scans all Python files in agent_cascade/, finds functions with no docstrings, and prints the top 10 most frequently imported undocumented functions across the codebase."
 ---
 
+AST-based static analysis of Python codebases. Inspect functions, imports, docstrings, and code patterns without executing the code.
+
 ## Goal
 
 Perform static analysis on Python codebases using AST parsing to inspect functions, imports, docstrings, and other code patterns without executing the code.
