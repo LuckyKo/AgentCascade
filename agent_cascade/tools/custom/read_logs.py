@@ -117,6 +117,21 @@ class ReadLogs(BaseTool):
             return idx - 1, idx
 
     @staticmethod
+    def _humanize_size(file_path: Path) -> str:
+        """Return a humanized file size string (B/KB/MB/GB/TB), matching read_file's style.
+
+        Reuses FileOpsMixin._format_size so the two tools can't drift on thresholds.
+        Returns "?" if the stat call fails.
+        """
+        try:
+            from agent_cascade.operation_manager.file_operations import FileOpsMixin
+            # Non-Path objects (e.g. test mocks) raise here and fall through to "?".
+            size_bytes = file_path.stat().st_size
+            return FileOpsMixin._format_size(size_bytes)
+        except Exception:
+            return "?"
+
+    @staticmethod
     def _is_metadata(entry):
         """Check if an entry is a metadata line."""
         return isinstance(entry, dict) and "metadata" in entry
@@ -432,10 +447,13 @@ class ReadLogs(BaseTool):
         for idx, l in enumerate(parsed_lines):
             all_lines.append((idx + 1, l))
 
+        total = len(all_lines)
+        file_size_str = self._humanize_size(file_path)
+
         try:
             if range_str is not None:
-                # Unified range parameter (1-indexed, inclusive like re_indent / edit_file)
-                start_idx, end_idx = self._parse_range(range_str, len(all_lines))
+                # Unified range parameter (1-indexed inclusive like re_indent / edit_file)
+                start_idx, end_idx = self._parse_range(range_str, total)
                 selected = all_lines[start_idx:end_idx]
             else:
                 # Default fallback — last 20 entries
@@ -446,6 +464,32 @@ class ReadLogs(BaseTool):
         truncated_lines = []
         for pos, item in selected:
             truncated_lines.append((pos, ReadLogs.truncate_item(item, mode, max_chars)))
+
+        # --- Empty log (0 entries): mirror read_file's empty-file style ---
+        if total == 0:
+            return f"OK: Read {file_path} lines 0/0 ({fmt}, {file_size_str})"
+
+        # --- Build the operation-status header (first line of output) ---
+        # Wording mirrors read_file's "OK: Read {path} lines {start}-{end}/{total} (...)" so the
+        # two tools look consistent. The ({fmt}, ...) tag carries the log-specific detail.
+        first = truncated_lines[0][0]
+        last = truncated_lines[-1][0]
+        shown = len(truncated_lines)
+
+        header = f"OK: Read {file_path} lines {first}-{last}/{total} ({fmt}, {file_size_str})"
+
+        # [TRUNCATED] only when an EXPLICIT range was requested and it doesn't cover all entries.
+        # The implicit default (last 20) is NOT marked truncated — it's surfaced via the footer hint.
+        explicit_partial = range_str is not None and (first > 1 or last < total)
+        if explicit_partial:
+            header += " [TRUNCATED]"
+
+        # --- Pagination footer (only when content was actually limited) ---
+        footer = ""
+        if range_str is not None and last < total:
+            footer = f'\n→ continue at range="{last + 1}:{total}"'
+        elif range_str is None and total > shown:
+            footer = f'\n→ showing last {shown} of {total}; continue at range="1:{total}" for full log'
 
         # --- Output formatting based on 'format' parameter ---
         if fmt == 'raw':
@@ -458,7 +502,7 @@ class ReadLogs(BaseTool):
                     line_text = json.dumps(item, ensure_ascii=False)
                 num_label = "meta" if pos == 0 else pos
                 result.append(f"{num_label}: {line_text}")
-            return "\n".join(result)
+            return f"{header}\n" + "\n".join(result) + footer
 
         # simple mode: human-readable summary (using original entry positions)
         result = []
@@ -467,4 +511,4 @@ class ReadLogs(BaseTool):
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)
-        return "\n".join(result)
+        return f"{header}\n" + "\n".join(result) + footer

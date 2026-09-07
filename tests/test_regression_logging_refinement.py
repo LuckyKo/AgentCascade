@@ -349,10 +349,12 @@ class TestReadLogsFormatParameter:
 
             assert "Error" not in result, f"Unexpected error: {result}"
             lines = result.strip().split("\n")
-            assert len(lines) == 2
+            # First line is the operation-status header; remaining lines are numbered JSON entries.
+            assert len(lines) == 3
+            assert lines[0].startswith("OK: Read "), f"Missing header: {lines[0]}"
 
-            # Each line starts with a number prefix followed by ": " and valid JSON
-            for line in lines:
+            # Each entry line (after the header) starts with a number prefix followed by ": " and valid JSON
+            for line in lines[1:]:
                 assert ": " in line, f"Line missing ': ' separator: {line}"
                 num_prefix, json_part = line.split(": ", 1)
                 assert num_prefix.isdigit(), f"Prefix not numeric: {num_prefix}"
