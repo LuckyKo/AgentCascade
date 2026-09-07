@@ -1192,7 +1192,7 @@ class Grep(BaseTool):
 
 @register_tool('delete_file', allow_overwrite=True)
 class DeleteFile(BaseTool):
-    """Delete a file — creates a timestamped backup before deletion (requires user approval)."""
+    """Delete a file or directory — auto-approved for agent-owned files, otherwise requires user approval. Creates a timestamped backup before deletion."""
 
     name = 'delete_file'
     description = TOOL_METADATA['delete_file']['description']
@@ -1203,12 +1203,42 @@ class DeleteFile(BaseTool):
                 'type': 'string',
                 'description': TOOL_METADATA['delete_file']['parameters']['path']
             },
+            'paths': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': TOOL_METADATA['delete_file']['parameters']['paths']
+            },
+            'include': {
+                'type': 'string',
+                'description': TOOL_METADATA['delete_file']['parameters']['include']
+            },
+            'exclude': {
+                'type': 'string',
+                'description': TOOL_METADATA['delete_file']['parameters']['exclude']
+            },
+            'min_size': {
+                'type': 'string',
+                'description': TOOL_METADATA['delete_file']['parameters']['min_size']
+            },
+            'max_size': {
+                'type': 'string',
+                'description': TOOL_METADATA['delete_file']['parameters']['max_size']
+            },
+            'modified_after': {
+                'type': 'string',
+                'description': TOOL_METADATA['delete_file']['parameters']['modified_after']
+            },
+            'modified_before': {
+                'type': 'string',
+                'description': TOOL_METADATA['delete_file']['parameters']['modified_before']
+            },
             'justification': {
                 'type': 'string',
                 'description': 'Why you need to delete this file'
             }
         },
-        'required': ['path'],
+        # At least one of path/paths is required — enforced in call() so the
+        # error message can name the missing input rather than failing schema.
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -1221,10 +1251,23 @@ class DeleteFile(BaseTool):
 
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
-        path = params['path']
+        path = params.get('path') or None
+        paths = params.get('paths') or None
+        if not path and not paths:
+            return "ERROR: Provide at least one of 'path' (single entry) or 'paths' (list of entries)."
         justification = params.get('justification', '')
         agent_name = self._get_agent_name(kwargs)
-        return self.agent_pool.operation_manager.delete_file(path, agent_name, justification=justification)
+        return self.agent_pool.operation_manager.delete_file(
+            path, agent_name,
+            paths=paths,
+            include=params.get('include'),
+            exclude=params.get('exclude'),
+            min_size=params.get('min_size'),
+            max_size=params.get('max_size'),
+            modified_after=params.get('modified_after'),
+            modified_before=params.get('modified_before'),
+            justification=justification,
+        )
 
 
 @register_tool('copy_file', allow_overwrite=True)

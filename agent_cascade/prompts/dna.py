@@ -309,12 +309,21 @@ TOOL_METADATA = {
     },
     'delete_file': {
         'description': (
-            'Delete a file. The file is actually moved to a backup folder so it can be restored if needed. '
-            'Requires user approval before deletion for any files not owned by the current agent. '
-            'Deleting files you created in this session is auto-approved.'
+            'Delete one or more files/directories. Each entry is actually moved to a backup folder so it can be restored if needed. '
+            'Deleting entries you created in this session is auto-approved; any entry not owned by the current agent requires user approval. '
+            'When multiple targets are requested, a SINGLE aggregate approval prompt is shown listing exactly what will be removed (a bulk delete is not transactional — partial success is possible, and each deleted target is individually restorable from its backup). '
+            'Filters (include/exclude/min_size/max_size/modified_after/modified_before) work like list_dir: they are applied within the resolved base directory of a path. '
+            'Concurrent deletes on the same file are not supported; there is no per-file filesystem lock.'
         ),
         'parameters': {
-            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'temp/scratch.py')"
+            'path': "Path to a single file/directory, absolute or relative to the workspace root (e.g., 'temp/scratch.py'). Provide this OR 'paths' (at least one required).",
+            'paths': "Optional list of file/directory paths to delete in one bulk operation. Each path is resolved and containment-checked individually. Use for deleting several explicit entries at once.",
+            'include': "Optional glob pattern(s) to keep, applied within the base directory of 'path'. Single pattern ('*.md') or comma-separated ('*.py,*.js'). Simple globs only; '**' not supported. Mirrors list_dir semantics.",
+            'exclude': "Optional glob pattern(s) to exclude (single or comma-separated), applied within the base directory of 'path'. Mirrors list_dir semantics.",
+            'min_size': "Minimum file size filter, human-readable ('500B', '1.5KB', '5MB') or raw bytes as string. Only files at/above this size are deleted; directories are unaffected. Mirrors list_dir.",
+            'max_size': "Maximum file size filter, same format as min_size. Only files at/below this size are deleted. Mirrors list_dir.",
+            'modified_after': "Only delete files modified after this time (ISO date/datetime, relative like '2 days ago', compact like '2h'/'1d', or epoch seconds). Mirrors list_dir.",
+            'modified_before': "Only delete files modified before this time. Same formats as modified_after. Mirrors list_dir."
         }
     },
     'copy_file': {

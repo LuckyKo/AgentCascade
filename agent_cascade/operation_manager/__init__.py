@@ -66,7 +66,14 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
         # Lock for thread-safe access to pending dict
         self._lock = threading.Lock()
 
+        # Dedicated lock for the file_ownership dict. The _lock above only guards
+        # `pending`; ownership is mutated concurrently by multiple file ops, so it
+        # needs its own lock to avoid lost updates / wrong attribution (A1).
+        self._ownership_lock = threading.Lock()
+
         # File ownership tracking (still useful for context in approval UI)
+        # Keys are normalized with os.path.normcase at storage time (see _own/_unown)
+        # so lookups and comparisons are case/slash-insensitive on Windows.
         self.file_ownership: Dict[str, str] = {}
 
         # Track heuristic edit counts per file to warn about indentation drift
@@ -130,3 +137,50 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
                 self.agent_pool.notify_config_changed()
         else:
             logger.debug("[Workspace] Tiered folders unchanged, skipping config notification")
+
+    # ─── File ownership helpers (thread-safe, normalized) ──────────────────
+
+    def _own(self, path, agent_name: str) -> None:
+        """Record *agent_name* as owner of *path*.
+
+        The key is stored normalized with os.path.normcase so that later lookups
+        and comparisons are case/slash-insensitive (Decision #4: normcase-at-storage).
+        All mutation of file_ownership goes through this helper under _ownership_lock.
+        """
+        key = os.path.normcase(str(path))
+        with self._ownership_lock:
+            self.file_ownership[key] = agent_name
+
+    def _unown(self, paths) -> None:
+        """Remove ownership entries for the given paths (normalized).
+
+        Accepts a single path or an iterable of paths. Keys are normalized with
+        os.path.normcase to match what _own stored. No-op for unknown keys.
+        """
+        if isinstance(paths, (str, Path)):
+            paths = [paths]
+        keys = {os.path.normcase(str(p)) for p in paths}
+        with self._ownership_lock:
+            for key in keys:
+                self.file_ownership.pop(key, None)
+
+    def _get_owner(self, path) -> Optional[str]:
+        """Return the owner of *path* (normalized lookup), or None if unowned."""
+        key = os.path.normcase(str(path))
+        with self._ownership_lock:
+            return self.file_ownership.get(key)
+
+    def _unown_recursive(self, path) -> None:
+        """Atomically remove the ownership entry for *path* and all entries under it.
+
+        Used when deleting a directory: clears the dir's own key plus every child
+        file/dir key in one locked pass so no stale keys leak and there is no
+        lost-update window between scanning and removal (A1/A3). The comparison
+        uses normcase on both sides so case/slash differences on Windows still match.
+        """
+        prefix = os.path.normcase(str(path)) + os.sep
+        with self._ownership_lock:
+            to_remove = [k for k in self.file_ownership.keys()
+                         if k == os.path.normcase(str(path)) or k.startswith(prefix)]
+            for key in to_remove:
+                del self.file_ownership[key]

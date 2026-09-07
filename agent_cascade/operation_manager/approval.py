@@ -76,7 +76,7 @@ class ApprovalMixin:
                 return True  # New file — no existing work affected
 
         resolved = self._resolve_path(path, mode="rw")
-        owner = self.file_ownership.get(str(resolved))
+        owner = self._get_owner(resolved)
         return owner == agent_name
 
     # ─── Blocking Approval API ────────────────────────────────────────────

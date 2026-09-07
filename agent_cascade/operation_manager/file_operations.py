@@ -20,6 +20,11 @@ from agent_cascade.tool_utils import truncate_with_spillover
 _SIZE_RE = re.compile(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)?$', re.IGNORECASE)
 _SIZE_UNITS = {'B': 1, 'KB': 1024, 'MB': 1024 ** 2, 'GB': 1024 ** 3, 'TB': 1024 ** 4}
 
+# Cap on files counted by _compute_scope_info for directory scope reporting.
+# Prevents rglob('*') from walking arbitrarily large trees on the approval
+# critical path (A5). Only delete_file and copy_file use this helper.
+_SCOPE_INFO_FILE_CAP = 1000
+
 
 def _parse_size(s: Optional[str]) -> Optional[int]:
     """Parse human-readable size string to bytes. Returns None if invalid/empty.
@@ -261,7 +266,13 @@ class FileOpsMixin:
     def _compute_scope_info(path) -> str:
         """Compute pre-operation scope info string for reporting (file stats or directory count)."""
         if path.is_dir():
-            file_count = sum(1 for _ in path.rglob('*') if _.is_file())
+            # Cap the file count so a huge tree doesn't stall the approval prompt (A5).
+            file_count = 0
+            for entry in path.rglob('*'):
+                if entry.is_file():
+                    file_count += 1
+                    if file_count >= _SCOPE_INFO_FILE_CAP:
+                        return f"(directory, {_SCOPE_INFO_FILE_CAP}+ files)"
             return f"(directory, {file_count} files)"
 
         size_str = FileOpsMixin._format_size(path.stat().st_size)
@@ -800,7 +811,7 @@ class FileOpsMixin:
 
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding='utf-8')
-            self.file_ownership[str(resolved)] = agent_name
+            self._own(resolved, agent_name)
 
             line_count = len(content.splitlines())
             file_size_str = self._format_size(len(content.encode('utf-8')))
@@ -1342,7 +1353,7 @@ class FileOpsMixin:
                     diff_content = '\n'.join(first_lines + ['...'] + last_lines)
 
             resolved.write_text(new_file_content, encoding='utf-8')
-            self.file_ownership[str(resolved)] = agent_name
+            self._own(resolved, agent_name)
 
             # Line delta computation using splitlines()
             if match_mode == 'delete_and_insert':
@@ -1723,7 +1734,7 @@ class FileOpsMixin:
 
             resolved.write_text(new_content_val, encoding='utf-8')
 
-            self.file_ownership[str(resolved)] = agent_name
+            self._own(resolved, agent_name)
 
             display_start = start + 1
             total_in_range = end - start  # lines in the requested range
@@ -1772,81 +1783,382 @@ class FileOpsMixin:
 
     # ─── Delete file ──────────────────────────────────────────────────────
 
-    def delete_file(self, path: str, agent_name: str, justification: str = "") -> str:
-        """Delete a file or directory — auto-approved for agent-owned files. Creates timestamped backup before deletion."""
-        import os
-        try:
-            resolved = self._resolve_path(path, mode="rw")
-        except Exception as e:
-            return f"ERROR: {str(e)}"
-        if not resolved.exists():
-            return f"File not found: {path}"
+    def delete_file(
+        self,
+        path: Optional[str],
+        agent_name: str,
+        paths: Optional[List[str]] = None,
+        include: Optional[str] = None,
+        exclude: Optional[str] = None,
+        min_size: Optional[str] = None,
+        max_size: Optional[str] = None,
+        modified_after: Optional[str] = None,
+        modified_before: Optional[str] = None,
+        justification: str = "",
+    ) -> str:
+        """Delete one or more files/directories.
 
-        if not self._is_auto_approved(path, agent_name):
-            description = f"Delete: {path}"
+        Accepts a single ``path`` (backward-compatible) and/or a ``paths`` list for
+        bulk deletion. Filters (``include``/``exclude``/size/date) are applied within
+        the resolved base directory of ``path``, mirroring ``list_dir`` semantics.
+
+        Flow: symlink-check(s) → resolve/expand targets → empty check (B6) → approval
+        (B3, single aggregate prompt when needed) → per-target delete with
+        continue-on-error (B4). Every target is backed up before deletion (A2/A3/B8).
+        """
+        explicit = []
+        if path:
+            explicit.append(path)
+        if paths:
+            for p in paths:
+                if isinstance(p, str) and p.strip():
+                    explicit.append(p)
+
+        # ── B6a: nothing requested → clear error (no approval prompt). ──────────
+        if not explicit:
+            return "ERROR: No path(s) provided. Supply 'path' or a non-empty 'paths' list."
+
+        # ── A9 (symlink security): check the RAW input path BEFORE _resolve_path. ─
+        # Path.resolve() follows symlinks, so is_symlink() on the resolved path is
+        # always False; a workspace symlink pointing out-of-bounds would otherwise
+        # pass containment and its real target would be deleted. Reject in v1.
+        for p in explicit:
+            if os.path.islink(p) or Path(p).is_symlink():
+                return f"ERROR: Symlink deletion is not supported: {p}"
+
+        # ── B2: resolve + expand into a concrete, de-duplicated target set. ──────
+        targets: List[Path] = []
+        seen: set = set()
+        errors: List[str] = []
+
+        def _add_target(resolved: Path) -> None:
+            key = os.path.normcase(str(resolved))
+            if key not in seen:
+                seen.add(key)
+                targets.append(resolved)
+
+        for p in explicit:
+            try:
+                resolved = self._resolve_path(p, mode="rw")
+            except Exception as e:
+                errors.append(f"{p}: {e}")
+                continue
+            if not resolved.exists():
+                errors.append(f"File not found: {p}")
+                continue
+            # Filters are applied within the base directory of a path (B2).
+            if self._has_filters(include, exclude, min_size, max_size, modified_after, modified_before):
+                matched = self._expand_filtered(resolved, include, exclude,
+                                                min_size, max_size, modified_after, modified_before)
+                for m in matched:
+                    _add_target(m)
+            else:
+                _add_target(resolved)
+
+        # ── B6: empty resolved set → return BEFORE any approval prompt. ──────────
+        if not targets:
+            detail = "; ".join(errors) if errors else "no entries matched the given path/filter"
+            return f"No files matched (0 of {len(explicit)} requested). {detail}"
+
+        # ── B3: approval model for bulk deletes. ────────────────────────────────
+        # Auto-approve only if ALL targets are agent-owned. Otherwise fire a SINGLE
+        # aggregate prompt. The WebUI (web_ui/app.js renderApprovals) renders ONLY the
+        # justification field (prominently) + JSON.stringify(tool_args) — it does NOT
+        # render `description`. So we compose the human-readable scope summary into
+        # tool_args['justification'] (which request_user_approval stores on the
+        # PendingApproval and app.js shows most prominently), and keep tool_args itself
+        # COMPACT (count + a short paths_preview, never the full list) so the JSON block
+        # stays small even for huge bulk deletes. `description` is still passed for any
+        # future/other client that does render it, but we don't rely on it.
+        # _is_auto_approved resolves its argument internally (needs a str); passing the
+        # already-resolved path string is idempotent and avoids re-resolution cost.
+        non_owned = [t for t in targets if not self._is_auto_approved(str(t), agent_name)]
+        if non_owned:
+            description = self._build_delete_approval_description(targets, non_owned, justification)
+            # Compose the readable scope summary with the original agent justification so
+            # the UI shows both (audit trail preserved). Keep tool_args compact.
+            paths_preview = [str(t) for t in targets[:5]]
+            visible_justification = description if not justification else \
+                f"{description}\nJustification: {justification}"
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='delete_file',
-                tool_args={'path': path, 'justification': justification},
+                tool_args={'count': len(targets), 'paths_preview': paths_preview,
+                           'justification': visible_justification},
                 description=description,
             )
             if not approved:
                 return f"REJECTED: {reason}"
-            justification = reason
-        else:
-            justification = ""
+            # Keep the agent's stated reason (A4); append the user's approval note.
+            if reason and reason not in justification:
+                justification = f"{justification}\n{reason}".strip()
 
-        try:
-            is_directory = resolved.is_dir()
-
-            scope_info = self._compute_scope_info(resolved)
-
-            safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-            backup_dir = self.base_dir / "logs" / "backups" / safe_agent
-            backup_dir.mkdir(parents=True, exist_ok=True)
-
-            timestamp = int(time.time())
-            counter = 0
-            while True:
-                if counter == 0:
-                    backup_filename = f"{resolved.name}.{timestamp}.bak"
-                else:
-                    backup_filename = f"{resolved.name}.{timestamp}_{counter}.bak"
-                backup_path = backup_dir / backup_filename
-                if not backup_path.exists():
-                    break
-                counter += 1
-
+        # ── B4: per-target execution with continue-on-error + aggregated report. ─
+        deleted: List[Tuple[Path, str]] = []   # (resolved, backup_path_str)
+        failures: List[str] = []
+        for t in targets:
             try:
-                shutil.move(resolved, backup_path)
-            except Exception as move_err:
+                backup_str = self._delete_one(t, agent_name, justification)
+            except Exception as e:
+                failures.append(f"{t}: {e}")
+                continue
+            deleted.append((t, backup_str))
+
+        total = len(targets)
+        ok_count = len(deleted)
+        lines = [f"OK: Deleted {ok_count} of {total} entries"]
+        for t, backup_str in deleted:
+            lines.append(f"  ✓ {t}  →  backup {backup_str}")
+        # A4 (audit trail): on a clean full delete, echo the justification exactly like
+        # the single-delete path did. On partial failures it is omitted to keep the
+        # per-target failure list the focus of the report.
+        if ok_count == total and not errors and justification:
+            lines.append(f"Security Justification: {justification}")
+        if failures:
+            lines.append("Failures:")
+            lines.extend(f"  ✗ {f}" for f in failures)
+        # B6a errors (unresolvable / not-found explicit entries) are surfaced here.
+        if errors:
+            lines.append("Skipped (unresolved):")
+            lines.extend(f"  - {e}" for e in errors)
+        return "\n".join(lines)
+
+    # ─── delete_file helpers (B2/B3 + A2/A3 core) ──────────────────────────────
+
+    @staticmethod
+    def _has_filters(include, exclude, min_size, max_size, modified_after, modified_before) -> bool:
+        """True if any filter argument is a non-empty string."""
+        return any(v and str(v).strip() for v in (include, exclude, min_size, max_size,
+                                                  modified_after, modified_before))
+
+    def _build_filter_ctx(self, include, exclude, min_size, max_size, modified_after, modified_before):
+        """Build a FilterContext from raw filter strings (mirrors list_directory)."""
+        return FilterContext(
+            include_fn=_build_pattern_fn(include),
+            exclude_fn=_build_pattern_fn(exclude),
+            min_size=_parse_size(min_size),
+            max_size=_parse_size(max_size),
+            modified_after=_parse_time(modified_after),
+            modified_before=_parse_time(modified_before),
+        )
+
+    def _expand_filtered(self, base: Path, include, exclude, min_size, max_size,
+                         modified_after, modified_before) -> List[Path]:
+        """Expand *base* into matched targets using the shared list_dir filter helpers.
+
+        Mirrors list_directory semantics:
+          - If *base* is a file, apply the filters to it directly (its own name/size/mtime).
+          - If *base* is a directory, walk recursively and collect every entry whose own
+            name passes the include/exclude filter; size/date filters apply only to files.
+        Every returned path is inside *base*, so containment is guaranteed by the caller's
+        _resolve_path(base). De-duplication + stable order are applied by the caller.
+        """
+        ctx = self._build_filter_ctx(include, exclude, min_size, max_size, modified_after, modified_before)
+        results: List[Path] = []
+
+        if base.is_file():
+            try:
+                st = base.stat()
+                size, mtime = st.st_size, st.st_mtime
+            except OSError:
+                size, mtime = None, None
+            if self._matches_filters(base.name, False, size=size, mtime=mtime, ctx=ctx):
+                results.append(base)
+            return results
+
+        # Directory: recursive walk (consistent with list_dir's recursion).
+        # DELETION SEMANTICS DIFFER FROM LISTING: a bare filter (no include/exclude name
+        # pattern) must match FILES only. Otherwise every subdirectory — including the
+        # auto-created logs/backups/ tree that holds this very operation's backups — would
+        # be swept in as a delete target. Directories are only matched when the caller
+        # explicitly supplies a directory-name filter (include/exclude).
+        match_dirs = ctx.include_fn is not None or ctx.exclude_fn is not None
+
+        visited: set = set()
+        for dirpath, subdirs, filenames in os.walk(str(base), topdown=True):
+            current_dir = Path(dirpath)
+            abs_path = current_dir.resolve()
+            if abs_path in visited:      # symlink cycle guard (mirrors _list_recursive)
+                subdirs.clear()
+                continue
+            visited.add(abs_path)
+
+            if match_dirs:
+                for name in sorted(subdirs):
+                    d = current_dir / name
+                    try:
+                        st = d.stat()
+                        size, mtime = 0, None      # dirs: size/date filters never apply
+                    except OSError:
+                        size, mtime = None, None
+                    if self._matches_filters(name, True, size=size, mtime=mtime, ctx=ctx):
+                        results.append(d)
+
+            for name in sorted(filenames):
+                f = current_dir / name
+                try:
+                    st = f.stat()
+                    size, mtime = st.st_size, st.st_mtime
+                except OSError:
+                    size, mtime = None, None
+                if self._matches_filters(name, False, size=size, mtime=mtime, ctx=ctx):
+                    results.append(f)
+
+        return results
+
+    def _build_delete_approval_description(self, targets: List[Path], non_owned: List[Path],
+                                           justification: str = "") -> str:
+        """Human-readable scope summary for the aggregate approval prompt (B3).
+
+        Carries the readable count, total size and a sample of the paths. Broadcast to
+        the WebUI as `description` (shown by any client that renders it). The full list
+        is passed separately in tool_args for machine consumers. NOTE: the current
+        web_ui/app.js approval card does not render `description`; see delete_file().
+        """
+        n = len(targets)
+        n_files = sum(1 for t in targets if not t.is_dir())
+        n_dirs = n - n_files
+
+        # Cap the walk so a huge directory can't stall the approval prompt (UI lag).
+        # The size is only an informational summary, not used for any decision.
+        total_size = 0
+        counted_files = 0
+        for t in targets:
+            try:
+                if t.is_file():
+                    total_size += t.stat().st_size
+                    counted_files += 1
+                else:
+                    for f in t.rglob('*'):
+                        if f.is_file():
+                            total_size += f.stat().st_size
+                            counted_files += 1
+                            if counted_files >= _SCOPE_INFO_FILE_CAP:
+                                break
+            except OSError:
+                pass
+
+        sample = targets[:5]
+        sample_str = "\n".join(f"  - {t}" for t in sample)
+        more = f"\n  … and {n - len(sample)} more" if n > len(sample) else ""
+
+        desc = (f"Delete {n} entr{'y' if n == 1 else 'ies'} "
+                f"({n_files} file(s), {n_dirs} dir(s), total {self._format_size(total_size)}):")
+        desc += "\n" + sample_str + more
+        if non_owned:
+            desc += f"\n\n{len(non_owned)} of these are not owned by you and require approval."
+        if justification:
+            desc += f"\nJustification: {justification}"
+        return desc
+
+    def _delete_one(self, resolved: Path, agent_name: str, justification: str = "") -> str:
+        """Hardened single-target delete (A2 backup+verify, A3 ownership cleanup).
+
+        Returns the backup path string on success. Raises on failure so the bulk
+        loop can collect per-target status (continue-on-error, B4).
+        """
+        is_directory = resolved.is_dir()
+
+        safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+        backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = int(time.time())
+        counter = 0
+        while True:
+            if counter == 0:
+                backup_filename = f"{resolved.name}.{timestamp}.bak"
+            else:
+                backup_filename = f"{resolved.name}.{timestamp}_{counter}.bak"
+            backup_path = backup_dir / backup_filename
+            if not backup_path.exists():
+                break
+            counter += 1
+
+        # A2: back up, verify integrity, then delete — never delete the original
+        # unless we are sure the backup is complete. Partial backups are removed.
+        try:
+            shutil.move(resolved, backup_path)
+        except Exception as move_err:
+            # Fallback: copy to backup, verify, then remove the original.
+            try:
                 if is_directory:
                     shutil.copytree(resolved, backup_path)
-                    shutil.rmtree(resolved)
                 else:
                     shutil.copy2(resolved, backup_path)
+            except Exception as copy_err:
+                # Copy failed before any deletion — clean up partial backup,
+                # leave the original untouched. (A6: name the failed step.)
+                self._remove_partial_backup(backup_path)
+                raise RuntimeError(f"backup failed before delete: {copy_err}")
+
+            try:
+                if is_directory:
+                    if not self._verify_dir_backup(resolved, backup_path):
+                        raise RuntimeError("backup integrity check failed (file count/size mismatch)")
+                    shutil.rmtree(resolved)
+                else:
+                    if not self._verify_file_backup(resolved, backup_path):
+                        raise RuntimeError("backup integrity check failed (missing or size mismatch)")
                     resolved.unlink()
+            except Exception as del_err:
+                # Delete/integrity step failed — clean up partial backup.
+                # Original is only gone if rmtree/unlink itself succeeded first.
+                self._remove_partial_backup(backup_path)
+                raise RuntimeError(f"delete failed after backup: {del_err}")
 
-            backup_path_str = self._backup_path_str(backup_path)
+        backup_path_str = self._backup_path_str(backup_path)
 
-            if str(resolved) in self.file_ownership:
-                del self.file_ownership[str(resolved)]
+        # A3: normalized ownership cleanup (atomic + normcase under lock).
+        if is_directory:
+            self._unown_recursive(resolved)
+        else:
+            self._unown(resolved)
 
-            if is_directory:
-                resolved_str = str(resolved) + os.sep
-                keys_to_remove = [k for k in self.file_ownership.keys() if k.startswith(resolved_str)]
-                for key in keys_to_remove:
-                    del self.file_ownership[key]
+        return backup_path_str
 
-            msg = f"OK: Deleted {path} {scope_info}"
-            if justification:
-                msg += f"\nSecurity Justification: {justification}"
+    # ─── delete_file helpers (A2/A3) ───────────────────────────────────────
 
-            msg += f'\n  backup → {backup_path_str}'
+    @staticmethod
+    def _remove_partial_backup(backup_path) -> None:
+        """Best-effort removal of a partially-created backup (file or dir)."""
+        try:
+            if backup_path.is_dir():
+                shutil.rmtree(backup_path, ignore_errors=True)
+            elif backup_path.exists():
+                backup_path.unlink()
+        except Exception:
+            pass
 
-            return msg
-        except Exception as e:
-            return f"ERROR: Approved but execution failed: {str(e)}"
+    @staticmethod
+    def _verify_file_backup(source, backup_path) -> bool:
+        """Verify a file backup exists and matches the source size."""
+        if not backup_path.is_file():
+            return False
+        try:
+            return backup_path.stat().st_size == source.stat().st_size
+        except OSError:
+            return False
+
+    @staticmethod
+    def _verify_dir_backup(source, backup_path) -> bool:
+        """Verify a directory backup has file-count and total-size parity with the source.
+
+        File count is the primary check (cheap); total size is a lightweight
+        spot-check that catches most partial copies without hashing every file.
+        """
+        if not backup_path.is_dir():
+            return False
+        try:
+            src_files = [f for f in source.rglob('*') if f.is_file()]
+            bak_files = [f for f in backup_path.rglob('*') if f.is_file()]
+            if len(src_files) != len(bak_files):
+                return False
+            src_size = sum(f.stat().st_size for f in src_files)
+            bak_size = sum(f.stat().st_size for f in bak_files)
+            return src_size == bak_size
+        except OSError:
+            return False
 
     # ─── Copy file ────────────────────────────────────────────────────────
 
@@ -1911,7 +2223,7 @@ class FileOpsMixin:
             else:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dest_path)
-            self.file_ownership[str(dest_path)] = agent_name
+            self._own(dest_path, agent_name)
 
             if was_overwrite:
                 msg = f"OK: Copied {source} → {destination} (overwrote{scope_info})"
@@ -1989,9 +2301,8 @@ class FileOpsMixin:
 
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(src_path, dest_path)
-            if str(src_path) in self.file_ownership:
-                del self.file_ownership[str(src_path)]
-            self.file_ownership[str(dest_path)] = agent_name
+            self._unown(src_path)
+            self._own(dest_path, agent_name)
             msg = f"OK: Moved {source} → {destination}"
 
             if justification:
@@ -2007,5 +2318,5 @@ class FileOpsMixin:
     # ─── Utilities ────────────────────────────────────────────────────────
 
     def get_file_owner(self, path: str) -> Optional[str]:
-        """Get the owner of a file."""
-        return self.file_ownership.get(path)
+        """Get the owner of a file (normalized lookup)."""
+        return self._get_owner(path)
