@@ -2230,7 +2230,18 @@ class TestN13StructuredEventLogCoverage:
 
         t = threading.Thread(target=waiter)
         t.start()
-        time.sleep(0.3)
+        # Poll until the waiter's ticket is actually registered in the pool's FIFO
+        # waiter set (bounded ~5s). A blind time.sleep(0.3) here is flaky: under load
+        # the thread may not have reached pool.acquire() yet, so a later cancel_all
+        # misses its unregistered ticket and the waiter waits out its full deadline.
+        # The registration check uses the same _waiter_names accessor as the rest of
+        # this file (see the caption-enqueue polls above).
+        deadline = time.monotonic() + 5.0
+        while name not in _waiter_names(router.scheduler._get_or_create_pool(SEQ_BASE, 0)) \
+                and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert name in _waiter_names(router.scheduler._get_or_create_pool(SEQ_BASE, 0)), \
+            f"{name} must register a FIFO ticket while the holder holds"
         assert not granted.is_set(), f"{name} must be blocked while the holder holds"
         return t, granted, inst
 
@@ -2459,6 +2470,14 @@ class TestN13StructuredEventLogCoverage:
             # without a grant; join it so no thread outlives this sub-scenario.
             t_s.join(timeout=10)
             assert not t_s.is_alive(), "waiter thread must exit after stop_session cancels it"
+            # RACE HARDENING (Fix 2A): stop_session releases the holder's slot BEFORE
+            # cancel_all runs. A woken FIFO waiter can therefore grant itself the just-
+            # freed shared slot before cancel_all pops its ticket — and a granted waiter
+            # is invisible to cancel_all, so its permit would leak and pin the slot for
+            # the next sub-scenario's acquire(timeout=5.0). Release it here: idempotent
+            # (no-op if the waiter was cancelled; releases synchronously if it was
+            # granted). The join above guarantees _slot_release was set before this.
+            self._release_permit(_w_s)
 
             # Restore the stopped flag for the next sub-scenario (stop_session
             # latches pool.stopped=True; nothing else in this test resets it).

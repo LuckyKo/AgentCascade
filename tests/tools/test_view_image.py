@@ -148,7 +148,11 @@ class TestViewImageBase64FallbackUncaptioned:
         because plain existing files are now served in place and never attempt a media save.
         We therefore drive it with a CROP (crop_tmp set → needs_save=True) so the save is
         actually attempted and its failure falls through to base64."""
-        from agent_cascade.utils.media_utils import MediaStorageError
+        # Import MediaStorageError from file_ops (NOT media_utils) so the raised
+        # exception's class is exactly the object bound in file_ops' `except` clause.
+        # A module reload elsewhere in the suite would recreate the media_utils class,
+        # and importing it here would break isinstance() matching in file_ops.py:724.
+        from agent_cascade.tools.custom.file_ops import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
                     side_effect=MediaStorageError("disk full")), \
@@ -176,7 +180,11 @@ class TestViewImageBase64FallbackUncaptioned:
 
         Driven with a CROP because the base64 fallback is only reachable for transient
         inserts — plain existing files are served in place and never attempt a media save."""
-        from agent_cascade.utils.media_utils import MediaStorageError
+        # Import MediaStorageError from file_ops (NOT media_utils) so the raised
+        # exception's class is exactly the object bound in file_ops' `except` clause.
+        # A module reload elsewhere in the suite would recreate the media_utils class,
+        # and importing it here would break isinstance() matching in file_ops.py:724.
+        from agent_cascade.tools.custom.file_ops import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
                     side_effect=MediaStorageError("disk full")), \

@@ -845,13 +845,11 @@ class TestInstanceIsolation:
         # Ensure no instance ID is set
         saved = os.environ.pop("AGENT_CASCADE_INSTANCE_ID", None)
         try:
-            # Force reload to pick up env change
-            import importlib
-            import agent_cascade.instance_id as iid_mod
-            importlib.reload(iid_mod)
-            import agent_cascade.utils.media_utils as mu_mod
-            importlib.reload(mu_mod)
-
+            # No reload needed: AGENT_CASCADE_INSTANCE_ID is read at call time by
+            # get_instance_id()/make_instance_dir(), so the env change takes effect
+            # without re-executing the modules (a reload would recreate
+            # MediaStorageError as a new class object and break class identity for
+            # other tests in the same xdist worker).
             from agent_cascade.utils.media_utils import _get_media_root
             root = _get_media_root()
             # Should end with logs/media (no instance suffix)
@@ -868,13 +866,11 @@ class TestInstanceIsolation:
         saved = os.environ.get("AGENT_CASCADE_INSTANCE_ID")
         os.environ["AGENT_CASCADE_INSTANCE_ID"] = "test_instance"
         try:
-            # Force reload to pick up env change
-            import importlib
-            import agent_cascade.instance_id as iid_mod
-            importlib.reload(iid_mod)
-            import agent_cascade.utils.media_utils as mu_mod
-            importlib.reload(mu_mod)
-
+            # No reload needed: AGENT_CASCADE_INSTANCE_ID is read at call time by
+            # get_instance_id()/make_instance_dir(), so the env change takes effect
+            # without re-executing the modules (a reload would recreate
+            # MediaStorageError as a new class object and break class identity for
+            # other tests in the same xdist worker).
             from agent_cascade.utils.media_utils import _get_media_root
             root = _get_media_root()
             # Should end with logs_test_instance/media
