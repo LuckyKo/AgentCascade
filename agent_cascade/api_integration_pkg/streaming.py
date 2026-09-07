@@ -297,7 +297,7 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
     due to queue saturation, so operators can diagnose stale-UI issues.
     """
     global _qf_last_warn, _hw_last_warn
-    if hasattr(queue, 'maxsize') and queue.maxsize > 0:
+    if queue.maxsize > 0:
         if queue.qsize() >= int(queue.maxsize * 0.75):
             now = time.monotonic()
             if now - _hw_last_warn >= 5.0:

@@ -43,8 +43,7 @@ const TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine'
 // ── Throttle configuration (all streaming/render timing constants in one place) ──
 const THROTTLE = Object.freeze({
   PUSH_IMMEDIATE_MS: 30,       // ActivityBar push throttle
-  RENDER_SUBAGENT_MS: 250,     // sub-agent streaming render throttle (raised to reduce image re-decode pressure during streaming)
-  RENDER_ROOT_BASE_MS: 250,    // root agent base render throttle
+  RENDER_BASE_MS: 250,         // base streaming render throttle (sub-agent + root; raised to reduce image re-decode pressure during streaming)
   RENDER_ROOT_MAX_MS: 500,     // root agent max render throttle cap (adaptive)
   ACTIVITY_BAR_RENDER_MS: 200, // ActivityBar full render throttle
   GEN_STATS_MS: 500,           // gen stats update throttle (~2Hz)
@@ -2218,8 +2217,7 @@ function handleServerMessage(data) {
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
       // Adaptive: if last render took long, increase throttle to avoid stacking renders.
       const lastRenderDur = Math.max(0, state.genStats.lastSubAgentRenderDuration || 0);
-      const baseThrottle = isSubAgentActive ? THROTTLE.RENDER_SUBAGENT_MS : THROTTLE.RENDER_ROOT_BASE_MS;
-      const subThrottleContent = Math.min(THROTTLE.RENDER_ROOT_MAX_MS, baseThrottle + Math.round(lastRenderDur * 0.5));
+      const subThrottleContent = Math.min(THROTTLE.RENDER_ROOT_MAX_MS, THROTTLE.RENDER_BASE_MS + Math.round(lastRenderDur * 0.5));
       
       // Force render on: completion detected, stack change, new visible message bubble,
       // or when the adaptive rendering throttle interval has elapsed. Content streaming within
@@ -2862,13 +2860,6 @@ function createMessageEl(msg, index, config) {
 // ── Bubble content updater ─────────────────────────────────────────────
 
 /**
- * Check if a content div contains base64/data URI images.
- */
-function bubbleHasImages(contentDiv) {
-    return contentDiv && contentDiv.querySelector('img[src^="data:image"]');
-}
-
-/**
  * Extract a stable hash key from a data URI by using the last 80 chars of the base64 portion only.
  */
 function extractSrcHash(src) {
@@ -3119,7 +3110,10 @@ function updateBubbleContent(bubble, msg, config) {
     if (isGenerating && prevReasoning !== undefined && msg.reasoning_content && !msg.function_call && msg.role !== 'function' && curContent === (prevContent || '')) {
         const newReasoning = curReasoning.slice(prevReasoning.length);
         if (newReasoning) {
-            const thinkingDiv = contentDiv.querySelector('.thinking-content');
+            // Cache the .thinking-content node on the bubble to avoid a per-tick DOM query.
+            // Invalidated after any full innerHTML re-render (see below).
+            if (!bubble._thinkingDiv) bubble._thinkingDiv = contentDiv.querySelector('.thinking-content');
+            const thinkingDiv = bubble._thinkingDiv;
             if (thinkingDiv) {
                 try {
                     thinkingDiv.insertAdjacentText('beforeend', newReasoning);
@@ -3138,9 +3132,12 @@ function updateBubbleContent(bubble, msg, config) {
         const newText = curContent.slice(prevContent.length);
         if (newText) {
             const lastEl = contentDiv.lastElementChild;
-            // Only use incremental append if container already has a content node outside thinking-block
-            if (lastEl && !lastEl.closest('.thinking-block')) {
-                const hasImages = bubbleHasImages(contentDiv);
+            // Only use incremental append if container already has a content node outside thinking-block.
+            // classList check instead of .closest() to avoid walking the DOM tree on every tick.
+            if (lastEl && !lastEl.classList.contains('thinking-block') && !lastEl.classList.contains('thinking-content')) {
+                // Cache image detection on the bubble; invalidated after full re-render (see below).
+                if (bubble._hasImages === undefined) bubble._hasImages = !!contentDiv.querySelector('img[src^="data:image"]');
+                const hasImages = bubble._hasImages;
                 const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
                 const msgLen = curContent.length;
                 let forceInterval = 8; // default for plain text
@@ -3179,10 +3176,12 @@ function updateBubbleContent(bubble, msg, config) {
     </details>
   `;
         } else {
+            // Cache miss: parse markdown ONCE and inline the block (same structure as the
+            // cache-hit path) instead of calling renderThinkingBlock() which would re-parse.
             const thinkingContentHtml = renderMarkdown(msg.reasoning_content);
             bubble._cachedReasoning = msg.reasoning_content;
             bubble._cachedThinkingContentHtml = thinkingContentHtml;
-            html += renderThinkingBlock(msg.reasoning_content, isGenerating);
+            html += `<details class="thinking-block" ${isGenerating ? 'open' : ''}><summary>💭 Thinking...</summary><div class="thinking-content">${thinkingContentHtml}</div></details>`;
         }
     }
 
@@ -3210,6 +3209,11 @@ function updateBubbleContent(bubble, msg, config) {
     const restoreImages = createImagePreserver(contentDiv);
 
     contentDiv.innerHTML = html;
+
+    // Full re-render replaced the DOM subtree: invalidate cached node refs so they are
+    // re-queried on the next fast-path tick (stale references would point at detached nodes).
+    bubble._thinkingDiv = null;
+    bubble._hasImages = undefined;
 
     // Restore cached images (preserves decoded bitmaps) and apply decoding="async"
     if (restoreImages) restoreImages(contentDiv);
