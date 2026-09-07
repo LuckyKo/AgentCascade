@@ -296,6 +296,26 @@ STREAM_MAX_SILENCE_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_STREAM_MAX_SILENCE_SECONDS', 180.0))  # Max seconds between chunks before considering stream stalled
 STREAM_MAX_TOTAL_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_STREAM_MAX_TOTAL_SECONDS', 900.0))  # Max total duration of a streaming response
+# Additive/delta streaming: when enabled (default ON), partial (streaming) frames send only a
+# small safe tail instead of the full committed history; force_full / connect-time frames stay full.
+# Set AGENT_CASCADE_STREAM_DELTA=0 to disable and revert to full-send legacy behavior.
+STREAM_DELTA_ENABLED: bool = os.getenv('AGENT_CASCADE_STREAM_DELTA', '1').strip().lower() not in ('0', 'false', 'off', 'no')
+
+
+def _parse_stream_tail() -> int:
+    """Defensively parse AGENT_CASCADE_STREAM_TAIL; fall back to 1 on bad values.
+
+    settings.py has no logger and uses plain module-level env parsing, so a bad value
+    falls back silently rather than crashing at import time.
+    """
+    raw = os.getenv('AGENT_CASCADE_STREAM_TAIL', '1')
+    try:
+        return int(str(raw).strip())
+    except (ValueError, TypeError):
+        return 1
+
+
+STREAM_DELTA_TAIL_COMMITTED: int = _parse_stream_tail()
 
 # Dismiss thread join timeout (seconds to wait for agent thread to stop cooperatively)
 DISMISS_THREAD_JOIN_TIMEOUT: float = float(os.getenv(

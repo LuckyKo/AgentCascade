@@ -34,13 +34,16 @@ def _msg_fingerprint(msg: Any) -> Optional[tuple]:
     c = len(content) if isinstance(content, list) else str(content)[:64]
     return (role, c)
 
-# Additive/delta streaming (phase 1). When enabled, partial (streaming) frames send only a
+from agent_cascade.settings import (
+    STREAM_DELTA_ENABLED,
+    STREAM_DELTA_TAIL_COMMITTED,
+)
+
+# Additive/delta streaming. When enabled (default ON), partial (streaming) frames send only a
 # small safe tail instead of the full committed history; force_full / connect-time frames stay
-# full. Read at import time (no runtime toggling in phase 1). Default OFF => byte-identical to
-# legacy full-send behavior. TAIL_COMMITTED is hardcoded for phase 1; add an env var later if
-# tail-size tuning becomes necessary.
-STREAM_DELTA_ENABLED = os.environ.get("AGENT_CASCADE_STREAM_DELTA") == "1"
-TAIL_COMMITTED = 1
+# full. Defined in agent_cascade/settings.py and overridable via AGENT_CASCADE_STREAM_DELTA.
+# TAIL_COMMITTED is aliased to STREAM_DELTA_TAIL_COMMITTED for backward compatibility.
+TAIL_COMMITTED = STREAM_DELTA_TAIL_COMMITTED
 
 def _serialize_loop_settings(ps):
     """Serialize loop detection settings from PoolSettings instance."""

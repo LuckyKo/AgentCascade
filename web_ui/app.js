@@ -2848,11 +2848,16 @@ function createMessageEl(msg, index, config) {
       if (!img.decoding || img.decoding === 'sync') img.decoding = 'async';
   });
 
-  // Initialize streaming optimization dataset attributes
+  // Initialize streaming optimization properties
   // lastFlushTime ensures the 100ms flush window starts from bubble creation
   div.dataset.lastFlushTime = String(performance.now());
-  div.dataset.prevContent = msg.content || '';
-  div.dataset.prevReasoning = msg.reasoning_content || '';
+  div._prevContent = msg.content || '';
+  div._prevReasoning = msg.reasoning_content || '';
+  if (msg.reasoning_content) {
+    div._cachedReasoning = msg.reasoning_content;
+    const tc = contentDiv.querySelector('.thinking-content');
+    if (tc) div._cachedThinkingContentHtml = tc.innerHTML;
+  }
   
   div.appendChild(contentDiv);
 
@@ -3091,26 +3096,26 @@ function updateBubbleContent(bubble, msg, config) {
     // Performance: Check if content actually changed before re-rendering.
     // We still re-render the whole bubble to ensure correct Markdown formatting
     // (O(1) append breaks formatting), but we skip it if nothing changed.
-    const prevContent = bubble.dataset.prevContent;
+    const prevContent = bubble._prevContent !== undefined ? bubble._prevContent : bubble.dataset.prevContent;
     const curContent = msg.content || '';
-    const prevReasoning = bubble.dataset.prevReasoning;
+    const prevReasoning = bubble._prevReasoning !== undefined ? bubble._prevReasoning : bubble.dataset.prevReasoning;
     const curReasoning = msg.reasoning_content || '';
     const isGenerating = (config.isGenerating !== undefined) ? config.isGenerating : state.generating;
 
     // Reset incremental append counter when streaming is done or for fresh messages
     if (!isGenerating) {
-        bubble.dataset.incrementCount = '0';
+        bubble._incrementCount = 0;
     }
 
-    if (prevContent === curContent && prevReasoning === curReasoning && bubble.dataset.wasGenerating === String(isGenerating)) {
+    if (prevContent === curContent && prevReasoning === curReasoning && bubble._wasGenerating === isGenerating) {
         // Content unchanged, but the meta line may need to appear/disappear when the toggle flips
         applyMsgMeta(bubble, msg);
         return; // Nothing changed
     }
     
-    bubble.dataset.prevContent = curContent;
-    bubble.dataset.prevReasoning = curReasoning;
-    bubble.dataset.wasGenerating = String(isGenerating);
+    bubble._prevContent = curContent;
+    bubble._prevReasoning = curReasoning;
+    bubble._wasGenerating = isGenerating;
 
     // Fast path 1: incremental append for in-flight reasoning deltas during thinking phase
     // Avoids running full renderMarkdown() on massive 20k+ token reasoning blocks on every tick.
@@ -3124,6 +3129,9 @@ function updateBubbleContent(bubble, msg, config) {
             if (thinkingDiv) {
                 try {
                     thinkingDiv.insertAdjacentText('beforeend', newReasoning);
+                    // Keep cache in sync so transition to content or periodic drift correction never has a cache miss!
+                    bubble._cachedReasoning = curReasoning;
+                    bubble._cachedThinkingContentHtml = thinkingDiv.innerHTML;
                     return; // Success - O(1) text append
                 } catch(e) {
                     console.warn('Incremental reasoning append failed, falling back to full render:', e);
@@ -3138,14 +3146,19 @@ function updateBubbleContent(bubble, msg, config) {
     if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function' && !reasoningActive) {
         const newText = curContent.slice(prevContent.length);
         if (newText) {
-            const lastEl = contentDiv.lastElementChild;
-            // Only use incremental append if container already has a content node outside thinking-block.
-            // classList check instead of .closest() to avoid walking the DOM tree on every tick.
+            let lastEl = contentDiv.lastElementChild;
+            // If container only has thinking-block, create a content container for streaming text
+            if (!lastEl || lastEl.classList.contains('thinking-block') || lastEl.classList.contains('thinking-content')) {
+                const p = document.createElement('p');
+                contentDiv.appendChild(p);
+                lastEl = p;
+            }
+
             if (lastEl && !lastEl.classList.contains('thinking-block') && !lastEl.classList.contains('thinking-content')) {
                 // Cache image detection on the bubble; invalidated after full re-render (see below).
                 if (bubble._hasImages === undefined) bubble._hasImages = !!contentDiv.querySelector('img[src^="data:image"]');
                 const hasImages = bubble._hasImages;
-                const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
+                const incrementCount = bubble._incrementCount !== undefined ? bubble._incrementCount : 0;
                 const msgLen = curContent.length;
                 let forceInterval = 8; // default for plain text
                 if (hasImages) {
@@ -3155,9 +3168,9 @@ function updateBubbleContent(bubble, msg, config) {
 
                 try {
                     appendStreamingDelta(contentDiv, newText);
-                    bubble.dataset.incrementCount = String(incrementCount + 1);
+                    bubble._incrementCount = incrementCount + 1;
                     if (incrementCount + 1 >= forceInterval) {
-                        bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
+                        bubble._incrementCount = 0; // Reset counter after drift correction
                     } else {
                         return;  // Success - skip full re-render (critical for image-bearing bubbles!)
                         // NOTE: meta line is intentionally NOT refreshed on incremental ticks — it is
@@ -3183,9 +3196,13 @@ function updateBubbleContent(bubble, msg, config) {
     </details>
   `;
         } else {
-            // Cache miss: parse markdown ONCE and inline the block (same structure as the
-            // cache-hit path) instead of calling renderThinkingBlock() which would re-parse.
-            const thinkingContentHtml = renderMarkdown(msg.reasoning_content);
+            // Cache miss: if thinkingDiv is live and has content, reuse its innerHTML to avoid 20k-token markdown parsing
+            let thinkingContentHtml = '';
+            if (bubble._thinkingDiv && bubble._thinkingDiv.innerHTML) {
+                thinkingContentHtml = bubble._thinkingDiv.innerHTML;
+            } else {
+                thinkingContentHtml = renderMarkdown(msg.reasoning_content);
+            }
             bubble._cachedReasoning = msg.reasoning_content;
             bubble._cachedThinkingContentHtml = thinkingContentHtml;
             html += `<details class="thinking-block" ${isGenerating ? 'open' : ''}><summary>💭 Thinking...</summary><div class="thinking-content">${thinkingContentHtml}</div></details>`;

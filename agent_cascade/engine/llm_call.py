@@ -479,9 +479,11 @@ class LLMCallMixin:
                         model=getattr(template.llm, 'model', '') or '',
                     )
 
-                    # Streaming UI Content Update Fix: Track partial LLM content
-                    # for UI updates every ~100ms
+                    # Streaming UI Content Update: Track partial LLM content
+                    # for UI updates every ~100ms or on fast bursts
                     last_streaming_update_time = time.monotonic()
+                    _chunks_since_last_update = 0
+                    _chars_since_last_update = 0
 
                     # Inner-loop detector: fresh instance per retry attempt to
                     # catch generation loops mid-stream. Uses char_run + max_chars
@@ -629,6 +631,7 @@ class LLMCallMixin:
                                 _prev_text_len = len(_total_text)
 
                                 if _delta_text:
+                                    _chars_since_last_update += len(_delta_text)
                                     # Inner-loop detection (gated by pool settings
                                     # toggle)
                                     if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
@@ -713,13 +716,22 @@ class LLMCallMixin:
                             break
                         # Compression-halt during streaming: let the stream complete, handle at Site 3
 
+                        _chunks_since_last_update += 1
+
                         # Update _streaming_responses every ~100ms with deep copy
-                        # of partial content
+                        # of partial content, or on rapid bursts (every 25 chunks or 150 chars)
                         current_time = time.monotonic()
-                        if current_time - last_streaming_update_time >= 0.1:
+                        should_update = (
+                            (current_time - last_streaming_update_time >= 0.1)
+                            or (_chunks_since_last_update >= 25)
+                            or (_chars_since_last_update >= 150)
+                        )
+                        if should_update:
                             with instance._compression_lock:
                                 self._update_streaming_responses(instance, last_output)
-                                last_streaming_update_time = current_time
+                            last_streaming_update_time = current_time
+                            _chunks_since_last_update = 0
+                            _chars_since_last_update = 0
 
                         # Re-check stop/halt after UI update (defense in depth —
                         # catches stop during slow streaming)
@@ -741,11 +753,15 @@ class LLMCallMixin:
                             yield None  # Signal UI that stop was detected mid-stream
                             break
 
-                        # Yield partial content for UI update (after both checks
-                        # pass)
-                        yield None
+                        # Yield partial content for UI update only when responses were updated
+                        if should_update:
+                            yield None
 
                     if last_output is not None:
+                        # Ensure any remaining in-flight tokens from the final burst are synced
+                        if _chunks_since_last_update > 0:
+                            with instance._compression_lock:
+                                self._update_streaming_responses(instance, last_output)
                         # Token counts captured at streaming layer via _on_usage callback.
                         # record_llm_call_end uses ground-truth values if available, falls back to char-count estimate of last_output.
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=last_output)
