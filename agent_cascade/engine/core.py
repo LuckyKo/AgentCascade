@@ -1918,11 +1918,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # Extracted to _normalize_turn_output() - Phase 3.3 (FIX
         self._normalize_turn_output(turn_output)
 
-        self._append_and_log_batch(instance, turn_output)
-        response.extend(turn_output)  # Separate list for streaming/accumulation
-        # Streaming UI Content Update Fix: Clear _streaming_responses after
-        # Phase 4 commits messages
-        instance._streaming_responses = []
+        # Commit + clear ATOMIC under _compression_lock so no concurrent serialization can
+        # observe "committed but not cleared" (the commit-race window that let a stale
+        # in-flight partial be appended as a near-duplicate alongside the committed final).
+        # _append_and_log_batch(lock_held=True) reuses this lock (RLock, reentrant) and logs
+        # each msg exactly once — identical logging to the previous non-locked call.
+        with instance._compression_lock:
+            self._append_and_log_batch(instance, turn_output, lock_held=True)
+            response.extend(turn_output)  # Separate list for streaming/accumulation
+            # Streaming UI Content Update Fix: Clear _streaming_responses in the SAME locked
+            # section as the commit above so the two are atomic w.r.t. serialization.
+            instance._streaming_responses = []
 
         # FIX: Option B - Merge continue-saved assistant message if present.
         # When Continue is clicked, the last assistant message was popped from

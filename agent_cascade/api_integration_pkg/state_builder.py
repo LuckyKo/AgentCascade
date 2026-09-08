@@ -906,6 +906,83 @@ def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:
         logger.debug(f"is_waiting check failed for {instance_name}: {e}")
     return False
 
+
+def _is_stale_prefix_of_serialized(
+    stream_content: str,
+    stream_reasoning: str,
+    serialized_msgs: List[dict],
+) -> bool:
+    """Return True if a streaming partial is a STALE version of the LAST serialized assistant.
+
+    A stale partial is one whose (content, reasoning) are prefixes of (or equal to) the LAST
+    serialized assistant message's (content, reasoning) — i.e. that committed message already
+    CONTAINS everything the in-flight partial has. This happens during the commit-race window:
+    core.py Phase 4 commits the final message to conversation, then clears _streaming_responses
+    non-atomically, so a concurrent serialization can see BOTH the just-committed final AND a
+    stale in-flight prefix partial captured a few tokens earlier. Exact-fingerprint dedup misses
+    it (the stale partial is shorter), so without this guard it would be appended as a
+    near-duplicate second assistant message -> "broken chunks" on the frontend.
+
+    HARDENED to eliminate false positives (independent review):
+      * LAST-ONLY: we compare ONLY against the last serialized assistant message — the current
+        turn's just-committed final, which is the only message that can be a stale version of an
+        in-flight partial. An OLDER committed answer can never be a "stale" version of a fresh
+        turn's partial, so comparing against it would risk suppressing legitimate growth.
+      * NO universal-prefix matching: for each field that is EMPTY on the partial side, the
+        committed message must ALSO be empty in that field. Previously an empty stream_reasoning
+        matched ANY committed reasoning (and vice-versa), so a new turn with empty reasoning
+        could be wrongly "subsumed" by an old answer that HAS reasoning.
+
+    SAFETY (must not break legitimate streaming growth): during NORMAL active streaming the
+    current turn's in-flight message is NOT yet committed, so the last serialized assistant is
+    from an OLDER turn (or absent) and does not contain the fresh partial -> it is never
+    "subsumed" and still gets appended. Proven by test_normal_growth_not_suppressed and
+    test_new_turn_partial_prefixing_older_answer_not_suppressed.
+    """
+    sc = stream_content or ''
+    sr = stream_reasoning or ''
+
+    # Find the LAST serialized assistant message with string content — the only candidate that
+    # can be a stale version of the in-flight partial. Nothing (or no assistant) -> not stale.
+    last_assistant: Optional[dict] = None
+    for m in serialized_msgs:
+        if not isinstance(m, dict):
+            continue
+        if (m.get(ROLE) or '').lower() != ASSISTANT:
+            continue
+        mc = m.get(CONTENT)
+        # Only consider messages whose content is a plain string. serialize_message normally
+        # normalizes multimodal list content to a string, but guard defensively so a non-string
+        # (e.g. raw multimodal list) can never trigger an AttributeError in the prefix checks.
+        if isinstance(mc, str):
+            last_assistant = m
+    if last_assistant is None:
+        return False
+
+    mc = last_assistant.get(CONTENT)
+    mr = last_assistant.get(REASONING_CONTENT)
+    # Content must be a plain string to prefix-compare; reasoning is treated as '' when not a
+    # string (a non-string committed reasoning can never subsume the partial).
+    if not isinstance(mc, str):
+        return False
+    mr = mr if isinstance(mr, str) else ''
+
+    # A field that is EMPTY on the partial side requires the committed message to be empty in
+    # that same field — no universal-prefix matching. This is what stops an empty-reasoning new
+    # turn from being suppressed by an old answer that has reasoning.
+    if sc == '':
+        content_ok = (mc == '')
+    else:
+        content_ok = mc.startswith(sc)
+
+    if sr == '':
+        reasoning_ok = (mr == '')
+    else:
+        reasoning_ok = mr.startswith(sr)
+
+    return content_ok and reasoning_ok
+
+
 def _serialize_instance(
     inst: AgentInstance, pool: AgentPool,
     include_messages: bool = False, streaming: bool = False,
@@ -1014,9 +1091,17 @@ def _serialize_instance(
             stream_func_call = str(stream_msg.get('function_call') if isinstance(stream_msg, dict) else getattr(stream_msg, 'function_call', None))
             stream_name = stream_msg.get(NAME) if isinstance(stream_msg, dict) else getattr(stream_msg, NAME, None)
             fingerprint = (stream_content, stream_reasoning, stream_func_call, stream_name)
-            
-            # Only append if not duplicate and has meaningful content
-            if fingerprint not in existing_fingerprints and fingerprint != ('', '', 'None', None):
+
+            # Only append if not duplicate and has meaningful content.
+            # Guard 2 (stale-prefix dedup): also skip a partial that is a STALE version of the
+            # LAST serialized assistant message — i.e. the just-committed final already CONTAINS
+            # everything this in-flight partial has (each non-empty field is a prefix, and each
+            # empty field must be empty on both sides). This catches the commit-race duplicate
+            # that exact-fingerprint dedup misses. It can NEVER suppress legitimate streaming
+            # growth: a genuinely growing partial is not yet committed, so the last serialized
+            # assistant (an older turn's final, or none) does not contain it.
+            if fingerprint not in existing_fingerprints and fingerprint != ('', '', 'None', None) \
+                    and not _is_stale_prefix_of_serialized(stream_content, stream_reasoning, serialized_msgs):
                 # use_cache=False: streaming partials are short-lived deep copies whose
                 # memory addresses get recycled by GC. Caching them by id() causes stale
                 # hits when the next turn's copy lands at the same address (id collision).
