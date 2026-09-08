@@ -495,3 +495,87 @@ test('frontend render-cadence: does the adaptive throttle collapse a real stream
 
   console.log('✔ All render-cadence assertions passed — baseline locked in.');
 });
+
+// ── FIX B (turn-end full-rebuild) regression test ────────────────────────────
+// The shared 'state'/'done' handler used to call invalidateAllPanelCaches() UNCONDITIONALLY.
+// That stamps panel.dataset.lastRenderedCount = '999999999' + contentKey='' on every visible
+// panel, so the NEXT render sees currentCount < 999999999 and does a FULL innerHTML='' rebuild —
+// even though the preceding commit frame already rendered incrementally. On reasoning-heavy turns
+// that full rebuild re-parses large reasoning markdown → visible burst at every sub-agent turn end.
+//
+// FIX B: only invalidate on genuine 'state' frames (initial load / explicit reset). A routine
+// turn-end 'done' frame carries a snapshot already rendered incrementally, so it must NOT stamp
+// the sentinel. This test drives the REAL handler + render path and spies on the real
+// invalidateAllPanelCaches to lock in that: a 'state' frame invokes it, a 'done' frame does not.
+test('FIX B: done frames must not invalidate panel caches; state frames must', () => {
+  // Build a minimal but valid full-state payload for the primary agent.
+  function makeFrame(type, name) {
+    return {
+      type,
+      agent_instances: {
+        [name]: {
+          messages: [
+            { role: 'user', content: 'q' },
+            { role: 'assistant', content: 'a', reasoning_content: 'r'.repeat(40), name },
+          ],
+          history_count: 2,
+          is_partial: false,
+          active: false,
+          agent_class: 'coder',
+          agent_state: 'IDLE',
+        },
+      },
+      active_stack: [],
+      pool_settings: {},
+      total_tokens: 100,
+      current_model: 'test-model',
+      paused: false,
+      approvals: [],
+    };
+  }
+
+  // loadApp() returns a fresh context with the REAL app.js loaded. We spy on the real
+  // `invalidateAllPanelCaches` (a top-level function declaration, so it is in lexical scope
+  // for handleServerMessage) and count how many times the shared 'state'/'done' handler
+  // invokes it per frame. That call — not the DOM — is exactly what FIX B gates:
+  //   state frame → invalidate (genuine reset);  done frame → skip (routine turn-end).
+  function loadAppWithSpy() {
+    const app = loadApp();
+    const ctx = vm.createContext(app.sandbox);
+    // Count calls WITHOUT altering behavior (still run the real invalidation + render path).
+    vm.runInContext(
+      `__invCount = 0;
+       __origInv = invalidateAllPanelCaches;
+       invalidateAllPanelCaches = function spyInv() { __invCount++; return __origInv.apply(this, arguments); };`,
+      ctx
+    );
+    const invCount = () => vm.runInContext('__invCount', ctx);
+    // handleServerMessage must run through the context so it resolves the spied binding.
+    const feed = (data) => { app.sandbox.__data = data; vm.runInContext('handleServerMessage(__data)', ctx); };
+    return { name: app.sessionName, feed, invCount };
+  }
+
+  // ── A routine turn-end 'done' frame must NOT invalidate the panel caches ──
+  const doneApp = loadAppWithSpy();
+  doneApp.feed(makeFrame('state', doneApp.name));   // baseline full state (also renders panels)
+  const beforeDone = doneApp.invCount();
+  doneApp.feed(makeFrame('done', doneApp.name));    // routine turn-end 'done'
+  assert.equal(
+    doneApp.invCount(), beforeDone,
+    `FIX B: a routine 'done' frame must NOT call invalidateAllPanelCaches (it already ran ${beforeDone}x at load/state); count went to ${doneApp.invCount()}`
+  );
+
+  // ── A genuine 'state' frame MUST invalidate the panel caches ──
+  const stateApp = loadAppWithSpy();
+  stateApp.feed(makeFrame('state', stateApp.name)); // initial full state
+  const beforeState = stateApp.invCount();
+  stateApp.feed(makeFrame('done', stateApp.name));  // warm the caches (turn-end, no invalidation)
+  assert.equal(stateApp.invCount(), beforeState, `precondition: 'done' frame must not invalidate`);
+  stateApp.feed(makeFrame('state', stateApp.name)); // genuine full-state reset → must invalidate
+  assert.equal(
+    stateApp.invCount(), beforeState + 1,
+    `FIX B: a genuine 'state' frame MUST call invalidateAllPanelCaches exactly once (expected ${beforeState + 1}, got ${stateApp.invCount()})`
+  );
+
+  console.log('✔ FIX B assertions passed — done frames skip invalidation, state frames invalidate.');
+});

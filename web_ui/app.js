@@ -1978,8 +1978,16 @@ function handleServerMessage(data) {
         }
       }
 
-      // Full state: force complete re-render (session load, reset, edit, delete, etc.)
-      invalidateAllPanelCaches();
+      // FIX B (turn-end full-rebuild): only invalidate panel caches on genuine 'state'
+      // frames (initial load / explicit full-state reset). A routine turn-end 'done' frame
+      // carries a snapshot already rendered incrementally by the preceding commit frame, so
+      // stamping the 999999999 sentinel here forced a full innerHTML='' rebuild of every
+      // visible panel on each sub-agent turn end (expensive for reasoning-heavy turns).
+      // Resync/recovery uses force_full stream_update frames (unaffected); the skip-gate
+      // (contentKey) + incremental-append path still handle any residual change.
+      if (data.type === 'state') {
+        invalidateAllPanelCaches();
+      }
 
       // Render all agents through the same path — no root/sub distinction
       renderSubAgents();
