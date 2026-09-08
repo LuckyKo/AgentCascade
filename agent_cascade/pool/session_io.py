@@ -3,6 +3,7 @@ SessionIOMixin — session loading from logs and instance state save/restore. Mo
 """
 
 from __future__ import annotations
+import datetime
 import json
 import time
 from pathlib import Path
@@ -537,9 +538,14 @@ class SessionIOMixin:
         msg_objects = []
         for msg_dict in working_set:
             try:
-                msg_objects.append(Message(**msg_dict))
+                msg = Message(**msg_dict)
             except Exception as e:
                 logger.warning(f"Skipping malformed message on load: {e}")
+                continue
+            # Backfill ts from the log's ISO 'timestamp' string so restored
+            # messages carry a completion timestamp (never overwrite existing).
+            self._backfill_ts_from_dict(msg, msg_dict)
+            msg_objects.append(msg)
 
         # --- 7. Delete old instance, create a fresh one --------------------
         normalized_agent_class = agent_class.strip().lower()
@@ -625,3 +631,25 @@ class SessionIOMixin:
 
         log_source = "file" if Path(log_input).exists() else "JSON input"
         return f"Loaded {len(msg_objects)} messages for '{instance_name}' ({agent_class}) from {log_source}."
+
+    @staticmethod
+    def _backfill_ts_from_dict(msg: Message, msg_dict: dict) -> None:
+        """Backfill ``msg.ts`` from the log dict's ISO 'timestamp' field.
+
+        Log entries store a naive local-time ISO string (e.g. "2026-09-07T12:54:00.071151"),
+        not the in-memory unix ``ts`` field. Parsing it with ``datetime.fromisoformat`` and
+        calling ``.timestamp()`` interprets it in LOCAL time, matching how ``time.time()``
+        stamps ts at commit time — so restored and live timestamps stay on the same clock.
+
+        Non-fatal and idempotent: only sets ``msg.ts`` when it is currently None; a
+        malformed/missing timestamp leaves ``msg.ts`` unchanged and never raises.
+        """
+        if msg.ts is not None:
+            return
+        ts_raw = msg_dict.get('timestamp')
+        if not isinstance(ts_raw, str) or not ts_raw:
+            return
+        try:
+            msg.ts = datetime.datetime.fromisoformat(ts_raw).timestamp()
+        except (ValueError, TypeError, OSError):
+            logger.debug(f"Could not backfill Message.ts from timestamp={ts_raw!r}")
