@@ -978,8 +978,6 @@ def _serialize_instance(
         serialize_message(m, i)
         for i, m in enumerate(msgs[start_idx:], start=start_idx)
     ]
-    if use_delta:
-        logger.debug(f"[DELTA] {inst.instance_name}: tail={len(serialized_msgs)}/{original_history_count}, start_idx={start_idx}")
 
     # Set is_partial=True when there are active streaming responses so the frontend uses
     # the partial merge path (smart splice with history_count), which properly handles
