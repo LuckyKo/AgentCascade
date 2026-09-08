@@ -3181,7 +3181,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
                     # ── Push stream_update to frontend during sub-agent execution ──
-                    _prev_sub_send = _last_sub_send
                     _last_sub_send, _sub_last_resp_len = broadcast_stream_update(
                         pool=self.pool,
                         instance_name=instance_name,
@@ -3193,9 +3192,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         last_resp_len=_sub_last_resp_len,
                         yield_time=now_mono,
                     )
-                    # FIX A: a suppressed tick returns its (stale) last_send unchanged — record it
-                    # so the post-loop final-frame decision can force delivery of throttled state.
-                    _last_tick_suppressed = (_last_sub_send == _prev_sub_send)
+                    # FIX A: a suppressed tick returns its (stale) last_send unchanged, while a real
+                    # broadcast returns now_sec (= now_mono). Compare against the current tick's own
+                    # timestamp so detection is robust even if two consecutive sends land on the same
+                    # monotonic resolution tick (avoids a false "suppressed" → spurious extra frame).
+                    _last_tick_suppressed = (_last_sub_send != now_mono)
                     _tick_num += 1
             finally:
                 # Deterministic generator cleanup: close() forces the suspended
