@@ -56,6 +56,35 @@ class _WindowsSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
                 pass  # Silently ignore - rotation will retry next time file size threshold is hit
 
 
+class _SafeStreamHandler(logging.StreamHandler):
+    """
+    StreamHandler that tolerates a closed/broken target stream without printing
+    "--- Logging error ---" tracebacks to stderr.
+
+    The default StreamHandler.emit() catches write failures (e.g. "ValueError: I/O
+    operation on closed file") and delegates to Handler.handleError(), which prints a
+    full traceback + call stack to stderr whenever logging.raiseExceptions is True
+    (the default). This fires at teardown — after pytest closes its captured stdout, or
+    during interpreter shutdown — when a record is emitted to an already-closed stream.
+
+    Such failures are benign: the message simply can't reach the console. Override
+    handleError() to suppress that noise. Normal logging behavior is unchanged; only the
+    error-reporting for a dead console stream is silenced (the message was unreachable
+    anyway). NOTE: wrapping emit() in try/except does NOT work here — StreamHandler.emit
+    never re-raises, it calls handleError() internally.
+    """
+
+    def handleError(self, record):
+        # Suppress the "--- Logging error ---" stderr dump ONLY for a dead/broken console
+        # stream (closed stdout at teardown / broken pipe) — the benign case. Any other
+        # error type (formatter bug, encoding problem, genuine I/O failure) is passed to
+        # the base implementation so it still gets reported and isn't silently masked.
+        _, exc, _ = sys.exc_info()
+        if isinstance(exc, (ValueError, OSError)):
+            return
+        super().handleError(record)
+
+
 class _CapturingStream:
     """
     Replacement for sys.stdout / sys.stderr that routes every write()
@@ -137,7 +166,7 @@ def setup_logger(level=None):
 
     instance_id = _get_instance_id()
 
-    handler = logging.StreamHandler(stream=_original_stdout)
+    handler = _SafeStreamHandler(stream=_original_stdout)
     # Do not run handler.setLevel(level) so that users can change the level via logger.setLevel later
     formatter = logging.Formatter('%(asctime)s - %(filename)s - %(lineno)d - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
