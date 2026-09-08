@@ -3123,6 +3123,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             _update_counter = 0
             _last_sub_send = 0.0
             _sub_last_resp_len = 0
+            _last_tick_suppressed = False  # FIX A: True if the most recent loop tick was throttled out (its state never reached the UI)
             _tick_num = 0
 
             # Bug
@@ -3180,6 +3181,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
                     # ── Push stream_update to frontend during sub-agent execution ──
+                    _prev_sub_send = _last_sub_send
                     _last_sub_send, _sub_last_resp_len = broadcast_stream_update(
                         pool=self.pool,
                         instance_name=instance_name,
@@ -3191,6 +3193,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         last_resp_len=_sub_last_resp_len,
                         yield_time=now_mono,
                     )
+                    # FIX A: a suppressed tick returns its (stale) last_send unchanged — record it
+                    # so the post-loop final-frame decision can force delivery of throttled state.
+                    _last_tick_suppressed = (_last_sub_send == _prev_sub_send)
                     _tick_num += 1
             finally:
                 # Deterministic generator cleanup: close() forces the suspended
@@ -3238,18 +3243,55 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
             self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
-            # ── Push final stream_update after sub-agent completes ──
+            # ── Push final stream_update after sub-agent completes ──────────────
+            # FIX A (turn-end frame dedup): the old code forced last_send=0.0 so the
+            # throttle check `(now - 0.0 > 0.1)` was ALWAYS true → an unconditional
+            # full frame even when the last loop tick had just delivered one <100ms ago.
+            # That produced a same-timestamp duplicate of the final committed state.
+            #
+            # Safe conditional: only emit a final sub-agent frame when it is NOT already
+            # covered by the most recent loop broadcast. need_final is True when ANY of:
+            #   (a) the last loop tick was SUPPRESSED (_last_tick_suppressed) — its committed
+            #       state never reached the UI, so we MUST deliver it now even if <100ms have
+            #       passed since the previous actual send (guards the message-loss regression
+            #       on fast turns that finish right after a throttled tick), OR
+            #   (b) >=100ms elapsed since the last ACTUAL send — the throttle window has opened,
+            #       so the current state is fresh enough to warrant a frame, OR
+            #   (c) the response length changed vs. what the last tick reported — a new committed
+            #       message not yet broadcast.
+            # When need_final is False the loop already delivered an equivalent final state <100ms
+            # ago and nothing has changed since, so we skip to avoid the spurious duplicate frame.
+            #
+            # We pass the REAL tracked values (_last_sub_send / _sub_last_resp_len), NOT 0.0:
+            # if the last tick JUST sent (<100ms) and len is unchanged and it was not suppressed,
+            # need_final is False → skip; if it was suppressed or throttled out, we send.
+            # (broadcast_stream_update re-evaluates the same condition internally with these real
+            # values, so no double-send can occur.)
             now_mono = time.monotonic()
-            broadcast_stream_update(
-                pool=self.pool,
-                instance_name=instance_name,
-                turn_output=final_resp,
-                is_streaming_tick=False,
-                tick_num=_tick_num,
-                now_sec=now_mono,
-                last_send=0.0,
-                last_resp_len=0,
+            need_final = (
+                _last_tick_suppressed
+                or ((now_mono - _last_sub_send) > 0.1)
+                or (len(final_resp) != _sub_last_resp_len)
             )
+            if need_final:
+                broadcast_stream_update(
+                    pool=self.pool,
+                    instance_name=instance_name,
+                    turn_output=final_resp,
+                    is_streaming_tick=False,
+                    tick_num=_tick_num,
+                    now_sec=now_mono,
+                    last_send=_last_sub_send,
+                    last_resp_len=_sub_last_resp_len,
+                )
+
+            # Root/caller panel refresh — KEEP (do NOT remove). While the parent is
+            # suspended inside the child's tool call it has no other immediate update path,
+            # so this is the only thing that refreshes the ROOT panel after the child completes.
+            # NOTE: push_final_state targets a DIFFERENT instance (instance_name=caller, full
+            # pool snapshot) than the sub-agent final frame above (instance_name=<sub>), so it
+            # is NOT a same-timestamp duplicate of that frame — no stagger needed. The measured
+            # "same timestamp" pair was queue-level; per-instance there is never a collision.
             self.stream_publisher.push_final_state(inst, caller)
 
         finally:
