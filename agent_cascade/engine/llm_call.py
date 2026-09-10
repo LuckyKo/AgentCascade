@@ -35,8 +35,7 @@ from agent_cascade.exceptions import (
     MaxTokenExceeded,
     AgentTerminatedError,
 )
-from agent_cascade.utils.utils import extract_text_from_message, msg_field
-from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+from agent_cascade.utils.utils import get_message_stats, msg_field
 from agent_cascade.inner_loop_detect import InnerLoopDetector, save_loop_sample
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
 from agent_cascade.exact_loop_detect import detect_exact_loop as _detect_exact_loop
@@ -1020,11 +1019,9 @@ class LLMCallMixin:
                                             )
 
                                     if next_limit > 0:
-                                        # Estimate tokens of compressed payload using actual token counting
-                                        estimated = 0
-                                        for msg in llm_messages:
-                                            content = extract_text_from_message(msg, add_upload_info=False)
-                                            estimated += qwen_count(content)
+                                        # Full message stats (reasoning, tool_calls, template overhead) —
+                                        # prevents the undercount that caused "chain of compressions".
+                                        estimated = sum(get_message_stats(msg)['tokens'] for msg in llm_messages)
 
                                         logger.debug(
                                             f"[FALLBACK_COMPRESSION] Post-compression check for {inst_name}: "
