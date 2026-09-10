@@ -600,6 +600,47 @@ class TestReadLogsFormatParameter:
             assert "Error" not in result_none, f"Unexpected error: {result_none}"
             assert "USER" in result_none
 
+    def test_no_role_raw_entry_respects_mode_none(self):
+        """Regression: a dict entry without a recognizable 'role' field hits the RAW
+        branch of _format_simple_entry and must NOT be truncated when mode='none'.
+
+        Before the fix, that branch unconditionally called _truncate_middle regardless
+        of mode, so mode='none' still produced a TRUNCATED marker for role-less entries.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            long_value = "z" * 2000
+            self._write_test_log(
+                tmp_path,
+                "test.jsonl",
+                [
+                    {"type": "custom_event", "payload": long_value},
+                ],
+            )
+
+            pool = self._create_mock_agent_pool(str(tmp_path))
+            from agent_cascade.tools.custom.read_logs import ReadLogs
+
+            tool = ReadLogs(agent_pool=pool)
+
+            # none: role-less RAW entry must be emitted in full, no TRUNCATED marker
+            result_none = tool.call(
+                {"log_file": "test.jsonl", "format": "simple", "mode": "none"}
+            )
+            assert "Error" not in result_none, f"Unexpected error: {result_none}"
+            assert "[RAW]" in result_none
+            assert long_value in result_none
+            assert "TRUNCATED" not in result_none
+
+            # trim_all: same entry must still be truncated (guard is mode-specific)
+            result_trim_all = tool.call(
+                {"log_file": "test.jsonl", "format": "simple", "mode": "trim_all", "max_chars_per_message": 100}
+            )
+            assert "Error" not in result_trim_all, f"Unexpected error: {result_trim_all}"
+            assert "[RAW]" in result_trim_all
+            assert long_value not in result_trim_all
+            assert "TRUNCATED" in result_trim_all
+
     def test_invalid_format_returns_error(self):
         """Invalid format value returns a clear error message (via jsonschema validation)."""
         with tempfile.TemporaryDirectory() as tmp:

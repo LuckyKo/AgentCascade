@@ -226,8 +226,9 @@ class ReadLogs(BaseTool):
         role = entry.get("role", "").lower()
         if not role:
             json_str = json.dumps(entry, ensure_ascii=False)
-            truncated = ReadLogs._truncate_middle(json_str, max_chars)
-            return f"⟨L {entry_num}⟩ [RAW] {truncated}", None
+            if mode != 'none' and len(json_str) > max_chars:
+                json_str = ReadLogs._truncate_middle(json_str, max_chars)
+            return f"⟨L {entry_num}⟩ [RAW] {json_str}", None
 
         timestamp = entry.get("timestamp", "")
         time_str = ""
