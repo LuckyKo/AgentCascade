@@ -56,6 +56,21 @@ if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids circular import
 
 logger = logging.getLogger(__name__)
 
+# Per-thread session for sanity probes — enables TCP keep-alive so N probes to the same
+# host reuse one socket instead of opening N (WinError 10055 / WSAENOBUFS exhaustion fix).
+# threading.local because requests.Session is NOT thread-safe; each thread gets its own
+# session (and its own connection pool) while still reusing sockets within that thread.
+_probe_session_local = threading.local()
+
+
+def _get_probe_session() -> requests.Session:
+    """Return the current thread's probe session, creating it on first use."""
+    session = getattr(_probe_session_local, 'session', None)
+    if session is None:
+        session = requests.Session()
+        _probe_session_local.session = session
+    return session
+
 # A1/A2 gate safety factor for server-reported context windows (n_ctx). llama.cpp rejects
 # at roughly n_prompt >= n_ctx - n_predict_reserve, so a payload that provably exceeds
 # this fraction of the reported window is a genuine overflow even when it fits the
@@ -1093,55 +1108,66 @@ class APIRouter:
     # loop (at most one per fresh acquisition); pre_validate_endpoint_chain() is the same
     # gate applied to a whole chain.
 
-    def _sanity_probe(self, endpoint_cfg: dict) -> bool:
+    def _sanity_probe(self, endpoint_cfg: dict) -> Tuple[bool, bool]:
         """Lightweight probe: checks endpoint reachability and auth via a fast GET /models.
 
         Does NOT issue chat completion POST requests, avoiding model loading/thrashing
         on local servers (LM Studio, llama.cpp, etc.) and saving token/inference latency.
 
-        Returns True if the server responds successfully (HTTP 200), False otherwise.
+        Returns a tuple ``(passed, was_connection_error)``:
+          - ``(True, False)``   — server responded successfully (HTTP 2xx).
+          - ``(False, False)``  — server responded with an HTTP error (401/403/404/5xx):
+                                  the host IS reachable, just not this endpoint.
+          - ``(False, True)``   — connection-level failure (WinError 10055, refused,
+                                  timeout, generic requests.ConnectionError): the host is
+                                  unreachable RIGHT NOW, so probing other models on the
+                                  same base is wasted (per-host dedup in call_with_fallback).
         MUST NOT be called while holding self._lock (makes a network call).
         """
         api_base = endpoint_cfg.get('api_base') or endpoint_cfg.get('model_server', '')
         if not api_base:
-            return True
+            return (True, False)
 
         api_key = endpoint_cfg.get('api_key', 'EMPTY')
         headers = {"Authorization": f"Bearer {api_key}"} if api_key and api_key != 'EMPTY' else {}
         timeout = (1.5, SANITY_PROBE_TIMEOUT_SECONDS)
 
         try:
+            session = _get_probe_session()
             base = api_base.rstrip('/')
             url = f"{base}/models"
-            resp = requests.get(url, headers=headers, timeout=timeout)
+            resp = session.get(url, headers=headers, timeout=timeout)
             if resp.status_code == 404 and not base.endswith('/v1'):
                 # Try with /v1/models if base didn't include /v1
                 url_v1 = f"{base}/v1/models"
-                resp = requests.get(url_v1, headers=headers, timeout=timeout)
+                resp = session.get(url_v1, headers=headers, timeout=timeout)
 
             if 200 <= resp.status_code < 300:
-                return True
+                return (True, False)
             elif resp.status_code in (401, 403):
                 logger.warning(
                     f"[SanityProbe] Endpoint {api_base} rejected probe with auth error (HTTP {resp.status_code})"
                 )
-                return False
+                return (False, False)
             elif resp.status_code == 404:
                 logger.warning(
                     f"[SanityProbe] Endpoint {api_base} models endpoint not found (HTTP 404)"
                 )
-                return False
+                return (False, False)
             else:
                 logger.warning(
                     f"[SanityProbe] Endpoint {api_base} returned HTTP {resp.status_code}"
                 )
-                return False
+                return (False, False)
         except requests.exceptions.RequestException as e:
+            # Connection-level failure: no HTTP response was received at all. The host is
+            # unreachable right now (WinError 10055/10061, refused, timeout, DNS, ...), so
+            # callers can dedup remaining same-base probes in this pass.
             logger.warning(f"[SanityProbe] Probe connection failed for {api_base}: {e}")
-            return False
+            return (False, True)
         except Exception as e:
             logger.warning(f"[SanityProbe] Unexpected probe error for {api_base}: {e}")
-            return False
+            return (False, False)
 
     def pre_validate_endpoint_chain(
         self, chain: List[dict], instance_name: Optional[str] = None
@@ -1241,7 +1267,7 @@ class APIRouter:
                 continue
 
             # ── Network probe (NO lock held — safe for I/O) — at most ONE per fresh acquisition. ──
-            success = self._sanity_probe(cfg)
+            success, _conn_err = self._sanity_probe(cfg)
 
             # Re-consult the breaker AFTER the probe: if the base tripped OPEN during the
             # probe (e.g. a busy 503 that carried the SERVER_BUSY_LOADING signature and was
@@ -1799,6 +1825,12 @@ class APIRouter:
 
         all_errors = []
 
+        # Per-host dedup within this pass: bases that failed with a CONNECTION-level error
+        # (host unreachable right now — WinError 10055/10061, refused, timeout). Remaining
+        # same-base endpoints skip their probes (record cooldown + continue, no HTTP) so we
+        # don't fire N sequential probes at a host whose socket buffers are already exhausted.
+        _probe_failed_bases: set = set()
+
         for cfg_idx, llm_cfg in enumerate(chain):
             # ── Lazy sanity probe (Fix D): validate THIS endpoint only, just before trying it.
             # Same gate as pre_validate_endpoint_chain but for the current endpoint alone — a
@@ -1811,6 +1843,32 @@ class APIRouter:
                 _probe_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', '')
                 _probe_key = (normalize_api_base(_probe_base), llm_cfg.get('model', ''))
                 _now_probe = time.time()
+
+                # ── Per-host dedup: a same-base endpoint already failed with a CONNECTION-level
+                # error earlier in this pass → the host is unreachable right now. Skip the probe
+                # entirely (no HTTP), record cooldown, and move on — mirroring the probe-failure
+                # branch below but without firing a request that would also fail. ──
+                if normalize_api_base(_probe_base) in _probe_failed_bases:
+                    logger.debug(
+                        f"[APIRouter] Skipping probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                        f"(same base already failed with connection error this pass)"
+                    )
+                    if ENDPOINT_COOLDOWN_SECONDS > 0:
+                        with self._lock:
+                            self._cleanup_stale_failure_records(time.time())
+                            self._endpoint_failure_times[_probe_key] = time.time()
+                    # Tier-4 visibility (mirrors probe-failure branch): if this is the last
+                    # non-default endpoint, log that only the global default remains.
+                    if not _tier4_only_logged and cfg_idx == len(chain) - 2:
+                        _t4 = chain[-1]
+                        logger.info(
+                            f"[APIRouter] {agent_type}: no effective endpoints "
+                            f"(all filtered/exhausted), using global default "
+                            f"'{_t4.get('model', 'unknown')}' @ "
+                            f"{_t4.get('api_base') or _t4.get('model_server', 'unknown')}"
+                        )
+                        _tier4_only_logged = True
+                    continue
 
                 if self._breaker_is_open(_probe_base):
                     logger.debug(
@@ -1843,7 +1901,7 @@ class APIRouter:
                     else:
                         # Network probe (NO lock held — safe for I/O) — at most ONE per fresh
                         # acquisition of this endpoint.
-                        _probe_ok = self._sanity_probe(llm_cfg)
+                        _probe_ok, _probe_conn_err = self._sanity_probe(llm_cfg)
 
                         # Re-consult the breaker AFTER the probe: if the base tripped OPEN during
                         # the probe (e.g. a busy 503 carrying the SERVER_BUSY_LOADING signature),
@@ -1881,6 +1939,13 @@ class APIRouter:
                                 f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
                                 f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s)."
                             )
+
+                            # Connection-level failure → the host is unreachable RIGHT NOW. Mark
+                            # the base so remaining same-base endpoints skip their probes this
+                            # pass (per-host dedup). HTTP-level failures (401/403/404/5xx) do NOT
+                            # mark the base — the host IS reachable, only this endpoint is bad.
+                            if _probe_conn_err:
+                                _probe_failed_bases.add(normalize_api_base(_probe_base))
 
                             # Tier-4 visibility (case 2): this was a NON-default endpoint that
                             # just failed its probe. Log "using global default" ONLY when it is

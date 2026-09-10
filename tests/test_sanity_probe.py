@@ -48,42 +48,42 @@ def _ok_response():
 
 class TestSanityProbe:
     def test_success(self, router):
-        """A successful GET /models (HTTP 200) → True."""
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
-            assert router._sanity_probe(_cfg()) is True
+        """A successful GET /models (HTTP 200) → (True, False)."""
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
+            assert router._sanity_probe(_cfg()) == (True, False)
         assert mock_get.called
         url = mock_get.call_args[0][0]
         assert url == 'http://127.0.0.1:1234/v1/models'
 
     def test_401_auth_failure_returns_false(self, router):
-        """HTTP 401 Unauthorized → False."""
+        """HTTP 401 Unauthorized → (False, False) — host reachable, auth bad."""
         resp = MagicMock(spec=requests.Response)
         resp.status_code = 401
         resp.text = '{"error": "Invalid API key"}'
-        with patch('requests.get', return_value=resp):
-            assert router._sanity_probe(_cfg()) is False
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=resp):
+            assert router._sanity_probe(_cfg()) == (False, False)
 
     def test_503_service_error_returns_false(self, router):
-        """HTTP 503 Service Unavailable → False."""
+        """HTTP 503 Service Unavailable → (False, False) — host reachable."""
         resp = MagicMock(spec=requests.Response)
         resp.status_code = 503
         resp.text = '{"error": "Server unavailable"}'
-        with patch('requests.get', return_value=resp):
-            assert router._sanity_probe(_cfg()) is False
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=resp):
+            assert router._sanity_probe(_cfg()) == (False, False)
 
     def test_connection_error_returns_false(self, router):
-        """Connection refused or timeout → False."""
-        with patch('requests.get', side_effect=requests.exceptions.ConnectionError('Connection refused')):
-            assert router._sanity_probe(_cfg()) is False
+        """Connection refused or timeout → (False, True) — connection-level failure."""
+        with patch.object(router_mod._get_probe_session(), 'get', side_effect=requests.exceptions.ConnectionError('Connection refused')):
+            assert router._sanity_probe(_cfg()) == (False, True)
 
     def test_unexpected_exception_returns_false(self, router):
-        """Any unexpected error → False."""
-        with patch('requests.get', side_effect=ValueError('Unexpected error')):
-            assert router._sanity_probe(_cfg()) is False
+        """Any unexpected error → (False, False)."""
+        with patch.object(router_mod._get_probe_session(), 'get', side_effect=ValueError('Unexpected error')):
+            assert router._sanity_probe(_cfg()) == (False, False)
 
     def test_uses_configured_timeout(self, router):
         """Probe uses SANITY_PROBE_TIMEOUT_SECONDS."""
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
             router._sanity_probe(_cfg())
         kwargs = mock_get.call_args.kwargs
         assert kwargs['timeout'] == (1.5, router_mod.SANITY_PROBE_TIMEOUT_SECONDS)
@@ -97,8 +97,8 @@ class TestSanityProbe:
         resp_404.text = 'not found'
         resp_200 = _ok_response()
 
-        with patch('requests.get', side_effect=[resp_404, resp_200]) as mock_get:
-            assert router._sanity_probe(cfg) is True
+        with patch.object(router_mod._get_probe_session(), 'get', side_effect=[resp_404, resp_200]) as mock_get:
+            assert router._sanity_probe(cfg) == (True, False)
         assert mock_get.call_count == 2
         urls_called = [call[0][0] for call in mock_get.call_args_list]
         assert urls_called[0] == 'http://127.0.0.1:1234/models'
@@ -112,8 +112,8 @@ class TestSanityProbe:
         resp_404.status_code = 404
         resp_404.text = 'not found'
 
-        with patch('requests.get', return_value=resp_404) as mock_get:
-            assert router._sanity_probe(cfg) is False
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=resp_404) as mock_get:
+            assert router._sanity_probe(cfg) == (False, False)
         assert mock_get.call_count == 1
         assert mock_get.call_args[0][0] == 'http://127.0.0.1:1234/v1/models'
 
@@ -121,8 +121,8 @@ class TestSanityProbe:
         """When api_key is not set or is 'EMPTY', no Authorization header is sent."""
         cfg = _cfg()
         # No api_key key at all in the config dict.
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
-            assert router._sanity_probe(cfg) is True
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
+            assert router._sanity_probe(cfg) == (True, False)
         headers = mock_get.call_args.kwargs['headers']
         assert 'Authorization' not in headers
 
@@ -130,8 +130,8 @@ class TestSanityProbe:
         """api_key set to empty string → no Authorization header."""
         cfg = _cfg()
         cfg['api_key'] = ''
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
-            assert router._sanity_probe(cfg) is True
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
+            assert router._sanity_probe(cfg) == (True, False)
         headers = mock_get.call_args.kwargs['headers']
         assert 'Authorization' not in headers
 
@@ -139,8 +139,8 @@ class TestSanityProbe:
         """api_key set to the literal string 'EMPTY' → no Authorization header."""
         cfg = _cfg()
         cfg['api_key'] = 'EMPTY'
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
-            assert router._sanity_probe(cfg) is True
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
+            assert router._sanity_probe(cfg) == (True, False)
         headers = mock_get.call_args.kwargs['headers']
         assert 'Authorization' not in headers
 
@@ -167,7 +167,7 @@ class TestPreValidateEndpointChain:
                 return resp
             return _ok_response()
 
-        with patch('requests.get', side_effect=fake_get):
+        with patch.object(router_mod._get_probe_session(), 'get', side_effect=fake_get):
             result = router.pre_validate_endpoint_chain([bad, good])
         assert result == [good]
         # Part 2: probe failure records the endpoint into cooldown (_endpoint_failure_times)
@@ -183,7 +183,7 @@ class TestPreValidateEndpointChain:
         with router._lock:
             router._instance_committed_endpoint['inst1'] = key
         try:
-            with patch('requests.get') as mock_get:
+            with patch.object(router_mod._get_probe_session(), 'get') as mock_get:
                 assert router.pre_validate_endpoint_chain([cfg], instance_name='inst1') == [cfg]
             assert mock_get.call_count == 0, \
                 "a live connection must NOT be re-probed (the core flood fix)"
@@ -194,7 +194,7 @@ class TestPreValidateEndpointChain:
     def test_no_live_marker_reprobes(self, router):
         """Part 2: without a live marker, the endpoint IS probed once."""
         cfg = _cfg()
-        with patch('requests.get', return_value=_ok_response()) as mock_get:
+        with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
             assert router.pre_validate_endpoint_chain([cfg], instance_name='inst1') == [cfg]
         assert mock_get.call_count == 1, "no live marker → probe once"
 
@@ -202,7 +202,7 @@ class TestPreValidateEndpointChain:
         """SANITY_PROBE_ENABLED=False → chain returned as-is, zero probes."""
         cfg = _cfg()
         with patch.object(router_mod, 'SANITY_PROBE_ENABLED', False), \
-             patch('requests.get') as mock_get:
+             patch.object(router_mod._get_probe_session(), 'get') as mock_get:
             assert router.pre_validate_endpoint_chain([cfg]) == [cfg]
             assert mock_get.call_count == 0
 
@@ -218,7 +218,7 @@ class TestPreValidateEndpointChain:
         with router._lock:
             router._endpoint_blacklist = {key: time.time() + 7200}
         try:
-            with patch('requests.get', return_value=_ok_response()) as mock_get:
+            with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
                 result = router.pre_validate_endpoint_chain([bad, good])
             # Blacklisted endpoint skipped (no probe), healthy one probed and kept.
             assert result == [good]
@@ -240,7 +240,7 @@ class TestPreValidateEndpointChain:
             router._endpoint_blacklist = {key: time.time() - 1}
             router._endpoint_deterministic_failures = {key: 3}
         try:
-            with patch('requests.get', return_value=_ok_response()):
+            with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()):
                 result = router.pre_validate_endpoint_chain([cfg])
             assert result == [cfg]
             with router._lock:
@@ -262,7 +262,7 @@ class TestPreValidateEndpointChain:
             resp.text = 'unauthorized'
             return resp
 
-        with patch('requests.get', side_effect=fake_get):
+        with patch.object(router_mod._get_probe_session(), 'get', side_effect=fake_get):
             with pytest.raises(RuntimeError, match='sanity probe'):
                 router.pre_validate_endpoint_chain([bad1, bad2])
 
@@ -299,7 +299,7 @@ class TestCallWithFallbackIntegration:
             called.append(llm_cfg.get('model'))
             return 'done'
 
-        with patch('requests.get', side_effect=fake_get):
+        with patch.object(router_mod._get_probe_session(), 'get', side_effect=fake_get):
             result = router.call_with_fallback('coder', call_fn)
         assert result == 'done'
         # The bad endpoint was filtered by the probe — only the default endpoint was called.

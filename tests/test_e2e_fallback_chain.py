@@ -313,7 +313,8 @@ class TestTier4Logging:
 
         def _fake_probe(cfg):
             base = cfg.get('api_base') or cfg.get('model_server', '')
-            return base != 'http://a-api'  # fail the fake Tier-1, pass the real default
+            # HTTP-level failure for the fake Tier-1 (host reachable), success for the default.
+            return (base != 'http://a-api', False)
 
         try:
             with caplog.at_level(logging.INFO, logger="agent_cascade.api_router_pkg.router"):
@@ -335,6 +336,94 @@ class TestTier4Logging:
         # It must be the "all filtered/exhausted" variant (case 2), naming the default.
         assert "(all filtered/exhausted)" in msg
         assert "default-model" in msg and "http://default-api" in msg
+
+
+# ============================================================================
+# WinError 10055 probe cascade fix — per-host dedup within a chain pass
+#
+# When multiple endpoints share the same physical server and the first probe hits a
+# connection-level failure (WinError 10055 / WSAENOBUFS, refused, timeout), remaining
+# same-base endpoints must SKIP their probes (no HTTP) — probing them would also fail and
+# further exhaust socket buffers. Different-base endpoints are still probed normally.
+# ============================================================================
+
+class TestProbeDedupPerHost:
+    def test_connection_error_skips_same_base_probes(self, router):
+        """First endpoint's probe fails with a CONNECTION error → same-base endpoints skip
+        their probes (no _sanity_probe call), different-base endpoints are still probed.
+        The chain falls through to the working different-base endpoint instead of raising
+        'All API endpoints exhausted'."""
+        import logging
+        import agent_cascade.api_router_pkg.router as router_mod
+
+        # 3 endpoints on the same base + 1 on a different (working) base.
+        _add_endpoint(router, "a1", "http://same-host:1234/v1", model="model-a1", max_retries=0)
+        _add_endpoint(router, "a2", "http://same-host:1234/v1", model="model-a2", max_retries=0)
+        _add_endpoint(router, "a3", "http://same-host:1234/v1", model="model-a3", max_retries=0)
+        _add_endpoint(router, "b", "http://other-host:9999/v1", model="model-b", max_retries=0)
+        router.set_agent_priorities("coder", ["ep_a1", "ep_a2", "ep_a3", "ep_b"])
+
+        orig_probe = router_mod.SANITY_PROBE_ENABLED
+        router_mod.SANITY_PROBE_ENABLED = True
+
+        probed_bases = []
+
+        def _fake_probe(cfg):
+            base = cfg.get('api_base') or cfg.get('model_server', '')
+            probed_bases.append(base)
+            if 'same-host' in base:
+                # Connection-level failure (e.g. WinError 10055) — host unreachable NOW.
+                return (False, True)
+            return (True, False)
+
+        try:
+            with patch.object(router, "_sanity_probe", side_effect=_fake_probe):
+                result = router.call_with_fallback(
+                    "coder", lambda cfg, *a, **k: f"ok-{cfg.get('model')}"
+                )
+        finally:
+            router_mod.SANITY_PROBE_ENABLED = orig_probe
+
+        # The working different-base endpoint was reached.
+        assert result == "ok-model-b"
+        # Only the FIRST same-base endpoint and the different-base endpoint were probed —
+        # the remaining 2 same-base endpoints skipped their probes (per-host dedup).
+        assert 'http://same-host:1234/v1' in probed_bases
+        assert 'http://other-host:9999/v1' in probed_bases
+        assert probed_bases.count('http://same-host:1234/v1') == 1, \
+            f"expected exactly ONE probe of the same base (dedup), got {probed_bases}"
+
+    def test_http_error_does_not_skip_same_base_probes(self, router):
+        """An HTTP-level failure (host reachable, endpoint bad) does NOT dedup — remaining
+        same-base endpoints are still probed normally."""
+        import agent_cascade.api_router_pkg.router as router_mod
+
+        _add_endpoint(router, "a1", "http://same-host:1234/v1", model="model-a1", max_retries=0)
+        _add_endpoint(router, "a2", "http://same-host:1234/v1", model="model-a2", max_retries=0)
+        router.set_agent_priorities("coder", ["ep_a1", "ep_a2"])
+
+        orig_probe = router_mod.SANITY_PROBE_ENABLED
+        router_mod.SANITY_PROBE_ENABLED = True
+
+        probed_bases = []
+
+        def _fake_probe(cfg):
+            base = cfg.get('api_base') or cfg.get('model_server', '')
+            probed_bases.append(base)
+            # HTTP-level failure (401/403/404/5xx) — host IS reachable.
+            return (False, False)
+
+        try:
+            with patch.object(router, "_sanity_probe", side_effect=_fake_probe):
+                with pytest.raises(Exception, match="exhausted"):
+                    router.call_with_fallback("coder", lambda cfg, *a, **k: "ok")
+        finally:
+            router_mod.SANITY_PROBE_ENABLED = orig_probe
+
+        # Both same-base endpoints were probed (no dedup for HTTP-level failures).
+        # Chain = [a1, a2, Tier-4 default] → 3 probes total, both same-base ones fired.
+        assert probed_bases.count('http://same-host:1234/v1') == 2, \
+            f"expected BOTH same-base endpoints to be probed (no dedup for HTTP errors), got {probed_bases}"
 
 
 # ============================================================================
