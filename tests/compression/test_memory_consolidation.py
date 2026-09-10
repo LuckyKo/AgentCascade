@@ -27,6 +27,8 @@ from agent_cascade.compression.helpers import (
     select_markers_for_consolidation,
     extract_summary_from_marker,
     build_consolidation_marker_message,
+    _parse_marker_timestamps,
+    build_marker_message,
 )
 from agent_cascade.agent_pool import AgentPool
 
@@ -70,11 +72,12 @@ def _build_history_with_markers(num_markers: int, msgs_between: int = 3) -> List
 
 
 def _is_compression_marker(msg: Any) -> bool:
-    """Local version of is_compression_marker that uses correct import.
+    """Local marker-detection helper used by tests that don't need the production function.
 
-    The production helpers.py has a bug importing COMPRESSION_MARKER from settings
-    instead of prompts.dna. We use this local copy for tests, and also test via
-    AgentPool's methods which import correctly.
+    Mirrors helpers.is_compression_marker (which imports COMPRESSION_MARKER from
+    agent_cascade.prompts.dna). Kept local so unit tests stay self-contained and don't
+    depend on import side-effects; the production function is covered separately in
+    TestProductionIsCompressionMarker.
     """
     from agent_cascade.llm.schema import USER as USER_ROLE
     role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
@@ -242,6 +245,84 @@ class TestBuildConsolidationMarkerMessage:
         """Built consolidation marker should be recognized by AgentPool.count_markers."""
         msg = build_consolidation_marker_message("Summary", num_summaries_consolidated=3)
         assert _is_compression_marker(msg) is True
+
+    def test_header_without_timestamps_uses_fallback(self):
+        """With no timestamps, header keeps the plain 'L2, N summaries consolidated' form."""
+        msg = build_consolidation_marker_message("Summary", num_summaries_consolidated=4)
+        content = str(msg.content)
+        assert "L2, 4 summaries consolidated" in content
+        # No arrow range should be present.
+        assert "→" not in content
+
+    def test_header_with_timestamps_includes_range(self):
+        """With both timestamps, header includes the time span before the summary count."""
+        start = 1757086440.0   # some fixed unix ts
+        end = start + 80160     # ~22h 16m later
+        msg = build_consolidation_marker_message(
+            "Summary", num_summaries_consolidated=3, first_ts=start, last_ts=end
+        )
+        content = str(msg.content)
+        assert "L2" in content
+        assert "→" in content
+        assert "3 summaries consolidated" in content
+        # The range portion should be parseable back to the same timestamps.
+        parsed_start, parsed_end = _parse_marker_timestamps(msg)
+        assert parsed_start is not None and parsed_end is not None
+        assert abs(parsed_start - start) < 60   # minute-resolution rounding
+        assert abs(parsed_end - end) < 60
+
+    def test_header_with_only_one_timestamp_uses_fallback(self):
+        """If only one timestamp is provided, fall back to the plain form."""
+        msg = build_consolidation_marker_message(
+            "Summary", num_summaries_consolidated=2, first_ts=1757086440.0
+        )
+        content = str(msg.content)
+        assert "L2, 2 summaries consolidated" in content
+        assert "→" not in content
+
+
+class TestParseMarkerTimestamps:
+    """Test _parse_marker_timestamps() extraction and graceful failure."""
+
+    def test_extracts_from_l1_marker(self):
+        """Round-trips an L1 marker header produced by build_marker_message."""
+        start = 1757086440.0
+        end = start + 90000
+        msg = build_marker_message("Summary", first_ts=start, last_ts=end, n_messages=10)
+        parsed_start, parsed_end = _parse_marker_timestamps(msg)
+        assert parsed_start is not None and parsed_end is not None
+        assert abs(parsed_start - start) < 60
+        assert abs(parsed_end - end) < 60
+
+    def test_extracts_from_l2_marker(self):
+        """Matches the L2 header format (range prefixed by 'L2, ') too."""
+        start = 1757086440.0
+        end = start + 80160
+        msg = build_consolidation_marker_message(
+            "Summary", num_summaries_consolidated=5, first_ts=start, last_ts=end
+        )
+        parsed_start, parsed_end = _parse_marker_timestamps(msg)
+        assert parsed_start is not None and parsed_end is not None
+        assert abs(parsed_start - start) < 60
+        assert abs(parsed_end - end) < 60
+
+    def test_returns_none_for_no_range(self):
+        """A marker with no timestamp range yields (None, None)."""
+        msg = build_consolidation_marker_message("Summary", num_summaries_consolidated=3)
+        assert _parse_marker_timestamps(msg) == (None, None)
+
+    def test_returns_none_for_plain_text(self):
+        """Non-marker / malformed content yields (None, None) without raising."""
+        assert _parse_marker_timestamps(_make_msg(USER, "just some text")) == (None, None)
+
+    def test_handles_dict_input(self):
+        """Works when the marker is passed as a dict rather than a Message object."""
+        start = 1757086440.0
+        end = start + 90000
+        msg = build_marker_message("Summary", first_ts=start, last_ts=end, n_messages=5)
+        d = {"role": USER, "content": str(msg.content)}
+        parsed_start, parsed_end = _parse_marker_timestamps(d)
+        assert parsed_start is not None and parsed_end is not None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -501,6 +582,75 @@ class TestConsolidateMarkersUnit:
 
                     assert new_raw_count == original_raw_count, \
                         f"Raw segments lost: {original_raw_count} -> {new_raw_count}"
+
+    def test_l2_marker_includes_combined_timestamp_range(self):
+        """L2 marker built from markers with real timestamp headers carries a parseable range.
+
+        Exercises the Phase-3 wiring: loop over consolidated markers, call
+        _parse_marker_timestamps on each, take min(start)/max(end), and pass to
+        build_consolidation_marker_message. The resulting L2 header must contain the
+        combined span (earliest start → latest end) across all input markers.
+        """
+        from agent_cascade.compression.core import _consolidate_markers
+
+        # Build 8 markers, each with a REAL parseable timestamp header spanning distinct
+        # windows. Marker i covers [base + i*day, base + i*day + 2h].
+        day = 86400.0
+        base = 1757000000.0  # arbitrary fixed unix ts (local-time rendering is consistent)
+
+        history: List[Message] = [_make_msg(SYSTEM, "System")]
+        for i in range(8):
+            first_ts = base + i * day
+            last_ts = first_ts + 7200.0  # +2h
+            marker = build_marker_message(f"Summary {i}", first_ts=first_ts, last_ts=last_ts, n_messages=3)
+            history.append(marker)
+            # A couple of raw messages after each marker
+            history.append(_make_msg(USER, f"User-{i}"))
+            history.append(_make_msg("assistant", f"Asst-{i}"))
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = list(history)
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+        mock_pool.get_logger.return_value._consolidate_markers_in_jsonl.return_value = True
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    mock_invoke.return_value = ("Consolidated", "")
+
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+        assert mock_inst.rebuild_conversation.called
+        new_history = mock_inst.rebuild_conversation.call_args[0][0]
+
+        # Exactly one L2 marker should be present (the consolidated one).
+        l2_markers = [m for m in new_history if isinstance(m, Message) and "L2," in str(m.content)]
+        assert len(l2_markers) == 1, f"Expected 1 L2 marker, got {len(l2_markers)}"
+        l2_content = str(l2_markers[0].content)
+
+        # The L2 header must carry a parseable time range (arrow + both dates).
+        assert "→" in l2_content, f"L2 marker missing arrow range: {l2_content[:120]}"
+        parsed_start, parsed_end = _parse_marker_timestamps(l2_markers[0])
+        assert parsed_start is not None and parsed_end is not None
+
+        # The span must cover the earliest start and latest end across the CONSOLIDATED
+        # markers only. select_markers_for_consolidation keeps the newest (marker 7), so
+        # markers 0..6 are merged: earliest start = marker 0, latest end = marker 6's end.
+        expected_start = base
+        expected_end = base + 6 * day + 7200.0
+        assert abs(parsed_start - expected_start) < 60, \
+            f"L2 start {parsed_start} != earliest marker start {expected_start}"
+        assert abs(parsed_end - expected_end) < 60, \
+            f"L2 end {parsed_end} != latest marker end {expected_end}"
 
     def test_recursion_guard_prevents_re_entry(self):
         """If consolidation is already running for an agent, second call should skip."""
@@ -963,6 +1113,89 @@ class TestCompressContextConsolidationTrigger:
                 assert result.success is True
                 mock_consolidate.assert_not_called()
 
+    def test_repeat_compression_carries_forward_original_start_time(self):
+        """Regression: on a 2nd compression the new marker's start time must not regress.
+
+        When latest_summary_idx != -1, compress_context parses the existing marker's start
+        from its header and sets first_ts = min(new_msgs_first_ts, old_marker_start). So the
+        2nd marker's header start time must be <= the 1st marker's (it carries the original
+        start forward instead of only reflecting the newly-compressed messages).
+        """
+        from agent_cascade.compression.core import compress_context, _consolidate_markers
+        from tests.conftest import MockAgentPool
+
+        hour = 3600.0
+        base = 1757000000.0  # arbitrary fixed unix ts; local-time rendering is consistent
+
+        def _msg_with_ts(role: str, text: str, ts: float) -> Message:
+            m = _make_msg(role, text)
+            m.ts = ts
+            return m
+
+        # Initial history: SYSTEM + U0 (kept as initial prompt) + 8 timestamped messages.
+        history: List[Message] = [
+            _make_msg(SYSTEM, "System"),
+            _make_msg(USER, "Initial user prompt"),
+        ]
+        for i in range(8):
+            role = USER if i % 2 == 0 else "assistant"
+            history.append(_msg_with_ts(role, f"Msg {i}", base + (10 + i) * hour))
+
+        pool = MockAgentPool(history)
+        mock_logger = MagicMock()
+        pool.get_logger = MagicMock(return_value=mock_logger)
+
+        # NOTE: no api_router on the mock, so compress_context's token-budget branch is
+        # skipped (available_for_messages stays None). Payloads are tiny; that path is
+        # covered separately in test_compression_marker_timestamps.py.
+
+        # ── Compression 1 ── (no existing marker → latest_summary_idx == -1)
+        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
+            mock_invoke.return_value = ("First compression summary", "")
+            with patch("agent_cascade.compression.core._consolidate_markers"):
+                result1 = compress_context(
+                    agent_pool=pool, target_agent_name="TestAgent",
+                    fraction=0.5, mode="auto", force=True,
+                )
+        assert result1.success is True
+        marker1 = result1.marker_message
+        start1, end1 = _parse_marker_timestamps(marker1)
+        assert start1 is not None and end1 is not None, "1st marker must have a parseable range"
+
+        # Add fresh messages with NEWER timestamps after the 1st marker.
+        conv = pool.get_conversation("TestAgent")
+        for i in range(8):
+            role = USER if i % 2 == 0 else "assistant"
+            conv.append(_msg_with_ts(role, f"New msg {i}", base + (100 + i) * hour))
+        pool.instance_conversations["TestAgent"] = conv
+
+        # ── Compression 2 ── (existing marker present → latest_summary_idx != -1)
+        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
+            mock_invoke.return_value = ("Second compression summary", "")
+            with patch("agent_cascade.compression.core._consolidate_markers"):
+                result2 = compress_context(
+                    agent_pool=pool, target_agent_name="TestAgent",
+                    fraction=0.5, mode="auto", force=True,
+                )
+        assert result2.success is True
+        marker2 = result2.marker_message
+        start2, end2 = _parse_marker_timestamps(marker2)
+        assert start2 is not None and end2 is not None, "2nd marker must have a parseable range"
+
+        # The 2nd marker's start must carry forward the original (earlier) start — it cannot
+        # be later than the 1st marker's start. This is the regression guard for Bug 2: without
+        # the fix, start2 would be min of the NEWER batch (~base+100h), far past start1.
+        assert start2 <= start1 + 60, \
+            f"2nd marker start {start2} regressed past 1st marker start {start1}"
+        # Both markers carry forward the same original boundary (the first compressed message,
+        # ~base+10h), so their parsed starts should agree within minute-resolution rounding.
+        assert abs(start2 - start1) < 60, \
+            f"2nd marker start {start2} != carried-forward original start {start1}"
+        # Sanity: the newer batch is strictly later, confirming the min() actually mattered.
+        new_batch_start = base + 100 * hour
+        assert start2 < new_batch_start - 3600, \
+            f"2nd marker start {start2} looks like it used the newer batch, not the original"
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # 7. Production is_compression_marker tests (helpers.py) — BLOCKER #1
@@ -972,26 +1205,20 @@ class TestCompressContextConsolidationTrigger:
 class TestProductionIsCompressionMarker:
     """Direct tests for the production is_compression_marker from helpers.py.
 
-    NOTE: The production function imports COMPRESSION_MARKER from settings instead
-    of prompts.dna, which is a bug (COMPRESSION_MARKER is defined only in prompts.dna).
-    These tests verify the actual behavior as-is — they will fail with ImportError
-    if the import bug exists, documenting it for fix.
+    These exercise the real function (which imports COMPRESSION_MARKER from
+    agent_cascade.prompts.dna) to guard against import regressions and to verify
+    detection behavior on Message objects, dicts, and edge cases.
     """
 
     def test_import_works_or_fails_consistently(self):
-        """Verify whether the production function can be imported at all.
-
-        If this fails with ImportError, it confirms the known bug: helpers.py
-        imports COMPRESSION_MARKER from settings where it does not exist.
-        """
-        # This import will raise ImportError if COMPRESSION_MARKER is not in settings
+        """The production function must be importable and callable."""
         try:
             from agent_cascade.compression.helpers import is_compression_marker
             assert callable(is_compression_marker)
         except ImportError as e:
             pytest.fail(
-                f"Production is_compression_marker has broken import: {e}. "
-                f"COMPRESSION_MARKER should be imported from prompts.dna, not settings."
+                f"Production is_compression_marker failed to import: {e}. "
+                f"It should import COMPRESSION_MARKER from agent_cascade.prompts.dna."
             )
 
     def test_valid_marker_message_object(self):

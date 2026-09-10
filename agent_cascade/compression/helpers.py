@@ -1,10 +1,22 @@
 """Helper functions for the compression system."""
 import copy
+import logging
+import re
 from datetime import datetime
 from typing import Any, List, Tuple
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, Message
 from agent_cascade.utils.utils import extract_text_from_message
+
+logger = logging.getLogger(__name__)
+
+# Matches the timestamp interval embedded in compression marker headers, e.g.
+# "2026-09-06 10:14 → 2026-09-07 08:30, 22h 16m" (L1) or "L2, <same>, N summaries consolidated".
+# Anchored on the arrow pattern only — no surrounding parens required, so it matches both L1
+# and L2 formats. Groups: (1) start datetime, (2) end datetime.
+_MARKER_TS_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) → (\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
+)
 
 
 def is_compression_marker(msg: Any) -> bool:
@@ -456,26 +468,71 @@ def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0
     return Message(role=USER, content=str(content))
 
 
-def build_consolidation_marker_message(summary_text: str, num_summaries_consolidated: int) -> Message:
+def build_consolidation_marker_message(
+    summary_text: str,
+    num_summaries_consolidated: int,
+    first_ts: float | None = None,
+    last_ts: float | None = None,
+) -> Message:
     """Build a L2 consolidation marker message.
 
     Wraps the consolidated summary in COMPRESSION_BASELINE_TEMPLATE with an L2 header
-    indicating how many summaries were merged into this higher-level marker.
+    indicating how many summaries were merged into this higher-level marker. When both
+    timestamps are available, the combined time span of all consolidated markers is also
+    included (e.g. ``"L2, 2026-09-06 10:14 → 2026-09-07 08:30, 22h 16m, 3 summaries consolidated"``).
 
     Args:
         summary_text: The raw consolidated summary text (before template wrapping).
         num_summaries_consolidated: Number of lower-level summaries merged into this one.
+        first_ts: Earliest timestamp (unix seconds) across the consolidated markers, if known.
+        last_ts: Latest timestamp (unix seconds) across the consolidated markers, if known.
 
     Returns:
         A Message object (USER role) with the formatted consolidation marker.
     """
-    header = f"L2, {num_summaries_consolidated} summaries consolidated"
+    if first_ts is not None and last_ts is not None:
+        header = f"L2, {_format_timestamp_interval(first_ts, last_ts, 0)}, {num_summaries_consolidated} summaries consolidated"
+    else:
+        header = f"L2, {num_summaries_consolidated} summaries consolidated"
 
     content = COMPRESSION_BASELINE_TEMPLATE.format(
         header=header,
         summary=summary_text,
     )
     return Message(role=USER, content=str(content))
+
+
+def _parse_marker_timestamps(msg: Any) -> Tuple[float | None, float | None]:
+    """Extract the (start_ts, end_ts) unix timestamps from a compression marker's header.
+
+    Marker headers embed a timestamp interval rendered by ``_format_timestamp_interval``
+    as ``"{start} → {end}, {duration}"`` (e.g. ``"2026-09-06 10:14 → 2026-09-07 08:30, 22h 16m"``).
+    Both L1 markers and L2 consolidation markers carry this range (L2 prefixes it with
+    ``"L2, "``), so a single arrow-based pattern matches both without requiring surrounding
+    parens.
+
+    Args:
+        msg: A Message object or dict that is a compression marker.
+
+    Returns:
+        (start_ts, end_ts) as unix seconds, or (None, None) if the range can't be parsed.
+    """
+    try:
+        content = extract_text_from_message(msg, add_upload_info=False)
+        if not isinstance(content, str):
+            return (None, None)
+        match = _MARKER_TS_RE.search(content)
+        if not match:
+            return (None, None)
+        # NOTE: strptime().timestamp() interprets the naive string as LOCAL time. This is
+        # intentional and consistent with _format_timestamp_interval(), which renders via
+        # datetime.fromtimestamp().strftime(...) (also local), so the round-trip is correct.
+        start_ts = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").timestamp()
+        end_ts = datetime.strptime(match.group(2), "%Y-%m-%d %H:%M").timestamp()
+        return (float(start_ts), float(end_ts))
+    except Exception as e:
+        logger.debug(f"Marker timestamp parse failed (non-fatal): {e}")
+        return (None, None)
 
 
 def rebuild_working_set(

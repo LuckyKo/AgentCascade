@@ -6,9 +6,11 @@ from agent_cascade.compression.helpers import (
     _refine_tool_call_boundary,
     compute_discard_count,
     build_marker_message,
+    build_consolidation_marker_message,
     extract_summary_from_marker,
     get_message_role,
     select_markers_for_consolidation,
+    _parse_marker_timestamps,
 )
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message, strip_base64_from_images
@@ -85,8 +87,6 @@ def _consolidate_markers(
         marker_indices = []
         summaries_to_consolidate = []
         consolidate_indices = []
-        first_consolidate_idx = -1
-        remove_indices = set()
 
         with target_inst._compression_lock:
             history = list(target_inst.conversation)
@@ -139,10 +139,6 @@ def _consolidate_markers(
             except Exception as e:
                 logger.debug(f"Token count check for consolidation skipped (non-fatal): {e}")
 
-            # Capture indices for later use
-            first_consolidate_idx = consolidate_indices[0]
-            remove_indices = set(consolidate_indices[1:])
-
         # ── Phase 2: LLM call OUTSIDE lock (long-running) ──
         from agent_cascade.compression.agent_invoker import invoke_consolidation_agent
         try:
@@ -158,10 +154,6 @@ def _consolidate_markers(
         if not consolidated_summary or not consolidated_summary.strip():
             logger.error(f"Empty consolidation result for '{target_agent_name}' — aborting")
             return
-
-        # Build new L2 marker
-        from agent_cascade.compression.helpers import build_consolidation_marker_message
-        new_marker = build_consolidation_marker_message(consolidated_summary, len(summaries_to_consolidate))
 
         logger.info(
             f"Consolidation summary generated for '{target_agent_name}': "
@@ -185,6 +177,26 @@ def _consolidate_markers(
             current_consolidate_indices = current_markers[:-1]
             current_first_idx = current_consolidate_indices[0]
             current_remove_indices = set(current_consolidate_indices[1:])
+
+            # Build the L2 marker here so its timestamp span reflects exactly the markers
+            # being consolidated in this (re-read) snapshot. Non-fatal: parse failures simply
+            # yield a plain "L2, N summaries consolidated" header with no time range.
+            l2_starts: list[float] = []
+            l2_ends: list[float] = []
+            for idx in current_consolidate_indices:
+                s, e = _parse_marker_timestamps(current_history[idx])
+                if s is not None:
+                    l2_starts.append(s)
+                if e is not None:
+                    l2_ends.append(e)
+            l2_first_ts = min(l2_starts) if l2_starts else None
+            l2_last_ts = max(l2_ends) if l2_ends else None
+            new_marker = build_consolidation_marker_message(
+                consolidated_summary,
+                len(summaries_to_consolidate),
+                first_ts=l2_first_ts,
+                last_ts=l2_last_ts,
+            )
 
             # Pool mutation: replace M0 position with new marker, remove M1..M6 only.
             # CRITICAL: Preserve all raw message segments between markers.
@@ -584,6 +596,18 @@ def compress_context(
         _ts_list = []
     first_ts = min(_ts_list) if _ts_list else None
     last_ts = max(_ts_list) if _ts_list else None
+
+    # On a repeat compression the new summary also encompasses the previously-compressed
+    # content, so the header range must start from the ORIGINAL first message — i.e. the old
+    # marker's start time — not just the newly-discarded messages. Non-fatal: if the old
+    # marker's header can't be parsed we simply keep the newly-derived first_ts.
+    if latest_summary_idx != -1:
+        try:
+            old_start, _old_end = _parse_marker_timestamps(history[latest_summary_idx])
+            if old_start is not None:
+                first_ts = old_start if first_ts is None else min(first_ts, old_start)
+        except Exception as e:
+            logger.debug(f"Old marker start-time parse failed (non-fatal): {e}")
 
     marker_message = build_marker_message(
         generated_summary,
