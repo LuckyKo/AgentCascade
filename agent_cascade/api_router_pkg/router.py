@@ -928,21 +928,21 @@ class APIRouter:
             # removed/renamed/disabled by a UI reload) the tier is silently skipped and Tier-4
             # remains the last resort. Read-only w.r.t. _last_active_endpoint — no writes.
             # NOTE: distinct from _instance_committed_endpoint, which is retained solely as the
-            # probe fast-path gate in pre_validate_endpoint_chain (skip re-probing a live conn).
+            # per-instance probe fast-path gate (skip re-probing a live connection).
             if not endpoint_configs:
-                _committed_key = self._last_active_endpoint
-                if _committed_key is not None:
-                    _committed_base, _committed_model = _committed_key
-                    # Skip if the committed endpoint IS the Tier-4 default (same base+model):
+                _la_key = self._last_active_endpoint
+                if _la_key is not None:
+                    _la_base, _la_model = _la_key
+                    # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
                     # it would otherwise be appended here AND again as the default below.
                     _default_cfg = self.default_llm_cfg or {}
                     _is_default = (
-                        normalize_api_base(_default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == _committed_base
-                        and _default_cfg.get('model') == _committed_model
+                        normalize_api_base(_default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == _la_base
+                        and _default_cfg.get('model') == _la_model
                     )
                     if not _is_default:
                         for ep in self.endpoints.values():
-                            if normalize_api_base(ep.api_base) == _committed_base and ep.model == _committed_model and ep.enabled:
+                            if normalize_api_base(ep.api_base) == _la_base and ep.model == _la_model and ep.enabled:
                                 cfg = copy.deepcopy(ep.to_llm_cfg())
                                 ep_limit = ep.max_input_tokens
                                 if ep_limit <= 0 and general_limit > 0:
@@ -950,7 +950,7 @@ class APIRouter:
 
                                 # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
                                 endpoint_configs.append(cfg)
-                                logger.debug(f"[APIRouter] {agent_type}/{instance_name}: using committed endpoint '{_committed_model}' @ {_committed_base}")
+                                logger.debug(f"[APIRouter] {agent_type}/{instance_name}: using last-active endpoint '{_la_model}' @ {_la_base}")
                                 break
 
             # Tier 3: Last successful endpoint fallback — only for agents that ever had priorities configured
@@ -1089,8 +1089,9 @@ class APIRouter:
     # model readiness or call-shape compatibility. The probe runs OUTSIDE
     # get_endpoint_chain: that method holds self._lock for its entire body, so
     # any network call inside it would block every other thread needing the lock
-    # (deadlock risk). Instead, call_with_fallback calls pre_validate_endpoint_chain()
-    # AFTER get_endpoint_chain returns — the lock is already released there.
+    # (deadlock risk). Instead, probes run LAZILY inline in call_with_fallback's endpoint
+    # loop (at most one per fresh acquisition); pre_validate_endpoint_chain() is the same
+    # gate applied to a whole chain.
 
     def _sanity_probe(self, endpoint_cfg: dict) -> bool:
         """Lightweight probe: checks endpoint reachability and auth via a fast GET /models.
@@ -1147,7 +1148,8 @@ class APIRouter:
     ) -> List[dict]:
         """Filter the endpoint chain by running sanity probes on endpoints that need one.
 
-        Called from call_with_fallback AFTER get_endpoint_chain returns (lock released).
+        Chain-level form of the lazy per-endpoint probes in call_with_fallback's loop;
+        run it only AFTER get_endpoint_chain returns (the lock is released there).
 
         Probe trigger model (per-connection health, NOT a global TTL): an endpoint is
         probed at most ONCE per fresh slot acquisition, and only when the caller has no
@@ -1908,7 +1910,6 @@ class APIRouter:
 
             concurrency_limit = 0
             rate_limit_rpm = 0           # Default: unlimited
-            is_default = (cfg_idx == len(chain) - 1)
 
             # Resolve endpoint-specific settings — always try to read from
             # the endpoint config, even for the default fallback endpoint.
@@ -2193,8 +2194,8 @@ class APIRouter:
                         # Unlike CharacterRunDetected/MaxTokenExceeded (which occur during streaming
                         # in execution_engine), context-exceeded happens here at API call time.
                         # Advance the per-instance cursor so engine-level retries skip past this endpoint.
-                        _inst_name_for_cursor = _inst_name  # Use the variable extracted at call time (kwargs.pop removed it)
-                        if _inst_name_for_cursor and self._is_context_exceeded_error(e):
+                        # _inst_name was extracted from kwargs at call entry (kwargs.pop removed it).
+                        if _inst_name and self._is_context_exceeded_error(e):
                             # ── A1/A2 gate: sanity-check a server-side context-exceeded error against the
                             # endpoint's CONFIGURED limit before triggering fallback compression.
                             # A 400 under model-swap/eviction conditions (server now running a smaller
@@ -2230,7 +2231,7 @@ class APIRouter:
                                     _genuine_overflow = any(srv_n_prompt > b for b in _bounds)
                                     if _genuine_overflow:
                                         logger.warning(
-                                            f"[APIRouter] Context-exceeded for '{_inst_name_for_cursor}' on endpoint "
+                                            f"[APIRouter] Context-exceeded for '{_inst_name}' on endpoint "
                                             f"'{endpoint_name}': server-reported n_prompt_tokens={srv_n_prompt} exceeds "
                                             f"verified bound(s) {dict(zip(('configured_limit', 'safety_fraction_of_n_ctx'), _bounds))} "
                                             f"(n_ctx={srv_n_ctx}) — genuine overflow."
@@ -2248,26 +2249,26 @@ class APIRouter:
                                 # for genuine context errors (reset happens at turn end anyway).
                                 if not _has_known_limit:
                                     logger.warning(
-                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}' but the endpoint has no configured "
                                         f"max_input_tokens — treating as service error, falling through to next endpoint."
                                     )
                                 elif isinstance(srv_n_prompt, int) and srv_n_prompt > 0:
                                     logger.warning(
-                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}': server-reported n_prompt_tokens={srv_n_prompt} "
                                         f"(n_ctx={srv_n_ctx}) fits every verified bound — treating as service error, "
                                         f"falling through to next endpoint."
                                     )
                                 elif _estimated is None:
                                     logger.warning(
-                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}' but payload token estimation failed — "
                                         f"treating as service error, falling through to next endpoint."
                                     )
                                 else:
                                     logger.warning(
-                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name_for_cursor}' "
+                                        f"[APIRouter] Context-exceeded reported by server for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}' but payload fits configured limit "
                                         f"{_cfg_limit} (~{_estimated} tokens) — treating as service error, "
                                         f"falling through to next endpoint."
@@ -2275,23 +2276,23 @@ class APIRouter:
                             if _genuine_overflow:
                                 # For Compressor agents: just advance cursor (they handle their own compression)
                                 if agent_type.lower().startswith('compressor'):
-                                    new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                                    new_pos = self.advance_instance_endpoint(_inst_name)
                                     logger.warning(
-                                        f"[APIRouter] Context window exceeded for Compressor '{_inst_name_for_cursor}' "
+                                        f"[APIRouter] Context window exceeded for Compressor '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}."
                                     )
                                 else:
                                     # Advance cursor NOW so retry uses a different (hopefully larger) endpoint after compression.
-                                    new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                                    new_pos = self.advance_instance_endpoint(_inst_name)
                                     logger.warning(
-                                        f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
+                                        f"[APIRouter] Context window exceeded for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}'. Triggering iterative fallback compression. "
                                         f"Cursor advanced to {new_pos}."
                                     )
                                     # Lazy import to avoid potential circular imports
                                     from agent_cascade.exceptions import FallbackCompressionRequired
                                     raise FallbackCompressionRequired(
-                                        _inst_name_for_cursor, agent_type, endpoint_name, original_error=e
+                                        _inst_name, agent_type, endpoint_name, original_error=e
                                     ) from e
 
                         # NOTE: CharacterRunDetected/MaxTokenExceeded exceptions are raised during

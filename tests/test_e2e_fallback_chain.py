@@ -375,7 +375,7 @@ class TestPriorityDropWarning:
 # by a UI reload), it degrades gracefully to Tier-4.
 # ============================================================================
 
-class TestCommittedEndpointFallback:
+class TestLastActiveEndpointFallback:
     def test_unassigned_agent_with_last_active_endpoint_uses_it_first(self, router):
         """Unassigned agent + global last-active endpoint → chain = [last-active cfg, Tier-4].
 
