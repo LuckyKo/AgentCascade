@@ -311,6 +311,50 @@ class ShellCmd(BaseTool):
         return None
 
     # ────────────────────────────────────────────────────────────────
+    _HEAD_TAIL_DENIAL = (
+        "DENIED: shell_cmd auto-rejects '| head' / '| tail' pipe stages — they are not "
+        "available on Windows and are redundant: AgentCascade already truncates shell "
+        "output with spillover. Remove the '| head ...' / '| tail ...' segment and run "
+        "the base command; large output is truncated automatically (use read_file/grep "
+        "for targeted extraction)."
+    )
+
+    @staticmethod
+    def _detect_head_tail_pipe(command: str) -> str | None:
+        """Detect a `head`/`tail` pipe stage in a shell command.
+
+        Returns an actionable denial reason string if any pipeline stage (the segment
+        after a `|`) begins with a `head` or `tail` command, else ``None``. Detection is
+        case-insensitive and skips leading `-flag` tokens so that forms like
+        ``head -n 5``, ``tail --lines=10`` and ``HEAD`` are all caught.
+
+        Only post-``|`` segments are inspected, so `head`/`tail` appearing as a git
+        subcommand argument (e.g. ``git show-ref --head``) or as the first command is
+        NOT matched. The ``cd <path> &&`` / ``cd <path>;`` prefix is stripped first via
+        :meth:`ShellMixin._strip_cd_prefix` to stay consistent with the safe-command
+        classifier (avoiding drift).
+
+        This is a tool-level denial layer — it does not affect
+        ``_is_safe_readonly_shell_command`` (the auto-approve gate).
+        """
+        if not command:
+            return None
+        cmd = ShellMixin._strip_cd_prefix(command.strip())
+        stages = cmd.split('|')
+        for stage in stages[1:]:
+            tokens = stage.strip().split()
+            # Skip leading flag tokens (e.g. `-n`, `--lines=10`) before the command name.
+            first_cmd = None
+            for tok in tokens:
+                if tok.startswith('-'):
+                    continue
+                first_cmd = tok.lower()
+                break
+            if first_cmd in ('head', 'tail'):
+                return ShellCmd._HEAD_TAIL_DENIAL
+        return None
+
+    # ────────────────────────────────────────────────────────────────
     def _launch_async(
         self, agent_name: str, command: str, justification: str,
         cwd: str, timeout: int, heartbeat_interval: float,
@@ -328,6 +372,12 @@ class ShellCmd(BaseTool):
         Returns:
             Response string with tool_id and PID, or completion result if command finished quickly.
         """
+        # ── Denial guard: reject `| head` / `| tail` pipes BEFORE any cwd
+        #    resolution, approval flow, or process spawn (never executes). ──
+        denial = ShellCmd._detect_head_tail_pipe(command)
+        if denial is not None:
+            return denial
+
         # ── Resolve cwd using the same resolver as file tools ────────
         try:
             from agent_cascade.utils.tool_path_resolver import resolve_tool_path
@@ -613,6 +663,12 @@ class ShellCmd(BaseTool):
         Returns:
             Command output or error message.
         """
+        # ── Denial guard: reject `| head` / `| tail` pipes BEFORE any
+        #    char-limit check, approval flow, or process spawn (never executes). ──
+        denial = ShellCmd._detect_head_tail_pipe(command)
+        if denial is not None:
+            return denial
+
         # Get the truncation limit from agent/tool options
         char_limit = 2048
         if hasattr(self, 'agent_pool') and self.agent_pool:

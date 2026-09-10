@@ -357,6 +357,7 @@ TOOL_METADATA = {
         'description': (
             'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval.\n\n'
             '**WARNING:** DO NOT use shell_cmd with file redirects, pipes or filters.\n\n'
+            '`| head X` and `| tail X` pipe commands are auto-denied (not available on Windows; output is already truncated with spillover).\n\n'
             '**Execution mode:** "auto" (default) = background if timeout>60s, else blocking; "sync" = always blocking; "async" = always background. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
         ),
