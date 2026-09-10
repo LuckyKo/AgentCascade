@@ -238,13 +238,14 @@ SANITY_PROBE_TIMEOUT_SECONDS: float = float(os.getenv(
 # Phase 2: Fix B1 — endpoint blacklist for deterministic failures.
 # An endpoint that fails ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD consecutive times
 # with a DETERMINISTIC client error (one that will recur on every attempt, e.g. an
-# HTTP 400 "not supported") is blacklisted for ENDPOINT_BLACKLIST_SECONDS — much
-# longer than the 60s cooldown because deterministic errors don't self-resolve.
+# HTTP 400 "not supported") is blacklisted for ENDPOINT_BLACKLIST_SECONDS — longer
+# than the 60s cooldown because deterministic errors don't self-resolve quickly, but
+# short enough (5 min) to re-try a recovered endpoint without waiting an hour.
 # Non-deterministic failures (network, timeout, 5xx) reset the counter instead.
 ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD: int = int(os.getenv(
     'QWEN_AGENT_ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD', 3))  # Consecutive deterministic failures before blacklisting an endpoint
 ENDPOINT_BLACKLIST_SECONDS: int = int(os.getenv(
-    'QWEN_AGENT_ENDPOINT_BLACKLIST_SECONDS', 7200))  # Blacklist duration (seconds) for a persistently-failing endpoint
+    'QWEN_AGENT_ENDPOINT_BLACKLIST_SECONDS', 300))  # Blacklist duration (seconds) for a persistently-failing endpoint
 
 # Phase 3: Fix A1 — cap on SLEEPING duration.
 # Max seconds an agent may remain in SLEEPING state waiting for background tools

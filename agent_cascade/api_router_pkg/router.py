@@ -156,6 +156,16 @@ class APIRouter:
         # request, so re-probing it would be wasted HTTP.
         self._instance_committed_endpoint: Dict[str, Tuple[str, str]] = {}
 
+        # Global "last active endpoint" — the (normalized_base, model) of the most recent
+        # successful call by ANY agent. Unlike _instance_committed_endpoint (per-instance,
+        # probe fast-path only), this is a single shared marker used for UNASSIGNED-agent
+        # selection: when an agent has no endpoints of its own it picks up whatever was last
+        # used by anyone (a child spawned via call_agent typically inherits the parent's).
+        # In-memory only — NOT cleared by from_dict; after a config reload a stale key simply
+        # fails to match any enabled endpoint and degrades gracefully to Tier-4. Guarded by
+        # self._lock (simple assignment inside the existing lock block — no compound RMW).
+        self._last_active_endpoint: Optional[Tuple[str, str]] = None
+
         # Persistence path — env var takes precedence for test isolation
         if os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR"):
             self._config_dir = Path(os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"])
@@ -851,8 +861,8 @@ class APIRouter:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
           1. Agent-specific endpoints (priority order, enabled only) — Tier 1
-          2. Instance committed endpoint (last turn's endpoint for this instance;
-             unassigned agents only, requires ``instance_name``) — Tier 1.5 (L147)
+          2. Last active endpoint (most recent successful call by any agent;
+             unassigned agents only) — Tier 1.5 (L147)
           3. Last successful endpoint (if available and validated) — Tier 3
           4. General Settings default (always last) — Tier 4
 
@@ -866,9 +876,9 @@ class APIRouter:
         skip past endpoints that already failed instead of starting from index 0.
 
         NOTE: There is no caller-inheritance tier. Every agent resolves through its own
-        Tier 1 → Tier 1.5 (committed) → Tier 3 → Tier 4 chain (single FIFO slot system).
-        An unconfigured agent falls to its committed endpoint (if it has one), then the
-        last-successful / global default, exactly like any other agent.
+        Tier 1 → Tier 1.5 (last-active) → Tier 3 → Tier 4 chain (single FIFO slot system).
+        An unconfigured agent falls to the global last-active endpoint (if one was recorded),
+        then the last-successful / global default, exactly like any other agent.
 
         Args:
             agent_type: The type of agent requesting endpoints
@@ -909,15 +919,18 @@ class APIRouter:
                 # (see reports/fallback-compression-misclass-investigation.md).
                 endpoint_configs.append(cfg)
 
-            # Tier 1.5 (L147): Instance committed-endpoint fallback — the endpoint this agent
-            # instance last successfully used. Fires ONLY for unassigned agents (Tier-1 empty)
-            # that have a live per-instance committed key from a previous successful call.
+            # Tier 1.5 (L147): Last-active-endpoint fallback — the GLOBAL endpoint most
+            # recently used successfully by ANY agent (_last_active_endpoint). Fires ONLY for
+            # unassigned agents (Tier-1 empty); no instance_name required to look it up, so a
+            # child spawned via call_agent picks up whatever the parent (or anyone) just used.
             # Maps the stored (normalized_base, model) key back to an ENABLED endpoint in
             # self.endpoints (same matching pattern as Tier 3 below). On no match (endpoint
             # removed/renamed/disabled by a UI reload) the tier is silently skipped and Tier-4
-            # remains the last resort. Read-only w.r.t. _instance_committed_endpoint — no writes.
-            if not endpoint_configs and instance_name:
-                _committed_key = self._instance_committed_endpoint.get(instance_name)
+            # remains the last resort. Read-only w.r.t. _last_active_endpoint — no writes.
+            # NOTE: distinct from _instance_committed_endpoint, which is retained solely as the
+            # probe fast-path gate in pre_validate_endpoint_chain (skip re-probing a live conn).
+            if not endpoint_configs:
+                _committed_key = self._last_active_endpoint
                 if _committed_key is not None:
                     _committed_base, _committed_model = _committed_key
                     # Skip if the committed endpoint IS the Tier-4 default (same base+model):
@@ -2081,6 +2094,11 @@ class APIRouter:
                         if _inst_name:
                             with self._lock:
                                 self._instance_committed_endpoint[_inst_name] = _det_key
+                                # Also update the GLOBAL last-active marker so any unassigned
+                                # agent (e.g. a child spawned via call_agent) picks up the
+                                # endpoint this call just succeeded on. Simple assignment — no
+                                # compound read-modify-write, safe under the shared lock.
+                                self._last_active_endpoint = _det_key
 
                         # Sticky slot: no per-call release on success (generator or not) —
                         # the permit lives on the instance and is released only at lifecycle

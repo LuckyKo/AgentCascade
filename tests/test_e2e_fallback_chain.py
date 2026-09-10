@@ -366,83 +366,87 @@ class TestPriorityDropWarning:
 
 
 # ============================================================================
-# L147 — Instance committed-endpoint fallback (Tier 1.5)
+# L147 — Last-active-endpoint fallback (Tier 1.5)
 #
-# When an agent has NO endpoints assigned, the chain should prefer the endpoint
-# that instance last successfully used (_instance_committed_endpoint) over
-# jumping straight to the Tier-4 global default. If that committed endpoint is
-# gone (removed/renamed by a UI reload), it degrades gracefully to Tier-4.
+# When an agent has NO endpoints assigned, the chain should prefer the GLOBAL
+# endpoint most recently used successfully by any agent (_last_active_endpoint)
+# over jumping straight to the Tier-4 global default. No instance_name is
+# required to pick it up. If that last-active endpoint is gone (removed/renamed
+# by a UI reload), it degrades gracefully to Tier-4.
 # ============================================================================
 
 class TestCommittedEndpointFallback:
-    def test_unassigned_agent_with_committed_instance_uses_committed_first(self, router):
-        """Unassigned agent + live committed key → chain = [committed cfg, Tier-4 default].
+    def test_unassigned_agent_with_last_active_endpoint_uses_it_first(self, router):
+        """Unassigned agent + global last-active endpoint → chain = [last-active cfg, Tier-4].
 
-        The committed endpoint is NOT assigned to any agent (so Tier-1 is empty), but the
-        instance last succeeded on it. get_endpoint_chain must prepend that endpoint's cfg
-        ahead of the Tier-4 global default — instead of returning Tier-4 only.
+        The last-active endpoint is NOT assigned to any agent (so Tier-1 is empty), but some
+        agent just succeeded on it. get_endpoint_chain must prepend that endpoint's cfg ahead
+        of the Tier-4 global default — instead of returning Tier-4 only. No instance_name is
+        required to pick up the global marker (a child spawned via call_agent inherits it).
         """
         # Endpoint exists and is enabled, but is NOT assigned to 'security' (unassigned agent).
         _add_endpoint(router, "c", "http://c-api", model="model-c")
 
-        # Simulate a prior success on this endpoint for instance 'worker1'.
+        # Simulate a prior success on this endpoint by ANY agent.
         # Key format mirrors call_with_fallback: (normalize_api_base(base), model).
         with router._lock:
-            router._instance_committed_endpoint["worker1"] = (
+            router._last_active_endpoint = (
                 normalize_api_base("http://c-api"), "model-c",
             )
 
+        # Works whether or not an instance_name is passed.
         chain = router.get_endpoint_chain("security", instance_name="worker1")
-
-        # Committed endpoint is first, Tier-4 global default is last.
         assert [c['api_base'] for c in chain] == ["http://c-api", "http://default-api"]
         assert chain[0]['model'] == "model-c"
         assert chain[-1]['api_base'] == "http://default-api"
 
-    def test_committed_key_stale_after_from_dict_degrades_to_tier4(self, router):
-        """Committed key stale (endpoint renamed by a UI reload) → chain = [Tier-4 only].
+    def test_last_active_key_stale_after_from_dict_degrades_to_tier4(self, router):
+        """Last-active key stale (endpoint renamed by a UI reload) → chain = [Tier-4 only].
 
-        _instance_committed_endpoint SURVIVES from_dict (unlike _last_successful_endpoint_cfg),
-        so a stale key can outlive the config change. The committed tier must NOT offer an
-        endpoint that no longer exists under its old identity — it degrades to Tier-4.
+        _last_active_endpoint SURVIVES from_dict (it is an in-memory live-connection marker,
+        like _instance_committed_endpoint), so a stale key can outlive the config change. The
+        last-active tier must NOT offer an endpoint that no longer exists under its old
+        identity — it degrades gracefully to Tier-4.
         """
-        # Endpoint 'c' originally served model-c; instance 'worker1' last succeeded on it.
+        # Endpoint 'c' originally served model-c; some agent just succeeded on it.
         _add_endpoint(router, "c", "http://c-api", model="model-c")
         with router._lock:
-            router._instance_committed_endpoint["worker1"] = (
+            router._last_active_endpoint = (
                 normalize_api_base("http://c-api"), "model-c",
             )
 
-        # Sanity: before the reload, the committed tier resolves to the endpoint.
+        # Sanity: before the reload, the last-active tier resolves to the endpoint.
         chain_before = router.get_endpoint_chain("security", instance_name="worker1")
         assert [c['api_base'] for c in chain_before] == ["http://c-api", "http://default-api"]
 
-        # User renames the model via a UI config change (from_dict). The committed key now
-        # points at a (base, model) that no enabled endpoint matches.
+        # User renames the model via a UI config change (from_dict). The last-active key now
+        # points at a (base, model) that no enabled endpoint matches. from_dict does NOT clear
+        # _last_active_endpoint, so the stale marker is still present but must not be offered.
         router.from_dict({
             "endpoints": [_ep_dict("c", "http://c-api", "model-NEW")],
             "agent_priorities": {},  # 'security' stays unassigned
         })
 
-        # The stale committed key must NOT be offered → chain is Tier-4 only.
+        # The stale last-active key must NOT be offered → chain is Tier-4 only.
         chain_after = router.get_endpoint_chain("security", instance_name="worker1")
         assert [c['api_base'] for c in chain_after] == ["http://default-api"]
 
-    def test_instance_name_none_leaves_new_tier_inert(self, router):
-        """instance_name=None → committed tier is inert; existing Tier-3/Tier-4 behavior unchanged.
+    def test_last_active_endpoint_picked_up_without_instance_name(self, router):
+        """instance_name=None → last-active tier STILL fires (no instance name required).
 
-        Callers that don't pass an instance name (get_llm_config, compressor lookups) must see
-        exactly the pre-L147 chain: no committed endpoint injected, Tier-4 as the sole entry for
-        an unassigned agent with no last-successful cfg.
+        Unlike the old per-instance committed tier, Tier 1.5 now reads the GLOBAL
+        _last_active_endpoint and needs no instance_name to look it up. Callers that don't pass
+        an instance name (get_llm_config, compressor lookups) must still pick up the endpoint
+        most recently used by anyone.
         """
         _add_endpoint(router, "c", "http://c-api", model="model-c")
-        # A committed key exists for 'worker1', but we call WITHOUT instance_name.
+        # A last-active key is set; we call WITHOUT instance_name.
         with router._lock:
-            router._instance_committed_endpoint["worker1"] = (
+            router._last_active_endpoint = (
                 normalize_api_base("http://c-api"), "model-c",
             )
 
         chain = router.get_endpoint_chain("security")  # instance_name defaults to None
 
-        # No committed endpoint injected → Tier-4 only, identical to pre-L147 behavior.
-        assert [c['api_base'] for c in chain] == ["http://default-api"]
+        # Last-active endpoint IS injected even without an instance name.
+        assert [c['api_base'] for c in chain] == ["http://c-api", "http://default-api"]
