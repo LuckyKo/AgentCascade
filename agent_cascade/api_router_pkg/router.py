@@ -851,8 +851,10 @@ class APIRouter:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
           1. Agent-specific endpoints (priority order, enabled only) — Tier 1
-          2. Last successful endpoint (if available and validated) — Tier 3
-          3. General Settings default (always last) — Tier 4
+          2. Instance committed endpoint (last turn's endpoint for this instance;
+             unassigned agents only, requires ``instance_name``) — Tier 1.5 (L147)
+          3. Last successful endpoint (if available and validated) — Tier 3
+          4. General Settings default (always last) — Tier 4
 
         Priority order is preserved as configured by the user. Images are captioned
         upstream so any endpoint in the chain can handle them without reordering,
@@ -864,8 +866,9 @@ class APIRouter:
         skip past endpoints that already failed instead of starting from index 0.
 
         NOTE: There is no caller-inheritance tier. Every agent resolves through its own
-        Tier 1 → Tier 3 → Tier 4 chain (single FIFO slot system). An unconfigured agent
-        falls to the last-successful / global default, exactly like any other agent.
+        Tier 1 → Tier 1.5 (committed) → Tier 3 → Tier 4 chain (single FIFO slot system).
+        An unconfigured agent falls to its committed endpoint (if it has one), then the
+        last-successful / global default, exactly like any other agent.
 
         Args:
             agent_type: The type of agent requesting endpoints
@@ -905,6 +908,37 @@ class APIRouter:
                 # blinded both layers when an agent failed over to a smaller endpoint
                 # (see reports/fallback-compression-misclass-investigation.md).
                 endpoint_configs.append(cfg)
+
+            # Tier 1.5 (L147): Instance committed-endpoint fallback — the endpoint this agent
+            # instance last successfully used. Fires ONLY for unassigned agents (Tier-1 empty)
+            # that have a live per-instance committed key from a previous successful call.
+            # Maps the stored (normalized_base, model) key back to an ENABLED endpoint in
+            # self.endpoints (same matching pattern as Tier 3 below). On no match (endpoint
+            # removed/renamed/disabled by a UI reload) the tier is silently skipped and Tier-4
+            # remains the last resort. Read-only w.r.t. _instance_committed_endpoint — no writes.
+            if not endpoint_configs and instance_name:
+                _committed_key = self._instance_committed_endpoint.get(instance_name)
+                if _committed_key is not None:
+                    _committed_base, _committed_model = _committed_key
+                    # Skip if the committed endpoint IS the Tier-4 default (same base+model):
+                    # it would otherwise be appended here AND again as the default below.
+                    _default_cfg = self.default_llm_cfg or {}
+                    _is_default = (
+                        normalize_api_base(_default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == _committed_base
+                        and _default_cfg.get('model') == _committed_model
+                    )
+                    if not _is_default:
+                        for ep in self.endpoints.values():
+                            if normalize_api_base(ep.api_base) == _committed_base and ep.model == _committed_model and ep.enabled:
+                                cfg = copy.deepcopy(ep.to_llm_cfg())
+                                ep_limit = ep.max_input_tokens
+                                if ep_limit <= 0 and general_limit > 0:
+                                    cfg['max_input_tokens'] = general_limit
+
+                                # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
+                                endpoint_configs.append(cfg)
+                                logger.debug(f"[APIRouter] {agent_type}/{instance_name}: using committed endpoint '{_committed_model}' @ {_committed_base}")
+                                break
 
             # Tier 3: Last successful endpoint fallback — only for agents that ever had priorities configured
             if not endpoint_configs and self._last_successful_endpoint_cfg is not None:
