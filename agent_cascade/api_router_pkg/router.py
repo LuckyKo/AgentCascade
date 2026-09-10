@@ -283,8 +283,12 @@ class APIRouter:
             elif canonical in self.agent_priorities:
                 del self.agent_priorities[canonical]
                 self._agent_types_with_priorities.discard(canonical)
-                logger.info(f"[APIRouter.set_agent_priorities] Removed priorities for {canonical} "
-                           f"(all {len(endpoint_ids)} IDs were invalid)")
+                # WARNING (not INFO): silently dropping a whole priority list is a real
+                # config-loss event — the agent falls back to Tier-3/Tier-4 and the user
+                # sees "old config" behavior. Surface it loudly so it is not missed.
+                invalid_ids = [eid for eid in endpoint_ids if eid not in self.endpoints]
+                logger.warning(f"[APIRouter.set_agent_priorities] ALL endpoint IDs invalid for "
+                              f"'{agent_type}', priorities removed. Invalid IDs: {invalid_ids}")
             else:
                 logger.debug(f"[APIRouter.set_agent_priorities] No action for {agent_type} "
                             f"(no valid IDs, no existing priorities)")
@@ -1686,6 +1690,28 @@ class APIRouter:
         chain = self.get_endpoint_chain(
             agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
         )
+
+        # FIX (Tier-4 visibility): the "only the global default will be used" log is emitted
+        # in TWO places so it covers BOTH ways the effective chain ends up Tier-4-only:
+        #   1. len(chain) == 1 right here — the agent had NO effective Tier-1/Tier-3 endpoints
+        #      at all (the "mystery" hardcoded default, e.g. whatever_is_on @ localhost:1234).
+        #   2. Inside the endpoint loop's probe-failure branch — Tier-1 endpoints EXISTED but
+        #      every one failed its lazy sanity probe, so only the Tier-4 default remains.
+        # _tier4_only_logged guards against double-logging when BOTH conditions could apply in a
+        # single call attempt (e.g. a single-Tier-1 endpoint that fails its probe). A Tier-4
+        # entry inside a multi-endpoint chain is normal last-resort fallback and is never logged.
+        _tier4_only_logged = False
+
+        if len(chain) == 1:
+            _t4_cfg = chain[0]
+            _t4_model = _t4_cfg.get('model', 'unknown')
+            _t4_base = _t4_cfg.get('api_base') or _t4_cfg.get('model_server', 'unknown')
+            logger.info(
+                f"[APIRouter] {agent_type}: no effective endpoints, using global default "
+                f"'{_t4_model}' @ {_t4_base}"
+            )
+            _tier4_only_logged = True
+
         # ── Fix D: sanity probe is LAZY — each endpoint is probed at most once, just before
         # it is tried (gate at the top of the loop below). Fixes WinError 10055 socket-buffer
         # exhaustion: the former eager pre_validate_endpoint_chain call here probed every
@@ -1806,6 +1832,27 @@ class APIRouter:
                                 f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
                                 f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s)."
                             )
+
+                            # Tier-4 visibility (case 2): this was a NON-default endpoint that
+                            # just failed its probe. Log "using global default" ONLY when it is
+                            # the LAST non-default in the chain — i.e. second-to-last, so only
+                            # the Tier-4 default (chain[-1]) remains to be tried. A positional
+                            # check (cfg_idx == len(chain) - 2) is used rather than a base
+                            # comparison: a base match would fire prematurely when other
+                            # non-default endpoints on the same base still sit between here and
+                            # the default and have not been tried yet. The early len(chain)==1
+                            # check cannot see this (probing is lazy, inside the loop). Guarded
+                            # by _tier4_only_logged so a single call attempt logs at most once.
+                            if not _tier4_only_logged and cfg_idx == len(chain) - 2:
+                                _t4 = chain[-1]
+                                logger.info(
+                                    f"[APIRouter] {agent_type}: no effective endpoints "
+                                    f"(all filtered/exhausted), using global default "
+                                    f"'{_t4.get('model', 'unknown')}' @ "
+                                    f"{_t4.get('api_base') or _t4.get('model_server', 'unknown')}"
+                                )
+                                _tier4_only_logged = True
+
                             continue
 
             # Default per-endpoint retry count from policy. Endpoint config (max_retries field)
@@ -2801,7 +2848,31 @@ class APIRouter:
             # Swap atomically only after all parsing succeeds
             self.endpoints.clear()
             self.endpoints.update(new_endpoints)
-            
+
+            # FIX (health-state reset): a from_dict() call is an EXPLICIT user action
+            # ("I fixed this endpoint in the UI"). The blacklist / failure counters are
+            # keyed by (normalized_api_base, model); after a full endpoint-list replacement
+            # every old key is stale, so a 2-hour blacklist or a 60s cooldown must NOT
+            # survive — otherwise a "fixed" endpoint stays skipped for up to 7200s and the
+            # user perceives the config change as ignored. Clear both dicts entirely.
+            n_blacklist = len(self._endpoint_blacklist)
+            n_failures = len(self._endpoint_failure_times)
+            self._endpoint_blacklist.clear()
+            self._endpoint_failure_times.clear()
+
+            # Also drop the last-successful endpoint (Tier-3 fallback source). It is a raw
+            # llm_cfg captured from whatever endpoint last succeeded; if the user changed an
+            # endpoint's model/api_base, that stale cfg would otherwise be offered as Tier-3
+            # against a server that no longer serves it. Clearing forces re-validation on the
+            # next successful call (which re-captures a fresh cfg).
+            had_last_success = self._last_successful_endpoint_cfg is not None
+            self._last_successful_endpoint_cfg = None
+
+            if n_blacklist > 0 or n_failures > 0 or had_last_success:
+                logger.info(f"[APIRouter] from_dict: cleared {n_blacklist} blacklist entries, "
+                            f"{n_failures} failure counters"
+                            + (", last-successful endpoint" if had_last_success else ""))
+
             # Normalize agent_priorities to remove case-insensitive duplicates
             raw_priorities = data.get('agent_priorities', {})
             self.agent_priorities = self._normalize_agent_priorities(raw_priorities)

@@ -58,6 +58,15 @@ WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
 ensure_workspace(WORKSPACE_DIR)
 
 # Tool availability is driven by AVAILABLE_TOOLS in dna.py.
+#
+# GLOBAL DEFAULT ENDPOINT (Tier-4 fallback):
+#   - model='whatever_is_on' is the LM Studio "use whatever model is currently loaded"
+#     sentinel — llm/oai.py special-cases this string so it never pins a specific model.
+#   - This cfg becomes the router's Tier-4 global default: get_endpoint_chain() ALWAYS
+#     appends it as the last-resort endpoint for every agent, even one with no assigned
+#     endpoints of its own. It is intentionally NOT filtered by cooldown/blacklist.
+#   - Values are deliberately left as-is (do not "fix" them); they are only documented +
+#     logged at startup so the source of this fallback is visible in the logs.
 llm_cfg = {
     'model': 'whatever_is_on',
     'model_server': 'http://localhost:1234/v1',
@@ -65,6 +74,9 @@ llm_cfg = {
     'model_type': 'qwenvl_oai',
     'max_input_tokens': 65536,
 }
+# NOTE (Fix 4): the Tier-4 visibility log for this cfg is emitted in __main__ AFTER
+# init_logging() — logging a bare logger at module-import time would be dropped because
+# no handlers are attached yet. See the `logger.info(...Tier-4 fallback...)` call below.
 
 
 def initialize_agents():
@@ -99,6 +111,14 @@ def initialize_agents():
 if __name__ == '__main__':
     from agent_cascade.log import init_logging, logger
     init_logging()
+
+    # Fix 4: make the hardcoded Tier-4 global default visible at startup. Emitted here
+    # (after init_logging) so it actually reaches the configured handlers — logging a
+    # bare module-level logger at import time would be dropped (no handlers yet).
+    logger.info(
+        f"[APIRouter] Global default endpoint: '{llm_cfg['model']}' @ {llm_cfg['model_server']} "
+        f"(Tier-4 fallback)"
+    )
 
     import sys
 
