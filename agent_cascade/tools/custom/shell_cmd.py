@@ -321,21 +321,15 @@ class ShellCmd(BaseTool):
 
     @staticmethod
     def _detect_head_tail_pipe(command: str) -> str | None:
-        """Detect a `head`/`tail` pipe stage in a shell command.
+        """Detect a `head`/`tail` pipe stage and return the denial string, else ``None``.
 
-        Returns an actionable denial reason string if any pipeline stage (the segment
-        after a `|`) begins with a `head` or `tail` command, else ``None``. Detection is
-        case-insensitive and skips leading `-flag` tokens so that forms like
-        ``head -n 5``, ``tail --lines=10`` and ``HEAD`` are all caught.
+        Inspects only post-``|`` stages (case-insensitive, skipping leading `-flag`
+        tokens, so ``head -n 5``, ``tail --lines=10`` and ``HEAD`` are all caught).
+        `head`/`tail` as the first command or a git arg (e.g. ``git show-ref --head``)
+        is NOT matched. The leading ``cd <path> &&`` / ``;`` prefix is stripped via
+        :meth:`ShellMixin._strip_cd_prefix` for consistency with the safe classifier.
 
-        Only post-``|`` segments are inspected, so `head`/`tail` appearing as a git
-        subcommand argument (e.g. ``git show-ref --head``) or as the first command is
-        NOT matched. The ``cd <path> &&`` / ``cd <path>;`` prefix is stripped first via
-        :meth:`ShellMixin._strip_cd_prefix` to stay consistent with the safe-command
-        classifier (avoiding drift).
-
-        This is a tool-level denial layer — it does not affect
-        ``_is_safe_readonly_shell_command`` (the auto-approve gate).
+        Tool-level denial only — does not affect ``_is_safe_readonly_shell_command``.
         """
         if not command:
             return None
