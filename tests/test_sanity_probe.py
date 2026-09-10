@@ -1,9 +1,10 @@
 """Fix D — lightweight pre-allocation API sanity probe (subagent_timeout_fix_plan.md §5, v3).
 
 Covers:
-- _sanity_probe: success path (HTTP 200); 401/403 auth errors → False; 404 models not found → False;
-  connection errors / exceptions → False; checks base_url/models.
-- pre_validate_endpoint_chain: filters failing endpoints; respects cache TTL (no re-probe);
+- _sanity_probe (returns ``(passed, was_connection_error)``): success (HTTP 200) → (True, False);
+  401/403 auth errors and 404 models-not-found → (False, False) — host reachable;
+  connection-level failures → (False, True); unexpected exceptions → (False, False).
+- pre_validate_endpoint_chain: filters failing endpoints; a live committed endpoint is fast-pathed (no re-probe);
   disabled via SANITY_PROBE_ENABLED=False; blacklisted endpoints skipped WITHOUT probing;
   successful probe clears blacklist + failure count; ALL-endpoints-fail raises a clear error.
 

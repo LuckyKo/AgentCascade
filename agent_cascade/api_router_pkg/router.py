@@ -1185,7 +1185,7 @@ class APIRouter:
           - blacklisted (Fix B1)                 → drop, NO probe
           - else                                 → probe ONCE; pass → keep, fail → drop + cooldown
 
-        ``instance_name`` (threaded from call_with_fallback): if this instance already holds
+        ``instance_name``: if this instance already holds
         a live connection to an endpoint in the chain, that endpoint is fast-pathed — no
         re-probe across turns or engine retries of a still-live connection. This stops a
         healthy primary being probed every turn + every retry (the accept-queue flood).
@@ -1267,7 +1267,9 @@ class APIRouter:
                 continue
 
             # ── Network probe (NO lock held — safe for I/O) — at most ONE per fresh acquisition. ──
-            success, _conn_err = self._sanity_probe(cfg)
+            # No per-host dedup here: pre_validate_endpoint_chain has no production callers
+            # (tests only), so the extra same-base probes it could fire never happen on the hot path.
+            success, _ = self._sanity_probe(cfg)
 
             # Re-consult the breaker AFTER the probe: if the base tripped OPEN during the
             # probe (e.g. a busy 503 that carried the SERVER_BUSY_LOADING signature and was
@@ -1767,11 +1769,13 @@ class APIRouter:
         )
 
         # FIX (Tier-4 visibility): the "only the global default will be used" log is emitted
-        # in TWO places so it covers BOTH ways the effective chain ends up Tier-4-only:
+        # in THREE places so it covers BOTH ways the effective chain ends up Tier-4-only:
         #   1. len(chain) == 1 right here — the agent had NO effective Tier-1/Tier-3 endpoints
         #      at all (the "mystery" hardcoded default, e.g. whatever_is_on @ localhost:1234).
         #   2. Inside the endpoint loop's probe-failure branch — Tier-1 endpoints EXISTED but
         #      every one failed its lazy sanity probe, so only the Tier-4 default remains.
+        #   3. The per-host dedup-skip branch (same base already connection-failed this pass)
+        #      — identical block, same guard; kept in sync with case 2 by inspection.
         # _tier4_only_logged guards against double-logging when BOTH conditions could apply in a
         # single call attempt (e.g. a single-Tier-1 endpoint that fails its probe). A Tier-4
         # entry inside a multi-endpoint chain is normal last-resort fallback and is never logged.
@@ -1792,8 +1796,7 @@ class APIRouter:
         # exhaustion: the former eager pre_validate_endpoint_chain call here probed every
         # fallback on EVERY turn even when a committed healthy primary was never going to
         # fall back. Lazy probing means a live primary costs ZERO probe HTTP to its fallbacks.
-        # Gates per endpoint, in priority order: breaker-open → skip; committed-live + not
-        # blacklisted → fast-path (no probe); blacklisted → skip; else probe once. ──
+        # (Per-endpoint gate priority order is documented in the loop below.) ──
         # D1 fail-fast scan uses the NON-mutating _breaker_is_open (not _breaker_should_skip):
         # a pre-loop claim of the single half-open probe would wedge recovery — the endpoint
         # loop re-consults, sees half_open/probing, skips the busy base, and the claimed probe
@@ -1844,10 +1847,10 @@ class APIRouter:
                 _probe_key = (normalize_api_base(_probe_base), llm_cfg.get('model', ''))
                 _now_probe = time.time()
 
-                # ── Per-host dedup: a same-base endpoint already failed with a CONNECTION-level
-                # error earlier in this pass → the host is unreachable right now. Skip the probe
-                # entirely (no HTTP), record cooldown, and move on — mirroring the probe-failure
-                # branch below but without firing a request that would also fail. ──
+                # ── Per-host dedup (see _probe_failed_bases above): same base already
+                # connection-failed this pass → skip the probe (no HTTP), record cooldown,
+                # move on. Mirrors the probe-failure branch below except it does not fire a
+                # request that would also fail. ──
                 if normalize_api_base(_probe_base) in _probe_failed_bases:
                     logger.debug(
                         f"[APIRouter] Skipping probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
@@ -2152,11 +2155,11 @@ class APIRouter:
 
                         # Part 2: record the committed endpoint for this instance (last
                         # successful call). A real call just succeeded on it, so a live
-                        # connection is established. This is what lets
-                        # pre_validate_endpoint_chain fast-path (skip the probe) on the next
-                        # turn / engine retry of this same endpoint. When we succeed on a
-                        # DIFFERENT endpoint than previously committed, the old connection is no
-                        # longer in use — the new key simply replaces it.
+                        # connection is established. This is what lets the committed-live fast
+                        # path in call_with_fallback's lazy probe gate (and pre_validate_endpoint_chain)
+                        # skip the probe on the next turn / engine retry of this same endpoint.
+                        # When we succeed on a DIFFERENT endpoint than previously committed, the
+                        # old connection is no longer in use — the new key simply replaces it.
                         if _inst_name:
                             with self._lock:
                                 self._instance_committed_endpoint[_inst_name] = _det_key
