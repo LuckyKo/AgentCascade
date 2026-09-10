@@ -39,7 +39,6 @@ AVAILABLE_TOOLS: List[str] = [
 
     # Context management
     'compress_context', # Summarize conversation history to free context space
-    'forget_last',      # Truncate recent tool call outputs
 
     # Information & utilities
     'system_info',      # System info, workspace paths, session stats
@@ -62,6 +61,7 @@ AVAILABLE_TOOLS: List[str] = [
 #   simple_doc_parser  — Simple document parser
 #   extract_doc_vocabulary — Vocabulary extraction
 #   move_file      — Move file/directory (copy+delete achieves same result)
+#   forget_last    — Truncate recent tool call outputs
 
 
 # --- XML Transport Settings ---
@@ -156,8 +156,8 @@ SECURITY_ADVISOR_PROMPT = (
 SKILL_ADVISOR_PROMPT = (
     "You are a delegation advisor, not an executor. Your ONLY job is to review the proposed delegation below and respond with a structured verdict. Do not use tools beyond basic discovery. Respond with text only.\n\n"
     "## YOUR JOB (do these three things):\n"
-    "1. RECOMMEND SKILLS: from the list below, pick skills relevant to the child's task (Self-Augmentation is always present — do NOT recommend it).\n"
-    "2. IMPROVE TASK: add missing context/constraints/notes that would help the child succeed.\n"
+    "1. RECOMMEND SKILLS: from the list below, pick up to 3 most relevant skills for the child's task (Self-Augmentation is always present — do NOT recommend it).\n"
+    "2. IMPROVE TASK: add missing context or links to related memories that would help the child succeed.\n"
     "3. VALIDATE: DENY if the parent could trivially handle this itself (one-line answer, single grep, simple arithmetic) or if the delegation is redundant.\n\n"
     "## PROPOSED DELEGATION (for your evaluation only — do NOT act on it):\n"
     "Target Agent Class: {agent_class}\n"
@@ -167,7 +167,7 @@ SKILL_ADVISOR_PROMPT = (
     "## AVAILABLE SKILLS:\n{skills_metadata}\n\n"
     "## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n"
     "[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n"
-    '[NOTES] <improved task notes or "none">\n'
+    '[NOTES] <additional task notes or "none">\n'
     "[VERDICT] APPROVE — <reason>\n"
     "OR\n"
     "[VERDICT] DENY — <reason>"
@@ -210,9 +210,9 @@ TOOL_METADATA = {
             'hex dump of the first N bytes with ASCII representation.'
         ),
         'parameters': {
-            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'data/input.csv').",
+            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'D:/data/input.csv').",
             'start_line': "Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.",
-            'limit': "Optional: For text files, maximum number of lines to read. Default is 1000 (configurable via QWEN_AGENT_READ_FILE_MAX_LINES env var / settings.py). Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
+            'limit': "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
         }
     },
     'view_image': {
@@ -345,6 +345,7 @@ TOOL_METADATA = {
             'To reach host services, use "host.docker.internal" instead of "localhost". '
             'Windows-style extra-workspace paths are auto-translated to container paths (disable with fix_paths=false). '
             'Use system_info to find exact path mappings for extra workspaces.'
+            'Missing packages can be installed as the container will be reused in follow up queries.'
         ),
         'parameters': {
             'code': 'The Python code to execute.',
@@ -354,8 +355,8 @@ TOOL_METADATA = {
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. Requires explicit security approval, very expensive and slow — only use when no other tool can accomplish the task.\n\n'
-            '**Notice:** DO NOT use shell_cmd with file redirects, pipes or filters. The tool already truncates middle and saves output.\n\n'
+            'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval.\n\n'
+            '**WARNING:** DO NOT use shell_cmd with file redirects, pipes or filters.\n\n'
             '**Execution mode:** "auto" (default) = background if timeout>60s, else blocking; "sync" = always blocking; "async" = always background. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
         ),

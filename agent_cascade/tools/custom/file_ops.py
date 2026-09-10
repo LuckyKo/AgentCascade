@@ -53,7 +53,7 @@ _gtk_common_paths = [
 
 # --- read_file constants ----------------------------------------------------- #
 # DEFAULT_MAX_INPUT_TOKENS is imported from agent_cascade.settings (canonical, default 65000).
-DEFAULT_READ_LINES = DEFAULT_READ_FILE_MAX_LINES  # From settings (default: 1000)
+DEFAULT_READ_LINES = DEFAULT_READ_FILE_MAX_LINES  # From settings (default: 150)
 MAX_LINE_LIMIT_EXPLICIT = 100000          # Max lines when user explicitly sets a limit
 HEX_DUMP_BYTES = 1024                     # Bytes to show in hex view for binary files
 CONTEXT_FRACTION = 0.25                   # Fraction of context window reserved for tool output
@@ -94,8 +94,11 @@ def _format_hex_dump(data: bytes) -> str:
 class ReadFile(BaseTool, PathResolutionMixin):
     """Reads and returns the content of a specified file.
 
-    Handles text files natively with streaming line-by-line reading. For binary
-    files, displays a hex dump of the first N bytes with ASCII representation.
+    Text files are read line-by-line with dual limits: a line cap (default 150 for
+    wild reads, up to 100000 when limit is explicit) and a character budget derived
+    from the context window. Wild reads that exceed the high-water mark (~2000 chars)
+    are truncated post-hoc with an unbound-read warning.
+    Binary files display a hex dump of the first 1024 bytes with ASCII representation.
     """
 
     name = 'read_file'
@@ -170,42 +173,45 @@ class ReadFile(BaseTool, PathResolutionMixin):
     # ------------------------------------------------------------------ #
     def _determine_limits(self, limit: Optional[int]) -> tuple[int, bool]:
         """Return (line_limit, is_wild_read). Wild reads have no explicit limit
-        set by the caller and get capped more aggressively on character budget.
-        
+        set by the caller; they use the default line count and are subject to a
+        post-hoc high-water-mark truncation (see _read_text_file).
+
         Priority: explicit limit > -1 (unlimited) > default."""
         if limit == -1:
             return MAX_LINE_LIMIT_EXPLICIT, False
         elif limit is not None:
             return min(int(limit), MAX_LINE_LIMIT_EXPLICIT), False
         else:
-            return DEFAULT_READ_LINES, True  # wild read — char budget will be capped lower
+            return DEFAULT_READ_LINES, True  # wild read — high-water mark applied post-hoc
 
     # ------------------------------------------------------------------ #
     #  Helper: calculate character budget for the read                    #
     # ------------------------------------------------------------------ #
-    def _calculate_char_limit(self, kwargs: dict, is_wild_read: bool,
-                              wild_truncation: int = DEFAULT_WILD_READ_TRUNCATION_CHARS) -> int:
+    def _calculate_char_limit(self, kwargs: dict) -> int:
         """Calculate the character limit based on context window and token estimates.
 
-        For wild reads (no explicit limit), the char budget is capped at the lower
-        truncation cut (`wild_truncation`): once a read trips the threshold, content
-        beyond a small window is probably useless.
+        The char budget is derived from the context window regardless of read type.
+        For wild reads, `wild_truncation` acts as a high-water mark (trip threshold)
+        passed separately to _read_text_file — it does NOT cap this budget proactively.
         """
         max_input_tokens = self._get_max_input_tokens(kwargs)
         char_limit = int(max_input_tokens * CONTEXT_FRACTION * CHARS_PER_TOKEN_ESTIMATE)
         char_limit = max(500, char_limit)  # floor at 500 chars
-        if is_wild_read:
-            char_limit = min(char_limit, wild_truncation)
         return char_limit
 
     # ------------------------------------------------------------------ #
     #  Helper: read text file with streaming line-by-line iteration       #
     # ------------------------------------------------------------------ #
     def _read_text_file(
-        self, path: str, resolved: Path, start_line: int, limit: int, char_limit: int
+        self, path: str, resolved: Path, start_line: int, limit: int, char_limit: int,
+        is_wild_read: bool = False, wild_truncation: int = 0,
     ) -> str:
         """Read a text file using streaming line-by-line iteration.
-        
+
+        For wild reads (no explicit limit), if accumulated content exceeds the
+        high-water mark (`wild_truncation`), the output is truncated to that
+        threshold with an unbound-read warning.
+
         Returns formatted content string ready for the user.
         """
         total_lines = 0
@@ -253,6 +259,23 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         content = ''.join(lines_read)
 
+        # Wild read high-water mark: if an unbound read exceeded the trip threshold,
+        # truncate to that limit and flag it.
+        wild_truncated = False
+        displayed_lines = len(lines_read)
+        if is_wild_read and wild_truncation > 0 and len(content) > wild_truncation:
+            # Cut at the line boundary closest to (and below) the threshold.
+            cut_pos = content.rfind('\n', 0, wild_truncation)
+            if cut_pos > 0:
+                content = content[:cut_pos]  # exclude the newline -> whole lines only
+            else:
+                # No newline before the threshold (single very long line): hard-cut.
+                content = content[:wild_truncation] + " ...\n"
+            wild_truncated = True
+            # Count displayed lines (the last line has no trailing newline after the cut).
+            displayed_lines = content.count('\n') + (0 if content.endswith('\n') else 1)
+            displayed_lines = max(1, displayed_lines)
+
         if not lines_read:
             if total_lines == 0:
                 file_size = resolved.stat().st_size if resolved.exists() else 0
@@ -260,7 +283,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
             else:
                 return f"ERROR: start_line {start_line} exceeds file length ({total_lines} lines)"
 
-        actual_end = start_line + len(lines_read) - 1
+        actual_end = start_line + displayed_lines - 1
 
         # m1: Encoding warning via replacement character U+FFFD count
         repl_count = content.count('\ufffd')
@@ -281,7 +304,15 @@ class ReadFile(BaseTool, PathResolutionMixin):
         header = f"OK: Read {path} lines {start_line}-{actual_end}/{total_lines} (text, {file_size_str}){encoding_note}"
 
         truncated_msg = ""
-        if hit_line_limit or hit_char_limit:
+        if wild_truncated:
+            header += " [TRUNCATION WARNING: Unbound read detected!]"
+            truncated_msg = (
+                f"\n⚠ This was a wild read (no limit specified). Content exceeded the "
+                f"{wild_truncation}-char high-water mark and was truncated. "
+                f"Use start_line/limit for targeted reads."
+                f"\n→ continue at start_line={actual_end + 1}"
+            )
+        elif hit_line_limit or hit_char_limit:
             header += " [TRUNCATED]"
             # m2: Compact pagination footer
             truncated_msg = f"\n→ continue at start_line={actual_end + 1}"
@@ -355,9 +386,10 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         limit = params.get('limit')
 
-        # Get the lower truncation cut used for the actual char budget when a wild read trips.
-        # (The trip threshold / tool_result_max_chars still acts as the outer safety net via
-        # _assemble_tool_result in compression/handler.py — no need to read it here.)
+        # High-water mark (trip threshold) for wild reads: the read proceeds normally up
+        # to the line/char limits, and is only truncated post-hoc if content exceeds this.
+        # (tool_result_max_chars still acts as the outer safety net via _assemble_tool_result
+        # in compression/handler.py — no need to read it here.)
         wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
         if self.agent_pool is not None:
             wild_truncation = getattr(self.agent_pool, 'llm_cfg', {}).get(
@@ -378,8 +410,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
             if not resolved.is_file():
                 return f"Not a regular file: {path}"
 
-            # Determine character budget for this read
-            char_limit = self._calculate_char_limit(kwargs, is_wild_read, wild_truncation)
+            # Determine character budget for this read (context-derived, same for all read types)
+            char_limit = self._calculate_char_limit(kwargs)
 
             # Check for binary content
             if _is_binary_file(resolved):
@@ -397,6 +429,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
             return self._read_text_file(
                 path=path, resolved=resolved, start_line=start_line,
                 limit=limit, char_limit=char_limit,
+                is_wild_read=is_wild_read, wild_truncation=wild_truncation,
             )
 
         except ValueError as e:

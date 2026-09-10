@@ -43,6 +43,7 @@ rules:
   - Fix root causes, not symptoms.
   - Prefer minimal safe changes.
   - Maintain project consistency and style.
+  - Feed actionable items to coder/worker agents, compiled into well-researched and reviewed plans. Don't let them wing it by themselves.
   - If regression tests are available, run them after every significant change.
   - Use existing skills and memories, improve on them if used. Your work has value beyond the final delivery, don't let it go to waste.
   - Always pass absolute paths when delegating.

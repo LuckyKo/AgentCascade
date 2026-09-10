@@ -292,6 +292,79 @@ class TestFileOpsRefactoring:
                 test_file.unlink()
 
 
+class TestReadFileWildReadHighWaterMark:
+    """Regression tests for the read_file wild-read high-water-mark behavior.
+
+    A "wild read" (no explicit limit) uses the default line cap as its primary
+    bound. The `wild_read_truncation_chars` value is a HIGH-WATER MARK (trip
+    threshold), not a proactive char budget: the read proceeds normally and is
+    only truncated post-hoc if accumulated content exceeds the threshold, at which
+    point an unbound-read warning is emitted instead of the generic [TRUNCATED].
+    """
+
+    def _read(self, tmp_path: Path, content: str, **kwargs):
+        from agent_cascade.tools.custom.file_ops import ReadFile
+        p = tmp_path / "f.txt"
+        p.write_text(content, encoding="utf-8")
+        tool = ReadFile()
+        # Large char_limit so the context-derived budget never trips first;
+        # only the high-water mark should drive truncation.
+        return tool._read_text_file(
+            path=str(p), resolved=p, start_line=1, limit=150,
+            char_limit=10_000_000, **kwargs,
+        )
+
+    def test_wild_read_multi_line_truncates_at_hwm(self):
+        """A wild read exceeding the HWM on a multi-line file warns and cuts at a line boundary."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = [f"line {i} " + "p" * 35 for i in range(1, 60)]  # ~2.6KB > 2000
+            out = self._read(Path(tmp), "\n".join(lines) + "\n",
+                             is_wild_read=True, wild_truncation=2000)
+            assert "[TRUNCATION WARNING: Unbound read detected!]" in out
+            assert "[TRUNCATED]" not in out
+            # Pagination hint present and consistent with the last displayed line.
+            body = out.split("```")[1]
+            last = [l for l in body.split("\n") if l.strip()][-1]
+            last_num = int(last.split(":")[0])
+            assert f"→ continue at start_line={last_num + 1}" in out
+
+    def test_wild_read_single_long_line_hard_cut(self):
+        """A single very long line (no newline before the threshold) is hard-cut."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._read(Path(tmp), "x" * 5000,
+                             is_wild_read=True, wild_truncation=2000)
+            assert "[TRUNCATION WARNING: Unbound read detected!]" in out
+            # Content body should be bounded near the threshold (not 5000 chars).
+            body = out.split("```")[1]
+            assert len(body) < 4000
+
+    def test_wild_read_under_hwm_no_warning(self):
+        """A wild read under the HWM is returned in full with no truncation marker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._read(Path(tmp), "short\nfile\nunder limit\n",
+                             is_wild_read=True, wild_truncation=2000)
+            assert "TRUNCATION WARNING" not in out
+            assert "[TRUNCATED]" not in out
+
+    def test_explicit_limit_never_uses_wild_warning(self):
+        """An explicit limit (even beyond the HWM) uses [TRUNCATED], never the wild warning."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = [f"line {i} " + "p" * 35 for i in range(1, 200)]
+            out = self._read(Path(tmp), "\n".join(lines) + "\n",
+                             is_wild_read=False, wild_truncation=2000)
+            assert "TRUNCATION WARNING" not in out
+            # limit=150 on a 199-line file -> line-limit truncation marker.
+            assert "[TRUNCATED]" in out
+
+    def test_calculate_char_limit_ignores_wild_read(self):
+        """_calculate_char_limit is context-derived and takes only kwargs (no wild cap)."""
+        from agent_cascade.tools.custom.file_ops import ReadFile
+        tool = ReadFile()
+        # New signature: single positional arg, no wild-read capping.
+        limit = tool._calculate_char_limit({})
+        assert isinstance(limit, int) and limit >= 500
+
+
 class TestForgetLastToolRefactoring:
     """Verify forget_last_tool still works after adding exception logging."""
 

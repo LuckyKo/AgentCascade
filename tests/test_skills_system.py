@@ -37,18 +37,18 @@ def _skill_path(name: str) -> Path:
 
 
 @pytest.fixture(scope="module")
-def httpx_skill_file():
-    """Path to the httpx connection pooling skill file."""
-    p = _skill_path("auto-skill-httpx-connection-pooling")
-    assert p.exists(), f"httpx skill not found at {p}"
+def version_control_skill_file():
+    """Path to the version-control skill file."""
+    p = _skill_path("version-control")
+    assert p.exists(), f"version-control skill not found at {p}"
     return p
 
 
 @pytest.fixture(scope="module")
-def startup_skill_file():
-    """Path to the startup error audit skill file."""
-    p = _skill_path("auto-skill-startup-error-audit")
-    assert p.exists(), f"startup skill not found at {p}"
+def debugging_skill_file():
+    """Path to the systematic-debugging skill file."""
+    p = _skill_path("systematic-debugging")
+    assert p.exists(), f"systematic-debugging skill not found at {p}"
     return p
 
 
@@ -132,18 +132,18 @@ class TestParseFrontmatter:
 class TestParseSkillFile:
     """Test parse_skill_file with real SKILL.md files."""
 
-    def test_parse_real_httpx_skill(self, httpx_skill_file):
-        result = parse_skill_file(httpx_skill_file)
+    def test_parse_real_version_control_skill(self, version_control_skill_file):
+        result = parse_skill_file(version_control_skill_file)
         assert "frontmatter" in result
         assert "body" in result
         assert "path" in result
         assert isinstance(result["frontmatter"], dict)
-        assert result["frontmatter"]["name"] == "httpx-connection-pooling"
+        assert result["frontmatter"]["name"] == "version-control"
         assert len(result["body"]) > 100
 
-    def test_parse_real_startup_skill(self, startup_skill_file):
-        result = parse_skill_file(startup_skill_file)
-        assert result["frontmatter"]["name"] == "startup-error-audit"
+    def test_parse_real_debugging_skill(self, debugging_skill_file):
+        result = parse_skill_file(debugging_skill_file)
+        assert result["frontmatter"]["name"] == "systematic-debugging"
         assert len(result["body"]) > 50
 
     def test_missing_file_raises(self):
@@ -151,9 +151,9 @@ class TestParseSkillFile:
         with pytest.raises(FileNotFoundError, match="Skill file not found"):
             parse_skill_file(p)
 
-    def test_path_in_result(self, httpx_skill_file):
-        result = parse_skill_file(httpx_skill_file)
-        assert str(httpx_skill_file) in result["path"]
+    def test_path_in_result(self, version_control_skill_file):
+        result = parse_skill_file(version_control_skill_file)
+        assert str(version_control_skill_file) in result["path"]
 
 
 # ===========================================================================
@@ -294,8 +294,8 @@ class TestSkillManager:
         """Discover skills from the real .qwen/skills/ directory."""
         self.manager.discover([_SKILLS_DIR])
         assert len(self.manager._skills_registry) >= 2
-        assert "httpx-connection-pooling" in self.manager._skills_registry
-        assert "startup-error-audit" in self.manager._skills_registry
+        assert "version-control" in self.manager._skills_registry
+        assert "systematic-debugging" in self.manager._skills_registry
 
     def test_discover_from_nonexistent_dir(self):
         """Should not crash on missing directory."""
@@ -435,7 +435,7 @@ class TestSkillManager:
         assert len(sm._skills_registry) == initial_count, (
             "Fixed flow: registry should be fully repopulated after invalidate_cache()"
         )
-        assert "httpx-connection-pooling" in sm._skills_registry
+        assert "version-control" in sm._skills_registry
 
     def test_invalidate_cache_resets_fields_under_lock(self):
         """invalidate_cache() must reset both cache fields (thread-safe)."""
@@ -453,9 +453,9 @@ class TestSkillManager:
 
     def test_get_skill_metadata_known_name(self):
         self.manager.discover([_SKILLS_DIR])
-        meta = self.manager.get_skill_metadata("httpx-connection-pooling")
+        meta = self.manager.get_skill_metadata("version-control")
         assert meta is not None
-        assert meta["name"] == "httpx-connection-pooling"
+        assert meta["name"] == "version-control"
         assert len(meta["description"]) > 10
 
     def test_get_skill_metadata_unknown_name(self):
@@ -483,7 +483,7 @@ class TestSkillManager:
 
     def test_load_full_instructions_known_skill(self):
         self.manager.discover([_SKILLS_DIR])
-        body = self.manager.load_full_instructions("httpx-connection-pooling")
+        body = self.manager.load_full_instructions("version-control")
         assert body is not None
         assert len(body) > 100
         # Body should contain markdown content from the SKILL.md
@@ -504,7 +504,7 @@ class TestSkillManager:
         """resolve_load_skill with a list should return instruction strings."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            ["httpx-connection-pooling"],
+            ["version-control"],
             task_text="Fix connection issues",
         )
         assert isinstance(result, list)
@@ -537,7 +537,7 @@ class TestSkillManager:
         """Missing skill names in a list should not crash, just be skipped."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            ["httpx-connection-pooling", "nonexistent-skill"],
+            ["version-control", "nonexistent-skill"],
             task_text="test",
         )
         assert len(result) == 1  # Only the valid skill loaded
@@ -551,7 +551,7 @@ class TestSkillManager:
         """Loading multiple skills by name should return all available."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            ["httpx-connection-pooling", "startup-error-audit"],
+            ["version-control", "systematic-debugging"],
         )
         assert len(result) == 2
 
