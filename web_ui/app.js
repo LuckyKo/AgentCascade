@@ -6,16 +6,25 @@
  */
 
 // ── Markdown setup ───────────────────────────────────────────────────────────
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-  highlight: (code, lang) => {
-    if (lang && hljs.getLanguage(lang)) {
-      try { return hljs.highlight(code, { language: lang }).value; } catch { }
-    }
-    return hljs.highlightAuto(code).value;
-  },
-});
+// Guard against missing libs (e.g. offline / vendor load failure) so a missing
+// `marked` or `hljs` degrades to plain text instead of aborting the whole script.
+// NOTE: marked >= v5 no longer invokes the `highlight` option from setOptions,
+// so this callback is inert under the vendored marked v12 — it's kept only as a
+// harmless safety net. Code blocks are emitted with a language class; actual
+// highlighting would need a separate post-parse hljs pass (out of scope here).
+if (typeof marked !== 'undefined') {
+  marked.setOptions({
+    breaks: true,
+    gfm: true,
+    highlight: (code, lang) => {
+      if (typeof hljs === 'undefined') return code; // no syntax highlighting available
+      if (lang && hljs.getLanguage(lang)) {
+        try { return hljs.highlight(code, { language: lang }).value; } catch { }
+      }
+      return hljs.highlightAuto(code).value;
+    },
+  });
+}
 
 // ── DOMPurify security configuration ─────────────────────────────────────────
 // Hardened config: explicitly whitelist allowed tags/attributes for defense-in-depth.
