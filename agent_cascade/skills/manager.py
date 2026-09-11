@@ -507,7 +507,7 @@ class SkillManager:
                 logger.debug("[SKILLS] Loaded Tier 2 instructions for '%s' (%d chars)",
                              skill_name, len(body))
                 self._increment_load_count(skill_name, version)
-                return body
+                return body or None
 
             # Fallback: re-read from disk
             file_path = reg.get('file_path')
@@ -518,33 +518,73 @@ class SkillManager:
                     body = parsed.get('body', '')
                     logger.debug("[SKILLS] Re-parsed '%s' from disk (%d chars)", skill_name, len(body))
                     self._increment_load_count(skill_name, version)
-                    return body
+                    return body or None
                 except (FileNotFoundError, OSError) as e:
                     logger.warning("[SKILLS] Failed to re-parse '%s': %s", skill_name, e)
 
             return None
 
+    def _load_body_no_count(self, skill_name: str) -> Optional[str]:
+        """Return the full SKILL.md body for *skill_name* WITHOUT incrementing
+        the global per-skill load metrics.
+
+        Used by ``_resolve_skill_names`` for loadability checks so that the name
+        computation does not double-count loads (the real body-load in
+        ``resolve_load_skill`` is what increments the counter). Returns None if
+        the skill cannot be loaded. Shares the same lookup logic as
+        ``load_full_instructions`` minus the metric increment.
+        """
+        with self._write_lock:
+            reg = self._skills_registry.get(skill_name)
+            if reg is not None:
+                pass
+            else:
+                lower = skill_name.lower()
+                for key, entry in self._skills_registry.items():
+                    if key.lower() == lower:
+                        reg = entry
+                        break
+            if reg is None:
+                return None
+
+            parsed = reg.get('_parsed_data')
+            if parsed and 'body' in parsed:
+                body = parsed['body']
+                return body or None
+
+            file_path = reg.get('file_path')
+            if file_path:
+                try:
+                    parsed = parse_skill_file(Path(file_path))
+                    reg['_parsed_data'] = parsed
+                    body = parsed.get('body', '')
+                    return body or None
+                except (FileNotFoundError, OSError) as e:
+                    # Non-loadable skills are expected during AUTO matching — keep this
+                    # at debug level to match the silent-skip behavior of _resolve_skill_names.
+                    logger.debug("[SKILLS] Failed to re-parse '%s': %s", skill_name, e)
+
+            return None
+
     # ── Resolution (load_skill argument handling) ────────────────────────────
 
-    def resolve_load_skill(
+    def _resolve_skill_names(
         self,
         load_skill_value: Union[List[str], str, None],
         task_text: str = "",
         context_text: str = "",
     ) -> List[str]:
-        """Resolve the load_skill argument value to actual skill content.
+        """Compute the names of skills that WILL actually load for a given
+        ``load_skill`` value, filtered by loadability.
 
-        Args:
-            load_skill_value: One of:
-                - list[str]: Named skills to load (e.g., ["httpx-connection-pooling"])
-                - "AUTO": Auto-match relevant skills from task+context text
-                - "NONE": No skill loading
-                - None/omitted: Falls back to default behavior (AUTO)
-            task_text: Task description for AUTO mode matching.
-            context_text: Additional context for AUTO mode matching.
+        This is the single source of truth shared by both ``resolve_load_skill``
+        (which loads bodies) and ``resolve_load_skill_names`` (which returns
+        names), so the two can never drift apart. Loadability checks use
+        ``_load_body_no_count`` so they do NOT increment the global per-skill
+        load metrics (the real body-load in ``resolve_load_skill`` does).
 
         Returns:
-            List of full instruction strings (one per loaded skill).
+            List of skill names that will be loaded (empty if none).
         """
         # Coerce JSON-encoded string arrays into real lists. LLMs sometimes emit
         # load_skill as a JSON-encoded string (e.g. "[\"AUTO\"]") instead of a
@@ -566,16 +606,16 @@ class SkillManager:
         if load_skill_value is None or (isinstance(load_skill_value, str) and load_skill_value.strip().upper() == LOAD_SKILL_NONE):
             return []
 
-        # Handle explicit list of skill names
+        # Handle explicit list of skill names — keep only those that are loadable.
         if isinstance(load_skill_value, list):
-            instructions = []
+            names = []
             for name in load_skill_value:
-                body = self.load_full_instructions(name)
+                body = self._load_body_no_count(name)
                 if body:
-                    instructions.append(body)
+                    names.append(name)
                 else:
                     logger.debug("[SKILLS] Skill '%s' not found — silently skipping", name)
-            return instructions
+            return names
 
         # Handle AUTO mode (case-insensitive, whitespace-tolerant)
         if isinstance(load_skill_value, str):
@@ -587,23 +627,65 @@ class SkillManager:
                     logger.debug("[SKILLS] AUTO mode — no matching skills for query")
                     return []
 
-                # Load instructions for top matches above configured threshold
-                instructions = []
+                names = []
                 for name, score in matches:
                     if score < SKILL_MATCH_THRESHOLD:
                         continue
-                    body = self.load_full_instructions(name)
+                    body = self._load_body_no_count(name)
                     if body:
                         logger.debug("[SKILLS] AUTO loaded skill '%s' (score=%.2f)", name, score)
-                        instructions.append(body)
+                        names.append(name)
 
-                return instructions
+                return names
 
             # Unknown string value — treat as NONE
             logger.debug("[SKILLS] Unknown load_skill value: %s", load_skill_value)
             return []
 
         return []
+
+    def resolve_load_skill_names(
+        self,
+        load_skill_value: Union[List[str], str, None],
+        task_text: str = "",
+        context_text: str = "",
+    ) -> List[str]:
+        """Return the names of skills that ``resolve_load_skill`` would load for
+        the given arguments (loadability-filtered). Additive helper used by the
+        telemetry capture points; shares name-computation with
+        ``resolve_load_skill`` so it always matches what is actually injected.
+        """
+        return self._resolve_skill_names(load_skill_value, task_text, context_text)
+
+    def resolve_load_skill(
+        self,
+        load_skill_value: Union[List[str], str, None],
+        task_text: str = "",
+        context_text: str = "",
+    ) -> List[str]:
+        """Resolve the load_skill argument value to actual skill content.
+
+        Args:
+            load_skill_value: One of:
+                - list[str]: Named skills to load (e.g., ["httpx-connection-pooling"])
+                - "AUTO": Auto-match relevant skills from task+context text
+                - "NONE": No skill loading
+                - None/omitted: Falls back to default behavior (AUTO)
+            task_text: Task description for AUTO mode matching.
+            context_text: Additional context for AUTO mode matching.
+
+        Returns:
+            List of full instruction strings (one per loaded skill).
+        """
+        # Name-computation is shared with resolve_load_skill_names so the two can
+        # never drift apart; bodies are then loaded for exactly those names.
+        _names = self._resolve_skill_names(load_skill_value, task_text, context_text)
+        instructions = []
+        for name in _names:
+            body = self.load_full_instructions(name)
+            if body:
+                instructions.append(body)
+        return instructions
 
     # ── Dynamic Registration ─────────────────────────────────────────────
 

@@ -109,6 +109,12 @@ class TelemetryCollector:
         # fingerprint is model-only), so this is a separate accumulator from _config_stats.
         self._agent_class_stats: Dict[str, Dict] = {}
 
+        # Per-skill usage aggregates for the "Skill Usage" table.
+        # Keyed by skill name; each entry tracks how many times it was injected
+        # this session, which agent classes loaded it, and the acquisition-mode
+        # breakdown (explicit / auto / advisor / self-augmentation / runtime).
+        self._skill_usage_stats: Dict[str, Dict] = {}
+
         # Guard against duplicate session_end events (BUG 8 fix)
         self._session_ended = False
 
@@ -731,6 +737,10 @@ class TelemetryCollector:
             "agent_instance_calls": stats["agent_instance_calls"],
             "llm_calls_by_model": dict(stats["llm_calls_by_model"]),
             "tool_effectiveness": tool_success_rates,
+            # Skill Advisor (AUTO Skill Helper — Advanced) session counters.
+            "skill_advisor_calls": stats.get("skill_advisor_calls", 0),
+            "skill_advisor_denials": stats.get("skill_advisor_denials", 0),
+            "skill_advisor_fallbacks": stats.get("skill_advisor_fallbacks", 0),
         }
 
     def get_config_comparison(self) -> List[Dict]:
@@ -801,6 +811,57 @@ class TelemetryCollector:
                     "tokens_generated": acs["tokens_generated"],
                     "turns": acs["turns"],
                 })
+        return result
+
+    def record_skills_loaded(self, agent_class: str, skill_names, mode: str):
+        """Record that *skill_names* were injected into an agent of *agent_class*.
+
+        One injection event = one count per (deduped) skill. ``mode`` is the
+        acquisition path: "explicit" | "auto" | "advisor" | "self-augmentation" |
+        "runtime". No-op when ``skill_names`` is empty/None. Duplicate names within
+        a single call are counted once.
+        """
+        if not skill_names:
+            return
+        with _telemetry_lock:
+            for name in dict.fromkeys(skill_names):  # dedupe, preserve order
+                entry = self._skill_usage_stats.get(name)
+                if entry is None:
+                    entry = {
+                        "loads": 0,
+                        "agent_classes": set(),
+                        "modes": collections.Counter(),
+                    }
+                    self._skill_usage_stats[name] = entry
+                entry["loads"] += 1
+                entry["agent_classes"].add(agent_class)
+                entry["modes"][mode] += 1
+
+    def get_skill_usage_summary(self) -> List[Dict]:
+        """Get per-skill usage stats for the "Skill Usage" table.
+
+        Returns a snapshot list (not live dicts) sorted by ``loads`` desc then name
+        asc, so callers can iterate safely without holding the lock. Each entry:
+        ``{skill, loads, agent_classes (sorted list), top_mode}`` where ``top_mode``
+        is the most common acquisition mode (ties broken alphabetically). Returns
+        ``[]`` when no skills have been recorded.
+        """
+        with _telemetry_lock:
+            result = []
+            for name, entry in self._skill_usage_stats.items():
+                modes = entry["modes"]
+                if modes:
+                    # Most common mode; ties broken alphabetically (sort by -count then name).
+                    top_mode = sorted(modes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+                else:
+                    top_mode = ""
+                result.append({
+                    "skill": name,
+                    "loads": entry["loads"],
+                    "agent_classes": sorted(entry["agent_classes"]),
+                    "top_mode": top_mode,
+                })
+        result.sort(key=lambda r: (-r["loads"], r["skill"]))
         return result
 
     def get_recent_events(self, count: int = DEFAULT_RECENT_EVENT_COUNT) -> List[Dict]:

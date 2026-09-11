@@ -1074,9 +1074,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 "session": agent_pool.telemetry.get_session_summary(),
                 "configs": agent_pool.telemetry.get_config_comparison(),
                 "agent_classes": agent_pool.telemetry.get_agent_class_summary(),
+                "skills": agent_pool.telemetry.get_skill_usage_summary(),
                 "recent_events": agent_pool.telemetry.get_recent_events(50),
             }
-        return {"session": {}, "configs": [], "agent_classes": [], "recent_events": []}
+        return {"session": {}, "configs": [], "agent_classes": [], "skills": [], "recent_events": []}
 
     @app.get("/api/telemetry/export")
     async def api_telemetry_export():

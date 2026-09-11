@@ -496,6 +496,86 @@ class TestAgentClassSummary:
 
 
 # ---------------------------------------------------------------------------
+# I2. Skill usage summary (per-skill accumulator)
+# ---------------------------------------------------------------------------
+
+class TestSkillUsageSummary:
+    def test_empty_when_nothing_recorded(self, collector):
+        assert collector.get_skill_usage_summary() == []
+
+    def test_single_record(self, collector):
+        collector.record_skills_loaded("coder", ["docker-best-practices"], "explicit")
+        rows = collector.get_skill_usage_summary()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["skill"] == "docker-best-practices"
+        assert r["loads"] == 1
+        assert r["agent_classes"] == ["coder"]
+        assert r["top_mode"] == "explicit"
+
+    def test_same_skill_two_agent_classes(self, collector):
+        """Same skill loaded by two classes -> loads=2, both classes listed."""
+        collector.record_skills_loaded("coder", ["httpx-connection-pooling"], "auto")
+        collector.record_skills_loaded("researcher", ["httpx-connection-pooling"], "auto")
+        rows = {r["skill"]: r for r in collector.get_skill_usage_summary()}
+        r = rows["httpx-connection-pooling"]
+        assert r["loads"] == 2
+        assert r["agent_classes"] == ["coder", "researcher"]
+
+    def test_multiple_modes_top_mode_majority(self, collector):
+        """top_mode picks the majority; ties broken alphabetically."""
+        collector.record_skills_loaded("coder", ["skill-x"], "auto")
+        collector.record_skills_loaded("coder", ["skill-x"], "auto")
+        collector.record_skills_loaded("coder", ["skill-x"], "explicit")
+        rows = {r["skill"]: r for r in collector.get_skill_usage_summary()}
+        assert rows["skill-x"]["top_mode"] == "auto"
+
+    def test_top_mode_tie_broken_alphabetically(self, collector):
+        collector.record_skills_loaded("coder", ["skill-y"], "runtime")
+        collector.record_skills_loaded("coder", ["skill-y"], "advisor")
+        rows = {r["skill"]: r for r in collector.get_skill_usage_summary()}
+        # advisor (1) vs runtime (1) -> alphabetical winner is "advisor".
+        assert rows["skill-y"]["top_mode"] == "advisor"
+
+    def test_dedupe_within_single_call(self, collector):
+        """Duplicate names within one call count once."""
+        collector.record_skills_loaded("coder", ["dup", "dup"], "explicit")
+        rows = {r["skill"]: r for r in collector.get_skill_usage_summary()}
+        assert rows["dup"]["loads"] == 1
+
+    def test_sorted_by_loads_desc_then_name(self, collector):
+        collector.record_skills_loaded("a", ["bbb"], "auto")
+        collector.record_skills_loaded("a", ["aaa"], "auto")
+        collector.record_skills_loaded("a", ["aaa"], "auto")
+        rows = collector.get_skill_usage_summary()
+        assert [r["skill"] for r in rows] == ["aaa", "bbb"]
+
+    def test_noop_on_empty_and_none(self, collector):
+        collector.record_skills_loaded("coder", [], "explicit")
+        collector.record_skills_loaded("coder", None, "explicit")
+        assert collector.get_skill_usage_summary() == []
+
+
+class TestSkillAdvisorCountersInSummary:
+    """The advisor session counters must be surfaced by get_session_summary()."""
+
+    def test_advisor_counters_present_and_zero_by_default(self, collector):
+        s = collector.get_session_summary()
+        assert s["skill_advisor_calls"] == 0
+        assert s["skill_advisor_denials"] == 0
+        assert s["skill_advisor_fallbacks"] == 0
+
+    def test_advisor_counters_increment_and_surface(self, collector):
+        collector.record_skill_advisor_decision("inst", "approve")
+        collector.record_skill_advisor_decision("inst", "deny")
+        collector.record_skill_advisor_decision("inst", "ambiguous", was_fallback=True)
+        s = collector.get_session_summary()
+        assert s["skill_advisor_calls"] == 3
+        assert s["skill_advisor_denials"] == 1
+        assert s["skill_advisor_fallbacks"] == 1
+
+
+# ---------------------------------------------------------------------------
 # J. Event log
 # ---------------------------------------------------------------------------
 

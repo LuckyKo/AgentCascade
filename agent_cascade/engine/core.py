@@ -3029,6 +3029,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         # Skill Advisor (Advanced mode) APPROVED — use its semantic
                         # recommendations instead of basic keyword matching. Names were
                         # already validated against the registry by the advisor.
+                        _advisor_loaded_names = []
                         for _name in _advisor_recommended_skills:
                             _body = skill_manager.load_full_instructions(_name)
                             if _body is None:
@@ -3040,6 +3041,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                 )
                             elif _body not in loaded_skills:
                                 loaded_skills.append(_body)
+                                _advisor_loaded_names.append(_name)
+                        # Telemetry: capture advisor-approved skills (init path only).
+                        if _advisor_loaded_names:
+                            _tel = getattr(self.pool, 'telemetry', None)
+                            if _tel is not None:
+                                _tel.record_skills_loaded(inst.agent_class, _advisor_loaded_names, "advisor")
                     else:
                         try:
                             loaded_skills = skill_manager.resolve_load_skill(
@@ -3048,6 +3055,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         except Exception as e:
                             logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
                             loaded_skills = []
+                        # Telemetry: capture resolved (explicit/auto) skills. Names come
+                        # from the shared resolver so they match what was injected exactly.
+                        _resolved_names = skill_manager.resolve_load_skill_names(
+                            load_skill_value, task_text, context_text
+                        )
+                        if _resolved_names:
+                            _tel = getattr(self.pool, 'telemetry', None)
+                            if _tel is not None:
+                                _mode = "explicit" if _is_explicit_skill_list(load_skill_value) else "auto"
+                                _tel.record_skills_loaded(inst.agent_class, _resolved_names, _mode)
                 elif auto_skill_mode == AUTO_SKILL_MODE_NONE and _is_explicit_skill_list(load_skill_value):
                     # "none" mode: skip system auto-matching entirely (no Basic keyword
                     # match, no Advanced advisor). Caller-explicit skill lists are still
@@ -3066,6 +3083,15 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     except Exception as e:
                         logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
                         loaded_skills = []
+                    # Telemetry: capture explicit skills (this branch is explicit-only by
+                    # construction — _is_explicit_skill_list gate above).
+                    _resolved_names = skill_manager.resolve_load_skill_names(
+                        load_skill_value, task_text, context_text
+                    )
+                    if _resolved_names:
+                        _tel = getattr(self.pool, 'telemetry', None)
+                        if _tel is not None:
+                            _tel.record_skills_loaded(inst.agent_class, _resolved_names, "explicit")
                 # else: "none" mode + AUTO/default → no auto-matched skills (loaded_skills stays [])
 
                 # (2) Self-Augmentation — gated by the GLOBAL "Enable skills" toggle
@@ -3077,6 +3103,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
                 if self_augmentation_instructions and self_augmentation_instructions not in loaded_skills:
                     loaded_skills.append(self_augmentation_instructions)
+                    # Telemetry: capture Self-Augmentation (init path only). The restore/
+                    # runner paths record it in _inject_self_augmentation_skill instead —
+                    # these are mutually exclusive, so each injection is counted once.
+                    _tel = getattr(self.pool, 'telemetry', None)
+                    if _tel is not None:
+                        _tel.record_skills_loaded(inst.agent_class, ["self-augmentation"], "self-augmentation")
 
             # Inject skills into system message using general-purpose helper.
             # When the global toggle is OFF (global_skills_enabled False),

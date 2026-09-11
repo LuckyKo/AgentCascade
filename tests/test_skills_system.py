@@ -564,6 +564,64 @@ class TestSkillManager:
         )
         assert isinstance(result, list)
 
+    # -- resolve_load_skill_names (shared name-computation) --
+
+    def test_resolve_names_explicit_returns_only_loadable(self):
+        """Explicit list returns only the names that are actually loadable."""
+        self._setup_manager_with_skills()
+        result = self.manager.resolve_load_skill_names(
+            ["version-control", "nonexistent-skill"],
+        )
+        assert result == ["version-control"]
+
+    def test_resolve_names_auto_returns_above_threshold_and_loadable(self):
+        """AUTO returns names that are above threshold AND loadable."""
+        self._setup_manager_with_skills()
+        bodies = self.manager.resolve_load_skill(
+            "AUTO", task_text="slow API connection pooling issues",
+        )
+        names = self.manager.resolve_load_skill_names(
+            "AUTO", task_text="slow API connection pooling issues",
+        )
+        # Every name must be a real registered skill, and count matches bodies.
+        assert len(names) == len(bodies)
+        for n in names:
+            assert n in self.manager._skills_registry
+
+    def test_resolve_names_none_and_null_return_empty(self):
+        self._setup_manager_with_skills()
+        assert self.manager.resolve_load_skill_names("NONE") == []
+        assert self.manager.resolve_load_skill_names(None) == []
+
+    def test_resolve_names_matches_bodies_drift_guard(self):
+        """Drift guard: names must be exactly the set backing resolve_load_skill bodies.
+
+        Regression guard against the name-computation and body-loading diverging.
+        Verifies not just equal lengths but that each returned name corresponds to a
+        real, loadable body (and vice versa) — i.e. the two methods share one source of truth.
+        """
+        self._setup_manager_with_skills()
+        for value, kwargs in [
+            (["version-control", "systematic-debugging"], {}),
+            ("AUTO", {"task_text": "slow API connection pooling issues"}),
+            ("NONE", {}),
+            (None, {}),
+            ("UNKNOWN_MODE", {}),
+        ]:
+            bodies = self.manager.resolve_load_skill(value, **kwargs)
+            names = self.manager.resolve_load_skill_names(value, **kwargs)
+            assert len(names) == len(bodies), f"drift for {value!r}: {len(names)} names vs {len(bodies)} bodies"
+
+            # Each name must be a real registered skill with a loadable (non-empty) body.
+            for n in names:
+                assert n in self.manager._skills_registry, f"{n!r} not registered for {value!r}"
+                assert self.manager.load_full_instructions(n), f"{n!r} has no loadable body for {value!r}"
+
+            # Every produced body must be the body of one of the returned names (no orphans).
+            expected_bodies = [self.manager.load_full_instructions(n) for n in names]
+            assert sorted(map(repr, bodies)) == sorted(map(repr, expected_bodies)), \
+                f"bodies do not correspond to names for {value!r}"
+
     # -- Fix B: Multi-tier discovery with priority resolution --
 
     def test_discover_picks_up_workspace_tier(self, tmp_path):

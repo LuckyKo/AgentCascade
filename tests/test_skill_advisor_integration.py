@@ -61,6 +61,16 @@ class FakeSkillManager:
             return_value=["# basic-keyword-match-skill\nresolved via basic matching"]
         )
 
+    def resolve_load_skill_names(self, load_skill_value, task_text="", context_text=""):
+        # Mirrors the real SkillManager: returns the names backing resolve_load_skill's
+        # bodies. The fake always resolves one skill when a body is produced, so echo a
+        # matching name; empty when nothing loads (NONE/None).
+        if load_skill_value is None:
+            return []
+        if isinstance(load_skill_value, str) and load_skill_value.strip().upper() == "NONE":
+            return []
+        return ["basic-keyword-match-skill"]
+
     def get_skill_names(self):
         return list(self._names)
 
@@ -68,6 +78,10 @@ class FakeSkillManager:
         return [{"name": n, "description": f"desc for {n}"} for n in self._names]
 
     def load_full_instructions(self, name):
+        # "self-augmentation" is the meta-skill core.py always attempts to inject when
+        # skills are globally enabled — serve a body so the init self-aug path runs.
+        if str(name).lower() == "self-augmentation":
+            return "# self-augmentation\nmeta-skill instructions"
         for n in self._names:
             if n.lower() == str(name).lower():
                 return f"# {n}\ninstructions for {n}"
@@ -176,7 +190,8 @@ def _build_engine(pool, lifecycle):
 
 def _run_gate(advisor_result, auto_skill_mode="advanced", default_load_skill_mode="AUTO",
               skill_names=("docker-best-practices", "httpx-connection-pooling"),
-              pre_existing_instance=None, advisor_raises=False, load_skill_value="AUTO"):
+              pre_existing_instance=None, advisor_raises=False, load_skill_value="AUTO",
+              telemetry=None):
     """Drive the real gate block and return (engine, pool, lifecycle, result).
 
     ``advisor_result`` is returned by the patched run_skill_advisor unless
@@ -186,9 +201,14 @@ def _run_gate(advisor_result, auto_skill_mode="advanced", default_load_skill_mod
     ``load_skill_value`` is placed in args["load_skill"]. Pass the sentinel
     ``_OMIT_LOAD_SKILL`` to omit the key entirely, so the gate falls back to
     ``pool.settings.default_load_skill_mode`` (exercises the None branch).
+
+    ``telemetry`` — optional object attached as pool.telemetry so skill-usage
+    recording calls can be observed (e.g. a MagicMock for invariant tests).
     """
     sm = FakeSkillManager(skill_names)
     pool = FakePool(sm, auto_skill_mode=auto_skill_mode, default_load_skill_mode=default_load_skill_mode)
+    if telemetry is not None:
+        pool.telemetry = telemetry
     if pre_existing_instance is not None:
         pool.instances["worker1"] = pre_existing_instance
 
@@ -587,3 +607,61 @@ class TestLoadSkillDefaultFallback:
             load_skill_value=_OMIT_LOAD_SKILL,
         )
         assert mock_advisor.call_count == 0
+
+
+# ===========================================================================
+# 8. Skill-usage telemetry invariants (init vs recall; no double-count)
+# ===========================================================================
+
+class TestSkillUsageTelemetryInvariants:
+    """Guard the skill-usage recording invariants: init path records, recall does not,
+    and self-augmentation is counted exactly once per instance."""
+
+    def _approve(self):
+        return SkillAdvisorResult(
+            verdict="approve", reason="ok", recommended_skills=[], task_notes=""
+        )
+
+    def test_init_path_records_self_augmentation_once(self):
+        """Fresh init: core records self-aug; the restore/runner helper does NOT re-run,
+        so the instance's self-aug is counted exactly once."""
+        tel = MagicMock()
+        _, pool, lifecycle, _, _ = _run_gate(
+            self._approve(), load_skill_value="AUTO", telemetry=tel,
+        )
+        # Self-augmentation recorded exactly once on the init path.
+        self_aug_calls = [
+            c for c in tel.record_skills_loaded.call_args_list
+            if list(c.args[1]) == ["self-augmentation"] and c.args[2] == "self-augmentation"
+        ]
+        assert len(self_aug_calls) == 1, f"expected exactly 1 self-aug record, got {len(self_aug_calls)}"
+
+    def test_recall_path_never_records_skills(self):
+        """Recall of an idle instance must NOT call record_skills_loaded at all."""
+        existing = FakeInstance(
+            agent_class="coder",
+            conversation=[Message(role=SYSTEM, content="ORIGINAL SYS")],
+        )
+        sm = FakeSkillManager(["docker-best-practices"])
+        pool = FakePool(sm)
+        tel = MagicMock()
+        pool.telemetry = tel
+        pool.instances["worker1"] = existing
+
+        lifecycle = FakeLifecycle(pool)
+        # Recall: reuse=True, session_was_loaded=False → _is_recall True.
+        lifecycle.find_or_create_instance = MagicMock(return_value=(existing, True, False))
+        engine = _build_engine(pool, lifecycle)
+        args = {"task": "do it", "context": "", "load_skill": "AUTO"}
+
+        with patch("agent_cascade.skills.advisor.run_skill_advisor",
+                   side_effect=lambda **kw: SkillAdvisorResult(verdict="approve")) as mock_advisor:
+            engine._create_and_run_agent(
+                agent_class="coder", instance_name="worker1",
+                args=args, caller="maine", nest_depth=0, force_fresh=False,
+            )
+
+        # Recall detected before the advisor → advisor never invoked.
+        assert mock_advisor.call_count == 0
+        # No skill-usage recording on the recall path.
+        tel.record_skills_loaded.assert_not_called()

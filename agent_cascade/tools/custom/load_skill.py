@@ -160,6 +160,14 @@ class LoadSkill(BaseTool):
 
             logger.info("[SKILLS] Runtime load: queued skill '%s' for instance '%s'", name, agent_name)
 
+        # Telemetry: capture runtime (mid-task) skill loads. Only successfully-loaded
+        # names are counted; the load_skill TOOL is the primary self-augmentation mechanism.
+        if loaded:
+            _tel = getattr(self.agent_pool, 'telemetry', None)
+            if _tel is not None:
+                _agent_class = getattr(inst, 'agent_class', '') or ''
+                _tel.record_skills_loaded(_agent_class, loaded, "runtime")
+
         # Build summary
         lines = []
         if loaded:

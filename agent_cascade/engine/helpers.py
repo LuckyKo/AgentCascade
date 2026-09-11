@@ -558,7 +558,16 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
 
     skills_to_inject.append(self_augmentation_instructions)
 
-    return _inject_skills_to_system_message(pool, instance, skills_to_inject)
+    injected = _inject_skills_to_system_message(pool, instance, skills_to_inject)
+    # Telemetry: capture Self-Augmentation for the restore/runner paths. The fresh-init
+    # path records it in core.py (_create_and_run_agent) instead — these are mutually
+    # exclusive code paths, so each self-aug injection is counted exactly once. Only
+    # record when injection actually happened (idempotency guard may have skipped).
+    if injected:
+        _tel = getattr(pool, 'telemetry', None)
+        if _tel is not None:
+            _tel.record_skills_loaded(instance.agent_class, ["self-augmentation"], "self-augmentation")
+    return injected
 
 
 def _get_supervisor_log_filename(pool: Any, supervisor_name: str) -> Optional[str]:

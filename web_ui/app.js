@@ -5910,6 +5910,26 @@ function updateTelemetryAgentClassTable(rows) {
   }).join('');
 }
 
+function updateTelemetrySkillTable(rows) {
+  const tbody = document.getElementById('telem-skill-tbody');
+  if (!tbody) return;
+
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No skill data yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => {
+    const classes = Array.isArray(r.agent_classes) ? r.agent_classes.join(', ') : (r.agent_classes || '');
+    return `<tr>
+      <td title="${escapeHtml(r.skill)}">${escapeHtml(r.skill)}</td>
+      <td>${formatNumber(r.loads)}</td>
+      <td title="${escapeHtml(classes)}">${escapeHtml(classes) || '—'}</td>
+      <td>${escapeHtml(r.top_mode || '')}</td>
+    </tr>`;
+  }).join('');
+}
+
 // Fetch full telemetry from API (for config comparison data not in WebSocket)
 async function fetchTelemetry() {
   try {
@@ -5918,6 +5938,7 @@ async function fetchTelemetry() {
     if (data.session) updateTelemetryPanel(data.session);
     if (data.configs) updateTelemetryConfigTable(data.configs);
     if (data.agent_classes) updateTelemetryAgentClassTable(data.agent_classes);
+    if (data.skills) updateTelemetrySkillTable(data.skills);
   } catch (err) {
     console.warn('Failed to fetch telemetry:', err);
   }
