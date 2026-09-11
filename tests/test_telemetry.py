@@ -471,6 +471,29 @@ class TestAgentClassSummary:
         assert rows["coder"]["turns"] == 1
         assert rows["reviewer"]["turns"] == 1
 
+    def test_all_tool_calls_fail_gives_zero_accuracy(self, collector):
+        """When every tool call fails, accuracy is exactly 0 (not None)."""
+        collector.record_turn_start("inst", agent_class="coder")
+        collector.record_tool_call_start("inst", "read_file")
+        collector.record_tool_call_end("inst", "read_file", success=False, error="e1")
+        collector.record_tool_call_start("inst", "write_file")
+        collector.record_tool_call_end("inst", "write_file", success=False, error="e2")
+        collector.record_turn_end("inst")
+
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert rows["coder"]["tool_usage_accuracy"] == 0.0
+
+    def test_summary_rows_sorted_by_agent_class(self, collector):
+        """get_agent_class_summary returns rows sorted by agent_class name."""
+        for cls in ("reviewer", "coder", "orchestrator"):
+            collector.record_turn_start("inst", agent_class=cls)
+            collector.record_llm_call_start("inst", input_tokens_est=1, model="m")
+            collector.record_llm_call_end("inst", output_tokens_est=1)
+            collector.record_turn_end("inst")
+
+        names = [r["agent_class"] for r in collector.get_agent_class_summary()]
+        assert names == sorted(names) == ["coder", "orchestrator", "reviewer"]
+
 
 # ---------------------------------------------------------------------------
 # J. Event log

@@ -145,6 +145,9 @@ class TelemetryCollector:
         in the signature purely for call-site compatibility; they no longer affect
         the fingerprint (the "prompt print" grouping concern was removed).
 
+        NOTE: keep passing these args at call sites (e.g. engine/core.py) — do not
+        "clean up" the unused params, it would break callers that still supply them.
+
         Returns a stable 12-char hex string so it stays compatible with
         ``_config_stats`` keying and JSONL export.
         """
