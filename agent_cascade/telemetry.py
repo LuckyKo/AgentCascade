@@ -146,12 +146,13 @@ class TelemetryCollector:
         """
         Create a stable hash fingerprint from the current agent configuration.
 
-        This is the A/B grouping key = one row per model/endpoint. The key is the
-        MODEL ONLY — runs are grouped by model for A/B comparison regardless of
-        endpoint, sampling params, system prompt, or tool set. ``generate_cfg`` /
-        ``system_prompt`` / ``tools`` / ``api_base`` are kept in the signature purely
-        for call-site compatibility; they no longer affect the fingerprint (the "prompt
-        print" grouping concern was removed). Do not assume sampling params matter here.
+        This is the A/B grouping key: one row per model. The key is the MODEL ONLY —
+        runs are grouped by model for A/B comparison regardless of endpoint, sampling
+        params, system prompt, or tool set (so different endpoints serving the same
+        model collapse into a single row). ``generate_cfg`` / ``system_prompt`` /
+        ``tools`` / ``api_base`` are kept in the signature purely for call-site
+        compatibility; they no longer affect the fingerprint (the "prompt print"
+        grouping concern was removed). Do not assume sampling params matter here.
 
         NOTE: keep passing these args at call sites (e.g. engine/core.py) — do not
         "clean up" the unused params, it would break callers that still supply them.
