@@ -293,9 +293,10 @@ class TestBuildSkillAdvisorPromptFreshness:
         """Regression: get_skill_names() must read under the write lock so a concurrent
         re-scan (discover clear/rebuild) cannot make it observe an empty/partial registry.
 
-        We prove the method takes _write_lock by patching the RLock to record acquisitions
-        and asserting at least one acquire happens per call. Without the fix, get_skill_names()
-        reads self._skills_registry directly with no lock → 0 acquires → test fails."""
+        We prove the method takes _write_lock by replacing it with a spy that records
+        acquisitions and asserting at least one happens per call. Without the fix,
+        get_skill_names() reads self._skills_registry directly with no lock → 0 acquires
+        → test fails."""
         from agent_cascade.skills.manager import SkillManager
 
         skills_root = tmp_path / "skills"
@@ -309,11 +310,12 @@ class TestBuildSkillAdvisorPromptFreshness:
         sm.discover([skills_root])
         assert set(sm.get_skill_names()) == {"skill-a"}
 
-        # Wrap the RLock to count acquire() calls made by get_skill_names().
-        # `with self._write_lock:` resolves __enter__/__exit__ via type(lock), and since
-        # _SpyLock is a distinct type (not an RLock subclass) it must implement the
-        # context-manager protocol itself — delegating to the real lock. acquire() is
-        # intercepted to record each acquisition.
+        # Replace _write_lock with a spy that records acquisitions. We cannot patch acquire()
+        # on the real lock — _thread.RLock.acquire is a read-only C attribute, so we wrap it.
+        # `with self._write_lock:` resolves __enter__/__exit__ via type(lock); since _SpyLock
+        # is a distinct type (not an RLock subclass) it must implement the protocol itself.
+        # __enter__/__exit__ delegate through acquire()/release() so the count reflects real
+        # acquisitions and the lock stays fully functional.
         acquires = []
         real_lock = sm._write_lock
 
@@ -326,11 +328,11 @@ class TestBuildSkillAdvisorPromptFreshness:
                 return real_lock.release(*a, **k)
 
             def __enter__(self):
-                acquires.append(1)
-                return real_lock.__enter__()
+                self.acquire()
+                return self
 
             def __exit__(self, *a):
-                return real_lock.__exit__(*a)
+                self.release()
 
         with patch.object(sm, "_write_lock", _SpyLock()):
             sm.get_skill_names()
