@@ -150,9 +150,22 @@ class WebSearch(BaseTool):
 
     @staticmethod
     def _format_serper_results(search_results: List[Any]) -> str:
-        """Format Serper results into a readable string."""
-        content = '```\n{}\n```'.format('\n\n'.join([
-            f"[{i}]\"{doc['title']}\n{doc.get('snippet', '')}\"{doc.get('date', '')}"
-            for i, doc in enumerate(search_results, 1)
-        ]))
-        return content
+        """Format Serper results into a readable string.
+
+        Each result shows title, URL (so the agent can fetch/follow it),
+        snippet, and date when present. No code fence — plain text is easier
+        for an agent to parse and act on.
+        """
+        lines = []
+        for i, doc in enumerate(search_results, 1):
+            title = doc.get('title', '')
+            link = doc.get('link', '')
+            snippet = doc.get('snippet', '')
+            date = doc.get('date')
+            entry = f"[{i}] {title}\nURL: {link}"
+            if snippet:
+                entry += f"\n{snippet}"
+            if date:
+                entry += f"\n({date})"
+            lines.append(entry)
+        return "\n\n".join(lines)
