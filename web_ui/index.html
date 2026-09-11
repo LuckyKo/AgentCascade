@@ -900,6 +900,22 @@
               </div>
 
               <div class="settings-section">
+                <h3 class="settings-section-title">Skill Usage</h3>
+                <div class="settings-section-body">
+                  <div id="telemetry-skill-table" class="telemetry-table-container">
+                    <table class="telemetry-table">
+                      <thead>
+                        <tr><th>Skill</th><th>Loads</th><th>Agent Classes</th><th>Mode</th></tr>
+                      </thead>
+                      <tbody id="telem-skill-tbody">
+                        <tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No data yet</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section">
                 <h3 class="settings-section-title">Agent Class Usage</h3>
                 <div class="settings-section-body">
                   <div id="telemetry-agentclass-table" class="telemetry-table-container">
@@ -913,22 +929,6 @@
                     </table>
                   </div>
                   <button id="telem-export-btn" class="btn btn-secondary" style="width: 100%; margin-top: 12px;">📥 Export Raw Telemetry (JSONL)</button>
-                </div>
-              </div>
-
-              <div class="settings-section">
-                <h3 class="settings-section-title">Skill Usage</h3>
-                <div class="settings-section-body">
-                  <div id="telemetry-skill-table" class="telemetry-table-container">
-                    <table class="telemetry-table">
-                      <thead>
-                        <tr><th>Skill</th><th>Loads</th><th>Agent Classes</th><th>Mode</th></tr>
-                      </thead>
-                      <tbody id="telem-skill-tbody">
-                        <tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No data yet</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
                 </div>
               </div>
             </div>
