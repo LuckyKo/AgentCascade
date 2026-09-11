@@ -328,6 +328,76 @@ def setup_signal_handler(agent_pool, server=None):
     if os.name != 'nt':
         _signal_mod.signal(_signal_mod.SIGTERM, handle_shutdown)
 
+    # Defense-in-depth: on Windows, install a console Ctrl+C guard so a
+    # console-wide Ctrl+C broadcast cannot hard-kill the server. Must run AFTER
+    # the signal.signal(...) calls above so the Python SIGINT handler exists first.
+    install_console_ctrl_guard()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  6b. Windows console Ctrl+C defense-in-depth guard
+# ──────────────────────────────────────────────────────────────────────────────
+
+_console_ctrl_handler = None      # KEEP REFERENCE — ctypes callback must not be GC'd (dangling ptr crash)
+_console_ctrl_raw_handler = None  # raw Python callable behind the ctypes wrapper (test hook / introspection)
+_console_guard_installed = False
+
+
+def install_console_ctrl_guard() -> bool:
+    """Idempotent. No-op returning False on non-Windows. On Windows installs a console
+    control handler that re-dispatches SIGINT for CTRL_C/CTRL_BREAK/CTRL_CLOSE/CTRL_SHUTDOWN
+    (graceful shutdown) and returns handled; returns False for CTRL_LOGOFF. Safe to call repeatedly."""
+    if os.name != 'nt':
+        return False
+    return _install_windows_console_guard()
+
+
+def _install_windows_console_guard(kernel32=None) -> bool:
+    """Testable core (injectable kernel32). Returns True if a handler was registered this call.
+    Idempotent via _console_guard_installed."""
+    global _console_ctrl_handler, _console_ctrl_raw_handler, _console_guard_installed
+    import ctypes
+    if _console_guard_installed:
+        return False
+    if kernel32 is None:
+        kernel32 = ctypes.windll.kernel32
+
+    # CTRL_* event types (wincon.h): CTRL_C=0, CTRL_BREAK=1, CTRL_CLOSE=2,
+    # CTRL_LOGOFF=4, CTRL_SHUTDOWN=5.
+    CTRL_C_EVENT = 0
+    CTRL_BREAK_EVENT = 1
+    CTRL_CLOSE_EVENT = 2
+    CTRL_LOGOFF_EVENT = 4
+    CTRL_SHUTDOWN_EVENT = 5
+
+    def _handler(ctrl_type):
+        # Runs on a raw Windows control thread — must re-acquire the GIL.
+        try:
+            gil = ctypes.pythonapi.PyGILState_Ensure()
+        except Exception:
+            # GIL unavailable / interpreter finalizing -> fall through to default handler
+            return False
+        try:
+            if ctrl_type == CTRL_LOGOFF_EVENT:
+                # Must not block logoff; no re-dispatch.
+                return False
+            logger.warning("console Ctrl+C received (type=%s) — initiating graceful shutdown", ctrl_type)
+            _signal_mod.raise_signal(_signal_mod.SIGINT)
+            return True
+        except Exception:
+            # Never propagate out of the control handler -> fall through to default.
+            return False
+        finally:
+            ctypes.pythonapi.PyGILState_Release(gil)
+
+    # WINFUNCTYPE signature for SetConsoleCtrlHandler: BOOL CALLBACK Handler(DWORD dwCtrlType)
+    _console_ctrl_raw_handler = _handler  # keep the raw callable reachable (test hook / introspection)
+    _console_ctrl_handler = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(_handler)
+    ok = bool(kernel32.SetConsoleCtrlHandler(_console_ctrl_handler, True))
+    if ok:
+        _console_guard_installed = True
+    return ok
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  7. Shared CLI argument parsing

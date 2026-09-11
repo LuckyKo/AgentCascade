@@ -173,6 +173,11 @@ if __name__ == '__main__':
     if os.name != 'nt':
         signal.signal(signal.SIGTERM, handle_shutdown)
 
+    # Defense-in-depth: on Windows, install a console Ctrl+C guard so a
+    # console-wide Ctrl+C broadcast cannot hard-kill the server. No-op elsewhere.
+    from agent_cascade.shared_init import install_console_ctrl_guard
+    install_console_ctrl_guard()
+
     # Prevent uvicorn from installing its own signal handlers (ours are already registered)
     server.install_signal_handlers = lambda: None
 
