@@ -667,17 +667,6 @@ class TestConsumeTurnFirstTurnSemantics:
         assert turns == 5
         assert collector.get_session_summary()["total_user_turns"] == 1
 
-    def test_flag_reset_starts_new_count(self, collector):
-        engine = _make_engine_with_telemetry(collector)
-        inst = _FakeInstance()
-        for _ in range(3):
-            engine._consume_turn(inst, 10)
-        assert collector.get_session_summary()["total_user_turns"] == 1
-        # A fresh run resets the flag (mirrors the top-of-run reset).
-        inst._turn_consumed = False
-        engine._consume_turn(inst, 10)
-        assert collector.get_session_summary()["total_user_turns"] == 2
-
     def test_consecutive_runs_same_instance(self, collector):
         """Two full runs on the same instance (flag reset between) → exactly 2 user turns."""
         engine = _make_engine_with_telemetry(collector)
@@ -692,11 +681,15 @@ class TestConsumeTurnFirstTurnSemantics:
             engine._consume_turn(inst, 10)
         assert collector.get_session_summary()["total_user_turns"] == 2
 
-    def test_early_exit_records_nothing(self, collector):
-        """No consumption → no user turn recorded and flag stays False at next run start."""
+    def test_no_consumption_records_nothing(self, collector):
+        """A run that exits before consuming any budget records no user turn.
+
+        Models an early-exit path (e.g. terminal stop) where _consume_turn is never
+        called: the flag stays False and total_user_turns stays 0.
+        """
         engine = _make_engine_with_telemetry(collector)
         inst = _FakeInstance()
-        # A run that returns before any budget consumption.
+        # No budget consumption occurs (early exit before the turn loop).
         assert getattr(inst, "_turn_consumed", False) is False
         assert collector.get_session_summary()["total_user_turns"] == 0
 
