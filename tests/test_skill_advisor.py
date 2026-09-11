@@ -310,6 +310,10 @@ class TestBuildSkillAdvisorPromptFreshness:
         assert set(sm.get_skill_names()) == {"skill-a"}
 
         # Wrap the RLock to count acquire() calls made by get_skill_names().
+        # `with self._write_lock:` resolves __enter__/__exit__ via type(lock), and since
+        # _SpyLock is a distinct type (not an RLock subclass) it must implement the
+        # context-manager protocol itself — delegating to the real lock. acquire() is
+        # intercepted to record each acquisition.
         acquires = []
         real_lock = sm._write_lock
 
