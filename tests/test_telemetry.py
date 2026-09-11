@@ -575,6 +575,185 @@ class TestAgentClassSummary:
 
 
 # ---------------------------------------------------------------------------
+# I-quad. Live per-config / per-class aggregation (Fix B)
+# ---------------------------------------------------------------------------
+# Per-config and per-class counters are now accumulated LIVE inside the recorders
+# (turn_start / llm_call_end / tool_call_end / loop_detected / compression) instead of
+# being flushed once in record_turn_end. These tests prove the values are visible BEFORE
+# turn_end AND that turn_end does NOT re-add them (a MOVE, not a copy — no double count).
+
+class TestLivePerConfigClassAggregation:
+    FP = "fp_live"
+
+    def _cfg(self, collector):
+        return {c["config_fingerprint"]: c for c in collector.get_config_comparison()}[self.FP]
+
+    def _cls(self, collector):
+        return {r["agent_class"]: r for r in collector.get_agent_class_summary()}["coder"]
+
+    def test_turns_live_before_turn_end(self, collector):
+        """turns is incremented at turn_start — visible before any turn_end."""
+        collector.record_turn_start("inst", config_fingerprint=self.FP, agent_class="coder")
+        # BEFORE turn_end:
+        assert self._cfg(collector)["turns"] == 1
+        assert self._cls(collector)["turns"] == 1
+
+    def test_llm_calls_and_tokens_live_before_turn_end(self, collector):
+        """llm_calls + input/output tokens (config) and tokens_generated (class) update live."""
+        collector.record_turn_start("inst", config_fingerprint=self.FP, agent_class="coder")
+        collector.record_llm_call_start("inst", input_tokens_est=120, model="m")
+        collector.record_llm_first_token("inst")
+        collector.record_llm_call_end("inst", output_tokens_est=45)
+
+        # BEFORE turn_end:
+        cfg = self._cfg(collector)
+        assert cfg["llm_calls"] == 1
+        assert cfg["input_tokens_est"] == 120
+        assert cfg["output_tokens_est"] == 45
+        assert self._cls(collector)["tokens_generated"] == 45
+
+    def test_tool_calls_and_failures_live_before_turn_end(self, collector):
+        """A failing tool updates per-config per-name counts and class accuracy live."""
+        collector.record_turn_start("inst", config_fingerprint=self.FP, agent_class="coder")
+        # one success + one failure for "write_file"
+        collector.record_tool_call_start("inst", "write_file")
+        collector.record_tool_call_end("inst", "write_file", success=True)
+        collector.record_tool_call_start("inst", "write_file")
+        collector.record_tool_call_end("inst", "write_file", success=False, error="boom")
+
+        # BEFORE turn_end:
+        cfg = self._cfg(collector)
+        assert cfg["tool_calls"] == 2
+        eff = cfg["tool_effectiveness"]["write_file"]
+        assert eff["total"] == 2
+        assert eff["success_rate"] == 50.0
+        # class accuracy reflects the failure live: (2 - 1)/2 = 50.0
+        assert self._cls(collector)["tool_usage_accuracy"] == 50.0
+
+    def test_loops_and_retries_live_before_turn_end(self, collector):
+        """record_loop_detected(auto_rolled_back=True) updates config loops + retries live."""
+        collector.record_turn_start("inst", config_fingerprint=self.FP, agent_class="coder")
+        collector.record_loop_detected("inst", "stuck", auto_rolled_back=True)
+
+        # BEFORE turn_end:
+        cfg = self._cfg(collector)
+        assert cfg["loops_detected"] == 1
+        assert cfg["retries"] == 1
+
+    def test_no_double_count_full_turn(self, collector):
+        """CRITICAL regression: a full turn then turn_end must NOT re-add live counters.
+
+        Captures the per-config/per-class values BEFORE turn_end, ends the turn, and asserts
+        the SAME values after — proving record_turn_end is a no-op for the moved counters.
+        """
+        N_LLM = 3
+        M_TOOLS = 2  # one success + one failure
+
+        collector.record_turn_start("inst", config_fingerprint=self.FP, agent_class="coder")
+        for _ in range(N_LLM):
+            collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+            collector.record_llm_first_token("inst")
+            collector.record_llm_call_end("inst", output_tokens_est=20)
+        collector.record_tool_call_start("inst", "read_file")
+        collector.record_tool_call_end("inst", "read_file", success=True)
+        collector.record_tool_call_start("inst", "write_file")
+        collector.record_tool_call_end("inst", "write_file", success=False, error="e")
+        collector.record_loop_detected("inst", "stuck", auto_rolled_back=True)
+        collector.record_compression("inst", 0.5, tokens_before=100, tokens_after=50)
+
+        # ---- capture live values BEFORE turn_end ----
+        cfg_before = self._cfg(collector)
+        cls_before = self._cls(collector)
+        before = {
+            "turns": cfg_before["turns"],
+            "llm_calls": cfg_before["llm_calls"],
+            "tool_calls": cfg_before["tool_calls"],
+            "input_tokens_est": cfg_before["input_tokens_est"],
+            "output_tokens_est": cfg_before["output_tokens_est"],
+            "loops_detected": cfg_before["loops_detected"],
+            "retries": cfg_before["retries"],
+            "total_compressions": collector._config_stats[self.FP]["total_compressions"],
+            "cls_turns": cls_before["turns"],
+            "cls_tokens_generated": cls_before["tokens_generated"],
+            # get_agent_class_summary() exposes tool_usage_accuracy (derived), not the raw
+            # tool_calls count, so read it straight from the internal accumulator.
+            "cls_tool_calls": collector._agent_class_stats["coder"]["tool_calls"],
+            # Per-name tool breakdowns + class failures (explicit guards against
+            # double-counting that a total alone wouldn't catch if offsets cancelled).
+            "cfg_tool_by_name": dict(collector._config_stats[self.FP]["tool_calls_by_name"]),
+            "cfg_tool_fail_by_name": dict(collector._config_stats[self.FP]["tool_failures_by_name"]),
+            "cls_tool_failures": collector._agent_class_stats["coder"]["tool_failures"],
+        }
+
+        # sanity: live values are already correct mid-turn
+        assert before["turns"] == 1
+        assert before["llm_calls"] == N_LLM
+        assert before["tool_calls"] == M_TOOLS
+        assert before["input_tokens_est"] == N_LLM * 10
+        assert before["output_tokens_est"] == N_LLM * 20
+        assert before["loops_detected"] == 1
+        assert before["retries"] == 1
+        assert before["total_compressions"] == 1
+        assert before["cls_turns"] == 1
+        assert before["cls_tokens_generated"] == N_LLM * 20
+        assert before["cls_tool_calls"] == M_TOOLS
+
+        # ---- end the turn ----
+        collector.record_turn_end("inst")
+
+        # ---- after turn_end, moved counters must be UNCHANGED (move, not copy) ----
+        cfg_after = self._cfg(collector)
+        cls_after = self._cls(collector)
+        assert cfg_after["turns"] == before["turns"]
+        assert cfg_after["llm_calls"] == before["llm_calls"]
+        assert cfg_after["tool_calls"] == before["tool_calls"]
+        assert cfg_after["input_tokens_est"] == before["input_tokens_est"]
+        assert cfg_after["output_tokens_est"] == before["output_tokens_est"]
+        assert cfg_after["loops_detected"] == before["loops_detected"]
+        assert cfg_after["retries"] == before["retries"]
+        assert collector._config_stats[self.FP]["total_compressions"] == before["total_compressions"]
+        assert cls_after["turns"] == before["cls_turns"]
+        assert cls_after["tokens_generated"] == before["cls_tokens_generated"]
+        assert collector._agent_class_stats["coder"]["tool_calls"] == before["cls_tool_calls"]
+        # Per-name breakdowns + class failures must also be unchanged (no re-flush).
+        assert dict(collector._config_stats[self.FP]["tool_calls_by_name"]) == before["cfg_tool_by_name"]
+        assert dict(collector._config_stats[self.FP]["tool_failures_by_name"]) == before["cfg_tool_fail_by_name"]
+        assert collector._agent_class_stats["coder"]["tool_failures"] == before["cls_tool_failures"]
+
+    def test_duration_zero_before_positive_after_turn_end(self, collector):
+        """total_duration_sec is 0 while the turn is in progress and > 0 after it ends."""
+        collector.record_turn_start("inst", config_fingerprint=self.FP)
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_first_token("inst")
+        collector.record_llm_call_end("inst", output_tokens_est=5)
+
+        # BEFORE turn_end: no completed time yet.
+        assert self._cfg(collector)["total_duration_sec"] == 0
+
+        collector.record_turn_end("inst")
+        # AFTER turn_end: duration reflects the (tiny but real) elapsed wall time.
+        assert self._cfg(collector)["total_duration_sec"] >= 0
+        # A completed turn must register *some* duration > 0 in practice; guard only that
+        # it's a non-negative number and the field is populated (perf_counter guarantees >0).
+        assert collector._config_stats[self.FP]["total_duration_ms"] > 0
+
+    def test_compression_not_double_counted(self, collector):
+        """record_compression bumps per-config total_compressions live; turn_end must NOT add again.
+
+        Regression for the latent double-count (record_turn_end used to add turn["compressions"]).
+        """
+        collector.record_turn_start("inst", config_fingerprint=self.FP)
+        collector.record_compression("inst", 0.5, tokens_before=100, tokens_after=50)
+
+        # BEFORE turn_end: exactly 1.
+        assert collector._config_stats[self.FP]["total_compressions"] == 1
+
+        collector.record_turn_end("inst")
+        # AFTER turn_end: still exactly 1 (NOT 2).
+        assert collector._config_stats[self.FP]["total_compressions"] == 1
+
+
+# ---------------------------------------------------------------------------
 # I2. Skill usage summary (per-skill accumulator)
 # ---------------------------------------------------------------------------
 

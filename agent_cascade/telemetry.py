@@ -252,6 +252,13 @@ class TelemetryCollector:
             # Initialize per-config stats on first turn — use helper method
             self._ensure_config_stats(config_fingerprint, config_description)
 
+            # Live per-config / per-class turn count (moved from record_turn_end).
+            # A run counts as an engagement the moment it starts.
+            if config_fingerprint:
+                self._config_stats[config_fingerprint]["turns"] += 1
+            if agent_class:
+                self._ensure_agent_class_stats(agent_class)["turns"] += 1
+
         event = {
             "type": "turn_start",
             "instance": instance_name,
@@ -294,40 +301,21 @@ class TelemetryCollector:
             self._session_stats["total_turns"] += 1
             self._session_stats["total_retries"] += turn["retries"]
 
-            # Update per-config stats — ensure entry exists before updating
+            # Update per-config stats — duration is only known at turn end. The
+            # other counters (turns, llm_calls, tool_calls, tokens, loops, retries,
+            # total_compressions) are now accumulated live in the recorders (B1-B5),
+            # so they must NOT be re-flushed here or they would double-count.
             if fp:
                 self._ensure_config_stats(fp, turn.get("config_description"))
                 cs = self._config_stats[fp]
-                cs["turns"] += 1
-                cs["llm_calls"] += turn["llm_calls"]
-                cs["tool_calls"] += turn["tool_calls"]
-                cs["input_tokens_est"] += turn["input_tokens_est"]
-                cs["output_tokens_est"] += turn["output_tokens_est"]
                 cs["total_duration_ms"] += duration_ms
-                cs["loops_detected"] += turn["loops_detected"]
-                cs["retries"] += turn["retries"]
-                cs["total_compressions"] += turn["compressions"]
-                for td in turn["tool_calls_detail"]:
-                    cs["tool_calls_by_name"][td["tool_name"]] += 1
-                    if not td.get("success", True):
-                        cs["tool_failures_by_name"][td["tool_name"]] += 1
 
-            # Update per-agent-class stats (separate accumulator — one model can
-            # serve multiple agent classes now that the fingerprint is model-only).
+            # Update per-agent-class stats — same live-accumulation rule as above;
+            # only total_time_ms is flushed here (duration known at end).
             agent_class = turn.get("agent_class") or ""
             if agent_class:
                 acs = self._ensure_agent_class_stats(agent_class)
-                acs["turns"] += 1
                 acs["total_time_ms"] += duration_ms
-                # "Tokens Generated" = completion tokens only (what the model produced),
-                # matching the "Output Tokens (est)" session card. Input/prompt tokens are
-                # what we feed the model (system + history + user + tool results) and are
-                # NOT generated, so they must not be counted here.
-                acs["tokens_generated"] += turn["output_tokens_est"]
-                acs["tool_calls"] += turn["tool_calls"]
-                for td in turn["tool_calls_detail"]:
-                    if not td.get("success", True):
-                        acs["tool_failures"] += 1
 
         self._write_event(event)
 
@@ -490,9 +478,16 @@ class TelemetryCollector:
                 # Update per-config latency fields (BUG 5 fix)
                 fp = turn.get("config_fingerprint", "")
                 if fp and fp in self._config_stats:
-                    self._config_stats[fp]["total_llm_latency_ms"] += latency_ms
-                    self._config_stats[fp]["total_ttft_ms"] += ttft_ms
-                    self._config_stats[fp]["total_streaming_time_ms"] += streaming_time_ms
+                    cs = self._config_stats[fp]
+                    cs["total_llm_latency_ms"] += latency_ms
+                    cs["total_ttft_ms"] += ttft_ms
+                    cs["total_streaming_time_ms"] += streaming_time_ms
+                    # Live per-config llm_calls + tokens (moved from record_turn_end).
+                    cs["llm_calls"] += 1
+                    cs["input_tokens_est"] += call["input_tokens_est"]
+                    cs["output_tokens_est"] += actual_output
+                if ac:
+                    self._ensure_agent_class_stats(ac)["tokens_generated"] += actual_output
 
         self._write_event(event)
 
@@ -563,6 +558,21 @@ class TelemetryCollector:
                     "success": success,
                     "truncated": truncated,
                 })
+                # Live per-config tool counts (moved from record_turn_end).
+                fp = turn.get("config_fingerprint", "")
+                if fp and fp in self._config_stats:
+                    cs = self._config_stats[fp]
+                    cs["tool_calls"] += 1
+                    cs["tool_calls_by_name"][tool_name] += 1
+                    if not success:
+                        cs["tool_failures_by_name"][tool_name] += 1
+                # Live per-class tool counts (moved from record_turn_end). Bumping
+                # tool_calls here — not just on failure — keeps tool_usage_accuracy live.
+                ac = turn.get("agent_class") or ""
+                if ac:
+                    self._ensure_agent_class_stats(ac)["tool_calls"] += 1
+                    if not success:
+                        self._ensure_agent_class_stats(ac)["tool_failures"] += 1
 
         self._write_event(event)
 
@@ -617,6 +627,12 @@ class TelemetryCollector:
                 turn["loops_detected"] += 1
                 if auto_rolled_back:
                     turn["retries"] += 1
+                # Live per-config loop/retry counts (moved from record_turn_end).
+                fp = turn.get("config_fingerprint", "")
+                if fp and fp in self._config_stats:
+                    self._config_stats[fp]["loops_detected"] += 1
+                    if auto_rolled_back:
+                        self._config_stats[fp]["retries"] += 1
 
         self._write_event(event)
 

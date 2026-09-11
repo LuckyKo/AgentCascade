@@ -111,7 +111,6 @@ const state = {
     lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
   lastTelemetryUpdate: 0,     // updateTelemetryPanel throttling (~2s)
-  lastTelemetryFetch: 0,      // periodic fetchTelemetry() re-fetch of full tables during generation (~30s)
   },
   totalTokens: 0,
   totalWords: 0,
@@ -2222,15 +2221,10 @@ function handleServerMessage(data) {
         }
       }
 
-      // Periodic re-fetch of the FULL telemetry tables (Config Fingerprint A/B + Agent
-      // Class Usage) during generation. The WS stream only carries the session summary,
-      // so these two tables otherwise refresh only at turn-end. Throttled to ~30s — no
-      // need for fast telemetry; a lightweight REST GET every 30s keeps them live without
-      // hammering the API. No-op when not generating (stream_update only flows then).
-      if (state.generating && telemNow - state.lastTelemetryFetch > THROTTLE.TELEMETRY_FETCH_MS) {
-        state.lastTelemetryFetch = telemNow;
-        fetchTelemetry();
-      }
+      // NOTE: the periodic full-tables re-fetch (Config Fingerprint A/B + Agent Class
+      // Usage) is driven by a module-level 30s setInterval (see startTelemetryPoll below),
+      // independent of WS frame arrival — so it keeps ticking even while a long tool call
+      // blocks the engine and no stream_update frames flow.
 
              const now = performance.now();
       
@@ -5767,12 +5761,16 @@ document.addEventListener('visibilitychange', () => {
     // Force panels to re-render (bypass lastRenderedCount/contentKey cache) and paint now.
     invalidateAllPanelCaches();
     renderSubAgents();
+    // Refresh the full telemetry tables immediately on return to the foreground.
+    fetchTelemetry();
   } catch (err) {
     console.error('[visibility] catch-up failed:', err);
   }
 });
 
 connect();
+let _telemetryPollStarted = false; // guard: startTelemetryPoll() creates its interval exactly once
+startTelemetryPoll(); // WS-independent ~30s refresh of the full telemetry tables (created once)
 initAgentMessagesTab(); // NEW: initialize Agent Messages tab
 if ($('#apply-mcp-btn')) {
   $('#apply-mcp-btn').addEventListener('click', () => {
@@ -5956,6 +5954,28 @@ async function fetchTelemetry() {
   } catch (err) {
     console.warn('Failed to fetch telemetry:', err);
   }
+}
+
+// True when there's agent work in progress worth keeping the full telemetry tables fresh:
+// the main generation is running, or any sub-agent is active / not yet halted.
+function _workInProgress() {
+  return state.generating ||
+    Object.values(state.subAgents).some(sa => sa && (sa.active || !sa.is_halted));
+}
+
+// WS-independent periodic re-fetch of the FULL telemetry tables (Config Fingerprint A/B,
+// Agent Class Usage, Skill Usage). The WS stream only carries the session summary, and a
+// long tool call blocks the engine so no stream_update frames flow — a real setInterval is
+// the only thing that guarantees the ~30s cadence. Created exactly once (guarded) so a
+// reconnect never spawns duplicate timers. No-op when idle via _workInProgress().
+// NOTE: `_telemetryPollStarted` is declared near the top of the script (before the call to
+// startTelemetryPoll below) — `let` has no hoisting, so it must be initialized before use.
+function startTelemetryPoll() {
+  if (_telemetryPollStarted) return;
+  _telemetryPollStarted = true;
+  setInterval(() => {
+    if (_workInProgress()) fetchTelemetry();
+  }, THROTTLE.TELEMETRY_FETCH_MS);
 }
 
 // Export telemetry JSONL
