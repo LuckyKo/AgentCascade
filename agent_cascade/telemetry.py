@@ -146,11 +146,12 @@ class TelemetryCollector:
         """
         Create a stable hash fingerprint from the current agent configuration.
 
-        The grouping key is the MODEL ONLY — runs are grouped by model for A/B
-        comparison regardless of endpoint, sampling params, system prompt, or tool
-        set. ``generate_cfg`` / ``system_prompt`` / ``tools`` / ``api_base`` are kept
-        in the signature purely for call-site compatibility; they no longer affect
-        the fingerprint (the "prompt print" grouping concern was removed).
+        This is the A/B grouping key = one row per model/endpoint. The key is the
+        MODEL ONLY — runs are grouped by model for A/B comparison regardless of
+        endpoint, sampling params, system prompt, or tool set. ``generate_cfg`` /
+        ``system_prompt`` / ``tools`` / ``api_base`` are kept in the signature purely
+        for call-site compatibility; they no longer affect the fingerprint (the "prompt
+        print" grouping concern was removed). Do not assume sampling params matter here.
 
         NOTE: keep passing these args at call sites (e.g. engine/core.py) — do not
         "clean up" the unused params, it would break callers that still supply them.
@@ -350,6 +351,7 @@ class TelemetryCollector:
                 "tokens_generated": 0,
                 "tool_calls": 0,
                 "tool_failures": 0,
+                "llm_calls": 0,
             }
         return self._agent_class_stats[agent_class]
 
@@ -477,6 +479,11 @@ class TelemetryCollector:
             turn = self._active_turns.get(instance_name)
             if turn:
                 turn["llm_calls"] += 1
+                # Attribute this LLM call to the calling instance's agent class.
+                # Guarded: no active turn / empty class → not attributed (no spurious row).
+                ac = turn.get("agent_class") or ""
+                if ac:
+                    self._ensure_agent_class_stats(ac)["llm_calls"] += 1
                 turn["input_tokens_est"] += call["input_tokens_est"]
                 turn["output_tokens_est"] += actual_output
                 # Update per-config latency fields (BUG 5 fix)
@@ -807,8 +814,9 @@ class TelemetryCollector:
 
         Returns a snapshot list (not live dicts) so callers can iterate safely
         without holding the lock. Each entry:
-        ``{agent_class, tool_usage_accuracy, total_time_sec, tokens_generated, turns}``
-        where ``tool_usage_accuracy`` is a 0-100 float (or None when no tool calls).
+        ``{agent_class, llm_calls, tool_usage_accuracy, total_time_sec, tokens_generated, turns}``
+        where ``llm_calls`` is the number of LLM API calls made by this agent class and
+        ``tool_usage_accuracy`` is a 0-100 float (or None when no tool calls).
         """
         with _telemetry_lock:
             result = []
@@ -821,6 +829,7 @@ class TelemetryCollector:
                     accuracy = None
                 result.append({
                     "agent_class": agent_class,
+                    "llm_calls": acs["llm_calls"],
                     "tool_usage_accuracy": accuracy,
                     "total_time_sec": round(acs["total_time_ms"] / 1000, 1),
                     "tokens_generated": acs["tokens_generated"],

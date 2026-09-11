@@ -5894,7 +5894,7 @@ function updateTelemetryConfigTable(configs) {
       <td title="${escapeHtml(c.config_fingerprint)}"><span class="telem-config-tag">${label}</span></td>
       <td>${c.turns}</td>
       <td>${formatNumber(c.total_tokens)}</td>
-      <td>${formatMs(c.avg_turn_duration_ms)}</td>
+      <td>${formatMs((c.total_streaming_time_sec || 0) * 1000)}</td>
       <td>${c.avg_tps ? c.avg_tps.toFixed(1) : '—'}</td>
     </tr>`;
   }).join('');
@@ -5905,7 +5905,7 @@ function updateTelemetryAgentClassTable(rows) {
   if (!tbody) return;
 
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No agent class data yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-secondary)">No agent class data yet</td></tr>';
     return;
   }
 
@@ -5916,6 +5916,7 @@ function updateTelemetryAgentClassTable(rows) {
       : '—';
     return `<tr>
       <td>${escapeHtml(r.agent_class)}</td>
+      <td>${formatNumber(r.llm_calls || 0)}</td>
       <td>${accCell}</td>
       <td>${formatMs((r.total_time_sec || 0) * 1000)}</td>
       <td>${formatNumber(r.tokens_generated)}</td>

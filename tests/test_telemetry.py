@@ -365,6 +365,24 @@ class TestConfigComparison:
         collector.record_turn_end("inst")
         assert collector.get_config_comparison() == []
 
+    def test_row_exposes_total_streaming_time_sec(self, collector):
+        """Guard the frontend "Total Time" column: each A/B row must expose
+        ``total_streaming_time_sec`` (per-endpoint total streaming time)."""
+        fp = "fp_stream"
+        collector.record_turn_start("inst", config_fingerprint=fp)
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        # Record first token so streaming_time_ms is measured (non-zero), then end.
+        collector.record_llm_first_token("inst")
+        collector.record_llm_call_end("inst", output_tokens_est=5)
+        collector.record_turn_end("inst")
+
+        cfgs = {c["config_fingerprint"]: c for c in collector.get_config_comparison()}
+        assert fp in cfgs
+        row = cfgs[fp]
+        assert "total_streaming_time_sec" in row
+        assert isinstance(row["total_streaming_time_sec"], (int, float))
+        assert row["total_streaming_time_sec"] >= 0
+
 
 # ---------------------------------------------------------------------------
 # I-bis. Config fingerprint is model-only (no prompt print)
@@ -495,6 +513,65 @@ class TestAgentClassSummary:
 
         names = [r["agent_class"] for r in collector.get_agent_class_summary()]
         assert names == sorted(names) == ["coder", "orchestrator", "reviewer"]
+
+    def test_llm_calls_attributed_to_agent_class(self, collector):
+        """Each LLM call inside a turn is attributed to that instance's agent class."""
+        collector.record_turn_start("inst", agent_class="coder")
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("inst", output_tokens_est=5)
+
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert rows["coder"]["llm_calls"] == 1
+
+        # A second call within the same (still-active) turn -> 2.
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("inst", output_tokens_est=5)
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert rows["coder"]["llm_calls"] == 2
+
+    def test_no_active_turn_not_attributed(self, collector):
+        """An LLM call with NO active turn is not attributed anywhere (no crash, no row)."""
+        collector.record_llm_call_start("ghost", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("ghost", output_tokens_est=5)
+        assert collector.get_agent_class_summary() == []
+
+    def test_empty_agent_class_not_attributed(self, collector):
+        """An LLM call inside a turn with an empty agent_class is not attributed."""
+        collector.record_turn_start("inst")  # agent_class defaults to ""
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("inst", output_tokens_est=5)
+        collector.record_turn_end("inst")
+        assert collector.get_agent_class_summary() == []
+
+    def test_sub_agent_calls_isolated_per_class(self, collector):
+        """Two instances with different agent classes each count only their own calls."""
+        # "coder" makes 2 calls; "researcher" makes 1 call.
+        for _ in range(2):
+            collector.record_turn_start("worker_a", agent_class="coder")
+            collector.record_llm_call_start("worker_a", input_tokens_est=10, model="m")
+            collector.record_llm_call_end("worker_a", output_tokens_est=5)
+            collector.record_turn_end("worker_a")
+
+        collector.record_turn_start("worker_b", agent_class="researcher")
+        collector.record_llm_call_start("worker_b", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("worker_b", output_tokens_est=5)
+        collector.record_turn_end("worker_b")
+
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert rows["coder"]["llm_calls"] == 2
+        assert rows["researcher"]["llm_calls"] == 1
+
+    def test_llm_calls_key_present_with_default_zero(self, collector):
+        """A class that had turns but zero LLM calls still reports llm_calls == 0."""
+        collector.record_turn_start("inst", agent_class="coder")
+        # No LLM call — only a tool call.
+        collector.record_tool_call_start("inst", "read_file")
+        collector.record_tool_call_end("inst", "read_file", success=True)
+        collector.record_turn_end("inst")
+
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert "coder" in rows
+        assert rows["coder"]["llm_calls"] == 0
 
 
 # ---------------------------------------------------------------------------
