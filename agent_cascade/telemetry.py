@@ -316,7 +316,11 @@ class TelemetryCollector:
                 acs = self._ensure_agent_class_stats(agent_class)
                 acs["turns"] += 1
                 acs["total_time_ms"] += duration_ms
-                acs["tokens_generated"] += turn["input_tokens_est"] + turn["output_tokens_est"]
+                # "Tokens Generated" = completion tokens only (what the model produced),
+                # matching the "Output Tokens (est)" session card. Input/prompt tokens are
+                # what we feed the model (system + history + user + tool results) and are
+                # NOT generated, so they must not be counted here.
+                acs["tokens_generated"] += turn["output_tokens_est"]
                 acs["tool_calls"] += turn["tool_calls"]
                 for td in turn["tool_calls_detail"]:
                     if not td.get("success", True):
