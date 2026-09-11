@@ -63,6 +63,13 @@ def build_skill_advisor_prompt(
     Each skill is formatted as ``- {name}: {description}``.
     """
     from agent_cascade.prompts.dna import SKILL_ADVISOR_PROMPT
+    from agent_cascade.log import logger
+
+    # Acquire a fresh list at run time (cache-respecting, like scan_skills/load_skill).
+    try:
+        skill_manager._ensure_discovered()
+    except Exception as e:  # noqa: BLE001 — never block the advisor over a discovery hiccup
+        logger.warning("[SKILL-ADVISOR] _ensure_discovered failed (using cached list): %s", e)
 
     metadata_lines = []
     for meta in skill_manager.get_all_metadata():

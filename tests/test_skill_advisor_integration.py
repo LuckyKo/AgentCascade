@@ -665,3 +665,57 @@ class TestSkillUsageTelemetryInvariants:
         assert mock_advisor.call_count == 0
         # No skill-usage recording on the recall path.
         tel.record_skills_loaded.assert_not_called()
+
+
+# ===========================================================================
+# 9. Gate freshness — the gate's count check uses a fresh skill list at run time
+# ===========================================================================
+
+class TestGateFreshness:
+    """The gate must refresh the skill list (cache-respecting) BEFORE computing
+    should_run_advisor, so its ``len(get_skill_names()) > 0`` "nothing to recommend"
+    short-circuit sees FRESH data. Regression guard for the case where the registry
+    is empty at gate time but a new skill was added on disk + cache invalidated:
+    the advisor must NOT be skipped."""
+
+    def _approve(self):
+        return SkillAdvisorResult(
+            verdict="approve", reason="ok", recommended_skills=[], task_notes=""
+        )
+
+    def test_gate_refreshes_before_count_check(self, tmp_path):
+        """Registry empty at gate time (fresh install / cleared cache) but a new skill is
+        on disk with the cache invalidated → _ensure_discovered() re-scans, the count check
+        sees the fresh skill, and the advisor is NOT skipped."""
+        from agent_cascade.skills.manager import SkillManager
+
+        # New skill exists on disk.
+        b_dir = tmp_path / "skill-b"
+        b_dir.mkdir()
+        (b_dir / "SKILL.md").write_text(
+            "---\nname: skill-b\ndescription: second skill\n---\nbody B\n", encoding="utf-8"
+        )
+
+        # Real SkillManager with an EMPTY registry at gate time, cache invalidated so a
+        # re-scan is forced (simulates fresh install / cleared cache).
+        sm = SkillManager()
+        sm._skill_paths = [tmp_path]   # _ensure_discovered() needs paths to scan
+        sm.invalidate_cache()
+        assert sm.get_skill_names() == []  # registry is empty before the gate runs
+
+        pool = FakePool(sm, auto_skill_mode="advanced", default_load_skill_mode="AUTO")
+        lifecycle = FakeLifecycle(pool)
+        engine = _build_engine(pool, lifecycle)
+        args = {"task": "do it", "context": "", "load_skill": "AUTO"}
+
+        with patch("agent_cascade.skills.advisor.run_skill_advisor",
+                   side_effect=lambda **kw: self._approve()) as mock_advisor:
+            engine._create_and_run_agent(
+                agent_class="coder", instance_name="worker1",
+                args=args, caller="maine", nest_depth=0, force_fresh=False,
+            )
+
+        # The gate's refresh re-scanned disk → registry now has the fresh skill.
+        assert "skill-b" in sm.get_skill_names()
+        # Because the count check saw a fresh non-empty list, the advisor was NOT skipped.
+        assert mock_advisor.call_count == 1

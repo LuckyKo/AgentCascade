@@ -2857,6 +2857,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         auto_skill_mode = getattr(self.pool.settings, 'auto_skill_mode', 'basic')
         _skill_mgr_gate = getattr(self.pool, 'skill_manager', None)
 
+        # Refresh skill list once (cache-respecting) so the gate's count check is fresh.
+        try:
+            if _skill_mgr_gate is not None:
+                _skill_mgr_gate._ensure_discovered()
+        except Exception as e:  # noqa: BLE001 — never block delegation on a discovery hiccup
+            logger.debug("[SKILL-ADVISOR] gate _ensure_discovered failed: %s", e)
+
         # NOTE: auto_skill_mode == "none" never runs the advisor. The `== "advanced"`
         # check below already excludes it (only "advanced" passes), so no extra guard
         # is required — this comment documents that intent explicitly.

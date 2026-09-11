@@ -413,10 +413,15 @@ class SkillManager:
     def get_skill_names(self) -> List[str]:
         """Return a list of all registered skill names.
 
+        Reads under the write lock (same as ``get_skill_metadata``) so a concurrent
+        re-scan in ``discover()`` cannot observe the registry mid clear/rebuild and
+        return an empty/partial name list.
+
         Returns:
             List of skill name strings.
         """
-        return list(self._skills_registry.keys())
+        with self._write_lock:
+            return list(self._skills_registry.keys())
 
     def match_skills(self, query: str) -> List[Tuple[str, float]]:
         """Public interface for matching skills against a query.

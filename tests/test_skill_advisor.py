@@ -189,6 +189,152 @@ class TestBuildSkillAdvisorPrompt:
 
 
 # ===========================================================================
+# 2b. Prompt freshness — build_skill_advisor_prompt acquires a fresh list at run time
+# ===========================================================================
+
+class TestBuildSkillAdvisorPromptFreshness:
+    """build_skill_advisor_prompt must call skill_manager._ensure_discovered() (a
+    cache-respecting discovery) before reading metadata, so the advisor's Security
+    agent recommends from a FRESH list — not just the startup snapshot. Uses the
+    REAL SkillManager so _ensure_discovered()/discover()/invalidate_cache() are real."""
+
+    def test_freshness_new_skill_on_disk_appears(self, tmp_path):
+        """Seed registry with skill A; add skill B's SKILL.md on disk; invalidate cache.
+        After build_skill_advisor_prompt(), skill B is present (proves _ensure_discovered ran)."""
+        from agent_cascade.skills.manager import SkillManager
+
+        # Scan a dedicated subdirectory (not tmp_path itself) so pytest's marker file
+        # never enters the scanned tree — keeps the scan signature deterministic.
+        skills_root = tmp_path / "skills"
+
+        # Skill A: on disk so the real discover() re-scans and keeps it in the registry.
+        a_dir = skills_root / "skill-a"
+        a_dir.mkdir(parents=True)
+        (a_dir / "SKILL.md").write_text(
+            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        )
+
+        sm = SkillManager()
+        sm.discover([skills_root])        # warm cache → registry has {skill-a}
+        assert set(sm.get_skill_names()) == {"skill-a"}
+
+        # Skill B: added to disk AFTER the initial scan, then invalidate so a re-scan is forced.
+        b_dir = skills_root / "skill-b"
+        b_dir.mkdir()
+        (b_dir / "SKILL.md").write_text(
+            "---\nname: skill-b\ndescription: second skill\n---\nbody B\n", encoding="utf-8"
+        )
+        sm.invalidate_cache()
+
+        prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
+
+        # The fresh discovery picked up skill B from disk.
+        assert "skill-b" in prompt
+        assert "skill-a" in prompt
+
+    def test_no_forced_rescan_when_cache_warm(self, tmp_path):
+        """With a warm cache (TTL not expired, signature unchanged), the advisor must NOT
+        force a full re-scan — the TTL is respected.
+
+        Note: ``_ensure_discovered()`` ALWAYS calls ``discover()`` (the TTL gate lives
+        INSIDE ``discover``), so spying on ``discover`` would always show one call and could
+        never prove "no re-scan". The real signal that a scan happened is the scan body
+        executing — i.e. ``parse_skill_file`` being invoked (manager.py only calls it in the
+        scan loop). A warm cache short-circuits before any parsing, so we assert 0 parse calls."""
+        from agent_cascade.skills.manager import SkillManager
+        import agent_cascade.skills.manager as mgr_mod
+
+        # Scan a dedicated subdirectory so pytest's tmp_path marker file (.pytest_tmpdir,
+        # created when the fixture is set up) never enters the scanned tree — otherwise it
+        # changes the scan signature between the warm scan and the advisor call and forces
+        # a legitimate re-scan, defeating what this test is trying to prove.
+        skills_root = tmp_path / "skills"
+        a_dir = skills_root / "skill-a"
+        a_dir.mkdir(parents=True)
+        (a_dir / "SKILL.md").write_text(
+            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        )
+
+        sm = SkillManager()
+        sm.discover([skills_root])        # warm cache; _skill_paths set; TTL clock started
+
+        with patch.object(mgr_mod, "parse_skill_file") as mock_parse:
+            prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
+
+        # Warm cache → no re-scan (the scan body never runs).
+        mock_parse.assert_not_called()
+        # The cached list is still served correctly.
+        assert "skill-a" in prompt
+
+    def test_ensure_discovered_failure_isolated(self, tmp_path):
+        """If _ensure_discovered() raises, build_skill_advisor_prompt must still return a
+        valid prompt from the cached list — no exception propagates."""
+        from agent_cascade.skills.manager import SkillManager
+
+        a_dir = tmp_path / "skill-a"
+        a_dir.mkdir()
+        (a_dir / "SKILL.md").write_text(
+            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        )
+
+        sm = SkillManager()
+        sm.discover([tmp_path])           # warm cache with skill-a in the registry
+
+        def _boom():
+            raise RuntimeError("discovery blew up")
+
+        with patch.object(sm, "_ensure_discovered", side_effect=_boom):
+            prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
+
+        # No exception propagated; cached skill-a still present in the prompt.
+        assert "skill-a" in prompt
+
+    def test_get_skill_names_is_lock_protected(self, tmp_path):
+        """Regression: get_skill_names() must read under the write lock so a concurrent
+        re-scan (discover clear/rebuild) cannot make it observe an empty/partial registry.
+
+        We prove the method takes _write_lock by patching the RLock to record acquisitions
+        and asserting at least one acquire happens per call. Without the fix, get_skill_names()
+        reads self._skills_registry directly with no lock → 0 acquires → test fails."""
+        from agent_cascade.skills.manager import SkillManager
+
+        skills_root = tmp_path / "skills"
+        a_dir = skills_root / "skill-a"
+        a_dir.mkdir(parents=True)
+        (a_dir / "SKILL.md").write_text(
+            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        )
+
+        sm = SkillManager()
+        sm.discover([skills_root])
+        assert set(sm.get_skill_names()) == {"skill-a"}
+
+        # Wrap the RLock to count acquire() calls made by get_skill_names().
+        acquires = []
+        real_lock = sm._write_lock
+
+        class _SpyLock:
+            def acquire(self, *a, **k):
+                acquires.append(1)
+                return real_lock.acquire(*a, **k)
+
+            def release(self, *a, **k):
+                return real_lock.release(*a, **k)
+
+            def __enter__(self):
+                acquires.append(1)
+                return real_lock.__enter__()
+
+            def __exit__(self, *a):
+                return real_lock.__exit__(*a)
+
+        with patch.object(sm, "_write_lock", _SpyLock()):
+            sm.get_skill_names()
+
+        assert len(acquires) >= 1, "get_skill_names() must read the registry under _write_lock"
+
+
+# ===========================================================================
 # 3. Registry validation — recommended skill names checked against registry
 # ===========================================================================
 
