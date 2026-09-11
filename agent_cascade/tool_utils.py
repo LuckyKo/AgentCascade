@@ -238,7 +238,11 @@ def truncate_with_spillover(
 
     mark_tool_call_truncated(instance_name, tool_name)
 
-    return f"{truncated}\n\n[TRUNCATED — Character limit exceeded. Full output ({original_len} chars) saved to: {rel_spill}]"
+    total_lines = text.count('\n') + 1
+    shown_lines = truncated.count('\n') + 1
+    return (f"{truncated}\n\n"
+            f"[TRUNCATED — showing {shown_lines} of {total_lines} lines "
+            f"({original_len} chars total). Full output saved to: {rel_spill}]")
 
 
 def resolve_prev_arg_placeholders(

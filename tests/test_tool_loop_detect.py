@@ -589,10 +589,10 @@ class TestOutputNormalization:
         from agent_cascade.tool_loop_detect import _normalize_output
 
         body = "AssertionError: expected 4, got 1"
-        t1 = (body + "\n\n[TRUNCATED — Character limit exceeded. Full output (4996 chars) "
-               "saved to: logs/spillover/impl_phase1_D_fixup_shell_20260824_125626_155333.txt]")
-        t2 = (body + "\n\n[TRUNCATED — Character limit exceeded. Full output (9876 chars) "
-               "saved to: logs/spillover/other_agent_tool_cmd_20260825_010101_999999.txt]")
+        t1 = (body + "\n\n[TRUNCATED — showing 200 of 5000 lines "
+                "(4996 chars total). Full output saved to: logs/spillover/impl_phase1_D_fixup_shell_20260824_125626_155333.txt]")
+        t2 = (body + "\n\n[TRUNCATED — showing 200 of 5000 lines "
+                "(9876 chars total). Full output saved to: logs/spillover/other_agent_tool_cmd_20260825_010101_999999.txt]")
         assert _normalize_output(t1) == _normalize_output(t2)
 
     def test_elapsed_and_timestamp_stripped_everywhere(self):
