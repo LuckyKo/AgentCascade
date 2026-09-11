@@ -38,3 +38,7 @@ soundfile                  # Audio file I/O (for voice tools)
 pillow                     # Image manipulation
 mss>=9.0.0                 # Cross-platform screen capture (fallback + Linux window capture)
 pywin32>=306; sys_platform == 'win32'  # Windows window capture via PrintWindow API
+
+# ── Web Content Parsing ─────────────────────────────────────
+beautifulsoup4             # HTML parsing (web_extractor / simple_doc_parser)
+lxml                       # Fast XML/HTML parser backend for BeautifulSoup

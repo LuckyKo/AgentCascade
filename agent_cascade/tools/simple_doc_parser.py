@@ -200,6 +200,13 @@ def parse_tsv(file_path: str, extract_image: bool = False) -> List[dict]:
 
 
 def parse_html_bs(path: str, extract_image: bool = False):
+    """Parse an HTML file into plain text.
+
+    Uses a best-effort heuristic to strip boilerplate (nav, cookie banners,
+    scripts, etc.) and prefer main content (<main>, <article>, or <body>).
+    This is NOT production-grade extraction; some layouts may still leak noise
+    or rarely over-strip.
+    """
     if extract_image:
         raise ValueError('Currently, extracting images is not supported!')
 
@@ -210,6 +217,80 @@ def parse_html_bs(path: str, extract_image: bool = False):
         s = s.replace("Add to Qwen's Reading List", '')
         return s
 
+    # Tags that never hold meaningful body content — always decompose.
+    _ALWAYS_STRIP_TAGS = ('script', 'style', 'noscript', 'svg', 'iframe', 'canvas', 'form')
+    # ARIA roles indicating non-content regions.
+    _STRIP_ROLES = {'navigation', 'banner', 'contentinfo', 'complementary'}
+    # Class/id substrings (case-insensitive) for cookie/consent banners.
+    # Deliberately conservative: bare "banner" or "main" are NOT matched.
+    _BANNER_CLASS_SUBSTRINGS = ('cookie', 'consent', 'gdpr', 'privacy-banner', 'popup', 'modal', 'overlay')
+
+    def _pick_content_root(soup):
+        """Return the best content root element: <main> > first <article> > <body> > soup."""
+        main = soup.find('main')
+        if main:
+            return main
+        article = soup.find('article')
+        if article:
+            return article
+        body = soup.find('body')
+        if body:
+            return body
+        return soup
+
+    def _strip_boilerplate(soup, protected_root):
+        """Remove boilerplate elements from the soup in-place.
+
+        `protected_root` is never decomposed (prevents stripping <main> etc.).
+        """
+        # 1. Always-strip tags
+        for tag_name in _ALWAYS_STRIP_TAGS:
+            for tag in soup.find_all(tag_name):
+                if tag is not protected_root:
+                    tag.decompose()
+
+        # 2. Strip by ARIA role (handles space-separated multi-role values)
+        for el in soup.find_all(attrs={'role': True}):
+            if el is protected_root:
+                continue
+            role_tokens = el.get('role', '').strip().lower().split()
+            if any(token in _STRIP_ROLES for token in role_tokens):
+                el.decompose()
+
+        # 3. Conditionally strip <header>/<footer> (MUST run before nav/aside
+        #    strip so that the nav-descendant check still finds <nav> children).
+        for tag_name in ('header', 'footer'):
+            for tag in soup.find_all(tag_name):
+                if tag is protected_root:
+                    continue
+                # Strip only if it contains a <nav> descendant OR has
+                # role="banner"/"contentinfo".  Otherwise keep (sites use
+                # header/footer for real content like author/date).
+                role = tag.get('role', '').strip().lower()
+                has_nav_child = tag.find('nav') is not None
+                if has_nav_child or role in ('banner', 'contentinfo'):
+                    tag.decompose()
+
+        # 4. Unconditionally strip <nav>/<aside> (safe now that header/footer
+        #    check has already used their presence as a signal).
+        for tag_name in ('nav', 'aside'):
+            for tag in soup.find_all(tag_name):
+                if tag is not protected_root:
+                    tag.decompose()
+
+        # 5. Cookie/consent banner strip by class/id substring
+        for el in soup.find_all(attrs={'class': True}):
+            if el is protected_root:
+                continue
+            classes = ' '.join(el.get('class') or [])
+            if any(sub in classes.lower() for sub in _BANNER_CLASS_SUBSTRINGS):
+                el.decompose()
+        for el in soup.find_all(id=True):
+            if el is protected_root:
+                continue
+            if any(sub in el['id'].lower() for sub in _BANNER_CLASS_SUBSTRINGS):
+                el.decompose()
+
     try:
         from bs4 import BeautifulSoup
     except Exception:
@@ -218,12 +299,16 @@ def parse_html_bs(path: str, extract_image: bool = False):
     with open(path, 'r', encoding='utf-8') as f:
         soup = BeautifulSoup(f, **bs_kwargs)
 
-    text = soup.get_text()
-
+    # Extract title BEFORE stripping (title lives in <head>).
     if soup.title:
-        title = str(soup.title.string)
+        title = str(soup.title.get_text()).strip()
     else:
         title = ''
+
+    # Pick content root first so it's protected from boilerplate stripping.
+    content_root = _pick_content_root(soup)
+    _strip_boilerplate(soup, content_root)
+    text = content_root.get_text()
 
     text = pre_process_html(text)
     paras = text.split(PARAGRAPH_SPLIT_SYMBOL)
@@ -373,12 +458,15 @@ PARSER_SUPPORTED_FILE_TYPES = ['pdf', 'docx', 'pptx', 'md', 'txt', 'html', 'csv'
 
 def get_plain_doc(doc: list):
     paras = []
+    title_line = ""
+    if doc and doc[0].get('title'):
+        title_line = f"Title: {doc[0]['title']}\n"
     for page in doc:
         for para in page['content']:
             for k, v in para.items():
                 if k in ['text', 'table', 'image']:
                     paras.append(v)
-    return PARAGRAPH_SPLIT_SYMBOL.join(paras)
+    return title_line + PARAGRAPH_SPLIT_SYMBOL.join(paras)
 
 
 @register_tool('simple_doc_parser')
