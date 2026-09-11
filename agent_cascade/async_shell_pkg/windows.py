@@ -22,12 +22,19 @@ else:
 def _send_windows_ctrl_c(pid: int) -> bool:
     """Send Ctrl+C to a Windows process using GenerateConsoleCtrlEvent via ctypes.
 
-    Works for cmd.exe commands running with CREATE_NEW_CONSOLE where
-    proc.send_signal(signal.CTRL_C_EVENT) fails. Runs in a separate Python
+    Used unconditionally on Windows for async shells: direct signal delivery
+    (proc.send_signal / CTRL_C_EVENT) is unreliable for cmd.exe children, so this
+    helper drives the console event explicitly. It runs in a separate Python
     subprocess to safely call FreeConsole/AttachConsole without affecting the parent.
 
+    The event is scoped to the target's own process group (pid), NOT broadcast to
+    the whole console (0). Async children are spawned with CREATE_NEW_PROCESS_GROUP
+    but WITHOUT CREATE_NEW_CONSOLE, so they share the AC server's console — a
+    broadcast would deliver Ctrl+C to the AC server itself and kill it.
+
     Args:
-        pid: Target process PID
+        pid: Target process PID (== its process-group ID, created with
+             CREATE_NEW_PROCESS_GROUP).
 
     Returns:
         True if Ctrl+C was sent successfully, False on failure.
@@ -55,8 +62,13 @@ try:
         print(f"SetConsoleCtrlHandler failed: {{ctypes.get_last_error()}}", file=sys.stderr)
         sys.exit(1)
 
-    # Send CTRL_C_EVENT to the target's console process group
-    result = kernel.GenerateConsoleCtrlEvent(0, 0)  # 0 = CTRL_C_EVENT, 0 = all processes in console
+    # Send CTRL_C_EVENT to ONLY the target's process group.
+    # The 2nd arg is the process-group ID to target; passing 0 broadcasts to
+    # EVERY process attached to this console — which, because async children are
+    # spawned WITHOUT CREATE_NEW_CONSOLE (console_window=False), is the AC server's
+    # own console and would kill the whole Agent Cascade instance. Async children
+    # are created with CREATE_NEW_PROCESS_GROUP, so their group ID == their PID.
+    result = kernel.GenerateConsoleCtrlEvent(0, pid)  # 0 = CTRL_C_EVENT, pid = child's process group only
     if not result:
         print(f"GenerateConsoleCtrlEvent failed: {{ctypes.get_last_error()}}", file=sys.stderr)
         sys.exit(1)

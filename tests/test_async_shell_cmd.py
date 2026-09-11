@@ -620,6 +620,41 @@ class TestOptionalJustification:
         assert 'ValueError' not in result
         assert 'Tool ID: 3' in result or 'Ctrl+C sent' in result or 'Failed' in result
 
+    def test_windows_ctrl_c_scoped_to_target_pid_not_broadcast(self):
+        """Regression (todo.md #166): __ctrl_c must NOT broadcast CTRL_C_EVENT to the
+        whole console. The Windows helper builds a subprocess that calls
+        GenerateConsoleCtrlEvent(event, group). Passing 0 as `group` broadcasts to EVERY
+        process attached to the console — and because async children are spawned WITHOUT
+        CREATE_NEW_CONSOLE (console_window=False) they share the AC server's console, so a
+        broadcast delivers Ctrl+C to the AC server itself and kills the whole instance.
+
+        The fix scopes the event to the child's own process group (== its PID, since it is
+        created with CREATE_NEW_PROCESS_GROUP). This test inspects the generated helper
+        source to pin that behavior, so a future revert to `GenerateConsoleCtrlEvent(0, 0)`
+        fails here even on non-Windows CI.
+        """
+        from agent_cascade.async_shell_pkg import windows as _win_mod
+
+        captured = {}
+
+        def _fake_run(cmd, *args, **kwargs):
+            # cmd == [sys.executable, '-c', helper_code]
+            captured['helper'] = cmd[2]
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with patch.object(_win_mod.subprocess, 'run', side_effect=_fake_run):
+            ok = _win_mod._send_windows_ctrl_c(12345)
+
+        assert ok is True
+        helper = captured['helper']
+        # The event must target the specific pid (scoped), not 0 (console-wide broadcast).
+        assert 'GenerateConsoleCtrlEvent(0, pid)' in helper
+        assert 'GenerateConsoleCtrlEvent(0, 0)' not in helper
+        # The concrete pid must be embedded in the helper so `pid` resolves to it.
+        assert 'pid = 12345' in helper
+
     def test_heartbeat_update_without_justification(self, shell_cmd_tool):
         tracker = self._tracker_with_task(tool_id=4, heartbeat_interval=10.0)
         _make_tool_with_tracker(shell_cmd_tool, tracker)

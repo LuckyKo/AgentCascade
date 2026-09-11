@@ -6,6 +6,7 @@ Phase 3b pure-move refactor. ``broadcast_stream_update`` calls
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -61,7 +62,18 @@ _last_force_full_evict_time: float = 0.0
 # Set False / remove after diagnosis. When False, nothing below is logged and
 # there is no measurable overhead. See reports/streaming_backend_probe_HOWTO.md
 # ────────────────────────────────────────────────────────────────────────────
-STREAM_BACKEND_DEBUG = False  # streaming backlog probe — code retained for per-instance "weird mode" diagnosis; set True to re-enable (see reports/streaming_backend_probe_HOWTO.md). Probe state is self-cleaning and a no-op when False.
+# Streaming backlog probe — code retained for per-instance "weird mode" diagnosis.
+# Enable via env var STREAM_BACKEND_DEBUG=1/true/yes/on (case-insensitive) so it can be
+# toggled from launch scripts without editing this file. Defaults to False (no-op, zero
+# overhead). See reports/stream_probe_backend_HOWTO.md. Probe state is self-cleaning and a
+# no-op when off.
+def _env_flag(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ('1', 'true', 'yes', 'on')
+
+STREAM_BACKEND_DEBUG = _env_flag('STREAM_BACKEND_DEBUG', False)
 
 _PROBE_LOCK = threading.Lock()
 _PROBE_STATE: dict = {}
@@ -95,10 +107,20 @@ def _probe_get_logger():
         project_root = Path(__file__).resolve().parent.parent.parent
         log_dir = project_root / 'logs'
         log_dir.mkdir(parents=True, exist_ok=True)
+        # Instance-suffixed filename (matches the app logger's console_{instance_id}.log
+        # convention) so concurrent instances with the probe enabled don't collide on one
+        # shared file. get_instance_suffix() returns '_<id>' (with underscore) or ''. Lazy
+        # import avoids the __init__ → agent → log → instance_id cycle.
+        try:
+            from agent_cascade.instance_id import get_instance_suffix
+            _suffix = get_instance_suffix()
+        except Exception:
+            _suffix = ''
+        probe_filename = f'stream_probe_backend{_suffix}.log'
         probe_logger = logging.getLogger('stream_probe_backend')
         if not probe_logger.handlers:  # idempotent
             probe_logger.setLevel(logging.INFO)
-            fh = logging.FileHandler(str(log_dir / 'stream_probe_backend.log'), encoding='utf-8', delay=True)
+            fh = logging.FileHandler(str(log_dir / probe_filename), encoding='utf-8', delay=True)
             fh.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(message)s', datefmt='%H:%M:%S'))
             probe_logger.addHandler(fh)
             probe_logger.propagate = False  # never leak into the root/main logger
