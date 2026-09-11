@@ -2213,9 +2213,9 @@ function handleServerMessage(data) {
       // button label and "⏸ Paused" status without waiting for the next full-state refresh.
       if (data.paused !== undefined) state.paused = data.paused;
       if (data.current_model && statusModel) statusModel.textContent = data.current_model;
+      const telemNow = performance.now();
       if (data.telemetry) {
         state.pendingTelemetry = data.telemetry;
-        const telemNow = performance.now();
         if (telemNow - state.genStats.lastTelemetryUpdate > THROTTLE.TELEMETRY_MS) {
           updateTelemetryPanel(data.telemetry);
           state.genStats.lastTelemetryUpdate = telemNow;
@@ -2227,12 +2227,9 @@ function handleServerMessage(data) {
       // so these two tables otherwise refresh only at turn-end. Throttled to ~30s — no
       // need for fast telemetry; a lightweight REST GET every 30s keeps them live without
       // hammering the API. No-op when not generating (stream_update only flows then).
-      {
-        const fetchNow = performance.now();
-        if (state.generating && fetchNow - state.lastTelemetryFetch > THROTTLE.TELEMETRY_FETCH_MS) {
-          state.lastTelemetryFetch = fetchNow;
-          fetchTelemetry();
-        }
+      if (state.generating && telemNow - state.lastTelemetryFetch > THROTTLE.TELEMETRY_FETCH_MS) {
+        state.lastTelemetryFetch = telemNow;
+        fetchTelemetry();
       }
 
              const now = performance.now();

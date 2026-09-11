@@ -341,7 +341,8 @@ class TextChatAtOAI(BaseFnCallModel):
                 # Ids to match against: the user's configured name plus the id the server
                 # last reported in its responses. Matching both preserves exact-match
                 # behavior (the server id can differ from the config alias, e.g. a gguf
-                # filename) without mutating self.model.
+                # filename) without mutating self.model. Shared by the exact and substring
+                # passes below so they cannot drift.
                 _match_ids = {self.model}
                 if self._server_model:
                     _match_ids.add(self._server_model)
@@ -359,12 +360,11 @@ class TextChatAtOAI(BaseFnCallModel):
                         target_model = loaded_models[0]
                         logger.debug(f"Using loaded model '{target_model.get('id')}' for context detection.")
                     elif len(loaded_models) > 1:
-                        # Multiple loaded — try substring match against the configured name
-                        # or the server-reported id.
-                        _names = [n for n in (self.model, self._server_model) if n]
+                        # Multiple loaded — try substring match against the same id set
+                        # used by the exact pass above (config name and/or server-reported id).
                         for m in loaded_models:
                             mid_lower = m.get('id', '').lower()
-                            if any(n.lower() in mid_lower for n in _names):
+                            if any(n.lower() in mid_lower for n in _match_ids):
                                 target_model = m
                                 logger.debug(f"Using loaded model '{target_model.get('id')}' for context detection (name match).")
                                 break
