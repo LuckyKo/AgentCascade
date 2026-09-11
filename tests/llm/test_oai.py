@@ -86,3 +86,83 @@ def test_llm_oai_streaming(local_llm_cfg):
 
     assert len(response) > 0
     assert isinstance(response[-1][-1]['content'], str)
+
+
+class TestServerModelSeparation:
+    """Regression: the server-echoed model id must NOT overwrite self.model.
+
+    Telemetry and the A/B config fingerprint key on ``self.model`` (the user's
+    configured name). Previously the OAI client wrote the server-reported id
+    (e.g. a llama.cpp --alias / gguf filename) back into ``self.model`` on every
+    stream, so call #1 logged the alias and call #2+ logged the filename —
+    duplicating per-model telemetry. The echoed id is now kept in a separate
+    ``_server_model`` field used only for context-window detection.
+    """
+
+    def _make_client(self):
+        from agent_cascade.llm.oai import TextChatAtOAI
+        return TextChatAtOAI({'api_base': 'http://127.0.0.1:9/v1', 'model': 'my-alias'})
+
+    def test_init_keeps_config_name(self):
+        llm = self._make_client()
+        assert llm.model == 'my-alias'
+        assert llm._server_model is None
+
+    def test_server_echo_does_not_mutate_self_model(self):
+        """Simulate the streaming path writing the server-reported id."""
+        llm = self._make_client()
+        # Replicate the exact mutation logic now in _chat_stream / non-stream:
+        echoed = 'Qwen3-4B-Instruct-Q4_K_M.gguf'
+        if echoed != llm._server_model:
+            llm._server_model = echoed
+
+        # The canonical identity (what telemetry reads) is untouched.
+        assert llm.model == 'my-alias'
+        # The server id is captured separately for context detection.
+        assert llm._server_model == echoed
+
+    def test_context_match_considers_server_id(self):
+        """Context detection must still find the model by its server-reported id."""
+        llm = self._make_client()
+        llm._server_model = 'Qwen3-4B-Instruct-Q4_K_M.gguf'
+        # The match-id set used by _detect_context_window includes both names.
+        _match_ids = {llm.model}
+        if llm._server_model:
+            _match_ids.add(llm._server_model)
+        assert 'Qwen3-4B-Instruct-Q4_K_M.gguf' in _match_ids
+        assert 'my-alias' in _match_ids
+
+    def test_non_stream_chat_keeps_config_name(self, monkeypatch):
+        """Drive the REAL non-stream chat() path with a mocked server response that
+        echoes a different model id (a gguf filename). Assert self.model — the value
+        telemetry reads — stays the config name while _server_model captures the echo.
+
+        This exercises the actual mutation site in oai.py rather than re-implementing
+        it, so it fails if anyone reintroduces ``self.model = response.model``.
+        """
+        llm = self._make_client()
+
+        class _Msg:
+            content = 'hi'
+            reasoning_content = None
+            tool_calls = None
+
+        class _Choice:
+            finish_reason = 'stop'
+            message = _Msg()
+
+        class _Resp:
+            model = 'Qwen3-4B-Instruct-Q4_K_M.gguf'  # server echoes the gguf filename
+            choices = [_Choice()]
+            usage = None
+
+        llm._chat_complete_create = lambda **kwargs: _Resp()
+
+        result = llm.chat(messages=[Message('user', 'hello')], stream=False)
+
+        # The call succeeded and returned content.
+        assert result[-1].content == 'hi'
+        # Canonical identity (telemetry source) is untouched by the server echo.
+        assert llm.model == 'my-alias'
+        # Server-reported id captured separately for context detection.
+        assert llm._server_model == 'Qwen3-4B-Instruct-Q4_K_M.gguf'

@@ -308,7 +308,13 @@ class TextChatAtOAI(BaseFnCallModel):
         # Attempt to dynamically detect context window size from local model servers (LM Studio, Ollama, etc.)
         self.dynamic_model = not cfg.get('model') or cfg.get('model') == 'whatever_is_on'
         self.original_model = self.model
-        
+        # The model id the server actually reports in its responses (e.g. a llama.cpp
+        # --alias / gguf filename). Tracked SEPARATELY from self.model: self.model is
+        # kept as the user's configured name (the canonical identity for telemetry and
+        # A/B fingerprinting), while _server_model feeds context-window detection, which
+        # needs to match the id the server exposes in /models.
+        self._server_model = None
+
         if api_base and self.model and 'max_input_tokens' not in self.generate_cfg:
             self._detect_context_window(api_base, api_key)
 
@@ -331,10 +337,18 @@ class TextChatAtOAI(BaseFnCallModel):
                 data = models_data.get('data', [])
                 non_chat_keywords = ['whisper', 'tts-', '-tts', 'embedding', 'rerank']
                 target_model = None
-                
-                # 1. Try exact match
+
+                # Ids to match against: the user's configured name plus the id the server
+                # last reported in its responses. Matching both preserves exact-match
+                # behavior (the server id can differ from the config alias, e.g. a gguf
+                # filename) without mutating self.model.
+                _match_ids = {self.model}
+                if self._server_model:
+                    _match_ids.add(self._server_model)
+
+                # 1. Try exact match (config name or server-reported id)
                 for m in data:
-                    if m.get('id') == self.model:
+                    if m.get('id') in _match_ids:
                         target_model = m
                         break
                 
@@ -345,9 +359,12 @@ class TextChatAtOAI(BaseFnCallModel):
                         target_model = loaded_models[0]
                         logger.debug(f"Using loaded model '{target_model.get('id')}' for context detection.")
                     elif len(loaded_models) > 1:
-                        # Multiple loaded — try substring match against configured model name
+                        # Multiple loaded — try substring match against the configured name
+                        # or the server-reported id.
+                        _names = [n for n in (self.model, self._server_model) if n]
                         for m in loaded_models:
-                            if self.model and self.model.lower() in m.get('id', '').lower():
+                            mid_lower = m.get('id', '').lower()
+                            if any(n.lower() in mid_lower for n in _names):
                                 target_model = m
                                 logger.debug(f"Using loaded model '{target_model.get('id')}' for context detection (name match).")
                                 break
@@ -496,12 +513,14 @@ class TextChatAtOAI(BaseFnCallModel):
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
 
-                    # Update local model info if returned by the server (e.g. LM Studio)
-                    # NOTE: self.model is updated here for context window detection, but original_model
-                    # is intentionally NOT updated — the dynamic branch logic no longer depends on it.
+                    # Capture the model id the server reports (e.g. a llama.cpp --alias /
+                    # gguf filename). Stored in _server_model ONLY — self.model stays as the
+                    # user's configured name so telemetry/A-B fingerprinting keep a single
+                    # canonical identity. A change in the reported id re-triggers context
+                    # detection (same condition as before, without mutating self.model).
                     if hasattr(chunk, 'model') and chunk.model:
-                        if chunk.model != self.model:
-                            self.model = chunk.model
+                        if chunk.model != self._server_model:
+                            self._server_model = chunk.model
                             if self.dynamic_model and cur_base:
                                 self._detect_context_window(cur_base, cur_key)
                         
@@ -537,12 +556,11 @@ class TextChatAtOAI(BaseFnCallModel):
                     except Exception:
                         pass
 
-                    # Update local model info if returned by the server
-                    # NOTE: self.model is updated here for context window detection, but original_model
-                    # is intentionally NOT updated — the dynamic branch logic no longer depends on it.
+                    # Capture the model id the server reports (see _server_model note above).
+                    # Stored in _server_model only — self.model keeps the configured name.
                     if hasattr(chunk, 'model') and chunk.model:
-                        if chunk.model != self.model:
-                            self.model = chunk.model
+                        if chunk.model != self._server_model:
+                            self._server_model = chunk.model
                             if self.dynamic_model and cur_base:
                                 self._detect_context_window(cur_base, cur_key)
 
@@ -738,12 +756,11 @@ class TextChatAtOAI(BaseFnCallModel):
         try:
             response = self._chat_complete_create(model=request_model, messages=messages, stream=False, **generate_cfg)
 
-            # Update local model info if returned by the server
-            # NOTE: self.model is updated here for context window detection, but original_model
-            # is intentionally NOT updated — the dynamic branch logic no longer depends on it.
+            # Capture the model id the server reports (see _server_model note above).
+            # Stored in _server_model only — self.model keeps the configured name.
             if hasattr(response, 'model') and response.model:
-                if response.model != self.model:
-                    self.model = response.model
+                if response.model != self._server_model:
+                    self._server_model = response.model
                     if self.dynamic_model and cur_base:
                         self._detect_context_window(cur_base, cur_key)
 
