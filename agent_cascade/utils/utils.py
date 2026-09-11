@@ -367,10 +367,13 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
     else:
         headers = {
             'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.3',
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
         }
         try:
-            response = requests.get(url, headers=headers, timeout=DEFAULT_REQUEST_TIMEOUT)
+            response = requests.get(url, headers=headers, timeout=(10, 30))
             response.raise_for_status()
             with open(new_path, 'wb') as file:
                 file.write(response.content)
