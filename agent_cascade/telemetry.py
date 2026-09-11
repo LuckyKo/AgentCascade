@@ -303,8 +303,9 @@ class TelemetryCollector:
 
             # Update per-config stats — duration is only known at turn end. The
             # other counters (turns, llm_calls, tool_calls, tokens, loops, retries,
-            # total_compressions) are now accumulated live in the recorders (B1-B5),
-            # so they must NOT be re-flushed here or they would double-count.
+            # total_compressions) are now accumulated live in the individual record_*
+            # methods as events happen, so they must NOT be re-flushed here or they
+            # would double-count.
             if fp:
                 self._ensure_config_stats(fp, turn.get("config_description"))
                 cs = self._config_stats[fp]

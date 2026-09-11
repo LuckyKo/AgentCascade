@@ -70,6 +70,9 @@ const AUTO_SCROLL_THRESHOLD = 50; // Distance from bottom (px) to consider user 
 let lastNotificationSoundTime = 0;
 const NOTIFICATION_COOLDOWN_MS = 500;
 
+// Telemetry polling guard: ensures the periodic full-tables setInterval is created exactly once.
+let _telemetryPollStarted = false;
+
 // ── Import retry configuration ──
 const IMPORT_RETRY_MAX_ATTEMPTS = 10;
 const IMPORT_RETRY_INTERVAL_MS = 100;
@@ -5769,7 +5772,6 @@ document.addEventListener('visibilitychange', () => {
 });
 
 connect();
-let _telemetryPollStarted = false; // guard: startTelemetryPoll() creates its interval exactly once
 startTelemetryPoll(); // WS-independent ~30s refresh of the full telemetry tables (created once)
 initAgentMessagesTab(); // NEW: initialize Agent Messages tab
 if ($('#apply-mcp-btn')) {
@@ -5957,7 +5959,9 @@ async function fetchTelemetry() {
 }
 
 // True when there's agent work in progress worth keeping the full telemetry tables fresh:
-// the main generation is running, or any sub-agent is active / not yet halted.
+// the main generation is running, or any sub-agent that is currently active or not yet
+// halted (i.e., still potentially producing telemetry). We deliberately keep polling while
+// a sub-agent exists but isn't halted — it may be blocked on a long tool call with no frames.
 function _workInProgress() {
   return state.generating ||
     Object.values(state.subAgents).some(sa => sa && (sa.active || !sa.is_halted));
@@ -5966,10 +5970,9 @@ function _workInProgress() {
 // WS-independent periodic re-fetch of the FULL telemetry tables (Config Fingerprint A/B,
 // Agent Class Usage, Skill Usage). The WS stream only carries the session summary, and a
 // long tool call blocks the engine so no stream_update frames flow — a real setInterval is
-// the only thing that guarantees the ~30s cadence. Created exactly once (guarded) so a
-// reconnect never spawns duplicate timers. No-op when idle via _workInProgress().
-// NOTE: `_telemetryPollStarted` is declared near the top of the script (before the call to
-// startTelemetryPoll below) — `let` has no hoisting, so it must be initialized before use.
+// the only thing that guarantees the ~30s cadence. Created exactly once (guarded by
+// _telemetryPollStarted) so a reconnect never spawns duplicate timers. No-op when idle via
+// _workInProgress().
 function startTelemetryPoll() {
   if (_telemetryPollStarted) return;
   _telemetryPollStarted = true;
