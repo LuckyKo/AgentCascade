@@ -350,8 +350,6 @@ HTTP_POOL_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_HTTP_POOL_TIMEOUT', 30.0))  # Timeout waiting for connection from pool
 
 # Settings for telemetry
-SYSTEM_PROMPT_HASH_MAX_CHARS: int = int(os.getenv(
-    'QWEN_AGENT_SYSTEM_PROMPT_HASH_MAX_CHARS', 2000))  # Max chars for system prompt before hashing
 DEFAULT_RECENT_EVENT_COUNT: int = int(os.getenv(
     'QWEN_AGENT_DEFAULT_RECENT_EVENT_COUNT', 50))  # Default recent events count
 MAX_EVENTS_IN_MEMORY: int = int(os.getenv(

@@ -536,7 +536,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     )
                     desc = tel.describe_config(model=model, generate_cfg=cfg, tools=tools_list, api_base=api_base)
                     tel.record_turn_start(instance.instance_name,
-                                         config_fingerprint=fp, config_description=desc)
+                                         config_fingerprint=fp, config_description=desc,
+                                         agent_class=instance.agent_class)
                 except Exception:
                     pass
 

@@ -13,7 +13,6 @@ import datetime
 import hashlib
 import json
 import logging
-import re
 import threading
 import time
 from pathlib import Path
@@ -33,7 +32,6 @@ MAX_ERROR_MESSAGE_LENGTH = 200
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
 
 from agent_cascade.settings import (
-    SYSTEM_PROMPT_HASH_MAX_CHARS,
     DEFAULT_RECENT_EVENT_COUNT,
     MAX_EVENTS_IN_MEMORY,
 )
@@ -106,6 +104,11 @@ class TelemetryCollector:
         # Per-config aggregates for A/B comparison
         self._config_stats: Dict[str, Dict] = {}
 
+        # Per-agent-class aggregates for the "Agent Class Usage" table.
+        # Keyed by agent_class (one model can serve multiple classes now that the
+        # fingerprint is model-only), so this is a separate accumulator from _config_stats.
+        self._agent_class_stats: Dict[str, Dict] = {}
+
         # Guard against duplicate session_end events (BUG 8 fix)
         self._session_ended = False
 
@@ -126,62 +129,6 @@ class TelemetryCollector:
     # ── Config Fingerprinting ─────────────────────────────────────────────
 
     @staticmethod
-    def _normalize_system_prompt(prompt: str) -> str:
-        """Remove instance-specific identifiers from system prompt for fingerprinting.
-
-        System prompts are constructed as "You are {instance_name}." where instance_name
-        includes unique suffixes (e.g., Security_op_091f048b). This strips those unique
-        parts so all instances of the same agent class share a fingerprint.
-
-        Example: "You are Security_op_091f048b.\nRole: ..." → "You are Security_op.\nRole: ..."
-        """
-        if not prompt:
-            return prompt
-
-        lines = prompt.split('\n', 1)
-        first_line = lines[0]
-
-        # Match "You are <identifier>." where identifier may contain underscores
-        match = re.match(r'^(You are\s+)([A-Za-z][A-Za-z0-9_]*?)(\..*)$', first_line)
-        if not match:
-            return prompt
-
-        prefix_text = match.group(1)  # "You are "
-        name = match.group(2)         # e.g., "Security_op_091f048b" or "Maine"
-        rest = match.group(3)         # "." or remaining text after period
-
-        parts = name.split('_')
-        if len(parts) == 1:
-            # Simple name like "Maine" — keep as is
-            normalized_name = name
-        else:
-            # Multi-part name like "Security_op_091f048b" — strip unique suffixes.
-            # Strip trailing underscore-separated parts that look like unique identifiers:
-            # - Pure hex strings (e.g., 091f048b)
-            # - Pure numeric strings (e.g., 1, 42)
-            # - Mixed alphanumeric strings longer than 3 chars (e.g., worker1, abc123)
-            # Keep short all-letter parts that look like meaningful names (e.g., "op").
-            keep_parts = [parts[0]]  # Always keep the first part (agent class)
-            for part in parts[1:]:
-                is_unique = False
-                if part.isdigit():
-                    # Pure numeric suffix like "_1", "_42"
-                    is_unique = True
-                elif part.isalpha() and len(part) <= 3:
-                    # Short all-letter part like "op" — keep it
-                    pass
-                elif len(part) > 3 and any(c.isdigit() for c in part):
-                    # Mixed alphanumeric or long hex-like string (e.g., worker1, 091f048b)
-                    is_unique = True
-                if is_unique:
-                    break
-                keep_parts.append(part)
-            normalized_name = '_'.join(keep_parts)
-
-        lines[0] = f"{prefix_text}{normalized_name}{rest}"
-        return '\n'.join(lines)
-
-    @staticmethod
     def fingerprint_config(
         model: str = "",
         generate_cfg: Optional[Dict] = None,
@@ -191,32 +138,17 @@ class TelemetryCollector:
     ) -> str:
         """
         Create a stable hash fingerprint from the current agent configuration.
-        This groups runs by their config for A/B comparison.
+
+        The grouping key is the MODEL ONLY — runs are grouped by model for A/B
+        comparison regardless of endpoint, sampling params, system prompt, or tool
+        set. ``generate_cfg`` / ``system_prompt`` / ``tools`` / ``api_base`` are kept
+        in the signature purely for call-site compatibility; they no longer affect
+        the fingerprint (the "prompt print" grouping concern was removed).
+
+        Returns a stable 12-char hex string so it stays compatible with
+        ``_config_stats`` keying and JSONL export.
         """
-        cfg = generate_cfg or {}
-
-        # Extract only the params that matter for comparison
-        relevant_keys = [
-            "temperature", "top_p", "top_k", "min_p",
-            "max_tokens", "max_input_tokens",
-            "presence_penalty", "frequency_penalty",
-            "repetition_penalty", "repeat_penalty",
-        ]
-        params = {k: cfg.get(k) for k in relevant_keys if cfg.get(k) is not None}
-
-        # Normalize system prompt to group by agent class, not instance
-        normalized_prompt = TelemetryCollector._normalize_system_prompt(system_prompt)
-
-        # Group by API endpoint (api_base) rather than specific model,
-        # so that all models from the same provider/endpoint share a fingerprint.
-        fingerprint_data = {
-            "api_base": api_base or model,  # fallback to model if api_base empty
-            "params": params,
-            "system_prompt_hash": hashlib.md5(normalized_prompt[:SYSTEM_PROMPT_HASH_MAX_CHARS].encode()).hexdigest()[:8],
-            "tools": sorted(tools or []),
-        }
-
-        raw = json.dumps(fingerprint_data, sort_keys=True, default=str)
+        raw = model or ""
         return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
     @staticmethod
@@ -273,8 +205,13 @@ class TelemetryCollector:
         instance_name: str,
         config_fingerprint: str = "",
         config_description: Optional[Dict] = None,
+        agent_class: str = "",
     ):
-        """Mark the start of a new agent turn."""
+        """Mark the start of a new agent turn.
+
+        ``agent_class`` is optional; when non-empty it drives the per-agent-class
+        usage accumulator (see ``get_agent_class_summary()``).
+        """
         with _telemetry_lock:
             # Warn if an active turn already exists with a different fingerprint
             existing_turn = self._active_turns.get(instance_name)
@@ -289,6 +226,7 @@ class TelemetryCollector:
                 "start_time": time.perf_counter(),
                 "config_fingerprint": config_fingerprint,
                 "config_description": config_description or {},
+                "agent_class": agent_class,
                 "llm_calls": 0,
                 "tool_calls": 0,
                 "tool_calls_detail": [],
@@ -362,7 +300,35 @@ class TelemetryCollector:
                     if not td.get("success", True):
                         cs["tool_failures_by_name"][td["tool_name"]] += 1
 
+            # Update per-agent-class stats (separate accumulator — one model can
+            # serve multiple agent classes now that the fingerprint is model-only).
+            agent_class = turn.get("agent_class") or ""
+            if agent_class:
+                acs = self._ensure_agent_class_stats(agent_class)
+                acs["turns"] += 1
+                acs["total_time_ms"] += duration_ms
+                acs["tokens_generated"] += turn["input_tokens_est"] + turn["output_tokens_est"]
+                acs["tool_calls"] += turn["tool_calls"]
+                for td in turn["tool_calls_detail"]:
+                    if not td.get("success", True):
+                        acs["tool_failures"] += 1
+
         self._write_event(event)
+
+    def _ensure_agent_class_stats(self, agent_class: str):
+        """Ensure per-agent-class stats dict exists for *agent_class*, creating it if needed.
+
+        Caller must hold ``_telemetry_lock``.
+        """
+        if agent_class not in self._agent_class_stats:
+            self._agent_class_stats[agent_class] = {
+                "turns": 0,
+                "total_time_ms": 0,
+                "tokens_generated": 0,
+                "tool_calls": 0,
+                "tool_failures": 0,
+            }
+        return self._agent_class_stats[agent_class]
 
     def record_llm_call_start(self, instance_name: str, input_tokens_est: int = 0, model: str = ""):
         """Mark the start of an LLM API call."""
@@ -806,6 +772,32 @@ class TelemetryCollector:
                     "tool_effectiveness": tool_rates,
                 })
 
+        return result
+
+    def get_agent_class_summary(self) -> List[Dict]:
+        """Get per-agent-class usage stats for the "Agent Class Usage" table.
+
+        Returns a snapshot list (not live dicts) so callers can iterate safely
+        without holding the lock. Each entry:
+        ``{agent_class, tool_usage_accuracy, total_time_sec, tokens_generated, turns}``
+        where ``tool_usage_accuracy`` is a 0-100 float (or None when no tool calls).
+        """
+        with _telemetry_lock:
+            result = []
+            for agent_class in sorted(self._agent_class_stats):
+                acs = self._agent_class_stats[agent_class]
+                tool_calls = acs["tool_calls"]
+                if tool_calls > 0:
+                    accuracy = round((tool_calls - acs["tool_failures"]) / tool_calls * 100, 1)
+                else:
+                    accuracy = None
+                result.append({
+                    "agent_class": agent_class,
+                    "tool_usage_accuracy": accuracy,
+                    "total_time_sec": round(acs["total_time_ms"] / 1000, 1),
+                    "tokens_generated": acs["tokens_generated"],
+                    "turns": acs["turns"],
+                })
         return result
 
     def get_recent_events(self, count: int = DEFAULT_RECENT_EVENT_COUNT) -> List[Dict]:

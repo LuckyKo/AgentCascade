@@ -5887,6 +5887,29 @@ function updateTelemetryConfigTable(configs) {
   }).join('');
 }
 
+function updateTelemetryAgentClassTable(rows) {
+  const tbody = document.getElementById('telem-agentclass-tbody');
+  if (!tbody) return;
+
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No agent class data yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => {
+    const hasAcc = r.tool_usage_accuracy !== null && r.tool_usage_accuracy !== undefined;
+    const accCell = hasAcc
+      ? `<span class="${getSuccessClass(r.tool_usage_accuracy)}">${r.tool_usage_accuracy.toFixed(1)}%</span>`
+      : '—';
+    return `<tr>
+      <td>${escapeHtml(r.agent_class)}</td>
+      <td>${accCell}</td>
+      <td>${formatMs((r.total_time_sec || 0) * 1000)}</td>
+      <td>${formatNumber(r.tokens_generated)}</td>
+    </tr>`;
+  }).join('');
+}
+
 // Fetch full telemetry from API (for config comparison data not in WebSocket)
 async function fetchTelemetry() {
   try {
@@ -5894,6 +5917,7 @@ async function fetchTelemetry() {
     const data = await res.json();
     if (data.session) updateTelemetryPanel(data.session);
     if (data.configs) updateTelemetryConfigTable(data.configs);
+    if (data.agent_classes) updateTelemetryAgentClassTable(data.agent_classes);
   } catch (err) {
     console.warn('Failed to fetch telemetry:', err);
   }

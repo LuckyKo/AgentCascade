@@ -367,6 +367,112 @@ class TestConfigComparison:
 
 
 # ---------------------------------------------------------------------------
+# I-bis. Config fingerprint is model-only (no prompt print)
+# ---------------------------------------------------------------------------
+
+class TestFingerprintModelOnly:
+    def test_same_model_different_configs_same_fingerprint(self):
+        """Same model but different prompts/params/tools/api_base -> SAME fingerprint."""
+        base = TelemetryCollector.fingerprint_config(model="qwen3-4b")
+        varied = TelemetryCollector.fingerprint_config(
+            model="qwen3-4b",
+            generate_cfg={"temperature": 0.9, "max_tokens": 8192},
+            system_prompt="You are a totally different agent.",
+            tools=["read_file", "write_file"],
+            api_base="http://localhost:1234/v1",
+        )
+        assert base == varied
+
+    def test_different_models_different_fingerprint(self):
+        fp_a = TelemetryCollector.fingerprint_config(model="qwen3-4b")
+        fp_b = TelemetryCollector.fingerprint_config(model="llama-3-8b")
+        assert fp_a != fp_b
+
+    def test_fingerprint_is_stable_string(self):
+        """Fingerprint must stay a stable short string for _config_stats/JSONL compat."""
+        fp = TelemetryCollector.fingerprint_config(model="qwen3-4b")
+        assert isinstance(fp, str)
+        assert len(fp) == 12
+        # Deterministic across calls.
+        assert fp == TelemetryCollector.fingerprint_config(model="qwen3-4b")
+
+    def test_fingerprint_ignores_system_prompt_arg(self):
+        """system_prompt no longer influences the fingerprint (prompt print removed)."""
+        with_prompt = TelemetryCollector.fingerprint_config(
+            model="m", system_prompt="You are Security_op_091f048b."
+        )
+        without_prompt = TelemetryCollector.fingerprint_config(model="m")
+        assert with_prompt == without_prompt
+
+
+# ---------------------------------------------------------------------------
+# I-ter. Agent class usage summary
+# ---------------------------------------------------------------------------
+
+class TestAgentClassSummary:
+    def test_empty_when_no_agent_class_turns(self, collector):
+        # A turn without agent_class does not create an entry.
+        collector.record_turn_start("inst")
+        collector.record_turn_end("inst")
+        assert collector.get_agent_class_summary() == []
+
+    def test_accuracy_time_tokens_for_scripted_sequence(self, collector):
+        """Two turns for one class: 3 tool calls (2 success, 1 failure) -> ~66.7% accuracy."""
+        # Turn 1: two successful tool calls.
+        collector.record_turn_start("inst", agent_class="coder")
+        collector.record_tool_call_start("inst", "read_file")
+        collector.record_tool_call_end("inst", "read_file", success=True)
+        collector.record_tool_call_start("inst", "write_file")
+        collector.record_tool_call_end("inst", "write_file", success=True)
+        collector.record_llm_call_start("inst", input_tokens_est=100, model="qwen3-4b")
+        collector.record_llm_call_end("inst", output_tokens_est=50)
+        collector.record_turn_end("inst")
+
+        # Turn 2: one failing tool call.
+        collector.record_turn_start("inst", agent_class="coder")
+        collector.record_tool_call_start("inst", "write_file")
+        collector.record_tool_call_end("inst", "write_file", success=False, error="boom")
+        collector.record_llm_call_start("inst", input_tokens_est=200, model="qwen3-4b")
+        collector.record_llm_call_end("inst", output_tokens_est=80)
+        collector.record_turn_end("inst")
+
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert "coder" in rows
+        row = rows["coder"]
+        assert row["turns"] == 2
+        # tokens_generated = (100+50) + (200+80) = 430
+        assert row["tokens_generated"] == 430
+        # accuracy = (3 - 1) / 3 * 100 = 66.7
+        assert row["tool_usage_accuracy"] == 66.7
+        # total_time_sec is a non-negative float (turns actually took some wall time).
+        assert isinstance(row["total_time_sec"], float)
+        assert row["total_time_sec"] >= 0
+
+    def test_no_tool_calls_gives_null_accuracy(self, collector):
+        collector.record_turn_start("inst", agent_class="researcher")
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("inst", output_tokens_est=5)
+        collector.record_turn_end("inst")
+
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert rows["researcher"]["tool_usage_accuracy"] is None
+        assert rows["researcher"]["tokens_generated"] == 15
+
+    def test_multiple_classes_are_separate_rows(self, collector):
+        """One model can serve multiple classes -> separate accumulator rows."""
+        for cls in ("coder", "reviewer"):
+            collector.record_turn_start("inst", agent_class=cls)
+            collector.record_llm_call_start("inst", input_tokens_est=10, model="same-model")
+            collector.record_llm_call_end("inst", output_tokens_est=5)
+            collector.record_turn_end("inst")
+
+        rows = {r["agent_class"]: r for r in collector.get_agent_class_summary()}
+        assert set(rows) == {"coder", "reviewer"}
+        assert rows["coder"]["turns"] == 1
+        assert rows["reviewer"]["turns"] == 1
+
+
+# ---------------------------------------------------------------------------
 # J. Event log
 # ---------------------------------------------------------------------------
 
