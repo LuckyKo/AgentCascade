@@ -1165,8 +1165,8 @@ class Grep(BaseTool):
             },
             'timeout': {
                 'type': 'number',
-                'description': 'Timeout in seconds for the grep operation (default: 30.0). Increase for large codebases.',
-                'default': 30.0
+                'description': 'Timeout in seconds for the grep operation (default: 5.0). Searches normally finish well under this; only raise it for very large codebases.',
+                'default': 5.0
             }
         },
         'required': ['pattern'],
@@ -1197,8 +1197,13 @@ class Grep(BaseTool):
             ignore_vcs = bool(ignore_vcs)
         context = params.get('context', 0)
         smart_case = params.get('smart_case', True)
-        # Read timeout parameter with default 30.0
-        timeout = params.get('timeout', 30.0)
+        # Default timeout comes from settings (DEFAULT_GREP_TIMEOUT); an explicit
+        # caller value still overrides it.
+        try:
+            from agent_cascade.settings import DEFAULT_GREP_TIMEOUT as _default_grep_timeout
+        except Exception:
+            _default_grep_timeout = 5.0
+        timeout = params.get('timeout', _default_grep_timeout)
 
         # Get the truncation limit from agent/tool options
         char_limit = 2000

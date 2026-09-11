@@ -342,7 +342,7 @@ class GrepMixin:
     def _grep_single_file(self, file_path: Path, pattern: str, char_limit: int,
                           include: str = "*", exclude: str = "", context: int = 0, smart_case: bool = True,
                           agent_name: str = "unknown",
-                          spill_file_path: Optional[str] = None, timeout: float = 30.0) -> str:
+                          spill_file_path: Optional[str] = None, timeout: float = 5.0) -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
 
         try:
@@ -435,7 +435,7 @@ class GrepMixin:
 
         return f"{summary}:\n\n" + output_text
 
-    def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, timeout: float = 30.0, agent_name: str = "unknown",
+    def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, timeout: float = 5.0, agent_name: str = "unknown",
              exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
              spill_file_path: Optional[str] = None) -> str:
         """Search for text pattern in files.

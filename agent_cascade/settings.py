@@ -91,6 +91,10 @@ DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_C
 # so we hand the agent just enough to see what's there rather than a huge block of it.
 DEFAULT_WILD_READ_TRUNCATION_CHARS: int = int(os.getenv('QWEN_AGENT_WILD_READ_TRUNCATION_CHARS', 2000))
 DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 150))
+# Wall-clock ceiling (seconds) for a single grep search before it aborts with a
+# "narrow your search" error. Kept low so a pathological wide search can't hang the
+# agent for tens of seconds; ripgrep searches normally finish well under this.
+DEFAULT_GREP_TIMEOUT: float = float(os.getenv('QWEN_AGENT_GREP_TIMEOUT', 5.0))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC_MATCH_THRESHOLD', 0.90))
 
 # Settings for RAG
