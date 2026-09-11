@@ -34,7 +34,7 @@ class SystemInfo(BaseTool):
         'properties': {
             'help': {
                 'type': 'string',
-                'description': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Leave empty/omit for normal system information.",
+                'description': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information.",
             },
         },
         'required': [],
@@ -55,6 +55,93 @@ class SystemInfo(BaseTool):
                 # Different drive letters on Windows
                 continue
         return False
+
+    def _render_telemetry_dump(self) -> str:
+        """Render a live, human-readable dump of the current session telemetry.
+
+        Computed from ``self.agent_pool.telemetry`` (the same getters the
+        ``/api/telemetry`` endpoint uses) — never raises; degrades to a clear
+        message if telemetry is unavailable. Excludes per-event detail
+        (``recent_events``) to stay compact; raw JSONL is at /api/telemetry/export.
+        """
+        telem = getattr(self.agent_pool, 'telemetry', None)
+        if not telem:
+            return ("system_info telemetry dump unavailable: no telemetry collector "
+                    "attached to the agent pool.")
+        try:
+            session = telem.get_session_summary() or {}
+            configs = telem.get_config_comparison() or []
+            agent_classes = telem.get_agent_class_summary() or []
+            skills = telem.get_skill_usage_summary() or []
+
+            lines = ["--- AC Telemetry Dump (live) ---"]
+
+            # ── Session totals ──
+            lines.append("")
+            lines.append("Session:")
+            for k in ('total_turns', 'total_llm_calls', 'total_tool_calls',
+                      'total_input_tokens_est', 'total_output_tokens_est',
+                      'avg_tps', 'total_retries', 'total_compressions'):
+                if k in session:
+                    lines.append(f"  {k}: {session[k]}")
+            # llm_calls_by_model — per-model call counts
+            by_model = session.get('llm_calls_by_model') or {}
+            if by_model:
+                lines.append("  LLM calls by model:")
+                for model, cnt in sorted(by_model.items(), key=lambda x: -x[1]):
+                    lines.append(f"    {model}: {cnt}")
+
+            # ── Config fingerprint (A/B) comparison ──
+            if configs:
+                lines.append("")
+                lines.append("Config fingerprints (A/B):")
+                for c in configs:
+                    fp = c.get('config_fingerprint', '?')
+                    model = (c.get('config_description') or {}).get('model', '?')
+                    llm_calls = c.get('llm_calls', '')
+                    turns = c.get('turns', '')
+                    avg_tps = c.get('avg_tps', '')
+                    lines.append(
+                        f"  {fp}  model={model}  turns={turns} "
+                        f"llm_calls={llm_calls}  avg_tps={avg_tps}"
+                    )
+
+            # ── Agent class usage ──
+            if agent_classes:
+                lines.append("")
+                lines.append("Agent class usage:")
+                for a in agent_classes:
+                    cls = a.get('agent_class', '?')
+                    acc = a.get('tool_usage_accuracy')
+                    acc_str = f"{acc:.1f}%" if isinstance(acc, (int, float)) else "n/a"
+                    lines.append(
+                        f"  {cls}: turns={a.get('turns', '')} "
+                        f"time={a.get('total_time_sec', '')}s "
+                        f"tokens_gen={a.get('tokens_generated', '')} "
+                        f"tool_acc={acc_str}"
+                    )
+
+            # ── Skill usage ── (get_skill_usage_summary returns a list of
+            # {skill, loads, agent_classes, top_mode}, sorted by loads desc)
+            if skills:
+                lines.append("")
+                lines.append("Skill usage:")
+                for s in skills:
+                    name = s.get('skill', '?')
+                    loads = s.get('loads', '')
+                    top_mode = s.get('top_mode', '')
+                    classes = s.get('agent_classes') or []
+                    cls_str = f" [{', '.join(classes)}]" if classes else ""
+                    mode_str = f" top_mode={top_mode}" if top_mode else ""
+                    lines.append(f"  {name}: loads={loads}{cls_str}{mode_str}")
+
+            lines.append("")
+            lines.append("(Raw JSONL export: GET /api/telemetry/export)")
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.warning(f"system_info telemetry dump failed: {e}")
+            return f"system_info telemetry dump unavailable: {e}"
 
     def _render_help(self, key: str) -> str:
         """Render a help section from the YAML file. Never raises."""
@@ -158,6 +245,9 @@ class SystemInfo(BaseTool):
         except Exception:
             help_key = ''
         if help_key:
+            # Live telemetry dump is computed from the running pool, not static YAML.
+            if help_key.lower() == 'telemetry':
+                return self._render_telemetry_dump()
             return self._render_help(help_key)
 
         # Just return the information as a string

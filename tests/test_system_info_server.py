@@ -117,3 +117,113 @@ class TestSystemInfoHelp:
         """Section matching is case-insensitive."""
         out = self._make_tool().call('{"help": "REST_API"}')
         assert "AC Help: rest_api" in out
+
+
+class _FakeTelemetry:
+    """Minimal stand-in exposing the four getters SystemInfo's dump reads."""
+
+    def get_session_summary(self):
+        return {
+            "total_turns": 3,
+            "total_llm_calls": 7,
+            "total_tool_calls": 12,
+            "total_input_tokens_est": 5000,
+            "total_output_tokens_est": 1500,
+            "avg_tps": 42.5,
+            "total_retries": 1,
+            "total_compressions": 0,
+            "llm_calls_by_model": {"qwen3.8-27b": 5, "gemma-4-31b-it": 2},
+        }
+
+    def get_config_comparison(self):
+        return [{
+            "config_fingerprint": "abc123def456",
+            "config_description": {"model": "qwen3.8-27b", "api_base": "http://x"},
+            "turns": 3,
+            "llm_calls": 7,
+            "avg_tps": 42.5,
+        }]
+
+    def get_agent_class_summary(self):
+        return [{
+            "agent_class": "orchestrator",
+            "tool_usage_accuracy": 91.7,
+            "total_time_sec": 12.3,
+            "tokens_generated": 1500,
+            "turns": 3,
+        }]
+
+    def get_skill_usage_summary(self):
+        return [{
+            "skill": "docker-best-practices",
+            "loads": 4,
+            "agent_classes": ["coder"],
+            "top_mode": "auto",
+        }]
+
+
+class TestSystemInfoTelemetryDump:
+    """Tests for the live `help='telemetry'` dump (computed from pool.telemetry)."""
+
+    def _tool_with(self, telemetry):
+        pool = _FakePool(server_info=("0.0.0.0", 8765))
+        pool.telemetry = telemetry
+        return SystemInfo(agent_pool=pool)
+
+    def test_populated_dump_renders_all_sections(self):
+        out = self._tool_with(_FakeTelemetry()).call('{"help": "telemetry"}')
+        assert "AC Telemetry Dump" in out
+        # Session totals + per-model breakdown
+        assert "total_llm_calls: 7" in out
+        assert "qwen3.8-27b: 5" in out
+        # Config fingerprint A/B
+        assert "abc123def456" in out
+        assert "model=qwen3.8-27b" in out
+        # Agent class usage (accuracy formatted as %)
+        assert "orchestrator:" in out
+        assert "91.7%" in out
+        # Skill usage
+        assert "docker-best-practices: loads=4" in out
+        assert "top_mode=auto" in out
+        # Export pointer
+        assert "/api/telemetry/export" in out
+
+    def test_case_insensitive(self):
+        out = self._tool_with(_FakeTelemetry()).call('{"help": "TELEMETRY"}')
+        assert "AC Telemetry Dump" in out
+
+    def test_no_telemetry_degrades_gracefully(self):
+        """Pool with no telemetry -> clear message, does not raise."""
+        pool = _FakePool(server_info=("0.0.0.0", 8765))
+        # No .telemetry attribute set at all
+        out = SystemInfo(agent_pool=pool).call('{"help": "telemetry"}')
+        assert "unavailable" in out
+
+    def test_empty_telemetry_still_headers(self):
+        """Telemetry present but all getters return empty -> headers + export only."""
+        class _Empty:
+            def get_session_summary(self):
+                return {}
+            def get_config_comparison(self):
+                return []
+            def get_agent_class_summary(self):
+                return []
+            def get_skill_usage_summary(self):
+                return []
+        out = self._tool_with(_Empty()).call('{"help": "telemetry"}')
+        assert "AC Telemetry Dump" in out
+        assert "/api/telemetry/export" in out
+
+    def test_getter_exception_degrades_gracefully(self):
+        """A getter raising is caught -> error string, does not propagate."""
+        class _Boom:
+            def get_session_summary(self):
+                raise RuntimeError("boom")
+            def get_config_comparison(self):
+                return []
+            def get_agent_class_summary(self):
+                return []
+            def get_skill_usage_summary(self):
+                return []
+        out = self._tool_with(_Boom()).call('{"help": "telemetry"}')
+        assert "unavailable" in out

@@ -58,6 +58,7 @@ const THROTTLE = Object.freeze({
   GEN_STATS_MS: 500,           // gen stats update throttle (~2Hz)
   CONTROLS_MS: 1000,           // controls update throttle (~1Hz)
   TELEMETRY_MS: 2000,          // telemetry panel update throttle (~2s)
+  TELEMETRY_FETCH_MS: 30000,   // periodic REST re-fetch of the full telemetry tables (fingerprint A/B + agent-class usage) during generation; no need for fast telemetry
   RENDER_DIAG_THRESHOLD_MS: 100, // render duration diagnostic warning threshold
   AUTO_SECURITY_SYNC_DEBOUNCE: 100, // Debounce window for server→client auto-security state sync (ms)
   AUTO_SECURITY_TOGGLE_GUARD: 150,  // Guard window blocking toggle clicks during incoming server sync (ms)
@@ -110,6 +111,7 @@ const state = {
     lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
   lastTelemetryUpdate: 0,     // updateTelemetryPanel throttling (~2s)
+  lastTelemetryFetch: 0,      // periodic fetchTelemetry() re-fetch of full tables during generation (~30s)
   },
   totalTokens: 0,
   totalWords: 0,
@@ -2217,6 +2219,19 @@ function handleServerMessage(data) {
         if (telemNow - state.genStats.lastTelemetryUpdate > THROTTLE.TELEMETRY_MS) {
           updateTelemetryPanel(data.telemetry);
           state.genStats.lastTelemetryUpdate = telemNow;
+        }
+      }
+
+      // Periodic re-fetch of the FULL telemetry tables (Config Fingerprint A/B + Agent
+      // Class Usage) during generation. The WS stream only carries the session summary,
+      // so these two tables otherwise refresh only at turn-end. Throttled to ~30s — no
+      // need for fast telemetry; a lightweight REST GET every 30s keeps them live without
+      // hammering the API. No-op when not generating (stream_update only flows then).
+      {
+        const fetchNow = performance.now();
+        if (state.generating && fetchNow - state.lastTelemetryFetch > THROTTLE.TELEMETRY_FETCH_MS) {
+          state.lastTelemetryFetch = fetchNow;
+          fetchTelemetry();
         }
       }
 

@@ -377,10 +377,10 @@ TOOL_METADATA = {
             'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
             'Python version, and basic session stats. '
             'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
-            'Optionally pass `help="<section>"` to fetch a targeted section of AgentCascade system knowledge (e.g. REST API reference) instead of normal system info; valid sections are listed in the error you get if you pass an unknown value.'
+            'Optionally pass `help="<section>"` to fetch a targeted section of AgentCascade system knowledge (e.g. REST API reference) instead of normal system info; valid sections are listed in the error you get if you pass an unknown value. Use `help="telemetry"` for a live dump of current session telemetry.'
         ),
         'parameters': {
-            'help': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g., 'rest_api', 'websocket', 'parallel_instances'). Leave empty/omit for normal system information."
+            'help': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g., 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
         }
     },
     'read_logs': {
