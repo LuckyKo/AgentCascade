@@ -5868,7 +5868,7 @@ function updateTelemetryConfigTable(configs) {
   if (!configTbody) return;
 
   if (!configs || configs.length === 0) {
-    configTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No config data yet</td></tr>';
+    configTbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-secondary)">No config data yet</td></tr>';
     return;
   }
 
@@ -5883,6 +5883,7 @@ function updateTelemetryConfigTable(configs) {
       <td>${c.turns}</td>
       <td>${formatNumber(c.total_tokens)}</td>
       <td>${formatMs(c.avg_turn_duration_ms)}</td>
+      <td>${c.avg_tps ? c.avg_tps.toFixed(1) : '—'}</td>
     </tr>`;
   }).join('');
 }
