@@ -73,6 +73,7 @@ class TelemetryCollector:
         # Session-level aggregates (updated on each event)
         self._session_stats = {
             "total_turns": 0,
+            "total_user_turns": 0,
             "total_llm_calls": 0,
             "total_tool_calls": 0,
             "total_input_tokens_est": 0,
@@ -327,6 +328,15 @@ class TelemetryCollector:
                         acs["tool_failures"] += 1
 
         self._write_event(event)
+
+    def record_user_turn(self, instance_name: str):
+        """Count one user-initiated turn (a fresh agent run/budget). Thread-safe.
+
+        ``instance_name`` is accepted for call-site symmetry with the other
+        record_* methods; the counter is a session-level aggregate.
+        """
+        with _telemetry_lock:
+            self._session_stats["total_user_turns"] += 1
 
     def _ensure_agent_class_stats(self, agent_class: str):
         """Ensure per-agent-class stats dict exists for *agent_class*, creating it if needed.
@@ -721,6 +731,7 @@ class TelemetryCollector:
         return {
             "session_id": self.session_id,
             "total_turns": stats["total_turns"],
+            "total_user_turns": stats["total_user_turns"],
             "total_llm_calls": stats["total_llm_calls"],
             "total_tool_calls": stats["total_tool_calls"],
             "total_input_tokens_est": stats["total_input_tokens_est"],

@@ -5835,7 +5835,7 @@ function updateTelemetryPanel(telemetry) {
     if (el) el.textContent = val;
   };
 
-  set('telem-turns', formatNumber(telemetry.total_turns));
+  set('telem-turns', formatNumber(telemetry.total_user_turns ?? telemetry.total_turns));
   set('telem-llm-calls', formatNumber(telemetry.total_llm_calls));
   set('telem-tool-calls', formatNumber(telemetry.total_tool_calls));
   set('telem-sa-calls', formatNumber(telemetry.agent_instance_calls));

@@ -116,18 +116,18 @@ class LLMCallMixin:
             return True  # Skip LLM call, yield and continue loop
 
         if self._inject_async_messages(instance, messages, llm_messages, response):
-            turns_wrapper[0] -= 1  # R2: async injection is a real cycle
+            turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R2: async injection is a real cycle
             return True  # Yield and continue loop to process new messages
 
         # Pass `response` so notification messages get yielded (fixes compress feedback bug).
         if self.compression_handler.handle_rollback_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Rollback command handled for {inst_name}")
-            turns_wrapper[0] -= 1  # R3: user rollback command is a real cycle
+            turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R3: user rollback command is a real cycle
             return True  # Command handled — yield and continue
 
         if self.compression_handler.handle_compress_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Compress command handled for {inst_name}")
-            turns_wrapper[0] -= 1  # R4: user compress command is a real cycle
+            turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R4: user compress command is a real cycle
             return True  # Command handled — yield and continue
 
         # Size the compression guard against the endpoint actually about to be called
@@ -146,7 +146,7 @@ class LLMCallMixin:
 
         if self._check_and_trigger_compression(instance, messages, llm_messages, response, assigned_max_tokens=_assigned_max_tokens):
             logger.debug(f"[PRE_LLM] Compression triggered for {inst_name}")
-            turns_wrapper[0] -= 1  # R5: forced compression is a real cycle
+            turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R5: forced compression is a real cycle
             return True  # Compression triggered — yield and continue
 
         # Loop detection — two tiers (2026-08 redesign; flag semantics: plan §5.3).
@@ -220,7 +220,7 @@ class LLMCallMixin:
                         # so other agents are unaffected.
                         self.pool.terminate_instance(inst_name, set_global_stopped=False)
                         # Turn consumed for this rollback cycle
-                        turns_wrapper[0] -= 1
+                        turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])
                         return True  # Caller will break on _check_stop_conditions next iteration
                     elif rollbacks >= 3 and rollbacks < effective_limit:
                         # Warn at ≥3rd rollback only if we still have headroom before limit
@@ -239,7 +239,7 @@ class LLMCallMixin:
                             pass
 
                     # Turn consumed for this rollback cycle (Change 2 integration)
-                    turns_wrapper[0] -= 1  # R6: loop rollback is a real cycle
+                    turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R6: loop rollback is a real cycle
                     return True  # Continue loop with fresh state
 
             # Tier 2 — fuzzy tool-call matcher (warning-first + optional escalation).
@@ -311,7 +311,7 @@ class LLMCallMixin:
                             )
                             self._append_and_log(instance, fail_msg)
                             self.pool.terminate_instance(inst_name, set_global_stopped=False)
-                            turns_wrapper[0] -= 1
+                            turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])
                             return True  # Caller will break on _check_stop_conditions next iteration
 
                         # Telemetry (non-blocking)
@@ -324,7 +324,7 @@ class LLMCallMixin:
                                 pass
 
                         # Turn consumed for this rollback cycle (exactly like a Tier-1 rollback)
-                        turns_wrapper[0] -= 1
+                        turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])
                         return True  # Continue loop with fresh state
 
                     if (not getattr(instance, '_fuzzy_warn_armed', True)

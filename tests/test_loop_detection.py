@@ -1038,6 +1038,8 @@ class TestMaxAutoRollbacksEnforcement:
 
         # Bind real _pre_llm_checks method to the mock
         engine._pre_llm_checks = ExecutionEngine._pre_llm_checks.__get__(engine, ExecutionEngine)
+        # Bind real _consume_turn so budget decrements return an int (not a MagicMock)
+        engine._consume_turn = ExecutionEngine._consume_turn.__get__(engine, ExecutionEngine)
         engine._check_stop_conditions = MagicMock(return_value=False)
         engine._inject_async_messages = MagicMock(return_value=False)
         engine._check_and_trigger_compression = MagicMock(return_value=False)

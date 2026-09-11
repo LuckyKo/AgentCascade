@@ -246,6 +246,7 @@ class AgentInstance:
     is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)
     max_turns: Optional[int] = None      # Per-instance turn limit (None = use default 50)
     _current_turn: int = field(default=0)  # Current turn number during execution (for system_info display)
+    _turn_consumed: bool = field(default=False)  # True once a run() consumes its first turn; reset at each run() start so the first consumption counts as one user turn in telemetry
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
     _child_instances: List[str] = field(default_factory=list)  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)

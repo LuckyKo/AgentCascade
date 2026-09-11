@@ -190,6 +190,19 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         """Return the telemetry collector if available, else None."""
         return getattr(self.pool, 'telemetry', None)
 
+    def _consume_turn(self, instance, turns: int) -> int:
+        """Consume one turn from *turns* (remaining budget). On the FIRST consumption of
+        this run() (instance._turn_consumed not yet set), also record a user turn in
+        telemetry. Returns the new remaining count."""
+        if not getattr(instance, "_turn_consumed", False):
+            instance._turn_consumed = True
+            if (tel := self._telemetry()) is not None:
+                try:
+                    tel.record_user_turn(instance.instance_name)
+                except Exception:
+                    pass  # telemetry must never break the agent loop
+        return turns - 1
+
     # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────
 
     def _acquire_slot_with_logging(self, instance: AgentInstance, context: str = "initial") -> None:
@@ -424,6 +437,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 Consumers should unpack tuples before extending conversations to avoid bool leaks.
         """
         logger.debug("engine.run() ENTRY - instance=%s", instance.instance_name)
+        # Every run starts with a clean turn-consumed flag so the first budget
+        # consumption of this run counts as exactly one user turn in telemetry.
+        # Set BEFORE any early-exit path so a stale flag can never suppress it.
+        instance._turn_consumed = False
         # Transition to RUNNING state (replaces is_active=True)
         with instance._state_lock:
             if instance.state == AgentState.IDLE:
@@ -685,7 +702,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             instance._generate_cfg_override['disabled_tools'] = all_tools
                             final_turn_tools_disabled = True
 
-                turns_available -= 1
+                turns_available = self._consume_turn(instance, turns_available)
 
                 # ── Phase 3: LLM Call with Injection Points ────────────────
                 # logger.debug(f"[LLM_CALL_START] Calling LLM for {inst_name}

@@ -605,3 +605,131 @@ class TestEventLog:
         events = collector.get_recent_events(count=50)
         types = [e["type"] for e in events]
         assert "session_start" in types
+
+
+# ---------------------------------------------------------------------------
+# K. User-turn counting (total_user_turns)
+# ---------------------------------------------------------------------------
+
+class TestUserTurnCounting:
+    """``total_user_turns`` counts fresh agent runs/budgets, independently of the
+    run-cycle counter ``total_turns``."""
+
+    def test_fresh_collector_defaults_to_zero_and_key_present(self, collector):
+        s = collector.get_session_summary()
+        assert "total_user_turns" in s
+        assert s["total_user_turns"] == 0
+
+    def test_record_user_turn_accumulates(self, collector):
+        for _ in range(4):
+            collector.record_user_turn("inst")
+        assert collector.get_session_summary()["total_user_turns"] == 4
+
+    def test_independent_of_total_turns(self, collector):
+        # Run cycles and user turns are separate counters.
+        collector.record_turn_start("inst")
+        collector.record_turn_end("inst")
+        collector.record_user_turn("inst")
+        s = collector.get_session_summary()
+        assert s["total_turns"] == 1
+        assert s["total_user_turns"] == 1
+
+
+# ---------------------------------------------------------------------------
+# L. Engine-level first-turn semantics (_consume_turn)
+# ---------------------------------------------------------------------------
+
+class _FakeInstance:
+    """Minimal stand-in exposing only what ``_consume_turn`` touches."""
+    def __init__(self, name="inst"):
+        self.instance_name = name
+        self._turn_consumed = False
+
+
+def _make_engine_with_telemetry(collector):
+    from agent_cascade.execution_engine import ExecutionEngine
+
+    class _Pool:
+        telemetry = collector
+    return ExecutionEngine(_Pool())
+
+
+class TestConsumeTurnFirstTurnSemantics:
+    """Drive ``ExecutionEngine._consume_turn`` directly to verify the first-consumption
+    of a run records exactly one user turn."""
+
+    def test_k_consumptions_record_one_user_turn(self, collector):
+        engine = _make_engine_with_telemetry(collector)
+        inst = _FakeInstance()
+        turns = 10
+        for _ in range(5):  # simulate K LLM iterations within one run
+            turns = engine._consume_turn(inst, turns)
+        assert turns == 5
+        assert collector.get_session_summary()["total_user_turns"] == 1
+
+    def test_flag_reset_starts_new_count(self, collector):
+        engine = _make_engine_with_telemetry(collector)
+        inst = _FakeInstance()
+        for _ in range(3):
+            engine._consume_turn(inst, 10)
+        assert collector.get_session_summary()["total_user_turns"] == 1
+        # A fresh run resets the flag (mirrors the top-of-run reset).
+        inst._turn_consumed = False
+        engine._consume_turn(inst, 10)
+        assert collector.get_session_summary()["total_user_turns"] == 2
+
+    def test_consecutive_runs_same_instance(self, collector):
+        """Two full runs on the same instance (flag reset between) → exactly 2 user turns."""
+        engine = _make_engine_with_telemetry(collector)
+        inst = _FakeInstance()
+        # Run 1: several iterations.
+        inst._turn_consumed = False
+        for _ in range(4):
+            engine._consume_turn(inst, 10)
+        # Run 2: fresh budget on the same instance.
+        inst._turn_consumed = False
+        for _ in range(2):
+            engine._consume_turn(inst, 10)
+        assert collector.get_session_summary()["total_user_turns"] == 2
+
+    def test_early_exit_records_nothing(self, collector):
+        """No consumption → no user turn recorded and flag stays False at next run start."""
+        engine = _make_engine_with_telemetry(collector)
+        inst = _FakeInstance()
+        # A run that returns before any budget consumption.
+        assert getattr(inst, "_turn_consumed", False) is False
+        assert collector.get_session_summary()["total_user_turns"] == 0
+
+    def test_pre_llm_first_iteration_counts_one(self, collector):
+        """A pre-LLM consumption as the very first consumption records exactly one user turn."""
+        engine = _make_engine_with_telemetry(collector)
+        inst = _FakeInstance()
+        turns_wrapper = [10]
+        # Simulate _pre_llm_checks consuming on iteration 1 (e.g. async injection pending).
+        turns_wrapper[0] = engine._consume_turn(inst, turns_wrapper[0])
+        assert collector.get_session_summary()["total_user_turns"] == 1
+        # A subsequent normal-iteration consumption in the same run must NOT add another.
+        turns_wrapper[0] = engine._consume_turn(inst, turns_wrapper[0])
+        assert collector.get_session_summary()["total_user_turns"] == 1
+
+    def test_flag_reset_per_run(self, collector):
+        """After a run consumes, resetting _turn_consumed=False (run start) makes the next
+        consumption count a fresh user turn — so a recalled/reused instance counts again."""
+        engine = _make_engine_with_telemetry(collector)
+        inst = _FakeInstance()
+        engine._consume_turn(inst, 10)
+        assert inst._turn_consumed is True
+        # run() start resets the flag:
+        inst._turn_consumed = False
+        engine._consume_turn(inst, 10)
+        assert collector.get_session_summary()["total_user_turns"] == 2
+
+    def test_no_telemetry_is_safe(self):
+        """_consume_turn must not raise when no telemetry collector is attached."""
+        from agent_cascade.execution_engine import ExecutionEngine
+
+        class _NoTelPool:
+            pass  # no `telemetry` attribute → _telemetry() returns None
+        engine = ExecutionEngine(_NoTelPool())
+        inst = _FakeInstance()
+        assert engine._consume_turn(inst, 5) == 4
