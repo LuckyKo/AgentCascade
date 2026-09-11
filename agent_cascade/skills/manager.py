@@ -468,16 +468,20 @@ class SkillManager:
 
     # ── Tier 2 Loading (Full Instructions) ───────────────────────────────────
 
-    def load_full_instructions(self, skill_name: str) -> Optional[str]:
+    def load_full_instructions(self, skill_name: str, count_load: bool = True) -> Optional[str]:
         """Load full SKILL.md body (Tier 2) for a skill.
 
         Supports case-insensitive matching to tolerate LLM input variations.
 
         Args:
             skill_name: The registered skill name.
+            count_load: When True (default), increment the global per-skill load
+                metric on a successful load. Pass False for pure loadability checks
+                (e.g. ``_resolve_skill_names``) that must not inflate the metric —
+                the real body-load in ``resolve_load_skill`` is what counts.
 
         Returns:
-            Full markdown instructions string, or None if skill not found.
+            Full markdown instructions string, or None if skill not found / not loadable.
         """
         with self._write_lock:
             # Exact match first
@@ -506,7 +510,8 @@ class SkillManager:
                 body = parsed['body']
                 logger.debug("[SKILLS] Loaded Tier 2 instructions for '%s' (%d chars)",
                              skill_name, len(body))
-                self._increment_load_count(skill_name, version)
+                if count_load:
+                    self._increment_load_count(skill_name, version)
                 return body or None
 
             # Fallback: re-read from disk
@@ -517,47 +522,8 @@ class SkillManager:
                     reg['_parsed_data'] = parsed
                     body = parsed.get('body', '')
                     logger.debug("[SKILLS] Re-parsed '%s' from disk (%d chars)", skill_name, len(body))
-                    self._increment_load_count(skill_name, version)
-                    return body or None
-                except (FileNotFoundError, OSError) as e:
-                    logger.warning("[SKILLS] Failed to re-parse '%s': %s", skill_name, e)
-
-            return None
-
-    def _load_body_no_count(self, skill_name: str) -> Optional[str]:
-        """Return the full SKILL.md body for *skill_name* WITHOUT incrementing
-        the global per-skill load metrics.
-
-        Used by ``_resolve_skill_names`` for loadability checks so that the name
-        computation does not double-count loads (the real body-load in
-        ``resolve_load_skill`` is what increments the counter). Returns None if
-        the skill cannot be loaded. Shares the same lookup logic as
-        ``load_full_instructions`` minus the metric increment.
-        """
-        with self._write_lock:
-            reg = self._skills_registry.get(skill_name)
-            if reg is not None:
-                pass
-            else:
-                lower = skill_name.lower()
-                for key, entry in self._skills_registry.items():
-                    if key.lower() == lower:
-                        reg = entry
-                        break
-            if reg is None:
-                return None
-
-            parsed = reg.get('_parsed_data')
-            if parsed and 'body' in parsed:
-                body = parsed['body']
-                return body or None
-
-            file_path = reg.get('file_path')
-            if file_path:
-                try:
-                    parsed = parse_skill_file(Path(file_path))
-                    reg['_parsed_data'] = parsed
-                    body = parsed.get('body', '')
+                    if count_load:
+                        self._increment_load_count(skill_name, version)
                     return body or None
                 except (FileNotFoundError, OSError) as e:
                     # Non-loadable skills are expected during AUTO matching — keep this
@@ -580,8 +546,9 @@ class SkillManager:
         This is the single source of truth shared by both ``resolve_load_skill``
         (which loads bodies) and ``resolve_load_skill_names`` (which returns
         names), so the two can never drift apart. Loadability checks use
-        ``_load_body_no_count`` so they do NOT increment the global per-skill
-        load metrics (the real body-load in ``resolve_load_skill`` does).
+        ``load_full_instructions(..., count_load=False)`` so they do NOT increment
+        the global per-skill load metrics (the real body-load in
+        ``resolve_load_skill`` does).
 
         Returns:
             List of skill names that will be loaded (empty if none).
@@ -610,7 +577,7 @@ class SkillManager:
         if isinstance(load_skill_value, list):
             names = []
             for name in load_skill_value:
-                body = self._load_body_no_count(name)
+                body = self.load_full_instructions(name, count_load=False)
                 if body:
                     names.append(name)
                 else:
@@ -631,7 +598,7 @@ class SkillManager:
                 for name, score in matches:
                     if score < SKILL_MATCH_THRESHOLD:
                         continue
-                    body = self._load_body_no_count(name)
+                    body = self.load_full_instructions(name, count_load=False)
                     if body:
                         logger.debug("[SKILLS] AUTO loaded skill '%s' (score=%.2f)", name, score)
                         names.append(name)
