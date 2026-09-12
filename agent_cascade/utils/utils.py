@@ -53,6 +53,17 @@ VISION_MODEL_TYPES = frozenset({
     'qwenaudio_dashscope',
 })
 
+# Browser-like headers used for outbound HTTP fetches (web_extractor, view_image URL
+# downloads). A current User-Agent avoids 403/bot-blocking on modern sites.
+_HTTP_FETCH_HEADERS = {
+    'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.3',
+    'Accept':
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
+_HTTP_FETCH_TIMEOUT = (10, 30)  # (connect, read) seconds
+
 
 def is_multimodal_content(content) -> bool:
     """Check if content contains image/video/audio ContentItems.
@@ -362,15 +373,8 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
         url = sanitize_chrome_file_path(url)
         shutil.copy(url, new_path)
     else:
-        headers = {
-            'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.3',
-            'Accept':
-                'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
         try:
-            response = requests.get(url, headers=headers, timeout=(10, 30))
+            response = requests.get(url, headers=_HTTP_FETCH_HEADERS, timeout=_HTTP_FETCH_TIMEOUT)
             response.raise_for_status()
             with open(new_path, 'wb') as file:
                 file.write(response.content)
