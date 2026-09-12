@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 from collections import Counter
 from typing import Dict, List, Optional, Union
 
@@ -230,16 +231,20 @@ def parse_tsv(file_path: str, extract_image: bool = False) -> List[dict]:
     return [{'page_num': i + 1, 'content': [{'table': md_tables[i]}]} for i in range(len(md_tables))]
 
 
-def parse_html_bs(path: str, extract_image: bool = False):
+def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str] = None):
     """Parse an HTML file into plain text.
 
     Uses a best-effort heuristic to strip boilerplate (nav, cookie banners,
     scripts, etc.) and prefer main content (<main>, <article>, or <body>).
     This is NOT production-grade extraction; some layouts may still leak noise
     or rarely over-strip.
+
+    When ``extract_image`` is True, image entries are interleaved with the text
+    in document (reading) order as markdown ``![alt](abs_src)``. ``base_url``
+    is used to resolve relative ``src`` attributes to absolute URLs; when it is
+    None, a ``<base href>`` in the document is used if present, otherwise the
+    src is emitted as-is.
     """
-    if extract_image:
-        raise ValueError('Currently, extracting images is not supported!')
 
     def pre_process_html(s):
         # replace multiple newlines
@@ -323,7 +328,7 @@ def parse_html_bs(path: str, extract_image: bool = False):
                 el.decompose()
 
     try:
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup, Comment, NavigableString, Tag
     except Exception:
         raise ValueError('Please install bs4 by `pip install beautifulsoup4`')
     bs_kwargs = {'features': 'lxml'}
@@ -337,6 +342,27 @@ def parse_html_bs(path: str, extract_image: bool = False):
     else:
         title = ''
 
+    def _resolve_image_src(src):
+        """Resolve an <img> src to an absolute URL.
+
+        Uses ``base_url`` when provided, else a ``<base href>`` in the document,
+        else returns the src unchanged. Returns None for missing/empty or
+        data: URIs (which are skipped).
+        """
+        if not src or not src.strip():
+            return None
+        src = src.strip()
+        if src.lower().startswith('data:'):
+            return None
+        base = base_url
+        if not base:
+            base_tag = soup.find('base', href=True)
+            if base_tag is not None:
+                base = base_tag['href']
+        if base:
+            return urllib.parse.urljoin(base, src)
+        return src
+
     # Pick content root first so it's protected from boilerplate stripping.
     content_root = _pick_content_root(soup)
     _strip_boilerplate(soup, content_root)
@@ -344,11 +370,66 @@ def parse_html_bs(path: str, extract_image: bool = False):
 
     text = pre_process_html(text)
     paras = text.split(PARAGRAPH_SPLIT_SYMBOL)
-    content = []
-    for p in paras:
-        p = clean_paragraph(p)
-        if p.strip():
-            content.append({'text': p})
+
+    if extract_image:
+        # Build image entries interleaved with text in TRUE document (reading) order by
+        # walking the content root depth-first. As we traverse, an <img> is emitted at its
+        # exact position; consecutive text nodes are accumulated into a per-block buffer and
+        # flushed as cleaned paragraphs either right before an image or when the block ends.
+        # No offset math, independent of pre_process_html length changes. Boilerplate has
+        # already been stripped, so only surviving content-root images appear here.
+        content = []
+        _TEXT_SKIP = {'script', 'style'}
+
+        def _flush(buf):
+            if buf:
+                t = pre_process_html(''.join(buf))
+                for p in t.split(PARAGRAPH_SPLIT_SYMBOL):
+                    cp = clean_paragraph(p)
+                    if cp.strip():
+                        content.append({'text': cp})
+                buf.clear()
+
+        def _walk(el, buf):
+            # Process this element's children in document order.
+            for child in el.children:
+                if isinstance(child, Comment):
+                    continue  # get_text() excludes comments
+                name = getattr(child, 'name', None)
+                if name in _TEXT_SKIP:
+                    continue  # skip script/style subtrees entirely (get_text() omits them)
+                if name == 'img':
+                    _flush(buf)  # flush pending text BEFORE the image (true order)
+                    abs_src = _resolve_image_src(child.get('src'))
+                    if abs_src:
+                        content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
+                elif isinstance(child, NavigableString):
+                    buf.append(str(child))  # accumulate; flushed before images / at block end
+                else:  # other element (p, div, span, ...)
+                    _walk(child, buf)  # recurse in order
+            _flush(buf)  # flush any remaining text so nothing is lost
+
+        for child in content_root.children:
+            name = getattr(child, 'name', None)
+            if isinstance(child, Comment):
+                continue  # get_text() excludes comments
+            if name == 'img':
+                # Top-level bare <img> (not wrapped in a block) — emit directly.
+                abs_src = _resolve_image_src(child.get('src'))
+                if abs_src:
+                    content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
+            elif isinstance(child, Tag):
+                _walk(child, [])  # each top-level block gets its own buffer -> paragraphs stay per-block
+            elif isinstance(child, NavigableString):
+                cp = clean_paragraph(pre_process_html(str(child)))
+                if cp.strip():
+                    content.append({'text': cp})
+    else:
+        content = []
+        for p in paras:
+            p = clean_paragraph(p)
+            if p.strip():
+                content.append({'text': p})
 
     # Honest feedback when a JS shell likely yielded no real content. Markers
     # are checked against the raw source (they live in the markup, not the
@@ -573,7 +654,15 @@ class SimpleDocParser(BaseTool):
         # Resolve relative local paths against work_dir
         if not is_http_url(path) and not os.path.isabs(path):
             path = os.path.join(self.work_dir, path)
-            
+
+        # Capture the base URL for resolving relative <img src> in HTML. Taken AFTER
+        # normalization (which may prefix a bare domain like "www.example.com/..." with
+        # http://) but BEFORE `path` is reassigned to the local temp file on download.
+        # Note: such normalized domain-like paths intentionally get an http base_url —
+        # that's the origin the user meant, so relative srcs resolve correctly. Genuinely
+        # local files stay None -> resolve via <base href> or emit as-is.
+        base_for_html = path if is_http_url(path) else None
+
         cached_name_ori = f'{hash_sha256(path)}_ori'
         try:
             # Directly load the parsed doc
@@ -608,7 +697,7 @@ class SimpleDocParser(BaseTool):
                 elif f_type == 'txt':
                     parsed_file = parse_txt(path)
                 elif f_type == 'html':
-                    parsed_file = parse_html_bs(path, self.extract_image)
+                    parsed_file = parse_html_bs(path, self.extract_image, base_url=base_for_html)
                 elif f_type == 'csv':
                     parsed_file = parse_csv(path, self.extract_image)
                 elif f_type == 'tsv':
