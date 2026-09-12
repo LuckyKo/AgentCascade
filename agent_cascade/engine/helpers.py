@@ -482,7 +482,9 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
     # Idempotency guard: skip injection if '## Active Skills' already exists.
     # This is acceptable for self-augmentation because it's a static skill — once injected
     # into a session's system message, its content doesn't change, so re-injection is redundant.
-    if sys_msg.role != SYSTEM or "## Active Skills" in sys_msg.content:
+    if (sys_msg.role != SYSTEM
+            or re.search(r'^##\s+Active\s+Skills\s*$', sys_msg.content,
+                         re.MULTILINE | re.IGNORECASE)):
         return False
 
     skills_block = _build_skills_block(skills_to_inject)
@@ -722,11 +724,15 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
     return _replace_section(m0_content, "## AVAILABLE AGENTS", new_block)
 
 
-# The skills block contains ### sub-headings, so we cannot use _replace_section
-# (its pattern stops at any \n\n#{1,6} boundary). This matches from the
-# "## Active Skills" heading to the next \n\n## (level-2) heading, --- rule, or EOF.
+# The skills block contains arbitrary ## and ### sub-headings (skill content is
+# free-form markdown), so we cannot use _replace_section or a "next heading"
+# boundary like the old pattern did — skill text itself may contain level-2
+# headings, which would cause the match to stop early and orphan the tail.
+# Since the skills block is always the LAST section in the system prompt (it is
+# injected after AVAILABLE AGENTS or appended at end, and nothing is ever added
+# after it), we match from "## Active Skills" greedily to EOF.
 _SKILLS_SECTION_RE = re.compile(
-    re.escape("## Active Skills") + r'.*?(?=\n\n##[^\#]|\n\n---|\Z)',
+    re.escape("## Active Skills") + r'.*',
     flags=re.DOTALL,
 )
 

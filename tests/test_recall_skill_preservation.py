@@ -422,3 +422,81 @@ class TestRecallRefreshesSkills:
 
         # No AUTO re-matching against the new task on recall.
         mock_pool.skill_manager.resolve_load_skill.assert_not_called()
+
+
+# ──────────────────────────────────────────────
+# 6. BUG_0009 — skills block with internal ## headings refreshes cleanly
+# ──────────────────────────────────────────────
+
+class TestSkillsBlockInternalHeadings:
+    """Regression for BUG_0009: skill content contains its own level-2 (##)
+    markdown headings (e.g. "## WHEN TO ACT", "## TOOL REFERENCE"). The old
+    _SKILLS_SECTION_RE stopped at the first internal ## boundary, so only a
+    prefix of the block was replaced and the rest became orphaned tail —
+    producing duplicated skill text after a refresh. The block must be matched
+    greedily to EOF (it is always the last section)."""
+
+    def _skill_with_internal_headings(self):
+        return ("## Goal\nDo things.\n\n"
+                "## WHEN TO ACT (Concrete Triggers)\n- trigger A\n\n"
+                "## TOOL REFERENCE\n- tool X\n\n"
+                "## REQUIRED WORKFLOW\n1. step one\n2. step two")
+
+    def test_refresh_replaces_full_block_no_orphaned_tail(self):
+        """When the skill content has internal ## headings, a refresh must replace
+        the ENTIRE old block and leave no orphaned tail or duplicate text."""
+        from agent_cascade.engine.helpers import _refresh_active_skills_block
+
+        # Old system prompt: skills block (last section) with internal ## headings.
+        old_skill = self._skill_with_internal_headings()
+        sys_msg = Message(
+            role=SYSTEM,
+            content="You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n"
+                    "## Active Skills\n### Skill 1\n" + old_skill,
+        )
+        inst = _make_mock_instance(conversation=[sys_msg])
+
+        # New skill content — different body, also with internal ## headings.
+        new_skill = ("## Goal\nDo OTHER things.\n\n"
+                     "## WHEN TO ACT (Concrete Triggers)\n- trigger B\n\n"
+                     "## TOOL REFERENCE\n- tool Y")
+        pool = MagicMock()
+
+        changed = _refresh_active_skills_block(pool, inst, [new_skill])
+
+        assert changed is True
+        result = sys_msg.content
+        # Exactly ONE '## Active Skills' heading — no duplicate.
+        assert result.count("## Active Skills") == 1
+        # New content present, old content fully gone (no orphaned tail).
+        assert "Do OTHER things." in result
+        assert "Do things." not in result
+        assert "trigger A" not in result
+        assert "step two" not in result
+        # The internal ## headings of the NEW skill survived intact.
+        assert "## WHEN TO ACT (Concrete Triggers)" in result
+        assert "## TOOL REFERENCE" in result
+
+    def test_refresh_to_empty_removes_entire_block(self):
+        """Removing skills (empty list) must strip the whole block including any
+        internal ## headings, leaving no orphaned tail."""
+        from agent_cascade.engine.helpers import _refresh_active_skills_block
+
+        old_skill = self._skill_with_internal_headings()
+        sys_msg = Message(
+            role=SYSTEM,
+            content="You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n"
+                    "## Active Skills\n### Skill 1\n" + old_skill,
+        )
+        inst = _make_mock_instance(conversation=[sys_msg])
+        pool = MagicMock()
+
+        changed = _refresh_active_skills_block(pool, inst, [])
+
+        assert changed is True
+        result = sys_msg.content
+        assert "## Active Skills" not in result
+        # No orphaned tail from the old block's internal headings.
+        assert "## WHEN TO ACT (Concrete Triggers)" not in result
+        assert "step two" not in result
+
