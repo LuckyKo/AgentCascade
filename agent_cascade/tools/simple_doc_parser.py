@@ -274,6 +274,28 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
             return body
         return soup
 
+    def _collapse_math(root):
+        """Collapse each <math> (MathML) element to a single text node of its LaTeX source.
+
+        MathML is deeply nested (<mi>O</mi><mo>(</mo>...), so extracting it raw splayed an
+        expression like O(log n) across many lines. The clean source lives in the alttext
+        attribute (and an inner <annotation encoding="application/x-tex">). Replacing each
+        <math> with one text node keeps each expression on a single line and benefits both
+        the get_text() path and the depth-first image walk. Idempotent: no <math> remains after.
+        """
+        for math_el in root.find_all('math'):
+            tex = (math_el.get('alttext') or '').strip()
+            if not tex:
+                ann = math_el.find('annotation', attrs={'encoding': 'application/x-tex'})
+                if ann is not None:
+                    tex = ann.get_text().strip()
+            if not tex:
+                tex = math_el.get_text().strip()  # last resort; still collapses to one node
+            if not tex:
+                math_el.decompose()  # empty math — drop it entirely
+            else:
+                math_el.replace_with(NavigableString(tex))
+
     def _strip_boilerplate(soup, protected_root):
         """Remove boilerplate elements from the soup in-place.
 
@@ -366,6 +388,7 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
     # Pick content root first so it's protected from boilerplate stripping.
     content_root = _pick_content_root(soup)
     _strip_boilerplate(soup, content_root)
+    _collapse_math(content_root)  # collapse MathML to single-line LaTeX before extraction
     text = content_root.get_text()
 
     text = pre_process_html(text)

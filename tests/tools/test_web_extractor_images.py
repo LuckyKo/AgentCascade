@@ -212,3 +212,62 @@ def test_simple_doc_parser_call_with_image_entry_no_crash():
         assert '![Fig](https://example.com/fig.png)' in res
     finally:
         os.unlink(path)
+
+
+# --- MathML collapse tests -------------------------------------------------
+
+def _math_html(inner, alttext=None):
+    """Build a <math> element with nested MathML leaves (the splaying case)."""
+    attrs = f' alttext="{alttext}"' if alttext is not None else ''
+    return (f'<html><head><title>M</title></head><body><p>cost is '
+            f'<math xmlns="http://www.w3.org/1998/Math/MathML"{attrs}>'
+            f'{inner}</math> in the worst case.</p></body></html>')
+
+
+def test_mathml_collapsed_to_single_line():
+    """A nested <math> with alttext becomes ONE text entry (the LaTeX), not splayed leaves."""
+    inner = ('<mi>O</mi><mo stretchy="false">(</mo><mi>log</mi>'
+             '<mo>\u2061</mo><mi>n</mi><mo stretchy="false">)</mo>')
+    html = _math_html(inner, alttext='{\\displaystyle O(\\log n)}')
+    result = _parse(html, extract_image=False)  # get_text path
+    texts = [item.get('text', '') for item in result[0]['content']]
+    joined = ' '.join(texts)
+    # The full LaTeX expression appears intact on a single line...
+    assert '{\\displaystyle O(\\log n)}' in joined
+    # ...and the splayed individual leaves do NOT appear as separate entries.
+    assert not any(t.strip() == 'O' for t in texts)
+    assert not any(t.strip() == 'log' for t in texts)
+
+
+def test_mathml_fallback_to_annotation_when_no_alttext():
+    """Math without alttext but with an <annotation encoding=x-tex> uses the annotation."""
+    inner = ('<semantics><mi>x</mi>'
+             '<annotation encoding="application/x-tex">{\\displaystyle x^2}</annotation></semantics>')
+    html = _math_html(inner, alttext=None)  # no alttext attr
+    result = _parse(html, extract_image=False)
+    joined = ' '.join(item.get('text', '') for item in result[0]['content'])
+    assert '{\\displaystyle x^2}' in joined
+
+
+def test_mathml_no_regression_without_math():
+    """A page with no math is unaffected by the collapse."""
+    html = "<html><head><title>Plain</title></head><body><p>No math here, just text.</p></body></html>"
+    result = _parse(html, extract_image=False)
+    joined = ' '.join(item.get('text', '') for item in result[0]['content'])
+    assert 'No math here, just text.' in joined
+
+
+def test_mathml_and_image_together_in_order():
+    """Math collapses AND an image stays inline, both in reading order."""
+    html = ("<html><head><title>Both</title></head><body>"
+            "<p>cost is <math alttext='{\\displaystyle O(1)}'><mi>O</mi><mo>(</mo><mi>1</mi><mo>)</mo></math> here.</p>"
+            '<img src="https://example.com/x.png" alt="X">'
+            "<p>done.</p></body></html>")
+    result = _parse(html, extract_image=True, base_url='http://example.com/p.html')
+    seq = [(k, v) for item in result[0]['content'] for k, v in item.items()]
+    kinds = [k for k, _ in seq]
+    assert 'image' in kinds
+    # math collapsed inline before the image; image before "done."
+    text_before_img = ' '.join(v for k, v in seq[:kinds.index('image')])
+    assert '{\\displaystyle O(1)}' in text_before_img
+    assert '![X](https://example.com/x.png)' in [v for k, v in seq if k == 'image']
