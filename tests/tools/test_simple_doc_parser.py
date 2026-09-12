@@ -104,5 +104,47 @@ def test_get_plain_doc_title_prepended():
     assert output.startswith("Title: Test Title")
 
 
+def test_parse_html_bs_js_spa_note_appended():
+    """Short JS shell with a SPA marker (id="root") gets the JS-rendering note."""
+    html = ("<html><head><title>SPA Shell</title></head><body>"
+            "<div id=\"root\"></div>"
+            "<script src=\"/bundle.js\"></script>"
+            "</body></html>")
+    path = _write_temp_html(html)
+    try:
+        result = parse_html_bs(path)
+        # Return shape stays intact.
+        assert result[0]['page_num'] == 1
+        assert result[0]['title'] == 'SPA Shell'
+        texts = [item['text'] for item in result[0]['content']]
+        joined = '\n'.join(texts)
+        assert "JavaScript rendering" in joined
+        # The note is its own content item (last), not merged into body text.
+        assert texts[-1].startswith("[Note: this page appears to require JavaScript")
+    finally:
+        os.unlink(path)
+
+
+def test_parse_html_bs_no_note_on_server_rendered():
+    """Server-rendered page with real content + scripts but NO SPA marker: no note."""
+    paragraphs = "".join(f"<p>Real paragraph {i} with enough words to fill the page.</p>"
+                         for i in range(10))
+    html = ("<html><head><title>Normal Page</title></head><body>"
+            "<nav>NAV-NOISE</nav>"
+            f"{paragraphs}"
+            "<script src=\"/analytics.js\"></script>"
+            "</body></html>")
+    path = _write_temp_html(html)
+    try:
+        result = parse_html_bs(path)
+        texts = [item['text'] for item in result[0]['content']]
+        joined = '\n'.join(texts)
+        # Enough real text + no SPA marker => the note must NOT appear.
+        assert "JavaScript rendering" not in joined
+        assert all(not t.startswith("[Note:") for t in texts)
+    finally:
+        os.unlink(path)
+
+
 if __name__ == '__main__':
     test_simple_doc_parser()

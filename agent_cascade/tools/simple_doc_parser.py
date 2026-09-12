@@ -36,6 +36,33 @@ def clean_paragraph(text):
     return text
 
 
+# Substrings (case-insensitive) that indicate a JavaScript SPA shell. Checked
+# against the raw HTML source — these markers live in the markup, not in the
+# extracted text. Deliberately specific: bare <script> tags are NOT a signal
+# since many server-rendered pages also load scripts.
+_JS_SPA_MARKERS = (
+    '__next_data__',
+    'data-reactroot',
+    'id="root"',
+    'id="app"',
+    'window.__initial_state__',
+)
+
+
+def _looks_like_js_spa(html: str, text_len: int) -> bool:
+    """Cheap heuristic: does this page likely need JavaScript rendering?
+
+    True only when BOTH hold: the extracted text is very short (a JS shell
+    usually yields little readable content) AND the raw HTML carries at least
+    one known SPA marker. Returns False for normal server-rendered pages even
+    if they contain scripts.
+    """
+    if text_len >= 300:
+        return False
+    lowered = html.lower()
+    return any(marker in lowered for marker in _JS_SPA_MARKERS)
+
+
 class DocParserError(Exception):
 
     def __init__(self,
@@ -297,7 +324,8 @@ def parse_html_bs(path: str, extract_image: bool = False):
         raise ValueError('Please install bs4 by `pip install beautifulsoup4`')
     bs_kwargs = {'features': 'lxml'}
     with open(path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, **bs_kwargs)
+        raw_html = f.read()
+        soup = BeautifulSoup(raw_html, **bs_kwargs)
 
     # Extract title BEFORE stripping (title lives in <head>).
     if soup.title:
@@ -317,6 +345,14 @@ def parse_html_bs(path: str, extract_image: bool = False):
         p = clean_paragraph(p)
         if p.strip():
             content.append({'text': p})
+
+    # Honest feedback when a JS shell likely yielded no real content. Markers
+    # are checked against the raw source (they live in the markup, not the
+    # extracted text); only fires for short output + a known SPA marker, so
+    # normal server-rendered pages (even with scripts) are unaffected.
+    if _looks_like_js_spa(raw_html, len(text)):
+        content.append({'text': '[Note: this page appears to require JavaScript '
+                                'rendering; extracted content may be incomplete.]'})
 
     # The entire document is returned as one page
     return [{'page_num': 1, 'content': content, 'title': title}]
