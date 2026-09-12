@@ -201,9 +201,10 @@ def _consolidate_markers(
             # immediately after them and its content is already covered by one of those
             # ranges). Folding it in here would pin l2_first_ts to the newest compression's
             # start time — i.e. every consolidation marker would report the same "first
-            # timestamp" as the latest L1, breaking the cumulative range. The cumulative
-            # behavior is provided by L1 (compress_context step 9), which inherits the old
-            # marker's start time on repeat compression.
+            # timestamp" as the latest L1, breaking the intended span. The cumulative
+            # behavior is provided by L1 (compress_context step 9), which inherits from the
+            # previous marker's .ts field on repeat compression, not from re-parsing header
+            # text.
             new_marker = build_consolidation_marker_message(
                 consolidated_summary,
                 len(summaries_to_consolidate),

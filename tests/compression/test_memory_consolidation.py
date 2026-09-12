@@ -642,9 +642,9 @@ class TestConsolidateMarkersUnit:
         parsed_start, parsed_end = _parse_marker_timestamps(l2_markers[0])
         assert parsed_start is not None and parsed_end is not None
 
-        # The span must cover the earliest start and latest end across the CONSOLIDATED
-        # markers only. select_markers_for_consolidation keeps the newest (marker 7), so
-        # markers 0..6 are merged: earliest start = marker 0, latest end = marker 6's end.
+        # The span must cover the FIRST consolidated marker's start and LAST consolidated
+        # marker's end (positional endpoints). select_markers_for_consolidation keeps the
+        # newest (marker 7), so markers 0..6 are merged: start = marker 0, end = marker 6.
         expected_start = base
         expected_end = base + 6 * day + 7200.0
         assert abs(parsed_start - expected_start) < 60, \

@@ -194,21 +194,22 @@ class TestDictMessageTsExtraction:
         assert last_ts == late
 
 
-# ── L2 consolidation marker: cumulative range rendering (todo.md line 212) ──
+# ── L2 consolidation marker: positional span rendering (todo.md line 212) ──
 
-class TestConsolidationMarkerCumulativeRange:
-    """L2 header rendering for the cumulative-range design.
+class TestConsolidationMarkerRange:
+    """L2 header rendering for the positional-span design (todo.md line 212).
 
-    The "first timestamp is always the same" symptom in todo.md line 212 is inherent to
-    the cumulative design: each repeat L1 compression inherits the previous marker's start
-    time (compress_context step 9), so every later marker reports the session's original
-    first-message time. The Phase-3 exclusion logic that keeps this correct (consolidating
+    L1 markers are cumulative: each repeat compression inherits from the previous marker's
+    .ts field (compress_context step 9), so a later marker reports an earlier start than its
+    own window. L2 consolidation is POSITIONAL over the markers being merged: first_ts comes
+    from the FIRST consolidated marker's start, last_ts from the LAST one's end — the time
+    sequence actually compressed. The Phase-3 logic that keeps this correct (consolidating
     only markers[:-1], never folding in the kept newest marker) is exercised end-to-end by
     test_memory_consolidation.py::TestConsolidateMarkersUnit::test_l2_marker_includes_combined_timestamp_range;
     these tests cover the helper's rendering of that range.
     """
 
-    def test_l2_start_is_oldest_consolidated_not_kept_marker(self):
+    def test_l2_start_is_first_consolidated_not_kept_marker(self):
         # M1 (oldest, to be consolidated): 09-06 → 09-07
         m1 = build_marker_message("s1", first_ts=_ts(2026, 9, 6, 10, 14),
                                   last_ts=_ts(2026, 9, 7, 8, 30), n_messages=5)
@@ -230,13 +231,11 @@ class TestConsolidationMarkerCumulativeRange:
         # next L1 compression inheriting this range (see compress_context step 9).
         assert "→ 2026-09-07 08:30" in l2.content
 
-    def test_l2_multi_marker_span_uses_min_start_max_end(self):
+    def test_l2_multi_marker_span_first_start_last_end(self):
+        # Two consolidated markers: L2 span = first marker's start → last marker's end.
         s1, e1 = _ts(2026, 9, 6, 10, 14), _ts(2026, 9, 7, 8, 30)
         s2, e2 = _ts(2026, 9, 7, 9, 0), _ts(2026, 9, 8, 10, 0)
-        l2_starts = [s1, s2]
-        l2_ends = [e1, e2]
-        l2 = build_consolidation_marker_message("consolidated", 2,
-                                                first_ts=min(l2_starts), last_ts=max(l2_ends))
+        l2 = build_consolidation_marker_message("consolidated", 2, first_ts=s1, last_ts=e2)
         assert "2026-09-06 10:14 → 2026-09-08 10:00" in l2.content
 
 
