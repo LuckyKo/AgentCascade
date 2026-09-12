@@ -19,6 +19,7 @@ from agent_cascade.llm.schema import USER, Message
 from agent_cascade.compression.helpers import (
     _format_timestamp_interval,
     build_marker_message,
+    build_consolidation_marker_message,
 )
 
 
@@ -191,6 +192,52 @@ class TestDictMessageTsExtraction:
         first_ts, last_ts = _extract_ts_list(messages)
         assert first_ts == early
         assert last_ts == late
+
+
+# ── L2 consolidation marker: cumulative range rendering (todo.md line 212) ──
+
+class TestConsolidationMarkerCumulativeRange:
+    """L2 header rendering for the cumulative-range design.
+
+    The "first timestamp is always the same" symptom in todo.md line 212 is inherent to
+    the cumulative design: each repeat L1 compression inherits the previous marker's start
+    time (compress_context step 9), so every later marker reports the session's original
+    first-message time. The Phase-3 exclusion logic that keeps this correct (consolidating
+    only markers[:-1], never folding in the kept newest marker) is exercised end-to-end by
+    test_memory_consolidation.py::TestConsolidateMarkersUnit::test_l2_marker_includes_combined_timestamp_range;
+    these tests cover the helper's rendering of that range.
+    """
+
+    def test_l2_start_is_oldest_consolidated_not_kept_marker(self):
+        # M1 (oldest, to be consolidated): 09-06 → 09-07
+        m1 = build_marker_message("s1", first_ts=_ts(2026, 9, 6, 10, 14),
+                                  last_ts=_ts(2026, 9, 7, 8, 30), n_messages=5)
+        # M2 (newest L1, KEPT — not consolidated): 09-08 → 09-09
+        m2 = build_marker_message("s2", first_ts=_ts(2026, 9, 8, 9, 0),
+                                  last_ts=_ts(2026, 9, 9, 12, 0), n_messages=4)
+
+        # Consolidate M1 only (as _consolidate_markers does: all markers except the newest).
+        l2 = build_consolidation_marker_message("consolidated", 1,
+                                                first_ts=_ts(2026, 9, 6, 10, 14),
+                                                last_ts=_ts(2026, 9, 7, 8, 30))
+
+        assert "L2" in l2.content
+        # Start time = M1's start (the original first message of the compressed history),
+        # NOT M2's start — folding in the kept marker would render M2's start here.
+        assert "2026-09-06 10:14 →" in l2.content
+        assert "2026-09-08 09:00" not in l2.content
+        # End time = M1's end; the kept marker's later window is already covered by the
+        # next L1 compression inheriting this range (see compress_context step 9).
+        assert "→ 2026-09-07 08:30" in l2.content
+
+    def test_l2_multi_marker_span_uses_min_start_max_end(self):
+        s1, e1 = _ts(2026, 9, 6, 10, 14), _ts(2026, 9, 7, 8, 30)
+        s2, e2 = _ts(2026, 9, 7, 9, 0), _ts(2026, 9, 8, 10, 0)
+        l2_starts = [s1, s2]
+        l2_ends = [e1, e2]
+        l2 = build_consolidation_marker_message("consolidated", 2,
+                                                first_ts=min(l2_starts), last_ts=max(l2_ends))
+        assert "2026-09-06 10:14 → 2026-09-08 10:00" in l2.content
 
 
 if __name__ == "__main__":
