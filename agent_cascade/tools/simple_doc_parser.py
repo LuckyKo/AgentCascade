@@ -316,14 +316,14 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
         # after any decompose in the same pass can crash with AttributeError. Snapshotting
         # first means phase 2 never reads attributes off a possibly-invalidated tag.
 
-        # 1. Always-strip tags
-        for tag_name in _ALWAYS_STRIP_TAGS:
-            targets = [t for t in soup.find_all(tag_name) if t is not protected_root]
-            for tag in targets:
-                try:
-                    tag.decompose()
-                except AttributeError:
-                    continue  # already invalidated by an earlier decompose
+        # 1. Always-strip tags — single traversal (bs4 name-list filter) instead of one
+        #    find_all per tag. Removals are commutative, so document order is fine.
+        targets = [t for t in soup.find_all(list(_ALWAYS_STRIP_TAGS)) if t is not protected_root]
+        for tag in targets:
+            try:
+                tag.decompose()
+            except AttributeError:
+                continue  # already invalidated by an earlier decompose
 
         # 2. Strip by ARIA role (handles space-separated multi-role values)
         role_snap = [(el, el.get('role')) for el in soup.find_all(attrs={'role': True})
@@ -431,14 +431,16 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
         cells = tr.find_all(['td', 'th'], recursive=False)
         if not cells:
             return ''
+        # Extract + normalize each cell's text ONCE (avoids a redundant second get_text).
         cell_texts = [re.sub(r'\s+', ' ', c.get_text()).strip() for c in cells]
+        # A header row is one where every non-empty cell is a <th>.
+        all_th = all(c.name == 'th' for c, t in zip(cells, cell_texts) if t)
         while cell_texts and not cell_texts[-1]:
             cell_texts.pop()  # drop trailing empty cells, keep interior (column gaps)
         if not cell_texts:
             return ''
         first_cell, first = cells[0], cell_texts[0]
         rest = [t for t in cell_texts[1:] if t]
-        all_th = all(c.name == 'th' for c in cells if re.sub(r'\s+', ' ', c.get_text()).strip())
         # label:value when first cell is a <th> OR its text ends with a colon (Wikipedia
         # taxonomy rows use <td>Kingdom:</td><td>Animalia</td>). Header rows pipe-joined.
         if not all_th and (first_cell.name == 'th' or first.rstrip().endswith(':')):
@@ -466,6 +468,10 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
         """
         content = []
 
+        # Resolve the <base href> ONCE (not per-image) — the tree isn't mutated during the
+        # walk, so a single lookup is valid and avoids O(imgs x nodes) re-traversals.
+        base_tag = soup.find('base', href=True) if not base_url else None
+
         def _resolve_image_src(src):
             """Resolve an <img> src to an absolute URL (base_url > <base href> > as-is)."""
             if not src or not src.strip():
@@ -473,31 +479,36 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
             src = src.strip()
             if src.lower().startswith('data:'):
                 return None
-            base = base_url
-            if not base:
-                base_tag = soup.find('base', href=True)
-                if base_tag is not None:
-                    base = base_tag['href']
+            base = base_url or (base_tag['href'] if base_tag is not None else None)
             if base:
                 return urllib.parse.urljoin(base, src)
             return src
 
         def _emit_text(t):
-            """Append cleaned text entry(ies) from a raw string block."""
-            t = pre_process_html(t)
-            # Collapse source line-wraps (single \n + horizontal whitespace) to a space so
-            # a wrapped <p> stays ONE entry. Real block separation comes from the flush
-            # model, not from newlines within text.
-            t = re.sub(r'[ \t\r\f\v]*\n[ \t\r\f\v]*', ' ', t)
-            for p in t.split(PARAGRAPH_SPLIT_SYMBOL):
-                cp = clean_paragraph(p)
-                if cp.strip():
-                    content.append({'text': cp})
+            """Append a cleaned text entry from a raw string block.
+
+            Fused into one pass: drop the Qwen marker, then collapse every newline run
+            (with surrounding horizontal whitespace) to a single space so a wrapped <p>
+            stays ONE entry. Real block separation comes from the flush model, not from
+            newlines within text. (pre_process_html's '\\n+'->'\\n' is subsumed here.)
+            """
+            t = t.replace("Add to Qwen's Reading List", '')
+            t = re.sub(r'[ \t\r\f\v]*\n+[ \t\r\f\v]*', ' ', t)
+            cp = clean_paragraph(t)
+            if cp.strip():
+                content.append({'text': cp})
 
         def _flush(buf):
             if buf:
                 _emit_text(''.join(buf))
                 buf.clear()
+
+        def _emit_table_rows(table):
+            """Emit a <table>'s compact rows as one entry per row (shared by both loops)."""
+            for row in _emit_table(table).split(PARAGRAPH_SPLIT_SYMBOL):
+                cp = clean_paragraph(row)
+                if cp.strip():
+                    content.append({'text': cp})
 
         def _walk(el, buf):
             """Walk el's children in document order, accumulating text into buf.
@@ -520,11 +531,7 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     # Table path: emit compact rows directly (one entry per row), bypassing
                     # the text buffer so cells don't splay. Flush any pending text first.
                     _flush(buf)
-                    t = _emit_table(child)
-                    for row in t.split(PARAGRAPH_SPLIT_SYMBOL):
-                        cp = clean_paragraph(row)
-                        if cp.strip():
-                            content.append({'text': cp})
+                    _emit_table_rows(child)
                 elif name == 'pre':
                     # <pre> is preformatted: emit verbatim as ONE entry, newlines preserved.
                     _flush(buf)
@@ -554,11 +561,7 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                 if abs_src:
                     content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
             elif name == 'table' and not extract_image:
-                t = _emit_table(child)
-                for row in t.split(PARAGRAPH_SPLIT_SYMBOL):
-                    cp = clean_paragraph(row)
-                    if cp.strip():
-                        content.append({'text': cp})
+                _emit_table_rows(child)
             elif name == 'pre':
                 raw = child.get_text()
                 if raw.strip():
