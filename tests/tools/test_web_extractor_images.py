@@ -81,6 +81,19 @@ def test_parse_html_bs_relative_src_resolved_against_base_url():
     assert images == ['![rel](http://example.com/a/img/x.png)']
 
 
+def test_parse_html_bs_relative_src_resolved_against_base_href_tag():
+    """With no base_url (e.g. a local file), a relative src resolves against <base href>."""
+    html = ("<html><head>"
+            '<base href="http://cdn.example.com/assets/">'
+            "<title>BaseHref Page</title></head><body>"
+            '<img src="pic/y.png" alt="via-base">'
+            "</body></html>")
+    # base_url=None -> _resolve_image_src falls back to the <base href> in the doc.
+    result = _parse(html, base_url=None)
+    images = [v for item in result[0]['content'] for v in item.values() if 'image' in item]
+    assert images == ['![via-base](http://cdn.example.com/assets/pic/y.png)']
+
+
 def test_parse_html_bs_data_uri_skipped():
     """<img src='data:...'> is not included."""
     html = ("<html><head><title>Data Page</title></head><body>"
