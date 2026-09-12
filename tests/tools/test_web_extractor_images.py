@@ -580,3 +580,133 @@ def test_table_with_image_in_table_preserved_on_image_path():
     result = _parse(html, extract_image=True, base_url='http://example.com/p.html')
     imgs = [item.get('image', '') for item in result[0]['content'] if 'image' in item]
     assert '![InTable](https://example.com/in-table.png)' in imgs
+
+
+# ---------------------------------------------------------------------------
+# Admonition label merging (Note / See also / Warning -> one entry with body)
+# ---------------------------------------------------------------------------
+
+def test_admonition_note_label_merged_with_body():
+    """A Sphinx admonition label ('Note') merges into its body as 'Note: <body>'."""
+    html = ("<html><head><title>Adm</title></head><body>"
+            "<p>Intro paragraph.</p>"
+            '<div class="admonition note">'
+            '<p class="admonition-title">Note</p>'
+            "<p>All functions raise OSError on invalid input.</p>"
+            "</div>"
+            "<p>Trailing paragraph.</p>"
+            "</body></html>")
+    result = _parse(html, extract_image=True)
+    texts = [item.get('text', '') for item in result[0]['content']]
+    # The label must NOT be a standalone entry.
+    assert 'Note' not in texts, f"standalone 'Note' entry found: {texts!r}"
+    # The merged entry carries the label prefix + body in ONE entry.
+    assert any(t.strip().startswith('Note:') and 'OSError' in t for t in texts), \
+        f"no merged 'Note: ...' entry: {texts!r}"
+
+
+def test_admonition_see_also_and_warning_merged():
+    """'See also' and 'Warning' labels also merge into their following body."""
+    html = ("<html><head><title>Adm2</title></head><body>"
+            '<div class="admonition seealso">'
+            '<p class="admonition-title">See also</p>'
+            "<p>The os.reload_environ() function.</p>"
+            "</div>"
+            '<div class="admonition warning">'
+            '<p class="admonition-title">Warning</p>'
+            "<p>This function is not thread-safe.</p>"
+            "</div>"
+            "</body></html>")
+    result = _parse(html, extract_image=True)
+    texts = [item.get('text', '') for item in result[0]['content']]
+    assert any(t.strip().startswith('See also:') and 'reload_environ' in t for t in texts), \
+        f"no merged 'See also: ...' entry: {texts!r}"
+    assert any(t.strip().startswith('Warning:') and 'thread-safe' in t for t in texts), \
+        f"no merged 'Warning: ...' entry: {texts!r}"
+
+
+def test_admonition_label_does_not_leak_across_blocks():
+    """A label only prefixes the NEXT text entry; it never leaks into a later block."""
+    html = ("<html><head><title>Adm3</title></head><body>"
+            '<div class="admonition note">'
+            '<p class="admonition-title">Note</p>'
+            "<p>First body.</p>"
+            "</div>"
+            "<p>Unrelated paragraph that must NOT be prefixed.</p>"
+            "</body></html>")
+    result = _parse(html, extract_image=True)
+    texts = [item.get('text', '') for item in result[0]['content']]
+    # The unrelated paragraph must not carry the 'Note:' prefix.
+    assert any(t.strip() == 'Unrelated paragraph that must NOT be prefixed.' for t in texts), \
+        f"unrelated paragraph was altered: {texts!r}"
+    # And the label applied to exactly one entry.
+    prefixed = [t for t in texts if t.strip().startswith('Note:')]
+    assert len(prefixed) == 1, f"label leaked into multiple entries: {texts!r}"
+
+
+def test_admonition_label_not_leaked_when_body_is_image():
+    """If a non-text boundary (image) follows the label, the label is dropped, not leaked."""
+    html = ("<html><head><title>Adm4</title></head><body>"
+            '<div class="admonition note">'
+            '<p class="admonition-title">Note</p>'
+            '<img src="https://example.com/x.png" alt="X">'
+            "</div>"
+            "<p>Later text must not be prefixed.</p>"
+            "</body></html>")
+    result = _parse(html, extract_image=True)
+    texts = [item.get('text', '') for item in result[0]['content']]
+    # No entry should carry a stray 'Note:' prefix (the image consumed the boundary).
+    assert not any(t.strip().startswith('Note:') for t in texts), \
+        f"label leaked past an image: {texts!r}"
+
+
+def test_admonition_label_not_leaked_when_body_empty():
+    """An admonition with NO text body must not leak its label to a following paragraph."""
+    html = ("<html><head><title>Adm5</title></head><body>"
+            '<div class="admonition note">'
+            '<p class="admonition-title">Note</p>'
+            "</div>"
+            "<p>Next paragraph must not be prefixed.</p>"
+            "</body></html>")
+    result = _parse(html, extract_image=True)
+    texts = [item.get('text', '') for item in result[0]['content']]
+    assert any(t.strip() == 'Next paragraph must not be prefixed.' for t in texts), \
+        f"label leaked into following paragraph: {texts!r}"
+    assert not any(t.strip().startswith('Note:') for t in texts), \
+        f"stray 'Note:' prefix found: {texts!r}"
+
+
+def test_admonition_label_not_leaked_across_nested_siblings():
+    """A label inside a nested empty admonition must not leak to a sibling block's text."""
+    html = ("<html><head><title>Adm6</title></head><body>"
+            "<div>"
+              '<div class="admonition note"><p class="admonition-title">Note</p></div>'
+              "<p>Sibling text must not be prefixed.</p>"
+            "</div>"
+            "</body></html>")
+    result = _parse(html, extract_image=True)
+    texts = [item.get('text', '') for item in result[0]['content']]
+    assert any(t.strip() == 'Sibling text must not be prefixed.' for t in texts), \
+        f"label leaked across nested siblings: {texts!r}"
+
+
+def test_admonition_sphinx_sibling_blocks_merge():
+    """Real Sphinx structure: title and body are SEPARATE sibling <p> blocks in one div.
+
+    The label must still merge into the body even though they're not inline — the body's
+    own block-end flush consumes the stashed label before the enclosing div resets it.
+    """
+    html = ("<html><head><title>Adm7</title></head><body>"
+            "<p>Intro.</p>"
+            '<div class="admonition note">'
+            '<p class="admonition-title">Note</p>'
+            "<p>The body of the note lives in its own paragraph.</p>"
+            "</div>"
+            "<p>Trailing.</p>"
+            "</body></html>")
+    result = _parse(html, extract_image=True)
+    texts = [item.get('text', '') for item in result[0]['content']]
+    assert any(t.strip().startswith('Note:') and 'body of the note' in t for t in texts), \
+        f"sibling-block merge failed: {texts!r}"
+    assert any(t.strip() == 'Trailing.' for t in texts), \
+        f"trailing paragraph altered: {texts!r}"

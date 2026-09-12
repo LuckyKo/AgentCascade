@@ -459,6 +459,18 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                 lines.append(line)
         return '\n'.join(lines)
 
+    def _is_admonition_title(el):
+        """True if el is an admonition label element (Sphinx: class 'admonition-title').
+
+        These hold a short label like 'Note', 'Warning', 'See also' that introduces the
+        following content. We merge them into the next text entry rather than emitting
+        them as standalone entries, so the label + body stay one quotable unit.
+        """
+        if not isinstance(el, Tag):
+            return False
+        classes = el.get('class') or []
+        return 'admonition-title' in classes
+
     def _build_content(content_root, extract_image, base_url):
         """Build the list of content entries by walking content_root depth-first.
 
@@ -471,6 +483,12 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
         # Resolve the <base href> ONCE (not per-image) — the tree isn't mutated during the
         # walk, so a single lookup is valid and avoids O(imgs x nodes) re-traversals.
         base_tag = soup.find('base', href=True) if not base_url else None
+
+        # Admonition label pending to be merged into the next text entry (e.g. "Note",
+        # "See also", "Warning"). Stored as a single-element list so nested _walk/_flush
+        # can read and clear it. When set, the next flushed text entry is prefixed with
+        # "<label>: " so the label and its body stay in ONE entry (better quote-fidelity).
+        pending_label = [None]
 
         def _resolve_image_src(src):
             """Resolve an <img> src to an absolute URL (base_url > <base href> > as-is)."""
@@ -491,11 +509,18 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
             (with surrounding horizontal whitespace) to a single space so a wrapped <p>
             stays ONE entry. Real block separation comes from the flush model, not from
             newlines within text. (pre_process_html's '\\n+'->'\\n' is subsumed here.)
+
+            If an admonition label is pending (e.g. "Note"), it is prefixed to this entry
+            as "<label>: " and consumed, so the label + body become a single quotable unit.
             """
             t = t.replace("Add to Qwen's Reading List", '')
             t = re.sub(r'[ \t\r\f\v]*\n+[ \t\r\f\v]*', ' ', t)
             cp = clean_paragraph(t)
             if cp.strip():
+                label = pending_label[0]
+                if label:
+                    pending_label[0] = None  # consume; a label applies to at most one entry
+                    cp = f"{label}: {cp.strip()}"  # strip body so no double space after colon
                 content.append({'text': cp})
 
         def _flush(buf):
@@ -524,6 +549,7 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     continue  # skip script/style subtrees entirely (get_text() omits them)
                 if name == 'img' and extract_image:
                     _flush(buf)  # flush pending text BEFORE the image (true order)
+                    pending_label[0] = None  # a non-text boundary ends any pending label
                     abs_src = _resolve_image_src(child.get('src'))
                     if abs_src:
                         content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
@@ -531,10 +557,12 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     # Table path: emit compact rows directly (one entry per row), bypassing
                     # the text buffer so cells don't splay. Flush any pending text first.
                     _flush(buf)
+                    pending_label[0] = None  # a non-text boundary ends any pending label
                     _emit_table_rows(child)
                 elif name == 'pre':
                     # <pre> is preformatted: emit verbatim as ONE entry, newlines preserved.
                     _flush(buf)
+                    pending_label[0] = None  # a non-text boundary ends any pending label
                     raw = child.get_text()
                     if raw.strip():
                         content.append({'text': clean_paragraph(raw)})
@@ -544,17 +572,27 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     # here for consistency — the two lines stay in ONE entry, separated by
                     # a space rather than fragmenting into separate entries.
                     buf.append(' ')
+                elif _is_admonition_title(child):
+                    # Admonition label (e.g. <p class="admonition-title">Note</p>). Don't
+                    # emit it as its own entry; stash it so the next text entry is prefixed
+                    # with "<label>: " — keeping the label and its body in one quotable unit.
+                    _flush(buf)  # don't let pending body text absorb the label
+                    label_txt = clean_paragraph(child.get_text())
+                    if label_txt.strip():
+                        pending_label[0] = label_txt.strip()
                 elif isinstance(child, NavigableString):
                     buf.append(str(child))  # accumulate; flushed at block end / before images
                 else:  # other element (p, div, a, code, span, ...)
                     _walk(child, buf)  # recurse in order
             if el.name in _BLOCK_TAGS:
                 _flush(buf)  # flush only when a block-level element finishes
+                pending_label[0] = None  # a label dies with its enclosing block (no leak past it)
 
         for child in content_root.children:
             name = getattr(child, 'name', None)
             if isinstance(child, Comment):
                 continue  # get_text() excludes comments
+            pending_label[0] = None  # each top-level child starts with no stale label
             if name == 'img' and extract_image:
                 # Top-level bare <img> (not wrapped in a block) — emit directly.
                 abs_src = _resolve_image_src(child.get('src'))
