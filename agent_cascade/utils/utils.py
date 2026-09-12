@@ -42,9 +42,6 @@ from agent_cascade.settings import CHAT_TEMPLATE_TOKEN_OVERHEAD, IMAGE_TOKEN_EST
 # Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
 MAX_FC_ARGS_LEN = 2048
 
-# Default timeout for HTTP requests (seconds)
-DEFAULT_REQUEST_TIMEOUT = 30
-
 # Maximum size for base64 data URL decoded content (50MB) to prevent resource exhaustion
 MAX_DATA_URL_SIZE = 50 * 1024 * 1024
 

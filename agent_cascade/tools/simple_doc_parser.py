@@ -48,6 +48,10 @@ _JS_SPA_MARKERS = (
     'window.__initial_state__',
 )
 
+# Below this extracted-text length, a page with an SPA marker is treated as a
+# JS shell that plain requests couldn't render.
+_SPA_MIN_TEXT_LENGTH = 300
+
 
 def _looks_like_js_spa(html: str, text_len: int) -> bool:
     """Cheap heuristic: does this page likely need JavaScript rendering?
@@ -57,7 +61,7 @@ def _looks_like_js_spa(html: str, text_len: int) -> bool:
     one known SPA marker. Returns False for normal server-rendered pages even
     if they contain scripts.
     """
-    if text_len >= 300:
+    if text_len >= _SPA_MIN_TEXT_LENGTH:
         return False
     lowered = html.lower()
     return any(marker in lowered for marker in _JS_SPA_MARKERS)
