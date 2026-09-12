@@ -24,9 +24,10 @@ _resolve_path + real PIL image) so it stays hermetic.
 All external I/O is mocked (save_image_to_media / base64 encoding). No network calls.
 """
 
+import io
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from PIL import Image
@@ -222,3 +223,137 @@ class TestViewImageCropRegionUncaptioned:
         assert "cropped region x=10,y=20,w=100,h=80" in text
         # Guard still fires for genuine captioning.
         assert _guard_flags(result) is True
+
+
+# ---------------------------------------------------------------------------
+# URL branch (http(s) image URL → downloaded to a tempdir file, then the single
+# existing save_image_to_media call persists it to the media folder ONCE).
+# No real network: requests.get is mocked. The REAL save_image_to_media runs so we
+# can assert the persistent media file survives cleanup (regression guard for the
+# v1 bug where the finally-block unlinked the temp_png that pointed at media).
+# ---------------------------------------------------------------------------
+
+class TestViewImageUrl:
+    """Tests for view_image's http(s) URL download branch.
+
+    The URL branch writes the downloaded bytes to a TEMPDIR file and falls through,
+    so the existing pipeline (dimensions + crop + single save_image_to_media call)
+    handles it exactly like a screen capture. We exercise the REAL save_image_to_media
+    (no mock) for the success cases so we can assert the persistent media file still
+    exists on disk after cleanup — the regression guard for the v1 deletion bug.
+    """
+
+    def _png_bytes(self, w=200, h=150):
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), color="blue").save(buf, format="PNG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _fake_response(content=b"", content_length=None, status_code=200):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.headers = {} if content_length is None else {"Content-Length": str(content_length)}
+        resp.content = content
+        resp.raise_for_status.return_value = None
+        resp.close.return_value = None
+        return resp
+
+    def test_url_downloaded_to_media_and_captioned(self, view_image_tool):
+        """URL → media download: mocked fetch returns known PNG bytes; the result is an image
+        ContentItem under the real media images dir, and the caption includes dimensions."""
+        from agent_cascade.utils.media_utils import _get_media_root
+
+        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+                   return_value=self._fake_response(self._png_bytes(200, 150))) as mock_get:
+            result = view_image_tool.call(json.dumps({"path": "http://example.com/img.png"}))
+
+        assert mock_get.called
+        assert isinstance(result, list) and len(result) == 2
+        media_path = result[0].image
+        # Media path lives under the instance-aware media/images/ dir.
+        images_dir_str = str(_get_media_root() / "images").replace("\\", "/")
+        assert media_path.startswith(images_dir_str), f"{media_path} not under {images_dir_str}"
+        # Caption (text item) carries dimensions.
+        assert isinstance(result[1], ContentItem)
+        assert "Viewing image" in result[1].text
+        assert "200x150" in result[1].text
+
+    def test_url_media_file_persists_after_cleanup(self, view_image_tool):
+        """CRITICAL regression guard: after the URL call returns, the returned media path MUST
+        still exist on disk. The v1 bug pointed temp_png at the media file and let the
+        finally-block unlink it; with the v2 approach temp_png is a tempdir file so cleanup
+        must NOT touch the persistent media output."""
+        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+                   return_value=self._fake_response(self._png_bytes(120, 80))):
+            result = view_image_tool.call(json.dumps({"path": "http://example.com/persist.png"}))
+
+        media_path = result[0].image
+        try:
+            assert Path(media_path).exists(), (
+                f"media file was deleted by cleanup (v1 regression): {media_path}"
+            )
+        finally:
+            Path(media_path).unlink(missing_ok=True)  # clean up our test artifact
+
+    def test_url_non_image_returns_clean_error(self, view_image_tool):
+        """Non-image URL (HTML bytes) → clean error string, no exception."""
+        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+                   return_value=self._fake_response(b"<html>oops</html>", content_length=17)):
+            result = view_image_tool.call(json.dumps({"path": "http://example.com/page.html"}))
+
+        assert isinstance(result, str)
+        assert result.startswith("ERROR:")
+        assert "did not return a valid viewable image" in result
+
+    def test_url_download_failure_returns_clean_error(self, view_image_tool):
+        """requests.RequestException → clean error string (do NOT raise)."""
+        import requests as _requests
+        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+                   side_effect=_requests.RequestException("connection refused")):
+            result = view_image_tool.call(json.dumps({"path": "http://example.com/down.png"}))
+
+        assert isinstance(result, str)
+        assert result.startswith("ERROR:")
+        assert "Failed to download image from" in result
+
+    def test_url_oversized_rejected_without_body(self, view_image_tool):
+        """Content-Length over the 50 MB cap → rejected WITHOUT downloading the body.
+
+        The declared size (Content-Length) is what triggers rejection; the actual
+        `content` payload is intentionally a small opaque blob that is NOT a valid image,
+        so if the guard were bypassed the code would fall through to PIL validation and
+        return a DIFFERENT error — which is exactly how this test detects a regression."""
+        declared = 51 * 1024 * 1024  # 51 MB > 50 MB cap
+        resp = self._fake_response(content=MagicMock(name="body"), content_length=declared)
+        with patch("agent_cascade.tools.custom.file_ops.requests.get", return_value=resp) as mock_get:
+            result = view_image_tool.call(json.dumps({"path": "http://example.com/huge.png"}))
+
+        assert isinstance(result, str)
+        assert result.startswith("ERROR:")
+        assert "too large" in result.lower()
+        # Body was never read — only headers were inspected before rejecting.
+        resp.content.assert_not_called()
+        mock_get.assert_called_once()
+
+    def test_url_crop_region_saved_to_media(self, view_image_tool):
+        """crop_region on a downloaded URL image works and the result is saved to media."""
+        from agent_cascade.utils.media_utils import _get_media_root
+
+        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+                   return_value=self._fake_response(self._png_bytes(200, 150))):
+            result = view_image_tool.call(json.dumps({
+                "path": "http://example.com/crop.png",
+                "crop_region": "10,20,100,80",
+            }))
+
+        assert isinstance(result, list) and len(result) == 2
+        media_path = result[0].image
+        images_dir_str = str(_get_media_root() / "images").replace("\\", "/")
+        assert media_path.startswith(images_dir_str), f"{media_path} not under {images_dir_str}"
+        text = result[1].text
+        assert "200x150" in text
+        assert "cropped region x=10,y=20,w=100,h=80" in text
+        try:
+            assert Path(media_path).exists()
+        finally:
+            Path(media_path).unlink(missing_ok=True)

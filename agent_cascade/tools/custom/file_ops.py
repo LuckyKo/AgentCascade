@@ -13,10 +13,30 @@ from agent_cascade.settings import (
     DEFAULT_READ_FILE_MAX_LINES, DEFAULT_MAX_INPUT_TOKENS,
     DEFAULT_WILD_READ_TRUNCATION_CHARS,
 )
+import io
 import json
+import requests
+from PIL import Image
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.utils.utils import json_loads, encode_image_as_base64
+from agent_cascade.utils.utils import (
+    json_loads, encode_image_as_base64, is_http_url,
+    _HTTP_FETCH_HEADERS, _HTTP_FETCH_TIMEOUT,
+)
 from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
+
+# Hard cap on the declared size of an image URL we are willing to download
+# (checked via Content-Length BEFORE reading the body). A second line of defense
+# is save_image_to_media's 10 MB *encoded* cap.
+_MAX_URL_IMAGE_BYTES = 50 * 1024 * 1024
+
+
+def _is_temp_file(p) -> bool:
+    """True if p points under the system tempdir.
+
+    Used by view_image cleanup so a persistent media file is never unlinked, even
+    if a future source ever pointed temp_png/crop_tmp at a non-temp location.
+    """
+    return str(p).startswith(tempfile.gettempdir())
 
 
 class PathResolutionMixin:
@@ -643,6 +663,53 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 logger.info("Window capture completed via __window_capture:%d directive", pid)
                 # Fall through with the temp file path so normal image processing applies
 
+            elif is_http_url(path):
+                # HTTP(S) image URL: download to a TEMPDIR file and fall through so the
+                # existing pipeline treats it EXACTLY like a screen capture (skips
+                # _resolve_path, gets dimensions, applies any crop_region, and the single
+                # save_image_to_media call below persists it to the media folder ONCE).
+                # Do NOT call save_image_to_media here — that would double-encode.
+                try:
+                    response = requests.get(
+                        path, headers=_HTTP_FETCH_HEADERS,
+                        timeout=_HTTP_FETCH_TIMEOUT, stream=True,
+                    )
+                    response.raise_for_status()
+
+                    # Pre-download size guard: reject over-cap payloads via Content-Length
+                    # BEFORE reading the body (cheap; avoids pulling a huge file down).
+                    content_length = response.headers.get('Content-Length')
+                    if content_length is not None:
+                        try:
+                            declared = int(content_length)
+                        except (TypeError, ValueError):
+                            declared = None
+                        if declared is not None and declared > _MAX_URL_IMAGE_BYTES:
+                            response.close()
+                            return (
+                                f"ERROR: Image too large to download ({declared / (1024 * 1024):.1f} MB "
+                                f"> {_MAX_URL_IMAGE_BYTES // (1024 * 1024)} MB cap): {path}"
+                            )
+
+                    image_bytes = response.content
+                except requests.RequestException as e:
+                    return f"ERROR: Failed to download image from {path}: {e}"
+
+                # Cheaply validate the bytes are a real, viewable image (catches HTML/text).
+                try:
+                    _pil_img = Image.open(io.BytesIO(image_bytes))
+                    _pil_img.load()
+                except Exception:
+                    return f"ERROR: URL did not return a valid viewable image ({path})."
+
+                tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='url_view_')
+                os.close(tmp_fd)
+                with open(tmp_png_path, "wb") as f:
+                    f.write(image_bytes)
+                temp_png = Path(tmp_png_path)
+                logger.info("Image downloaded from URL via view_image: %s", path)
+                # Fall through with the temp file path so normal image processing applies
+
             try:
                 resolved = self._resolve_path(path) if not temp_png else None
             except ValueError as e:
@@ -778,14 +845,15 @@ class ViewImage(BaseTool, PathResolutionMixin):
             logger.exception(f"Unexpected error viewing image '{path}'")
             return f"ERROR: Error viewing image: {str(e)}"
         finally:
-            # Clean up the temp PNG file after serving (best-effort)
-            if temp_png and os.path.exists(temp_png):
+            # Clean up the temp PNG file after serving (best-effort). Only delete files
+            # under the system tempdir so a persistent media file is never unlinked.
+            if temp_png and os.path.exists(temp_png) and _is_temp_file(temp_png):
                 try:
                     os.remove(temp_png)
                 except OSError:
                     pass  # non-critical cleanup failure
-            # Clean up the cropped temp file
-            if crop_tmp and os.path.exists(crop_tmp):
+            # Clean up the cropped temp file (same tempdir-only guard).
+            if crop_tmp and os.path.exists(crop_tmp) and _is_temp_file(crop_tmp):
                 try:
                     os.remove(crop_tmp)
                 except OSError:
