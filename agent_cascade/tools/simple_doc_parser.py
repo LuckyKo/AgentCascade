@@ -305,6 +305,108 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
             except AttributeError:
                 continue  # element already invalidated by an earlier mutation — skip safely
 
+    def _extract_text_with_tables(root):
+        """Extract text from `root`, formatting <table> rows as compact single lines.
+
+        Plain get_text() splayed table cells across many lines (e.g. a Wikipedia infobox
+        became 'Kingdom:' / 'Animalia' / 'Phylum:' / 'Chordata' ...). This walks the tree
+        WITHOUT mutating it, so images and structure are untouched — it only changes how
+        text is assembled. For each table row: if the first cell is short (label-like),
+        join as 'Label: Value(s)'; otherwise join cells with ' | '. Non-table content is
+        extracted exactly like get_text() would be (block elements separated by newlines).
+        """
+        out = []
+
+        def _cell_text(cell):
+            # Cell text, internal whitespace collapsed to single spaces.
+            return re.sub(r'\s+', ' ', cell.get_text()).strip()
+
+        def _fmt_row(tr):
+            cells = tr.find_all(['td', 'th'], recursive=False)
+            if not cells:
+                return ''
+            texts = [_cell_text(c) for c in cells]
+            # Drop trailing empty cells but keep interior ones (preserves column gaps).
+            while texts and not texts[-1]:
+                texts.pop()
+            if not texts:
+                return ''
+            first_cell, first = cells[0], texts[0]
+            rest = [t for t in texts[1:] if t]
+            # A header row (every cell is <th>) is pipe-joined: 'Name | Age | City'.
+            # An infobox/taxonomy row (<th> or colon-ending label followed by value(s)) is
+            # label:value: 'Kingdom: Animalia'. A plain data row (<td> cells) is pipe-joined:
+            # 'Alice | 30 | Paris'. Labels are detected via <th> or a trailing colon, so real
+            # Wikipedia taxonomy rows (<td>Kingdom:</td><td>Animalia</td>) format correctly.
+            all_th = all(c.name == 'th' for c in cells if _cell_text(c))
+            # A row is label:value when the first cell is a <th> (header-label), OR its text
+            # ends with a colon (a strong label signal — e.g. Wikipedia taxonomy rows use
+            # <td>Kingdom:</td><td>Animalia</td>). Header rows (all <th>) are pipe-joined.
+            if not all_th and (first_cell.name == 'th' or first.rstrip().endswith(':')):
+                label = first.strip()
+                if not label.endswith(':'):
+                    label += ':'
+                if rest:
+                    return f"{label} {' | '.join(rest)}"
+                return label
+            return ' | '.join(t for t in texts if t)
+
+        def _emit_table(table):
+            # Handle nested tables: extract inner tables' text via get_text on the cell.
+            rows = table.find_all('tr')
+            lines = []
+            for tr in rows:
+                line = _fmt_row(tr)
+                if line:
+                    lines.append(line)
+            return '\n'.join(lines)
+
+        def _walk(el):
+            """Extract text preserving newlines (so paragraphs stay split).
+
+            Block-level elements are separated by a newline; inline runs collapse only
+            horizontal whitespace (spaces/tabs), never \\n. Tables emit compact row lines.
+            """
+            parts = []
+            for child in el.children:
+                if isinstance(child, Comment):
+                    continue
+                name = getattr(child, 'name', None)
+                if name in ('script', 'style'):
+                    continue
+                if name == 'table':
+                    t = _emit_table(child)
+                    if t:
+                        parts.append(t)  # rows already newline-separated
+                elif isinstance(child, NavigableString):
+                    # Collapse only horizontal whitespace; keep newlines intact.
+                    parts.append(re.sub(r'[ \t\r\f\v]+', ' ', str(child)))
+                else:
+                    sub = _walk(child)
+                    if sub.strip():
+                        parts.append(sub)
+            return ''.join(parts)
+
+        for child in root.children:
+            if isinstance(child, Comment):
+                continue
+            name = getattr(child, 'name', None)
+            if name in ('script', 'style'):
+                continue
+            if name == 'table':
+                t = _emit_table(child)
+                if t:
+                    out.append(t)  # table rows already newline-separated
+            elif isinstance(child, NavigableString):
+                line = re.sub(r'[ \t\r\f\v]+', ' ', str(child)).strip()
+                if line:
+                    out.append(line)
+            else:
+                block = _walk(child).strip()
+                if block:
+                    out.append(block)
+        return '\n'.join(out)
+
     def _strip_boilerplate(soup, protected_root):
         """Remove boilerplate elements from the soup in-place.
 
@@ -420,12 +522,11 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
     content_root = _pick_content_root(soup)
     _strip_boilerplate(soup, content_root)
     _collapse_math(content_root)  # collapse MathML to single-line LaTeX before extraction
-    text = content_root.get_text()
-
-    text = pre_process_html(text)
-    paras = text.split(PARAGRAPH_SPLIT_SYMBOL)
 
     if extract_image:
+        # Plain get_text() is used only as a length signal for the JS-SPA check below;
+        # the actual content is built by the depth-first walk.
+        text = content_root.get_text()
         # Build image entries interleaved with text in TRUE document (reading) order by
         # walking the content root depth-first. As we traverse, an <img> is emitted at its
         # exact position; consecutive text nodes are accumulated into a per-block buffer and
@@ -479,6 +580,10 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                 if cp.strip():
                     content.append({'text': cp})
     else:
+        # Table-aware text extraction: formats <table> rows as compact single lines so
+        # infoboxes don't splay across many entries. No DOM mutation (images preserved).
+        text = pre_process_html(_extract_text_with_tables(content_root))
+        paras = text.split(PARAGRAPH_SPLIT_SYMBOL)
         content = []
         for p in paras:
             p = clean_paragraph(p)

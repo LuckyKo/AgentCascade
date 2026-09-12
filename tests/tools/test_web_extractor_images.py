@@ -317,3 +317,84 @@ def test_web_extractor_success_path_unaffected():
         mock_parser.return_value.call.return_value = 'PARSED-CONTENT-OK'
         result = tool.call({'url': 'https://example.com/ok'})
     assert result == 'PARSED-CONTENT-OK'
+
+
+# --- Table-aware text extraction tests (Issue 2) ---------------------------
+
+def test_table_infobox_rows_compact():
+    """A 2-column label/value table becomes one 'Label: Value' line per row, not splayed cells."""
+    html = ("<html><head><title>Infobox</title></head><body>"
+            "<table class='infobox'>"
+            "<tr><th>Kingdom:</th><td>Animalia</td></tr>"
+            "<tr><th>Phylum:</th><td>Chordata</td></tr>"
+            "<tr><th>Class:</th><td>Mammalia</td></tr>"
+            "</table>"
+            "<p>Prose paragraph.</p>"
+            "</body></html>")
+    result = _parse(html, extract_image=False)  # table-aware path
+    texts = [item.get('text', '') for item in result[0]['content']]
+    joined = ' '.join(texts)
+    # Each row is one compact entry.
+    assert 'Kingdom: Animalia' in joined
+    assert 'Phylum: Chordata' in joined
+    assert 'Class: Mammalia' in joined
+    # Not splayed: no standalone 'Animalia' or 'Kingdom:' entries.
+    assert not any(t.strip() == 'Animalia' for t in texts)
+    assert not any(t.strip() == 'Kingdom:' for t in texts)
+    # Prose still present.
+    assert 'Prose paragraph.' in joined
+
+
+def test_table_wider_data_rows_pipe_joined():
+    """A 3+ column data table is pipe-joined, not mangled into label:value pairs."""
+    html = ("<html><head><title>Data</title></head><body>"
+            "<table>"
+            "<tr><th>Name</th><th>Age</th><th>City</th></tr>"
+            "<tr><td>Alice</td><td>30</td><td>Paris</td></tr>"
+            "</table>"
+            "</body></html>")
+    result = _parse(html, extract_image=False)
+    joined = ' '.join(item.get('text', '') for item in result[0]['content'])
+    # Header row and data row are pipe-joined single lines.
+    assert 'Name | Age | City' in joined
+    assert 'Alice | 30 | Paris' in joined
+
+
+def test_table_td_label_with_trailing_colon():
+    """Wikipedia taxonomy rows use <td>Label:</td><td>Value</td> (no <th>) — must be label:value."""
+    html = ("<html><head><title>Taxonomy</title></head><body>"
+            "<table class='infobox'>"
+            "<tr><td>Kingdom:</td><td>Animalia</td></tr>"
+            "<tr><td>Phylum:</td><td>Chordata</td></tr>"
+            "</table>"
+            "</body></html>")
+    result = _parse(html, extract_image=False)
+    joined = ' '.join(item.get('text', '') for item in result[0]['content'])
+    # Colon-ending <td> label -> 'Label: Value' (no doubled pipe separator).
+    assert 'Kingdom: Animalia' in joined
+    assert 'Phylum: Chordata' in joined
+    assert 'Kingdom: | Animalia' not in joined
+
+
+def test_table_no_regression_prose_only():
+    """A page with no tables is unaffected by the table-aware extraction."""
+    html = ("<html><head><title>Plain</title></head><body>"
+            "<p>First paragraph.</p>"
+            "<p>Second paragraph.</p>"
+            "</body></html>")
+    result = _parse(html, extract_image=False)
+    joined = ' '.join(item.get('text', '') for item in result[0]['content'])
+    assert 'First paragraph.' in joined
+    assert 'Second paragraph.' in joined
+
+
+def test_table_with_image_in_table_preserved_on_image_path():
+    """The image path still extracts an image that lives inside a table (no DOM mutation)."""
+    html = ("<html><head><title>Table+Img</title></head><body>"
+            "<table><tr><td>Label</td><td>"
+            '<img src="https://example.com/in-table.png" alt="InTable">'
+            "</td></tr></table>"
+            "</body></html>")
+    result = _parse(html, extract_image=True, base_url='http://example.com/p.html')
+    imgs = [item.get('image', '') for item in result[0]['content'] if 'image' in item]
+    assert '![InTable](https://example.com/in-table.png)' in imgs
