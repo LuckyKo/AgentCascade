@@ -500,3 +500,37 @@ class TestSkillsBlockInternalHeadings:
         assert "## WHEN TO ACT (Concrete Triggers)" not in result
         assert "step two" not in result
 
+    def test_inject_guard_tolerates_heading_variants(self):
+        """BUG_0009 refinement: the idempotency guard must detect heading variants
+        (case, whitespace, trailing text) so they can't bypass it and cause
+        duplicate injection."""
+        from agent_cascade.engine.helpers import _inject_skills_to_system_message
+
+        pool = MagicMock()
+        skill_text = "## Goal\nSome skill instructions."
+
+        # Variant headings that the old substring check caught — the new regex
+        # must also catch all of them (guard returns False, no injection).
+        variant_headings = [
+            "## Active Skills",          # canonical
+            "##  Active   Skills",       # extra whitespace
+            "## active skills",          # lowercase
+            "## ACTIVE SKILLS",          # uppercase
+            "## Active Skills: note",    # trailing text on same line
+        ]
+        for heading in variant_headings:
+            sys_msg = Message(
+                role=SYSTEM,
+                content=f"You are worker1.\n\n{heading}\n### Skill 1\nold skill body",
+            )
+            injected = _inject_skills_to_system_message(pool, sys_msg, [skill_text])
+            assert injected is False, f"Guard failed to detect heading variant: {heading!r}"
+            # Content must be untouched — no duplicate injection.
+            assert "Some skill instructions." not in sys_msg.content
+
+        # Control: no heading at all → injection proceeds.
+        sys_msg = Message(role=SYSTEM, content="You are worker1.\n\n## AVAILABLE AGENTS\n- coder")
+        injected = _inject_skills_to_system_message(pool, sys_msg, [skill_text])
+        assert injected is True
+        assert "## Active Skills" in sys_msg.content
+

@@ -482,8 +482,10 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
     # Idempotency guard: skip injection if '## Active Skills' already exists.
     # This is acceptable for self-augmentation because it's a static skill — once injected
     # into a session's system message, its content doesn't change, so re-injection is redundant.
+    # Tolerates heading variants (case/whitespace/trailing text) so a malformed or
+    # user-edited heading can't bypass the guard and cause duplicate injection.
     if (sys_msg.role != SYSTEM
-            or re.search(r'^##\s+Active\s+Skills\s*$', sys_msg.content,
+            or re.search(r'^##\s+Active\s+Skills', sys_msg.content,
                          re.MULTILINE | re.IGNORECASE)):
         return False
 
