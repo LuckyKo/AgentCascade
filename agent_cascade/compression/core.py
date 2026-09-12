@@ -608,15 +608,35 @@ def compress_context(
 
     # On a repeat compression the new summary also encompasses the previously-compressed
     # content, so the header range must start from the ORIGINAL first message — i.e. the old
-    # marker's start time — not just the newly-discarded messages. Non-fatal: if the old
-    # marker's header can't be parsed we simply keep the newly-derived first_ts.
+    # marker's start time — not just the newly-discarded messages.
+    #
+    # Source of truth: the old marker MESSAGE's own ts (the completion timestamp stamped when
+    # that marker was created), NOT its parsed header text. The header is minute-granularity,
+    # so re-parsing it and re-inheriting loses precision on every compression hop; the message
+    # ts carries full float precision and round-trips through JSONL (ts → 'timestamp' field in
+    # _format_message, backfilled on session load via _backfill_ts_from_dict).
+    #
+    # KNOWN LIMITATION: the marker's ts is its CREATION time (when the compression agent
+    # completed), which is usually AFTER all the messages it summarizes — and the marker is
+    # inserted BEFORE those messages (stacked behind the last marker position), so its ts is
+    # out of order with surrounding messages. The inherited start is therefore the previous
+    # marker's creation time, not the true earliest message of the session; each hop adds at
+    # most one compression-agent run-time of drift. Accepted: minute-granularity headers can't
+    # express sub-minute deltas anyway, and every later repeat re-anchors on the previous
+    # marker's own ts (full float precision), so no further precision is lost after hop one.
     if latest_summary_idx != -1:
+        _old_marker = history[latest_summary_idx]
+        _old_ts = (_old_marker.get('ts') if isinstance(_old_marker, dict)
+                   else getattr(_old_marker, 'ts', None))
         try:
-            old_start, _old_end = _parse_marker_timestamps(history[latest_summary_idx])
-            if old_start is not None:
-                first_ts = old_start if first_ts is None else min(first_ts, old_start)
+            if _old_ts is not None:
+                first_ts = float(_old_ts)
+            else:
+                old_start, _old_end = _parse_marker_timestamps(_old_marker)
+                if old_start is not None:
+                    first_ts = old_start if first_ts is None else min(first_ts, old_start)
         except Exception as e:
-            logger.debug(f"Old marker start-time parse failed (non-fatal): {e}")
+            logger.debug(f"Old marker start-time inheritance failed (non-fatal): {e}")
 
     marker_message = build_marker_message(
         generated_summary,
