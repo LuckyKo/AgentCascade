@@ -179,18 +179,22 @@ def _consolidate_markers(
             current_remove_indices = set(current_consolidate_indices[1:])
 
             # Build the L2 marker here so its timestamp span reflects exactly the markers
-            # being consolidated in this (re-read) snapshot. Non-fatal: parse failures simply
-            # yield a plain "L2, N summaries consolidated" header with no time range.
-            l2_starts: list[float] = []
-            l2_ends: list[float] = []
-            for idx in current_consolidate_indices:
-                s, e = _parse_marker_timestamps(current_history[idx])
-                if s is not None:
-                    l2_starts.append(s)
+            # being consolidated in this (re-read) snapshot. The span is POSITIONAL, not a
+            # min/max over all markers: first_ts comes from the FIRST marker's start and
+            # last_ts from the LAST marker's end — that's the time sequence actually covered
+            # by this consolidation. Markers are chronological by position (each L1 stacks
+            # behind the previous one), so positional endpoints equal min/max in the normal
+            # case; they differ only if a header is unparseable or out of order, where the
+            # positional choice stays anchored to the true sequence boundaries. Non-fatal:
+            # parse failures simply yield a plain "L2, N summaries consolidated" header with
+            # no time range.
+            l2_first_ts, _ = _parse_marker_timestamps(current_history[current_first_idx])
+            l2_last_ts = None
+            for idx in reversed(current_consolidate_indices):
+                _s, e = _parse_marker_timestamps(current_history[idx])
                 if e is not None:
-                    l2_ends.append(e)
-            l2_first_ts = min(l2_starts) if l2_starts else None
-            l2_last_ts = max(l2_ends) if l2_ends else None
+                    l2_last_ts = e
+                    break
 
             # Do NOT fold in the kept (newest, unconsolidated) marker's timestamps: its
             # window lies INSIDE the span of the markers being consolidated (it was stacked

@@ -584,12 +584,12 @@ class TestConsolidateMarkersUnit:
                         f"Raw segments lost: {original_raw_count} -> {new_raw_count}"
 
     def test_l2_marker_includes_combined_timestamp_range(self):
-        """L2 marker built from markers with real timestamp headers carries a parseable range.
+        """L2 marker span = FIRST consolidated marker's start → LAST consolidated marker's end.
 
-        Exercises the Phase-3 wiring: loop over consolidated markers, call
-        _parse_marker_timestamps on each, take min(start)/max(end), and pass to
-        build_consolidation_marker_message. The resulting L2 header must contain the
-        combined span (earliest start → latest end) across all input markers.
+        Exercises the Phase-3 wiring: parse the first marker's start and the last
+        marker's end (positional, not min/max over all markers) and pass them to
+        build_consolidation_marker_message. The resulting L2 header must contain that
+        positional span — the time sequence actually covered by this consolidation.
         """
         from agent_cascade.compression.core import _consolidate_markers
 
@@ -651,6 +651,75 @@ class TestConsolidateMarkersUnit:
             f"L2 start {parsed_start} != earliest marker start {expected_start}"
         assert abs(parsed_end - expected_end) < 60, \
             f"L2 end {parsed_end} != latest marker end {expected_end}"
+
+    def test_l2_marker_span_is_positional_first_start_last_end(self):
+        """L2 span must be positional: first consolidated marker's start → last one's end.
+
+        Regression guard against min/max-over-all-markers semantics. Markers are in
+        chronological order, so the only way to distinguish the two implementations is
+        an OUT-OF-ORDER middle marker (e.g. a hand-edited or stale header). With 8 markers
+        and threshold=5, markers 0..6 are consolidated and marker 7 kept:
+
+        - positional: start = marker 0's start (base), end = marker 6's end (base+6d+2h)
+        - min/max:    start would be the out-of-order marker 3's start (base-1d) — WRONG
+
+        If this test passes, the Phase-3 code is anchored to positional endpoints.
+        """
+        from agent_cascade.compression.core import _consolidate_markers
+
+        day = 86400.0
+        base = 1757000000.0
+
+        history: List[Message] = [_make_msg(SYSTEM, "System")]
+        for i in range(8):
+            first_ts = base + i * day
+            last_ts = first_ts + 7200.0
+            # Marker 3's header is out of order (claims a start one day BEFORE marker 0).
+            if i == 3:
+                first_ts = base - day
+            marker = build_marker_message(f"Summary {i}", first_ts=first_ts, last_ts=last_ts, n_messages=3)
+            history.append(marker)
+            history.append(_make_msg(USER, f"User-{i}"))
+            history.append(_make_msg("assistant", f"Asst-{i}"))
+
+        mock_inst = MagicMock()
+        mock_inst.conversation = list(history)
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+        mock_pool.get_logger.return_value._consolidate_markers_in_jsonl.return_value = True
+
+        with patch("agent_cascade.agent_pool.AgentPool") as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+            with patch("agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD", 5):
+                with patch(
+                    "agent_cascade.compression.agent_invoker.invoke_consolidation_agent"
+                ) as mock_invoke:
+                    mock_invoke.return_value = ("Consolidated", "")
+
+                    _consolidate_markers(mock_pool, "TestAgent")
+
+        assert mock_inst.rebuild_conversation.called
+        new_history = mock_inst.rebuild_conversation.call_args[0][0]
+
+        l2_markers = [m for m in new_history if isinstance(m, Message) and "L2," in str(m.content)]
+        assert len(l2_markers) == 1, f"Expected 1 L2 marker, got {len(l2_markers)}"
+        parsed_start, parsed_end = _parse_marker_timestamps(l2_markers[0])
+        assert parsed_start is not None and parsed_end is not None
+
+        # Positional: start = marker 0's start (base), NOT the out-of-order marker 3's base-day.
+        expected_start = base
+        assert abs(parsed_start - expected_start) < 60, \
+            f"L2 start {parsed_start} != first marker start {expected_start} " \
+            f"(min/max semantics would give {base - day})"
+        # Positional: end = marker 6's end (last consolidated).
+        expected_end = base + 6 * day + 7200.0
+        assert abs(parsed_end - expected_end) < 60, \
+            f"L2 end {parsed_end} != last consolidated marker end {expected_end}"
 
     def test_recursion_guard_prevents_re_entry(self):
         """If consolidation is already running for an agent, second call should skip."""
