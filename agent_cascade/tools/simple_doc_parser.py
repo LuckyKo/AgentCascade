@@ -283,6 +283,10 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
         <math> with one text node keeps each expression on a single line and benefits both
         the get_text() path and the depth-first image walk. Idempotent: no <math> remains after.
         """
+        # Two-phase: snapshot (element, resolved_tex) BEFORE any mutation. Decomposing/
+        # replacing a <math> can invalidate nested ones (attrs -> None), so we must not
+        # call .get()/.find() on an element after the tree has been mutated.
+        snapshots = []
         for math_el in root.find_all('math'):
             tex = (math_el.get('alttext') or '').strip()
             if not tex:
@@ -291,63 +295,90 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     tex = ann.get_text().strip()
             if not tex:
                 tex = math_el.get_text().strip()  # last resort; still collapses to one node
-            if not tex:
-                math_el.decompose()  # empty math — drop it entirely
-            else:
-                math_el.replace_with(NavigableString(tex))
+            snapshots.append((math_el, tex))
+        for math_el, tex in snapshots:
+            try:
+                if not tex:
+                    math_el.decompose()  # empty math — drop it entirely
+                else:
+                    math_el.replace_with(NavigableString(tex))
+            except AttributeError:
+                continue  # element already invalidated by an earlier mutation — skip safely
 
     def _strip_boilerplate(soup, protected_root):
         """Remove boilerplate elements from the soup in-place.
 
         `protected_root` is never decomposed (prevents stripping <main> etc.).
         """
+        # Every loop below uses the two-phase pattern: snapshot (element, needed_attrs)
+        # BEFORE mutating the tree, then decompose from the snapshot. Decomposing an element
+        # invalidates its descendants (attrs -> None), so calling .get()/.find() on a tag
+        # after any decompose in the same pass can crash with AttributeError. Snapshotting
+        # first means phase 2 never reads attributes off a possibly-invalidated tag.
+
         # 1. Always-strip tags
         for tag_name in _ALWAYS_STRIP_TAGS:
-            for tag in soup.find_all(tag_name):
-                if tag is not protected_root:
+            targets = [t for t in soup.find_all(tag_name) if t is not protected_root]
+            for tag in targets:
+                try:
                     tag.decompose()
+                except AttributeError:
+                    continue  # already invalidated by an earlier decompose
 
         # 2. Strip by ARIA role (handles space-separated multi-role values)
-        for el in soup.find_all(attrs={'role': True}):
-            if el is protected_root:
-                continue
-            role_tokens = el.get('role', '').strip().lower().split()
-            if any(token in _STRIP_ROLES for token in role_tokens):
-                el.decompose()
+        role_snap = [(el, el.get('role')) for el in soup.find_all(attrs={'role': True})
+                     if el is not protected_root]
+        for el, role_val in role_snap:
+            try:
+                tokens = (role_val or '').strip().lower().split()
+                if any(tok in _STRIP_ROLES for tok in tokens):
+                    el.decompose()
+            except AttributeError:
+                continue  # invalidated by an earlier decompose
 
         # 3. Conditionally strip <header>/<footer> (MUST run before nav/aside
         #    strip so that the nav-descendant check still finds <nav> children).
+        hf_snap = []
         for tag_name in ('header', 'footer'):
             for tag in soup.find_all(tag_name):
                 if tag is protected_root:
                     continue
-                # Strip only if it contains a <nav> descendant OR has
-                # role="banner"/"contentinfo".  Otherwise keep (sites use
-                # header/footer for real content like author/date).
-                role = tag.get('role', '').strip().lower()
+                role = (tag.get('role') or '').strip().lower()
                 has_nav_child = tag.find('nav') is not None
+                hf_snap.append((tag, has_nav_child, role))
+        for tag, has_nav_child, role in hf_snap:
+            try:
                 if has_nav_child or role in ('banner', 'contentinfo'):
                     tag.decompose()
+            except AttributeError:
+                continue  # invalidated by an earlier decompose
 
         # 4. Unconditionally strip <nav>/<aside> (safe now that header/footer
         #    check has already used their presence as a signal).
         for tag_name in ('nav', 'aside'):
-            for tag in soup.find_all(tag_name):
-                if tag is not protected_root:
+            targets = [t for t in soup.find_all(tag_name) if t is not protected_root]
+            for tag in targets:
+                try:
                     tag.decompose()
+                except AttributeError:
+                    continue  # already invalidated by an earlier decompose
 
         # 5. Cookie/consent banner strip by class/id substring
-        for el in soup.find_all(attrs={'class': True}):
-            if el is protected_root:
-                continue
-            classes = ' '.join(el.get('class') or [])
-            if any(sub in classes.lower() for sub in _BANNER_CLASS_SUBSTRINGS):
-                el.decompose()
-        for el in soup.find_all(id=True):
-            if el is protected_root:
-                continue
-            if any(sub in el['id'].lower() for sub in _BANNER_CLASS_SUBSTRINGS):
-                el.decompose()
+        class_snap = [(el, ' '.join(el.get('class') or []))
+                      for el in soup.find_all(attrs={'class': True}) if el is not protected_root]
+        for el, classes in class_snap:
+            try:
+                if any(sub in classes.lower() for sub in _BANNER_CLASS_SUBSTRINGS):
+                    el.decompose()
+            except AttributeError:
+                continue  # invalidated by an earlier decompose
+        id_snap = [(el, el.get('id')) for el in soup.find_all(id=True) if el is not protected_root]
+        for el, id_val in id_snap:
+            try:
+                if id_val and any(sub in id_val.lower() for sub in _BANNER_CLASS_SUBSTRINGS):
+                    el.decompose()
+            except AttributeError:
+                continue  # invalidated by an earlier decompose
 
     try:
         from bs4 import BeautifulSoup, Comment, NavigableString, Tag

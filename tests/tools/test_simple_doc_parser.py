@@ -72,6 +72,65 @@ def test_parse_html_bs_fallback_to_body():
         os.unlink(path)
 
 
+def test_strip_boilerplate_nested_role_elements_no_crash():
+    """Regression: nested role-bearing elements must not crash _strip_boilerplate.
+
+    The docs.python.org page triggered AttributeError: 'NoneType' object has no attribute
+    'get' because decomposing a parent during find_all iteration left its children with
+    attrs=None, and a later .get('role') on them crashed. This is the exact repro shape.
+    """
+    html = ("<html><head><title>Nested Roles</title></head><body>"
+            '<div role="navigation">'
+            '  <span role="banner">NAV-INNER</span>'
+            '  <a href="#">link</a>'
+            '</div>'
+            "<p>REAL-CONTENT</p>"
+            "</body></html>")
+    path = _write_temp_html(html)
+    try:
+        result = parse_html_bs(path)  # must NOT raise
+        text = ' '.join(item['text'] for item in result[0]['content'])
+        assert "REAL-CONTENT" in text
+        assert "NAV-INNER" not in text  # nested role element stripped, no crash
+    finally:
+        os.unlink(path)
+
+
+def test_strip_boilerplate_sibling_role_elements():
+    """Multiple sibling role-bearing elements where the first is stripped — second still processed."""
+    html = ("<html><head><title>Sibling Roles</title></head><body>"
+            '<div role="banner">FIRST-BANNER</div>'
+            '<div role="navigation">SECOND-NAV</div>'
+            "<p>KEEP-ME</p>"
+            "</body></html>")
+    path = _write_temp_html(html)
+    try:
+        result = parse_html_bs(path)  # must NOT raise
+        text = ' '.join(item['text'] for item in result[0]['content'])
+        assert "KEEP-ME" in text
+        assert "FIRST-BANNER" not in text
+        assert "SECOND-NAV" not in text
+    finally:
+        os.unlink(path)
+
+
+def test_collapse_math_nested_no_crash():
+    """Nested <math> elements must not crash _collapse_math (two-phase snapshot)."""
+    html = ("<html><head><title>Nested Math</title></head><body>"
+            "<p>x is "
+            '<math alttext="{\\displaystyle a}"><mi>a</mi>'
+            '  <math alttext="{\\displaystyle b}"><mi>b</mi></math>'
+            "</math> here.</p>"
+            "</body></html>")
+    path = _write_temp_html(html)
+    try:
+        result = parse_html_bs(path, extract_image=False)  # must NOT raise
+        text = ' '.join(item.get('text', '') for item in result[0]['content'])
+        assert "here" in text
+    finally:
+        os.unlink(path)
+
+
 def test_parse_html_bs_header_with_nav_fallback():
     """Header containing a <nav> is stripped entirely (including non-nav content).
 
