@@ -271,3 +271,49 @@ def test_mathml_and_image_together_in_order():
     text_before_img = ' '.join(v for k, v in seq[:kinds.index('image')])
     assert '{\\displaystyle O(1)}' in text_before_img
     assert '![X](https://example.com/x.png)' in [v for k, v in seq if k == 'image']
+
+
+# --- Error surfacing tests -------------------------------------------------
+
+def test_web_extractor_404_returns_clean_message():
+    """A 404 fetch failure returns a clean, actionable message — no traceback/internal paths."""
+    from unittest.mock import patch
+    tool = WebExtractor(cfg={'work_dir': ''})
+    # Simulate the download raising the same ValueError save_url_to_local_work_dir produces.
+    fake_err = ValueError('Can not download this file. Please check your network or the '
+                          'file link. (Error: 404 Client Error: Not Found for url: '
+                          'https://example.com/missing)')
+    with patch.object(tool, '_describe_fetch_error', wraps=tool._describe_fetch_error), \
+         patch('agent_cascade.tools.web_extractor.SimpleDocParser') as mock_parser:
+        mock_parser.return_value.call.side_effect = fake_err
+        result = tool.call({'url': 'https://example.com/missing'})
+    assert 'Failed to fetch https://example.com/missing' in result
+    assert '404' in result
+    # No raw traceback or internal file paths leak.
+    assert 'Traceback' not in result
+    assert 'simple_doc_parser.py' not in result
+    assert 'utils.py' not in result
+
+
+def test_web_extractor_describe_fetch_error_variants():
+    """_describe_fetch_error maps common failure shapes to short clean reasons."""
+    desc = WebExtractor._describe_fetch_error
+    # HTTP status codes
+    assert '404' in desc(ValueError('... (Error: 404 Client Error: Not Found ...)'))
+    assert '403' in desc(ValueError('... (Error: 403 Client Error: Forbidden ...)'))
+    # Connection-level failures (no status code)
+    assert 'timed out' in desc(ValueError('... (Error: HTTPSConnectionPool timed out)'))
+    assert 'DNS' in desc(ValueError('... (Error: Failed to resolve name for host)'.replace('resolve', 'name resolution')))
+    # Fallback: first line, no traceback
+    fb = desc(RuntimeError('some odd failure\nat line 2\nat line 3'))
+    assert fb == 'some odd failure'
+
+
+def test_web_extractor_success_path_unaffected():
+    """On success, web_extractor returns the parsed content unchanged (error handling is a no-op)."""
+    from unittest.mock import patch
+    tool = WebExtractor(cfg={'work_dir': ''})
+    with patch('agent_cascade.tools.web_extractor.SimpleDocParser') as mock_parser:
+        mock_parser.return_value.call.return_value = 'PARSED-CONTENT-OK'
+        result = tool.call({'url': 'https://example.com/ok'})
+    assert result == 'PARSED-CONTENT-OK'

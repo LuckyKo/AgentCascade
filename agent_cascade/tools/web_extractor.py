@@ -49,5 +49,38 @@ class WebExtractor(BaseTool):
         # concurrent calls on the same WebExtractor instance can't clobber each other's flag.
         parser = SimpleDocParser(cfg={'work_dir': self.work_dir,
                                       'extract_image': bool(params.get('extract_images', True))})
-        parsed_web = parser.call({'url': url})
-        return parsed_web
+        try:
+            parsed_web = parser.call({'url': url})
+            return parsed_web
+        except Exception as e:
+            # Translate failures into a clean, actionable message — no traceback or internal
+            # file paths leak to the calling agent. Preserve the URL (so it can be corrected)
+            # and any HTTP status code for quick diagnosis.
+            detail = self._describe_fetch_error(e)
+            return (f"Failed to fetch {url}: {detail}. "
+                    "Check that the URL is correct, the page exists, and is not blocked or "
+                    "requiring JavaScript rendering.")
+
+    @staticmethod
+    def _describe_fetch_error(e: Exception) -> str:
+        """Reduce an exception to a short human/agent-readable reason (no traceback)."""
+        msg = str(e)
+        # Extract an HTTP status code if present (e.g. "404 Client Error: Not Found ...").
+        import re
+        m = re.search(r'\b([45]\d{2})\b', msg)
+        if m:
+            code = m.group(1)
+            reason_map = {'404': 'HTTP 404 (Not Found)', '403': 'HTTP 403 (Forbidden)',
+                          '410': 'HTTP 410 (Gone)', '429': 'HTTP 429 (Too Many Requests)'}
+            return reason_map.get(code, f'HTTP {code}')
+        # Connection-level failures.
+        low = msg.lower()
+        if 'timed out' in low or 'timeout' in low:
+            return 'connection timed out'
+        if 'name resolution' in low or 'getaddrinfo' in low or 'failed to establish' in low:
+            return 'DNS / network error (could not reach the host)'
+        if 'certificate' in low or 'ssl' in low:
+            return 'SSL/TLS certificate error'
+        # Fallback: first line of the message, truncated — still no traceback.
+        first = msg.splitlines()[0] if msg else e.__class__.__name__
+        return first[:160]
