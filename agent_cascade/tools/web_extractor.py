@@ -28,6 +28,11 @@ class WebExtractor(BaseTool):
             'url': {
                 'description': TOOL_METADATA['web_extractor']['parameters']['url'],
                 'type': 'string',
+            },
+            'extract_images': {
+                'description': TOOL_METADATA['web_extractor']['parameters']['extract_images'],
+                'type': 'boolean',
+                'default': True,
             }
         },
         'required': ['url'],
@@ -36,10 +41,13 @@ class WebExtractor(BaseTool):
     def __init__(self, cfg: Optional[dict] = None):
         super().__init__(cfg)
         self.work_dir: str = self.cfg.get('work_dir', '')
-        self.simple_doc_parser = SimpleDocParser(cfg={'work_dir': self.work_dir})
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
         params = self._verify_json_format_args(params)
         url = params['url']
-        parsed_web = self.simple_doc_parser.call({'url': url})
+        # extract_images is a per-call param (default True). Build a fresh parser per call so
+        # concurrent calls on the same WebExtractor instance can't clobber each other's flag.
+        parser = SimpleDocParser(cfg={'work_dir': self.work_dir,
+                                      'extract_image': bool(params.get('extract_images', True))})
+        parsed_web = parser.call({'url': url})
         return parsed_web

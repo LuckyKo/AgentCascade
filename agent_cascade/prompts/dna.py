@@ -216,7 +216,16 @@ TOOL_METADATA = {
         }
     },
     'view_image': {
-        'description': 'View an image file in the workspace, download and view an http(s) image URL, or capture screen/window content. Returns the image for the model to see. Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. An http(s) image URL is downloaded to the media folder and shown like a local image. Special paths: "__screen_capture" captures all monitors combined; "__screen_capture:N" captures physical monitor N by 0-based index (0=first monitor, 1=second, etc.); "__window_capture:PID" captures a specific window by process ID. Use crop_region to view a specific area of large images in more detail.',
+        'description': (
+            'View an image file in the workspace, download and view an http(s) image URL, '
+            'or capture screen/window content. Returns the image for the model to see. '
+            'Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. '
+            'An http(s) image URL is downloaded to the media folder and shown like a local image. '
+            'Special paths: "__screen_capture" captures all monitors combined; '
+            '"__screen_capture:N" captures physical monitor N by 0-based index (0=first monitor, 1=second, etc.); '
+            '"__window_capture:PID" captures a specific window by process ID. '
+            'Use crop_region to view a specific area of large images in more detail.'
+        ),
         'parameters': {
             'path': 'Path to the image file, absolute or relative to workspace directory, or an http(s) image URL to download and view. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.',
             'crop_region': 'Optional. Crop region as "x,y,w,h" where x,y are the top-left pixel coordinates in the original image and w,h are the crop width/height in pixels. Use this to zoom into details of large images (e.g., "100,200,500,300" crops a 500x300 region starting at pixel (100,200)).'
@@ -337,7 +346,6 @@ TOOL_METADATA = {
             'destination': "Path to the destination, absolute or relative to workspace root (e.g., 'src/new.py')"
         }
     },
-    
     'code_interpreter': {
         'description': (
             'Python code sandbox (Docker-based). The workspace is mounted at /workspace; relative paths work directly. '
@@ -418,8 +426,7 @@ TOOL_METADATA = {
     },
     'web_search': {
         'description': (
-            'Search for information from the internet. Automatically selects the best '
-            'available backend: Serper (when SERPER_API_KEY is configured) or DuckDuckGo (fallback).'
+            'Search for information from the internet.'
         ),
         'parameters': {
             'query': 'The search query.'
@@ -432,9 +439,16 @@ TOOL_METADATA = {
         }
     },
     'web_extractor': {
-        'description': 'Get content of one webpage.',
+        'description': (
+            "Get content of one webpage. Image URLs found in the page are included inline as "
+            "markdown ![alt](url) entries in reading order, so they can be viewed with view_image."
+        ),
         'parameters': {
-            'url': 'The webpage url.'
+            'url': 'The webpage url.',
+            'extract_images': (
+                "Whether to include image URLs found in the page as inline markdown "
+                "![alt](url) entries (default: true). Set false to get text only."
+            )
         }
     },
     'retrieval': {
