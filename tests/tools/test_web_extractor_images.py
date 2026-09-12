@@ -71,6 +71,98 @@ def test_parse_html_bs_images_in_reading_order():
     assert img_value == '![Fig A](https://example.com/abs.png)'
 
 
+def _text_entries(result):
+    """Return the list of text values (in order) from a parse_html_bs result."""
+    return [item['text'] for item in result[0]['content'] if 'text' in item]
+
+
+def test_parse_html_bs_inline_tags_do_not_fragment_paragraph():
+    """A single <p> with many inline <a>/<code>/<span> must stay ONE text entry.
+
+    Regression: the old _walk flushed after EVERY element (incl. inline tags), so a
+    paragraph dense with code refs fragmented into many tiny entries like ', if'.
+    """
+    html = ("<html><head><title>Doc</title></head><body>"
+            "<p>This module provides a portable way of using operating system dependent "
+            'functionality.  If you just want to read or write a file see '
+            '<a href="#open"><code>open()</code></a>, if you want to manipulate paths, '
+            'see the <a href="#os.path"><code>os.path</code></a> module, and if you want '
+            'to read all the lines see the <a href="#fileinput"><code>fileinput</code></a> '
+            "module.</p>"
+            "</body></html>")
+    result = _parse(html, base_url='http://example.com/page.html')
+    texts = _text_entries(result)
+    # The whole paragraph must be a single entry (not split at each inline tag).
+    assert len(texts) == 1
+    joined = texts[0]
+    for fragment in ('portable way', 'open()', 'os.path', 'fileinput', 'module.'):
+        assert fragment in joined
+
+
+def test_parse_html_bs_deeply_nested_inline_single_entry():
+    """Deeply nested inline tags (<a><span><code>) still yield one entry."""
+    html = ("<html><head><title>Nested</title></head><body>"
+            "<p>before <a href='#'><span><code>x()</code></span></a> after</p>"
+            "</body></html>")
+    result = _parse(html, base_url='http://example.com/p.html')
+    texts = _text_entries(result)
+    assert len(texts) == 1
+    assert 'before' in texts[0] and 'x()' in texts[0] and 'after' in texts[0]
+
+
+def test_parse_html_bs_nested_block_in_block_stays_separate():
+    """<div><p>a</p><p>b</p></div> -> two entries, not one merged."""
+    html = ("<html><head><title>Blocks</title></head><body>"
+            "<div><p>ALPHA-para-one</p><p>BETA-para-two</p></div>"
+            "</body></html>")
+    result = _parse(html, base_url='http://example.com/p.html')
+    texts = _text_entries(result)
+    assert any('ALPHA-para-one' in t for t in texts)
+    assert any('BETA-para-two' in t for t in texts)
+    # They must be separate entries (not merged into one).
+    assert not any(('ALPHA-para-one' in t and 'BETA-para-two' in t) for t in texts)
+
+
+def test_parse_html_bs_toplevel_inline_element_not_lost():
+    """A top-level inline element (<span> directly under body) must not lose its text.
+
+    Regression guard for the content-loss safeguard: _walk no longer flushes inline
+    elements, so the top-level loop must flush any leftover buffer itself.
+    """
+    html = ("<html><head><title>TopInline</title></head><body>"
+            "<span>TOPLEVEL-INLINE-VISIBLE</span>"
+            "</body></html>")
+    result = _parse(html, base_url='http://example.com/p.html')
+    texts = _text_entries(result)
+    assert any('TOPLEVEL-INLINE-VISIBLE' in t for t in texts)
+
+
+def test_parse_html_bs_image_inside_inline_element_ordering():
+    """<p>before <a><img></a> after</p> -> text-before, image, text-after in order."""
+    html = ("<html><head><title>ImgInline</title></head><body>"
+            '<p>BEFORE-TEXT <a href="#"><img src="x.png" alt="inlink"></a> AFTER-TEXT</p>'
+            "</body></html>")
+    result = _parse(html, base_url='http://example.com/p.html')
+    seq = [(k, v) for item in result[0]['content'] for k, v in item.items()]
+    kinds = [k for k, _ in seq]
+    assert 'image' in kinds
+    img_idx = kinds.index('image')
+    text_before = ' '.join(v for k, v in seq[:img_idx])
+    text_after = ' '.join(v for k, v in seq[img_idx + 1:])
+    assert 'BEFORE-TEXT' in text_before
+    assert 'AFTER-TEXT' in text_after
+
+
+def test_parse_html_bs_unknown_custom_tag_treated_inline():
+    """An unknown/custom tag wrapping a paragraph is treated as inline (no flush)."""
+    html = ("<html><head><title>Custom</title></head><body>"
+            "<customwrap><p>CUSTOM-WRAP-para</p></customwrap>"
+            "</body></html>")
+    result = _parse(html, base_url='http://example.com/p.html')
+    texts = _text_entries(result)
+    assert any('CUSTOM-WRAP-para' in t for t in texts)
+
+
 def test_parse_html_bs_relative_src_resolved_against_base_url():
     """src='img/x.png' on a page from http://example.com/a/b.html -> /a/img/x.png."""
     html = ("<html><head><title>Rel Page</title></head><body>"

@@ -535,6 +535,19 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
         # already been stripped, so only surviving content-root images appear here.
         content = []
         _TEXT_SKIP = {'script', 'style'}
+        # Block-level tags: finishing one of these flushes its accumulated text as a
+        # paragraph. Inline tags (a, code, span, em, ...) do NOT flush — their text
+        # belongs to the enclosing block and must accumulate without breaking it up.
+        # Unknown/custom tags default to inline (no flush); a top-level safeguard below
+        # prevents any content loss for top-level inline elements.
+        _BLOCK_TAGS = frozenset({
+            'p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'tr', 'td', 'th', 'table', 'thead', 'tfoot',
+            'blockquote', 'pre', 'section', 'article', 'figure', 'figcaption',
+            'ul', 'ol', 'dl', 'dt', 'dd', 'header', 'footer', 'nav', 'main',
+            'aside', 'address', 'details', 'dialog', 'fieldset', 'form', 'hr',
+            'canvas', 'video', 'audio', 'legend',
+        })
 
         def _flush(buf):
             if buf:
@@ -546,7 +559,10 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                 buf.clear()
 
         def _walk(el, buf):
-            # Process this element's children in document order.
+            # Process this element's children in document order. Text from inline
+            # elements accumulates in the shared buffer; it is flushed only when a
+            # block-level element finishes (or before an image), so a paragraph with
+            # many inline <a>/<code>/<span> stays ONE entry instead of fragmenting.
             for child in el.children:
                 if isinstance(child, Comment):
                     continue  # get_text() excludes comments
@@ -559,10 +575,11 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     if abs_src:
                         content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
                 elif isinstance(child, NavigableString):
-                    buf.append(str(child))  # accumulate; flushed before images / at block end
-                else:  # other element (p, div, span, ...)
+                    buf.append(str(child))  # accumulate; flushed at block end / before images
+                else:  # other element (p, div, a, code, span, ...)
                     _walk(child, buf)  # recurse in order
-            _flush(buf)  # flush any remaining text so nothing is lost
+            if el.name in _BLOCK_TAGS:
+                _flush(buf)  # flush only when a block-level element finishes
 
         for child in content_root.children:
             name = getattr(child, 'name', None)
@@ -574,7 +591,10 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                 if abs_src:
                     content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
             elif isinstance(child, Tag):
-                _walk(child, [])  # each top-level block gets its own buffer -> paragraphs stay per-block
+                buf = []
+                _walk(child, buf)  # each top-level block gets its own buffer -> paragraphs stay per-block
+                if child.name not in _BLOCK_TAGS and buf:
+                    _flush(buf)  # safeguard: don't lose text from a top-level inline element
             elif isinstance(child, NavigableString):
                 cp = clean_paragraph(pre_process_html(str(child)))
                 if cp.strip():
