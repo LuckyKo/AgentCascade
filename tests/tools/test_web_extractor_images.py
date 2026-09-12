@@ -76,6 +76,96 @@ def _text_entries(result):
     return [item['text'] for item in result[0]['content'] if 'text' in item]
 
 
+def test_wrapped_p_single_entry_both_paths():
+    """A single <p> whose SOURCE has line-wraps (\n) must stay ONE entry.
+
+    Regression: source line-wraps were split into separate entries (one per source
+    line) because the output was split on \n. Must hold for BOTH extract_image values.
+    """
+    html = ("<html><head><title>T</title></head><body>"
+            "<p>WRAPPED-para starts here and continues "
+            "\nacross a second source line and then "
+            "\na third source line to finish.</p>"
+            "</body></html>")
+    for ei in (True, False):
+        result = _parse(html, extract_image=ei, base_url='http://x/p.html')
+        texts = _text_entries(result)
+        assert len(texts) == 1, f"extract_image={ei}: expected 1 entry, got {texts!r}"
+        joined = texts[0]
+        for frag in ('WRAPPED-para', 'second source line', 'third source line'):
+            assert frag in joined
+
+
+def test_div_two_p_separate_entries_both_paths():
+    """<div><p>a</p><p>b</p></div> must be TWO entries (not merged) in both paths.
+
+    Regression: the table path (extract_image=False) previously merged nested blocks
+    into one entry ('ab' with no separator).
+    """
+    html = ("<html><head><title>T</title></head><body>"
+            "<div><p>ALPHA-para-one</p><p>BETA-para-two</p></div>"
+            "</body></html>")
+    for ei in (True, False):
+        result = _parse(html, extract_image=ei, base_url='http://x/p.html')
+        texts = _text_entries(result)
+        assert any('ALPHA-para-one' in t for t in texts), f"extract_image={ei}: {texts!r}"
+        assert any('BETA-para-two' in t for t in texts), f"extract_image={ei}: {texts!r}"
+        # Not merged into a single entry.
+        assert not any(('ALPHA-para-one' in t and 'BETA-para-two' in t) for t in texts), \
+            f"extract_image={ei}: paragraphs merged: {texts!r}"
+
+
+def test_pre_block_preserves_newlines_both_paths():
+    """<pre> must be ONE entry with internal newlines PRESERVED (code block)."""
+    html = ("<html><head><title>T</title></head><body>"
+            "<pre>line-one\nline-two\nline-three</pre>"
+            "</body></html>")
+    for ei in (True, False):
+        result = _parse(html, extract_image=ei, base_url='http://x/p.html')
+        texts = _text_entries(result)
+        assert len(texts) == 1, f"extract_image={ei}: expected 1 entry, got {texts!r}"
+        entry = texts[0]
+        # Newlines preserved (not collapsed to spaces).
+        assert 'line-one\nline-two\nline-three' in entry, f"extract_image={ei}: {entry!r}"
+
+
+def test_br_inside_p_single_entry_both_paths():
+    """<p>a<br>b</p> stays ONE entry with the two parts separated (not merged, not split).
+
+    <br> is a soft line break; internal newlines collapse to spaces on flush, so the two
+    parts appear in one entry separated by whitespace — NOT two entries, and NOT run
+    together with no separator.
+    """
+    html = ("<html><head><title>T</title></head><body>"
+            "<p>FIRSTline<br>SECONDline</p>"
+            "</body></html>")
+    for ei in (True, False):
+        result = _parse(html, extract_image=ei, base_url='http://x/p.html')
+        texts = _text_entries(result)
+        assert len(texts) == 1, f"extract_image={ei}: expected 1 entry, got {texts!r}"
+        entry = texts[0]
+        # Both parts present and separated by whitespace (a space from <br>), not fused.
+        assert 'FIRSTline' in entry and 'SECONDline' in entry
+        assert 'FIRSTlineSECONDline' not in entry  # not run together with no separator
+
+
+def test_wrapped_p_with_inline_single_entry_both_paths():
+    """Wrapped <p> WITH inline tags stays ONE entry (combines newline + inline fixes)."""
+    html = ("<html><head><title>T</title></head><body>"
+            "<p>This module provides a portable way of using "
+            "\noperating system dependent functionality.  If you want to "
+            'read a file see <a href="#open"><code>open()</code></a>, if you want '
+            "\nto manipulate paths, see the os.path module.</p>"
+            "</body></html>")
+    for ei in (True, False):
+        result = _parse(html, extract_image=ei, base_url='http://x/p.html')
+        texts = _text_entries(result)
+        assert len(texts) == 1, f"extract_image={ei}: expected 1 entry, got {texts!r}"
+        joined = texts[0]
+        for frag in ('portable way', 'open()', 'os.path module'):
+            assert frag in joined
+
+
 def test_parse_html_bs_inline_tags_do_not_fragment_paragraph():
     """A single <p> with many inline <a>/<code>/<span> must stay ONE text entry.
 
