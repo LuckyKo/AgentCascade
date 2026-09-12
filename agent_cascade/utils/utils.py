@@ -409,7 +409,7 @@ def contains_html_tags(text: str) -> bool:
 
 def get_content_type_by_head_request(path: str) -> str:
     try:
-        response = requests.head(path, timeout=5)
+        response = requests.head(path, headers=_HTTP_FETCH_HEADERS, timeout=5)
         content_type = response.headers.get('Content-Type', '')
         return content_type
     except requests.RequestException:

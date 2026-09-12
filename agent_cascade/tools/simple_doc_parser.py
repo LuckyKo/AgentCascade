@@ -480,6 +480,13 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
         """
         content = []
 
+        # Deduplicate repeated <img> entries within this page (responsive/lazy-load pages
+        # often emit the same image multiple times, e.g. mobile+desktop variants or a
+        # repeated srcset). Keyed on the resolved abs_src so the same image with different
+        # alt text still collapses to one entry. Scoped to this call: it resets per page and
+        # never dedupes across pages.
+        seen_images = set()
+
         # Resolve the <base href> ONCE (not per-image) — the tree isn't mutated during the
         # walk, so a single lookup is valid and avoids O(imgs x nodes) re-traversals.
         base_tag = soup.find('base', href=True) if not base_url else None
@@ -551,7 +558,8 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     _flush(buf)  # flush pending text BEFORE the image (true order)
                     pending_label[0] = None  # a non-text boundary ends any pending label
                     abs_src = _resolve_image_src(child.get('src'))
-                    if abs_src:
+                    if abs_src and abs_src not in seen_images:
+                        seen_images.add(abs_src)
                         content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
                 elif name == 'table' and not extract_image:
                     # Table path: emit compact rows directly (one entry per row), bypassing
@@ -596,7 +604,8 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
             if name == 'img' and extract_image:
                 # Top-level bare <img> (not wrapped in a block) — emit directly.
                 abs_src = _resolve_image_src(child.get('src'))
-                if abs_src:
+                if abs_src and abs_src not in seen_images:
+                    seen_images.add(abs_src)
                     content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
             elif name == 'table' and not extract_image:
                 _emit_table_rows(child)
@@ -771,12 +780,19 @@ PARSER_SUPPORTED_FILE_TYPES = ['pdf', 'docx', 'pptx', 'md', 'txt', 'html', 'csv'
 def get_plain_doc(doc: list):
     paras = []
     title_line = ""
+    title = ""
     if doc and doc[0].get('title'):
+        title = doc[0]['title'].strip()
         title_line = f"Title: {doc[0]['title']}\n"
     for page in doc:
         for para in page['content']:
             for k, v in para.items():
                 if k in ['text', 'table', 'image']:
+                    # If the very first text entry merely repeats the <title>, drop it so the
+                    # title isn't emitted twice. Only one leading duplicate is removed; image/
+                    # table entries are never dropped, and a non-text first entry is kept.
+                    if not paras and k == 'text' and title and v.strip().casefold() == title.casefold():
+                        continue
                     paras.append(v)
     return title_line + PARAGRAPH_SPLIT_SYMBOL.join(paras)
 
