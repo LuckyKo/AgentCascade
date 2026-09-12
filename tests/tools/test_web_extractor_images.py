@@ -189,3 +189,26 @@ def test_web_extractor_extract_images_param_defaults_true():
     assert props['extract_images']['default'] is True
     # url remains the only required param.
     assert tool.parameters['required'] == ['url']
+
+
+def test_simple_doc_parser_call_with_image_entry_no_crash():
+    """Regression: the full SimpleDocParser.call() path must not crash on image entries.
+
+    The token-counting loop in call() iterates every content entry; image entries carry no
+    'text'/'table' key, so it must not pass None to count_tokens. This exercises the exact
+    path that parse_html_bs-level unit tests do NOT cover (they bypass call()).
+    """
+    from agent_cascade.tools.simple_doc_parser import SimpleDocParser
+    html = ("<html><head><title>Full Path Page</title></head><body>"
+            "<p>Before figure.</p>"
+            '<img src="https://example.com/fig.png" alt="Fig">'
+            "<p>After figure.</p>"
+            "</body></html>")
+    path = _write_temp_html(html)
+    try:
+        parser = SimpleDocParser(cfg={'extract_image': True})
+        res = parser.call({'url': path})  # full call() path, incl. token counting + caching
+        # Should not raise. The plain-doc output should contain the image markdown inline.
+        assert '![Fig](https://example.com/fig.png)' in res
+    finally:
+        os.unlink(path)

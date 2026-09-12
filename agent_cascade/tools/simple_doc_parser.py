@@ -717,8 +717,9 @@ class SimpleDocParser(BaseTool):
 
             for page in parsed_file:
                 for para in page['content']:
-                    # Todo: More attribute types
-                    para['token'] = count_tokens(para.get('text', para.get('table')))
+                    # Count tokens over the entry's text content. Image entries
+                    # carry no tokenizable text (just a markdown URL), so they get 0.
+                    para['token'] = count_tokens(para.get('text') or para.get('table') or '')
             time2 = time.time()
             logger.info(f'Finished parsing {path}. Time spent: {time2 - time1} seconds.')
             # Cache the parsing doc
