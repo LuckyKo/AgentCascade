@@ -20,14 +20,9 @@ from PIL import Image
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.utils import (
     json_loads, encode_image_as_base64, is_http_url,
-    _HTTP_FETCH_HEADERS, _HTTP_FETCH_TIMEOUT,
+    _HTTP_FETCH_HEADERS, _HTTP_FETCH_TIMEOUT, MAX_DATA_URL_SIZE,
 )
 from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
-
-# Hard cap on the declared size of an image URL we are willing to download
-# (checked via Content-Length BEFORE reading the body). A second line of defense
-# is save_image_to_media's 10 MB *encoded* cap.
-_MAX_URL_IMAGE_BYTES = 50 * 1024 * 1024
 
 
 def _is_temp_file(p) -> bool:
@@ -672,7 +667,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 try:
                     response = requests.get(
                         path, headers=_HTTP_FETCH_HEADERS,
-                        timeout=_HTTP_FETCH_TIMEOUT, stream=True,
+                        timeout=_HTTP_FETCH_TIMEOUT,
                     )
                     response.raise_for_status()
 
@@ -684,18 +679,28 @@ class ViewImage(BaseTool, PathResolutionMixin):
                             declared = int(content_length)
                         except (TypeError, ValueError):
                             declared = None
-                        if declared is not None and declared > _MAX_URL_IMAGE_BYTES:
+                        if declared is not None and declared > MAX_DATA_URL_SIZE:
                             response.close()
                             return (
                                 f"ERROR: Image too large to download ({declared / (1024 * 1024):.1f} MB "
-                                f"> {_MAX_URL_IMAGE_BYTES // (1024 * 1024)} MB cap): {path}"
+                                f"> {MAX_DATA_URL_SIZE // (1024 * 1024)} MB cap): {path}"
                             )
 
                     image_bytes = response.content
                 except requests.RequestException as e:
                     return f"ERROR: Failed to download image from {path}: {e}"
 
-                # Cheaply validate the bytes are a real, viewable image (catches HTML/text).
+                # Post-download backstop: the Content-Length check above is a fast path only.
+                # When the header is absent (or lies), an over-cap body would otherwise be
+                # written to disk — reject it here on the actual byte count instead.
+                if len(image_bytes) > MAX_DATA_URL_SIZE:
+                    return (f"ERROR: Image too large to download ({len(image_bytes) / (1024*1024):.1f} MB "
+                            f"> {MAX_DATA_URL_SIZE // (1024*1024)} MB cap): {path}")
+
+                # Deliberate EARLY validation: open+load the bytes before writing any temp
+                # file so a non-image body yields a clear "URL did not return a valid
+                # viewable image" error up front, rather than failing deeper in the pipeline.
+                # save_image_to_media validates again later; this is intentional, not redundant.
                 try:
                     _pil_img = Image.open(io.BytesIO(image_bytes))
                     _pil_img.load()

@@ -34,6 +34,11 @@ from PIL import Image
 
 from agent_cascade.llm.schema import ContentItem, Message, FUNCTION
 
+# Sentinel passed to TestViewImageUrl._fake_response to install a `content` property that
+# records whether it was accessed (see _fake_response docstring). Distinct from any real
+# bytes value so the recording branch is unambiguous.
+_RECORDING_CONTENT = object()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -250,9 +255,48 @@ class TestViewImageUrl:
 
     @staticmethod
     def _fake_response(content=b"", content_length=None, status_code=200):
+        """Build a fake requests.Response.
+
+        ``content`` is normally a plain bytes value. Pass the module-level sentinel
+        ``_RECORDING_CONTENT`` to get a response whose ``content`` is a *property* that
+        records whether it was accessed (sets ``resp._body_read_flag[0] = True``) instead
+        of returning bytes — used by the oversized test to prove the body was never read
+        when the guard fires. A plain MagicMock attribute cannot be a property, so the
+        recording case returns a dedicated wrapper instance (no shared-class mutation).
+        """
+        headers = {} if content_length is None else {"Content-Length": str(content_length)}
+
+        if content is _RECORDING_CONTENT:
+            # A plain (non-MagicMock) object so that `content` is a REAL class-level
+            # property: accessing resp.content invokes the getter and records the read.
+            # (Setting an attribute on a MagicMock would NOT install a property — it just
+            # stores/returns the value, which would make the "body not read" assertion
+            # vacuous. This is exactly the flaw the original test had.)
+            flag = [False]
+            _sc, _hdrs = status_code, headers  # capture before class-body shadowing
+
+            class _RecordingResponse:
+                status_code = _sc
+                headers = _hdrs
+
+                @property
+                def content(self):
+                    flag[0] = True
+                    return b""  # opaque; never a valid image
+
+                def raise_for_status(self):
+                    return None
+
+                def close(self):
+                    return None
+
+            resp = _RecordingResponse()
+            resp._body_read_flag = flag
+            return resp
+
         resp = MagicMock()
         resp.status_code = status_code
-        resp.headers = {} if content_length is None else {"Content-Length": str(content_length)}
+        resp.headers = headers
         resp.content = content
         resp.raise_for_status.return_value = None
         resp.close.return_value = None
@@ -324,16 +368,47 @@ class TestViewImageUrl:
         so if the guard were bypassed the code would fall through to PIL validation and
         return a DIFFERENT error — which is exactly how this test detects a regression."""
         declared = 51 * 1024 * 1024  # 51 MB > 50 MB cap
-        resp = self._fake_response(content=MagicMock(name="body"), content_length=declared)
+        # Use the recording sentinel: resp.content becomes a property that flips
+        # resp._body_read_flag[0] to True if (and only if) the body is accessed.
+        resp = self._fake_response(content=_RECORDING_CONTENT, content_length=declared)
         with patch("agent_cascade.tools.custom.file_ops.requests.get", return_value=resp) as mock_get:
             result = view_image_tool.call(json.dumps({"path": "http://example.com/huge.png"}))
 
         assert isinstance(result, str)
         assert result.startswith("ERROR:")
         assert "too large" in result.lower()
-        # Body was never read — only headers were inspected before rejecting.
-        resp.content.assert_not_called()
+        # Body was never read — only the Content-Length header was inspected before
+        # rejecting. If the guard regressed and the code fell through to `response.content`,
+        # this property would have been accessed and the flag would be True → test fails.
+        assert resp._body_read_flag[0] is False, (
+            "Content-Length guard should reject BEFORE reading the body; "
+            "resp.content was accessed"
+        )
         mock_get.assert_called_once()
+
+    def test_url_no_content_length_small_image_downloads(self, view_image_tool):
+        """A response with NO Content-Length header but a small valid image body downloads
+        successfully and is saved to media. The pre-download guard is skipped (no header), so
+        this exercises the post-download backstop path: the actual byte count is checked and,
+        being under the cap, processing proceeds normally."""
+        from agent_cascade.utils.media_utils import _get_media_root
+
+        # content_length=None → headers={} → no Content-Length key.
+        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+                   return_value=self._fake_response(self._png_bytes(200, 150), content_length=None)) as mock_get:
+            result = view_image_tool.call(json.dumps({"path": "http://example.com/noclen.png"}))
+
+        assert mock_get.called
+        assert isinstance(result, list) and len(result) == 2
+        media_path = result[0].image
+        images_dir_str = str(_get_media_root() / "images").replace("\\", "/")
+        assert media_path.startswith(images_dir_str), f"{media_path} not under {images_dir_str}"
+        assert isinstance(result[1], ContentItem)
+        assert "200x150" in result[1].text
+        try:
+            assert Path(media_path).exists()
+        finally:
+            Path(media_path).unlink(missing_ok=True)
 
     def test_url_crop_region_saved_to_media(self, view_image_tool):
         """crop_region on a downloaded URL image works and the result is saved to media."""
