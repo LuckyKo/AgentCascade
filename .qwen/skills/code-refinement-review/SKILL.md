@@ -4,7 +4,7 @@ description: Systematic quality assurance review of committed code changes focus
 source: auto-generated
 version: "1.0.0"
 triggers:
-  - "code review"
+  - "refinement review"
   - "quality gate"
   - "refinement pass"
   - "robustness check"
