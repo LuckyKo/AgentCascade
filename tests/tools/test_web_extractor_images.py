@@ -16,7 +16,7 @@
 
 Item 1+1b (core extraction) is covered here end-to-end at the parse_html_bs level:
 reading order, relative->absolute resolution, data:/empty src skipping, boilerplate
-stripping, no dedup, text-only regression, and extract_image=False. The
+stripping, per-page image dedup (same resolved URL collapses to one entry), text-only regression, and extract_image=False. The
 web_extractor-level default (extract_images on by default) is tested via the tool's
 parameter schema; its call() behavior is identical to SimpleDocParser with
 cfg['extract_image'] set, which is what parse_html_bs receives.
@@ -319,18 +319,25 @@ def test_parse_html_bs_boilerplate_images_stripped():
     assert 'nav-icon' not in joined
 
 
-def test_parse_html_bs_duplicate_images_kept():
-    """Two identical <img> at different positions both appear (no dedup)."""
+def test_parse_html_bs_duplicate_images_deduped():
+    """Two <img> with the same resolved src collapse to ONE entry (per-page dedup).
+
+    Regression for commit 427ca0b: responsive/lazy-load pages emit the same image
+    multiple times; parse_html_bs must emit it once. Distinct URLs are unaffected.
+    """
     html = ("<html><head><title>Dup Page</title></head><body>"
             '<p>FIRST-POS</p>'
             '<img src="x.png" alt="dup">'
             '<p>MIDDLE</p>'
             '<img src="x.png" alt="dup">'
+            '<img src="y.png" alt="other">'
             "</body></html>")
     result = _parse(html, base_url='http://example.com/p.html')
     content = result[0]['content']
     images = [v for item in content for v in item.values() if 'image' in item]
-    assert images == ['![dup](http://example.com/x.png)', '![dup](http://example.com/x.png)']
+    # The duplicated x.png appears once; the distinct y.png is preserved. Order follows
+    # document order: x (first seen) then y.
+    assert images == ['![dup](http://example.com/x.png)', '![other](http://example.com/y.png)']
 
 
 def test_parse_html_bs_no_images_text_only_regression():
