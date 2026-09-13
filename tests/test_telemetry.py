@@ -271,6 +271,53 @@ class TestLLMCallLifecycle:
         collector.record_token_usage("never_started", prompt_tokens=5, completion_tokens=5)
 
 
+class TestLLMCacheStatusEndpointAwareness:
+    """First call after an endpoint change must be counted as "unknown".
+
+    TTFB-based hit/miss classification is unreliable during model switches
+    (KV restore can take 10-30s), so the caller suppresses hit/miss on the
+    first call to a new endpoint via ``force_unknown=True``. The raw header is
+    still stored on the event for audit, but never classified as hit/miss.
+    """
+
+    def test_force_unknown_counts_unknown_even_for_hit_header(self, collector):
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        # A header that would normally classify as a "hit".
+        collector.record_llm_cache_status("inst", "llama; hit", force_unknown=True)
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 0
+        assert s["llm_cache_misses"] == 0
+        assert s["llm_cache_unknown"] == 1
+
+    def test_force_unknown_counts_unknown_even_for_miss_header(self, collector):
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        # A header that would normally classify as a "miss".
+        collector.record_llm_cache_status("inst", "llama; fwd=123", force_unknown=True)
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 0
+        assert s["llm_cache_misses"] == 0
+        assert s["llm_cache_unknown"] == 1
+
+    def test_normal_classification_when_not_suppressed(self, collector):
+        """Second call on the same endpoint classifies normally."""
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_cache_status("inst", "llama; hit")
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 1
+        assert s["llm_cache_unknown"] == 0
+
+    def test_force_unknown_still_stores_raw_header_on_event(self, collector):
+        """The raw header is preserved for audit even when classification is suppressed."""
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_cache_status("inst", "llama; hit", force_unknown=True)
+        # The active call dict retains the raw value before it's popped at end.
+        assert collector._active_llm_calls["inst"]["cache_status"] == "llama; hit"
+        collector.record_llm_call_end("inst")
+
+
 # ---------------------------------------------------------------------------
 # G. Tool call lifecycle
 # ---------------------------------------------------------------------------

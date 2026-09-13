@@ -498,6 +498,19 @@ class TextChatAtOAI(BaseFnCallModel):
             response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
             #logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create END (got response iterator)")
 
+            # RFC 9211 Cache-Status from autoloader forwarder (prompt-cache hit/miss telemetry).
+            # Must be read BEFORE the SSE body is consumed — headers are only guaranteed
+            # available on the httpx response before iteration begins.
+            try:
+                _raw_resp = getattr(response, 'response', None)  # httpx.Response for streaming
+                if _raw_resp is not None:
+                    _cache_status = _raw_resp.headers.get("cache-status", "")
+                    if _cache_status:
+                        from agent_cascade.llm.base import _fire_cache_status_callback
+                        _fire_cache_status_callback(_cache_status)
+            except Exception:
+                pass  # never let telemetry break the stream
+
             from agent_cascade.settings import STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS
             from agent_cascade.utils.streaming import watch_stream
 

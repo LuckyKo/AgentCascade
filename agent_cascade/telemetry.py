@@ -100,6 +100,10 @@ class TelemetryCollector:
             "skill_advisor_calls": 0,
             "skill_advisor_denials": 0,
             "skill_advisor_fallbacks": 0,
+            # RFC 9211 Cache-Status (prompt-cache hit/miss) counters
+            "llm_cache_hits": 0,
+            "llm_cache_misses": 0,
+            "llm_cache_unknown": 0,
         }
 
         # Per-config aggregates for A/B comparison
@@ -392,6 +396,33 @@ class TelemetryCollector:
             if details:
                 call["usage_details"] = details
 
+    def record_llm_cache_status(self, instance_name: str, cache_status: str, force_unknown: bool = False):
+        """Record RFC 9211 Cache-Status for the active LLM call. Thread-safe.
+
+        When ``force_unknown`` is True (first call after an endpoint change),
+        the raw header is still stored on the event for audit, but the value is
+        always counted as "unknown" — TTFB-based hit/miss classification is
+        unreliable during model switches (KV restore can take 10-30s).
+        """
+        with _telemetry_lock:
+            call = self._active_llm_calls.get(instance_name)
+            if not call:
+                return
+            # Store on the active call so record_llm_call_end can include it in the event
+            call["cache_status"] = cache_status
+
+            if force_unknown:
+                self._session_stats["llm_cache_unknown"] += 1
+                return
+
+            # Parse hit/miss for session-level counters
+            if "; hit" in cache_status or cache_status.endswith("hit"):
+                self._session_stats["llm_cache_hits"] += 1
+            elif "fwd=" in cache_status:
+                self._session_stats["llm_cache_misses"] += 1
+            else:
+                self._session_stats["llm_cache_unknown"] += 1
+
     def record_llm_call_end(self, instance_name: str, output_tokens_est: int = 0, last_output=None):
         """Mark the end of an LLM API call."""
         with _telemetry_lock:
@@ -453,6 +484,8 @@ class TelemetryCollector:
                 "ttft_ms": round(ttft_ms, 1),
                 "streaming_time_ms": round(streaming_time_ms, 1),
                 "tps": round(actual_output / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and actual_output > 0 else 0,
+                # RFC 9211 Cache-Status from forwarder; empty string if header was absent.
+                "cache_status": call.get("cache_status", ""),
                 "timestamp": _now_iso(),
             }
 
@@ -742,6 +775,10 @@ class TelemetryCollector:
         non_agent_tool_calls = stats["total_tool_calls"] - call_agent_count
         avg_tool_latency = stats["total_tool_latency_ms"] / non_agent_tool_calls if non_agent_tool_calls > 0 else 0
 
+        # RFC 9211 prompt-cache hit ratio (unknowns excluded from the denominator)
+        _cache_total = stats.get("llm_cache_hits", 0) + stats.get("llm_cache_misses", 0)
+        llm_cache_hit_ratio = round(stats.get("llm_cache_hits", 0) / _cache_total, 3) if _cache_total > 0 else None
+
         # Tool success rates
         tool_success_rates = {}
         for name, count in stats["tool_calls_by_name"].items():
@@ -781,6 +818,11 @@ class TelemetryCollector:
             "skill_advisor_calls": stats.get("skill_advisor_calls", 0),
             "skill_advisor_denials": stats.get("skill_advisor_denials", 0),
             "skill_advisor_fallbacks": stats.get("skill_advisor_fallbacks", 0),
+            # RFC 9211 prompt-cache hit/miss counters + derived hit ratio.
+            "llm_cache_hits": stats.get("llm_cache_hits", 0),
+            "llm_cache_misses": stats.get("llm_cache_misses", 0),
+            "llm_cache_unknown": stats.get("llm_cache_unknown", 0),
+            "llm_cache_hit_ratio": llm_cache_hit_ratio,
         }
 
     def get_config_comparison(self) -> List[Dict]:

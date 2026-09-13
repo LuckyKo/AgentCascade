@@ -5850,6 +5850,7 @@ function updateTelemetryPanel(telemetry) {
   set('telem-malformed', formatNumber(telemetry.total_auto_continues));
   set('telem-loops-outer', formatNumber(telemetry.loops_outer));
   set('telem-loops-inner', formatNumber(telemetry.loops_inner));
+  set('telem-cache-hit-ratio', telemetry.llm_cache_hit_ratio != null ? (telemetry.llm_cache_hit_ratio * 100).toFixed(1) + '%' : '—');
 
   // Tool effectiveness table
   const toolTbody = document.getElementById('telem-tool-tbody');

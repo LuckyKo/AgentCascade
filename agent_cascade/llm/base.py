@@ -78,6 +78,34 @@ def _fire_usage_callback(usage_data: Optional[Dict]) -> None:
         logger.debug("Telemetry usage callback failed: %s", e)  # Never break streaming
 
 
+# Thread-local storage for cache-status callback — same pattern as _chat_on_usage_cb.
+# Carries RFC 9211 Cache-Status header value from the forwarder to telemetry.
+_chat_on_cache_status = threading.local()
+
+
+def _get_on_cache_status_cb():
+    """Get the current thread's cache-status callback, or None."""
+    return getattr(_chat_on_cache_status, 'cb', None)
+
+
+def _set_on_cache_status_cb(cb):
+    """Set the current thread's cache-status callback."""
+    _chat_on_cache_status.cb = cb
+
+
+def _fire_cache_status_callback(cache_status: str) -> None:
+    """Fire the cache-status callback if registered. Never raises (telemetry must not break streaming)."""
+    if not cache_status:
+        return
+    _cb = _get_on_cache_status_cb()
+    if not callable(_cb):
+        return
+    try:
+        _cb(cache_status)
+    except Exception as e:
+        logger.debug("Cache-status callback failed: %s", e)
+
+
 def register_llm(model_type):
 
     def decorator(cls):
@@ -319,6 +347,10 @@ class BaseChatModel(ABC):
         # Extract usage callback (for response token tracking at streaming layer) and store in thread-local
         on_usage_cb = generate_cfg.pop('_on_usage', None)
         _set_on_usage_cb(on_usage_cb)
+
+        # Extract cache-status callback (RFC 9211 prompt-cache hit/miss) and store in thread-local
+        on_cache_status_cb = generate_cfg.pop('_on_cache_status', None)
+        _set_on_cache_status_cb(on_cache_status_cb)
 
         agent_settings = [
             'disabled_tools', 'max_turns', 'auto_continue', 'auto_rollback_on_loop',
