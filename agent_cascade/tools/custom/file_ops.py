@@ -1316,8 +1316,12 @@ class DeleteFile(BaseTool):
         'type': 'object',
         'properties': {
             'path': {
-                'type': ['string', 'array'],
-                'items': {'type': 'string'},
+                # oneOf (not type: ['string','array']) for maximum LLM-API
+                # compatibility — mirrors the load_skill tool's pattern.
+                'oneOf': [
+                    {'type': 'string'},
+                    {'type': 'array', 'items': {'type': 'string'}},
+                ],
                 'description': TOOL_METADATA['delete_file']['parameters']['path']
             },
             'include': {
@@ -1326,7 +1330,7 @@ class DeleteFile(BaseTool):
             },
             'justification': {
                 'type': 'string',
-                'description': 'Why you need to delete these file(s)'
+                'description': TOOL_METADATA['delete_file']['parameters']['justification']
             }
         },
         # 'path' (string or list) is required — enforced in call() so the error
@@ -1341,17 +1345,50 @@ class DeleteFile(BaseTool):
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
 
-    def call(self, params: str, **kwargs) -> str:
-        params = self._verify_json_format_args(params)
-        # Normalize input: 'path' accepts a single string OR a list of strings.
-        # A list is forwarded via the (hidden) 'paths' kwarg; a string via 'path'.
+    @staticmethod
+    def _normalize_path(params):
+        """Normalize the raw 'path' input BEFORE jsonschema validation.
+
+        'path' accepts a single string OR a list of strings. A list is moved to
+        the (hidden) 'paths' kwarg; non-string entries in a list are dropped so
+        the strict oneOf schema (array of strings) validates cleanly. Returns
+        (normalized_params, error_message); error_message is set for invalid
+        scalar types instead of surfacing a raw jsonschema ValidationError.
+        """
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except (json.JSONDecodeError, ValueError):
+                return params, None  # let _verify_json_format_args report the parse error
+            if not isinstance(params, dict):
+                return params, None
         raw = params.get('path')
+        if raw is None:
+            return params, None
         if isinstance(raw, list):
-            paths = [p for p in raw if isinstance(p, str) and p.strip()]
-            path = None
-        else:
-            path = raw or None
-            paths = params.get('paths') or None  # hidden legacy arg, still accepted
+            valid = [p for p in raw if isinstance(p, str) and p.strip()]
+            params = dict(params)
+            params['paths'] = valid
+            del params['path']
+            return params, None
+        if not isinstance(raw, str):
+            return params, "ERROR: 'path' must be a string or a list of strings."
+        return params, None
+
+    def call(self, params: str, **kwargs) -> str:
+        # Normalize input BEFORE schema validation (see _normalize_path). After
+        # normalization 'path' is either absent (list input → hidden 'paths') or
+        # a plain string, so the oneOf schema validates cleanly.
+        params, err = self._normalize_path(params)
+        if err:
+            return err
+        params = self._verify_json_format_args(params)
+        # After _normalize_path, 'path' is either absent (list input → hidden
+        # 'paths') or a plain string. No 'required' in the schema on purpose:
+        # list inputs legitimately omit it, so presence is checked here instead.
+        raw = params.get('path')
+        path = (raw or None) if isinstance(raw, str) else None
+        paths = params.get('paths') or None  # hidden legacy arg, still accepted
         if not path and not paths:
             return "ERROR: Provide at least one of 'path' (string or list)."
         justification = params.get('justification', '')

@@ -645,11 +645,29 @@ class TestDeleteFileSchema:
             f"Schema properties must be exactly {_EXPOSED_KEYS}, got {set(props.keys())}"
 
     def test_path_accepts_string_or_array(self):
+        """path uses oneOf [string, array-of-string] (LLM-API-compatible union)."""
         from agent_cascade.tools.custom.file_ops import DeleteFile
         p = DeleteFile.parameters['properties']['path']
-        assert p['type'] == ['string', 'array'], f"path type must allow string or array, got {p['type']}"
-        assert p.get('items') == {'type': 'string'}, \
-            f"path items must be string, got {p.get('items')}"
+        assert 'oneOf' in p, f"path must use oneOf for the string|array union, got keys {list(p.keys())}"
+        options = p['oneOf']
+        assert {'type': 'string'} in options, \
+            f"oneOf must include a plain string option, got {options}"
+        assert {'type': 'array', 'items': {'type': 'string'}} in options, \
+            f"oneOf must include an array-of-string option, got {options}"
+
+    def test_schema_validates_string_and_list_instances(self):
+        """jsonschema (used by _verify_json_format_args) accepts both forms and rejects others."""
+        import jsonschema
+        from agent_cascade.tools.custom.file_ops import DeleteFile
+        schema = DeleteFile.parameters
+        jsonschema.validate(instance={'path': 'a.md'}, schema=schema)
+        jsonschema.validate(instance={'path': ['a.md', 'b.md']}, schema=schema)
+        for bad in (123, {'a': 1}, True):
+            try:
+                jsonschema.validate(instance={'path': bad}, schema=schema)
+            except jsonschema.ValidationError:
+                continue
+            raise AssertionError(f"schema must reject path={bad!r}")
 
     def test_hidden_keys_absent_from_schema(self):
         from agent_cascade.tools.custom.file_ops import DeleteFile
@@ -727,4 +745,23 @@ class TestDeleteFileCall:
         res = tool.call({'path': [], 'justification': 'cleanup'})
         assert res.startswith("ERROR"), f"empty list must error, got: {res!r}"
         assert not om.calls, "no op-manager call should occur on the empty-list path"
+
+    def test_non_string_path_type_errors_cleanly(self):
+        """int/dict/bool 'path' values must produce a clean error, not crash downstream."""
+        tool, om = _make_tool()
+        for bad in (123, {'a': 1}, True):
+            res = tool.call({'path': bad, 'justification': 'cleanup'})
+            assert res.startswith("ERROR"), f"path={bad!r} must error cleanly, got: {res!r}"
+            assert "string or a list of strings" in res, \
+                f"error must name the expected types for path={bad!r}: {res!r}"
+        assert not om.calls, "no op-manager call should occur for invalid path types"
+
+    def test_list_with_non_string_entries_filters_them(self):
+        """Non-string entries in a list are dropped; only valid strings forward."""
+        tool, om = _make_tool()
+        res = tool.call({'path': ['a.md', 42, None, 'b.md'], 'justification': 'cleanup'})
+        assert not res.startswith("ERROR"), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['kwargs']['paths'] == ['a.md', 'b.md'], \
+            f"non-string entries must be filtered, got {call['kwargs'].get('paths')!r}"
 
