@@ -1307,49 +1307,30 @@ class DeleteFile(BaseTool):
 
     name = 'delete_file'
     description = TOOL_METADATA['delete_file']['description']
+
+    # Only 'path', 'include' and 'justification' are exposed to LLMs in the tool
+    # schema. The hidden filter keys (exclude/min_size/max_size/modified_after/
+    # modified_before) stay in TOOL_METADATA for internal callers but are
+    # deliberately NOT copied here.
     parameters = {
         'type': 'object',
         'properties': {
             'path': {
-                'type': 'string',
-                'description': TOOL_METADATA['delete_file']['parameters']['path']
-            },
-            'paths': {
-                'type': 'array',
+                'type': ['string', 'array'],
                 'items': {'type': 'string'},
-                'description': TOOL_METADATA['delete_file']['parameters']['paths']
+                'description': TOOL_METADATA['delete_file']['parameters']['path']
             },
             'include': {
                 'type': 'string',
                 'description': TOOL_METADATA['delete_file']['parameters']['include']
             },
-            'exclude': {
-                'type': 'string',
-                'description': TOOL_METADATA['delete_file']['parameters']['exclude']
-            },
-            'min_size': {
-                'type': 'string',
-                'description': TOOL_METADATA['delete_file']['parameters']['min_size']
-            },
-            'max_size': {
-                'type': 'string',
-                'description': TOOL_METADATA['delete_file']['parameters']['max_size']
-            },
-            'modified_after': {
-                'type': 'string',
-                'description': TOOL_METADATA['delete_file']['parameters']['modified_after']
-            },
-            'modified_before': {
-                'type': 'string',
-                'description': TOOL_METADATA['delete_file']['parameters']['modified_before']
-            },
             'justification': {
                 'type': 'string',
-                'description': 'Why you need to delete this file'
+                'description': 'Why you need to delete these file(s)'
             }
         },
-        # At least one of path/paths is required — enforced in call() so the
-        # error message can name the missing input rather than failing schema.
+        # 'path' (string or list) is required — enforced in call() so the error
+        # message can name the missing input rather than failing schema validation.
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -1362,10 +1343,17 @@ class DeleteFile(BaseTool):
 
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
-        path = params.get('path') or None
-        paths = params.get('paths') or None
+        # Normalize input: 'path' accepts a single string OR a list of strings.
+        # A list is forwarded via the (hidden) 'paths' kwarg; a string via 'path'.
+        raw = params.get('path')
+        if isinstance(raw, list):
+            paths = [p for p in raw if isinstance(p, str) and p.strip()]
+            path = None
+        else:
+            path = raw or None
+            paths = params.get('paths') or None  # hidden legacy arg, still accepted
         if not path and not paths:
-            return "ERROR: Provide at least one of 'path' (single entry) or 'paths' (list of entries)."
+            return "ERROR: Provide at least one of 'path' (string or list)."
         justification = params.get('justification', '')
         agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.delete_file(

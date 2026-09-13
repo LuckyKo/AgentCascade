@@ -604,3 +604,127 @@ def test_approval_description_marks_capped_size(monkeypatch):
             f"Capped size must be marked approximate with '+', got: {desc!r}"
 
     print("[PASS] test_approval_description_marks_capped_size")
+
+
+# ── Schema + tool-level (DeleteFile) tests ────────────────────────────────────
+
+_HIDDEN_KEYS = ('exclude', 'min_size', 'max_size', 'modified_after', 'modified_before')
+_EXPOSED_KEYS = {'path', 'include', 'justification'}
+
+
+class _StubOpManager:
+    """Records the kwargs it receives so we can assert on forwarding."""
+
+    def __init__(self):
+        self.calls = []
+
+    def delete_file(self, path, agent_name, **kwargs):
+        self.calls.append({'path': path, 'agent_name': agent_name, 'kwargs': kwargs})
+        return "OK: Deleted (stub)"
+
+
+class _StubAgentPool:
+    def __init__(self, op_manager):
+        self.operation_manager = op_manager
+
+
+def _make_tool():
+    from agent_cascade.tools.custom.file_ops import DeleteFile
+    om = _StubOpManager()
+    tool = DeleteFile(agent_pool=_StubAgentPool(om), agent_name='coder')
+    return tool, om
+
+
+class TestDeleteFileSchema:
+    """The LLM-facing schema must expose exactly path/include/justification."""
+
+    def test_exposes_exactly_three_properties(self):
+        from agent_cascade.tools.custom.file_ops import DeleteFile
+        props = DeleteFile.parameters['properties']
+        assert set(props.keys()) == _EXPOSED_KEYS, \
+            f"Schema properties must be exactly {_EXPOSED_KEYS}, got {set(props.keys())}"
+
+    def test_path_accepts_string_or_array(self):
+        from agent_cascade.tools.custom.file_ops import DeleteFile
+        p = DeleteFile.parameters['properties']['path']
+        assert p['type'] == ['string', 'array'], f"path type must allow string or array, got {p['type']}"
+        assert p.get('items') == {'type': 'string'}, \
+            f"path items must be string, got {p.get('items')}"
+
+    def test_hidden_keys_absent_from_schema(self):
+        from agent_cascade.tools.custom.file_ops import DeleteFile
+        props = DeleteFile.parameters['properties']
+        for key in _HIDDEN_KEYS:
+            assert key not in props, f"Hidden key '{key}' must NOT appear in the tool schema"
+
+    def test_justification_exposed(self):
+        from agent_cascade.tools.custom.file_ops import DeleteFile
+        props = DeleteFile.parameters['properties']
+        assert 'justification' in props, "justification must be an exposed schema property"
+
+    def test_hidden_keys_still_in_metadata(self):
+        """Hidden keys remain in TOOL_METADATA so internal callers keep working."""
+        from agent_cascade.prompts.dna import TOOL_METADATA
+        meta = TOOL_METADATA['delete_file']['parameters']
+        for key in _HIDDEN_KEYS:
+            assert key in meta, f"Hidden key '{key}' must remain in TOOL_METADATA"
+        # The three exposed params are also defined in the central metadata.
+        for key in _EXPOSED_KEYS:
+            assert key in meta, f"Exposed key '{key}' should be present in TOOL_METADATA"
+
+
+class TestDeleteFileCall:
+    """Tool-level call() input normalization and kwarg forwarding."""
+
+    def test_path_list_forwards_as_paths(self):
+        tool, om = _make_tool()
+        res = tool.call({'path': ['a', 'b'], 'justification': 'cleanup'})
+        assert not res.startswith("ERROR"), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['path'] is None, f"path must be None for a list input, got {call['path']!r}"
+        assert call['kwargs']['paths'] == ['a', 'b'], \
+            f"list input must forward as paths=['a','b'], got {call['kwargs'].get('paths')!r}"
+
+    def test_path_string_forwards_as_path(self):
+        tool, om = _make_tool()
+        res = tool.call({'path': 'single', 'justification': 'cleanup'})
+        assert not res.startswith("ERROR"), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['path'] == 'single', f"path must be 'single', got {call['path']!r}"
+        assert call['kwargs']['paths'] is None, \
+            f"strings input must not set paths, got {call['kwargs'].get('paths')!r}"
+
+    def test_hidden_legacy_paths_arg_still_accepted(self):
+        tool, om = _make_tool()
+        res = tool.call({'path': 'a', 'paths': ['x', 'y'], 'justification': 'cleanup'})
+        assert not res.startswith("ERROR"), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        # When a string path is given, the legacy hidden 'paths' arg is still forwarded.
+        assert call['path'] == 'a', f"path must be 'a', got {call['path']!r}"
+        assert call['kwargs']['paths'] == ['x', 'y'], \
+            f"legacy paths arg must forward, got {call['kwargs'].get('paths')!r}"
+
+    def test_hidden_filter_args_still_forwarded(self):
+        tool, om = _make_tool()
+        res = tool.call({'path': 'a', 'exclude': '*.log', 'min_size': '1KB',
+                         'modified_after': '2 days ago', 'justification': 'cleanup'})
+        assert not res.startswith("ERROR"), f"Unexpected error: {res}"
+        kw = om.calls[-1]['kwargs']
+        assert kw['exclude'] == '*.log', f"hidden exclude must forward, got {kw.get('exclude')!r}"
+        assert kw['min_size'] == '1KB', f"hidden min_size must forward, got {kw.get('min_size')!r}"
+        assert kw['modified_after'] == '2 days ago', \
+            f"hidden modified_after must forward, got {kw.get('modified_after')!r}"
+
+    def test_empty_path_errors(self):
+        tool, om = _make_tool()
+        res = tool.call({'justification': 'cleanup'})
+        assert res.startswith("ERROR"), f"missing path must error, got: {res!r}"
+        assert "'path' (string or list)" in res, f"error must name 'path' (string or list): {res!r}"
+        assert not om.calls, "no op-manager call should occur on the error path"
+
+    def test_empty_list_errors(self):
+        tool, om = _make_tool()
+        res = tool.call({'path': [], 'justification': 'cleanup'})
+        assert res.startswith("ERROR"), f"empty list must error, got: {res!r}"
+        assert not om.calls, "no op-manager call should occur on the empty-list path"
+
