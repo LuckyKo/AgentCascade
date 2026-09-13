@@ -491,7 +491,7 @@ AUTO_SKILL_EXTRA_TURNS: int = int(os.getenv(
     'QWEN_AGENT_AUTO_SKILL_EXTRA_TURNS', 25))            # Extra turns for auto-skill execution before rollback
 AUTO_SKILL_MIN_TOOL_CALLS: int = 5                       # Minimum tool calls before triggering reflection
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3              # Self-match score threshold for auto-promotion
-AUTO_SKILL_AUTO_PROMOTE: bool = True                     # Auto-promote validated skills to .qwen/skills/
+AUTO_SKILL_AUTO_PROMOTE: bool = True                     # Auto-promote validated skills to agents/global/skills/
 AUTO_SKILL_MAX_SIZE_KB: int = 15                         # Maximum SKILL.md file size in KB
 MAX_SKILL_INJECTION_TOKENS: int = 8000                   # Max tokens for skill injection per turn
 MAX_SKILLS_PER_CALL: int = 5                             # Max skills to propose per reflection call

@@ -80,7 +80,7 @@ def _cleanup_test_artifacts():
     """Remove test-specific artifacts left by the skill generation tests.
 
     - pending-skills/: deletes all entries (these are always test artifacts).
-    - .qwen/skills/: only deletes directories whose names match test patterns
+    - agents/global/skills/: only deletes directories whose names match test patterns
       ("test-*", "tmp-*"). Production skills must never be deleted here; we
       cannot rely on a hardcoded whitelist of canonical skills because new
       production skills get added over time.
@@ -117,13 +117,13 @@ def _cleanup_test_artifacts():
         except (PermissionError, OSError):
             pass
 
-    pending_root = Path(".qwen/pending-skills")
+    pending_root = Path("agents/global/pending-skills")
     if pending_root.exists():
         for entry in list(pending_root.iterdir()):
             if entry.is_dir():
                 _remove_empty_dir(entry)
 
-    skills_root = Path(".qwen/skills")
+    skills_root = Path("agents/global/skills")
     if skills_root.exists():
         for entry in list(skills_root.iterdir()):
             # Only remove directories that look like test artifacts.
@@ -394,8 +394,8 @@ class TestProposeValidatePromote:
 
         assert name in fresh_manager._skills_registry
 
-        target = Path(".qwen/skills") / name / "SKILL.md"
-        assert target.exists(), f"Skill was not promoted to .qwen/skills/{name}/"
+        target = Path("agents/global/skills") / name / "SKILL.md"
+        assert target.exists(), f"Skill was not promoted to agents/global/skills/{name}/"
 
         reg = fresh_manager._skills_registry[name]
         assert name in reg["file_path"]
@@ -508,7 +508,7 @@ class TestRateLimiting:
         success, _ = fresh_manager.register_skill_from_content(content)
         assert not success
 
-        pending_root = Path(".qwen/pending-skills")
+        pending_root = Path("agents/global/pending-skills")
         if pending_root.exists():
             for entry in list(pending_root.iterdir()):
                 skill_file = entry / "SKILL.md"
@@ -613,7 +613,7 @@ class TestCallAgentReturn:
         inst.state = "IDLE"
         fresh_manager._skills_registry["skill-creator"] = {
             "name": "skill-creator",
-            "file_path": ".qwen/skills/skill-creator/SKILL.md",
+            "file_path": "agents/global/skills/skill-creator/SKILL.md",
             "_parsed_data": {"body": "Create a reusable skill."},
         }
         return inst
@@ -697,7 +697,7 @@ class TestCallAgentReturn:
         # Register a skill that will match "Write a test"
         fresh_manager._skills_registry["test-writing"] = {
             "name": "test-writing",
-            "file_path": ".qwen/skills/test-writing/SKILL.md",
+            "file_path": "agents/global/skills/test-writing/SKILL.md",
             "triggers": ["test", "write"],
         }
         fresh_manager._matcher.build_index(

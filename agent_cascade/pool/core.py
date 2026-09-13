@@ -184,7 +184,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         self.agents_dir = Path(agents_dir)
         _skill_tiers = []
 
-        # Tier 1 — system: .qwen/skills/
+        # Tier 1 — system/global skills (agents/global/skills/); path below is a legacy no-op, auto-discovered via Tier 2
         _system_skills = _project_root / '.qwen' / 'skills'
         if _system_skills.exists():
             _skill_tiers.append(_system_skills)

@@ -2,7 +2,7 @@
 Skills System — Phase 1 MVP for Agent Cascade.
 
 Provides skill discovery, parsing, keyword matching, and management for
-SKILL.md files stored in .qwen/skills/ directories.
+SKILL.md files stored in agents/global/skills/ directories.
 
 See docs/skills_system_architecture.md for full design rationale.
 """

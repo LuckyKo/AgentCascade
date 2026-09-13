@@ -43,7 +43,7 @@ from .cache_helper import compute_scan_signature
 
 # Priority levels for duplicate skill name resolution:
 # Higher number = higher priority (wins over lower)
-_PRIORITY_SYSTEM = 1       # System-level skills (.qwen/skills/)
+_PRIORITY_SYSTEM = 1       # System/global skills (agents/global/skills/)
 _PRIORITY_AGENT = 2        # Agent-specific skills (agents/*/skills/)
 _PRIORITY_USER = 3         # User-defined skills (workspace/skills/)
 
@@ -52,16 +52,22 @@ def _priority_for_root(root: Path) -> int:
     """Map a scan root directory to its skill-tier priority.
 
     Derives the tier from path components (most specific check first):
+      - .../agents/global/skills  → _PRIORITY_SYSTEM (shared global store)
       - .../agents/<name>/skills  → _PRIORITY_AGENT
       - .../workspace/skills      → _PRIORITY_USER
       - anything else             → _PRIORITY_SYSTEM (default)
 
     Matching on path parts (rather than an explicit tier list) keeps
     ``discover(skill_paths)``'s signature unchanged and degrades gracefully to
-    the system tier for unknown roots.
+    the system tier for unknown roots. The shared global store lives under
+    agents/ but must keep SYSTEM (lowest) priority so per-agent and user skills
+    still override it on name collision.
     """
     parts = [p.lower() for p in root.parts]
     if 'agents' in parts and parts[-1] == 'skills':
+        # agents/global/skills is the shared global store, not an agent-specific one.
+        if 'global' in parts:
+            return _PRIORITY_SYSTEM
         return _PRIORITY_AGENT
     if 'workspace' in parts and parts[-1] == 'skills':
         return _PRIORITY_USER
@@ -113,7 +119,7 @@ class SkillManager:
         self._skill_paths: List[Path] = []  # stored for _ensure_discovered()
 
         # Metrics infrastructure (batched activation tracking)
-        self._metrics_file = Path(".qwen/skills-metrics.json")
+        self._metrics_file = Path("agents/global/skills-metrics.json")
         self._metrics: Dict[str, Dict[str, Any]] = {}  # skill_name -> {total_loads, by_version}
         self._metrics_lock = threading.Lock()
         self._pending_flush_count = 0       # tracks buffered increments
@@ -677,7 +683,7 @@ class SkillManager:
             skill_content: Full SKILL.md content string (frontmatter + body).
             source: Provenance label (default "auto-generated").
             task_text: Optional task text for self-match validation (Tier 2).
-            auto_promote: If True, move validated skill to .qwen/skills/.
+            auto_promote: If True, move validated skill to agents/global/skills/.
 
         Returns:
             Tuple of (success, error_messages).
@@ -685,7 +691,7 @@ class SkillManager:
         logger.info("[SKILLS] Registering skill from content (source=%s)", source)
 
         skill_id = uuid.uuid4().hex
-        pending_dir = Path(f".qwen/pending-skills/{skill_id}")
+        pending_dir = Path(f"agents/global/pending-skills/{skill_id}")
         pending_dir.mkdir(parents=True, exist_ok=True)
         pending_file = pending_dir / "SKILL.md"
         pending_file.write_text(skill_content, encoding='utf-8')
@@ -740,14 +746,14 @@ class SkillManager:
 
                 # Promote if validated
                 if auto_promote and AUTO_SKILL_AUTO_PROMOTE:
-                    target_dir = Path(f".qwen/skills/{name}")
+                    target_dir = Path(f"agents/global/skills/{name}")
                     target_dir.mkdir(parents=True, exist_ok=True)
                     target_file = target_dir / "SKILL.md"
                     if target_file.exists():
                         target_file.unlink()
                     pending_file.rename(target_file)
                     self._skills_registry[name]['file_path'] = str(target_file)
-                    logger.info("[SKILLS] Promoted skill '%s' to .qwen/skills/%s/", name, name)
+                    logger.info("[SKILLS] Promoted skill '%s' to agents/global/skills/%s/", name, name)
                 else:
                     logger.info("[SKILLS] Skill '%s' validated, staying in pending (auto_promote=%s)",
                                 name, auto_promote)
@@ -804,7 +810,7 @@ class SkillManager:
             try:
                 # Temporarily write to temp for parsing (reuse register pattern)
                 import uuid as _uuid
-                tmp_dir = Path(f".qwen/pending-skills/{_uuid.uuid4().hex}")
+                tmp_dir = Path(f"agents/global/pending-skills/{_uuid.uuid4().hex}")
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 tmp_file = tmp_dir / "SKILL.md"
                 tmp_file.write_text(skill_content, encoding='utf-8')

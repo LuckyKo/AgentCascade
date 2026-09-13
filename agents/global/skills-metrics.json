@@ -2,33 +2,33 @@
   "schema_version": "1.0",
   "skills": {
     "self-augmentation": {
-      "total_loads": 3009,
+      "total_loads": 3285,
       "by_version": {
-        "1.0.0": 3009
+        "1.0.0": 3285
       }
     },
     "project-memory-writing": {
-      "total_loads": 266,
+      "total_loads": 290,
       "by_version": {
-        "1.0.0": 93
+        "1.0.0": 117
       }
     },
     "python-codebase-static-analysis": {
-      "total_loads": 166,
+      "total_loads": 192,
       "by_version": {
-        "1.0.0": 166
+        "1.0.0": 192
       }
     },
     "investigate-streaming-gaps": {
-      "total_loads": 39,
+      "total_loads": 40,
       "by_version": {
-        "1.0.0": 39
+        "1.0.0": 40
       }
     },
     "version-control": {
-      "total_loads": 55,
+      "total_loads": 117,
       "by_version": {
-        "1.0.0": 55
+        "1.0.0": 117
       }
     },
     "scheduler-architecture": {
@@ -38,27 +38,27 @@
       }
     },
     "skill-creator": {
-      "total_loads": 58,
+      "total_loads": 60,
       "by_version": {
-        "1.0.0": 58
+        "1.0.0": 60
       }
     },
     "testing-best-practices": {
-      "total_loads": 156,
+      "total_loads": 189,
       "by_version": {
-        "1.0.0": 156
+        "1.0.0": 189
       }
     },
     "systematic-debugging": {
-      "total_loads": 113,
+      "total_loads": 212,
       "by_version": {
-        "1.0.0": 113
+        "1.0.0": 212
       }
     },
     "music-caption-rewriter": {
-      "total_loads": 123,
+      "total_loads": 145,
       "by_version": {
-        "1.0.0": 123
+        "1.0.0": 145
       }
     },
     "agent-cascade-compression-debugging": {
@@ -98,9 +98,9 @@
       }
     },
     "bug-tracker-entry-format": {
-      "total_loads": 20,
+      "total_loads": 31,
       "by_version": {
-        "1.0.0": 20
+        "1.0.0": 31
       }
     },
     "refinement-code-review": {
@@ -110,9 +110,9 @@
       }
     },
     "code-refinement-audit": {
-      "total_loads": 14,
+      "total_loads": 22,
       "by_version": {
-        "1.0.0": 14
+        "1.0.0": 22
       }
     },
     "httpx-connection-pooling": {
@@ -122,9 +122,9 @@
       }
     },
     "code-refinement-review": {
-      "total_loads": 64,
+      "total_loads": 107,
       "by_version": {
-        "1.0.0": 26
+        "1.0.0": 69
       }
     },
     "crossstack-trigger-diagnosis-verification": {
@@ -134,15 +134,15 @@
       }
     },
     "python-sibling-method-insertion": {
-      "total_loads": 14,
+      "total_loads": 30,
       "by_version": {
-        "1.0.0": 14
+        "1.0.0": 30
       }
     },
     "safe-optimization-pass": {
-      "total_loads": 4,
+      "total_loads": 12,
       "by_version": {
-        "1.0.0": 4
+        "1.0.0": 12
       }
     },
     "simple-test-skill": {
@@ -158,9 +158,9 @@
       }
     },
     "websocket-stream-capture-harness": {
-      "total_loads": 5,
+      "total_loads": 13,
       "by_version": {
-        "1.0.0": 5
+        "1.0.0": 13
       }
     },
     "independent-review-of-frontend-fix-b": {
@@ -176,9 +176,9 @@
       }
     },
     "frontend-fix-plan-critique": {
-      "total_loads": 6,
+      "total_loads": 29,
       "by_version": {
-        "1.0.0": 6
+        "1.0.0": 29
       }
     },
     "logging-handle-error-review": {
@@ -188,33 +188,45 @@
       }
     },
     "review-fix-plan-critical-analysis": {
-      "total_loads": 26,
+      "total_loads": 62,
       "by_version": {
-        "1.0.0": 26
+        "1.0.0": 62
       }
     },
     "streaming-burst-investigation-review": {
-      "total_loads": 15,
+      "total_loads": 23,
       "by_version": {
-        "1.0.0": 15
+        "1.0.0": 23
       }
     },
     "surgical-frontend-fix-review": {
-      "total_loads": 6,
+      "total_loads": 14,
       "by_version": {
-        "1.0.0": 6
+        "1.0.0": 14
       }
     },
     "timestamp-backfill-review": {
-      "total_loads": 4,
+      "total_loads": 11,
       "by_version": {
-        "1.0.0": 4
+        "1.0.0": 11
       }
     },
     "source-file-verification-protocol": {
       "total_loads": 15,
       "by_version": {
         "1.0.0": 15
+      }
+    },
+    "fullstack-data-feature-plumbing": {
+      "total_loads": 51,
+      "by_version": {
+        "1.0.0": 51
+      }
+    },
+    "code-review": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
       }
     }
   }

@@ -98,5 +98,7 @@ playback/
 
 # Windows reserved names / special files
 nul
-$null 
-" # Skill load telemetry (auto-bumped on every agent run — do not commit)"  
+$null
+
+# Inactive skill archive (do not track)
+agents/global/skills/INACTIVE/

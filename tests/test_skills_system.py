@@ -1,7 +1,7 @@
 """Unit and integration tests for the Skills System Phase 1 MVP.
 
 Covers parser, matcher, manager, and DNA/settings integration points.
-Uses real SKILL.md files from .qwen/skills/ as test data where possible.
+Uses real SKILL.md files from agents/global/skills/ as test data where possible.
 """
 
 import asyncio
@@ -28,11 +28,11 @@ from agent_cascade.skills.manager import SkillManager
 # Fixtures — paths to real skill files in the repo
 # ===========================================================================
 
-_SKILLS_DIR = _PROJECT_ROOT / ".qwen" / "skills"
+_SKILLS_DIR = _PROJECT_ROOT / "agents" / "global" / "skills"
 
 
 def _skill_path(name: str) -> Path:
-    """Return path to a SKILL.md inside .qwen/skills/<name>/"""
+    """Return path to a SKILL.md inside agents/global/skills/<name>/"""
     return _SKILLS_DIR / name / "SKILL.md"
 
 
@@ -291,7 +291,7 @@ class TestSkillManager:
     # -- Discovery --
 
     def test_discover_from_real_skills_dir(self):
-        """Discover skills from the real .qwen/skills/ directory."""
+        """Discover skills from the real agents/global/skills/ directory."""
         self.manager.discover([_SKILLS_DIR])
         assert len(self.manager._skills_registry) >= 2
         assert "version-control" in self.manager._skills_registry
