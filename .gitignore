@@ -102,3 +102,6 @@ $null
 
 # Inactive skill archive (do not track)
 agents/global/skills/INACTIVE/
+
+# Backup files (editor/tool .bak artifacts — do not track)
+*.bak
