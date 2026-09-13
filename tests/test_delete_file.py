@@ -608,7 +608,6 @@ def test_approval_description_marks_capped_size(monkeypatch):
 
 # ── Schema + tool-level (DeleteFile) tests ────────────────────────────────────
 
-_HIDDEN_KEYS = ('exclude', 'min_size', 'max_size', 'modified_after', 'modified_before')
 _EXPOSED_KEYS = {'path', 'include', 'justification'}
 
 
@@ -669,26 +668,17 @@ class TestDeleteFileSchema:
                 continue
             raise AssertionError(f"schema must reject path={bad!r}")
 
-    def test_hidden_keys_absent_from_schema(self):
-        from agent_cascade.tools.custom.file_ops import DeleteFile
-        props = DeleteFile.parameters['properties']
-        for key in _HIDDEN_KEYS:
-            assert key not in props, f"Hidden key '{key}' must NOT appear in the tool schema"
-
     def test_justification_exposed(self):
         from agent_cascade.tools.custom.file_ops import DeleteFile
         props = DeleteFile.parameters['properties']
         assert 'justification' in props, "justification must be an exposed schema property"
 
-    def test_hidden_keys_still_in_metadata(self):
-        """Hidden keys remain in TOOL_METADATA so internal callers keep working."""
+    def test_metadata_matches_schema(self):
+        """TOOL_METADATA carries exactly the three schema params (no hidden leftovers)."""
         from agent_cascade.prompts.dna import TOOL_METADATA
         meta = TOOL_METADATA['delete_file']['parameters']
-        for key in _HIDDEN_KEYS:
-            assert key in meta, f"Hidden key '{key}' must remain in TOOL_METADATA"
-        # The three exposed params are also defined in the central metadata.
-        for key in _EXPOSED_KEYS:
-            assert key in meta, f"Exposed key '{key}' should be present in TOOL_METADATA"
+        assert set(meta.keys()) == _EXPOSED_KEYS, \
+            f"metadata keys must be exactly {_EXPOSED_KEYS}, got {set(meta.keys())}"
 
 
 class TestDeleteFileCall:
@@ -711,27 +701,6 @@ class TestDeleteFileCall:
         assert call['path'] == 'single', f"path must be 'single', got {call['path']!r}"
         assert call['kwargs']['paths'] is None, \
             f"strings input must not set paths, got {call['kwargs'].get('paths')!r}"
-
-    def test_hidden_legacy_paths_arg_still_accepted(self):
-        tool, om = _make_tool()
-        res = tool.call({'path': 'a', 'paths': ['x', 'y'], 'justification': 'cleanup'})
-        assert not res.startswith("ERROR"), f"Unexpected error: {res}"
-        call = om.calls[-1]
-        # When a string path is given, the legacy hidden 'paths' arg is still forwarded.
-        assert call['path'] == 'a', f"path must be 'a', got {call['path']!r}"
-        assert call['kwargs']['paths'] == ['x', 'y'], \
-            f"legacy paths arg must forward, got {call['kwargs'].get('paths')!r}"
-
-    def test_hidden_filter_args_still_forwarded(self):
-        tool, om = _make_tool()
-        res = tool.call({'path': 'a', 'exclude': '*.log', 'min_size': '1KB',
-                         'modified_after': '2 days ago', 'justification': 'cleanup'})
-        assert not res.startswith("ERROR"), f"Unexpected error: {res}"
-        kw = om.calls[-1]['kwargs']
-        assert kw['exclude'] == '*.log', f"hidden exclude must forward, got {kw.get('exclude')!r}"
-        assert kw['min_size'] == '1KB', f"hidden min_size must forward, got {kw.get('min_size')!r}"
-        assert kw['modified_after'] == '2 days ago', \
-            f"hidden modified_after must forward, got {kw.get('modified_after')!r}"
 
     def test_empty_path_errors(self):
         tool, om = _make_tool()

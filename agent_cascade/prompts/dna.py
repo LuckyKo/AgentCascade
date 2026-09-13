@@ -325,16 +325,9 @@ TOOL_METADATA = {
             'Concurrent deletes on the same file are not supported; there is no per-file filesystem lock.'
         ),
         'parameters': {
-            # Exposed to LLMs (copied into the tool schema):
             'path': "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). At least one path is required.",
             'include': "Optional glob pattern(s) to keep, applied within the base directory of each path. Single pattern ('*.md') or comma-separated ('*.py,*.js'). Simple globs only; '**' not supported. Mirrors list_dir semantics.",
-            'justification': "Why you need to delete these file(s)",
-            # HIDDEN: kept for internal callers / backward compatibility but NOT copied into the tool schema.
-            'exclude': "Optional glob pattern(s) to exclude (single or comma-separated), applied within the base directory of each path. Mirrors list_dir semantics.",
-            'min_size': "Minimum file size filter, human-readable ('500B', '1.5KB', '5MB') or raw bytes as string. Only files at/above this size are deleted; directories are unaffected. Mirrors list_dir.",
-            'max_size': "Maximum file size filter, same format as min_size. Only files at/below this size are deleted. Mirrors list_dir.",
-            'modified_after': "Only delete files modified after this time (ISO date/datetime, relative like '2 days ago', compact like '2h'/'1d', or epoch seconds). Mirrors list_dir.",
-            'modified_before': "Only delete files modified before this time. Same formats as modified_after. Mirrors list_dir."
+            'justification': "Why you need to delete these file(s)"
         }
     },
     'copy_file': {

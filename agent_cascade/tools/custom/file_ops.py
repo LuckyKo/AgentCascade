@@ -322,7 +322,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         if wild_truncated:
             header += " [TRUNCATION WARNING: Unbound read detected!]"
             truncated_msg = (
-                f"\n⚠ This was a wild read (no limit specified). Content exceeded the "
+                f"\n\n[SYSTEM]: Content exceeded the "
                 f"{wild_truncation}-char high-water mark and was truncated. "
                 f"Use start_line/limit for targeted reads."
                 f"\n→ continue at start_line={actual_end + 1}"
@@ -1308,10 +1308,6 @@ class DeleteFile(BaseTool):
     name = 'delete_file'
     description = TOOL_METADATA['delete_file']['description']
 
-    # Only 'path', 'include' and 'justification' are exposed to LLMs in the tool
-    # schema. The hidden filter keys (exclude/min_size/max_size/modified_after/
-    # modified_before) stay in TOOL_METADATA for internal callers but are
-    # deliberately NOT copied here.
     parameters = {
         'type': 'object',
         'properties': {
@@ -1397,11 +1393,6 @@ class DeleteFile(BaseTool):
             path, agent_name,
             paths=paths,
             include=params.get('include'),
-            exclude=params.get('exclude'),
-            min_size=params.get('min_size'),
-            max_size=params.get('max_size'),
-            modified_after=params.get('modified_after'),
-            modified_before=params.get('modified_before'),
             justification=justification,
         )
 
