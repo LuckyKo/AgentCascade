@@ -203,6 +203,7 @@ def truncate_with_spillover(
     spill_path: Optional[Path] = None,
     total_lines_hint: Optional[int] = None,
     shown_lines_hint: Optional[int] = None,
+    skip_spillover: bool = False,
 ) -> str:
     """Truncate text to char_limit and write full content to a spillover file.
 
@@ -225,6 +226,9 @@ def truncate_with_spillover(
             When None (default), derived from the rendered text.
         shown_lines_hint: Optional override for the "shown lines" count in the footer.
             When None (default), derived from the truncated text.
+        skip_spillover: If True, do NOT write a spillover file. Used by tools that
+            already have their own pagination (read_file, read_logs) where the full
+            content remains accessible on disk via start_line/limit.
 
     Returns:
         Truncated text with notice, or original text if under limit.
@@ -234,21 +238,23 @@ def truncate_with_spillover(
 
     original_len = len(text)
 
-    # Cap output size before writing
-    if len(text) > MAX_SPILL_SIZE:
-        text = text[:MAX_SPILL_SIZE] + '\n\n[SPILL FILE TRUNCATED — exceeded maximum size]'
+    # Resolve spillover path (unless skipped)
+    rel_spill = None
+    if not skip_spillover:
+        # Cap output size before writing
+        if len(text) > MAX_SPILL_SIZE:
+            text = text[:MAX_SPILL_SIZE] + '\n\n[SPILL FILE TRUNCATED — exceeded maximum size]'
 
-    # Resolve spillover path
-    if spill_path is not None:
-        rel_spill = _write_spillover(text, spill_path, base_dir)
-    else:
-        log_dir = base_dir / 'logs' / 'spillover'
-        log_dir.mkdir(parents=True, exist_ok=True)
-        spill_filename = generate_spillover_filename(instance_name, tool_name, log_dir)
-        try:
-            rel_spill = _write_spillover(text, log_dir / spill_filename, base_dir)
-        except (OSError, ValueError):
-            rel_spill = f"logs/spillover/{spill_filename}"
+        if spill_path is not None:
+            rel_spill = _write_spillover(text, spill_path, base_dir)
+        else:
+            log_dir = base_dir / 'logs' / 'spillover'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            spill_filename = generate_spillover_filename(instance_name, tool_name, log_dir)
+            try:
+                rel_spill = _write_spillover(text, log_dir / spill_filename, base_dir)
+            except (OSError, ValueError):
+                rel_spill = f"logs/spillover/{spill_filename}"
 
     # Apply truncation based on operation_mode
     if operation_mode == 'tail':

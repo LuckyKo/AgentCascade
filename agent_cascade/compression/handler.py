@@ -11,6 +11,7 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager)
 """
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Union
@@ -321,6 +322,28 @@ class CompressionHandler:
                 text = f"{text}\n\n[TOOL WARNINGS]\n{block}"
         return text
 
+    @staticmethod
+    def _fixup_truncated_header(text: str) -> str:
+        """Fix read_file's header line range after safety-net truncation.
+
+        Changes 'lines X-Y/Z' to 'lines X+/Z' so the header doesn't claim
+        more lines are visible than actually survived the cut.
+        Only applies to the first line if it matches the read_file header pattern.
+        """
+        first_newline = text.find('\n')
+        if first_newline == -1:
+            return text
+        first_line = text[:first_newline]
+        # Match: "OK: Read ... lines 123-456/789 (...)"
+        m = re.match(r'^(.*lines )(\d+)-(\d+)(/\d+)', first_line)
+        if m:
+            prefix = m.group(1)
+            start = m.group(2)
+            total = m.group(4)  # "/789"
+            new_first = f"{prefix}{start}+{total}"
+            return new_first + text[first_newline:]
+        return text
+
     def _drain_cache_notifications(
         self,
         instance: 'AgentInstance',
@@ -570,6 +593,9 @@ class CompressionHandler:
                 and _threshold is not None and _threshold > 0
                 and len(raw_tool_result) > _threshold):
             _before_len = len(raw_tool_result)
+            # read_file and read_logs have their own pagination (start_line/limit)
+            # and the full content remains on disk — no need for a redundant spillover copy.
+            _skip_spill = tool_name in ('read_file', 'read_logs')
             raw_tool_result = truncate_with_spillover(
                 raw_tool_result,
                 char_limit=char_limit,
@@ -581,9 +607,13 @@ class CompressionHandler:
                 # Don't pass shown_lines_hint: the tool's count reflects what IT showed,
                 # but we're about to cut it further. Let truncate_with_spillover compute
                 # the actual shown lines from the truncated text.
+                skip_spillover=_skip_spill,
             )
             if len(raw_tool_result) < _before_len:
                 was_truncated = True
+                # Fixup: if read_file's header claims "lines X-Y/Z" but we cut it,
+                # change to "lines X+/Z" so the header doesn't overstate what's visible.
+                raw_tool_result = self._fixup_truncated_header(raw_tool_result)
 
         # Step 4: Drain cache notifications first (will be second from top)
         raw_tool_result = self._drain_cache_notifications(instance, raw_tool_result, prepend=True)
