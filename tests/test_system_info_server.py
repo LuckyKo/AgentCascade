@@ -298,3 +298,20 @@ class TestSystemInfoTelemetryDump:
         assert "Prompt cache:" in out
         assert "hit_ratio=n/a" in out
         assert "measured=n/a" in out
+
+
+class TestSystemInfoVersion:
+    """The normal (non-help) output must surface the AgentCascade package version."""
+
+    def test_version_line_present(self, monkeypatch):
+        """Output contains an 'AgentCascade Version:' line matching agent_cascade.__version__."""
+        import agent_cascade
+        out = _run(None)
+        assert "AgentCascade Version:" in out
+        assert f"AgentCascade Version: {agent_cascade.__version__}" in out
+
+    def test_version_matches_import(self, monkeypatch):
+        """The reported version equals the imported __version__ (single source of truth)."""
+        import agent_cascade
+        from agent_cascade.tools.custom.system_info import AC_VERSION
+        assert AC_VERSION == agent_cascade.__version__

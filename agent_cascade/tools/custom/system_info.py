@@ -6,6 +6,7 @@ import datetime
 import logging
 from pathlib import Path
 from typing import Dict, Any
+from agent_cascade import __version__ as AC_VERSION
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_TURNS
 from agent_cascade.utils.utils import get_history_stats
 
@@ -477,6 +478,7 @@ class SystemInfo(BaseTool):
             f"API Endpoint: {api_base}\n"
             f"Model Used: {model}\n"
             f"\n--- AgentCascade Server ---\n"
+            f"AgentCascade Version: {AC_VERSION}\n"
             f"Server Address: {ac_server_str}\n"
             f"\n--- Workspace & Permissions ---\n"
             f"{folders_info}"
