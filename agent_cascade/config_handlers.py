@@ -559,10 +559,20 @@ def _handle_tool_loop_detection_enabled(ui_cfg: dict, agent_pool: Optional[Any],
 
 @register_config_handler('tool_result_max_chars')
 def _handle_tool_result_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update tool result truncation limit."""
+    """Update tool result trip threshold.
+
+    Also clamps wild_read_truncation_chars to not exceed the new threshold,
+    preventing a misconfiguration where target > trigger.
+    """
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         val = int(ui_cfg.get('tool_result_max_chars', 10000))
-        agent_pool.llm_cfg['tool_result_max_chars'] = max(1000, val)
+        new_threshold = max(1000, val)
+        agent_pool.llm_cfg['tool_result_max_chars'] = new_threshold
+        # Clamp target to not exceed new threshold
+        if 'wild_read_truncation_chars' in agent_pool.llm_cfg:
+            agent_pool.llm_cfg['wild_read_truncation_chars'] = min(
+                agent_pool.llm_cfg['wild_read_truncation_chars'], new_threshold
+            )
 
 
 @register_config_handler('wild_read_truncation_chars')

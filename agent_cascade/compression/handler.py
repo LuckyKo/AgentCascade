@@ -569,6 +569,7 @@ class CompressionHandler:
         if (char_limit is not None and char_limit > 0
                 and _threshold is not None and _threshold > 0
                 and len(raw_tool_result) > _threshold):
+            _before_len = len(raw_tool_result)
             raw_tool_result = truncate_with_spillover(
                 raw_tool_result,
                 char_limit=char_limit,
@@ -579,7 +580,8 @@ class CompressionHandler:
                 total_lines_hint=_hints_total,
                 shown_lines_hint=_hints_shown,
             )
-            was_truncated = True
+            if len(raw_tool_result) < _before_len:
+                was_truncated = True
 
         # Step 4: Drain cache notifications first (will be second from top)
         raw_tool_result = self._drain_cache_notifications(instance, raw_tool_result, prepend=True)
