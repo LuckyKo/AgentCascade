@@ -72,44 +72,18 @@ def _fire_usage_callback(usage_data: Optional[Dict]) -> None:
         pt = usage_data.get('prompt_tokens', 0)
         ct = usage_data.get('completion_tokens', 0)
         # Merge both details dicts so telemetry ALWAYS sees cached_tokens (which lives only in
-        # prompt_tokens_details). Prompt wins on key conflicts, but the two dicts never share a key
-        # in practice: completion_tokens_details carries reasoning/tool/audio tokens while
-        # prompt_tokens_details carries cached/audio tokens. Starting from completion preserves its
-        # fields (e.g. reasoning_tokens) for backends that emit both; prompt fills in cached_tokens.
+        # prompt_tokens_details). Prompt wins on key conflicts ({**c, **p}); the two dicts are
+        # mostly disjoint — completion carries reasoning/tool tokens while prompt carries
+        # cached_tokens — EXCEPT ``audio_tokens``, which some backends emit in BOTH. On that one
+        # overlap the prompt-side value silently wins, which is acceptable: telemetry only consumes
+        # ``cached_tokens`` (prompt-only), and for input audio the prompt-side count is the relevant
+        # one. We do NOT restructure the merge — this overlap is harmless to every downstream use.
         p = usage_data.get('prompt_tokens_details') or {}
         c = usage_data.get('completion_tokens_details') or {}
         merged = {**c, **p}
         _on_usage_cb(pt, ct, merged if merged else None)
     except Exception as e:
         logger.debug("Telemetry usage callback failed: %s", e)  # Never break streaming
-
-
-# Thread-local storage for cache-status callback — same pattern as _chat_on_usage_cb.
-# Carries RFC 9211 Cache-Status header value from the forwarder to telemetry.
-_chat_on_cache_status = threading.local()
-
-
-def _get_on_cache_status_cb():
-    """Get the current thread's cache-status callback, or None."""
-    return getattr(_chat_on_cache_status, 'cb', None)
-
-
-def _set_on_cache_status_cb(cb):
-    """Set the current thread's cache-status callback."""
-    _chat_on_cache_status.cb = cb
-
-
-def _fire_cache_status_callback(cache_status: str) -> None:
-    """Fire the cache-status callback if registered. Never raises (telemetry must not break streaming)."""
-    if not cache_status:
-        return
-    _cb = _get_on_cache_status_cb()
-    if not callable(_cb):
-        return
-    try:
-        _cb(cache_status)
-    except Exception as e:
-        logger.debug("Cache-status callback failed: %s", e)
 
 
 def register_llm(model_type):
@@ -353,10 +327,6 @@ class BaseChatModel(ABC):
         # Extract usage callback (for response token tracking at streaming layer) and store in thread-local
         on_usage_cb = generate_cfg.pop('_on_usage', None)
         _set_on_usage_cb(on_usage_cb)
-
-        # Extract cache-status callback (RFC 9211 prompt-cache hit/miss) and store in thread-local
-        on_cache_status_cb = generate_cfg.pop('_on_cache_status', None)
-        _set_on_cache_status_cb(on_cache_status_cb)
 
         agent_settings = [
             'disabled_tools', 'max_turns', 'auto_continue', 'auto_rollback_on_loop',

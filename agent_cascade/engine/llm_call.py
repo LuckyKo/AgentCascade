@@ -79,7 +79,6 @@ from agent_cascade.engine.helpers import (
     _get_active_functions_from_template,
     _make_token_count_callback,
     _make_usage_callback,
-    _make_cache_status_callback,
 )
 
 # Sampling & limit parameters to strip when custom sampling is disabled for an
@@ -1433,17 +1432,11 @@ class LLMCallMixin:
                 api_base = llm_cfg.get('api_base', '') or ''
                 model = llm_cfg.get('model', '') or ''
                 with instance._state_lock:
-                    prev_endpoint = dict(instance._last_endpoint_config) if instance._last_endpoint_config else None
                     instance._last_endpoint_config = {
                         'api_base': api_base,
                         'model': model,
                         'state_save_enabled': llm_cfg.get('state_save_enabled', False)
                     }
-                # First call on a new endpoint: TTFB-based hit/miss classification is
-                # unreliable during model switches (KV restore 10-30s), so suppress it.
-                endpoint_changed = (prev_endpoint is None or
-                                    prev_endpoint.get('api_base') != api_base or
-                                    prev_endpoint.get('model') != model)
                 # Store allocated max_input_tokens in instance for compression
                 # check (ground-truth tracking)
                 self._store_allocated_max_input_tokens(instance, merged_cfg)
@@ -1456,8 +1449,6 @@ class LLMCallMixin:
                 _telemetry_collector = getattr(self.pool, 'telemetry', None)  # Same pattern as self._telemetry() helper
                 if _telemetry_collector is not None:
                     merged_cfg['_on_usage'] = _make_usage_callback(instance, _telemetry_collector)
-                    # Register cache-status callback (RFC 9211 prompt-cache hit/miss telemetry)
-                    merged_cfg['_on_cache_status'] = _make_cache_status_callback(instance, _telemetry_collector, suppress_hit_miss=endpoint_changed)
 
                 return llm.chat(
                     messages=messages,
@@ -1489,17 +1480,11 @@ class LLMCallMixin:
             api_base = getattr(llm, 'api_base', '') or ''
             model = getattr(llm, 'model', '') or ''
             with instance._state_lock:
-                prev_endpoint = dict(instance._last_endpoint_config) if instance._last_endpoint_config else None
                 instance._last_endpoint_config = {
                     'api_base': api_base,
                     'model': model,
                     'state_save_enabled': False  # Direct call mode doesn't support state save config from router
                 }
-            # First call on a new endpoint: TTFB-based hit/miss classification is
-            # unreliable during model switches (KV restore 10-30s), so suppress it.
-            endpoint_changed = (prev_endpoint is None or
-                                prev_endpoint.get('api_base') != api_base or
-                                prev_endpoint.get('model') != model)
 
             # Store allocated max_input_tokens in instance for compression
             # check (ground-truth tracking)
@@ -1513,8 +1498,6 @@ class LLMCallMixin:
             _telemetry_collector = getattr(self.pool, 'telemetry', None)  # Same pattern as self._telemetry() helper
             if _telemetry_collector is not None:
                 merged_cfg['_on_usage'] = _make_usage_callback(instance, _telemetry_collector)
-                # Register cache-status callback (RFC 9211 prompt-cache hit/miss telemetry)
-                merged_cfg['_on_cache_status'] = _make_cache_status_callback(instance, _telemetry_collector, suppress_hit_miss=endpoint_changed)
 
             return llm.chat(
                 messages=messages,

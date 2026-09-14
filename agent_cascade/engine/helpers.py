@@ -151,26 +151,6 @@ def _make_usage_callback(instance, telemetry_collector):
     return _on_usage
 
 
-def _make_cache_status_callback(instance, telemetry_collector, suppress_hit_miss: bool = False):
-    """Create a callback for capturing RFC 9211 Cache-Status from LLM streaming layer.
-
-    When ``suppress_hit_miss`` is True (first call after an endpoint change), the
-    raw header is still recorded but counted as "unknown" — TTFB-based hit/miss
-    classification is unreliable during model switches.
-    """
-    def _on_cache_status(cache_status: str):
-        """Called by streaming layer when the forwarder injects a Cache-Status header."""
-        # Record in telemetry (non-blocking) — same defensive pattern as _make_usage_callback
-        if telemetry_collector is not None:
-            try:
-                tel_name = instance.instance_name
-                telemetry_collector.record_llm_cache_status(tel_name, cache_status, force_unknown=suppress_hit_miss)
-            except Exception as e:
-                from agent_cascade.log import logger
-                logger.debug("Telemetry cache-status callback error for %s: %s", instance.instance_name, e)
-    return _on_cache_status
-
-
 def _invalidate_token_cache(instance):
     """Invalidate all token count caches after conversation mutation."""
     instance._last_actual_token_count = 0

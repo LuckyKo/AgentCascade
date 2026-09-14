@@ -271,60 +271,13 @@ class TestLLMCallLifecycle:
         collector.record_token_usage("never_started", prompt_tokens=5, completion_tokens=5)
 
 
-class TestLLMCacheStatusEndpointAwareness:
-    """First call after an endpoint change must be counted as "unknown".
-
-    TTFB-based hit/miss classification is unreliable during model switches
-    (KV restore can take 10-30s), so the caller suppresses hit/miss on the
-    first call to a new endpoint via ``force_unknown=True``. The raw header is
-    still stored on the event for audit, but never classified as hit/miss.
-    """
-
-    def test_force_unknown_counts_unknown_even_for_hit_header(self, collector):
-        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
-        # A header that would normally classify as a "hit".
-        collector.record_llm_cache_status("inst", "llama; hit", force_unknown=True)
-        collector.record_llm_call_end("inst")
-        s = collector.get_session_summary()
-        assert s["llm_cache_hits"] == 0
-        assert s["llm_cache_misses"] == 0
-        assert s["llm_cache_unknown"] == 1
-
-    def test_force_unknown_counts_unknown_even_for_miss_header(self, collector):
-        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
-        # A header that would normally classify as a "miss".
-        collector.record_llm_cache_status("inst", "llama; fwd=123", force_unknown=True)
-        collector.record_llm_call_end("inst")
-        s = collector.get_session_summary()
-        assert s["llm_cache_hits"] == 0
-        assert s["llm_cache_misses"] == 0
-        assert s["llm_cache_unknown"] == 1
-
-    def test_normal_classification_when_not_suppressed(self, collector):
-        """Second call on the same endpoint classifies normally."""
-        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
-        collector.record_llm_cache_status("inst", "llama; hit")
-        collector.record_llm_call_end("inst")
-        s = collector.get_session_summary()
-        assert s["llm_cache_hits"] == 1
-        assert s["llm_cache_unknown"] == 0
-
-    def test_force_unknown_still_stores_raw_header_on_event(self, collector):
-        """The raw header is preserved for audit even when classification is suppressed."""
-        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
-        collector.record_llm_cache_status("inst", "llama; hit", force_unknown=True)
-        # The active call dict retains the raw value before it's popped at end.
-        assert collector._active_llm_calls["inst"]["cache_status"] == "llama; hit"
-        collector.record_llm_call_end("inst")
-
-
 class TestCacheClassificationFromUsage:
     """Authoritative prompt-cache hit/miss from server-reported ``cached_tokens``.
 
     The classification lives in the pure static helper ``classify_cache_hit`` and is
-    wired into ``record_token_usage`` (the usage-callback path). It supersedes the
-    TTFB-based ``Cache-Status`` header heuristic, which remains only as a fallback for
-    backends that don't report usage.
+    wired into ``record_token_usage`` (the usage-callback path). It fully replaced the
+    retired TTFB-based ``Cache-Status`` header heuristic, so a call's cache outcome is
+    now measured solely from the usage object.
     """
 
     # ── Pure helper: boundary + unknown mapping ──────────────────────────────
@@ -427,45 +380,31 @@ class TestCacheClassificationFromUsage:
         assert s["llm_cache_misses"] == 0
         assert s["llm_cache_unknown"] == 0
 
-    # ── No double-counting when both a header and cached_tokens arrive ────────
-    def test_header_after_usage_does_not_double_count(self, collector):
-        """cached_tokens wins; a later Cache-Status header must not increment again.
+    # ── Idempotency: a call is classified at most once ────────────────────────
+    def test_repeated_usage_does_not_double_count(self, collector):
+        """Once a call is classified from cached_tokens, further usage callbacks are no-ops.
 
-        In the real stream the header is read first (before the SSE body) but the usage
-        chunk lands before record_llm_call_end. Whichever order, at most ONE counter
-        increments per call. Here we exercise usage-first then header.
+        The ``cache_classified`` guard on the active call guarantees at most one counter
+        bump per call even if the usage callback fires more than once (e.g. a backend
+        that emits multiple usage chunks). This replaced the old header-vs-usage
+        double-counting guard.
         """
         collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
-        # Authoritative path classifies a hit and marks the call classified.
+        # First usage classifies a hit and marks the call classified.
         collector.record_token_usage(
             "inst", prompt_tokens=1000, completion_tokens=5,
             details={"cached_tokens": 80},
         )
         assert collector._active_llm_calls["inst"].get("cache_classified") is True
-        # Header arrives (would be a hit too) — must be audit-only, no second increment.
-        collector.record_llm_cache_status("inst", "llama; hit")
+        # A second usage for the same call must not increment a counter again.
+        collector.record_token_usage(
+            "inst", prompt_tokens=1000, completion_tokens=5,
+            details={"cached_tokens": 80},
+        )
         collector.record_llm_call_end("inst")
         s = collector.get_session_summary()
         assert s["llm_cache_hits"] == 1  # exactly one, not two
         assert s["llm_cache_misses"] == 0
-
-    def test_header_first_then_usage_still_single_count(self, collector):
-        """If the header fires first and classifies, the later usage must not re-count.
-
-        This is the actual runtime order (header read before SSE body). The header path
-        marks the call classified so the authoritative path also skips its increment —
-        guaranteeing at most one counter bump per call in either order.
-        """
-        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
-        collector.record_llm_cache_status("inst", "llama; hit")  # header → hits=1
-        assert collector._active_llm_calls["inst"].get("cache_classified") is True
-        collector.record_token_usage(
-            "inst", prompt_tokens=1000, completion_tokens=5,
-            details={"cached_tokens": 80},
-        )
-        collector.record_llm_call_end("inst")
-        s = collector.get_session_summary()
-        assert s["llm_cache_hits"] == 1  # not 2
 
     def test_coverage_ratio_reflects_classified_share(self, collector):
         """llm_cache_classified_ratio = (hits+misses)/total_llm_calls."""

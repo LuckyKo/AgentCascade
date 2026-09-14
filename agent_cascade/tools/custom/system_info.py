@@ -23,6 +23,11 @@ def _help_file_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "ac_system_help.yaml"
 
 
+def _pct(v) -> str:
+    """Format a 0..1 ratio as a percentage string; 'n/a' for non-numeric/None."""
+    return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else "n/a"
+
+
 @register_tool('system_info', allow_overwrite=True)
 class SystemInfo(BaseTool):
     """Tool to get the current system information including OS, time, date, cwd, python version, and session stats."""
@@ -87,8 +92,6 @@ class SystemInfo(BaseTool):
 
             # Prompt cache (RFC 9211) hit/miss stats — only when LLM calls exist.
             if session.get('total_llm_calls', 0) > 0:
-                def _pct(v):
-                    return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else "n/a"
                 lines.append("  Prompt cache:")
                 lines.append(
                     f"    hits={session.get('llm_cache_hits', 0)}  "

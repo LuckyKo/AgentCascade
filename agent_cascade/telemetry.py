@@ -431,13 +431,11 @@ class TelemetryCollector:
             if details:
                 call["usage_details"] = details
 
-            # Authoritative cache hit/miss from server-reported cached_tokens.
-            # This is the primary classification path (llama.cpp / OpenAI usage object).
-            # It marks the call "cache_classified" so record_llm_cache_status() does not
-            # double-count when a Cache-Status header also arrives for the same call.
+            # Authoritative cache hit/miss from server-reported cached_tokens
+            # (llama.cpp / OpenAI usage object). Guarded by "cache_classified" so a call
+            # is counted at most once even if the usage callback fires more than once.
+            # Backends that don't report usable usage leave the call unmeasured.
             try:
-                # Skip if a Cache-Status header already classified this call (the header
-                # is read before the SSE body in the real stream, so it usually arrives first).
                 if not call.get("cache_classified"):
                     cached = None
                     if details and isinstance(details, dict):
@@ -451,42 +449,6 @@ class TelemetryCollector:
                             self._session_stats["llm_cache_misses"] += 1
             except Exception as e:
                 _logger.debug("Cache classification from usage failed for %s: %s", instance_name, e)
-
-    def record_llm_cache_status(self, instance_name: str, cache_status: str, force_unknown: bool = False):
-        """Record RFC 9211 Cache-Status for the active LLM call. Thread-safe.
-
-        When ``force_unknown`` is True (first call after an endpoint change),
-        the raw header is still stored on the event for audit, but the value is
-        always counted as "unknown" — TTFB-based hit/miss classification is
-        unreliable during model switches (KV restore can take 10-30s).
-        """
-        with _telemetry_lock:
-            call = self._active_llm_calls.get(instance_name)
-            if not call:
-                return
-            # Store on the active call so record_llm_call_end can include it in the event
-            call["cache_status"] = cache_status
-
-            # If the authoritative cached_tokens path already classified this call, the
-            # header is only kept for audit — do NOT increment a counter a second time.
-            if call.get("cache_classified"):
-                return
-
-            if force_unknown:
-                self._session_stats["llm_cache_unknown"] += 1
-                return
-
-            # Parse hit/miss for session-level counters. Mark the call classified so a
-            # later authoritative cached_tokens result (usage chunk lands after the
-            # header in the real stream) does not increment a counter a second time.
-            if "; hit" in cache_status or cache_status.endswith("hit"):
-                self._session_stats["llm_cache_hits"] += 1
-                call["cache_classified"] = True
-            elif "fwd=" in cache_status:
-                self._session_stats["llm_cache_misses"] += 1
-                call["cache_classified"] = True
-            else:
-                self._session_stats["llm_cache_unknown"] += 1
 
     def record_llm_call_end(self, instance_name: str, output_tokens_est: int = 0, last_output=None):
         """Mark the end of an LLM API call."""
@@ -549,8 +511,6 @@ class TelemetryCollector:
                 "ttft_ms": round(ttft_ms, 1),
                 "streaming_time_ms": round(streaming_time_ms, 1),
                 "tps": round(actual_output / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and actual_output > 0 else 0,
-                # RFC 9211 Cache-Status from forwarder; empty string if header was absent.
-                "cache_status": call.get("cache_status", ""),
                 "timestamp": _now_iso(),
             }
 
