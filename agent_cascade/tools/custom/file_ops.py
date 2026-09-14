@@ -15,7 +15,7 @@ from PIL import Image
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_LINES,
-                                    DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE)
+                                    DEFAULT_WILD_READ_TRUNCATION_CHARS)
 from agent_cascade.tool_utils import set_truncation_hints
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media

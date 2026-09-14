@@ -9,7 +9,7 @@ and the imports needed by these methods were added. The mixin is composed into
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List
+from typing import List
 
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS

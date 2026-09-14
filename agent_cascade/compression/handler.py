@@ -29,8 +29,10 @@ from agent_cascade.tool_utils import (clear_truncation_state, format_truncation_
 from agent_cascade.utils.pool_validation import validate_message_pool
 from agent_cascade.utils.utils import VISION_MODEL_TYPES, is_multimodal_content, msg_field
 
-# Tools that have their own pagination (start_line/limit) and keep full content on disk.
-# The outer safety net should skip spillover for these and fixup their line-range headers.
+# Tools whose full output remains accessible on disk via their own pagination
+# (start_line/limit). For these, the outer safety net:
+#   - skips writing a redundant spillover copy (the file IS the spillover)
+#   - fixups the line-range header so it doesn't overstate visible lines
 _SKIP_SPILLOVER_TOOLS = frozenset({'read_file', 'read_logs'})
 
 # ── Token Cache Helper (local copy to avoid circular import with execution_engine) ──
