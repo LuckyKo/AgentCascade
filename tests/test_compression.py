@@ -328,6 +328,120 @@ class TestMarkerTimestampInheritance:
 
 
 # ──────────────────────────────────────────────
+# 2c. compress_context — live-path marker ts stamping (root-cause regression)
+# ──────────────────────────────────────────────
+
+class TestLiveMarkerTsStamping:
+    """Root-cause regression for the compression-marker timestamp bug.
+
+    Compression markers are inserted via DIRECT pool mutation (core.py step 10 /
+    rebuild_conversation), bypassing append_message — the only place normal messages get
+    their Message.ts float. build_marker_message() therefore creates a marker with ts=None.
+    The fix stamps marker.ts = time.time() in the live compression path, so that on a repeat
+    compression L1 inheritance reads getattr(marker, 'ts', None) → a real float instead of
+    falling back to re-parsing the minute-granularity header text (which converges and loses
+    precision every hop).
+
+    Key assertion: a live-created marker HAS a usable ts float after going through the
+    compression path — no append_message involved.
+    """
+
+    def test_build_marker_has_no_ts_before_stamp(self):
+        """build_marker_message alone leaves ts=None (the gap this fix closes)."""
+        marker = build_marker_message(
+            "some summary", first_ts=_ts(2026, 9, 1, 10, 0),
+            last_ts=_ts(2026, 9, 1, 10, 30), n_messages=5,
+        )
+        assert marker.ts is None
+
+    def test_live_compression_stamps_marker_ts(self):
+        """After a live compress_context run, the returned marker has a real ts float.
+
+        This exercises the ACTUAL code path (direct pool insert, NOT append_message) and
+        asserts the stamp landed on the exact object that gets inserted into the pool.
+        """
+        # Active messages span 10:00–12:00 so the marker's header has a real range.
+        base = _ts(2026, 9, 1, 10, 0)
+        ts_list = [base + i * 60 for i in range(12)]
+        pool, _ = self._build_pool(ts_list=ts_list)
+
+        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
+            mock_invoke.return_value = ("Fresh summary", "")
+            result = compress_context(
+                agent_pool=pool, target_agent_name="TestAgent",
+                fraction=0.5, mode="auto", force=False,
+            )
+
+        assert result.success is True
+        # The live-created marker MUST carry a usable ts float after the compression path.
+        assert result.marker_message.ts is not None
+        assert isinstance(result.marker_message.ts, float)
+        # It's stamped at (roughly) creation time — sanity-check it's in this session's range.
+        import time as _time
+        now = _time.time()
+        assert abs(result.marker_message.ts - now) < 3600
+
+    def test_next_inheritance_uses_ts_not_header(self):
+        """A live-stamped marker, on the next compression hop, drives inheritance via .ts.
+
+        We pre-seed the pool with a marker that has BOTH a real ts (10:37) and a header
+        claiming an earlier start (09:00). If the live stamp is in effect, the repeat
+        compression inherits 10:37 from .ts — NOT the header's 09:00. This mirrors what a
+        marker produced by the live path would look like on its next hop.
+        """
+        marker_ts = _ts(2026, 9, 1, 10, 37)
+        pool, marker = self._build_pool(ts_list=None)
+        # Give the marker a real .ts (as the live path now stamps at creation time).
+        marker.ts = marker_ts
+        # Header claims an EARLIER start than the ts — proves .ts wins over header re-parse.
+        marker.content = (f"{COMPRESSION_MARKER} (50% summarized) ---\n"
+                          f"[2026-09-01 09:00 → 2026-09-01 09:30, 30m]\n"
+                          f"<context_summary>old stuff</context_summary>")
+
+        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
+            mock_invoke.return_value = ("Repeat summary", "")
+            result = compress_context(
+                agent_pool=pool, target_agent_name="TestAgent",
+                fraction=0.5, mode="auto", force=False,
+            )
+
+        assert result.success is True
+        parsed_start, _ = _parse_marker_timestamps(result.marker_message)
+        assert parsed_start is not None
+        # Inherited start must be the marker's .ts (10:37), not the header's 09:00.
+        assert abs(parsed_start - marker_ts) < 60, \
+            f"Inherited start {parsed_start} should use marker ts {marker_ts}, not header text"
+
+    @staticmethod
+    def _build_pool(ts_list=None):
+        """Pool with [SYSTEM] + U0 + MARKER + 6 active messages (each stamped)."""
+        history: list[Message] = [_make_msg(SYSTEM, "You are a test agent")]
+        u0 = _make_msg(USER, "U0 initial prompt")
+        u0.ts = _ts(2026, 9, 1, 9, 0)
+        history.append(u0)
+
+        marker_content = (f"{COMPRESSION_MARKER} (50% summarized) ---\n"
+                          f"<context_summary>old stuff</context_summary>")
+        marker = _make_msg(USER, marker_content)
+        history.append(marker)
+
+        base = _ts(2026, 9, 1, 10, 0)
+        for i in range(3):
+            u = _make_msg(USER, f"Active user {i}")
+            a = _make_msg("assistant", f"Active assistant {i}")
+            if ts_list:
+                u.ts = ts_list[i * 2]
+                a.ts = ts_list[i * 2 + 1]
+            else:
+                u.ts = base + i * 600
+                a.ts = base + i * 600 + 30
+            history.append(u)
+            history.append(a)
+
+        return MockAgentPool(history), marker
+
+
+# ──────────────────────────────────────────────
 # 3. rebuild_working_set
 # ──────────────────────────────────────────────
 

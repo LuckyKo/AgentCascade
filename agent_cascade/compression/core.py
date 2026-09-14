@@ -1,6 +1,7 @@
 """Unified compress_context() function — the single entry point for all compression."""
 import logging
 import threading
+import time
 from agent_cascade.compression.result import CompressResult
 from agent_cascade.compression.helpers import (
     _refine_tool_call_boundary,
@@ -188,10 +189,24 @@ def _consolidate_markers(
             # positional choice stays anchored to the true sequence boundaries. Non-fatal:
             # parse failures simply yield a plain "L2, N summaries consolidated" header with
             # no time range.
-            l2_first_ts, _ = _parse_marker_timestamps(current_history[current_first_idx])
+            # Consult each marker's own .ts float (full precision, stamped at creation)
+            # before falling back to re-parsing its minute-granularity header text. The
+            # .ts is the authoritative source when present; the header parse is only a
+            # fallback for markers loaded from JSONL without a backfilled ts.
+            def _marker_ts_or_header(msg):
+                """Return (start, end) preferring msg.ts over the parsed header."""
+                mt = msg.get('ts') if isinstance(msg, dict) else getattr(msg, 'ts', None)
+                if mt is not None:
+                    try:
+                        return float(mt), float(mt)
+                    except Exception:
+                        pass
+                return _parse_marker_timestamps(msg)
+
+            l2_first_ts, _ = _marker_ts_or_header(current_history[current_first_idx])
             l2_last_ts = None
             for idx in reversed(current_consolidate_indices):
-                _s, e = _parse_marker_timestamps(current_history[idx])
+                _s, e = _marker_ts_or_header(current_history[idx])
                 if e is not None:
                     l2_last_ts = e
                     break
@@ -211,6 +226,14 @@ def _consolidate_markers(
                 first_ts=l2_first_ts,
                 last_ts=l2_last_ts,
             )
+
+            # Stamp the L2 marker's completion ts at creation time. Like L1 markers it is
+            # inserted via direct pool mutation (rebuild_conversation), bypassing
+            # append_message — the only place normal messages get their Message.ts float.
+            # Without this, a later consolidation would fall back to re-parsing its
+            # minute-granularity header. Idempotent: mirrors append_message's guard.
+            if new_marker.ts is None:
+                new_marker.ts = time.time()
 
             # Pool mutation: replace M0 position with new marker, remove M1..M6 only.
             # CRITICAL: Preserve all raw message segments between markers.
@@ -649,6 +672,15 @@ def compress_context(
         last_ts=last_ts,
         n_messages=len(target_messages),
     )
+
+    # Stamp the marker's completion ts at creation time. The marker is inserted via direct
+    # pool mutation (step 10 below), bypassing append_message — the only place normal
+    # messages get their Message.ts float. Without this, a repeat compression would read
+    # getattr(marker, 'ts', None) → None and fall back to re-parsing the marker's
+    # minute-granularity header text, losing precision on every hop. Idempotent: mirrors
+    # append_message's guard (a pre-stamped ts, e.g. from JSONL reload, is never reset).
+    if marker_message.ts is None:
+        marker_message.ts = time.time()
 
     # ── 9b. Persist the session caption to log metadata (first meaningful one wins) ──
     # In-memory only: set_caption() updates data["metadata"]["caption"] and the existing
