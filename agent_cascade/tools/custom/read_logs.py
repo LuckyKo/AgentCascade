@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.tool_utils import set_truncation_hints
+
 
 logger = logging.getLogger(__name__)
 
@@ -480,19 +480,6 @@ class ReadLogs(BaseTool):
 
         header = f"OK: Read {file_path} lines {first}-{last}/{total} ({fmt}, {file_size_str})"
 
-        # [TRUNCATED] only when an EXPLICIT range was requested and it doesn't cover all entries.
-        # The implicit default (last 20) is NOT marked truncated — it's surfaced via the footer hint.
-        explicit_partial = range_str is not None and (first > 1 or last < total)
-        if explicit_partial:
-            header += " [TRUNCATED]"
-
-        # --- Pagination footer (only when content was actually limited) ---
-        footer = ""
-        if range_str is not None and last < total:
-            footer = f'\n→ continue at range="{last + 1}:{total}"'
-        elif range_str is None and total > shown:
-            footer = f'\n→ showing last {shown} of {total}; continue at range="1:{total}" for full log'
-
         # --- Output formatting based on 'format' parameter ---
         if fmt == 'raw':
             # Original behavior: numbered JSON lines (using original entry positions)
@@ -504,9 +491,7 @@ class ReadLogs(BaseTool):
                     line_text = json.dumps(item, ensure_ascii=False)
                 num_label = "meta" if pos == 0 else pos
                 result.append(f"{num_label}: {line_text}")
-            # Set hints so the outer safety-net footer reports entry counts, not rendered lines.
-            set_truncation_hints(total_lines=total, shown_lines=shown)
-            return f"{header}\n" + "\n".join(result) + footer
+            return f"{header}\n" + "\n".join(result)
 
         # simple mode: human-readable summary (using original entry positions)
         result = []
@@ -515,6 +500,4 @@ class ReadLogs(BaseTool):
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)
-        # Set hints so the outer safety-net footer reports entry counts, not rendered lines.
-        set_truncation_hints(total_lines=total, shown_lines=shown)
-        return f"{header}\n" + "\n".join(result) + footer
+        return f"{header}\n" + "\n".join(result)
