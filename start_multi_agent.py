@@ -26,23 +26,27 @@ import os
 
 # ── Parse instance-id BEFORE any agent_cascade imports ───────────────────────
 parser = argparse.ArgumentParser(description='AgentCascade Multi-Agent Orchestrator')
-parser.add_argument("--instance-id", type=str, default=None, 
-                    help="Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars). "
-                         "Use --instance-id= to explicitly clear instance mode and ignore AGENT_CASCADE_INSTANCE_ID env var.")
+parser.add_argument(
+    '--instance-id',
+    type=str,
+    default=None,
+    help='Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars). '
+    'Use --instance-id= to explicitly clear instance mode and ignore AGENT_CASCADE_INSTANCE_ID env var.')
 
 args_instance, remaining = parser.parse_known_args()
 
 # Determine raw ID: CLI overrides env var; validate ALWAYS (even env-only source)
 # None means "not provided" → fall back to env var. Empty string means "explicitly clear".
 from agent_cascade.instance_id import validate_instance_id
+
 if args_instance.instance_id is not None:
     raw_id = args_instance.instance_id  # CLI provided (including explicit empty string to clear)
 else:
-    raw_id = os.getenv("AGENT_CASCADE_INSTANCE_ID", "")  # Fall back to env var
+    raw_id = os.getenv('AGENT_CASCADE_INSTANCE_ID', '')  # Fall back to env var
 
 try:
     validated_id = validate_instance_id(raw_id)
-    os.environ["AGENT_CASCADE_INSTANCE_ID"] = validated_id  # Always set normalized value
+    os.environ['AGENT_CASCADE_INSTANCE_ID'] = validated_id  # Always set normalized value
 except ValueError as e:
     print(f"[FATAL] {e}")
     raise SystemExit(1)
@@ -53,6 +57,7 @@ from pathlib import Path
 # ── Workspace Detection (shared) ─────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.absolute()
 from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
+
 WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
 ensure_workspace(WORKSPACE_DIR)
 
@@ -65,12 +70,22 @@ llm_cfg = {
     'model_server': 'http://localhost:1234/v1',
     'api_key': 'EMPTY',
     'model_type': 'qwenvl_oai',  # Force multimodal support
-    'max_input_tokens': 65536,   # Custom context window limit (override detection)
+    'max_input_tokens': 65536,  # Custom context window limit (override detection)
 }
 
 if __name__ == '__main__':
     from agent_cascade.log import init_logging, logger
     init_logging()
+
+    # Startup splash (ASCII banner with version + URL). Additive: runs after logging is
+    # up so it also lands in console.log. Non-TTY / AGENT_CASCADE_NO_BANNER → one-liner.
+    # host="0.0.0.0" matches this entry point's uvicorn bind (LAN access).
+    from agent_cascade.splash import print_startup_banner
+    print_startup_banner(
+        mode='Multi-Agent',
+        port=int(os.getenv('QWEN_AGENT_PORT', 8765)),
+        host='0.0.0.0',
+    )
 
     import sys
 
@@ -78,14 +93,11 @@ if __name__ == '__main__':
     from agent_cascade.shared_init import parse_cli_args as _parse_base
     args = _parse_base(remaining, description='AgentCascade Multi-Agent Orchestrator')
 
-    logger.info("Initializing Agent Orchestrator...")
-    logger.info("=" * 50)
+    logger.info('Initializing Agent Orchestrator...')
+    logger.info('=' * 50)
 
     # ── Infrastructure initialization (delegated to shared module) ────────────
-    from agent_cascade.shared_init import (
-        initialize_infrastructure,
-        load_orchestrator, build_all_agents_list,
-    )
+    from agent_cascade.shared_init import build_all_agents_list, initialize_infrastructure, load_orchestrator
 
     operation_mgr, agent_pool = initialize_infrastructure(PROJECT_ROOT, llm_cfg)
 
@@ -99,10 +111,11 @@ if __name__ == '__main__':
     all_agents = build_all_agents_list(agent_pool, orchestrator)
 
     logger.info(f"[OK] Available agents: {[a.name for a in all_agents]}")
-    logger.info("=" * 50)
+    logger.info('=' * 50)
 
     # Set up background thread for async terminal messages
     import threading
+
     def async_input_listener():
         while True:
             try:
@@ -113,14 +126,16 @@ if __name__ == '__main__':
                     agent_pool.enqueue_message(target, msg)
                     logger.info(f"\n[QUEUED] '{msg}' → {target} (will be injected on its next turn)")
             except Exception as e:
-                logger.warning("Async input listener error: %s", e)
+                logger.warning('Async input listener error: %s', e)
                 break
+
     threading.Thread(target=async_input_listener, daemon=True).start()
 
     # ── Launch the API server (FastAPI + custom HTML/JS frontend) ──────────────
     try:
-        from agent_cascade.api_server import create_app
         import uvicorn
+
+        from agent_cascade.api_server import create_app
 
         chatbot_config = {
             'session_name': 'Maine',
@@ -133,39 +148,41 @@ if __name__ == '__main__':
             effective_auto_security = args.auto_security
 
         app = create_app(
-            all_agents, agent_pool, chatbot_config,
+            all_agents,
+            agent_pool,
+            chatbot_config,
             auto_security=effective_auto_security,
         )
-        logger.debug("FastAPI app created successfully")
+        logger.debug('FastAPI app created successfully')
         if args.auto_security:
-            logger.info("[OK] Auto-Ask Security mode ENABLED (all tool calls will be security-checked)")
+            logger.info('[OK] Auto-Ask Security mode ENABLED (all tool calls will be security-checked)')
     except Exception as e:
-        logger.error("[FATAL] Failed to create API server app: %s", e)
+        logger.error('[FATAL] Failed to create API server app: %s', e)
         raise SystemExit(1)
 
     port = int(os.getenv('QWEN_AGENT_PORT', 8765))
-    logger.info("\n[OK] API Server ready!")
-    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
-    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
-    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
-    logger.info("\n[TIP] Type in this terminal to inject messages into the active agent.")
-    logger.info("=" * 50)
+    logger.info('\n[OK] API Server ready!')
+    logger.info('    -> Open http://127.0.0.1:%d in your browser', port)
+    logger.info('    -> WebSocket at ws://127.0.0.1:%d/ws/chat', port)
+    logger.info('    -> REST API at http://127.0.0.1:%d/api/', port)
+    logger.info('\n[TIP] Type in this terminal to inject messages into the active agent.')
+    logger.info('=' * 50)
 
     import signal
 
     # Use Config + Server pattern for graceful shutdown support (host 0.0.0.0 allows LAN access)
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+    config = uvicorn.Config(app, host='0.0.0.0', port=port, log_level='warning')
     server = uvicorn.Server(config)
-    agent_pool.server_info = ("0.0.0.0", port)
+    agent_pool.server_info = ('0.0.0.0', port)
 
     def handle_shutdown(signum, frame):
-        logger.info("\n[INFO] Initiating graceful shutdown...")
+        logger.info('\n[INFO] Initiating graceful shutdown...')
         agent_pool.stopped = True
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()
             except Exception as e:
-                logger.warning("Cleanup backups failed during shutdown: %s", e)
+                logger.warning('Cleanup backups failed during shutdown: %s', e)
         # Set should_exit for graceful uvicorn shutdown (avoids resource leaks from sys.exit)
         server.should_exit = True
 
@@ -185,10 +202,11 @@ if __name__ == '__main__':
         server.run()
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error("[FATAL] Port %d is already in use. Change QWEN_AGENT_PORT env var or stop the other process.", port)
+            logger.error('[FATAL] Port %d is already in use. Change QWEN_AGENT_PORT env var or stop the other process.',
+                         port)
         else:
-            logger.error("[FATAL] Server failed to start: %s", e)
+            logger.error('[FATAL] Server failed to start: %s', e)
         raise SystemExit(1)
     except Exception as e:
-        logger.error("[FATAL] Server crashed: %s", e)
+        logger.error('[FATAL] Server crashed: %s', e)
         raise SystemExit(1)

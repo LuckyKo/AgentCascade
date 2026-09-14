@@ -26,24 +26,28 @@ import os
 # var won't be set yet and we'll get the default (shared) console.log.
 
 parser = argparse.ArgumentParser(description='AgentCascade Multi-Agent API Server')
-parser.add_argument("--port", type=int, default=12345, help="Port to bind to (default: 12345)")
-parser.add_argument("--instance-id", type=str, default=None, 
-                    help="Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars). "
-                         "Use --instance-id= to explicitly clear instance mode and ignore AGENT_CASCADE_INSTANCE_ID env var.")
+parser.add_argument('--port', type=int, default=12345, help='Port to bind to (default: 12345)')
+parser.add_argument(
+    '--instance-id',
+    type=str,
+    default=None,
+    help='Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars). '
+    'Use --instance-id= to explicitly clear instance mode and ignore AGENT_CASCADE_INSTANCE_ID env var.')
 
 args, remaining = parser.parse_known_args()
 
 # Determine raw ID: CLI overrides env var; validate ALWAYS (even env-only source)
 # None means "not provided" → fall back to env var. Empty string means "explicitly clear".
 from agent_cascade.instance_id import validate_instance_id
+
 if args.instance_id is not None:
     raw_id = args.instance_id  # CLI provided (including explicit empty string to clear)
 else:
-    raw_id = os.getenv("AGENT_CASCADE_INSTANCE_ID", "")  # Fall back to env var
+    raw_id = os.getenv('AGENT_CASCADE_INSTANCE_ID', '')  # Fall back to env var
 
 try:
     validated_id = validate_instance_id(raw_id)
-    os.environ["AGENT_CASCADE_INSTANCE_ID"] = validated_id  # Always set normalized value
+    os.environ['AGENT_CASCADE_INSTANCE_ID'] = validated_id  # Always set normalized value
 except ValueError as e:
     print(f"[FATAL] {e}")
     raise SystemExit(1)
@@ -54,6 +58,7 @@ from pathlib import Path
 # ── Workspace Detection (shared) ─────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.absolute()
 from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
+
 WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
 ensure_workspace(WORKSPACE_DIR)
 
@@ -81,13 +86,11 @@ llm_cfg = {
 
 def initialize_agents():
     """Set up agents, pool, and config. Returns (all_agents, agent_pool, chatbot_config)."""
-    logger.info("Initializing Agent Orchestrator (API Server)...")
-    logger.info("=" * 50)
+    logger.info('Initializing Agent Orchestrator (API Server)...')
+    logger.info('=' * 50)
 
     # ── Infrastructure initialization (delegated to shared module) ────────────
-    from agent_cascade.shared_init import (
-        initialize_infrastructure, load_orchestrator, build_all_agents_list,
-    )
+    from agent_cascade.shared_init import build_all_agents_list, initialize_infrastructure, load_orchestrator
 
     operation_mgr, agent_pool = initialize_infrastructure(PROJECT_ROOT, llm_cfg)
 
@@ -97,8 +100,8 @@ def initialize_agents():
 
     all_agents = build_all_agents_list(agent_pool, load_orchestrator(agent_pool))
 
-    logger.info("[OK] Available agents: %s", [a.name for a in all_agents])
-    logger.info("=" * 50)
+    logger.info('[OK] Available agents: %s', [a.name for a in all_agents])
+    logger.info('=' * 50)
 
     chatbot_config = {
         'session_name': 'Maine',
@@ -112,13 +115,16 @@ if __name__ == '__main__':
     from agent_cascade.log import init_logging, logger
     init_logging()
 
+    # Startup splash (ASCII banner with version + URL). Additive: runs after logging is
+    # up so it also lands in console.log. Non-TTY / AGENT_CASCADE_NO_BANNER → one-liner.
+    from agent_cascade.splash import print_startup_banner
+    print_startup_banner(mode='API Server', port=args.port, host='127.0.0.1')
+
     # Fix 4: make the hardcoded Tier-4 global default visible at startup. Emitted here
     # (after init_logging) so it actually reaches the configured handlers — logging a
     # bare module-level logger at import time would be dropped (no handlers yet).
-    logger.info(
-        f"[APIRouter] Global default endpoint: '{llm_cfg['model']}' @ {llm_cfg['model_server']} "
-        f"(Tier-4 fallback)"
-    )
+    logger.info(f"[APIRouter] Global default endpoint: '{llm_cfg['model']}' @ {llm_cfg['model_server']} "
+                f"(Tier-4 fallback)")
 
     import sys
 
@@ -137,11 +143,12 @@ if __name__ == '__main__':
     except SystemExit:
         raise
     except Exception as e:
-        logger.error("[FATAL] Agent initialization failed: %s", e)
+        logger.error('[FATAL] Agent initialization failed: %s', e)
         raise SystemExit(1)
 
     # Set up async terminal input (same as start_multi_agent.py)
     import threading
+
     def async_input_listener():
         while True:
             try:
@@ -151,14 +158,16 @@ if __name__ == '__main__':
                     agent_pool.enqueue_message(target, msg)
                     logger.info("\n[QUEUED] '%s' → %s (will be injected on next turn)", msg, target)
             except Exception as e:
-                logger.warning("Async input listener error: %s", e)
+                logger.warning('Async input listener error: %s', e)
                 break
+
     threading.Thread(target=async_input_listener, daemon=True).start()
 
     # Create and launch the API server
     try:
-        from agent_cascade.api_server import create_app
         import uvicorn
+
+        from agent_cascade.api_server import create_app
 
         # Use loaded auto_security from pool_settings.json if available, otherwise CLI flag
         effective_auto_security = getattr(agent_pool, '_loaded_auto_security', None)
@@ -166,28 +175,30 @@ if __name__ == '__main__':
             effective_auto_security = args.auto_security
 
         app = create_app(
-            all_agents, agent_pool, chatbot_config,
+            all_agents,
+            agent_pool,
+            chatbot_config,
             auto_security=effective_auto_security,
         )
-        logger.debug("FastAPI app created successfully")
+        logger.debug('FastAPI app created successfully')
         if args.auto_security:
-            logger.info("[OK] Auto-Ask Security mode ENABLED (all tool calls will be security-checked)")
+            logger.info('[OK] Auto-Ask Security mode ENABLED (all tool calls will be security-checked)')
     except Exception as e:
-        logger.error("[FATAL] Failed to create API server app: %s", e)
+        logger.error('[FATAL] Failed to create API server app: %s', e)
         raise SystemExit(1)
 
     port = args.port
-    logger.info("\n[OK] API Server ready!")
-    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
-    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
-    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
-    logger.info("\n[TIP] Type in this terminal to inject messages into the active agent.")
-    logger.info("=" * 50)
+    logger.info('\n[OK] API Server ready!')
+    logger.info('    -> Open http://127.0.0.1:%d in your browser', port)
+    logger.info('    -> WebSocket at ws://127.0.0.1:%d/ws/chat', port)
+    logger.info('    -> REST API at http://127.0.0.1:%d/api/', port)
+    logger.info('\n[TIP] Type in this terminal to inject messages into the active agent.')
+    logger.info('=' * 50)
 
     # Create server first so signal handler can reference it
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning')
     server = uvicorn.Server(config)
-    agent_pool.server_info = ("127.0.0.1", port)
+    agent_pool.server_info = ('127.0.0.1', port)
 
     # Use shared signal handler from shared_init (Phase 5B — deduplicated shutdown logic)
     from agent_cascade.shared_init import setup_signal_handler
@@ -200,10 +211,10 @@ if __name__ == '__main__':
         server.run()
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error("[FATAL] Port %d is already in use. Use --port <PORT> or stop the other process.", port)
+            logger.error('[FATAL] Port %d is already in use. Use --port <PORT> or stop the other process.', port)
         else:
-            logger.error("[FATAL] Server failed to start: %s", e)
+            logger.error('[FATAL] Server failed to start: %s', e)
         raise SystemExit(1)
     except Exception as e:
-        logger.error("[FATAL] Server crashed: %s", e)
+        logger.error('[FATAL] Server crashed: %s', e)
         raise SystemExit(1)
