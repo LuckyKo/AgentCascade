@@ -33,9 +33,20 @@ set -u
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 BUMP="$REPO_ROOT/scripts/bump_version.py"
 [ -f "$BUMP" ] || exit 0
-# Use the same python that runs this repo's tooling; fall back to `python`.
+# Resolve a Python 3 interpreter. Prefer python3; only fall back to `python` if it
+# actually reports version 3 (guards against systems where `python` is Python 2).
 PY="$(command -v python3 || command -v python || true)"
-[ -n "$PY" ] || PY=python
+if [ -z "$PY" ]; then
+    echo "bump_version: no python interpreter found (non-fatal)" >&2
+    exit 0
+fi
+case "$("$PY" --version 2>&1)" in
+    *\"Python 3\"*|*"Python 3."*) : ;;   # Python 3 — OK
+    *)
+        echo "bump_version: no Python 3 available (found: $("$PY" --version 2>&1)) (non-fatal)" >&2
+        exit 0
+        ;;
+esac
 "$PY" "$BUMP" --post-commit || echo "bump_version: post-commit bump failed (non-fatal)" >&2
 exit 0
 """

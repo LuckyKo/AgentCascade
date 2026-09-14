@@ -55,6 +55,19 @@ def _last_commit_message():
         return ''
 
 
+def _is_auto_bump_commit(subject):
+    """True only if `subject` is one of OUR auto-bump commits.
+
+    Our format is exactly: "<marker> <X.Y.Z>". Requiring the marker at the start
+    followed by a bare semantic version avoids false positives on user commits that
+    merely mention the marker phrase somewhere in the message.
+    """
+    if not subject or not subject.startswith(_AUTO_COMMIT_MARKER):
+        return False
+    suffix = subject[len(_AUTO_COMMIT_MARKER):].strip()
+    return bool(re.match(r'^\d+\.\d+\.\d+$', suffix))
+
+
 def _auto_commit(new_version):
     """Stage __init__.py and commit the bump. Returns True on success."""
     try:
@@ -139,7 +152,9 @@ def main(argv=None):
 
     # Recursion guard for post-commit mode: if HEAD is already one of our own bump
     # commits, do nothing (the auto-commit would otherwise re-trigger this hook).
-    if args.post_commit and _AUTO_COMMIT_MARKER in _last_commit_message():
+    # Match strictly (marker at start + a bare X.Y.Z) so a user commit that merely
+    # *mentions* the marker phrase is not wrongly skipped.
+    if args.post_commit and _is_auto_bump_commit(_last_commit_message()):
         print('post-commit: HEAD is a version-bump commit; skipping')
         return 0
 
