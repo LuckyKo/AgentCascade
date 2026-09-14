@@ -1,28 +1,26 @@
-from pathlib import Path
-import tempfile
-import os
 import atexit
-import sys
 import logging
-from typing import Optional, Any, Union
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Optional, Union
 
 logger = logging.getLogger(__name__)
-from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.settings import (
-    DEFAULT_WORKSPACE, CHARS_PER_TOKEN_ESTIMATE,
-    DEFAULT_READ_FILE_MAX_LINES, DEFAULT_MAX_INPUT_TOKENS,
-    DEFAULT_WILD_READ_TRUNCATION_CHARS,
-)
 import io
 import json
+
 import requests
 from PIL import Image
+
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.utils.utils import (
-    json_loads, encode_image_as_base64, is_http_url,
-    _HTTP_FETCH_HEADERS, _HTTP_FETCH_TIMEOUT, MAX_DATA_URL_SIZE,
-)
-from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
+from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE, DEFAULT_MAX_INPUT_TOKENS, DEFAULT_READ_FILE_MAX_LINES,
+                                    DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE)
+from agent_cascade.tool_utils import set_truncation_hints
+from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media
+from agent_cascade.utils.utils import (_HTTP_FETCH_HEADERS, _HTTP_FETCH_TIMEOUT, MAX_DATA_URL_SIZE,
+                                       encode_image_as_base64, is_http_url, json_loads)
 
 
 def _is_temp_file(p) -> bool:
@@ -37,14 +35,14 @@ def _is_temp_file(p) -> bool:
 class PathResolutionMixin:
     """Mixin providing _resolve_path() for all file-op tool classes."""
 
-    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
+    def _resolve_path(self, path: str, mode: str = 'ro') -> Path:
         from agent_cascade.utils.tool_path_resolver import resolve_tool_path
         return resolve_tool_path(path, mode=mode, agent_pool=self.agent_pool)
 
 
 # --- Module-level cairosvg DLL state (Windows only) --------------------------- #
-_cairosvg_dll_handles: list = []          # handles returned by os.add_dll_directory()
-_cairosvg_setup_done: bool = False        # ensures DLL setup runs exactly once
+_cairosvg_dll_handles: list = []  # handles returned by os.add_dll_directory()
+_cairosvg_setup_done: bool = False  # ensures DLL setup runs exactly once
 
 
 def _cleanup_cairosvg_dll_handles():
@@ -56,23 +54,24 @@ def _cleanup_cairosvg_dll_handles():
             pass
     _cairosvg_dll_handles.clear()
 
+
 atexit.register(_cleanup_cairosvg_dll_handles)
 
 _gtk_common_paths = [
-    os.environ.get("GTK_LIBS", ""),
-    os.environ.get("CAIROCFFI_DLL_DIRECTORIES", ""),
-    r"C:\Program Files\GTK3-Runtime Win64\bin",
-    r"D:\Program Files\GTK3-Runtime Win64\bin",
-    r"C:\Program Files (x86)\GTK3-Runtime Win64\bin",
+    os.environ.get('GTK_LIBS', ''),
+    os.environ.get('CAIROCFFI_DLL_DIRECTORIES', ''),
+    r'C:\Program Files\GTK3-Runtime Win64\bin',
+    r'D:\Program Files\GTK3-Runtime Win64\bin',
+    r'C:\Program Files (x86)\GTK3-Runtime Win64\bin',
 ]
 
 # --- read_file constants ----------------------------------------------------- #
 # DEFAULT_MAX_INPUT_TOKENS is imported from agent_cascade.settings (canonical, default 65000).
 DEFAULT_READ_LINES = DEFAULT_READ_FILE_MAX_LINES  # From settings (default: 150)
-MAX_LINE_LIMIT_EXPLICIT = 100000          # Max lines when user explicitly sets a limit
-HEX_DUMP_BYTES = 1024                     # Bytes to show in hex view for binary files
-CONTEXT_FRACTION = 0.25                   # Fraction of context window reserved for tool output
-MIN_TRUNCATED_LINE_CHARS = 200            # Minimum characters to keep when truncating a single line
+MAX_LINE_LIMIT_EXPLICIT = 100000  # Max lines when user explicitly sets a limit
+HEX_DUMP_BYTES = 1024  # Bytes to show in hex view for binary files
+CONTEXT_FRACTION = 0.25  # Fraction of context window reserved for tool output
+MIN_TRUNCATED_LINE_CHARS = 200  # Minimum characters to keep when truncating a single line
 
 # list_dir default output truncation limit (chars) before spillover is applied.
 DEFAULT_LIST_DIR_CHAR_LIMIT = 3000
@@ -161,7 +160,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
     # ------------------------------------------------------------------ #
     def _get_max_input_tokens(self, kwargs: dict) -> int:
         """Return the effective context window size in tokens.
-        
+
         Priority: agent_obj.llm > agent_pool.llm_cfg > DEFAULT_MAX_INPUT_TOKENS
         """
         tokens = DEFAULT_MAX_INPUT_TOKENS
@@ -218,8 +217,14 @@ class ReadFile(BaseTool, PathResolutionMixin):
     #  Helper: read text file with streaming line-by-line iteration       #
     # ------------------------------------------------------------------ #
     def _read_text_file(
-        self, path: str, resolved: Path, start_line: int, limit: int, char_limit: int,
-        is_wild_read: bool = False, wild_truncation: int = 0,
+        self,
+        path: str,
+        resolved: Path,
+        start_line: int,
+        limit: int,
+        char_limit: int,
+        is_wild_read: bool = False,
+        wild_truncation: int = 0,
     ) -> str:
         """Read a text file using streaming line-by-line iteration.
 
@@ -232,8 +237,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
         total_lines = 0
         lines_read: list[str] = []
         current_chars = 0
-        hit_line_limit = False   # Truncated because we hit the line count limit
-        hit_char_limit = False   # Truncated because we hit the character budget
+        hit_line_limit = False  # Truncated because we hit the line count limit
+        hit_char_limit = False  # Truncated because we hit the character budget
 
         with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
             for line_num, raw_line in enumerate(f, 1):
@@ -257,7 +262,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                     # First line itself is huge — include a truncated portion
                     if not lines_read:
                         cut = min(len(formatted), max(char_limit, MIN_TRUNCATED_LINE_CHARS))
-                        lines_read.append(formatted[:cut] + " ... [LINE TRUNCATED]\n")
+                        lines_read.append(formatted[:cut] + ' ... [LINE TRUNCATED]\n')
                     hit_char_limit = True
                     # Count remaining lines for accurate total (+1 for current line)
                     total_lines = line_num + sum(1 for _ in f)
@@ -285,7 +290,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 content = content[:cut_pos]  # exclude the newline -> whole lines only
             else:
                 # No newline before the threshold (single very long line): hard-cut.
-                content = content[:wild_truncation] + " ...\n"
+                content = content[:wild_truncation] + ' ...\n'
             wild_truncated = True
             # Count displayed lines (the last line has no trailing newline after the cut).
             displayed_lines = content.count('\n') + (0 if content.endswith('\n') else 1)
@@ -302,7 +307,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         # m1: Encoding warning via replacement character U+FFFD count
         repl_count = content.count('\ufffd')
-        encoding_note = f" [encoding: utf-8 with {repl_count} replacement(s)]" if repl_count > 0 else ""
+        encoding_note = f" [encoding: utf-8 with {repl_count} replacement(s)]" if repl_count > 0 else ''
 
         # File size for text files (inline formatting, no external deps)
         try:
@@ -314,23 +319,25 @@ class ReadFile(BaseTool, PathResolutionMixin):
             else:
                 file_size_str = f"{file_size_bytes / (1024 * 1024):.1f} MB"
         except OSError:
-            file_size_str = "?"
+            file_size_str = '?'
 
         header = f"OK: Read {path} lines {start_line}-{actual_end}/{total_lines} (text, {file_size_str}){encoding_note}"
 
-        truncated_msg = ""
+        truncated_msg = ''
         if wild_truncated:
-            header += " [TRUNCATION WARNING: Unbound read detected!]"
-            truncated_msg = (
-                f"\n\n[SYSTEM]: Content exceeded the "
-                f"{wild_truncation}-char high-water mark and was truncated. "
-                f"Use start_line/limit for targeted reads."
-                f"\n→ continue at start_line={actual_end + 1}"
-            )
+            header += ' [TRUNCATION WARNING: Unbound read detected!]'
+            truncated_msg = (f"\n\n[SYSTEM]: Content exceeded the "
+                             f"{wild_truncation}-char high-water mark and was truncated. "
+                             f"Use start_line/limit for targeted reads."
+                             f"\n→ continue at start_line={actual_end + 1}")
         elif hit_line_limit or hit_char_limit:
-            header += " [TRUNCATED]"
+            header += ' [TRUNCATED]'
             # m2: Compact pagination footer
             truncated_msg = f"\n→ continue at start_line={actual_end + 1}"
+
+        # Set truncation hints so the outer safety-net footer reports file line counts
+        # instead of rendered-output line counts (which include header + code fences).
+        set_truncation_hints(total_lines=total_lines, shown_lines=displayed_lines)
 
         return f"{header}\n```\n{content}```{truncated_msg}"
 
@@ -351,7 +358,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
             return f"OK: Read {path} (binary, 0 B)"
 
         hex_view = _format_hex_dump(data)
-        
+
         # Inline size formatting consistent with text files
         if file_size < 1024:
             size_str = f"{file_size} B"
@@ -361,8 +368,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
             size_str = f"{file_size / (1024 * 1024):.1f} MB"
 
         return (
-            f"OK: Read {path} (binary, {size_str}) showing first {len(data)} bytes as hex dump\n```\n{hex_view}\n```"
-        )
+            f"OK: Read {path} (binary, {size_str}) showing first {len(data)} bytes as hex dump\n```\n{hex_view}\n```")
 
     # ------------------------------------------------------------------ #
     #  Helper: resolve negative/zero start_line against total lines       #
@@ -370,7 +376,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
     @staticmethod
     def _resolve_start_line(start_line: int, total_lines: int) -> int:
         """Convert a possibly-negative start_line to a valid 1-based line number.
-        
+
         Mirrors ReIndent's negative-index handling (see operation_manager.py ~1927):
         - Positive: 1 = first line, 2 = second, etc. Clamped to [1, total_lines].
         - Zero or negative: converted like Python list indexing (-1 = last, -3 = third-to-last).
@@ -407,9 +413,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         # in compression/handler.py — no need to read it here.)
         wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
         if self.agent_pool is not None:
-            wild_truncation = getattr(self.agent_pool, 'llm_cfg', {}).get(
-                'wild_read_truncation_chars', wild_truncation
-            )
+            wild_truncation = getattr(self.agent_pool, 'llm_cfg', {}).get('wild_read_truncation_chars', wild_truncation)
 
         # Determine line limit and whether this is a "wild read" (no explicit limit)
         limit, is_wild_read = self._determine_limits(limit)
@@ -442,9 +446,13 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 start_line = raw_start
 
             return self._read_text_file(
-                path=path, resolved=resolved, start_line=start_line,
-                limit=limit, char_limit=char_limit,
-                is_wild_read=is_wild_read, wild_truncation=wild_truncation,
+                path=path,
+                resolved=resolved,
+                start_line=start_line,
+                limit=limit,
+                char_limit=char_limit,
+                is_wild_read=is_wild_read,
+                wild_truncation=wild_truncation,
             )
 
         except ValueError as e:
@@ -470,8 +478,19 @@ class ViewImage(BaseTool, PathResolutionMixin):
     """
 
     IMAGE_EXTENSIONS = {
-        '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg',
-        '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif',
+        '.png',
+        '.jpg',
+        '.jpeg',
+        '.gif',
+        '.webp',
+        '.bmp',
+        '.svg',
+        '.tiff',
+        '.tif',
+        '.ico',
+        '.avif',
+        '.heic',
+        '.heif',
     }
 
     name = 'view_image'
@@ -505,12 +524,12 @@ class ViewImage(BaseTool, PathResolutionMixin):
     @staticmethod
     def _setup_cairosvg_dll_dirs():
         """On Windows, register DLL directories so cairosvg's native libs can load.
-        
+
         Runs exactly once (guarded by the module-level _cairosvg_setup_done flag).
         All os.add_dll_directory() handles are stored and closed atexit.
         """
         global _cairosvg_setup_done
-        if _cairosvg_setup_done or sys.platform != "win32":
+        if _cairosvg_setup_done or sys.platform != 'win32':
             return
 
         for p in _gtk_common_paths:
@@ -541,17 +560,13 @@ class ViewImage(BaseTool, PathResolutionMixin):
         try:
             import cairosvg
         except ImportError:
-            raise ImportError(
-                "cairosvg is required for SVG viewing. Install it with: pip install cairosvg"
-            )
+            raise ImportError('cairosvg is required for SVG viewing. Install it with: pip install cairosvg')
         except OSError as exc:
             # Cairosvg may fail on Windows if GTK3 runtime is missing
-            raise OSError(
-                f"cairosvg native library error: {exc}. "
-                "On Windows you may need GTK3 runtime. "
-                "Install from: https://github.com/tschoonj/GTK3-Runtime-for-Windows/releases "
-                "or set the GTK_LIBS environment variable."
-            )
+            raise OSError(f"cairosvg native library error: {exc}. "
+                          'On Windows you may need GTK3 runtime. '
+                          'Install from: https://github.com/tschoonj/GTK3-Runtime-for-Windows/releases '
+                          'or set the GTK_LIBS environment variable.')
 
         # Read SVG, convert to PNG bytes
         svg_bytes = svg_path.read_bytes()
@@ -560,7 +575,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
         # Write to a temp file so the existing image-serving pipeline can use it
         tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='svg_view_')
         os.close(tmp_fd)
-        with open(tmp_png_path, "wb") as f:
+        with open(tmp_png_path, 'wb') as f:
             f.write(png_data)
 
         return Path(tmp_png_path)
@@ -583,22 +598,22 @@ class ViewImage(BaseTool, PathResolutionMixin):
 
         # Check SCREEN_CAPTURE_ENABLED flag (Fix #1)
         if os.environ.get('SCREEN_CAPTURE_ENABLED', 'True').lower() not in ('true', '1', 'yes'):
-            return "ERROR: Screen capture is disabled by operator configuration."
+            return 'ERROR: Screen capture is disabled by operator configuration.'
 
         temp_png: Path | None = None  # track temp file for cleanup
         crop_tmp: Path | None = None  # track cropped temp file for cleanup
         try:
             # Check for screen capture directives BEFORE _resolve_path() to avoid path validation errors
-            if path == "__screen_capture" or path.startswith("__screen_capture:"):
+            if path == '__screen_capture' or path.startswith('__screen_capture:'):
                 monitor_index = None
-                if path.startswith("__screen_capture:"):
-                    idx_str = path[len("__screen_capture:"):]
+                if path.startswith('__screen_capture:'):
+                    idx_str = path[len('__screen_capture:'):]
                     try:
                         monitor_index = int(idx_str)
                         if monitor_index < 0:
-                            raise ValueError("Monitor index must be non-negative")
+                            raise ValueError('Monitor index must be non-negative')
                     except ValueError:
-                        return "ERROR: Invalid screen capture format. Use __screen_capture or __screen_capture:N where N is a non-negative integer."
+                        return 'ERROR: Invalid screen capture format. Use __screen_capture or __screen_capture:N where N is a non-negative integer.'
 
                 try:
                     png_bytes = screen_capture.capture_screen(monitor_index=monitor_index)
@@ -608,28 +623,29 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     return f"ERROR: {str(e)}"
                 except Exception as e:
                     msg = str(e)
-                    logger.exception("Screen capture failed for __screen_capture directive")
-                    if "display" in msg.lower():
-                        return "ERROR: Screen capture requires a graphical display. No display server detected."
+                    logger.exception('Screen capture failed for __screen_capture directive')
+                    if 'display' in msg.lower():
+                        return 'ERROR: Screen capture requires a graphical display. No display server detected.'
                     return f"ERROR: Screen capture failed: {msg}"
 
                 # Save to temp file, then fall through to normal image handling (including captions)
                 tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
                 os.close(tmp_fd)
-                with open(tmp_png_path, "wb") as f:
+                with open(tmp_png_path, 'wb') as f:
                     f.write(png_bytes)
                 temp_png = Path(tmp_png_path)
-                logger.info("Screen capture completed via __screen_capture directive" + (f":{monitor_index}" if monitor_index is not None else ""))
+                logger.info('Screen capture completed via __screen_capture directive' +
+                            (f":{monitor_index}" if monitor_index is not None else ''))
                 # Fall through with the temp file path so normal image processing applies
 
-            elif path.startswith("__window_capture:"):
-                pid_str = path[len("__window_capture:"):]
+            elif path.startswith('__window_capture:'):
+                pid_str = path[len('__window_capture:'):]
                 try:
                     pid = int(pid_str)
                     if pid <= 0:
-                        raise ValueError("PID must be positive")
+                        raise ValueError('PID must be positive')
                 except ValueError:
-                    return "ERROR: Invalid window capture format. Use __window_capture:PID where PID is a positive integer."
+                    return 'ERROR: Invalid window capture format. Use __window_capture:PID where PID is a positive integer.'
 
                 try:
                     png_bytes = screen_capture.capture_window_by_pid(pid)
@@ -637,13 +653,13 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     return f"ERROR: {str(e)}"
                 except ValueError as e:
                     msg = str(e)
-                    if "No visible window found" in msg or "No window found" in msg:
+                    if 'No visible window found' in msg or 'No window found' in msg:
                         return f"ERROR: {msg}. The process may not have a UI or may be hidden."
                     return f"ERROR: {msg}"
                 except RuntimeError as e:
                     msg = str(e)
-                    if "display" in msg.lower():
-                        return "ERROR: Screen capture requires a graphical display. No display server detected."
+                    if 'display' in msg.lower():
+                        return 'ERROR: Screen capture requires a graphical display. No display server detected.'
                     return f"ERROR: {msg}"
                 except Exception as e:
                     logger.exception(f"Window capture failed for PID {pid}")
@@ -652,10 +668,10 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 # Save to temp file, then fall through to normal image handling (including captions)
                 tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
                 os.close(tmp_fd)
-                with open(tmp_png_path, "wb") as f:
+                with open(tmp_png_path, 'wb') as f:
                     f.write(png_bytes)
                 temp_png = Path(tmp_png_path)
-                logger.info("Window capture completed via __window_capture:%d directive", pid)
+                logger.info('Window capture completed via __window_capture:%d directive', pid)
                 # Fall through with the temp file path so normal image processing applies
 
             elif is_http_url(path):
@@ -666,7 +682,8 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 # Do NOT call save_image_to_media here — that would double-encode.
                 try:
                     response = requests.get(
-                        path, headers=_HTTP_FETCH_HEADERS,
+                        path,
+                        headers=_HTTP_FETCH_HEADERS,
                         timeout=_HTTP_FETCH_TIMEOUT,
                     )
                     response.raise_for_status()
@@ -681,10 +698,8 @@ class ViewImage(BaseTool, PathResolutionMixin):
                             declared = None
                         if declared is not None and declared > MAX_DATA_URL_SIZE:
                             response.close()
-                            return (
-                                f"ERROR: Image too large to download ({declared / (1024 * 1024):.1f} MB "
-                                f"> {MAX_DATA_URL_SIZE // (1024 * 1024)} MB cap): {path}"
-                            )
+                            return (f"ERROR: Image too large to download ({declared / (1024 * 1024):.1f} MB "
+                                    f"> {MAX_DATA_URL_SIZE // (1024 * 1024)} MB cap): {path}")
 
                     image_bytes = response.content
                 except requests.RequestException as e:
@@ -709,10 +724,10 @@ class ViewImage(BaseTool, PathResolutionMixin):
 
                 tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='url_view_')
                 os.close(tmp_fd)
-                with open(tmp_png_path, "wb") as f:
+                with open(tmp_png_path, 'wb') as f:
                     f.write(image_bytes)
                 temp_png = Path(tmp_png_path)
-                logger.info("Image downloaded from URL via view_image: %s", path)
+                logger.info('Image downloaded from URL via view_image: %s', path)
                 # Fall through with the temp file path so normal image processing applies
 
             try:
@@ -787,7 +802,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 caption_parts.append(f"({orig_width}x{orig_height})")
             if crop_x is not None:
                 caption_parts.append(f"[cropped region x={crop_x},y={crop_y},w={crop_w},h={crop_h}]")
-            caption = " ".join(caption_parts)
+            caption = ' '.join(caption_parts)
 
             # Only TRANSIENT inserts (screen/window capture, SVG->PNG conversion, or a
             # crop) have no stable on-disk file to reuse — they MUST be saved so the agent
@@ -801,7 +816,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 # Existing on-disk file: reuse the already-resolved absolute path as the
                 # media path. Normalize to forward slashes to match save_image_to_media's
                 # return format so downstream consumers see a consistent path shape.
-                media_path = str(resolved).replace("\\", "/")
+                media_path = str(resolved).replace('\\', '/')
                 return [
                     # Leave the image item UNCAPTIONED so the return-path guard
                     # (_has_uncaptioned_images) triggers a genuine vision/LLM caption via
@@ -917,12 +932,14 @@ class WriteFile(BaseTool, PathResolutionMixin):
 
     def call(self, params: str, **kwargs) -> str:
         import re
+
         from agent_cascade.utils.utils import extract_code
 
         # --- Robust Fallback for Non-JSON Input ---
         # Handles the case where the model emits "path\n```code```" instead of JSON
         if isinstance(params, str) and not params.strip().startswith('{'):
-            match = re.search(r'^(?:path:?\s*)?([^\n`]+)\s*?\n*?```[^\n]*\n(.*?)\n?```', params.strip(), re.DOTALL | re.IGNORECASE)
+            match = re.search(r'^(?:path:?\s*)?([^\n`]+)\s*?\n*?```[^\n]*\n(.*?)\n?```', params.strip(),
+                              re.DOTALL | re.IGNORECASE)
             if match:
                 path = match.group(1).strip()
                 content = match.group(2)
@@ -930,7 +947,7 @@ class WriteFile(BaseTool, PathResolutionMixin):
                     path=path,
                     content=content,
                     agent_name=self._get_agent_name(kwargs),
-                    justification="",  # Non-JSON fallback: no justification available from LLM
+                    justification='',  # Non-JSON fallback: no justification available from LLM
                 )
 
         # --- Standard JSON Path ---
@@ -1003,7 +1020,7 @@ class EditFile(BaseTool, PathResolutionMixin):
 
     def call(self, params: str, **kwargs) -> str:
         from agent_cascade.utils.utils import extract_code
-        
+
         # Normalize legacy parameter names to current schema
         try:
             if isinstance(params, str):
@@ -1028,7 +1045,7 @@ class EditFile(BaseTool, PathResolutionMixin):
         match_mode = params_json.get('match_mode', 'exact')
         range_param = params_json.get('range')
         justification = params_json.get('justification', '')
-        
+
         # Handle cases where model uses XML tags with old names
         if not old_content and params_json.get('old_string'):
             old_content = params_json.get('old_string')
@@ -1166,7 +1183,7 @@ class ListDir(BaseTool):
         dirs_only = bool(params.get('dirs_only', False))
 
         if files_only and dirs_only:
-            return "Error: files_only and dirs_only are mutually exclusive. Use only one."
+            return 'Error: files_only and dirs_only are mutually exclusive. Use only one.'
 
         # Get the truncation limit from agent/tool options
         char_limit = DEFAULT_LIST_DIR_CHAR_LIMIT
@@ -1189,13 +1206,22 @@ class ListDir(BaseTool):
 
         agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.list_directory(
-            path, recursive=recursive, max_depth=max_depth,
-            include=include, exclude=exclude, sort_by=sort_by,
-            show_summary=show_summary, max_entries=max_entries,
-            char_limit=char_limit, agent_name=agent_name,
-            min_size=min_size, max_size=max_size,
-            modified_after=modified_after, modified_before=modified_before,
-            files_only=files_only, dirs_only=dirs_only,
+            path,
+            recursive=recursive,
+            max_depth=max_depth,
+            include=include,
+            exclude=exclude,
+            sort_by=sort_by,
+            show_summary=show_summary,
+            max_entries=max_entries,
+            char_limit=char_limit,
+            agent_name=agent_name,
+            min_size=min_size,
+            max_size=max_size,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            files_only=files_only,
+            dirs_only=dirs_only,
         )
 
 
@@ -1237,9 +1263,12 @@ class Grep(BaseTool):
                 'description': TOOL_METADATA['grep']['parameters']['smart_case']
             },
             'timeout': {
-                'type': 'number',
-                'description': 'Timeout in seconds for the grep operation (default: 5.0). Searches normally finish well under this; only raise it for very large codebases.',
-                'default': 5.0
+                'type':
+                    'number',
+                'description':
+                    'Timeout in seconds for the grep operation (default: 5.0). Searches normally finish well under this; only raise it for very large codebases.',
+                'default':
+                    5.0
             }
         },
         'required': ['pattern'],
@@ -1289,7 +1318,9 @@ class Grep(BaseTool):
         agent_name = self._get_agent_name(kwargs)
         spill_file_path = kwargs.get('spill_file_path')  # Pre-computed by orchestrator
         return self.agent_pool.operation_manager.grep(
-            pattern, path, include,
+            pattern,
+            path,
+            include,
             char_limit=int(char_limit),
             timeout=float(timeout),  # Pass the configurable timeout
             agent_name=agent_name,
@@ -1297,8 +1328,7 @@ class Grep(BaseTool):
             ignore_vcs=ignore_vcs,  # Already resolved to True/False, no need for bool()
             context=int(context),
             smart_case=bool(smart_case),
-            spill_file_path=spill_file_path
-        )
+            spill_file_path=spill_file_path)
 
 
 @register_tool('delete_file', allow_overwrite=True)
@@ -1315,8 +1345,15 @@ class DeleteFile(BaseTool):
                 # oneOf (not type: ['string','array']) for maximum LLM-API
                 # compatibility — mirrors the load_skill tool's pattern.
                 'oneOf': [
-                    {'type': 'string'},
-                    {'type': 'array', 'items': {'type': 'string'}},
+                    {
+                        'type': 'string'
+                    },
+                    {
+                        'type': 'array',
+                        'items': {
+                            'type': 'string'
+                        }
+                    },
                 ],
                 'description': TOOL_METADATA['delete_file']['parameters']['path']
             },
@@ -1390,7 +1427,8 @@ class DeleteFile(BaseTool):
         justification = params.get('justification', '')
         agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.delete_file(
-            path, agent_name,
+            path,
+            agent_name,
             paths=paths,
             include=params.get('include'),
             justification=justification,
@@ -1522,4 +1560,3 @@ class ReIndent(BaseTool):
             mode=mode,
             justification=justification,
         )
-

@@ -18,25 +18,18 @@ from typing import TYPE_CHECKING, Any, List, Optional, Union
 if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
 
-from agent_cascade.log import logger
-from agent_cascade.llm.schema import ContentItem, Message, USER
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.settings import (
-    COMPRESSION_DEFAULT_FRACTION,
-    COMPRESSION_MIN_FRACTION,
-    COMPRESSION_MAX_FRACTION,
-    TOKEN_ESTIMATE_CHAR_DIVISOR,
-)
+from agent_cascade.llm.schema import USER, ContentItem, Message
+from agent_cascade.log import logger
+from agent_cascade.settings import (COMPRESSION_DEFAULT_FRACTION, COMPRESSION_MAX_FRACTION, COMPRESSION_MIN_FRACTION,
+                                    TOKEN_ESTIMATE_CHAR_DIVISOR)
+from agent_cascade.tool_utils import (clear_truncation_state, get_and_clear_truncation_hints, truncate_with_spillover,
+                                      was_tool_call_truncated)
 from agent_cascade.utils.pool_validation import validate_message_pool
-from agent_cascade.utils.utils import is_multimodal_content, msg_field, VISION_MODEL_TYPES
-from agent_cascade.tool_utils import (
-    was_tool_call_truncated,
-    clear_truncation_state,
-    truncate_with_spillover,
-)
-
+from agent_cascade.utils.utils import VISION_MODEL_TYPES, is_multimodal_content, msg_field
 
 # ── Token Cache Helper (local copy to avoid circular import with execution_engine) ──
+
 
 def _invalidate_token_cache(instance):
     """Invalidate all token count caches after conversation mutation."""
@@ -46,13 +39,14 @@ def _invalidate_token_cache(instance):
 
 # ── CompressionHandler Class ─────────────────────────────────────────────────
 
+
 class CompressionHandler:
     """Handles all compression-related logic for agent context management.
-    
+
     Extracted from ExecutionEngine (Phase 4.2) to reduce God Object complexity.
     Manages forced compression, cooldown checks, overfeeding detection, and
     manual /compress command handling.
-    
+
     Usage:
         handler = CompressionHandler(pool)
         engine.compression_handler.set_engine(engine)  # Set engine reference after construction
@@ -60,23 +54,23 @@ class CompressionHandler:
         if not should_skip:
             success = handler.execute_force_compression(instance, messages, llm_messages, usage_pct)
     """
-    
+
     def __init__(self, pool):
         """Initialize with pool reference only.
-        
+
         Args:
             pool: AgentPool for state management
         """
         self.pool = pool
         self._engine = None  # Lazy initialization (see REVIEWER FINDING #1)
-    
+
     @property
     def engine(self) -> 'ExecutionEngine':
         """Get engine reference (raises if not set)."""
         if self._engine is None:
-            raise RuntimeError("CompressionHandler._engine not set. Call ExecutionEngine.initialize().")
+            raise RuntimeError('CompressionHandler._engine not set. Call ExecutionEngine.initialize().')
         return self._engine
-    
+
     def set_engine(self, engine: 'ExecutionEngine') -> None:
         """Set engine reference after ExecutionEngine construction completes."""
         self._engine = engine
@@ -114,9 +108,7 @@ class CompressionHandler:
 
             # Wrap items in a temporary Message so caption_images can process them
             temp_msg = Message(role=USER, content=list(items))
-            api_router.caption_images(
-                [temp_msg], agent_type=agent_type, instance_name=instance_name
-            )
+            api_router.caption_images([temp_msg], agent_type=agent_type, instance_name=instance_name)
             # caption_images modifies in-place; items are now captioned if possible
         except Exception as e:
             logger.debug(f"[CompressionHandler] Image captioning failed (non-fatal): {e}")
@@ -124,8 +116,12 @@ class CompressionHandler:
     # ── Validation → Recovery Helper (Fix 5: deduplicated pattern) ────────────
 
     def _recover_or_halt(
-        self, instance: 'AgentInstance', conv: List[Message], context_label: str,
-        messages: List[Message], llm_messages: List[Message],
+        self,
+        instance: 'AgentInstance',
+        conv: List[Message],
+        context_label: str,
+        messages: List[Message],
+        llm_messages: List[Message],
     ) -> bool:
         """Validate message pool, recover from log if invalid, halt on failure.
 
@@ -144,7 +140,9 @@ class CompressionHandler:
         inst_name = instance.instance_name
         agent_class = instance.agent_class
         if not validate_message_pool(conv, inst_name):
-            logger.error(f"[MSG POOL VALIDATION] Pool invalid after {context_label} for '{inst_name}'. Attempting recovery from log...")
+            logger.error(
+                f"[MSG POOL VALIDATION] Pool invalid after {context_label} for '{inst_name}'. Attempting recovery from log..."
+            )
             try:
                 log_inst = self.pool.get_logger(inst_name, agent_class)
                 log_inst.load_history_from_file()
@@ -153,10 +151,10 @@ class CompressionHandler:
                     instance.rebuild_conversation(list(recov))
                     self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                     logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
-                    self._sync_logger_after_compression(inst_name, agent_class, "recovery", instance)
+                    self._sync_logger_after_compression(inst_name, agent_class, 'recovery', instance)
                     return True
                 else:
-                    logger.error("Recovery from log also failed — message pool may be corrupted")
+                    logger.error('Recovery from log also failed — message pool may be corrupted')
                     notification_text = f"[SYSTEM] Compression corrupted pool: {context_label} and recovery both failed for {inst_name}. Agent halted to prevent corruption."
                     self._inject_compression_notification(instance, notification_text, inst_name)
                     self.pool.halt_instance(inst_name)
@@ -188,15 +186,15 @@ class CompressionHandler:
         elif tokens_after > 0:
             util = f"Context: ~{tokens_after} tokens."
         else:
-            util = ""
+            util = ''
 
         msg_parts = [f"[COMPRESSION] {comp_type} compression complete."]
         if messages_discarded > 0:
             msg_parts.append(f"{messages_discarded} messages summarized.")
         if util:
             msg_parts.append(util)
-        msg_parts.append("Continue your work.")
-        return " ".join(msg_parts)
+        msg_parts.append('Continue your work.')
+        return ' '.join(msg_parts)
 
     @staticmethod
     def _format_compression_failure(
@@ -205,11 +203,11 @@ class CompressionHandler:
         usage_pct: float | None = None,
     ) -> str:
         """Build unified compression failure message."""
-        pct_str = f" Context still at ~{usage_pct:.1f}% usage." if usage_pct else ""
+        pct_str = f" Context still at ~{usage_pct:.1f}% usage." if usage_pct else ''
         return f"[COMPRESSION] {comp_type} compression failed: {error}.{pct_str}"
 
     # ── Notification Helper with Pending Queue ────────────────────────────────
-    
+
     def _inject_compression_notification(
         self,
         instance: 'AgentInstance',
@@ -217,15 +215,15 @@ class CompressionHandler:
         inst_name: str,
     ) -> None:
         """Push a compression notification into the pending queue for in-tool-response injection.
-        
+
         After forced compression the pool has [SYS][U0][MARKER=USER][tail...].
         A separate USER notification would create consecutive USER messages (API violation).
         The notification is queued and drained into the next tool response's FUNCTION content,
         or into the next _drain_and_inject USER message. If no such messages fire,
         the notification is simply not delivered — that's acceptable.
-        
+
         Dedup guard: checks if the exact notification text already exists in the conversation.
-        
+
         Args:
             instance: Agent instance with conversation pool access
             notification_text: The [SYSTEM] notification string to inject
@@ -234,14 +232,12 @@ class CompressionHandler:
         with instance._compression_lock:
             # Dedup guard — check if notification appears as a complete line (avoids substring false positives)
             notification_exists = any(
-                notification_text in str(msg_field(m, 'content', '')).split('\n')
-                for m in instance.conversation
-            )
-            
+                notification_text in str(msg_field(m, 'content', '')).split('\n') for m in instance.conversation)
+
             # Also check pending queue for undelivered duplicates (prevents double-queue on rapid compression)
             if notification_text in instance._pending_notifications:
                 notification_exists = True
-            
+
             if not notification_exists:
                 instance._pending_notifications.append(notification_text)
                 logger.info(f"Compression notification queued for injection into '{inst_name}'")
@@ -254,10 +250,10 @@ class CompressionHandler:
         tool_result: str,
     ) -> str:
         """Drain pending notifications into a tool result string.
-        
+
         Called from execution_engine before constructing the FUNCTION message.
         If there are pending notifications, they are appended to tool_result and queue cleared.
-        
+
         Args:
             instance: Agent instance with _pending_notifications attribute
             tool_result: The tool's raw output string (or any object convertible to str)
@@ -271,7 +267,7 @@ class CompressionHandler:
             if pending:
                 if not isinstance(tool_result, str):
                     tool_result = str(tool_result)
-                notif_block = "\n\n".join(n for n in pending)
+                notif_block = '\n\n'.join(n for n in pending)
                 tool_result = f"{tool_result}\n\n{notif_block}"
                 instance._pending_notifications = []
         return tool_result
@@ -282,10 +278,10 @@ class CompressionHandler:
         text: str,
     ) -> str:
         """Drain pending notifications into a USER message's content string.
-        
+
         Called from execution_engine before constructing the first USER message in _drain_and_inject.
         If there are pending notifications, they are prepended to text and queue cleared.
-        
+
         Args:
             instance: Agent instance with _pending_notifications attribute
             text: The user message's raw content string
@@ -297,7 +293,7 @@ class CompressionHandler:
             pending = instance._pending_notifications
             if pending:
                 if isinstance(text, str):
-                    notif_block = "\n\n".join(n for n in pending)
+                    notif_block = '\n\n'.join(n for n in pending)
                     text = f"{notif_block}\n{text}"
                 # Always clear the queue — notification was "attempted" even if text is non-string
                 instance._pending_notifications = []
@@ -318,7 +314,7 @@ class CompressionHandler:
         if items:
             if not isinstance(text, str):
                 text = str(text)
-            block = "\n\n".join(str(i) for i in items)
+            block = '\n\n'.join(str(i) for i in items)
             if prepend:
                 text = f"[TOOL WARNINGS]\n{block}\n\n{text}"
             else:
@@ -340,7 +336,7 @@ class CompressionHandler:
         if items:
             if not isinstance(text, str):
                 text = str(text)
-            block = "\n\n".join(str(i) for i in items)
+            block = '\n\n'.join(str(i) for i in items)
             if prepend:
                 text = f"[CACHE INFO]\n{block}\n\n{text}"
             else:
@@ -362,7 +358,7 @@ class CompressionHandler:
             instance._cache_notifications = []
 
         if notifications:
-            block = "\n\n".join(str(n) for n in notifications)
+            block = '\n\n'.join(str(n) for n in notifications)
             text = f"[CACHE INFO]\n{block}"
             text_item = ContentItem(text=text)
             if prepend:
@@ -384,7 +380,7 @@ class CompressionHandler:
             instance._tool_warnings = []
 
         if warnings:
-            block = "\n\n".join(str(w) for w in warnings)
+            block = '\n\n'.join(str(w) for w in warnings)
             text = f"[TOOL WARNINGS]\n{block}"
             text_item = ContentItem(text=text)
             if prepend:
@@ -402,7 +398,7 @@ class CompressionHandler:
         with instance._compression_lock:
             pending = instance._pending_notifications
             if pending:
-                notif_block = "\n\n".join(n for n in pending)
+                notif_block = '\n\n'.join(n for n in pending)
                 items.append(ContentItem(text=notif_block))
                 instance._pending_notifications = []
         return items
@@ -427,7 +423,7 @@ class CompressionHandler:
             Drained result string.
         """
         if raw_tool_result is None:
-            raw_tool_result = ""
+            raw_tool_result = ''
         elif not isinstance(raw_tool_result, str):
             raw_tool_result = str(raw_tool_result)
         raw_tool_result = self._drain_cache_notifications(instance, raw_tool_result, prepend=True)
@@ -513,8 +509,10 @@ class CompressionHandler:
                 # append a truncation notice as a text ContentItem.
                 if was_truncated:
                     raw_tool_result.append(
-                        ContentItem(text=f"\n[TRUNCATED — Character limit exceeded for {instance_name}:{tool_name}. Full output may be available in logs/spillover/]")
-                    )
+                        ContentItem(
+                            text=
+                            f"\n[TRUNCATED — Character limit exceeded for {instance_name}:{tool_name}. Full output may be available in logs/spillover/]"
+                        ))
 
                 return raw_tool_result
 
@@ -538,11 +536,11 @@ class CompressionHandler:
                 else:
                     # Fallback for unexpected types in the list
                     parts.append(str(item))
-            raw_tool_result = '\n'.join(parts) if parts else ""
+            raw_tool_result = '\n'.join(parts) if parts else ''
 
         # Step 1b: Ensure we have a string; handle None and other types explicitly
         if raw_tool_result is None:
-            raw_tool_result = ""
+            raw_tool_result = ''
         elif not isinstance(raw_tool_result, str):
             raw_tool_result = str(raw_tool_result)
 
@@ -552,6 +550,11 @@ class CompressionHandler:
         # Clear immediately so truncation flags don't leak into subsequent tool calls
         # in the same turn (e.g., a later small __wait response after a large truncated one).
         clear_truncation_state()
+
+        # Step 2a: Read and clear any line-count hints set by the tool (e.g. read_file).
+        # Done unconditionally so stale hints never leak into a later, different tool's
+        # result even when this result is not itself truncated.
+        _hints_total, _hints_shown = get_and_clear_truncation_hints()
 
         # Step 3: If char_limit is set and exceeded, truncate now.
         # truncate_with_spillover adds its own [TRUNCATED ...] footer, so we don't
@@ -564,6 +567,8 @@ class CompressionHandler:
                 tool_name=tool_name,
                 base_dir=base_dir,
                 operation_mode='head',
+                total_lines_hint=_hints_total,
+                shown_lines_hint=_hints_shown,
             )
             was_truncated = True
 
@@ -580,7 +585,7 @@ class CompressionHandler:
         # [TRUNCATED marker is present. truncate_with_spillover already adds its own
         # footer; this is a safety net for tools that set the truncation flag but
         # forget to append the marker themselves.
-        if was_truncated and "[TRUNCATED" not in raw_tool_result:
+        if was_truncated and '[TRUNCATED' not in raw_tool_result:
             raw_tool_result += f"\n\n[TRUNCATED — Character limit exceeded for {instance_name}:{tool_name}. Full output may be available in logs/spillover/]"
 
         return raw_tool_result
@@ -595,24 +600,24 @@ class CompressionHandler:
         instance: 'AgentInstance' = None,
     ) -> None:
         """Sync logger state to match pool after compression/rollback operations.
-        
+
         This is a unified helper for all compression paths (forced compression,
         compress_context tool, /compress command, /rollback command). Using
         reset_history() instead of update_history() ensures exact synchronization:
         - update_history() is ADDITIVE only (can't shrink history)
         - reset_history(rewrite=True) replaces logger state with pool state
-        
+
         FIX D4: If an `instance` is provided, pending notifications in the queue are
         flushed to JSONL as USER messages after the rewrite sync. This ensures
         compression notifications are persisted even if the agent halts before the
         next tool result drains them into a message.
-        
+
         IMPORTANT: Call this BEFORE appending any new notification messages via
         _append_and_log(). If you append first, reset_history will re-write those
         same messages to JSONL (double-logging). Correct order:
           1. _sync_logger_after_compression() — resets logger to match conv
           2. _append_and_log(notif_msg) — appends notification atomically
-        
+
         Args:
             instance_name: Name of the agent instance
             agent_class: Agent class for logger retrieval
@@ -622,14 +627,12 @@ class CompressionHandler:
         try:
             conv = self.pool.get_conversation(instance_name)
             log_inst = self.pool.get_logger(instance_name, agent_class)
-            
+
             # FIX D4: First rewrite the file with pool state (reset_history overwrites everything)
-            logger.debug(
-                f"Logger sync after {operation_name} for '{instance_name}': "
-                f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync"
-            )
+            logger.debug(f"Logger sync after {operation_name} for '{instance_name}': "
+                         f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync")
             log_inst.reset_history(conv, rewrite=True)
-            
+
             # Then flush pending notifications AFTER rewrite (they'd be lost if written before)
             if instance is not None and getattr(instance, '_pending_notifications', None):
                 with instance._compression_lock:
@@ -642,11 +645,10 @@ class CompressionHandler:
                         logger.error(f"Failed to flush notification for '{instance_name}': {e}")
                 if pending:
                     logger.debug(
-                        f"Flushed {len(pending)} pending notification(s) for '{instance_name}' after rewrite sync"
-                    )
+                        f"Flushed {len(pending)} pending notification(s) for '{instance_name}' after rewrite sync")
                     # Re-fetch conv since _append_and_log may have appended notifications to it
                     conv = self.pool.get_conversation(instance_name)
-            
+
             # ── Tail sync check after ALL operations complete (design doc §5.2 — D1 fix) ──
             # Runs after pool and JSONL are in final state (notifications flushed).
             # (JSONL keeps full history, pool keeps trimmed working set — counts differ by design.)
@@ -654,113 +656,96 @@ class CompressionHandler:
                 from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
                 _check_tail(instance_name, conv, log_inst.log_path, context=f"compression/{operation_name}")
         except Exception as e:
-            logger.error(
-                f"Logger sync after {operation_name} FAILED for '{instance_name}': {e}. "
-                f"Pool may desync — manual intervention required."
-            )
-    
+            logger.error(f"Logger sync after {operation_name} FAILED for '{instance_name}': {e}. "
+                         f"Pool may desync — manual intervention required.")
+
     # ── Forced Compression Methods (extracted from _force_compression) ────────
-    
-    def check_cooldown(
-        self,
-        instance: AgentInstance,
-        llm_messages: List[Message],
-        usage_pct: float
-    ) -> bool:
+
+    def check_cooldown(self, instance: AgentInstance, llm_messages: List[Message], usage_pct: float) -> bool:
         """Check if compression cooldown is active.
-        
+
         Extracted from _check_compression_cooldown() - Phase 3.5
-        
+
         Args:
             instance: Agent instance
             llm_messages: Working set for warning injection
             usage_pct: Current token usage percentage
-            
+
         Returns:
             True if cooldown active (skip compression this cycle)
         """
         inst_name = instance.instance_name
-        
+
         with instance._compression_lock:
             now = time.monotonic()
             cooldown = getattr(self.pool.settings, 'compression_force_cooldown', 2.0)
             elapsed = now - instance._last_force_compress_time
-            
+
             if elapsed < cooldown:
-                logger.warning(
-                    f"Forced compression cooldown active for {inst_name}: "
-                    f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle"
-                )
+                logger.warning(f"Forced compression cooldown active for {inst_name}: "
+                               f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle")
                 current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
                 # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
                 self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
                                                         self.engine._get_effective_limit(instance))
                 return True
-            
+
             # Mark this compression attempt (under lock for thread safety)
             instance._last_force_compress_time = now
             instance._force_compress_count += 1
-        
+
         return False
-    
-   
-    def check_overfeeding(
-        self,
-        instance: AgentInstance,
-        llm_messages: List[Message],
-        response: Optional[List[Message]] = None
-    ) -> bool:
+
+    def check_overfeeding(self,
+                          instance: AgentInstance,
+                          llm_messages: List[Message],
+                          response: Optional[List[Message]] = None) -> bool:
         """Check if overfeeding threshold exceeded.
-        
+
         Safety-net only: terminates after max_attempts forced compressions (default 100).
         TRUE overfeeding is detected in core.py via actual token counting of messages
         sent to the compressor — when tokens exceed the compressor's context window.
-        
+
         Args:
             instance: Agent instance
             llm_messages: Working set for notification injection
             response: Optional list to append notifications for yielding (fixes compress feedback bug)
-            
+
         Returns:
             True if overfeeding detected (terminate agent)
         """
         inst_name = instance.instance_name
         max_attempts = getattr(self.pool.settings, 'compression_max_attempts', 100)
-        
+
         if instance._force_compress_count >= max_attempts:
-            logger.warning(
-                f"Overfeeding safety net triggered for {inst_name}: "
-                f"{instance._force_compress_count} forced compressions exceeded limit of {max_attempts}. "
-                f"Context keeps filling faster than compression can reduce it. Terminating agent."
-            )
+            logger.warning(f"Overfeeding safety net triggered for {inst_name}: "
+                           f"{instance._force_compress_count} forced compressions exceeded limit of {max_attempts}. "
+                           f"Context keeps filling faster than compression can reduce it. Terminating agent.")
             notification_text = (
                 f"[SYSTEM] Overfeeding — {instance._force_compress_count} compressions without relief. "
-                f"Terminating."
-            )
+                f"Terminating.")
             self._inject_compression_notification(instance, notification_text, inst_name)
             self.pool.halt_instance(inst_name)
             return True
-        
+
         return False
-    
-    def execute_force_compression(
-        self,
-        instance: AgentInstance,
-        messages: List[Message],
-        llm_messages: List[Message],
-        usage_pct: float,
-        response: Optional[List[Message]] = None
-    ) -> bool:
+
+    def execute_force_compression(self,
+                                  instance: AgentInstance,
+                                  messages: List[Message],
+                                  llm_messages: List[Message],
+                                  usage_pct: float,
+                                  response: Optional[List[Message]] = None) -> bool:
         """Execute forced compression and rebuild working set.
-        
+
         Extracted from _execute_force_compression() - Phase 3.5
-        
+
         Args:
             instance: Agent instance
             messages, llm_messages: Working message sets
             usage_pct: Current token usage percentage
             response: Optional list to append notifications for yielding (fixes compress feedback bug)
-            
+
         Returns:
             True if compression successful (continue loop)
         """
@@ -775,12 +760,10 @@ class CompressionHandler:
         streak = getattr(instance, '_force_compress_fail_streak', 0)
         if streak > 0:
             elapsed = time.monotonic() - getattr(instance, '_last_force_compress_fail_at', 0.0)
-            backoff = min(60.0 * (2 ** (streak - 1)), 600.0)   # 60s → 600s cap
+            backoff = min(60.0 * (2**(streak - 1)), 600.0)  # 60s → 600s cap
             if elapsed < backoff:
-                logger.warning(
-                    f"[COMPRESSION_BACKOFF] {inst_name}: skipping forced compression "
-                    f"(attempt failed {elapsed:.0f}s ago, streak={streak}, backoff={backoff:.0f}s)"
-                )
+                logger.warning(f"[COMPRESSION_BACKOFF] {inst_name}: skipping forced compression "
+                               f"(attempt failed {elapsed:.0f}s ago, streak={streak}, backoff={backoff:.0f}s)")
                 current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
                 # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
                 self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
@@ -798,10 +781,8 @@ class CompressionHandler:
         self.pool.halt_all_instances(except_instances=exempt)
 
         try:
-            logger.info(
-                f"Context usage at {usage_pct:.1f}% for {inst_name} — "
-                f"forcing compression (attempt #{instance._force_compress_count})."
-            )
+            logger.info(f"Context usage at {usage_pct:.1f}% for {inst_name} — "
+                        f"forcing compression (attempt #{instance._force_compress_count}).")
 
             from agent_cascade.compression.core import compress_context as _compress
             result = _compress(
@@ -820,12 +801,14 @@ class CompressionHandler:
                 if (tel := self.engine._telemetry()) is not None:
                     try:
                         tel.record_compression(
-                            inst_name, fraction=COMPRESSION_DEFAULT_FRACTION,
-                            tokens_before=result.tokens_before, tokens_after=result.tokens_after,
+                            inst_name,
+                            fraction=COMPRESSION_DEFAULT_FRACTION,
+                            tokens_before=result.tokens_before,
+                            tokens_after=result.tokens_after,
                         )
                     except Exception:
                         pass
-                
+
                 # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
                 instance.compression_summary = result.summary_text
                 # Update latest_marker_index to point to the new marker in the conversation (P2 fix)
@@ -841,18 +824,16 @@ class CompressionHandler:
                     # Appending to the last message's content avoids creating a separate USER message
                     # which would violate OpenAI API alternation rules (consecutive USER messages after marker).
                     max_tokens = instance._allocated_max_input_tokens or 0
-                    notification_text = self._format_compression_feedback(
-                        "forced", result.messages_discarded, result.tokens_after, max_tokens
-                    )
+                    notification_text = self._format_compression_feedback('forced', result.messages_discarded,
+                                                                          result.tokens_after, max_tokens)
 
-                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)
+                    self._sync_logger_after_compression(inst_name, instance.agent_class, 'forced compression', instance)
 
                     # Validate BEFORE appending notification to avoid false recovery from notif role alternation
                     conv = self.pool.get_conversation(inst_name)
                     if not validate_message_pool(conv, inst_name):
-                        working_set_rebuilt = self._recover_or_halt(
-                            instance, conv, "forced compression", messages, llm_messages
-                        )
+                        working_set_rebuilt = self._recover_or_halt(instance, conv, 'forced compression', messages,
+                                                                    llm_messages)
 
                     # Append notification after validation passes
                     notif_msg = Message(role=USER, content=notification_text)
@@ -860,13 +841,13 @@ class CompressionHandler:
 
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
-                    
+
                     # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
                     self.engine.stream_publisher.push_periodic_update(instance.parent_instance or inst_name)
-            
+
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
-                notification_text = self._format_compression_failure("forced", result.error, usage_pct)
+                notification_text = self._format_compression_failure('forced', result.error, usage_pct)
                 self._inject_compression_notification(instance, notification_text, inst_name)
                 # BUG-7 FIX: honest failure — record streak so the backoff gate
                 # suppresses instant re-halt at the next checkpoint.
@@ -891,19 +872,14 @@ class CompressionHandler:
         with instance._compression_lock:
             instance._force_compress_fail_streak = 0
         return True
-    
+
     # ── Compress Context Tool Handler ────────────────────────────────────────
-    
-    def handle_compress_tool(
-        self,
-        args: Any,
-        instance: AgentInstance,
-        target_agent_name: str
-    ) -> str:
+
+    def handle_compress_tool(self, args: Any, instance: AgentInstance, target_agent_name: str) -> str:
         """Handle compress_context tool call — delegates to compression module.
-        
+
         Extracted from _handle_compress_context() - Phase 4.2
-        
+
         Args:
             args: Compression arguments (fraction, mode).
             instance: Agent instance for cache invalidation
@@ -917,7 +893,8 @@ class CompressionHandler:
             return 'Error: Invalid JSON arguments.'
 
         # Fix #7: Validate fraction to prevent extreme values
-        fraction = max(COMPRESSION_MIN_FRACTION, min(COMPRESSION_MAX_FRACTION, args.get('fraction', COMPRESSION_DEFAULT_FRACTION)))
+        fraction = max(COMPRESSION_MIN_FRACTION,
+                       min(COMPRESSION_MAX_FRACTION, args.get('fraction', COMPRESSION_DEFAULT_FRACTION)))
         mode = args.get('mode', 'auto')
         summary_text = args.get('summary_text')
         force = args.get('force', False)
@@ -942,25 +919,31 @@ class CompressionHandler:
             if (tel := self.engine._telemetry()) is not None:
                 try:
                     tel.record_compression(
-                        target_agent_name, fraction=fraction,
-                        tokens_before=result.tokens_before, tokens_after=result.tokens_after,
+                        target_agent_name,
+                        fraction=fraction,
+                        tokens_before=result.tokens_before,
+                        tokens_after=result.tokens_after,
                     )
                 except Exception:
                     pass
 
             # Get current messages for rebuild and validation
             conv = self.pool.get_conversation(target_agent_name)
-            
+
             if conv:
-                self._sync_logger_after_compression(target_agent_name, instance.agent_class, "compress_context tool", instance)
+                self._sync_logger_after_compression(target_agent_name, instance.agent_class, 'compress_context tool',
+                                                    instance)
 
                 working_set_rebuilt = False
                 if not validate_message_pool(conv, target_agent_name):
                     # Use recovered messages for rebuild_working_set in this path
                     recov_msgs = list(self.pool.get_conversation(target_agent_name)) or conv
                     working_set_rebuilt = self._recover_or_halt(
-                        instance, conv, "compress_context tool",
-                        recov_msgs, list(self.pool.slice_history_for_llm(conv)),
+                        instance,
+                        conv,
+                        'compress_context tool',
+                        recov_msgs,
+                        list(self.pool.slice_history_for_llm(conv)),
                     )
 
                 # Rebuild working set from compressed pool state (if not already rebuilt in recovery path)
@@ -976,34 +959,29 @@ class CompressionHandler:
                 self.engine.stream_publisher.push_periodic_update(instance.parent_instance or instance.instance_name)
 
             max_tokens = instance._allocated_max_input_tokens or 0
-            return self._format_compression_feedback(
-                "manual", result.messages_discarded, result.tokens_after, max_tokens
-            )
+            return self._format_compression_feedback('manual', result.messages_discarded, result.tokens_after,
+                                                     max_tokens)
         else:
             return f"Compression failed: {result.error}"
-    
+
     # ── /compress Command Handler Methods ────────────────────────────────────
-    
-    def detect_and_parse_compress_command(
-        self,
-        instance: AgentInstance,
-        messages: List[Message]
-    ) -> Optional[float]:
+
+    def detect_and_parse_compress_command(self, instance: AgentInstance, messages: List[Message]) -> Optional[float]:
         """Detect /compress command and parse fraction parameter.
-        
+
         Extracted from _detect_and_parse_compress_command() - Phase 3.7
-        
+
         Scans the last user message for /compress command pattern.
-        
+
         Args:
             instance: Current agent instance
             messages: Working message list
-            
+
         Returns:
             Fraction value (0.1-0.9) if command detected, None otherwise.
         """
         inst_name = instance.instance_name
-        
+
         # Find the last USER message
         last_user = None
         for msg in reversed(messages):
@@ -1011,24 +989,24 @@ class CompressionHandler:
             if role == USER:
                 last_user = msg
                 break
-        
+
         if last_user is None:
             return None
-        
+
         content = msg_field(last_user, 'content', '')
         if not isinstance(content, str):
             return None
-        
+
         stripped_content = content.strip()
         if not stripped_content.startswith('/compress'):
             return None
-        
+
         # Guard against re-detection of notification messages containing "/compress"
         # When a notification is appended with "\n\n{notification_text}", any text starting
         # with "/compress" will have "\n/compress" in the content. This catches such cases.
         if '\n/compress' in content:
             return None  # Skip embedded /compress references (e.g., in notifications)
-        
+
         # Parse fraction from command before modifying content - default uses centralized setting
         parts = content.strip().split()
         fraction = COMPRESSION_DEFAULT_FRACTION
@@ -1037,10 +1015,10 @@ class CompressionHandler:
                 fraction = float(parts[1])
             except ValueError as e:
                 logger.warning(f"Invalid fraction in /compress command for {inst_name}: {e}")
-        
+
         # Clamp fraction to valid range using centralized settings
         fraction = max(COMPRESSION_MIN_FRACTION, min(COMPRESSION_MAX_FRACTION, fraction))
-        
+
         # Replace the /compress command with a descriptive system message to prevent re-detection
         # Convert decimal fraction to percentage (e.g., 0.5 → "50%")
         percentage = int(round(fraction * 100))
@@ -1049,16 +1027,14 @@ class CompressionHandler:
             last_user['content'] = system_message
         else:
             last_user.content = system_message
-        
+
         return fraction
-    
-    def handle_compress_command(
-        self,
-        instance: AgentInstance,
-        messages: List[Message],
-        llm_messages: List[Message],
-        response: Optional[List[Message]] = None
-    ) -> bool:
+
+    def handle_compress_command(self,
+                                instance: AgentInstance,
+                                messages: List[Message],
+                                llm_messages: List[Message],
+                                response: Optional[List[Message]] = None) -> bool:
         """Detect and handle /compress [fraction] user command.
 
         Uses the same single-executor path as forced/auto compression:
@@ -1105,7 +1081,7 @@ class CompressionHandler:
             logger.info(f"/compress applied for {inst_name}: {result_str}")
 
             # Handle tool-level failure (tool returns error string)
-            if result_str.startswith("Compression failed") or result_str.startswith("ERROR"):
+            if result_str.startswith('Compression failed') or result_str.startswith('ERROR'):
                 notification_text = f"[SYSTEM] Compression command failed: {result_str}"
                 self._inject_compression_notification(instance, notification_text, inst_name)
                 return True
@@ -1115,7 +1091,7 @@ class CompressionHandler:
             # Validate message pool after compression
             conv = self.pool.get_conversation(inst_name)
 
-            self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command", instance)
+            self._sync_logger_after_compression(inst_name, instance.agent_class, '/compress command', instance)
 
             # Telemetry: record /compress command compression event with actual token counts (non-blocking)
             if (tel := self.engine._telemetry()) is not None:
@@ -1123,8 +1099,10 @@ class CompressionHandler:
                     _after = sum(len(msg.content or '') for msg in conv) // TOKEN_ESTIMATE_CHAR_DIVISOR if conv else 0
                     _before = int(_after / (1.0 - fraction)) if fraction < 1.0 else _after * 2
                     tel.record_compression(
-                        inst_name, fraction=fraction,
-                        tokens_before=_before, tokens_after=_after,
+                        inst_name,
+                        fraction=fraction,
+                        tokens_before=_before,
+                        tokens_after=_after,
                     )
                 except Exception:
                     pass
@@ -1132,9 +1110,7 @@ class CompressionHandler:
             # Recovery / working-set rebuild
             working_set_rebuilt = False
             if conv and not validate_message_pool(conv, inst_name):
-                working_set_rebuilt = self._recover_or_halt(
-                    instance, conv, "/compress command", messages, llm_messages
-                )
+                working_set_rebuilt = self._recover_or_halt(instance, conv, '/compress command', messages, llm_messages)
 
             conv = self.pool.get_conversation(inst_name)
             if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
@@ -1147,9 +1123,8 @@ class CompressionHandler:
 
             # Unified feedback notification
             est_tokens = int(sum(len(msg.content or '') for msg in conv) // TOKEN_ESTIMATE_CHAR_DIVISOR) if conv else 0
-            notification_text = self._format_compression_feedback(
-                "manual", 0, est_tokens, instance._allocated_max_input_tokens or 0
-            )
+            notification_text = self._format_compression_feedback('manual', 0, est_tokens,
+                                                                  instance._allocated_max_input_tokens or 0)
             notif_msg = Message(role=USER, content=notification_text)
             self.engine._append_and_log(instance, notif_msg)
             if response is not None:
@@ -1171,25 +1146,21 @@ class CompressionHandler:
 
     # ── /rollback Command Handler Methods ────────────────────────────────────
 
-    def detect_and_parse_rollback_command(
-        self,
-        instance: AgentInstance,
-        messages: List[Message]
-    ) -> Optional[int]:
+    def detect_and_parse_rollback_command(self, instance: AgentInstance, messages: List[Message]) -> Optional[int]:
         """Detect /rollback command and parse count parameter.
-        
+
         Scans the last user message for /rollback command pattern.
         Also replaces the command content with a descriptive system message to prevent re-detection.
-        
+
         Args:
             instance: Current agent instance
             messages: Working message list
-            
+
         Returns:
             Rollback count (positive integer) if command detected, None otherwise.
         """
         inst_name = instance.instance_name
-        
+
         # Find the last USER message
         last_user = None
         for msg in reversed(messages):
@@ -1197,22 +1168,22 @@ class CompressionHandler:
             if role == USER:
                 last_user = msg
                 break
-        
+
         if last_user is None:
             return None
-        
+
         content = msg_field(last_user, 'content', '')
         if not isinstance(content, str):
             return None
-        
+
         stripped_content = content.strip()
         if not stripped_content.startswith('/rollback'):
             return None
-        
+
         # Guard against re-detection of notification messages containing "/rollback"
         if '\n/rollback' in content:
             return None  # Skip embedded /rollback references (e.g., in notifications)
-        
+
         # Parse count from command before modifying content - default 1
         parts = content.strip().split()
         count = 1
@@ -1224,77 +1195,73 @@ class CompressionHandler:
             except ValueError as e:
                 logger.warning(f"Invalid count in /rollback command for {inst_name}: {e}")
                 count = 1
-        
+
         # Clamp count to reasonable range (1-50) to prevent catastrophic rollbacks
         max_rollback_count = getattr(self.pool.settings, 'rollback_max_count', 50)
         count = max(1, min(max_rollback_count, count))
-        
+
         # Replace the /rollback command with a descriptive system message to prevent re-detection
         system_message = f"[SYSTEM] Rolling back {count} {'message' if count == 1 else 'messages'}..."
         if isinstance(last_user, dict):
             last_user['content'] = system_message
         else:
             last_user.content = system_message
-        
+
         return count
 
-    def handle_rollback_command(
-        self,
-        instance: AgentInstance,
-        messages: List[Message],
-        llm_messages: List[Message],
-        response: Optional[List[Message]] = None
-    ) -> bool:
+    def handle_rollback_command(self,
+                                instance: AgentInstance,
+                                messages: List[Message],
+                                llm_messages: List[Message],
+                                response: Optional[List[Message]] = None) -> bool:
         """Detect and handle /rollback [count] user command.
-        
+
         Args:
             instance: Current agent instance
             messages, llm_messages: Working message sets
             response: Optional list to append notifications for yielding (fixes compress feedback bug)
-        
+
         Returns True if the command was handled (whether successful or not).
         """
         inst_name = instance.instance_name
-        
+
         # Step 1: Detect and parse command (also replaces content with descriptive message)
         count = self.detect_and_parse_rollback_command(instance, messages)
         if count is None:
             return False
-        
+
         # Step 2: Apply rollback using pool's surgical_rollback (unified path)
         # Note: surgical_rollback() handles cache invalidation internally — clears
         # _cached_messages, _cached_llm_messages, and sets _last_token_count_conversation_length = -1
         try:
-            actual_count = self.pool.surgical_rollback(inst_name, count, reason="Manual /rollback command")
-            
+            actual_count = self.pool.surgical_rollback(inst_name, count, reason='Manual /rollback command')
+
             # Validate message pool after rollback (Item 10 - same as compress handler lines 602-626)
             conv = self.pool.get_conversation(inst_name)
 
-            self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback command", instance)
+            self._sync_logger_after_compression(inst_name, instance.agent_class, '/rollback command', instance)
 
             working_set_rebuilt = False
             if conv and not validate_message_pool(conv, inst_name):
-                working_set_rebuilt = self._recover_or_halt(
-                    instance, conv, "/rollback command", messages, llm_messages
-                )
-            
+                working_set_rebuilt = self._recover_or_halt(instance, conv, '/rollback command', messages, llm_messages)
+
             # Rebuild working set after successful validation (if not already rebuilt in recovery path)
             if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
-            
+
             _invalidate_token_cache(instance)
-            
+
             instance._suppress_loop_detection_next_turn = True
-            
+
             notification_text = f"[SYSTEM] Rollback applied: Rolled back {actual_count} message(s) for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
             self.engine._append_and_log(instance, notif_msg)
             if response is not None:
                 response.append(notif_msg)
-            
+
             logger.info(f"/rollback command executed for {inst_name}: rolled back {actual_count} message(s)")
             return True
-            
+
         except Exception as e:
             logger.error(f"/rollback apply failed for {inst_name}: {e}")
             # Append notification as a new Message object (not mutating last message content)

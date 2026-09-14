@@ -145,8 +145,9 @@ class GrepMixin:
                              spill_file_path: Optional[str] = None):
         """Fast-path grep using system ripgrep or grep via subprocess.
 
-        Returns (results_list, count, was_timed_out, was_truncated, original_output_size, spillover_rel_path)
-        on success, or (None, 0, False, False, 0, None) on failure.
+        Returns (results_list, count, was_timed_out, was_truncated, original_output_size,
+                 spillover_rel_path, total_lines_before, shown_lines_after) on success, or
+        (None, 0, False, False, 0, None, 0, 0) on failure.
         Output format matches Python fallback: "relative_path:line_number: content"
         """
         import subprocess
@@ -158,7 +159,7 @@ class GrepMixin:
         if not _rg_available and not _grep_available:
             logger.debug('grep: subprocess fast path unavailable (rg=%s, grep=%s), falling back to Python',
                          _rg_available, _grep_available)
-            return None, 0, False, False, 0, None
+            return None, 0, False, False, 0, None, 0, 0
 
         try:
             if _rg_available:
@@ -331,6 +332,8 @@ class GrepMixin:
                 _was_truncated = False
                 _original_output_size = 0
                 _spill_rel_path = None
+                _total_lines_before = len(formatted)
+                _shown_lines_after = len(formatted)
                 if char_limit != -1 and count > 0:
                     output_size = sum(len(entry) for entry in formatted) + count
                     if output_size > char_limit:
@@ -361,34 +364,36 @@ class GrepMixin:
                             truncated.append(line)
                             byte_budget -= len(line) + 1
                         formatted = truncated
+                        _shown_lines_after = len(formatted)
                         if context > 0:
                             count = sum(1 for entry in formatted if '>>>' in entry)
                         else:
                             count = sum(1 for entry in formatted if entry != '---')
                         _was_truncated = True
 
-                return formatted, count, False, _was_truncated, _original_output_size, _spill_rel_path
+                return (formatted, count, False, _was_truncated, _original_output_size, _spill_rel_path,
+                        _total_lines_before, _shown_lines_after)
 
             # Non-zero return code (e.g., grep returns 1 for no matches) — still valid
             if result.returncode == 1:
-                return [], 0, False, False, 0, None
+                return [], 0, False, False, 0, None, 0, 0
 
             # Unexpected non-zero exit code (e.g., rg returns 2 for usage errors like unrecognized flags)
             stderr_msg = (result.stderr or '').strip()[:500]
             logger.warning(
                 f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
-            return None, 0, False, False, 0, None
+            return None, 0, False, False, 0, None, 0, 0
 
         except subprocess.TimeoutExpired:
             logger.warning(
                 f"grep subprocess timed out after {timeout}s (pattern/scope too broad); returning error instead of falling back to Python"
             )
-            return None, 0, True, False, 0, None
+            return None, 0, True, False, 0, None, 0, 0
 
         except (FileNotFoundError, PermissionError, OSError) as e:
             logger.debug(f"grep subprocess unavailable (falling back to Python): {e}")
 
-        return None, 0, False, False, 0, None
+        return None, 0, False, False, 0, None, 0, 0
 
     def _grep_single_file(self,
                           file_path: Path,
@@ -543,18 +548,19 @@ class GrepMixin:
                                               timeout=timeout)
 
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
-            results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel = self._try_subprocess_grep(
-                pattern=pattern,
-                path=resolved,
-                include=include,
-                char_limit=char_limit,
-                timeout=timeout,  # Use configurable timeout
-                agent_name=agent_name,
-                exclude=exclude,
-                ignore_vcs=ignore_vcs,
-                context=context,
-                smart_case=smart_case,
-                spill_file_path=spill_file_path)
+            (results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel, _sub_total_lines,
+             _sub_shown_lines) = self._try_subprocess_grep(
+                 pattern=pattern,
+                 path=resolved,
+                 include=include,
+                 char_limit=char_limit,
+                 timeout=timeout,  # Use configurable timeout
+                 agent_name=agent_name,
+                 exclude=exclude,
+                 ignore_vcs=ignore_vcs,
+                 context=context,
+                 smart_case=smart_case,
+                 spill_file_path=spill_file_path)
             if was_timed_out:
                 return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
             if results is not None:
@@ -576,7 +582,9 @@ class GrepMixin:
                         # spillover file with truncated content. Surface the captured path,
                         # matching the format read_file / the Python fallback produce.
                         if _sub_spill_rel:
-                            summary += f" [TRUNCATED — full output saved to: {_sub_spill_rel}]"
+                            summary += (
+                                f" [TRUNCATED — showing {_sub_shown_lines} of {_sub_total_lines} lines "
+                                f"({_original_output_size} chars total). Full output saved to: {_sub_spill_rel}]")
                         else:
                             summary += ' [TRUNCATED]'
                     else:

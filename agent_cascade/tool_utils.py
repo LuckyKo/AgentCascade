@@ -73,10 +73,10 @@ def apply_cached_entry_resolutions(
 
 def mark_tool_call_truncated(instance_name: str, tool_name: str):
     """Mark that a tool call was truncated for the current thread.
-    
+
     Replaces fragile string-match guards like '[TOOL RESPONSE TRUNCATED' in tool_result
     with explicit thread-local state tracking for reliable truncation detection.
-    
+
     Args:
         instance_name: The agent instance name
         tool_name: The tool that produced truncated output
@@ -89,11 +89,11 @@ def mark_tool_call_truncated(instance_name: str, tool_name: str):
 
 def was_tool_call_truncated(instance_name: str, tool_name: str) -> bool:
     """Check if a tool call was truncated in the current thread.
-    
+
     Args:
         instance_name: The agent instance name
         tool_name: The tool to check for truncation
-        
+
     Returns:
         True if the tool call was marked as truncated, False otherwise
     """
@@ -105,7 +105,7 @@ def was_tool_call_truncated(instance_name: str, tool_name: str) -> bool:
 
 def clear_truncation_state():
     """Clear truncation state for the current thread.
-    
+
     Call this at the start of each turn or when context is reset to prevent
     stale truncation markers from affecting subsequent operations.
     """
@@ -113,42 +113,60 @@ def clear_truncation_state():
         _thread_locals.truncated_calls = {}
 
 
+_truncation_hints = threading.local()
+
+
+def set_truncation_hints(total_lines: int, shown_lines: int) -> None:
+    """Store line-count hints for the next truncate_with_spillover call in this thread."""
+    _truncation_hints.total = total_lines
+    _truncation_hints.shown = shown_lines
+
+
+def get_and_clear_truncation_hints() -> tuple:
+    """Retrieve and clear stored truncation hints. Returns (total, shown) or (None, None)."""
+    total = getattr(_truncation_hints, 'total', None)
+    shown = getattr(_truncation_hints, 'shown', None)
+    _truncation_hints.total = None
+    _truncation_hints.shown = None
+    return total, shown
+
+
 def generate_spillover_filename(instance_name: str, tool_name: str, base_dir: Path) -> str:
     """Generate a unique spillover filename with collision detection.
-    
+
     Creates filenames in the format: {safe_instance}_{safe_tool}_{timestamp}.txt
     Handles collisions by appending a counter (_1, _2, etc.) up to 1000 attempts.
-    
+
     Args:
         instance_name: The agent instance name
         tool_name: The tool name
         base_dir: Directory to write spillover files
-        
+
     Returns:
         Unique filename string (not full path)
-        
+
     Raises:
         ValueError: If counter exceeds 1000 collisions
     """
     from datetime import datetime
-    
+
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
     safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
-    
+
     counter = 1
     while counter < 1000:
         if counter == 1:
             spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
         else:
             spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}_{counter}.txt"
-        
+
         spill_path = base_dir / spill_filename
         if not spill_path.exists():
             return spill_filename
-        
+
         counter += 1
-    
+
     raise ValueError(f"Spillover filename collision exceeded 1000 attempts for {instance_name}/{tool_name}")
 
 
@@ -181,8 +199,10 @@ def truncate_with_spillover(
     instance_name: str,
     tool_name: str,
     base_dir: Path,
-    operation_mode: str = "head",
+    operation_mode: str = 'head',
     spill_path: Optional[Path] = None,
+    total_lines_hint: Optional[int] = None,
+    shown_lines_hint: Optional[int] = None,
 ) -> str:
     """Truncate text to char_limit and write full content to a spillover file.
 
@@ -201,6 +221,10 @@ def truncate_with_spillover(
             - "tail": Keep the end, drop the beginning.
         spill_path: Optional custom spillover file path. If provided, the full text
             is written there instead of the default auto-generated path.
+        total_lines_hint: Optional override for the "total lines" count in the footer.
+            When None (default), derived from the rendered text.
+        shown_lines_hint: Optional override for the "shown lines" count in the footer.
+            When None (default), derived from the truncated text.
 
     Returns:
         Truncated text with notice, or original text if under limit.
@@ -212,7 +236,7 @@ def truncate_with_spillover(
 
     # Cap output size before writing
     if len(text) > MAX_SPILL_SIZE:
-        text = text[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
+        text = text[:MAX_SPILL_SIZE] + '\n\n[SPILL FILE TRUNCATED — exceeded maximum size]'
 
     # Resolve spillover path
     if spill_path is not None:
@@ -227,9 +251,9 @@ def truncate_with_spillover(
             rel_spill = f"logs/spillover/{spill_filename}"
 
     # Apply truncation based on operation_mode
-    if operation_mode == "tail":
+    if operation_mode == 'tail':
         truncated = text[-char_limit:]
-    elif operation_mode == "mid":
+    elif operation_mode == 'mid':
         half = char_limit // 2
         omitted = len(text) - char_limit
         truncated = text[:half] + f"\n\n[... {omitted} chars omitted ...]\n\n" + text[-half:]
@@ -238,8 +262,8 @@ def truncate_with_spillover(
 
     mark_tool_call_truncated(instance_name, tool_name)
 
-    total_lines = text.count('\n') + 1
-    shown_lines = truncated.count('\n') + 1
+    total_lines = total_lines_hint if total_lines_hint is not None else text.count('\n') + 1
+    shown_lines = shown_lines_hint if shown_lines_hint is not None else truncated.count('\n') + 1
     return (f"{truncated}\n\n"
             f"[TRUNCATED — showing {shown_lines} of {total_lines} lines "
             f"({original_len} chars total). Full output saved to: {rel_spill}]")
