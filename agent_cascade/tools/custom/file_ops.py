@@ -14,7 +14,7 @@ import requests
 from PIL import Image
 
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE, DEFAULT_MAX_INPUT_TOKENS, DEFAULT_READ_FILE_MAX_LINES,
+from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_LINES,
                                     DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE)
 from agent_cascade.tool_utils import set_truncation_hints
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -66,12 +66,9 @@ _gtk_common_paths = [
 ]
 
 # --- read_file constants ----------------------------------------------------- #
-# DEFAULT_MAX_INPUT_TOKENS is imported from agent_cascade.settings (canonical, default 65000).
 DEFAULT_READ_LINES = DEFAULT_READ_FILE_MAX_LINES  # From settings (default: 150)
 MAX_LINE_LIMIT_EXPLICIT = 100000  # Max lines when user explicitly sets a limit
 HEX_DUMP_BYTES = 1024  # Bytes to show in hex view for binary files
-CONTEXT_FRACTION = 0.25  # Fraction of context window reserved for tool output
-MIN_TRUNCATED_LINE_CHARS = 200  # Minimum characters to keep when truncating a single line
 
 # list_dir default output truncation limit (chars) before spillover is applied.
 DEFAULT_LIST_DIR_CHAR_LIMIT = 3000
@@ -108,10 +105,10 @@ def _format_hex_dump(data: bytes) -> str:
 class ReadFile(BaseTool, PathResolutionMixin):
     """Reads and returns the content of a specified file.
 
-    Text files are read line-by-line with dual limits: a line cap (default 150 for
-    wild reads, up to 100000 when limit is explicit) and a character budget derived
-    from the context window. Wild reads that exceed the high-water mark (~2000 chars)
-    are truncated post-hoc with an unbound-read warning.
+    Text files are read line-by-line with a line cap (default 150 for wild reads,
+    up to 100000 when limit is explicit). Wild reads that exceed the high-water mark
+    (~2000 chars) are truncated post-hoc with an unbound-read warning. The outer
+    safety net in _assemble_tool_result provides a final char-based truncation.
     Binary files display a hex dump of the first 1024 bytes with ASCII representation.
     """
 
@@ -146,43 +143,6 @@ class ReadFile(BaseTool, PathResolutionMixin):
         self.agent_name = kwargs.get('agent_name')
 
     # ------------------------------------------------------------------ #
-    #  Helper: safely extract max_input_tokens from a config dict         #
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _extract_max_tokens(cfg: dict) -> Optional[int]:
-        """Extract max_input_tokens from a config dict, checking both top-level
-        and generate_cfg sub-dict."""
-        val = cfg.get('max_input_tokens') or (cfg.get('generate_cfg', {}) or {}).get('max_input_tokens')
-        return int(val) if val else None
-
-    # ------------------------------------------------------------------ #
-    #  Helper: determine effective max_input_tokens from config hierarchy
-    # ------------------------------------------------------------------ #
-    def _get_max_input_tokens(self, kwargs: dict) -> int:
-        """Return the effective context window size in tokens.
-
-        Priority: agent_obj.llm > agent_pool.llm_cfg > DEFAULT_MAX_INPUT_TOKENS
-        """
-        tokens = DEFAULT_MAX_INPUT_TOKENS
-
-        # Check agent_pool configuration
-        if self.agent_pool is not None:
-            pool_max = self._extract_max_tokens(getattr(self.agent_pool, 'llm_cfg', {}))
-            if pool_max:
-                tokens = pool_max
-
-        # Check agent_obj override (highest priority)
-        agent_obj = kwargs.get('agent_obj')
-        if agent_obj is not None:
-            llm = getattr(agent_obj, 'llm', None)
-            gen_cfg = getattr(llm, 'generate_cfg', {}) if llm else {}
-            agent_max = self._extract_max_tokens(gen_cfg)
-            if agent_max and agent_max != DEFAULT_MAX_INPUT_TOKENS:
-                tokens = agent_max
-
-        return tokens
-
-    # ------------------------------------------------------------------ #
     #  Helper: determine line limit and whether this is a "wild read"     #
     # ------------------------------------------------------------------ #
     def _determine_limits(self, limit: Optional[int]) -> tuple[int, bool]:
@@ -199,21 +159,6 @@ class ReadFile(BaseTool, PathResolutionMixin):
             return DEFAULT_READ_LINES, True  # wild read — high-water mark applied post-hoc
 
     # ------------------------------------------------------------------ #
-    #  Helper: calculate character budget for the read                    #
-    # ------------------------------------------------------------------ #
-    def _calculate_char_limit(self, kwargs: dict) -> int:
-        """Calculate the character limit based on context window and token estimates.
-
-        The char budget is derived from the context window regardless of read type.
-        For wild reads, `wild_truncation` acts as a high-water mark (trip threshold)
-        passed separately to _read_text_file — it does NOT cap this budget proactively.
-        """
-        max_input_tokens = self._get_max_input_tokens(kwargs)
-        char_limit = int(max_input_tokens * CONTEXT_FRACTION * CHARS_PER_TOKEN_ESTIMATE)
-        char_limit = max(500, char_limit)  # floor at 500 chars
-        return char_limit
-
-    # ------------------------------------------------------------------ #
     #  Helper: read text file with streaming line-by-line iteration       #
     # ------------------------------------------------------------------ #
     def _read_text_file(
@@ -222,7 +167,6 @@ class ReadFile(BaseTool, PathResolutionMixin):
         resolved: Path,
         start_line: int,
         limit: int,
-        char_limit: int,
         is_wild_read: bool = False,
         wild_truncation: int = 0,
     ) -> str:
@@ -236,9 +180,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         """
         total_lines = 0
         lines_read: list[str] = []
-        current_chars = 0
         hit_line_limit = False  # Truncated because we hit the line count limit
-        hit_char_limit = False  # Truncated because we hit the character budget
 
         with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
             for line_num, raw_line in enumerate(f, 1):
@@ -258,18 +200,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 stripped = raw_line.rstrip('\n\r')
                 formatted = f"{line_num}: {stripped}\n"
 
-                if current_chars + len(formatted) > char_limit:
-                    # First line itself is huge — include a truncated portion
-                    if not lines_read:
-                        cut = min(len(formatted), max(char_limit, MIN_TRUNCATED_LINE_CHARS))
-                        lines_read.append(formatted[:cut] + ' ... [LINE TRUNCATED]\n')
-                    hit_char_limit = True
-                    # Count remaining lines for accurate total (+1 for current line)
-                    total_lines = line_num + sum(1 for _ in f)
-                    break
-
                 lines_read.append(formatted)
-                current_chars += len(formatted)
                 total_lines = line_num
 
         # Count actual file lines to distinguish empty file from out-of-range start_line
@@ -330,7 +261,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                              f"{wild_truncation}-char high-water mark and was truncated. "
                              f"Use start_line/limit for targeted reads."
                              f"\n→ continue at start_line={actual_end + 1}")
-        elif hit_line_limit or hit_char_limit:
+        elif hit_line_limit:
             header += ' [TRUNCATED]'
             # m2: Compact pagination footer
             truncated_msg = f"\n→ continue at start_line={actual_end + 1}"
@@ -429,9 +360,6 @@ class ReadFile(BaseTool, PathResolutionMixin):
             if not resolved.is_file():
                 return f"Not a regular file: {path}"
 
-            # Determine character budget for this read (context-derived, same for all read types)
-            char_limit = self._calculate_char_limit(kwargs)
-
             # Check for binary content
             if _is_binary_file(resolved):
                 return self._read_binary_file(path, resolved)
@@ -450,7 +378,6 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 resolved=resolved,
                 start_line=start_line,
                 limit=limit,
-                char_limit=char_limit,
                 is_wild_read=is_wild_read,
                 wild_truncation=wild_truncation,
             )
