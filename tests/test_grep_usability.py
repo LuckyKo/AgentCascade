@@ -1,5 +1,4 @@
 """Test suite for grep usability improvements in operation_manager.py."""
-import os
 import re
 import sys
 import tempfile
@@ -321,7 +320,91 @@ def test_grep_fast_path_truncation_surfaces_spillover():
             f"Spillover path notice missing from fast-path grep response: {result[:400]}"
         assert 'logs/spillover/' in result, \
             f"Spillover file path not surfaced in fast-path grep response: {result[:400]}"
+        del rg_available, grep_available  # availability already checked above; keep flake8 quiet
         print('[PASS] test_grep_fast_path_truncation_surfaces_spillover')
+
+
+def _body_after_summary(result):
+    """Return the output body after the 'summary:' header line.
+
+    The summary header is rendered as ``f"{summary}:\n\n" + output_text`` — a single,
+    deliberate blank line follows the header and must be allowed. Slicing at the first
+    '\n' keeps that expected blank line out of the body we assert on.
+    """
+    return result.split('\n', 1)[1] if '\n' in result else ''
+
+
+def test_grep_fast_path_no_blank_lines_between_matches():
+    """Regression: fast-path (rg) grep must not emit a blank line between match entries.
+
+    rg's --json 'lines.text' value always carries a trailing newline ('\\n' on POSIX,
+    '\\r\\n' on Windows). The old code appended that text verbatim and then joined the
+    list with '\\n', so every entry ended up as ``...content\\n`` + join ``\\n`` = a blank
+    line between EVERY entry (and a dangling trailing newline after the last one).
+
+    Skips gracefully when no subprocess grep tool (rg/grep) is available, since this only
+    exercises the subprocess fast path.
+    """
+    from agent_cascade.operation_manager import OperationManager
+    from agent_cascade.operation_manager.grep import _check_tool_availability
+    rg_available, grep_available = _check_tool_availability()
+    if not (rg_available or grep_available):
+        print('[SKIP] test_grep_fast_path_no_blank_lines_between_matches (no rg/grep available)')
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Two matching lines (ZEBRA) far apart, in one file. The filler lines contain no
+        # 'ZEBRA' and no uppercase, so the pattern matches exactly two lines.
+        Path(tmpdir, 't.txt').write_text('ZEBRA alpha\nbravo\n' + ('x' * 30 + '\n') * 5 + 'ZEBRA charlie\ndelta\n')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.grep(pattern='ZEBRA', path='.')
+        assert 'Found 2 matches' in result, f"Expected 2 matches: {result}"
+        body = _body_after_summary(result)
+        # No blank line between entries and no dangling trailing newline (the bug).
+        assert '\n\n' not in body, \
+            f"Blank line(s) present between match entries: {body!r}"
+        assert not body.endswith('\n'), \
+            f"Body has a dangling trailing newline after the last entry: {body!r}"
+        del rg_available, grep_available  # availability already checked above; keep flake8 quiet
+        # Both matches are actually surfaced.
+        for token in ('alpha', 'charlie'):
+            assert token in body, f"Match '{token}' missing from output: {body!r}"
+    print('[PASS] test_grep_fast_path_no_blank_lines_between_matches')
+
+
+def test_grep_fast_path_context_no_blank_lines():
+    """Regression: fast-path (rg) grep with context must not emit blank lines between the
+    match/context entry lines, each match keeps its '>>>' prefix, and the count is correct.
+
+    rg emits a trailing newline on BOTH 'match' and 'context' events, so both branches were
+    affected by the old bug. Skips gracefully when no subprocess grep tool is available.
+    """
+    from agent_cascade.operation_manager import OperationManager
+    from agent_cascade.operation_manager.grep import _check_tool_availability
+    rg_available, grep_available = _check_tool_availability()
+    if not (rg_available or grep_available):
+        print('[SKIP] test_grep_fast_path_context_no_blank_lines (no rg/grep available)')
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Two matches (ZEBRA) far apart so their context windows do not merge. Filler lines
+        # contain no 'ZEBRA' and no uppercase, so the pattern matches exactly two lines.
+        Path(tmpdir, 't.txt').write_text('ZEBRA alpha\nbravo\n' + ('x' * 30 + '\n') * 5 + 'ZEBRA charlie\ndelta\n')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.grep(pattern='ZEBRA', path='.', context=1)
+        assert 'Found 2 matches' in result, f"Expected exactly 2 matches: {result}"
+        body = _body_after_summary(result)
+        # No blank line between the match/context entry lines (the bug).
+        assert '\n\n' not in body, \
+            f"Blank line(s) present between context-group entries: {body!r}"
+        assert not body.endswith('\n'), \
+            f"Body has a dangling trailing newline after the last entry: {body!r}"
+        del rg_available, grep_available  # availability already checked above; keep flake8 quiet
+        # Each match is still prefixed with '>>>' (exactly two, one per match).
+        match_lines = [ln for ln in body.splitlines() if '>>>' in ln]
+        assert len(match_lines) == 2, f"Expected exactly 2 '>>>' match lines: {body!r}"
+        # Context neighbours are surfaced.
+        for token in ('alpha', 'bravo', 'charlie', 'delta'):
+            assert token in body, f"Line '{token}' missing from context output: {body!r}"
+    print('[PASS] test_grep_fast_path_context_no_blank_lines')
 
 
 if __name__ == '__main__':
@@ -345,6 +428,8 @@ if __name__ == '__main__':
         test_keyword_only_flags,
         test_extract_spill_path,
         test_grep_fast_path_truncation_surfaces_spillover,
+        test_grep_fast_path_no_blank_lines_between_matches,
+        test_grep_fast_path_context_no_blank_lines,
     ]
     passed = 0
     failed = 0

@@ -256,7 +256,10 @@ class GrepMixin:
                                 else:
                                     line_num = line_num_data
 
-                                match_text = data.get('lines', {}).get('text', '')
+                                # rg's lines.text always carries a trailing newline
+                                # ('\n' on POSIX, '\r\n' on Windows) — strip it so the
+                                # entries don't gain blank lines when joined below.
+                                match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
 
                                 normalized_path = file_path.replace('\\', '/')
 
@@ -276,7 +279,8 @@ class GrepMixin:
                                 else:
                                     line_num = line_num_data
 
-                                match_text = data.get('lines', {}).get('text', '')
+                                # Strip rg's trailing newline (see 'match' branch above).
+                                match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
                                 normalized_path = file_path.replace('\\', '/')
                                 formatted.append(f"{normalized_path}:{line_num}:     {match_text}")
 
@@ -319,15 +323,15 @@ class GrepMixin:
                             formatted.append(line)
 
                     if context > 0:
-                        count = sum(1 for l in formatted if '>>>' in l)
+                        count = sum(1 for entry in formatted if '>>>' in entry)
                     else:
-                        count = sum(1 for l in formatted if l != '---')
+                        count = sum(1 for entry in formatted if entry != '---')
 
                 _was_truncated = False
                 _original_output_size = 0
                 _spill_rel_path = None
                 if char_limit != -1 and count > 0:
-                    output_size = sum(len(l) for l in formatted) + count
+                    output_size = sum(len(entry) for entry in formatted) + count
                     if output_size > char_limit:
                         _original_output_size = output_size
 
@@ -357,9 +361,9 @@ class GrepMixin:
                             byte_budget -= len(line) + 1
                         formatted = truncated
                         if context > 0:
-                            count = sum(1 for l in formatted if '>>>' in l)
+                            count = sum(1 for entry in formatted if '>>>' in entry)
                         else:
-                            count = sum(1 for l in formatted if l != '---')
+                            count = sum(1 for entry in formatted if entry != '---')
                         _was_truncated = True
 
                 return formatted, count, False, _was_truncated, _original_output_size, _spill_rel_path
@@ -374,9 +378,10 @@ class GrepMixin:
                 f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
             return None, 0, False, False, 0, None
 
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             logger.warning(
-                f"grep subprocess timed out after {timeout}s (pattern/scope too broad); returning error instead of falling back to Python"
+                'grep subprocess timed out after %ss (pattern/scope too broad); returning error instead of falling back to Python',
+                timeout,
             )
             return None, 0, True, False, 0, None
 
