@@ -440,6 +440,7 @@ class CompressionHandler:
         tool_name: str,
         base_dir: Path,
         llm_cfg: Optional[dict] = None,
+        char_threshold: Optional[int] = None,
     ) -> Union[str, List[ContentItem]]:
         """Assemble a final tool result with consistent layout of warnings, output, and truncation.
 
@@ -462,11 +463,15 @@ class CompressionHandler:
         Args:
             instance: Agent instance holding notification queues.
             raw_tool_result: Raw tool output — string, or ContentItem list from vision tools.
-            char_limit: Maximum chars for the output body before additional truncation.
+            char_limit: Target size after truncation (how much to keep).
                         None or -1 means no additional truncation.
             instance_name: Agent instance name.
             tool_name: Name of the tool.
             base_dir: Base directory for spillover path resolution.
+            llm_cfg: Agent LLM config (for vision capability check).
+            char_threshold: Trip threshold — truncation only triggers if output exceeds
+                        this. Defaults to char_limit (i.e., trigger and target are the same).
+                        Used by wild-read logic where threshold (25k) >> target (2k).
 
         Returns:
             Assembled tool result — string for text-only, or ContentItem list for vision endpoints.
@@ -555,10 +560,15 @@ class CompressionHandler:
         # in the same turn (e.g., a later small __wait response after a large truncated one).
         clear_truncation_state()
 
-        # Step 3: If char_limit is set and exceeded, truncate now.
+        # Step 3: If output exceeds the trip threshold, truncate to char_limit.
+        # The threshold (when to trigger) may differ from the target (how much to keep).
+        # e.g., wild read: threshold=25000, target=2000.
         # truncate_with_spillover adds its own [TRUNCATED ...] footer, so we don't
         # need to track that separately.
-        if char_limit is not None and char_limit > 0 and len(raw_tool_result) > char_limit:
+        _threshold = char_threshold if char_threshold is not None else char_limit
+        if (char_limit is not None and char_limit > 0
+                and _threshold is not None and _threshold > 0
+                and len(raw_tool_result) > _threshold):
             raw_tool_result = truncate_with_spillover(
                 raw_tool_result,
                 char_limit=char_limit,

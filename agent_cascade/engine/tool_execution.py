@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, List
 
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
+from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS
 from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.log import logger
 from agent_cascade.exceptions import AgentTerminatedError
@@ -264,9 +264,15 @@ class ToolExecMixin:
                 # early failures.
                 if self.compression_handler:
                     try:
-                        # Determine char_limit from config or default
-                        char_limit = (self.pool.llm_cfg or {}).get(
+                        # Determine truncation params from config.
+                        # char_threshold: when to trigger (Wild Read Threshold)
+                        # char_limit: how much to keep after triggering (Wild Read Truncation)
+                        _llm_cfg = self.pool.llm_cfg or {}
+                        char_threshold = _llm_cfg.get(
                             'tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS
+                        )
+                        char_limit = _llm_cfg.get(
+                            'wild_read_truncation_chars', DEFAULT_WILD_READ_TRUNCATION_CHARS
                         )
 
                         # Get base_dir from operation_manager for spillover path resolution
@@ -289,6 +295,7 @@ class ToolExecMixin:
                             tool_name=tool_name,
                             base_dir=base_dir,
                             llm_cfg=agent_llm_cfg,
+                            char_threshold=char_threshold,
                         )
                     except Exception as e:
                         # Log the failure (was previously silent), then fall back
