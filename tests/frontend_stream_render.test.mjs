@@ -109,6 +109,13 @@ function makeEl(tag = 'div') {
     dispatchEvent() { return true; },
     focus() {},
     blur() {},
+    // Faithful-enough raw text append (used by app.js fast-path 1/2). We model it as appending to
+    // _innerHTML so a subsequent innerHTML read reflects the RAW appended text — exactly what the
+    // D2 bug depended on. (Real DOM would use a text node; for our assertions the string is enough.)
+    insertAdjacentText(pos, text) {
+      if (pos === 'beforeend') el._innerHTML += String(text);
+      else if (pos === 'afterbegin') el._innerHTML = String(text) + el._innerHTML;
+    },
     querySelector(sel) { return el.querySelectorAll(sel)[0] || null; },
     querySelectorAll(sel) {
       const out = [];
@@ -463,21 +470,32 @@ test('frontend render-cadence: does the adaptive throttle collapse a real stream
   assert.ok(inc.renders > 0, 'renderSubAgents must fire at least once on a smooth stream');
 
   // ══════════════════════════════════════════════════════════════════════════
-  // THE FINDING — the frontend does NOT collapse a VISIBLE stream.
+  // THE FINDING (NEW INTENDED BEHAVIOR) — a VISIBLE smooth stream renders at a SMOOTH,
+  // PREDICTABLE ~100ms cadence, NOT per-update and NOT the coarse 250-500ms adaptive throttle.
   //
-  // The task hypothesized the adaptive throttle would collapse a smooth ~40ms stream to
-  // ~8-12 renders with ~250ms gaps. That is FALSE for the agent the user is looking at:
-  // renderSubAgents auto-selects the streaming agent's tab (app.js L4065), so from the
-  // first paint onward `isVisibleActiveAgentContentChanged` (L2180) is true on every
-  // partial update and FORCES a render — bypassing the time throttle entirely. The result:
-  // renders track updates almost 1:1, with gaps equal to the inter-UPDATE interval (~40ms),
-  // not the ~250ms root throttle.
-  assert.ok(inc.renders >= inc.updates - 6,
-    `VISIBILITY BYPASS — a smooth stream viewed on-screen renders ~per-update: ${inc.updates} updates → ${inc.renders} renders. ` +
-    `The 250ms time throttle does NOT apply to the visible agent (isVisibleActiveAgentContentChanged forces a render each tick).`);
-  assert.ok(inc.maxRenderGap <= 80,
-    `No perceived stall on a visible smooth stream: max gap between paints is ${inc.maxRenderGap}ms (≈ the 40ms update interval), NOT the ~250ms root throttle.`);
-  // The thinking block grows visibly incrementally on screen (many distinct lengths).
+  // Commit fb579fe deliberately REMOVED the old per-update visibility bypass
+  // (isVisibleActiveAgentContentChanged) to stop DOM/markdown overload; that removal is
+  // INTENTIONAL and must NOT be restored. Instead, when the last message of the VISIBLE agent
+  // grows in a frame, the render gate uses a dedicated smooth cadence
+  // (THROTTLE.RENDER_STREAM_SMOOTH_MS = 100) rather than the coarse adaptive throttle.
+  //
+  // Consequence for a ~40ms feed: the first update renders immediately (generation-start reset),
+  // then each subsequent render waits until ≥100ms have elapsed since the last paint → a
+  // visible stream paints every ~80-250ms, i.e. roughly one render per 3 updates. We assert
+  // that cadence honestly rather than forcing an exact count (render timing depends on the
+  // post-render timer reset and adaptive subThrottleContent interplay).
+  const SMOOTH_MS = 100; // mirrors THROTTLE.RENDER_STREAM_SMOOTH_MS in web_ui/app.js
+  const expectedSmoothRenders = Math.round(inc.updates / 3); // ≈16 for 49 updates at a ~100ms gate
+  assert.ok(inc.renders >= expectedSmoothRenders - 2 && inc.renders <= expectedSmoothRenders + 4,
+    `SMOOTH CADENCE — a visible smooth stream renders at ~${SMOOTH_MS}ms cadence (≈ updates/3): ` +
+    `${inc.updates} updates → ${inc.renders} renders (expected ≈${expectedSmoothRenders}). ` +
+    `NOT per-update (would be ≈${inc.updates}) and NOT the coarse ~250-500ms adaptive throttle (would be ≈8-12).`);
+  // Gaps must sit in the smooth band: well below the coarse 250-500ms root throttle, comfortably
+  // above the per-update 40ms. This is the user-perceived "periodic refresh" — no long stall.
+  assert.ok(inc.maxRenderGap >= 80 && inc.maxRenderGap <= 250,
+    `Smooth periodic refresh: max gap between paints is ${inc.maxRenderGap}ms — in the ~100ms smooth band, ` +
+    `NOT the ~40ms per-update cadence (bypass was removed) and NOT the ~250-500ms coarse adaptive throttle.`);
+  // The thinking block still grows visibly incrementally on screen across many distinct lengths.
   assert.ok(inc.incremental && inc.distinctReasoningLens.length >= 3,
     `On a visible smooth stream the thinking block should grow across many renders — got ${inc.distinctReasoningLens.length} distinct lengths`);
 
@@ -578,4 +596,93 @@ test('FIX B: done frames must not invalidate panel caches; state frames must', (
   );
 
   console.log('✔ FIX B assertions passed — done frames skip invalidation, state frames invalidate.');
+});
+
+// ── D2 (reasoning markdown formatting) regression test ───────────────────────
+// The reasoning box's fast path 1 appends streamed deltas via raw insertAdjacentText (an O(1)
+// text append that does NOT parse markdown). Before the fix, the completion re-render reused the
+// RAW-appended cache (or the live thinkingDiv.innerHTML) instead of re-parsing, so a completed
+// reasoning block could display literal `**bold**` / unformatted code indefinitely.
+//
+// D2 FIX: when !isGenerating (message complete), updateBubbleContent ALWAYS re-runs renderMarkdown
+// on msg.reasoning_content (never reuses a possibly-raw cache). This test drives the REAL
+// updateBubbleContent with a realistic bubble + a marked stand-in that emits <strong>/<code> for
+// bold/code input, and asserts the final .thinking-content innerHTML is markdown-formatted.
+test('D2: completed reasoning must be markdown-formatted (not raw-appended text)', () => {
+  const app = loadApp();
+  const ctx = vm.createContext(app.sandbox);
+
+  // A marked stand-in faithful enough to prove renderMarkdown ran: bold → <strong>, code → <code>.
+  // The default sandbox `marked.parse` only wraps in <p>, so this distinguishes "re-parsed" from
+  // "raw text appended verbatim".
+  // Build the marked stand-in as a plain string (no nested template literals) so the regex for
+  // inline code (backtick-delimited) does not break this file's own backtick parsing. Each constant
+  // is a JS regex SOURCE string: BOLD_RE → /\*\*([^*]+)\*\*/g, CODE_RE → /`([^`]+)`/g.
+  const BOLD_RE = '\\*\\*([^*]+)\\*\\*';      // matches **bold** → <strong>bold</strong>
+  const CODE_RE = '\\`([^' + '`]+)\\`';       // matches `code` → <code>code</code>
+  vm.runInContext(
+    'window.marked = { setOptions: function(){}, parse: function(t){' +
+    '  var s = String(t);' +
+    '  s = s.replace(new RegExp(' + JSON.stringify(BOLD_RE) + ', "g"), "<strong>$1</strong>");' +
+    '  s = s.replace(new RegExp(' + JSON.stringify(CODE_RE) + ', "g"), "<code>$1</code>");' +
+    '  return "<p>" + s + "</p>";' +
+    '} };',
+    ctx
+  );
+
+  // Build a realistic bubble whose .msg-content is a REAL queryable element (the test's makeEl shim
+  // models innerHTML as an opaque string, so we construct the child nodes explicitly). The live
+  // .thinking-content starts with RAW-appended text — exactly what fast path 1 leaves behind after a
+  // stream of insertAdjacentText deltas. We then seed the bubble's cache fields the same way fast
+  // path 1 does (raw innerHTML + _thinkingRawAppended=true) and drive the REAL updateBubbleContent
+  // completion re-render (isGenerating=false). Everything runs in ONE script (bare top-level
+  // assignments, mirroring loadApp's __records pattern) and returns a result object for read-back.
+  const FINAL_REASONING = 'reasoning **bold** `code` done';
+  const result = vm.runInContext(
+    '(function(){' +
+    '  var bubble = document.createElement("div");' +
+    '  var c = document.createElement("div"); c.className = "msg-content";' +
+    '  var t = document.createElement("div"); t.className = "thinking-content";' +
+    // RAW-appended text (NOT markdown-formatted): the exact state fast path 1 produces.
+    '  t.innerHTML = ' + JSON.stringify(FINAL_REASONING) + ';' +
+    '  c.appendChild(t); bubble.appendChild(c);' +
+    // Seed bubble fields exactly as fast path 1 would after a raw append:
+    '  bubble._prevContent = "";' +
+    '  bubble._prevReasoning = ' + JSON.stringify(FINAL_REASONING) + ';' +
+    '  bubble._wasGenerating = true;' +
+    '  bubble._thinkingDiv = t;' +
+    '  bubble._cachedReasoning = ' + JSON.stringify(FINAL_REASONING) + ';' +
+    '  bubble._cachedThinkingContentHtml = t.innerHTML;' +
+    '  bubble._thinkingRawAppended = true;' +
+    '  var preFlag = bubble._thinkingRawAppended;' +
+    '  var preHtml = c.querySelector(".thinking-content").innerHTML;' +
+    // Drive the REAL completion re-render (isGenerating=false); the fix MUST re-run renderMarkdown.
+    '  updateBubbleContent(bubble, { role: "assistant", content: "", reasoning_content: ' +
+      JSON.stringify(FINAL_REASONING) + ', name: state.sessionName },' +
+    '    { instanceName: state.sessionName, isGenerating: false });' +
+    // The re-render replaced c.innerHTML (the shim clears child nodes), so read the formatted
+    // thinking HTML straight from the cache field the full-re-render path just populated. This is
+    // exactly what lands in the .thinking-content div — and the fix guarantees it is renderMarkdown
+    // output, never a raw-appended string.
+    '  return { preFlag: preFlag, preHtml: preHtml, postHtml: bubble._cachedThinkingContentHtml };' +
+    '})()',
+    ctx
+  );
+
+  // Precondition: the cache held RAW (unformatted) text — this is the bug state.
+  assert.equal(result.preFlag, true, 'precondition: raw-appended flag set (fast path 1 state)');
+  assert.ok(!result.preHtml.includes('<strong>') && !result.preHtml.includes('<code>'),
+    `precondition: pre-render thinking-content must be RAW (unformatted), got: ${JSON.stringify(result.preHtml)}`);
+
+  const thinkingHtml = result.postHtml;
+
+  assert.ok(thinkingHtml.includes('<strong>'),
+    `D2: completed reasoning must be markdown-formatted — .thinking-content should contain <strong>, got: ${JSON.stringify(thinkingHtml.slice(0, 120))}`);
+  assert.ok(thinkingHtml.includes('<code>'),
+    `D2: completed reasoning must be markdown-formatted — .thinking-content should contain <code>, got: ${JSON.stringify(thinkingHtml.slice(0, 120))}`);
+  // It must NOT still hold the raw literal markers from the fast-path append.
+  assert.ok(!thinkingHtml.includes('**bold**'),
+    `D2: completed reasoning must not display raw **bold** markers (unformatted), got: ${JSON.stringify(thinkingHtml.slice(0, 120))}`);
+
+  console.log('✔ D2 assertions passed — completed reasoning is markdown-formatted.');
 });

@@ -1,6 +1,6 @@
 /**
  * AgentCascade Console — Frontend Application
- * 
+ *
  * Connects to the API server via WebSocket for real-time streaming.
  * Renders messages with markdown, handles editing, deletion, and approvals.
  */
@@ -54,6 +54,7 @@ const THROTTLE = Object.freeze({
   PUSH_IMMEDIATE_MS: 30,       // ActivityBar push throttle
   RENDER_BASE_MS: 250,         // base streaming render throttle (sub-agent + root; raised to reduce image re-decode pressure during streaming)
   RENDER_ROOT_MAX_MS: 500,     // root agent max render throttle cap (adaptive)
+  RENDER_STREAM_SMOOTH_MS: 100, // dedicated smooth cadence for VISIBLE growing stream content (perceived "periodic refresh"); overrides the coarse adaptive throttle only while the on-screen bubble is actively growing
   ACTIVITY_BAR_RENDER_MS: 200, // ActivityBar full render throttle
   GEN_STATS_MS: 500,           // gen stats update throttle (~2Hz)
   CONTROLS_MS: 1000,           // controls update throttle (~1Hz)
@@ -63,6 +64,11 @@ const THROTTLE = Object.freeze({
   AUTO_SECURITY_SYNC_DEBOUNCE: 100, // Debounce window for server→client auto-security state sync (ms)
   AUTO_SECURITY_TOGGLE_GUARD: 150,  // Guard window blocking toggle clicks during incoming server sync (ms)
 });
+
+// D2: number of raw reasoning deltas before forcing a full re-render that re-parses the thinking
+// markdown. Mirrors fast path 2's content drift-correction counter so streamed reasoning doesn't
+// stay unformatted indefinitely on long thinking phases.
+const REASONING_DRIFT_INTERVAL = 8;
 
 const AUTO_SCROLL_THRESHOLD = 50; // Distance from bottom (px) to consider user "at bottom" for auto-scroll
 
@@ -572,17 +578,17 @@ const ActivityBar = {
   lastRenderTime: 0, // Throttle timer for render()
   _lastPushTime: 0,      // Throttle timer for pushImmediate()
   _initialized: false,   // Guard against duplicate init calls
-  
+
   // Queue banner refs
   queueBanner: null,       // DOM ref to #queueBanner
   queueMessageList: null,  // DOM ref to #queueMessageList
-  
+
   // Cached values for pushImmediate dedup (avoids JSON.stringify overhead)
   _dedupInstance: null,
   _dedupPreview: '',
   _dedupWaiting: false,
   _dedupTokens: 0,
-  
+
   init() {
     if (this._initialized) return;
     this._initialized = true;
@@ -592,7 +598,7 @@ const ActivityBar = {
       this.fifoEl = this.el.querySelector('.activity-fifo');
       this.queuedEl = this.el.querySelector('.activity-queued');
     }
-    
+
     // Queue banner initialization
     this.queueBanner = document.getElementById('queueBanner');
     this.queueMessageList = document.getElementById('queueMessageList');
@@ -608,7 +614,7 @@ const ActivityBar = {
         }
       });
     }
-    
+
     const clearAllBtn = document.getElementById('clearAllQueueBtn');
     if (clearAllBtn) {
       clearAllBtn.addEventListener('click', () => {
@@ -617,12 +623,12 @@ const ActivityBar = {
       });
     }
   },
-  
+
   push(instanceName, text) {
     if (instanceName !== this.getFilterInstance()) return;
     this.render(text);
   },
-  
+
   /** Build the status string for an agent from agentData and optional streaming text.
    * Shared by pushImmediate() and render() to eliminate duplicated status logic (C2 fix).
    * @param {Object} agentData - subAgents entry for the instance
@@ -687,15 +693,15 @@ const ActivityBar = {
 
     this.renderQueueBanner(agentData?.queued_messages);
   },
-  
+
   getFilterInstance() {
     return getActiveInstanceName();
   },
-  
+
   setActiveTab(tabId) {
     this.render();
   },
-  
+
 render(streamingText) {
     const now = performance.now();
     if (now - this.lastRenderTime < THROTTLE.ACTIVITY_BAR_RENDER_MS) return;
@@ -717,7 +723,7 @@ render(streamingText) {
 
     this.renderQueueBanner(agentData?.queued_messages);
   },
-  
+
   /** Render the queue banner showing queued messages with dismiss buttons */
   renderQueueBanner(queuedMessages) {
     if (!this.queueBanner || !this.queueMessageList) return;
@@ -1218,11 +1224,11 @@ function saveSettings(sendToServer) {
   // Shell, code, and list_dir char limits also saved via getGenerateCfg() as underscore keys — no duplicate hyphenated keys needed.
 
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
-  
+
   if (sendToServer && state.connected) {
     send({ type: 'update_config', generate_cfg: getGenerateCfg() });
   }
-  
+
   // Update inputs with validated/clamped values so UI reflects actual stored values
   applyRetryValidation();
 
@@ -1479,12 +1485,12 @@ function loadSettings() {
           defaultWorkspace.textContent = trimmed;
           defaultWorkspace.title = trimmed + ' (Pending restart)';
           defaultWorkspace.style.color = 'var(--accent)';
-          
+
           // Save to local settings
           const settings = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
           settings['default-workspace'] = trimmed;
           localStorage.setItem('agent-cascade-settings', JSON.stringify(settings));
-          
+
           alert('Default workspace path saved to settings. A full server restart is recommended to properly re-initialize the Code Interpreter (Docker) and other core services in the new location.');
         }
       });
@@ -1820,7 +1826,7 @@ function withRetry(conditionFn, actionFn) {
 function handleServerMessage(data) {
   const wasGenerating = state.generating;
   const prevApprovalsCount = (state.approvals || []).length;
-  
+
   // Capture root agent state transition for 'done' event sound trigger
   let rootCompleted = false;
   if (data.type === 'done' && data.agent_instances) {
@@ -1912,7 +1918,7 @@ function handleServerMessage(data) {
           }
         }, THROTTLE.AUTO_SECURITY_SYNC_DEBOUNCE);
       }
-  
+
       // Telemetry: update panel with session telemetry from server
       if (data.telemetry) {
         updateTelemetryPanel(data.telemetry);
@@ -1920,26 +1926,26 @@ function handleServerMessage(data) {
 
       if (data.api_router) {
         if (!state.api_router) state.api_router = { endpoints: [], agent_priorities: {} };
-        
+
         // Prevent overwriting local state and stealing focus if the user is actively editing
         const epList = document.getElementById('api-endpoints-list');
         const assignList = document.getElementById('agent-api-assignments');
-        
+
         const isEditingEndpoints = epList && epList.contains(document.activeElement);
         const isEditingAssignments = assignList && assignList.contains(document.activeElement);
-        
+
         if (!isEditingEndpoints) {
           state.api_router.endpoints = data.api_router.endpoints || [];
           renderApiEndpoints();
         }
-        
+
         if (!isEditingAssignments) {
           // Client-side deduplication: normalize agent_priorities to prevent duplicate keys
           // from case mismatches between frontend (PascalCase) and backend (lowercase)
           const rawPriorities = data.api_router.agent_priorities || {};
           const normalizedPriorities = {};
           const seenLower = new Set();
-          
+
           for (const [key, value] of Object.entries(rawPriorities)) {
             if (!key) continue;
             const keyLower = key.toLowerCase();
@@ -1948,14 +1954,14 @@ function handleServerMessage(data) {
               seenLower.add(keyLower);
             }
           }
-          
+
           // Only update if we actually removed duplicates
           if (Object.keys(normalizedPriorities).length !== Object.keys(rawPriorities).length) {
-            console.log('[WebSocket] Normalized agent_priorities:', 
-              Object.keys(rawPriorities).length, '→', 
+            console.log('[WebSocket] Normalized agent_priorities:',
+              Object.keys(rawPriorities).length, '→',
               Object.keys(normalizedPriorities).length, 'keys');
           }
-          
+
           state.api_router.agent_priorities = normalizedPriorities;
           renderAgentApiAssignments();
         }
@@ -1963,14 +1969,14 @@ function handleServerMessage(data) {
 
       // Sync pool settings from server state to UI elements
       syncPoolSettings(data.pool_settings);
-      
+
       // After syncing pool settings, render agent select if this was the first load
       // (so server's disabled_tools are applied before initializing UI)
       if (state._firstAgentLoad) {
         state._firstAgentLoad = false;
         renderAgentSelect();
       }
-      
+
       if (data.current_model && statusModel) {
         statusModel.textContent = data.current_model;
       }
@@ -2026,15 +2032,15 @@ function handleServerMessage(data) {
         const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
         updateGenStats(activeMsgs, true);
         state.genStats.active = false;
-        
+
         // Invalidate activity preview cache so next turn computes fresh preview
         delete state._lastActivityPreviewKey;
         delete state._lastActivityPreview;
-        
+
         // Refresh telemetry config comparison after turn ends
         fetchTelemetry();
       }
-      
+
 
       break;
 
@@ -2042,16 +2048,20 @@ function handleServerMessage(data) {
       // Only block stream updates when the ACTIVE agent itself is halted
       const activeName = getActiveAgentName();
       if (state.subAgents[activeName]?.is_halted) break;
-      
+
       let completionDetected = false;
-      
+
       const oldStackStr = (state.activeStack || []).join(',');
       // Track changes to decide render urgency:
       //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render).
       //     All agents (including root) contribute via the unified agent_instances loop.
 
       let subAgentNewVisibleMessage = false;
-      
+      // D1: true when the LAST message of the VISIBLE agent grew in this frame. Drives a
+      // dedicated smooth render cadence (RENDER_STREAM_SMOOTH_MS) so on-screen streaming content
+      // paints at a predictable ~100ms rhythm instead of the coarse adaptive throttle.
+      let visibleContentGrowing = false;
+
             // All agents (including root) flow through agent_instances — no special root path
       if (data.agent_instances) {
         for (const [name, sa] of Object.entries(data.agent_instances)) {
@@ -2059,17 +2069,26 @@ function handleServerMessage(data) {
           const prevMsgCount = existing ? existing.messages.length : 0;
           const wasActive = existing ? Boolean(existing.active) : false;
           const isNowActive = Boolean(sa.active);
-          
+
+          // D1: capture the pre-frame length of the VISIBLE agent's last message so we can tell
+          // whether it grew in this frame (drives the smooth render cadence). Only the visible
+          // agent matters — hidden panels stay on the coarse adaptive throttle.
+          let prevLastMsgLen = 0;
+          if (state.activeSubTab === 'sub-' + name && existing && existing.messages.length > 0) {
+            const _prevLast = existing.messages[existing.messages.length - 1];
+            prevLastMsgLen = (_prevLast.content || '').length + (_prevLast.reasoning_content || '').length;
+          }
+
                          // Completion detected when agent goes inactive AND is not on the active execution stack
                          // This prevents premature completion during race conditions or tool handoffs
                          if (wasActive && !isNowActive && state.activeStack.indexOf(name) === -1) {
             completionDetected = true;
           }
-          
+
           if (sa.is_partial) {
             if (existing && existing.messages) {
               const hCount = sa.history_count || 0;
-              
+
                // If we're in resync-pending state (a delta splice was skipped), skip this agent.
                // Delta splices are unsafe until a force_full snapshot re-establishes the baseline.
                // Full frames (non-partial) replace the entire object below, clearing _needsResync.
@@ -2159,13 +2178,13 @@ function handleServerMessage(data) {
           // NOT from `existing` which still points to the OLD object after replacement.
             state.subAgents[name] = { ...sa, _lastHistoryCount: sa.history_count || 0 };
           }
-          
+
           // Detect changes to decide render urgency:
           //   - New messages (message count grew or brand new agent) → force immediate render if visible
           //   - Any state change (including streaming content growth with same message count) → use flat ~200ms throttle
           const newMsgCount = state.subAgents[name]?.messages?.length ?? (sa.messages ? sa.messages.length : 0);
           const hasNewMessage = newMsgCount > prevMsgCount || !prevMsgCount;
-          
+
           if (hasNewMessage) {
             // Only force-render new bubbles for panels that are actually visible —
             // avoid wasting DOM work on hidden panels.
@@ -2173,11 +2192,20 @@ function handleServerMessage(data) {
               subAgentNewVisibleMessage = true;
             }
           }
+
+          // D1: the visible agent's last message grew in this frame → request a smooth-cadence render.
+          if (state.activeSubTab === 'sub-' + name && !hasNewMessage) {
+            const _curLast = state.subAgents[name]?.messages?.at(-1);
+            if (_curLast) {
+              const curLastMsgLen = (_curLast.content || '').length + (_curLast.reasoning_content || '').length;
+              if (curLastMsgLen > prevLastMsgLen) visibleContentGrowing = true;
+            }
+          }
       }
       // Remove agents that no longer exist on the server (e.g., dismissed agents)
       cleanupStaleSubAgents(data, state);
       }  // end if (data.agent_instances)
-      
+
       // Feed activity bar — happens on EVERY stream_update tick, before throttling
       const activeInstance = ActivityBar.getFilterInstance();
       const instanceData = state.subAgents[activeInstance];
@@ -2230,7 +2258,7 @@ function handleServerMessage(data) {
       // blocks the engine and no stream_update frames flow.
 
              const now = performance.now();
-      
+
       // Approvals require immediate rendering (user must see these promptly)
       // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
       if ('approvals' in data && Array.isArray(data.approvals)) {
@@ -2251,30 +2279,34 @@ function handleServerMessage(data) {
       // Adaptive: if last render took long, increase throttle to avoid stacking renders.
       const lastRenderDur = Math.max(0, state.genStats.lastSubAgentRenderDuration || 0);
       const subThrottleContent = Math.min(THROTTLE.RENDER_ROOT_MAX_MS, THROTTLE.RENDER_BASE_MS + Math.round(lastRenderDur * 0.5));
-      
+
       // Force render on: completion detected, stack change, new visible message bubble,
-      // or when the adaptive rendering throttle interval has elapsed. Content streaming within
-      // an existing bubble is governed by subThrottleContent to prevent DOM/markdown parsing overload.
-      const shouldRender = completionDetected || 
-                           stackChanged || 
-                           subAgentNewVisibleMessage || 
-                           (now - state.genStats.lastSubAgentRender > subThrottleContent);
+      // or when the rendering throttle interval has elapsed. Content streaming within an existing
+      // bubble is governed by subThrottleContent to prevent DOM/markdown parsing overload — EXCEPT
+      // for VISIBLE growing content, which uses a dedicated smooth cadence (RENDER_STREAM_SMOOTH_MS)
+      // so on-screen streaming paints at a predictable ~100ms rhythm (the "periodic refresh" the
+      // user perceives). Hidden agents and non-growing frames keep the coarse adaptive throttle.
+      const renderThrottle = visibleContentGrowing ? THROTTLE.RENDER_STREAM_SMOOTH_MS : subThrottleContent;
+      const shouldRender = completionDetected ||
+                           stackChanged ||
+                           subAgentNewVisibleMessage ||
+                           (now - state.genStats.lastSubAgentRender > renderThrottle);
       if (shouldRender) {
               // Measure render duration for adaptive throttling; reset timer AFTER to avoid stacking
               const renderStart = now;
-      
+
         // Check if Auto Agent Tab Focus is enabled (default: true if setting not found or checked)
         const autoTabFocusEnabled = !settingAutoTabFocus || settingAutoTabFocus.checked;
-        
+
         // Only call renderSubAgents if we're NOT about to call switchMainTab,
         // since switchMainTab calls renderSubAgents internally at the end.
         // This avoids redundant rendering when stackChanged triggers a tab switch.
         const willSwitchTab = autoTabFocusEnabled && stackChanged && (
-          (state.activeStack.length > 0 && state.subAgents?.[state.activeStack[state.activeStack.length - 1]] && 
+          (state.activeStack.length > 0 && state.subAgents?.[state.activeStack[state.activeStack.length - 1]] &&
            state.activeSubTab !== 'sub-' + state.activeStack[state.activeStack.length - 1]) ||
           (state.activeStack.length === 0 && state.activeSubTab !== getAgentTabId(state.sessionName))
         );
-        
+
         if (!willSwitchTab) {
           renderSubAgents();
           // Reset timer to ACTUAL post-render time so elapsed calculation includes render duration.
@@ -2290,7 +2322,7 @@ function handleServerMessage(data) {
           state.genStats.lastSubAgentRender = performance.now();
           state.genStats.lastSubAgentRenderDuration = 0;
         }
-        
+
         // Auto-switch tabs only when enabled and stack changed
         if (autoTabFocusEnabled && stackChanged) {
             if (state.activeStack.length > 0) {
@@ -2308,7 +2340,7 @@ function handleServerMessage(data) {
             }
           }
       }
-        
+
       // Throttle gen stats to ~2Hz instead of ~6.5Hz. The token/sec display is
       // approximate anyway, so updating twice per second is visually indistinguishable
       // from the original frequency.
@@ -2331,7 +2363,7 @@ function handleServerMessage(data) {
 
     case 'security_response': {
       const { request_id, response, verdict, reason } = data;
-      
+
       // Check if this approval still exists in state.approvals. If not, it was already
       // processed/approved (e.g., user toggled Auto-Security off during processing and
       // manually approved). Skip storing stale security response data.
@@ -2517,7 +2549,7 @@ function checkAfkAutoReply() {
     const now = Date.now();
     const timeSinceLastAfk = now - lastAfkTime;
     const cooldown = 5 * 60 * 1000; // 5 minutes
-    
+
     if (timeSinceLastAfk >= cooldown || lastAfkTime === 0) {
       // Send immediately (after a small delay to ensure UI updates)
       setTimeout(() => {
@@ -2540,7 +2572,7 @@ function triggerAfkSend() {
   lastAfkTime = Date.now();
   const msg = (settingAfkMessage && settingAfkMessage.value.trim()) ? settingAfkMessage.value.trim() : 'User is AFK, continue working on given task or polish/verify your work if there are things to improve...';
   if (state.generating) return;
-  
+
   chatInput.value = msg;
   autoResize(chatInput);
   sendMessage();
@@ -2577,7 +2609,7 @@ function roleName(role, msg, instanceName) {
     // Unified labels: "You" for user everywhere, agent name for assistant, "Tool Result" everywhere
     if (role === 'user') return 'You';
     if (role === 'tool' || role === 'function') return 'Tool Result';
-    
+
     // Assistant: show agent name from msg.name if available, then instanceName, then fallback
     if (msg.name) return msg.name;
     if (instanceName) return instanceName;  // Root also gets its instance name displayed now
@@ -2592,7 +2624,7 @@ function getAgentConfig(name) {
 /**
  * Render a complete agent conversation as a DOM document fragment.
  * This is the unified rendering entry point — all agents (including root) go through this.
- * 
+ *
  * @param {string} instanceName - agent name (e.g., "Maine" for root, "coder" for sub-agent)
  * @param {Array}  messages     - array of message objects
  * @param {number} depth        - nesting level (0=root, 1=direct sub-agent, etc.)
@@ -2606,7 +2638,7 @@ function renderAgentConversation(instanceName, messages, depth, indexMap, render
 
     // All agents use the same config path — no special handling needed
     let config = getAgentConfig(instanceName);
-    
+
     // Merge any render options (e.g., isGenerating from agentData.active)
     if (renderOpts) {
         config = Object.assign({}, config, renderOpts);
@@ -2629,7 +2661,7 @@ function renderAgentConversation(instanceName, messages, depth, indexMap, render
             fragment.appendChild(placeholderEl);
             continue;
         }
-        
+
         // Use original index from indexMap if provided, otherwise use the loop index
         const origIndex = indexMap ? indexMap[i] : i;
         const el = createMessageEl(msg, origIndex, config);
@@ -2763,21 +2795,21 @@ function createMessageEl(msg, index, config) {
   const div = document.createElement('div');
   div.className = msgClass(msg.role || 'unknown');
   div.dataset.index = index;
-  
+
   // All agents get data-instance-name for per-agent accent color styling
   if (config.instanceName) {
       div.dataset.instanceName = config.instanceName;
   }
 
   const isEditable = !msg.function_call && msg.role !== 'function' && msg.role !== 'system';
-  
+
   // Extract instanceName from config for edit/delete operations (all agents now have one)
   const instName = config.instanceName || null;
 
   // Header
   const header = document.createElement('div');
   header.className = headerClass();
-  
+
   // Left group: name + inline meta stay together on the left; actions are pushed right by the flex header.
   const nameGroup = document.createElement('span');
   nameGroup.className = 'msg-name-group';
@@ -2814,7 +2846,7 @@ function createMessageEl(msg, index, config) {
 
   // Double click edit
   div.addEventListener('dblclick', (e) => {
-    const isAgentGenerating = instName 
+    const isAgentGenerating = instName
       ? (state.subAgents[instName]?.active ?? state.generating)
       : state.generating;
     if (isAgentGenerating || !isEditable) return;
@@ -2868,7 +2900,7 @@ function createMessageEl(msg, index, config) {
   }
 
   contentDiv.innerHTML = html;
-  
+
   // FIX 3: Apply decoding="async" to all images to avoid blocking main thread during decode
   contentDiv.querySelectorAll('img').forEach(img => {
       if (!img.decoding || img.decoding === 'sync') img.decoding = 'async';
@@ -2884,7 +2916,7 @@ function createMessageEl(msg, index, config) {
     const tc = contentDiv.querySelector('.thinking-content');
     if (tc) div._cachedThinkingContentHtml = tc.innerHTML;
   }
-  
+
   div.appendChild(contentDiv);
 
   // Per-message meta line (char count + real completion timestamp). Called unconditionally
@@ -3040,7 +3072,7 @@ function createAgentMessageEl(msg) {
   const contentDiv = document.createElement('div');
   contentDiv.className = 'msg-content';
   contentDiv.innerHTML = renderMarkdown(msg.message || '', false);
-  
+
   // Apply decoding="async" to all images (same optimization as regular messages)
   contentDiv.querySelectorAll('img').forEach(img => {
     if (!img.decoding || img.decoding === 'sync') img.decoding = 'async';
@@ -3069,11 +3101,11 @@ function formatTimestamp(ts) {
 
 /**
  * Updates the content of a message bubble with INCREMENTAL rendering support.
- * 
+ *
  * PERFORMANCE: During streaming, only renders the delta (new text appended)
  * instead of re-rendering the entire message. This avoids O(N) marked.parse()
  * on every tick when N is large (thousands of words).
- * 
+ *
  * Strategy:
  * - If curContent.startsWith(prevContent): content grew incrementally → render only delta and append
  * - Otherwise: full re-render (edit, delete, or structural change)
@@ -3082,7 +3114,7 @@ function formatTimestamp(ts) {
 /**
  * Attempt to append delta text into the last leaf element of a .msg-content div,
  * using insertAdjacentText (main branch approach - O(1) raw text append).
- * 
+ *
  * @param {HTMLElement} container - The .msg-content or .sub-msg-content div
  * @param {string} newText - The delta text to append
  * @returns {boolean} true if appended successfully, false if caller should fall back to full re-render
@@ -3115,7 +3147,7 @@ function updateBubbleContent(bubble, msg, config) {
     if (!config) config = getAgentConfig(state.sessionName);
 
     if (!msg) return;
-    
+
     const contentDiv = bubble.querySelector('.' + contentClass());
     if (!contentDiv) return;
 
@@ -3133,12 +3165,20 @@ function updateBubbleContent(bubble, msg, config) {
         bubble._incrementCount = 0;
     }
 
+    // D2: track whether the live thinkingDiv has received a raw insertAdjacentText append since
+    // its last full re-render. When set, _cachedThinkingContentHtml / thinkingDiv.innerHTML hold
+    // RAW (unformatted) text and must NOT be reused as "markdown" — they must be re-parsed via
+    // renderMarkdown. Cleared by the full re-render path below (it replaces innerHTML with parsed HTML).
+    if (!isGenerating) {
+        bubble._thinkingRawAppended = false;
+    }
+
     if (prevContent === curContent && prevReasoning === curReasoning && bubble._wasGenerating === isGenerating) {
         // Content unchanged, but the meta line may need to appear/disappear when the toggle flips
         applyMsgMeta(bubble, msg);
         return; // Nothing changed
     }
-    
+
     bubble._prevContent = curContent;
     bubble._prevReasoning = curReasoning;
     bubble._wasGenerating = isGenerating;
@@ -3154,11 +3194,23 @@ function updateBubbleContent(bubble, msg, config) {
             const thinkingDiv = bubble._thinkingDiv;
             if (thinkingDiv) {
                 try {
-                    thinkingDiv.insertAdjacentText('beforeend', newReasoning);
-                    // Keep cache in sync so transition to content or periodic drift correction never has a cache miss!
-                    bubble._cachedReasoning = curReasoning;
-                    bubble._cachedThinkingContentHtml = thinkingDiv.innerHTML;
-                    return; // Success - O(1) text append
+                    // D2 drift correction: the raw insertAdjacentText append leaves streamed markdown
+                    // unformatted. Mirror fast path 2's counter and force a full re-render every N
+                    // reasoning ticks so long thinking phases periodically re-parse via renderMarkdown.
+                    const reasonIncrement = bubble._reasoningIncrementCount !== undefined ? bubble._reasoningIncrementCount : 0;
+                    if (reasonIncrement + 1 >= REASONING_DRIFT_INTERVAL) {
+                        bubble._reasoningIncrementCount = 0; // reset; fall through to full re-render below
+                    } else {
+                        thinkingDiv.insertAdjacentText('beforeend', newReasoning);
+                        bubble._reasoningIncrementCount = reasonIncrement + 1;
+                        // Keep cache in sync so transition to content never has a cache miss. The cached
+                        // HTML is RAW (raw-appended) — flagged via _thinkingRawAppended so the full re-render
+                        // path re-parses it instead of reusing innerHTML as markdown.
+                        bubble._cachedReasoning = curReasoning;
+                        bubble._cachedThinkingContentHtml = thinkingDiv.innerHTML;
+                        bubble._thinkingRawAppended = true;
+                        return; // Success - O(1) text append
+                    }
                 } catch(e) {
                     console.warn('Incremental reasoning append failed, falling back to full render:', e);
                 }
@@ -3212,27 +3264,26 @@ function updateBubbleContent(bubble, msg, config) {
 
     let html = '';
     if (msg.reasoning_content) {
-        // Cache parsed thinking markdown HTML to avoid re-parsing massive 20k token strings on content ticks
-        if (bubble._cachedReasoning && bubble._cachedReasoning.length === msg.reasoning_content.length && bubble._cachedReasoning === msg.reasoning_content && bubble._cachedThinkingContentHtml) {
-            const isOpen = isGenerating;
-            html += `
-    <details class="thinking-block" ${isOpen ? 'open' : ''}>
-      <summary>💭 Thinking...</summary>
-      <div class="thinking-content">${bubble._cachedThinkingContentHtml}</div>
-    </details>
-  `;
+        // D3: label reflects completion state — "Thinking…" while generating/open, "Thought" when done.
+        const thinkingLabel = isGenerating ? '💭 Thinking…' : '💭 Thought';
+        const isOpen = isGenerating;
+        // D2a/D2c: the cached HTML may hold RAW (raw-appended) text if fast path 1 appended to the live
+        // thinkingDiv. It is only safe to reuse when it came from renderMarkdown output AND the message
+        // is still generating (a perf win mid-stream). When !isGenerating (message complete) we ALWAYS
+        // re-run renderMarkdown so completed reasoning is guaranteed properly formatted — never reuse a
+        // possibly-raw cache at turn end. Same rule for a live thinkingDiv that has received raw appends.
+        const cacheIsClean = bubble._cachedReasoning === msg.reasoning_content && !!bubble._cachedThinkingContentHtml;
+        const canReuseCache = isGenerating && cacheIsClean && !bubble._thinkingRawAppended;
+        let thinkingContentHtml;
+        if (canReuseCache) {
+            thinkingContentHtml = bubble._cachedThinkingContentHtml;
         } else {
-            // Cache miss: if thinkingDiv is live and has content, reuse its innerHTML to avoid 20k-token markdown parsing
-            let thinkingContentHtml = '';
-            if (bubble._thinkingDiv && bubble._thinkingDiv.innerHTML) {
-                thinkingContentHtml = bubble._thinkingDiv.innerHTML;
-            } else {
-                thinkingContentHtml = renderMarkdown(msg.reasoning_content);
-            }
-            bubble._cachedReasoning = msg.reasoning_content;
-            bubble._cachedThinkingContentHtml = thinkingContentHtml;
-            html += `<details class="thinking-block" ${isGenerating ? 'open' : ''}><summary>💭 Thinking...</summary><div class="thinking-content">${thinkingContentHtml}</div></details>`;
+            // Re-parse from the raw source text so the output is always markdown-formatted.
+            thinkingContentHtml = renderMarkdown(msg.reasoning_content);
         }
+        bubble._cachedReasoning = msg.reasoning_content;
+        bubble._cachedThinkingContentHtml = thinkingContentHtml;
+        html += `<details class="thinking-block" ${isOpen ? 'open' : ''}><summary>${thinkingLabel}</summary><div class="thinking-content">${thinkingContentHtml}</div></details>`;
     }
 
     if (msg.function_call) {
@@ -3245,7 +3296,7 @@ function updateBubbleContent(bubble, msg, config) {
         // Full parsing (allowThinking=true) is only needed on final renders when streaming stops.
         html += renderMarkdown(getDisplayedText(msg), false);
     }
-    
+
     // Preserve <details> open/close state and code block scroll positions during innerHTML replacement
     const details = contentDiv.querySelectorAll('details');
     const detailStates = Array.from(details).map(d => d.open);
@@ -3264,6 +3315,10 @@ function updateBubbleContent(bubble, msg, config) {
     // re-queried on the next fast-path tick (stale references would point at detached nodes).
     bubble._thinkingDiv = null;
     bubble._hasImages = undefined;
+    // D2: the new .thinking-content was built from renderMarkdown output (or a clean cache), so it
+    // no longer holds raw-appended text. Reset the drift counter too — this re-render just reformatted.
+    bubble._thinkingRawAppended = false;
+    bubble._reasoningIncrementCount = 0;
 
     // Restore cached images (preserves decoded bitmaps) and apply decoding="async"
     if (restoreImages) restoreImages(contentDiv);
@@ -3278,10 +3333,11 @@ function updateBubbleContent(bubble, msg, config) {
         if (i < codeScrollPositions.length) cb.scrollTop = codeScrollPositions[i].scrollTop;
     });
 
-    // Full re-render path: refresh the meta line only when the message is complete. During
-    // streaming we skip it (the per-tick call was removed) so the meta/char-count is computed
-    // at bubble end, not every stream tick. The meta element already exists from creation
-    // (createMessageEl calls applyMsgMeta unconditionally), so a blank slot shows until then.
+    // D4: the meta line (char count / timestamp) is COMPLETION-ONLY BY DESIGN. It is refreshed here
+    // only when the message is complete (!isGenerating). During streaming it is intentionally NOT
+    // updated on incremental ticks — the char count stays at its birth value until the bubble commits,
+    // so we avoid recomputing getMessageTextLength() every stream tick. The meta element already exists
+    // from creation (createMessageEl calls applyMsgMeta unconditionally), so a blank slot shows until then.
     if (!isGenerating) {
         applyMsgMeta(bubble, msg);
     }
@@ -3290,7 +3346,7 @@ function updateBubbleContent(bubble, msg, config) {
 function renderMarkdown(text, allowThinking = true) {
   if (!text || !text.trim()) return '';
 
-  // PERFORMANCE OPTIMIZATION: Only perform expensive thinking-block parsing 
+  // PERFORMANCE OPTIMIZATION: Only perform expensive thinking-block parsing
   // on final messages or if specifically requested. During streaming, we skip
   // O(N^2) regex work to keep the UI responsive.
   if (!allowThinking) {
@@ -3417,8 +3473,8 @@ function isToolFailure(msg) {
     const stripped = line.trim();
     if (stripped) { firstLine = stripped.toLowerCase(); break; }
   }
-  return firstLine.startsWith('error:') || 
-         firstLine.startsWith('failed:') || 
+  return firstLine.startsWith('error:') ||
+         firstLine.startsWith('failed:') ||
          firstLine.startsWith('invalid:') ||
          firstLine.startsWith('permission denied:') ||
          firstLine.includes('rejected by user:') ||
@@ -3437,7 +3493,7 @@ function renderToolResult(msg) {
   // Some tools return prose/markdown (web_extractor, ddg_search, calculate) that should be formatted.
   // Others return code-like output (code_interpreter, read_file, shell_cmd, grep, list_dir, write_file) that should stay in <pre><code>.
   const isCodeTool = ['code_interpreter', 'read_file', 'shell_cmd', 'grep', 'list_dir', 'write_file'].includes(msg.name);
-  
+
   let contentHtml;
   if (msg.name === 'view_image' || content.match(/!\[.*?\]\(.*?\)/)) {
     // Image content: process through markdown to render images, rewriting local paths via backend proxy
@@ -3469,9 +3525,11 @@ function renderToolResult(msg) {
 }
 
 function renderThinkingBlock(thought, isOpen) {
+  // D3: label reflects completion state — "Thinking…" while generating/open, "Thought" when done.
+  const label = isOpen ? '💭 Thinking…' : '💭 Thought';
   return `
     <details class="thinking-block" ${isOpen ? 'open' : ''}>
-      <summary>💭 Thinking...</summary>
+      <summary>${label}</summary>
       <div class="thinking-content">${renderMarkdown(thought)}</div>
     </details>
   `;
@@ -3480,7 +3538,7 @@ function renderThinkingBlock(thought, isOpen) {
     /**
      * Show a message in the system toast bar at the top of the chat area.
      * Used for errors, warnings, and notifications that don't belong in the main conversation flow.
-     * 
+     *
      * @param {string} text - The message text to display (supports markdown via renderMarkdown)
      */
     function showInSystemToastBar(text) {
@@ -3549,7 +3607,7 @@ function startEdit(index, selectedText = '', proportion = 0, instanceName = null
   const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
   const msg = msgs[index];
   // Check if the specific agent is generating, not just the global root state
-  const isAgentGenerating = instanceName 
+  const isAgentGenerating = instanceName
     ? (state.subAgents[instanceName]?.active ?? state.generating)
     : state.generating;
   if (!msg || msg.function_call || msg.role === 'function' || isAgentGenerating) return;
@@ -3680,10 +3738,10 @@ function finishEdit(index, newContent, instanceName = null) {
     state.editingIndex = null;
     state.editingInstance = null;
   }
-  
+
   const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
   if (msgs[index]) msgs[index].content = newContent; // Optimistic update
-  
+
   send({ type: 'edit_message', index, content: newContent, instance_name: instanceName });
 
   // Localized re-render — all agents use panelSub-{name} now
@@ -3790,9 +3848,9 @@ function renderApprovals() {
   // Auto-security check (Auto-Ask) takes priority — always check before skipping render
   if (state.autoSecurity) {
     const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id));
-    
+
     // FIX 3: Only process ONE approval at a time to prevent multiple simultaneous security checks
-    // After the first check completes and backend broadcasts updated approvals, 
+    // After the first check completes and backend broadcasts updated approvals,
     // renderApprovals() will be called again and pick up the next pending approval automatically.
     if (pending.length > 0) {
       const ap = pending[0];  // Process only the first pending approval
@@ -3800,7 +3858,7 @@ function renderApprovals() {
       send({ type: 'ask_security', request_id: ap.request_id, auto_apply: true });
       console.debug(`[AUTO-ASK] Triggering security check for ${ap.request_id} (1 of ${pending.length} pending)`);
     }
-    
+
     // Don't clear approvals immediately - keep them in case user toggles Auto-Ask off.
     // They will be cleared by the backend when it broadcasts updated approvals after auto-applying.
     bar.style.display = 'none';
@@ -3809,14 +3867,14 @@ function renderApprovals() {
 
   // Auto-reject if AFK is enabled (and auto-security is OFF)
   if (afkToggle && afkToggle.checked) {
-    const reason = (settingAfkMessage && settingAfkMessage.value.trim()) 
+    const reason = (settingAfkMessage && settingAfkMessage.value.trim())
       ? `Auto-rejected (AFK): ${settingAfkMessage.value.trim()}`
       : 'Auto-rejected (AFK mode active)';
-    
+
     const pending = [...state.approvals];
     state.approvals = [];
     bar.style.display = 'none';
-    
+
     pending.forEach(ap => {
       send({ type: 'reject', request_id: ap.request_id, reason: reason, automated: true });
     });
@@ -3834,7 +3892,7 @@ function renderApprovals() {
 
   bar.style.display = 'block';
   bar.innerHTML = '';
-  
+
   // Scroll approval bar into view if it's off-screen (happens with many agent tabs)
   requestAnimationFrame(() => {
     bar.scrollIntoView({ behavior: 'instant', block: 'start' });
@@ -4022,7 +4080,7 @@ function initAgentMessagesTab() {
 
 function renderSubAgents() {
   const t0 = performance.now();
-  
+
   // Preserve chat input focus and cursor position during DOM manipulation.
   // renderSubAgents rebuilds message panels which can steal focus from #chatInput,
   // causing the caret to jump while typing or during streaming.
@@ -4035,7 +4093,7 @@ function renderSubAgents() {
   }
 
   const sa = state.subAgents;
-  
+
   // Build agent list from subAgents, filtered by closedTabs.
   // All agents are equal — no root-first sorting needed.
   const namesArr = Object.keys(sa).filter(name => !state.closedTabs.has('sub-' + name));
@@ -4109,7 +4167,7 @@ function renderSubAgents() {
       const isStreaming = agentData?.is_partial ?? false;
       const agentState = (agentData?.agent_state || 'idle').toLowerCase();
       const shouldShowDot = !['idle', 'terminated'].includes(agentState);
-      
+
       // Only update icon innerHTML when active state or streaming status actually changes to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
       const prevStreaming = tabBtn.dataset.isStreaming === 'true';
@@ -4125,7 +4183,7 @@ function renderSubAgents() {
       tabBtn.dataset.isActive = String(shouldShowDot);
       tabBtn.dataset.isStreaming = String(isStreaming);
     }
-    
+
     // Update agent state class for colored activity indicator (needed for CSS selectors)
     const agentStateForClass = agentData?.agent_state || 'idle';
     const prevStateClass = tabBtn.dataset.agentState;
@@ -4137,7 +4195,7 @@ function renderSubAgents() {
       tabBtn.classList.add(stateClass);
       tabBtn.dataset.agentState = agentStateForClass;
     }
-    
+
     const labelSpan = tabBtn.querySelector('.tab-label');
     if (labelSpan && labelSpan.textContent !== ` ${name}`) {
       labelSpan.textContent = ` ${name}`;
@@ -4211,7 +4269,7 @@ function renderSubAgents() {
 
     ActivityBar.setActiveTab(tabId);
   }
-  
+
   // Diagnostic: warn on slow renders
   const renderMs = performance.now() - t0;
   if (renderMs > THROTTLE.RENDER_DIAG_THRESHOLD_MS) {
@@ -4222,15 +4280,15 @@ function renderSubAgents() {
 function renderSubAgentPanel(panel, agentData, name) {
   const isVisible = state.activeSubTab === 'sub-' + name;
   const msgs = (agentData && agentData.messages) ? agentData.messages : [];
-  
+
   // Agent-specific active state only — no global fallback (prevents cross-agent pulsing)
   const isActive = agentData?.active ?? false;
-  
+
   // Unified token/word counts: use agent-level stats if available, fall back to global
   const tokCount = agentData?.total_tokens ?? state.totalTokens;
   const wordCount = agentData?.total_words ?? state.totalWords;
   const maxTok = agentData?.max_tokens ?? state.maxTokens;
-  
+
   // Pool mirror: show ALL messages including system prompt — no filtering
   const displayMsgs = msgs;
   const lastMsg = displayMsgs.length > 0 ? displayMsgs[displayMsgs.length - 1] : null;
@@ -4249,7 +4307,7 @@ function renderSubAgentPanel(panel, agentData, name) {
 
   // Initialize scroll lock state and attach listener (if not already done)
   initSubAgentScrollLock(name, scrollContainer);
-  
+
   // Update global activity bar if this is the active visible tab
   if (isVisible) {
     ActivityBar.render();
@@ -4282,14 +4340,14 @@ function renderSubAgentPanel(panel, agentData, name) {
   const funcCallLen = lastMsg?.function_call?.arguments ? (lastMsg.function_call.arguments + '').length : 0;
   // Agent-specific active flag only — no global fallback (prevents cross-agent pulsing)
   const activeFlag = agentData?.active ?? false;
-  
+
   // Include token count in contentKey so status bar updates even when text length is unchanged.
   // During tool execution pauses, text doesn't grow but tokens do — without this the render skips.
   const tokPart = (typeof tokCount === 'number' && !isNaN(tokCount)) ? tokCount : '0';
-  
+
   // Include streaming state in contentKey so bubble UI (waiting animation, token count) updates even when content dims match
   const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0') + ':' + tokPart;
-  
+
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
     // Nothing changed — skip scrollHeight read and all DOM updates.
     // BUT during active streaming, force at least one render per throttle cycle to catch
@@ -4315,7 +4373,7 @@ function renderSubAgentPanel(panel, agentData, name) {
     const subConfig = getAgentConfig(name);
     subConfig.isGenerating = isActive;
     scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
-    
+
     // Show a loading placeholder when agent is active but has no messages yet
     if (currentCount === 0 && isActive) {
       const loadingDiv = document.createElement('div');
@@ -4324,7 +4382,7 @@ function renderSubAgentPanel(panel, agentData, name) {
       loadingDiv.innerHTML = '<div class="msg-content">⏳ Initializing…</div>';
       scrollContainer.appendChild(loadingDiv);
     }
-    
+
     // Update context bar with unified token counts
     updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, tokCount, maxTok);
   } else {
@@ -4338,7 +4396,7 @@ function renderSubAgentPanel(panel, agentData, name) {
       const subConfig = getAgentConfig(name);
       subConfig.isGenerating = isActive;
       scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
-      
+
       // Show a loading placeholder when agent is active but has no messages yet
       if (currentCount === 0 && isActive) {
         const loadingDiv = document.createElement('div');
@@ -4347,7 +4405,7 @@ function renderSubAgentPanel(panel, agentData, name) {
         loadingDiv.innerHTML = '<div class="msg-content">⏳ Initializing…</div>';
         scrollContainer.appendChild(loadingDiv);
       }
-      
+
       // Update context bar since we just did a full re-render
       updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, tokCount, maxTok);
     } else {
@@ -4360,13 +4418,13 @@ function renderSubAgentPanel(panel, agentData, name) {
         }
       }
 
-      // Feature Plan #021: Before adding new messages, ensure the PREVIOUS last message 
+      // Feature Plan #021: Before adding new messages, ensure the PREVIOUS last message
       // gets one final full render to ensure it's fully formatted (e.g. reasoning block finished).
       if (currentCount > lastCount && scrollContainer.lastElementChild) {
         const subConfig = getAgentConfig(name);
         // The previous message is by definition not the "actively generating" one anymore
         // if a new message has arrived.
-        subConfig.isGenerating = false; 
+        subConfig.isGenerating = false;
         updateBubbleContent(scrollContainer.lastElementChild, displayMsgs[lastCount - 1], subConfig);
       }
 
@@ -4442,17 +4500,17 @@ function switchMainTab(tabId) {
 
   // Update panels — all tabs use the same dynamic panel system now
   mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => p.classList.remove('active'));
-  
+
   const name = tabId.startsWith('sub-') ? tabId.slice(4) : tabId; // strip 'sub-' prefix (works for root too: sub-Maine → Maine)
   const panel = document.getElementById('panelSub-' + name);
   if (panel) {
     panel.classList.add('active');
     scrollPanelToBottom(panel, name, false);
   }
-  
+
   state.activeSubTab = tabId;
   ActivityBar.setActiveTab(tabId);
-  
+
   // Invalidate target panel's content key cache to force a full re-render.
   // Without this, if the agent didn't receive new messages while hidden,
   // the content key matches and ALL rendering is skipped (including activity bar
@@ -4462,12 +4520,12 @@ function switchMainTab(tabId) {
     delete panel.dataset.contentKey;
     delete panel.dataset.lastRenderedCount;
   }
-  
+
   // Reset throttle timer so the new tab renders immediately
   state.genStats.lastSubAgentRender = 0;
-  
+
   renderSubAgents();
-  
+
   // Ensure active class is set on tab and panel after renderSubAgents()
   // (When switching to a brand-new agent, the tab/panel didn't exist when
   // we tried to add 'active' above — re-apply now that they've been created.)
@@ -4633,7 +4691,7 @@ document.querySelectorAll('.settings-sub-tab-btn').forEach(btn => {
 
 function updateControls() {
   const isGenerating = state.generating;
-  
+
   // Only do destructive innerHTML/body classList changes when generating state actually changes
   if (state._lastIsGenerating !== isGenerating) {
     if (isGenerating) {
@@ -4735,7 +4793,7 @@ function updateControls() {
     const isInstanceActive = activeAgentData?.active ?? state.generating;
     terminateBtn.style.display = isInstanceActive ? 'inline-flex' : 'none';
   }
-  
+
   chatInput.placeholder = state.generating
     ? 'Inject a message into the active agent...'
     : 'Send a message...';
@@ -4801,7 +4859,7 @@ function estimateTokens(text) {
 function formatTokenCount(count) {
   // Defensive: handle negative or NaN values
   if (count < 0 || isNaN(count)) count = 0;
-  
+
   if (count >= 1000000) {
     return (count / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
   } else if (count >= 1000) {
@@ -4828,7 +4886,7 @@ function updateContextBar(barEl, msgs, overrideTokens, overrideMax) {
 
   const pct = Math.min(100, Math.max(0, (tokens / maxContext) * 100));
   barEl.style.width = pct + '%';
-  
+
   // Update tooltip with full numeric values
   barEl.title = `${tokens} / ${maxContext} tokens`;
 
@@ -4909,7 +4967,7 @@ function updateGenStats(msgs, isFinal = false) {
   // Extremely lightweight token calculation: only look at new messages in this turn
   // and use basic length division (O(1) string length reads) instead of regex
   let currentGenLength = 0;
-  
+
   // 1. Main Agent Tokens
   const startIdx = state.genStats.startMsgCount || 0;
   for (let i = startIdx; i < msgs.length; i++) {
@@ -4943,7 +5001,7 @@ function updateGenStats(msgs, isFinal = false) {
 
   const currentGenTokens = Math.ceil(currentGenLength / 3.5);
   const now = performance.now();
-  
+
   if (currentGenTokens > state.genStats.tokenCount) {
     if (state.genStats.firstTokenTime === 0) {
       state.genStats.firstTokenTime = now;
@@ -4959,12 +5017,12 @@ function updateGenStats(msgs, isFinal = false) {
   }
 
   const totalTime = (now - state.genStats.startTime) / 1000;
-  
+
   if (state.genStats.firstTokenTime > 0) {
     const activeGenTimeSec = state.genStats.activeGenTime / 1000;
     const tps = activeGenTimeSec > 0 ? state.genStats.tokenCount / activeGenTimeSec : 0;
     statusTokensSec.textContent = `${tps.toFixed(1)} t/s`;
-    
+
     const ttft = (state.genStats.firstTokenTime - state.genStats.startTime) / 1000;
     if (isFinal) {
       statusGenInfo.textContent = `${state.genStats.tokenCount} tokens in ${totalTime.toFixed(1)}s (TPS: ${tps.toFixed(1)}, TTFT: ${ttft.toFixed(2)}s)`;
@@ -5045,7 +5103,7 @@ function insertImageMarkdown(base64Data, filename) {
   const endPos = chatInput.selectionEnd;
   const text = chatInput.value;
   chatInput.value = text.substring(0, startPos) + markdown + text.substring(endPos);
-  
+
   // Resize first, then set selection — setting height='auto' can shift layout
   // and invalidate caret position if we set selection before resize.
   autoResize(chatInput);
@@ -5317,16 +5375,16 @@ if (inputArea) {
  */
 function proxyLocalImagePaths(text) {
     if (typeof text !== 'string') return text;
-    
+
     // Strategy: match ![alt](url) and rewrite the URL portion based on its type
     return text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
         // Already proxied or external — leave as-is
-        if (url.startsWith('/api/') || url.startsWith('/media/') || 
-            url.startsWith('http://') || url.startsWith('https://') || 
+        if (url.startsWith('/api/') || url.startsWith('/media/') ||
+            url.startsWith('http://') || url.startsWith('https://') ||
             url.startsWith('data:')) {
             return match;
         }
-        
+
         // file:// URI → extract path, proxy it
         let filePath = url;
         if (url.startsWith('file:///')) {
@@ -5334,17 +5392,17 @@ function proxyLocalImagePaths(text) {
         } else if (url.startsWith('file://')) {
             filePath = url.slice(7);
         }
-        
+
         // Windows absolute path: N:/... or N:\...
         if (/^[A-Za-z]:[\\/]/.test(filePath)) {
             return `![${alt}](/api/file?path=${encodeURIComponent(filePath)})`;
         }
-        
+
         // POSIX absolute path: /workspace/..., /logs/..., etc. (but not relative like ./foo)
         if (/^\//.test(filePath) && !filePath.startsWith('/.')) {
             return `![${alt}](/api/file?path=${encodeURIComponent(filePath)})`;
         }
-        
+
         // Unknown format — leave as-is to avoid breaking things
         return match;
     });
@@ -5357,7 +5415,7 @@ if (stopBtn) stopBtn.addEventListener('click', () => send({ type: 'stop' }));
 function createPauseButton(btn, instanceSource) {
   // instanceSource: a function returning the instance name (e.g. () => sessionNameInput.value)
   if (!btn || typeof instanceSource !== 'function') return;
-  
+
   btn.addEventListener('click', async () => {
     const sessionName = instanceSource();
     if (btn.textContent.includes('Pause')) {
@@ -6010,7 +6068,7 @@ function renderApiEndpoints() {
   if (!listEl) return;
 
   const endpoints = (state.api_router && state.api_router.endpoints) ? state.api_router.endpoints : [];
-  
+
   if (endpoints.length === 0) {
     listEl.innerHTML = `
       <div class="api-endpoint-empty" style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
@@ -6046,7 +6104,7 @@ function renderApiEndpoints() {
                <button class="api-endpoint-move-up" ${isFirst ? 'disabled style="opacity:0.2"' : ''} title="Move Up">▲</button>
                <button class="api-endpoint-move-down" ${isLast ? 'disabled style="opacity:0.2"' : ''} title="Move Down">▼</button>
              </div>
-             
+
              <button class="api-endpoint-expand ${isOpen ? 'open' : ''}">▸</button>
            </div>
 
@@ -6090,7 +6148,7 @@ function renderApiEndpoints() {
                  <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm || 0}" title="Requests per minute. 0 = unlimited">
                </label>
              </div>
-             
+
              <!-- Per-endpoint feature toggles -->
              <label class="setting-field toggle-field" style="margin:8px 0 0 0;font-size:12px;cursor:pointer;">
                <span>👁 Vision Enabled</span>
@@ -6387,10 +6445,10 @@ function handleApiEndpointRangeInput(e) {
 function renderAgentApiAssignments() {
   const container = document.getElementById('agent-api-assignments');
   if (!container) return;
-  
+
   const endpoints = (state.api_router && state.api_router.endpoints) ? state.api_router.endpoints : [];
   const priorities = (state.api_router && state.api_router.agent_priorities) ? state.api_router.agent_priorities : {};
-  
+
   // Show placeholder when agents haven't loaded yet (no endpoints to assign anyway)
   if (endpoints.length === 0) {
     container.innerHTML = `
@@ -6408,7 +6466,7 @@ function renderAgentApiAssignments() {
       if (!typeToName[type]) typeToName[type] = a.name;
     });
   }
-  
+
   const agentTypes = Object.keys(typeToName);
   // Ensure orchestrator and coder are always in the list even if missing
   if (!agentTypes.includes('orchestrator')) {
@@ -6442,7 +6500,7 @@ function renderAgentApiAssignments() {
     const assignedIds = priorities[type] || [];
     const availableEndpoints = endpoints.filter(ep => !assignedIds.includes(ep.id));
     const friendlyName = typeToName[type] || (type.charAt(0).toUpperCase() + type.slice(1));
-    
+
     let addSelectHtml = '';
     if (availableEndpoints.length > 0) {
       addSelectHtml = `
@@ -6501,7 +6559,7 @@ function renderAgentApiAssignments() {
     // List actions
     block.querySelectorAll('.agent-api-priority-item').forEach(item => {
       const id = item.querySelector('.agent-api-remove').dataset.id;
-      
+
       item.querySelector('.agent-api-remove').addEventListener('click', () => {
         priorities[type] = priorities[type].filter(eid => eid !== id);
         if (priorities[type].length === 0) delete priorities[type];
@@ -6743,7 +6801,7 @@ if (btnAddEndpoint) {
     e.stopPropagation(); // Prevent the settings section from collapsing
     if (!state.api_router) state.api_router = { endpoints: [], agent_priorities: {} };
     if (!state.api_router.endpoints) state.api_router.endpoints = [];
-    
+
     // Add a new blank endpoint with defaults matching backend dataclass
     state.api_router.endpoints.push({
       id: crypto.randomUUID(),
@@ -6756,7 +6814,7 @@ if (btnAddEndpoint) {
       rate_limit_rpm: 0,
       reasoning_effort: 'none'
     });
-    
+
     sendApiRouterUpdate();
   });
 }

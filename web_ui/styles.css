@@ -933,7 +933,7 @@ body {
   display: none;
 }
 
-/* We need to reverse the order in HTML or use flex-direction: row-reverse if we want resizer BEFORE side-panel in DOM but AFTER in flow? 
+/* We need to reverse the order in HTML or use flex-direction: row-reverse if we want resizer BEFORE side-panel in DOM but AFTER in flow?
    Actually, with flex-direction: row, it's Sidebar -> Main -> Resizer -> SidePanel.
    In index.html I put Resizer BEFORE SidePanel, so it will be between Main and SidePanel. Perfect.
 */
@@ -1412,7 +1412,7 @@ body {
   word-break: break-word;
 }
 
-/* Markdown-rendered tool results (prose tools like web_extractor, ddg_search) 
+/* Markdown-rendered tool results (prose tools like web_extractor, ddg_search)
    — scoped to .tool-rendered-content wrapper so they don't affect code-tool <pre><code> */
 .tool-result .tool-rendered-content p {
   margin: 0 0 8px;
@@ -1521,6 +1521,9 @@ body {
   font-size: 13px;
   color: var(--text-secondary);
   border-top: 1px solid var(--thinking-border);
+  /* D5: cap the box so long reasoning doesn't grow it without bound (mirrors streaming_demo.html). */
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 /* ─── Editing ─────────────────────────────────────────────────────────────── */
