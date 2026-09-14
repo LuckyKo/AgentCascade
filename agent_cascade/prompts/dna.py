@@ -67,16 +67,14 @@ AVAILABLE_TOOLS: List[str] = [
 # --- XML Transport Settings ---
 # Fields that should be placed in XML tags instead of inside JSON strings.
 XML_CONTENT_FIELDS: Set[str] = {
-    'content', 
-    'old_content', 
-    'new_content', 
-    'old_string', 
-    'new_string', 
-    'full_content', 
-    'code', 
+    # Legacy-only: used only by the nous fncall path (llm/fncall_prompts/nous_fncall_prompt.py).
+    # Entries must match live tool parameter names — remove any that no longer exist.
+    'content',
+    'old_content',
+    'new_content',
+    'code',
     'command',
-    'justification',
-    'summary'
+    'justification'
 }
 
 # Minimum length for a field value to be emitted as XML instead of JSON.
@@ -199,6 +197,14 @@ KNOWLEDGE_SNIPPET_EN = """## The content from {source}:
 KNOWLEDGE_SNIPPET = {'zh': KNOWLEDGE_SNIPPET_ZH, 'en': KNOWLEDGE_SNIPPET_EN}
 
 # --- Tool Descriptions & Metadata ---
+# Two parameter formats coexist in this dict:
+#   1. Simple-string ('name': 'desc') — description-only; the emitted JSON Schema
+#      infers a string schema type for it. Tools that need integer/boolean types
+#      declare those locally in their own tool class (e.g. tools/custom/file_ops.py),
+#      which is why most consumers pull only the description text from here.
+#      Do NOT convert these to structured dicts — 12+ consumers read them as strings.
+#   2. Structured-dict ('name': {'type':..., 'description':...}) — passed through as-is
+#      (used by call_agent / dismiss_agent / load_skill).
 TOOL_METADATA = {
     'read_file': {
         'description': (
@@ -221,9 +227,7 @@ TOOL_METADATA = {
             'or capture screen/window content. Returns the image for the model to see. '
             'Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. '
             'An http(s) image URL is downloaded to the media folder and shown like a local image. '
-            'Special paths: "__screen_capture" captures all monitors combined; '
-            '"__screen_capture:N" captures physical monitor N by 0-based index (0=first monitor, 1=second, etc.); '
-            '"__window_capture:PID" captures a specific window by process ID. '
+            'Supports special paths for screen/window capture — see \'path\' param for details. '
             'Use crop_region to view a specific area of large images in more detail.'
         ),
         'parameters': {
@@ -347,7 +351,7 @@ TOOL_METADATA = {
             'Use for quick snippets; for longer code, write .py files via file tools and import them here. '
             'To reach host services, use "host.docker.internal" instead of "localhost". '
             'Windows-style extra-workspace paths are auto-translated to container paths (disable with fix_paths=false). '
-            'Use system_info to find exact path mappings for extra workspaces.'
+            'Use system_info to find exact path mappings for extra workspaces. '
             'Missing packages can be installed as the container will be reused in follow up queries.'
         ),
         'parameters': {
@@ -360,7 +364,7 @@ TOOL_METADATA = {
         'description': (
             'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval.\n\n'
             '**WARNING:** DO NOT use shell_cmd with file redirects, pipes or filters.\n\n'
-            '**Execution mode:** "auto" (default) = background if timeout>60s, else blocking; "sync" = always blocking; "async" = always background. '
+            '**Execution mode:** auto/sync/async — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
         ),
         'parameters': {
@@ -380,7 +384,7 @@ TOOL_METADATA = {
             'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
             'Python version, and basic session stats. '
             'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
-            'Optionally pass `help="<section>"` to fetch a targeted section of AgentCascade system knowledge (e.g. REST API reference) instead of normal system info; valid sections are listed in the error you get if you pass an unknown value. Use `help="telemetry"` for a live dump of current session telemetry.'
+            "Pass 'help' to fetch a specific AgentCascade documentation section instead of system info."
         ),
         'parameters': {
             'help': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g., 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
@@ -479,7 +483,7 @@ TOOL_METADATA = {
             },
             'context': {
                 'type': 'string',
-                'description': 'Optional background context for the agent instance, usefull for auto skill allocator to match relevant skills.'
+                'description': 'Optional background context for the agent instance, useful for the auto skill allocator to match relevant skills.'
             },
             'log_file': {
                 'type': 'string',

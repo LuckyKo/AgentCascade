@@ -101,6 +101,7 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
             t = CodeMap()
             tools_to_register[tool_name] = (t, True, False)
         elif tool_name == 'forget_last':
+            # Hidden tool: registered here but intentionally excluded from AVAILABLE_TOOLS in dna.py.
             t = ForgetLast()
             tools_to_register[tool_name] = (t, True, True)
         elif tool_name == 'code_interpreter':
