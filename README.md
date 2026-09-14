@@ -75,6 +75,13 @@ For example, a coder agent might prioritize a local model for speed, with a clou
    - For document analysis: `pip install agent-cascade[rag]`
    - For code execution: `pip install agent-cascade[code_interpreter]`
    - For MCP support: `pip install agent-cascade[mcp]`
+4. (Contributors, optional) Install the version auto-bump hook so the patch
+   version in `agent_cascade/__init__.py` increments on every commit:
+    ```bash
+    python scripts/install_version_hook.py
+    ```
+   The hook lives in `.git/hooks` (not versioned), so run this once after each
+   fresh clone. Safe to skip — it only affects the version number, not functionality.
 
 ### Basic Usage
 
@@ -91,11 +98,11 @@ For example, a coder agent might prioritize a local model for speed, with a clou
    python start_api_server.py
    ```
    By default, the server listens on port **12345**. To use a custom port: `python start_api_server.py --port <PORT>`
-   
+
    To enable automatic security checks for all tool calls, add `--auto_security`:
-   
+
 3. Interact: Open the Web UI at `http://localhost:12345` (or your configured port) to send your first request. The lead orchestrator will automatically begin building the agent tree to solve your task.
-   
+
 ### Programmatic Usage
 
 You can interact with AgentCascade programmatically via WebSocket or REST endpoints.
