@@ -19,27 +19,20 @@ import os
 import shutil
 import sys
 
-# Hand-authored ASCII wordmark. Kept to a modest width so it fits common terminals.
+# ASCII wordmark "AgentCascade" — generated with pyfiglet (font='standard') and
+# hand-verified to render legibly. Each line is exactly 65 columns wide. Kept as a
+# plain list so the splash has no third-party runtime dependency on pyfiglet.
 _ART = [
-    r'     _          _  __   ____   ',
-    r'    | |__   ___| |/ /  / __ \  ',
-    r"    | '_ \ / _ \ ' /  | |  | | ",
-    r'    | |_) |  __/ . \  | |__| | ',
-    r'    |_.__/ \___/_/\_\  \____/  ',
+    '    _                    _    ____                        _      ',
+    '   / \\   __ _  ___ _ __ | |_ / ___|__ _ ___  ___ __ _  __| | ___ ',
+    "  / _ \\ / _` |/ _ \\ '_ \\| __| |   / _` / __|/ __/ _` |/ _` |/ _ \\",
+    ' / ___ \\ (_| |  __/ | | | |_| |__| (_| \\__ \\ (_| (_| | (_| |  __/',
+    '/_/   \\_\\__, |\\___|_| |_|\\__|\\____\\__,_|___/\\___\\__,_|\\__,_|\\___|',
+    '        |___/                                                    ',
 ]
 
-# The wordmark is "AgentCascade"; the art above spells "Agent". We append "Cascade"
-# on a second visual row to complete the name without making the art too tall.
-_ART_SUFFIX = [
-    r'   ____   _          __  __       ',
-    r'  / __ \ | |        |  \/  |      ',
-    r' | |  | || |  __ _  | \  / | ___  ',
-    r" | |__| || |_| '_ | | |\/| |/ _ \ ",
-    r'  \____/ |____/.___| |_||_|_\___/ ',
-]
-
-# Width of the widest art line (drives both the box width and the narrow check).
-_ART_WIDTH = max(len(line) for line in _ART + _ART_SUFFIX)
+# Width of the widest art line (drives the narrow-terminal check).
+_ART_WIDTH = max(len(line) for line in _ART)
 
 
 def _resolve_version(version):
@@ -86,8 +79,6 @@ def _banner_width(rows):
 def _build_banner(rows):
     """Build the full multi-line banner (art + info box). Caller handles output."""
     lines = list(_ART)
-    lines += ['']
-    lines += list(_ART_SUFFIX)
     lines.append('')
 
     inner_w = _inner_width(rows)
@@ -105,6 +96,25 @@ def _build_banner(rows):
     return '\n'.join(lines)
 
 
+def _terminal_stream():
+    """Return the real terminal stream to write the banner to, or None.
+
+    After ``init_logging()`` runs, ``sys.stdout`` is a capturing stream that BOTH logs
+    (with a timestamp prefix) AND echoes to the original stdout — so a multi-line banner
+    would appear twice on screen. To avoid that, we write directly to the underlying real
+    stream (``agent_cascade.log._original_stdout``) when it's available. Falls back to
+    ``sys.stdout`` (pre-logging or if the log module wasn't imported).
+    """
+    try:
+        from agent_cascade import log as _log_mod
+        original = getattr(_log_mod, '_original_stdout', None)
+        if original is not None:
+            return original
+    except Exception:  # noqa: BLE001 - logging not set up yet; use sys.stdout
+        pass
+    return sys.stdout
+
+
 def print_startup_banner(mode, port, host='127.0.0.1', version=None):
     """Print the startup banner. Never raises; degrades gracefully.
 
@@ -118,15 +128,25 @@ def print_startup_banner(mode, port, host='127.0.0.1', version=None):
         ver = _resolve_version(version)
         rows = _info_rows(mode, port, host, ver)
 
+        # Resolve the real terminal stream once (see _terminal_stream for why).
+        out = _terminal_stream()
+
+        def emit(text):
+            out.write(text + '\n')
+            try:
+                out.flush()
+            except Exception:  # noqa: BLE001 - broken pipe etc. is non-fatal
+                pass
+
         # Non-TTY (piped/CI) or explicit opt-out → compact one-liner only.
         non_tty = False
         try:
-            non_tty = not sys.stdout.isatty()
+            non_tty = not out.isatty()
         except Exception:  # noqa: BLE001 - isatty can raise on odd streams
             non_tty = True
 
         if os.getenv('AGENT_CASCADE_NO_BANNER') or non_tty:
-            print(_compact_line(mode, port, host, ver))
+            emit(_compact_line(mode, port, host, ver))
             return
 
         # Narrow terminal → compact one-liner (no art/box to avoid wrapping).
@@ -138,16 +158,17 @@ def print_startup_banner(mode, port, host='127.0.0.1', version=None):
         except Exception:  # noqa: BLE001
             cols = 80
         if cols < _banner_width(rows) + 2:
-            print(_compact_line(mode, port, host, ver))
+            emit(_compact_line(mode, port, host, ver))
             return
 
         banner = _build_banner(rows)
         # Blank line before/after for clean separation from surrounding logs.
-        print()
-        print(banner)
-        print()
+        emit('')
+        emit(banner)
+        emit('')
     except Exception:  # noqa: BLE001 - the splash must never block startup
         try:
-            print(f"AgentCascade v{_resolve_version(version)} [{mode}] starting...")
+            out.write(f"AgentCascade v{_resolve_version(version)} [{mode}] starting...\n")
+            out.flush()
         except Exception:  # noqa: BLE001 - absolute last resort
             pass

@@ -47,8 +47,13 @@ class _Size:
 
 
 def _capture(monkeypatch, tty=True, cols=120, env=None):
-    """Run print_startup_banner with a controlled stdout/width/env; return output string."""
+    """Run print_startup_banner with a controlled stdout/width/env; return output string.
+
+    Forces _terminal_stream() to return our fake so the test is independent of whether
+    agent_cascade.log has been initialized (which would otherwise redirect output).
+    """
     fake = _FakeStream(tty)
+    monkeypatch.setattr(splash_module, '_terminal_stream', lambda: fake)
     monkeypatch.setattr(splash_module.sys, 'stdout', fake, raising=False)
     monkeypatch.setattr(
         splash_module.shutil,
@@ -93,6 +98,7 @@ class TestExplicitVersion:
 
     def test_explicit_version_reflected(self, monkeypatch):
         fake = _FakeStream(True)
+        monkeypatch.setattr(splash_module, '_terminal_stream', lambda: fake)
         monkeypatch.setattr(splash_module.sys, 'stdout', fake, raising=False)
         monkeypatch.setattr(splash_module.shutil, 'get_terminal_size', lambda d=(80, 24): _Size(120))
         monkeypatch.delenv('AGENT_CASCADE_NO_BANNER', raising=False)
@@ -164,6 +170,7 @@ class TestRobustness:
     def test_bad_port_type_does_not_raise(self, monkeypatch):
         """Even a non-int port must not crash the splash (it's display-only)."""
         fake = _FakeStream(True)
+        monkeypatch.setattr(splash_module, '_terminal_stream', lambda: fake)
         monkeypatch.setattr(splash_module.sys, 'stdout', fake, raising=False)
         monkeypatch.setattr(splash_module.shutil, 'get_terminal_size', lambda d=(80, 24): _Size(120))
         monkeypatch.delenv('AGENT_CASCADE_NO_BANNER', raising=False)
