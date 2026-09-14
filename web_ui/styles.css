@@ -1521,9 +1521,6 @@ body {
   font-size: 13px;
   color: var(--text-secondary);
   border-top: 1px solid var(--thinking-border);
-  /* D5: cap the box so long reasoning doesn't grow it without bound (mirrors streaming_demo.html). */
-  max-height: 300px;
-  overflow-y: auto;
 }
 
 /* ─── Editing ─────────────────────────────────────────────────────────────── */
