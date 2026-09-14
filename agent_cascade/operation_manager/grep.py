@@ -279,7 +279,8 @@ class GrepMixin:
                                 else:
                                     line_num = line_num_data
 
-                                # Strip rg's trailing newline (see 'match' branch above).
+                                # Strip rg's trailing newline (same as 'match' branch above) —
+                                # would otherwise create blank lines between entries.
                                 match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
                                 normalized_path = file_path.replace('\\', '/')
                                 formatted.append(f"{normalized_path}:{line_num}:     {match_text}")
@@ -380,8 +381,7 @@ class GrepMixin:
 
         except subprocess.TimeoutExpired:
             logger.warning(
-                'grep subprocess timed out after %ss (pattern/scope too broad); returning error instead of falling back to Python',
-                timeout,
+                f"grep subprocess timed out after {timeout}s (pattern/scope too broad); returning error instead of falling back to Python"
             )
             return None, 0, True, False, 0, None
 

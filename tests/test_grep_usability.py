@@ -302,10 +302,7 @@ def test_grep_fast_path_truncation_surfaces_spillover():
     only exercises the subprocess fast path.
     """
     from agent_cascade.operation_manager import OperationManager
-    from agent_cascade.operation_manager.grep import _check_tool_availability
-    rg_available, grep_available = _check_tool_availability()
-    if not (rg_available or grep_available):
-        print('[SKIP] test_grep_fast_path_truncation_surfaces_spillover (no rg/grep available)')
+    if not _require_subprocess_grep('test_grep_fast_path_truncation_surfaces_spillover'):
         return
     with tempfile.TemporaryDirectory() as tmpdir:
         # 60 lines, each ~50 chars → well over the default char_limit of 2000.
@@ -320,8 +317,16 @@ def test_grep_fast_path_truncation_surfaces_spillover():
             f"Spillover path notice missing from fast-path grep response: {result[:400]}"
         assert 'logs/spillover/' in result, \
             f"Spillover file path not surfaced in fast-path grep response: {result[:400]}"
-        del rg_available, grep_available  # availability already checked above; keep flake8 quiet
         print('[PASS] test_grep_fast_path_truncation_surfaces_spillover')
+
+
+def _require_subprocess_grep(test_name):
+    """Return True if a subprocess grep tool (rg/grep) is available, else print a skip note."""
+    from agent_cascade.operation_manager.grep import _check_tool_availability
+    if any(_check_tool_availability()):
+        return True
+    print(f'[SKIP] {test_name} (no rg/grep available)')
+    return False
 
 
 def _body_after_summary(result):
@@ -346,10 +351,7 @@ def test_grep_fast_path_no_blank_lines_between_matches():
     exercises the subprocess fast path.
     """
     from agent_cascade.operation_manager import OperationManager
-    from agent_cascade.operation_manager.grep import _check_tool_availability
-    rg_available, grep_available = _check_tool_availability()
-    if not (rg_available or grep_available):
-        print('[SKIP] test_grep_fast_path_no_blank_lines_between_matches (no rg/grep available)')
+    if not _require_subprocess_grep('test_grep_fast_path_no_blank_lines_between_matches'):
         return
     with tempfile.TemporaryDirectory() as tmpdir:
         # Two matching lines (ZEBRA) far apart, in one file. The filler lines contain no
@@ -364,7 +366,6 @@ def test_grep_fast_path_no_blank_lines_between_matches():
             f"Blank line(s) present between match entries: {body!r}"
         assert not body.endswith('\n'), \
             f"Body has a dangling trailing newline after the last entry: {body!r}"
-        del rg_available, grep_available  # availability already checked above; keep flake8 quiet
         # Both matches are actually surfaced.
         for token in ('alpha', 'charlie'):
             assert token in body, f"Match '{token}' missing from output: {body!r}"
@@ -379,10 +380,7 @@ def test_grep_fast_path_context_no_blank_lines():
     affected by the old bug. Skips gracefully when no subprocess grep tool is available.
     """
     from agent_cascade.operation_manager import OperationManager
-    from agent_cascade.operation_manager.grep import _check_tool_availability
-    rg_available, grep_available = _check_tool_availability()
-    if not (rg_available or grep_available):
-        print('[SKIP] test_grep_fast_path_context_no_blank_lines (no rg/grep available)')
+    if not _require_subprocess_grep('test_grep_fast_path_context_no_blank_lines'):
         return
     with tempfile.TemporaryDirectory() as tmpdir:
         # Two matches (ZEBRA) far apart so their context windows do not merge. Filler lines
@@ -397,7 +395,6 @@ def test_grep_fast_path_context_no_blank_lines():
             f"Blank line(s) present between context-group entries: {body!r}"
         assert not body.endswith('\n'), \
             f"Body has a dangling trailing newline after the last entry: {body!r}"
-        del rg_available, grep_available  # availability already checked above; keep flake8 quiet
         # Each match is still prefixed with '>>>' (exactly two, one per match).
         match_lines = [ln for ln in body.splitlines() if '>>>' in ln]
         assert len(match_lines) == 2, f"Expected exactly 2 '>>>' match lines: {body!r}"
