@@ -5851,6 +5851,8 @@ function updateTelemetryPanel(telemetry) {
   set('telem-loops-outer', formatNumber(telemetry.loops_outer));
   set('telem-loops-inner', formatNumber(telemetry.loops_inner));
   set('telem-cache-hit-ratio', telemetry.llm_cache_hit_ratio != null ? (telemetry.llm_cache_hit_ratio * 100).toFixed(1) + '%' : '—');
+  // Coverage: share of LLM calls actually measured by the backend (authoritative cached_tokens).
+  set('telem-cache-measured', telemetry.llm_cache_classified_ratio != null ? (telemetry.llm_cache_classified_ratio * 100).toFixed(1) + '%' : '—');
 
   // Tool effectiveness table
   const toolTbody = document.getElementById('telem-tool-tbody');

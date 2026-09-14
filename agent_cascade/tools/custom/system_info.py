@@ -84,6 +84,22 @@ class SystemInfo(BaseTool):
                       'avg_tps', 'total_retries', 'total_compressions'):
                 if k in session:
                     lines.append(f"  {k}: {session[k]}")
+
+            # Prompt cache (RFC 9211) hit/miss stats — only when LLM calls exist.
+            if session.get('total_llm_calls', 0) > 0:
+                def _pct(v):
+                    return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else "n/a"
+                lines.append("  Prompt cache:")
+                lines.append(
+                    f"    hits={session.get('llm_cache_hits', 0)}  "
+                    f"misses={session.get('llm_cache_misses', 0)}  "
+                    f"unknown={session.get('llm_cache_unknown', 0)}"
+                )
+                lines.append(
+                    f"    hit_ratio={_pct(session.get('llm_cache_hit_ratio'))}   "
+                    f"measured={_pct(session.get('llm_cache_classified_ratio'))}"
+                )
+
             # llm_calls_by_model — per-model call counts
             by_model = session.get('llm_calls_by_model') or {}
             if by_model:

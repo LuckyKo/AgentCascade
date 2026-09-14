@@ -71,9 +71,15 @@ def _fire_usage_callback(usage_data: Optional[Dict]) -> None:
     try:
         pt = usage_data.get('prompt_tokens', 0)
         ct = usage_data.get('completion_tokens', 0)
-        details = (usage_data.get('completion_tokens_details') or 
-                   usage_data.get('prompt_tokens_details'))
-        _on_usage_cb(pt, ct, details)
+        # Merge both details dicts so telemetry ALWAYS sees cached_tokens (which lives only in
+        # prompt_tokens_details). Prompt wins on key conflicts, but the two dicts never share a key
+        # in practice: completion_tokens_details carries reasoning/tool/audio tokens while
+        # prompt_tokens_details carries cached/audio tokens. Starting from completion preserves its
+        # fields (e.g. reasoning_tokens) for backends that emit both; prompt fills in cached_tokens.
+        p = usage_data.get('prompt_tokens_details') or {}
+        c = usage_data.get('completion_tokens_details') or {}
+        merged = {**c, **p}
+        _on_usage_cb(pt, ct, merged if merged else None)
     except Exception as e:
         logger.debug("Telemetry usage callback failed: %s", e)  # Never break streaming
 

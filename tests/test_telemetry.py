@@ -318,6 +318,184 @@ class TestLLMCacheStatusEndpointAwareness:
         collector.record_llm_call_end("inst")
 
 
+class TestCacheClassificationFromUsage:
+    """Authoritative prompt-cache hit/miss from server-reported ``cached_tokens``.
+
+    The classification lives in the pure static helper ``classify_cache_hit`` and is
+    wired into ``record_token_usage`` (the usage-callback path). It supersedes the
+    TTFB-based ``Cache-Status`` header heuristic, which remains only as a fallback for
+    backends that don't report usage.
+    """
+
+    # ── Pure helper: boundary + unknown mapping ──────────────────────────────
+    def test_hit_when_cached_exceeds_floor(self):
+        # floor = max(1, int(0.05 * 1000)) = 50; 80 >= 50 → hit
+        assert TelemetryCollector.classify_cache_hit(80, 1000) == "hit"
+
+    def test_miss_when_cached_below_floor(self):
+        # floor = 50; 49 < 50 → miss (trivial overlap is not a hit)
+        assert TelemetryCollector.classify_cache_hit(49, 1000) == "miss"
+
+    def test_hit_at_exact_floor_boundary(self):
+        # cached == floor counts as a hit (>= comparison)
+        assert TelemetryCollector.classify_cache_hit(50, 1000) == "hit"
+
+    def test_min_floor_is_one_token(self):
+        # Small prompt: int(0.05 * 2) = 0 → floor clamps to 1; cached=1 → hit
+        assert TelemetryCollector.classify_cache_hit(1, 2) == "hit"
+        # cached=0 on a real prompt is always a miss
+        assert TelemetryCollector.classify_cache_hit(0, 2) == "miss"
+
+    def test_absent_cached_field_with_usage_is_miss(self):
+        # Usage present with a real prompt but no cached_tokens field → treated as 0
+        # (nothing served from cache) → miss. Only the absence of a usable prompt count
+        # is "unknown".
+        assert TelemetryCollector.classify_cache_hit(None, 1000) == "miss"
+
+    def test_unknown_when_no_prompt_reported(self):
+        # No prompt tokens → cannot classify meaningfully
+        assert TelemetryCollector.classify_cache_hit(50, 0) is None
+        assert TelemetryCollector.classify_cache_hit(50, None) is None
+
+    def test_bad_input_degrades_to_unknown_not_error(self):
+        # Must never raise on malformed values.
+        assert TelemetryCollector.classify_cache_hit("garbage", "also-bad") is None
+        assert TelemetryCollector.classify_cache_hit(None, "bad") is None
+
+    # ── Wired through record_token_usage into session counters ────────────────
+    def test_usage_hit_increments_hits_counter(self, collector):
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_token_usage(
+            "inst", prompt_tokens=1000, completion_tokens=5,
+            details={"cached_tokens": 80},
+        )
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 1
+        assert s["llm_cache_misses"] == 0
+        assert s["llm_cache_unknown"] == 0
+
+    def test_usage_miss_increments_misses_counter(self, collector):
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_token_usage(
+            "inst", prompt_tokens=1000, completion_tokens=5,
+            details={"cached_tokens": 0},
+        )
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_misses"] == 1
+        assert s["llm_cache_hits"] == 0
+
+    def test_usage_present_but_no_cached_field_is_miss(self, collector):
+        # Usage present (prompt_tokens > 0) but no cached_tokens → treated as 0 → miss.
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_token_usage(
+            "inst", prompt_tokens=1000, completion_tokens=5, details=None,
+        )
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 0
+        assert s["llm_cache_misses"] == 1
+        assert s["llm_cache_unknown"] == 0
+
+    def test_no_usage_at_all_is_not_classified(self, collector):
+        # Non-supporting backend: no usage callback fires at all → nothing classified.
+        # (record_token_usage is simply never called; the call ends with no cache info.)
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 0
+        assert s["llm_cache_misses"] == 0
+        assert s["llm_cache_unknown"] == 0
+
+    def test_usage_with_zero_prompt_tokens_is_not_classified(self, collector):
+        """Regression: classify_cache_hit returns None when prompt_tokens <= 0.
+
+        A usage object with no usable prompt count must NOT increment any counter —
+        in particular it must not fall into a spurious "miss" branch. (This guards the
+        exact bug where an unguarded else would inflate llm_cache_misses.)
+        """
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        # prompt_tokens=0 → classify returns None → no counter change.
+        collector.record_token_usage(
+            "inst", prompt_tokens=0, completion_tokens=5, details={"cached_tokens": 80},
+        )
+        assert "cache_classified" not in collector._active_llm_calls["inst"]
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 0
+        assert s["llm_cache_misses"] == 0
+        assert s["llm_cache_unknown"] == 0
+
+    # ── No double-counting when both a header and cached_tokens arrive ────────
+    def test_header_after_usage_does_not_double_count(self, collector):
+        """cached_tokens wins; a later Cache-Status header must not increment again.
+
+        In the real stream the header is read first (before the SSE body) but the usage
+        chunk lands before record_llm_call_end. Whichever order, at most ONE counter
+        increments per call. Here we exercise usage-first then header.
+        """
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        # Authoritative path classifies a hit and marks the call classified.
+        collector.record_token_usage(
+            "inst", prompt_tokens=1000, completion_tokens=5,
+            details={"cached_tokens": 80},
+        )
+        assert collector._active_llm_calls["inst"].get("cache_classified") is True
+        # Header arrives (would be a hit too) — must be audit-only, no second increment.
+        collector.record_llm_cache_status("inst", "llama; hit")
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 1  # exactly one, not two
+        assert s["llm_cache_misses"] == 0
+
+    def test_header_first_then_usage_still_single_count(self, collector):
+        """If the header fires first and classifies, the later usage must not re-count.
+
+        This is the actual runtime order (header read before SSE body). The header path
+        marks the call classified so the authoritative path also skips its increment —
+        guaranteeing at most one counter bump per call in either order.
+        """
+        collector.record_llm_call_start("inst", input_tokens_est=10, model="m")
+        collector.record_llm_cache_status("inst", "llama; hit")  # header → hits=1
+        assert collector._active_llm_calls["inst"].get("cache_classified") is True
+        collector.record_token_usage(
+            "inst", prompt_tokens=1000, completion_tokens=5,
+            details={"cached_tokens": 80},
+        )
+        collector.record_llm_call_end("inst")
+        s = collector.get_session_summary()
+        assert s["llm_cache_hits"] == 1  # not 2
+
+    def test_coverage_ratio_reflects_classified_share(self, collector):
+        """llm_cache_classified_ratio = (hits+misses)/total_llm_calls."""
+        # 4 calls: 1 hit (usage), 2 misses (usage / no cached field), 1 unmeasured
+        # (no usage callback at all — a non-supporting backend).
+        collector.record_llm_call_start("inst0", input_tokens_est=10, model="m")
+        collector.record_token_usage("inst0", 1000, 5, {"cached_tokens": 80})   # hit
+        collector.record_llm_call_end("inst0")
+
+        collector.record_llm_call_start("inst1", input_tokens_est=10, model="m")
+        collector.record_token_usage("inst1", 1000, 5, {"cached_tokens": 0})    # miss
+        collector.record_llm_call_end("inst1")
+
+        collector.record_llm_call_start("inst2", input_tokens_est=10, model="m")
+        collector.record_token_usage("inst2", 1000, 5, None)                    # miss (no cached field)
+        collector.record_llm_call_end("inst2")
+
+        collector.record_llm_call_start("inst3", input_tokens_est=10, model="m")
+        collector.record_llm_call_end("inst3")                                  # unmeasured (no usage)
+
+        s = collector.get_session_summary()
+        assert s["total_llm_calls"] == 4
+        assert s["llm_cache_hits"] == 1
+        assert s["llm_cache_misses"] == 2
+        assert s["llm_cache_classified_ratio"] == round(3 / 4, 3)
+
+    def test_coverage_ratio_none_when_no_llm_calls(self, collector):
+        assert collector.get_session_summary()["llm_cache_classified_ratio"] is None
+
+
 # ---------------------------------------------------------------------------
 # G. Tool call lifecycle
 # ---------------------------------------------------------------------------

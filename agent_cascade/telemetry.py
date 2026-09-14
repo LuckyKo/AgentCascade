@@ -368,6 +368,41 @@ class TelemetryCollector:
             if call and call["first_token_time"] == 0:
                 call["first_token_time"] = time.perf_counter()
 
+    @staticmethod
+    def classify_cache_hit(cached_tokens, prompt_tokens):
+        """Classify a single LLM call's prompt-cache outcome from server-reported data.
+
+        Uses the authoritative ``prompt_tokens_details.cached_tokens`` value that
+        llama.cpp (and compatible OpenAI backends) report in the usage object — the
+        exact number of prompt tokens served from the KV cache rather than reprocessed.
+        This replaces the old TTFB-based ``Cache-Status`` header heuristic.
+
+        Returns:
+            "hit"   — a non-trivial share of the prompt was cached.
+                      Floor: ``cached_tokens >= max(1, int(0.05 * prompt_tokens))`` so a
+                      1-token overlap on a large prompt is not counted as a hit.
+            "miss"  — usage present with a real prompt (prompt_tokens > 0) but no
+                      meaningful cached share: ``cached_tokens`` is 0, absent, or below
+                      the floor. (A backend that reports usage but omits the field means
+                      nothing was served from cache.)
+            None    — unknown: no usable prompt count (no usage / non-supporting backend).
+                      Callers treat this as "not measured".
+
+        Pure and total: never raises on bad input (bad values degrade to "miss").
+        """
+        try:
+            pt = int(prompt_tokens or 0)
+            if pt <= 0:
+                # No prompt reported — cannot meaningfully classify a cache outcome.
+                return None
+            ct = int(cached_tokens or 0)  # absent / None → treated as 0 (a miss)
+            floor = max(1, int(0.05 * pt))
+            if ct >= floor:
+                return "hit"
+            return "miss"
+        except (TypeError, ValueError):
+            return None
+
     def record_token_usage(
         self,
         instance_name: str,
@@ -390,11 +425,32 @@ class TelemetryCollector:
             # Update input_tokens_est with ground-truth value (was char-count estimate at call start)
             if prompt_tokens > 0:
                 call["input_tokens_est"] = prompt_tokens
-            
+
             # Store completion_tokens on the active call for use in record_llm_call_end
             call["completion_tokens"] = completion_tokens
             if details:
                 call["usage_details"] = details
+
+            # Authoritative cache hit/miss from server-reported cached_tokens.
+            # This is the primary classification path (llama.cpp / OpenAI usage object).
+            # It marks the call "cache_classified" so record_llm_cache_status() does not
+            # double-count when a Cache-Status header also arrives for the same call.
+            try:
+                # Skip if a Cache-Status header already classified this call (the header
+                # is read before the SSE body in the real stream, so it usually arrives first).
+                if not call.get("cache_classified"):
+                    cached = None
+                    if details and isinstance(details, dict):
+                        cached = details.get("cached_tokens")
+                    status = self.classify_cache_hit(cached, prompt_tokens)
+                    if status is not None:
+                        call["cache_classified"] = True
+                        if status == "hit":
+                            self._session_stats["llm_cache_hits"] += 1
+                        else:
+                            self._session_stats["llm_cache_misses"] += 1
+            except Exception as e:
+                _logger.debug("Cache classification from usage failed for %s: %s", instance_name, e)
 
     def record_llm_cache_status(self, instance_name: str, cache_status: str, force_unknown: bool = False):
         """Record RFC 9211 Cache-Status for the active LLM call. Thread-safe.
@@ -411,15 +467,24 @@ class TelemetryCollector:
             # Store on the active call so record_llm_call_end can include it in the event
             call["cache_status"] = cache_status
 
+            # If the authoritative cached_tokens path already classified this call, the
+            # header is only kept for audit — do NOT increment a counter a second time.
+            if call.get("cache_classified"):
+                return
+
             if force_unknown:
                 self._session_stats["llm_cache_unknown"] += 1
                 return
 
-            # Parse hit/miss for session-level counters
+            # Parse hit/miss for session-level counters. Mark the call classified so a
+            # later authoritative cached_tokens result (usage chunk lands after the
+            # header in the real stream) does not increment a counter a second time.
             if "; hit" in cache_status or cache_status.endswith("hit"):
                 self._session_stats["llm_cache_hits"] += 1
+                call["cache_classified"] = True
             elif "fwd=" in cache_status:
                 self._session_stats["llm_cache_misses"] += 1
+                call["cache_classified"] = True
             else:
                 self._session_stats["llm_cache_unknown"] += 1
 
@@ -775,9 +840,17 @@ class TelemetryCollector:
         non_agent_tool_calls = stats["total_tool_calls"] - call_agent_count
         avg_tool_latency = stats["total_tool_latency_ms"] / non_agent_tool_calls if non_agent_tool_calls > 0 else 0
 
-        # RFC 9211 prompt-cache hit ratio (unknowns excluded from the denominator)
+        # Prompt-cache hit ratio (unknowns excluded from the denominator).
+        # Derived from server-reported cached_tokens (authoritative) + header fallback.
         _cache_total = stats.get("llm_cache_hits", 0) + stats.get("llm_cache_misses", 0)
         llm_cache_hit_ratio = round(stats.get("llm_cache_hits", 0) / _cache_total, 3) if _cache_total > 0 else None
+
+        # Coverage: fraction of LLM calls that were actually classified (hit or miss).
+        # Low coverage means most traffic came from non-supporting backends (no usage),
+        # so the hit ratio above is based on a small sample. Exposed for the WebUI to
+        # display measurement confidence.
+        _total_llm = stats.get("total_llm_calls", 0)
+        llm_cache_classified_ratio = round(_cache_total / _total_llm, 3) if _total_llm > 0 else None
 
         # Tool success rates
         tool_success_rates = {}
@@ -823,6 +896,7 @@ class TelemetryCollector:
             "llm_cache_misses": stats.get("llm_cache_misses", 0),
             "llm_cache_unknown": stats.get("llm_cache_unknown", 0),
             "llm_cache_hit_ratio": llm_cache_hit_ratio,
+            "llm_cache_classified_ratio": llm_cache_classified_ratio,
         }
 
     def get_config_comparison(self) -> List[Dict]:

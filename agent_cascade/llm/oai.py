@@ -118,8 +118,41 @@ ALLOWED_LLM_PARAMS = {
     'timeout', 'request_timeout', 'api_base', 'api_key',
     # Standard OpenAI API param (o1/o3 reasoning models). Set per-endpoint via
     # the "Reasoning Effort" pulldown; backends that don't support it 400 → fatal.
-    'reasoning_effort'
+    'reasoning_effort',
+    # Streaming usage control — we inject this ourselves for our own backend to get
+    # authoritative prompt-cache telemetry (see _should_send_include_usage). Never set
+    # by callers; only added in _chat_stream when the target is a compatible backend.
+    'stream_options'
 }
+
+
+def _should_send_include_usage(api_base: Optional[str]) -> bool:
+    """Decide whether to request ``stream_options={"include_usage": True}`` on a stream.
+
+    llama.cpp's llama-server (and our autoloader forwarder) emit a final usage chunk —
+    including ``prompt_tokens_details.cached_tokens`` — only when this flag is set. We
+    want it for cache telemetry, but must NEVER send unknown params to arbitrary
+    third-party endpoints (some strict cloud proxies reject them).
+
+    Gating policy (explicit + safe):
+      - Env var ``AC_SEND_INCLUDE_USAGE`` wins: "1"/"true"/"yes" → on, "0"/"false"/"no" → off.
+      - Otherwise default ON only when the base_url host is loopback (127.0.0.1 /
+        localhost / ::1) — i.e. our local llama.cpp/autoloader. Anything else is left
+        untouched so non-supporting backends keep working unchanged.
+
+    Pure and total: any parse failure degrades to False (never send).
+    """
+    try:
+        flag = os.environ.get("AC_SEND_INCLUDE_USAGE")
+        if flag is not None:
+            return flag.strip().lower() in ("1", "true", "yes", "on")
+        if not api_base:
+            return False
+        from urllib.parse import urlparse
+        host = (urlparse(api_base).hostname or "").strip("[]").lower()
+        return host in ("127.0.0.1", "localhost", "::1")
+    except Exception:
+        return False
 
 
 def _extract_usage(usage_obj):
@@ -477,7 +510,16 @@ class TextChatAtOAI(BaseFnCallModel):
 
         # Strict Allowlist: Only pass parameters that the LLM API actually understands
         generate_cfg = {k: v for k, v in generate_cfg.items() if k in ALLOWED_LLM_PARAMS}
-        
+
+        # Request authoritative usage (incl. prompt_tokens_details.cached_tokens) so
+        # telemetry can classify prompt-cache hit/miss exactly instead of guessing from
+        # TTFB. Gated to our own backend only — never sent to third-party endpoints.
+        try:
+            if _should_send_include_usage(cur_base):
+                generate_cfg['stream_options'] = {"include_usage": True}
+        except Exception as e:
+            logger.debug("Failed to set stream_options include_usage: %s", e)
+
         if log_api_post:
             try:
                 import json, time

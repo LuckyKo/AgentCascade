@@ -133,6 +133,12 @@ class _FakeTelemetry:
             "total_retries": 1,
             "total_compressions": 0,
             "llm_calls_by_model": {"qwen3.8-27b": 5, "gemma-4-31b-it": 2},
+            # RFC 9211 prompt-cache counters + derived ratios (0..1).
+            "llm_cache_hits": 6,
+            "llm_cache_misses": 1,
+            "llm_cache_unknown": 0,
+            "llm_cache_hit_ratio": 0.857,
+            "llm_cache_classified_ratio": 1.0,
         }
 
     def get_config_comparison(self):
@@ -176,6 +182,11 @@ class TestSystemInfoTelemetryDump:
         # Session totals + per-model breakdown
         assert "total_llm_calls: 7" in out
         assert "qwen3.8-27b: 5" in out
+        # Prompt cache block (present because total_llm_calls > 0)
+        assert "Prompt cache:" in out
+        assert "hits=6  misses=1  unknown=0" in out
+        assert "hit_ratio=85.7%" in out
+        assert "measured=100.0%" in out
         # Config fingerprint A/B
         assert "abc123def456" in out
         assert "model=qwen3.8-27b" in out
@@ -227,3 +238,63 @@ class TestSystemInfoTelemetryDump:
                 return []
         out = self._tool_with(_Boom()).call('{"help": "telemetry"}')
         assert "unavailable" in out
+
+    def test_prompt_cache_block_present_when_llm_calls(self):
+        """Cache stats + total_llm_calls>0 -> block with % ratios."""
+        class _WithCache:
+            def get_session_summary(self):
+                return {
+                    "total_llm_calls": 4,
+                    "llm_cache_hits": 3,
+                    "llm_cache_misses": 1,
+                    "llm_cache_unknown": 0,
+                    "llm_cache_hit_ratio": 0.75,
+                    "llm_cache_classified_ratio": 0.5,
+                }
+            def get_config_comparison(self): return []
+            def get_agent_class_summary(self): return []
+            def get_skill_usage_summary(self): return []
+        out = self._tool_with(_WithCache()).call('{"help": "telemetry"}')
+        assert "Prompt cache:" in out
+        assert "hits=3  misses=1  unknown=0" in out
+        assert "hit_ratio=75.0%" in out
+        assert "measured=50.0%" in out
+
+    def test_prompt_cache_block_absent_when_no_llm_calls(self):
+        """total_llm_calls==0 -> block is NOT printed (no noise on fresh sessions)."""
+        class _NoCalls:
+            def get_session_summary(self):
+                return {
+                    "total_turns": 1,
+                    "total_llm_calls": 0,
+                    "llm_cache_hits": 0,
+                    "llm_cache_misses": 0,
+                    "llm_cache_unknown": 0,
+                    "llm_cache_hit_ratio": None,
+                    "llm_cache_classified_ratio": None,
+                }
+            def get_config_comparison(self): return []
+            def get_agent_class_summary(self): return []
+            def get_skill_usage_summary(self): return []
+        out = self._tool_with(_NoCalls()).call('{"help": "telemetry"}')
+        assert "Prompt cache:" not in out
+
+    def test_prompt_cache_none_ratios_render_na(self):
+        """Ratios None (but calls>0) -> 'n/a' instead of crashing."""
+        class _NoneRatio:
+            def get_session_summary(self):
+                return {
+                    "total_llm_calls": 2,
+                    "llm_cache_hits": 0,
+                    "llm_cache_misses": 0,
+                    "llm_cache_unknown": 2,
+                    "llm_cache_hit_ratio": None,
+                    "llm_cache_classified_ratio": None,
+                }
+            def get_config_comparison(self): return []
+            def get_agent_class_summary(self): return []
+            def get_skill_usage_summary(self): return []
+        out = self._tool_with(_NoneRatio()).call('{"help": "telemetry"}')
+        assert "Prompt cache:" in out
+        assert "hit_ratio=n/a" in out
+        assert "measured=n/a" in out
