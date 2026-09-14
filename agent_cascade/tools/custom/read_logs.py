@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.tool_utils import set_truncation_hints
 
 logger = logging.getLogger(__name__)
 
@@ -503,6 +504,8 @@ class ReadLogs(BaseTool):
                     line_text = json.dumps(item, ensure_ascii=False)
                 num_label = "meta" if pos == 0 else pos
                 result.append(f"{num_label}: {line_text}")
+            # Set hints so the outer safety-net footer reports entry counts, not rendered lines.
+            set_truncation_hints(total_lines=total, shown_lines=shown)
             return f"{header}\n" + "\n".join(result) + footer
 
         # simple mode: human-readable summary (using original entry positions)
@@ -512,4 +515,6 @@ class ReadLogs(BaseTool):
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)
+        # Set hints so the outer safety-net footer reports entry counts, not rendered lines.
+        set_truncation_hints(total_lines=total, shown_lines=shown)
         return f"{header}\n" + "\n".join(result) + footer

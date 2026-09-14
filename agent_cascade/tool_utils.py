@@ -264,9 +264,52 @@ def truncate_with_spillover(
 
     total_lines = total_lines_hint if total_lines_hint is not None else text.count('\n') + 1
     shown_lines = shown_lines_hint if shown_lines_hint is not None else truncated.count('\n') + 1
-    return (f"{truncated}\n\n"
-            f"[TRUNCATED — showing {shown_lines} of {total_lines} lines "
-            f"({original_len} chars total). Full output saved to: {rel_spill}]")
+    notice = format_truncation_notice(
+        shown_lines=shown_lines,
+        total_lines=total_lines,
+        total_chars=original_len,
+        spill_path=rel_spill,
+    )
+    return f"{truncated}\n\n{notice}"
+
+
+def format_truncation_notice(
+    shown_lines: Optional[int] = None,
+    total_lines: Optional[int] = None,
+    total_chars: Optional[int] = None,
+    spill_path: Optional[str] = None,
+) -> str:
+    """Build a standard truncation notice string.
+
+    Line-based format (when line counts provided):
+        [TRUNCATED — showing X of Y lines (Z chars total). Full output saved to: path]
+    Char-only format (when no line counts):
+        [TRUNCATED — Z chars total. Full output saved to: path]
+    No spillover (spill_path is None):
+        Omits the "Full output saved to" clause.
+
+    Args:
+        shown_lines: Number of lines shown (for line-based format).
+        total_lines: Total number of lines before truncation (for line-based format).
+        total_chars: Total character count before truncation.
+        spill_path: Relative path to the spillover file, or None.
+
+    Returns:
+        The formatted truncation notice string.
+    """
+    if shown_lines is not None and total_lines is not None:
+        msg = f"[TRUNCATED — showing {shown_lines} of {total_lines} lines"
+        if total_chars is not None:
+            msg += f" ({total_chars} chars total)"
+    elif total_chars is not None:
+        msg = f"[TRUNCATED — {total_chars} chars total"
+    else:
+        msg = "[TRUNCATED"
+
+    if spill_path:
+        msg += f". Full output saved to: {spill_path}"
+    msg += "]"
+    return msg
 
 
 def resolve_prev_arg_placeholders(

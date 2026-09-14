@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from agent_cascade.tool_utils import truncate_with_spillover
+from agent_cascade.tool_utils import truncate_with_spillover, format_truncation_notice
 
 # ─── Module-level cached helpers ──────────────────────────────────────────
 
@@ -582,9 +582,12 @@ class GrepMixin:
                         # spillover file with truncated content. Surface the captured path,
                         # matching the format read_file / the Python fallback produce.
                         if _sub_spill_rel:
-                            summary += (
-                                f" [TRUNCATED — showing {_sub_shown_lines} of {_sub_total_lines} lines "
-                                f"({_original_output_size} chars total). Full output saved to: {_sub_spill_rel}]")
+                            summary += ' ' + format_truncation_notice(
+                                shown_lines=_sub_shown_lines,
+                                total_lines=_sub_total_lines,
+                                total_chars=_original_output_size,
+                                spill_path=_sub_spill_rel,
+                            )
                         else:
                             summary += ' [TRUNCATED]'
                     else:

@@ -45,10 +45,7 @@ import jsonschema
 from agent_cascade.log import logger
 from agent_cascade.tools.base import BaseToolWithFileAccess, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.tool_utils import (
-    MAX_SPILL_SIZE,  # Consistent 50MB limit across all modules
-    generate_spillover_filename,  # Shared collision detection helper
-)
+from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.utils.utils import append_signal_handler, extract_code, has_chinese_chars, json_loads, print_traceback
 from agent_cascade.utils.code_path_resolver import resolve_code_paths, build_path_resolution_notice, set_active_mappings
 
@@ -66,9 +63,6 @@ CONTAINER_WATCHDOG_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT
 CONTAINER_MEMORY_LIMIT = os.getenv('M6_CODE_INTERPRETER_CONTAINER_MEMORY', '2g')
 CONTAINER_CPU_LIMIT = float(os.getenv('M6_CODE_INTERPRETER_CONTAINER_CPUS', '2.0'))
 CONTAINER_PID_LIMIT = int(os.getenv('M6_CODE_INTERPRETER_CONTAINER_PIDS', '100'))
-
-# Maximum size for spillover files (50MB) - uses MAX_SPILL_SIZE from tool_utils directly
-# This prevents disk exhaustion from massive code interpreter outputs
 
 LAUNCH_KERNEL_PY = """
 from ipykernel import kernelapp as app
@@ -1137,34 +1131,20 @@ class CodeInterpreter(BaseToolWithFileAccess):
             result = f'{result}\n\n{path_notice}'
 
         if char_limit != -1 and len(result) > char_limit:
-            # Save full result to spill file (use work_dir from config for correct path resolution)
-            log_dir = Path(self.work_dir) / 'logs' / 'spillover'
-            log_dir.mkdir(parents=True, exist_ok=True)
-            
             instance_name = kwargs.get('agent_instance_name', 'unknown')
-            
-            # Cap output to prevent disk exhaustion from massive code interpreter outputs
-            if len(result) > MAX_SPILL_SIZE:
-                result_copy = result[:MAX_SPILL_SIZE] + "\n\n[TRUNCATED — exceeded maximum size]"
-            else:
-                result_copy = result
-            
-            # Use shared generate_spillover_filename helper for collision detection with counter cap < 1000
-            spill_filename = generate_spillover_filename(instance_name, 'code_interpreter', log_dir)
-            spill_path = log_dir / spill_filename
-            
-            try:
-                spill_path.write_text(result_copy, encoding='utf-8')
-                rel_spill = str(spill_path)
-                if agent_pool and agent_pool.operation_manager:
-                    try:
-                        rel_spill = str(spill_path.relative_to(agent_pool.operation_manager.base_dir))
-                    except ValueError:
-                        pass
-            except Exception as e:
-                rel_spill = f"ERROR SAVING SPILL: {e}"
+            base_dir = Path(self.work_dir)
+            # Use agent_pool's base_dir for correct relative path resolution if available
+            if agent_pool and agent_pool.operation_manager:
+                base_dir = agent_pool.operation_manager.base_dir
 
-            result = result[:char_limit] + f"\n\n[TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
+            result = truncate_with_spillover(
+                result,
+                char_limit=char_limit,
+                instance_name=instance_name,
+                tool_name='code_interpreter',
+                base_dir=base_dir,
+                operation_mode='head',
+            )
 
         return result
 
