@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = '0.1.26'
+__version__ = '0.1.27'
 
 # Lazy imports to avoid circular dependency deadlocks when importing submodules
 # (e.g., 'from agent_cascade.instance_id import get_instance_id').
