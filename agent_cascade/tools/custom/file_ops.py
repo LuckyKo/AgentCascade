@@ -69,6 +69,7 @@ _gtk_common_paths = [
 DEFAULT_READ_LINES = DEFAULT_READ_FILE_MAX_LINES  # From settings (default: 150)
 MAX_LINE_LIMIT_EXPLICIT = 100000  # Max lines when user explicitly sets a limit
 HEX_DUMP_BYTES = 1024  # Bytes to show in hex view for binary files
+MAX_SINGLE_LINE_CHARS = 100_000  # Per-line memory guard: truncate pathological lines >100KB
 
 # list_dir default output truncation limit (chars) before spillover is applied.
 DEFAULT_LIST_DIR_CHAR_LIMIT = 3000
@@ -199,6 +200,10 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
                 stripped = raw_line.rstrip('\n\r')
                 formatted = f"{line_num}: {stripped}\n"
+
+                # Per-line memory guard: truncate pathological lines (>100KB)
+                if len(formatted) > MAX_SINGLE_LINE_CHARS:
+                    formatted = formatted[:MAX_SINGLE_LINE_CHARS] + ' ... [LINE TRUNCATED]\n'
 
                 lines_read.append(formatted)
                 total_lines = line_num

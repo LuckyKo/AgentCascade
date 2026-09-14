@@ -307,11 +307,8 @@ class TestReadFileWildReadHighWaterMark:
         p = tmp_path / "f.txt"
         p.write_text(content, encoding="utf-8")
         tool = ReadFile()
-        # Large char_limit so the context-derived budget never trips first;
-        # only the high-water mark should drive truncation.
         return tool._read_text_file(
-            path=str(p), resolved=p, start_line=1, limit=150,
-            char_limit=10_000_000, **kwargs,
+            path=str(p), resolved=p, start_line=1, limit=150, **kwargs,
         )
 
     def test_wild_read_multi_line_truncates_at_hwm(self):

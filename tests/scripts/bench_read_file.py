@@ -155,25 +155,20 @@ def benchmark_step_breakdown(tool: ReadFile, test_file: Path) -> None:
     _ = resolved.exists() and resolved.is_file()
     steps.append(("exists + is_file check", (time.perf_counter() - t0) * 1000))
     
-    # Step 4: _calculate_char_limit
-    t0 = time.perf_counter()
-    char_limit = tool._calculate_char_limit({})
-    steps.append(("_calculate_char_limit", (time.perf_counter() - t0) * 1000))
-    
-    # Step 5: _is_binary_file
+    # Step 4: _is_binary_file
     from agent_cascade.tools.custom.file_ops import _is_binary_file
     t0 = time.perf_counter()
     is_bin = _is_binary_file(resolved)
     steps.append(("_is_binary_file", (time.perf_counter() - t0) * 1000))
     
-    # Step 6: _determine_limits
+    # Step 5: _determine_limits
     t0 = time.perf_counter()
     limit, is_wild = tool._determine_limits(TEST_FILE_LINES)
     steps.append(("_determine_limits", (time.perf_counter() - t0) * 1000))
     
-    # Step 7: _read_text_file (the actual file I/O + formatting)
+    # Step 6: _read_text_file (the actual file I/O + formatting)
     t0 = time.perf_counter()
-    result = tool._read_text_file(rel, resolved, 1, TEST_FILE_LINES, char_limit)
+    result = tool._read_text_file(rel, resolved, 1, limit)
     steps.append(("_read_text_file (I/O + format)", (time.perf_counter() - t0) * 1000))
     
     # Print breakdown table
