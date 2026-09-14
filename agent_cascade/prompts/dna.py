@@ -11,47 +11,47 @@ from typing import Dict, List, Set
 # Order: sub-agent management → file ops → search → code/shell → context mgmt → misc
 AVAILABLE_TOOLS: List[str] = [
     # Sub-agent management
-    'call_agent',       # Delegate tasks to specialized agent instances
-    'dismiss_agent',    # End sub-agent sessions and clear context
-    'list_agents',      # List available agent classes and active instances
-    'send_message',     # Send async messages to running agents or user
+    'call_agent',  # Delegate tasks to specialized agent instances
+    'dismiss_agent',  # End sub-agent sessions and clear context
+    'list_agents',  # List available agent classes and active instances
+    'send_message',  # Send async messages to running agents or user
 
     # Read-only file ops
-    'read_file',        # Read file contents
-    'view_image',       # View image files
-    'list_dir',         # List directory contents
-    'grep',             # Search for text patterns in files
+    'read_file',  # Read file contents
+    'view_image',  # View image files
+    'list_dir',  # List directory contents
+    'grep',  # Search for text patterns in files
 
     # Mutating file ops
-    'write_file',       # Create or overwrite files
-    'edit_file',        # Surgical text replacement in existing files
-    're_indent',        # Re-indent code blocks
-    'delete_file',      # Delete files (with backup)
-    'copy_file',        # Copy files or directories
+    'write_file',  # Create or overwrite files
+    'edit_file',  # Surgical text replacement in existing files
+    're_indent',  # Re-indent code blocks
+    'delete_file',  # Delete files (with backup)
+    'copy_file',  # Copy files or directories
 
     # Code & shell execution
-    'code_interpreter', # Python sandbox (Docker-based)
-    'shell_cmd',        # Execute host shell commands
+    'code_interpreter',  # Python sandbox (Docker-based)
+    'shell_cmd',  # Execute host shell commands
 
     # Web & search
-    'web_search',       # Internet search (auto-selects Serper or DuckDuckGo backend)
-    'web_extractor',    # Extract webpage content
+    'web_search',  # Internet search (auto-selects Serper or DuckDuckGo backend)
+    'web_extractor',  # Extract webpage content
 
     # Context management
-    'compress_context', # Summarize conversation history to free context space
+    'compress_context',  # Summarize conversation history to free context space
 
     # Information & utilities
-    'system_info',      # System info, workspace paths, session stats
-    'read_logs',        # Read JSON/JSONL log files (arrays, objects, or mixed/malformed content)
-    'code_map',         # Quick file structure overview
-    'calculate',        # Evaluate mathematical expressions
-    'syntax_check',     # Check file syntax without execution
-    'scan_skills',      # Scan registered skills and return matching skills with relevance scores
-    'propose_skill',    # Propose a new reusable skill for future tasks
-    'load_skill',       # Load registered skill instructions into current context at runtime
+    'system_info',  # System info, workspace paths, session stats
+    'read_logs',  # Read JSON/JSONL log files (arrays, objects, or mixed/malformed content)
+    'code_map',  # Quick file structure overview
+    'calculate',  # Evaluate mathematical expressions
+    'syntax_check',  # Check file syntax without execution
+    'scan_skills',  # Scan registered skills and return matching skills with relevance scores
+    'propose_skill',  # Propose a new reusable skill for future tasks
+    'load_skill',  # Load registered skill instructions into current context at runtime
 
     # Image generation (ComfyUI text-to-image / SVG rendering)
-    'image_gen',        # Generate an image from a text prompt or render SVG code
+    'image_gen',  # Generate an image from a text prompt or render SVG code
 ]
 
 # Tools NOT in AVAILABLE_TOOLS (hidden from agents, used internally only):
@@ -62,7 +62,6 @@ AVAILABLE_TOOLS: List[str] = [
 #   extract_doc_vocabulary — Vocabulary extraction
 #   move_file      — Move file/directory (copy+delete achieves same result)
 #   forget_last    — Truncate recent tool call outputs
-
 
 # --- XML Transport Settings ---
 # Fields that should be placed in XML tags instead of inside JSON strings.
@@ -95,8 +94,7 @@ END_MARKER_INSTRUCTION = (
 # Optional caption instruction (only included on first compression when no caption exists yet).
 CAPTION_INSTRUCTION = (
     f" On the same line as the marker (no newline), append `CAPTION: <one short phrase, ≤120 chars>` "
-    f"describing the session's topic."
-)
+    f"describing the session's topic.")
 
 COMPRESSION_PROMPT = (
     'Summarize the following conversation history.\n'
@@ -107,15 +105,12 @@ COMPRESSION_PROMPT = (
     '3. Retain a compacted initial request and any follow ups from user in the summary.\n'
     '4. Existing summary is just for reference, focus on summarizing the events after that.\n\n'
     '--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n'
-    'Present the summary below.{end_instruction}'
-)
+    'Present the summary below.{end_instruction}')
 
-COMPRESSION_BASELINE_TEMPLATE = (
-    COMPRESSION_MARKER + ' ({header}) ---\n'
-    '<context_summary>\n'
-    '{summary}\n'
-    '</context_summary>'
-)
+COMPRESSION_BASELINE_TEMPLATE = (COMPRESSION_MARKER + ' ({header}) ---\n'
+                                 '<context_summary>\n'
+                                 '{summary}\n'
+                                 '</context_summary>')
 
 CONSOLIDATION_PROMPT = (
     'You are consolidating multiple existing conversation summaries into a single higher-level summary.\n\n'
@@ -131,8 +126,7 @@ CONSOLIDATION_PROMPT = (
     '- Maintain chronological order implicitly (earliest events first).\n'
     '- If conflicting information appears across summaries, prefer the most recent version.\n\n'
     '--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n'
-    'Present the consolidated summary below.{end_instruction}'
-)
+    'Present the consolidated summary below.{end_instruction}')
 
 # --- Security Advisor ---
 SECURITY_ADVISOR_PROMPT = (
@@ -147,8 +141,7 @@ SECURITY_ADVISOR_PROMPT = (
     'Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n'
     'CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as one of the following:\n'
     '[YES] Reason: ...\n'
-    '[NO] Reason: ...'
-)
+    '[NO] Reason: ...')
 
 # --- Skill Advisor (AUTO Skill Helper — Advanced mode) ---
 SKILL_ADVISOR_PROMPT = (
@@ -168,8 +161,7 @@ SKILL_ADVISOR_PROMPT = (
     '[NOTES] <additional task notes or "none">\n'
     '[VERDICT] APPROVE — <reason>\n'
     'OR\n'
-    '[VERDICT] DENY — <reason>'
-)
+    '[VERDICT] DENY — <reason>')
 
 # --- Knowledge Base Templates ---
 KNOWLEDGE_TEMPLATE_ZH = """# 知识库
@@ -207,41 +199,40 @@ KNOWLEDGE_SNIPPET = {'zh': KNOWLEDGE_SNIPPET_ZH, 'en': KNOWLEDGE_SNIPPET_EN}
 #      (used by call_agent / dismiss_agent / load_skill).
 TOOL_METADATA = {
     'read_file': {
-        'description': (
-            'Reads and returns the content of a specified file. If the file is large, '
-            'the content will be truncated. The tool\'s response will clearly indicate '
-            'if truncation has occurred and will provide details on how to read more '
-            'of the file using the \'start_line\' and \'limit\' parameters. Handles text files '
-            'natively with streaming line-by-line reading. For binary files, displays a '
-            'hex dump of the first N bytes with ASCII representation.'
-        ),
+        'description': ('Reads and returns the content of a specified file. If the file is large, '
+                        'the content will be truncated. The tool\'s response will clearly indicate '
+                        'if truncation has occurred and will provide details on how to read more '
+                        'of the file using the \'start_line\' and \'limit\' parameters. Handles text files '
+                        'natively with streaming line-by-line reading. For binary files, displays a '
+                        'hex dump of the first N bytes with ASCII representation.'),
         'parameters': {
-            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'D:/data/input.csv').",
-            'start_line': 'Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.',
-            'limit': "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
+            'path':
+                "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'D:/data/input.csv').",
+            'start_line':
+                'Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.',
+            'limit':
+                "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
         }
     },
     'view_image': {
-        'description': (
-            'View an image file in the workspace, download and view an http(s) image URL, '
-            'or capture screen/window content. Returns the image for the model to see. '
-            'Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. '
-            'An http(s) image URL is downloaded to the media folder and shown like a local image. '
-            'Supports special paths for screen/window capture — see \'path\' param for details. '
-            'Use crop_region to view a specific area of large images in more detail.'
-        ),
+        'description': ('View an image file in the workspace, download and view an http(s) image URL, '
+                        'or capture screen/window content. Returns the image for the model to see. '
+                        'Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. '
+                        'An http(s) image URL is downloaded to the media folder and shown like a local image. '
+                        'Supports special paths for screen/window capture — see \'path\' param for details. '
+                        'Use crop_region to view a specific area of large images in more detail.'),
         'parameters': {
-            'path': 'Path to the image file, absolute or relative to workspace directory, or an http(s) image URL to download and view. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.',
-            'crop_region': 'Optional. Crop region as "x,y,w,h" where x,y are the top-left pixel coordinates in the original image and w,h are the crop width/height in pixels. Use this to zoom into details of large images (e.g., "100,200,500,300" crops a 500x300 region starting at pixel (100,200)).'
+            'path':
+                'Path to the image file, absolute or relative to workspace directory, or an http(s) image URL to download and view. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.',
+            'crop_region':
+                'Optional. Crop region as "x,y,w,h" where x,y are the top-left pixel coordinates in the original image and w,h are the crop width/height in pixels. Use this to zoom into details of large images (e.g., "100,200,500,300" crops a 500x300 region starting at pixel (100,200)).'
         }
     },
     'write_file': {
-        'description': (
-            'Creates a new file or overwrites an existing one with full content. '
-            'If the file already exists, a backup is automatically created. '
-            'This is auto-approved for new files. Overwriting an existing file '
-            'requires user approval if you do not own it.'
-        ),
+        'description': ('Creates a new file or overwrites an existing one with full content. '
+                        'If the file already exists, a backup is automatically created. '
+                        'This is auto-approved for new files. Overwriting an existing file '
+                        'requires user approval if you do not own it.'),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'content': 'The full content to write to the file.',
@@ -249,20 +240,24 @@ TOOL_METADATA = {
         }
     },
     'edit_file': {
-        'description': (
-            'Performs a surgical text replacement within an existing file. '
-            'Always use this instead of write_file for modifying parts of a file, '
-            'as it is safer and preserves the rest of the content. '
-            'Requires user approval if you do not own the file. '
-            'Always read the file content before attempting an edit.'
-        ),
+        'description': ('Performs a surgical text replacement within an existing file. '
+                        'Always use this instead of write_file for modifying parts of a file, '
+                        'as it is safer and preserves the rest of the content. '
+                        'Requires user approval if you do not own the file. '
+                        'Always read the file content before attempting an edit.'),
         'parameters': {
-            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
-            'old_content': 'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode.',
-            'new_content': 'The exact literal text to replace old_content with. For delete_and_insert match_mode provide empty string to delete without inserting new content.',
-            'match_mode': "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (uses the `range` parameter to specify which lines to delete before inserting new_content).",
-            'range': "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10. IMPORTANT: A single number like '5' is INSERT-ONLY before that line — no deletion occurs. To delete a single line, use 'N:N' (e.g., '3:3'). Use '0' to append at end of file.",
-            'justification': 'Why you need to edit this file'
+            'path':
+                "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
+            'old_content':
+                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode.',
+            'new_content':
+                'The exact literal text to replace old_content with. For delete_and_insert match_mode provide empty string to delete without inserting new content.',
+            'match_mode':
+                "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (uses the `range` parameter to specify which lines to delete before inserting new_content).",
+            'range':
+                "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10. IMPORTANT: A single number like '5' is INSERT-ONLY before that line — no deletion occurs. To delete a single line, use 'N:N' (e.g., '3:3'). Use '0' to append at end of file.",
+            'justification':
+                'Why you need to edit this file'
         }
     },
     're_indent': {
@@ -271,11 +266,16 @@ TOOL_METADATA = {
             'It allows shifting, flattening, converting indentation between tabs and spaces, or adjusting base indentation.'
         ),
         'parameters': {
-            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
-            'lines': "Line range to re-indent, 1-based inclusive (e.g., '1:10', '5:', ':20').",
-            'indent': "Target indent unit size: number of spaces per indent level (for 'min'/'flat' modes), or tab width in columns (for 'convert' mode). For 'shift' mode: number of indent characters to add/remove per line — positive adds, negative removes; result clamped to no leading whitespace minimum.",
-            'indent_type': "Indentation character type: 'space' or 'tab'.",
-            'mode': "Optional: Re-alignment mode. Can be 'min' (default, trims to minimum indentation level then applies target indent while preserving relative hierarchy), 'shift' (adds or removes indent units from each line; positive adds, negative removes), 'flat' (flattens entire block to target indent), or 'convert' (converts between tabs and spaces using visual column alignment where 1 tab = indent spaces)."
+            'path':
+                "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
+            'lines':
+                "Line range to re-indent, 1-based inclusive (e.g., '1:10', '5:', ':20').",
+            'indent':
+                "Target indent unit size: number of spaces per indent level (for 'min'/'flat' modes), or tab width in columns (for 'convert' mode). For 'shift' mode: number of indent characters to add/remove per line — positive adds, negative removes; result clamped to no leading whitespace minimum.",
+            'indent_type':
+                "Indentation character type: 'space' or 'tab'.",
+            'mode':
+                "Optional: Re-alignment mode. Can be 'min' (default, trims to minimum indentation level then applies target indent while preserving relative hierarchy), 'shift' (adds or removes indent units from each line; positive adds, negative removes), 'flat' (flattens entire block to target indent), or 'convert' (converts between tabs and spaces using visual column alignment where 1 tab = indent spaces)."
         }
     },
     'list_dir': {
@@ -285,39 +285,58 @@ TOOL_METADATA = {
             'file-size and modification-date filters, sorting by name/size/date/type. Use filters for quick file search.'
         ),
         'parameters': {
-            'path': "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')",
-            'recursive': 'When true, recurse into subdirectories. Default: false.',
-            'max_depth': 'Maximum recursion depth when recursive=true. -1 means unlimited, 0 or negative behaves like non-recursive. Default: -1.',
-            'include': "Optional glob pattern(s) to include only matching files. Single pattern ('*.py') or comma-separated list ('*.py,*.js,test_*'). Simple globs only; '**' patterns are not supported. Note: a pattern cannot itself contain a comma.",
-            'exclude': "Optional glob pattern(s) to exclude matching entries. Single or comma-separated (e.g., '__pycache__/*,*.pyc,node_modules/*').",
-            'sort_by': 'Sorting order. Options: "name" (default), "size" (largest first), "date" (newest first), "type" (extension). For size and date, descending order is used.',
-            'show_summary': 'When true, append summary statistics (total files/dirs, total size) at the end. Default: false.',
-            'max_entries': 'Maximum number of entries to display before truncating output. Helps control verbosity in large directories. Default: 500.',
-            'min_size': "Minimum file size filter. Accepts human-readable sizes: '500B', '1.5KB', '5MB', '2.5GB' or raw bytes as string ('1048576'). Only files at or above this size are shown; directories are unaffected. Default: no limit.",
-            'max_size': "Maximum file size filter. Same format as min_size (e.g., '10KB', '1.5MB'). Only files at or below this size are shown. Default: no limit.",
-            'modified_after': "Only show files modified after this time. Accepts: ISO date ('2026-09-01'), ISO datetime ('2026-09-01T14:30:00'), relative expressions ('2 days ago', '1 week ago', '3 hours ago'), compact forms ('2h', '90min', '1d', '2.5w'), or epoch seconds as string ('1725187200'). All non-epoch times use the server's local timezone; comparisons are done on raw epoch seconds. Default: no limit.",
-            'modified_before': 'Only show files modified before this time. Same formats as modified_after (ISO, relative, compact, epoch). Default: no limit.',
-            'files_only': 'When true, show only files (suppress all directory entries). Useful for pure file-finding to reduce noise. Mutually exclusive with dirs_only. Default: false.',
-            'dirs_only': 'When true, show only directories (suppress all file entries). Mutually exclusive with files_only. Default: false.'
+            'path':
+                "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')",
+            'recursive':
+                'When true, recurse into subdirectories. Default: false.',
+            'max_depth':
+                'Maximum recursion depth when recursive=true. -1 means unlimited, 0 or negative behaves like non-recursive. Default: -1.',
+            'include':
+                "Optional glob pattern(s) to include only matching files. Single pattern ('*.py') or comma-separated list ('*.py,*.js,test_*'). Simple globs only; '**' patterns are not supported. Note: a pattern cannot itself contain a comma.",
+            'exclude':
+                "Optional glob pattern(s) to exclude matching entries. Single or comma-separated (e.g., '__pycache__/*,*.pyc,node_modules/*').",
+            'sort_by':
+                'Sorting order. Options: "name" (default), "size" (largest first), "date" (newest first), "type" (extension). For size and date, descending order is used.',
+            'show_summary':
+                'When true, append summary statistics (total files/dirs, total size) at the end. Default: false.',
+            'max_entries':
+                'Maximum number of entries to display before truncating output. Helps control verbosity in large directories. Default: 500.',
+            'min_size':
+                "Minimum file size filter. Accepts human-readable sizes: '500B', '1.5KB', '5MB', '2.5GB' or raw bytes as string ('1048576'). Only files at or above this size are shown; directories are unaffected. Default: no limit.",
+            'max_size':
+                "Maximum file size filter. Same format as min_size (e.g., '10KB', '1.5MB'). Only files at or below this size are shown. Default: no limit.",
+            'modified_after':
+                "Only show files modified after this time. Accepts: ISO date ('2026-09-01'), ISO datetime ('2026-09-01T14:30:00'), relative expressions ('2 days ago', '1 week ago', '3 hours ago'), compact forms ('2h', '90min', '1d', '2.5w'), or epoch seconds as string ('1725187200'). All non-epoch times use the server's local timezone; comparisons are done on raw epoch seconds. Default: no limit.",
+            'modified_before':
+                'Only show files modified before this time. Same formats as modified_after (ISO, relative, compact, epoch). Default: no limit.',
+            'files_only':
+                'When true, show only files (suppress all directory entries). Useful for pure file-finding to reduce noise. Mutually exclusive with dirs_only. Default: false.',
+            'dirs_only':
+                'When true, show only directories (suppress all file entries). Mutually exclusive with files_only. Default: false.'
         }
     },
     'grep': {
-        'description': (
-            'Search for a text pattern in files. Supports Python regex syntax.\n'
-            '- Smart case by default: case-insensitive unless pattern contains uppercase letters.\n'
-            '- Respects .gitignore/.rgignore when ignore_vcs is True (default).\n'
-            '- Use "context" to show surrounding lines (like -C N in grep/ripgrep).\n'
-            '- Matched text is prefixed with ">>>" when context is used; context lines have spaces.\n'
-            '- Groups of matches are separated by "---".'
-        ),
+        'description': ('Search for a text pattern in files. Supports Python regex syntax.\n'
+                        '- Smart case by default: case-insensitive unless pattern contains uppercase letters.\n'
+                        '- Respects .gitignore/.rgignore when ignore_vcs is True (default).\n'
+                        '- Use "context" to show surrounding lines (like -C N in grep/ripgrep).\n'
+                        '- Matched text is prefixed with ">>>" when context is used; context lines have spaces.\n'
+                        '- Groups of matches are separated by "---".'),
         'parameters': {
-            'pattern': 'Text or regex pattern to search for (Python regex syntax)',
-            'path': 'Directory to search in, absolute or relative to workspace root (default: ".")',
-            'include': 'File glob pattern to include (e.g., "*.py", "*.md"). Default: "*"',
-            'exclude': 'File glob pattern to exclude (e.g., "*_test.py", "docs/*"). Default: ""',
-            'ignore_vcs': 'When True (default), skip .git/ and other VCS/build directories. Set False to search everything.',
-            'context': 'Number of lines to show before/after each match (like -C N). Default: 0',
-            'smart_case': 'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.'
+            'pattern':
+                'Text or regex pattern to search for (Python regex syntax)',
+            'path':
+                'Directory to search in, absolute or relative to workspace root (default: ".")',
+            'include':
+                'File glob pattern to include (e.g., "*.py", "*.md"). Default: "*"',
+            'exclude':
+                'File glob pattern to exclude (e.g., "*_test.py", "docs/*"). Default: ""',
+            'ignore_vcs':
+                'When True (default), skip .git/ and other VCS/build directories. Set False to search everything.',
+            'context':
+                'Number of lines to show before/after each match (like -C N). Default: 0',
+            'smart_case':
+                'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.'
         }
     },
     'delete_file': {
@@ -326,20 +345,21 @@ TOOL_METADATA = {
             'Deleting entries you created in this session is auto-approved; any entry not owned by the current agent requires user approval. '
             'When multiple targets are requested, a SINGLE aggregate approval prompt is shown listing exactly what will be removed (a bulk delete is not transactional — partial success is possible, and each deleted target is individually restorable from its backup). '
             "The optional 'include' glob filter works like list_dir: it is applied within the resolved base directory of each path. "
-            'Concurrent deletes on the same file are not supported; there is no per-file filesystem lock.'
-        ),
+            'Concurrent deletes on the same file are not supported; there is no per-file filesystem lock.'),
         'parameters': {
-            'path': "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). At least one path is required.",
-            'include': "Optional glob pattern(s) to keep, applied within the base directory of each path. Single pattern ('*.md') or comma-separated ('*.py,*.js'). Simple globs only; '**' not supported. Mirrors list_dir semantics.",
-            'justification': 'Why you need to delete these file(s)'
+            'path':
+                "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). At least one path is required.",
+            'include':
+                "Optional glob pattern(s) to keep, applied within the base directory of each path. Single pattern ('*.md') or comma-separated ('*.py,*.js'). Simple globs only; '**' not supported. Mirrors list_dir semantics.",
+            'justification':
+                'Why you need to delete these file(s)'
         }
     },
     'copy_file': {
-        'description': (
-            'Copy a file or directory to a new location. If the destination already exists, '
-            'a timestamped backup is created before overwriting. This is auto-approved if the destination is new. '
-            'You become the owner of the copied file, allowing you to edit it freely without user approval.'
-        ),
+        'description':
+            ('Copy a file or directory to a new location. If the destination already exists, '
+             'a timestamped backup is created before overwriting. This is auto-approved if the destination is new. '
+             'You become the owner of the copied file, allowing you to edit it freely without user approval.'),
         'parameters': {
             'source': "Path to the source file/directory, absolute or relative to workspace root (e.g., 'src/old.py')",
             'destination': "Path to the destination, absolute or relative to workspace root (e.g., 'src/new.py')"
@@ -352,12 +372,14 @@ TOOL_METADATA = {
             'To reach host services, use "host.docker.internal" instead of "localhost". '
             'Windows-style extra-workspace paths are auto-translated to container paths (disable with fix_paths=false). '
             'Use system_info to find exact path mappings for extra workspaces. '
-            'Missing packages can be installed as the container will be reused in follow up queries.'
-        ),
+            'Missing packages can be installed as the container will be reused in follow up queries.'),
         'parameters': {
-            'code': 'The Python code to execute.',
-            'fix_paths': 'Auto-translate Windows host paths to Docker container paths. Default is true. Set to false to disable.',
-            'fresh': 'Force a fresh kernel with a new container, discarding all existing state. This will terminate any existing container shared by agents in this session. Default is false. Use when you need a clean environment.',
+            'code':
+                'The Python code to execute.',
+            'fix_paths':
+                'Auto-translate Windows host paths to Docker container paths. Default is true. Set to false to disable.',
+            'fresh':
+                'Force a fresh kernel with a new container, discarding all existing state. This will terminate any existing container shared by agents in this session. Default is false. Use when you need a clean environment.',
         }
     },
     'shell_cmd': {
@@ -366,15 +388,23 @@ TOOL_METADATA = {
             '**WARNING:** DO NOT use shell_cmd with file redirects, pipes or filters.\n\n'
             '**Execution mode:** auto/sync/async — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
+            '**Windows note:** unquoted `;` is translated to `&` (cmd.exe has no `;` separator) so `A; B` runs both commands. Quote a literal `;` to keep it as data.\n\n'
         ),
         'parameters': {
-            'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
-            'justification': 'Why you need to execute this command.',
-            'cwd': 'Optional working directory, absolute or relative to workspace root.',
-            'timeout': 'Timeout in seconds. With default auto mode, values over 60s run in the background. Default: 30s.',
-            'execution_mode': '"auto" (default) = background if timeout>60s else blocking; "sync" = always blocking; "async" = always background. null ≡ auto.',
-            'heartbeat_interval': 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective in async execution. Default: -1.',
-            'tool_id': 'Reference an existing running shell by its tool_id to send input, update settings, or kill it. Returned in the initial response when launching in async mode.'
+            'command':
+                'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
+            'justification':
+                'Why you need to execute this command.',
+            'cwd':
+                'Optional working directory, absolute or relative to workspace root.',
+            'timeout':
+                'Timeout in seconds. With default auto mode, values over 60s run in the background. Default: 30s.',
+            'execution_mode':
+                '"auto" (default) = background if timeout>60s else blocking; "sync" = always blocking; "async" = always background. null ≡ auto.',
+            'heartbeat_interval':
+                'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective in async execution. Default: -1.',
+            'tool_id':
+                'Reference an existing running shell by its tool_id to send input, update settings, or kill it. Returned in the initial response when launching in async mode.'
         }
     },
     'system_info': {
@@ -384,10 +414,10 @@ TOOL_METADATA = {
             'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
             'Python version, and basic session stats. '
             'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
-            "Pass 'help' to fetch a specific AgentCascade documentation section instead of system info."
-        ),
+            "Pass 'help' to fetch a specific AgentCascade documentation section instead of system info."),
         'parameters': {
-            'help': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g., 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
+            'help':
+                "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g., 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
         }
     },
     'read_logs': {
@@ -400,20 +430,23 @@ TOOL_METADATA = {
             'Use the `format` parameter to choose output style: "simple" (default, human-readable summary) or "raw" (original JSON lines).'
         ),
         'parameters': {
-            'log_file': 'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
-            'max_chars_per_message': 'Maximum characters to keep for each string value in messages. Defaults to 1000.',
-            'range': 'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries.',
-            'mode': 'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only tool OUTPUTS — the content of role="function"/"tool" entries — while leaving assistant tool calls (function_call.arguments / tool_calls arguments) intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
-            'format': 'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing.'
+            'log_file':
+                'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
+            'max_chars_per_message':
+                'Maximum characters to keep for each string value in messages. Defaults to 1000.',
+            'range':
+                'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries.',
+            'mode':
+                'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only tool OUTPUTS — the content of role="function"/"tool" entries — while leaving assistant tool calls (function_call.arguments / tool_calls arguments) intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
+            'format':
+                'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing.'
         }
     },
     'image_gen': {
-        'description': (
-            'Generate an image from a text prompt via ComfyUI, or render SVG code to an image. '
-            'Returns the image with a caption, same format as view_image. '
-            'For text prompts: describe what you want to see. For SVG: provide the full SVG markup. '
-            "Use the 'workflow' parameter (full path to JSON) to select which saved workflow to use."
-        ),
+        'description': ('Generate an image from a text prompt via ComfyUI, or render SVG code to an image. '
+                        'Returns the image with a caption, same format as view_image. '
+                        'For text prompts: describe what you want to see. For SVG: provide the full SVG markup. '
+                        "Use the 'workflow' parameter (full path to JSON) to select which saved workflow to use."),
         'parameters': {
             'prompt': 'Text description for image generation, or SVG code to render',
             'negative_prompt': 'Elements to exclude from the generated image (API only)',
@@ -424,9 +457,7 @@ TOOL_METADATA = {
         }
     },
     'web_search': {
-        'description': (
-            'Search for information from the internet.'
-        ),
+        'description': ('Search for information from the internet.'),
         'parameters': {
             'query': 'The search query.'
         }
@@ -438,26 +469,23 @@ TOOL_METADATA = {
         }
     },
     'web_extractor': {
-        'description': (
-            'Get content of one webpage. Image URLs found in the page are included inline as '
-            'markdown ![alt](url) entries in reading order, so they can be viewed with view_image.'
-        ),
+        'description': ('Get content of one webpage. Image URLs found in the page are included inline as '
+                        'markdown ![alt](url) entries in reading order, so they can be viewed with view_image.'),
         'parameters': {
-            'url': 'The webpage url.',
-            'extract_images': (
-                'Whether to include image URLs found in the page as inline markdown '
-                '![alt](url) entries (default: true). Set false to get text only.'
-            )
+            'url':
+                'The webpage url.',
+            'extract_images': ('Whether to include image URLs found in the page as inline markdown '
+                               '![alt](url) entries (default: true). Set false to get text only.')
         }
     },
     'retrieval': {
-        'description': (
-            'Retrieve relevant content from a given list of files. '
-            'Supports various file types (PDF, Word, PPT, Text, etc.).'
-        ),
+        'description': ('Retrieve relevant content from a given list of files. '
+                        'Supports various file types (PDF, Word, PPT, Text, etc.).'),
         'parameters': {
-            'query': 'The query keywords for matching relevant document segments. Use comma-separated keywords for better matching.',
-            'files': 'A list of file paths (local) or URLs (http/https) to be parsed and searched.'
+            'query':
+                'The query keywords for matching relevant document segments. Use comma-separated keywords for better matching.',
+            'files':
+                'A list of file paths (local) or URLs (http/https) to be parsed and searched.'
         }
     },
     'call_agent': {
@@ -470,57 +498,69 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'agent_class': {
-                'type': 'string',
-                'description': 'The class of agent to call (e.g. "coder", "researcher"). Only required when starting a NEW instance.'
+                'type':
+                    'string',
+                'description':
+                    'The class of agent to call (e.g. "coder", "researcher"). Only required when starting a NEW instance.'
             },
             'instance_name': {
-                'type': 'string',
-                'description': 'A unique name for this agent instance. If this name exists, the existing session is continued regardless of agent_class.'
+                'type':
+                    'string',
+                'description':
+                    'A unique name for this agent instance. If this name exists, the existing session is continued regardless of agent_class.'
             },
             'task': {
                 'type': 'string',
                 'description': 'The task or question to delegate'
             },
             'context': {
-                'type': 'string',
-                'description': 'Optional background context for the agent instance, useful for the auto skill allocator to match relevant skills.'
+                'type':
+                    'string',
+                'description':
+                    'Optional background context for the agent instance, useful for the auto skill allocator to match relevant skills.'
             },
             'log_file': {
-                'type': 'string',
-                'description': 'Path to a JSONL log file to restore the agent session from before starting. Only use for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
+                'type':
+                    'string',
+                'description':
+                    'Path to a JSONL log file to restore the agent session from before starting. Only use for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
             },
             'max_turns': {
-                'type': 'integer',
-                'minimum': 1,
-                'description': 'Optional turn limit for sub-agent execution. If omitted, defaults to caller\'s limit. Useful for short tasks requiring strict budget control. The sub-agent will be informed of its turn budget via context.'
+                'type':
+                    'integer',
+                'minimum':
+                    1,
+                'description':
+                    'Optional turn limit for sub-agent execution. If omitted, defaults to caller\'s limit. Useful for short tasks requiring strict budget control. The sub-agent will be informed of its turn budget via context.'
             },
             'load_skill': {
-                'oneOf': [
-                    {
-                        'type': 'array',
-                        'items': {'type': 'string'},
-                        'description': 'List of skill names to load (e.g., ["httpx-connection-pooling", "code-review"]). Full instructions will be injected into the child agent.'
+                'oneOf': [{
+                    'type':
+                        'array',
+                    'items': {
+                        'type': 'string'
                     },
-                    {
-                        'type': 'string',
-                        'enum': ['AUTO', 'NONE'],
-                        'description': '"AUTO" = auto-match relevant skills from task context; "NONE" = no skill loading (saves tokens).'
-                    },
-                    {
-                        'type': 'null',
-                        'description': 'Omit skill loading (same as "NONE").'
-                    }
-                ],
-                'description': 'Controls which specialized skills are loaded for this agent call. Must be a real JSON array of skill names (e.g. ["skill-a", "skill-b"]), or one of the strings "AUTO" / "NONE", or omitted. Do NOT pass a string representation of an array like "[\\"skill-a\\"]". Use scan_skills to discover available skills.'
+                    'description':
+                        'List of skill names to load (e.g., ["httpx-connection-pooling", "code-review"]). Full instructions will be injected into the child agent.'
+                }, {
+                    'type':
+                        'string',
+                    'enum': ['AUTO', 'NONE'],
+                    'description':
+                        '"AUTO" = auto-match relevant skills from task context; "NONE" = no skill loading (saves tokens).'
+                }, {
+                    'type': 'null',
+                    'description': 'Omit skill loading (same as "NONE").'
+                }],
+                'description':
+                    'Controls which specialized skills are loaded for this agent call. Must be a real JSON array of skill names (e.g. ["skill-a", "skill-b"]), or one of the strings "AUTO" / "NONE", or omitted. Do NOT pass a string representation of an array like "[\\"skill-a\\"]". Use scan_skills to discover available skills.'
             },
         },
         'required': ['agent_class', 'instance_name', 'task'],
     },
     'dismiss_agent': {
-        'description': (
-            "End a sub-agent instance's current task and clear its conversation context. "
-            "Use when you're done with a sub-agent and don't need its context anymore."
-        ),
+        'description': ("End a sub-agent instance's current task and clear its conversation context. "
+                        "Use when you're done with a sub-agent and don't need its context anymore."),
         'parameters': {
             'instance_name': {
                 'type': 'string',
@@ -541,16 +581,13 @@ TOOL_METADATA = {
         'parameters': {}
     },
     'send_message': {
-        'description': (
-            'Send an async message to another running agent or the user. '
-            'Delivered on the recipient\'s next turn without interrupting either party. '
-            'Fails if the destination is not actively running.'
-        ),
+        'description': ('Send an async message to another running agent or the user. '
+                        'Delivered on the recipient\'s next turn without interrupting either party. '
+                        'Fails if the destination is not actively running.'),
         'parameters': {
-            'destination': (
-                "Target of the message. Use an exact agent instance name (e.g., 'worker1') to send to another agent"
-                "or 'user' to send to the human user."
-            ),
+            'destination':
+                ("Target of the message. Use an exact agent instance name (e.g., 'worker1') to send to another agent"
+                 "or 'user' to send to the human user."),
             'message': 'The message content to send.'
         }
     },
@@ -558,102 +595,97 @@ TOOL_METADATA = {
         'description': (
             'Summarize the oldest part of the conversation history to free up context space. '
             'Supports two modes: "auto" (generated via specialized compression LLM) and "manual" (provided by agent via summary_text). '
-            'A fraction of history is replaced by a concise summary.'
-        ),
+            'A fraction of history is replaced by a concise summary.'),
         'parameters': {
-            'fraction': 'The fraction of history to summarize (e.g. 0.5 for 50%). Max 1.0.',
-            'mode': "Compression mode: 'auto' (default) or 'manual'.",
-            'summary_text': 'Your own summary of the conversation history portion that will be trimmed out. Required when mode=manual.',
-            'force': 'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
+            'fraction':
+                'The fraction of history to summarize (e.g. 0.5 for 50%). Max 1.0.',
+            'mode':
+                "Compression mode: 'auto' (default) or 'manual'.",
+            'summary_text':
+                'Your own summary of the conversation history portion that will be trimmed out. Required when mode=manual.',
+            'force':
+                'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
         }
     },
     'calculate': {
-        'description': (
-            'Evaluates a mathematical expression and returns the result. '
-            'Supports basic arithmetic (+, -, *, /, ^), trigonometry (sin, cos, tan), '
-            'logarithms (log, ln), constants like pi and e, random number generation '
-            '(random(), randint(a, b), uniform(a, b)), numeric builtins '
-            '(abs, round, min, max, pow, int, float, bool, len, sum, divmod, trunc, floor, ceil), '
-            'and list/sequence expressions.'
-        ),
+        'description': ('Evaluates a mathematical expression and returns the result. '
+                        'Supports basic arithmetic (+, -, *, /, ^), trigonometry (sin, cos, tan), '
+                        'logarithms (log, ln), constants like pi and e, random number generation '
+                        '(random(), randint(a, b), uniform(a, b)), numeric builtins '
+                        '(abs, round, min, max, pow, int, float, bool, len, sum, divmod, trunc, floor, ceil), '
+                        'and list/sequence expressions.'),
         'parameters': {
             'expression': 'The mathematical expression to evaluate (e.g., "sin(pi/2) + randint(1, 10)").'
         }
     },
     'code_map': {
-        'description': (
-            'Quickly map a code file to see its structure (classes, functions, methods) and their line numbers. '
-            'Use this for an overview of large files before performing targeted reads.'
-        ),
+        'description':
+            ('Quickly map a code file to see its structure (classes, functions, methods) and their line numbers. '
+             'Use this for an overview of large files before performing targeted reads.'),
         'parameters': {
             'path': 'Path to the file to map, absolute or relative to workspace root.',
             'force_as': 'Optional. Force parsing as a specific language (e.g., "python", "javascript", "cpp", "java").'
         }
     },
     'forget_last': {
-        'description': (
-            'Retroactively truncate the output of the last N tool call responses in the active conversation history. '
-            'Each truncated response is shortened to ~100 characters max, with a marker indicating truncation. '
-            'This frees up context space if the tool data is not useful. '
-            'Affects both the in-memory pool and the log file.'
-        ),
+        'description':
+            ('Retroactively truncate the output of the last N tool call responses in the active conversation history. '
+             'Each truncated response is shortened to ~100 characters max, with a marker indicating truncation. '
+             'This frees up context space if the tool data is not useful. '
+             'Affects both the in-memory pool and the log file.'),
         'parameters': {
-            'count': 'Number of recent tool call responses to truncate. Counts backwards from the most recent function result, skipping non-function messages. Default is 1.',
-            'justification': 'Optional reason for truncation. Appended to the truncation marker for context awareness. Keep it very short (e.g. "useless data").',
+            'count':
+                'Number of recent tool call responses to truncate. Counts backwards from the most recent function result, skipping non-function messages. Default is 1.',
+            'justification':
+                'Optional reason for truncation. Appended to the truncation marker for context awareness. Keep it very short (e.g. "useless data").',
         }
     },
     'syntax_check': {
-        'description': (
-            'Check a file for syntax errors without executing it. '
-            'Auto-detects the language from the file extension and applies the '
-            'appropriate syntax checker. Works with Python, JavaScript, TypeScript, '
-            'JSON, YAML, TOML, XML, HTML, CSS, C, C++, C#, Java, Go, Rust, and more. '
-            'Returns "Valid (<language>)" or a detailed error message.'
-        ),
+        'description': ('Check a file for syntax errors without executing it. '
+                        'Auto-detects the language from the file extension and applies the '
+                        'appropriate syntax checker. Works with Python, JavaScript, TypeScript, '
+                        'JSON, YAML, TOML, XML, HTML, CSS, C, C++, C#, Java, Go, Rust, and more. '
+                        'Returns "Valid (<language>)" or a detailed error message.'),
         'parameters': {
             'path': 'Path to the file to check, absolute or relative to the workspace root.'
         }
     },
     'scan_skills': {
-        'description': (
-            'Scan registered skills and return matching skills with relevance scores. '
-            'Use this to discover which skills are available before calling call_agent with load_skill. '
-            'Returns skill names, descriptions, and match scores for the given query.'
-        ),
+        'description': ('Scan registered skills and return matching skills with relevance scores. '
+                        'Use this to discover which skills are available before calling call_agent with load_skill. '
+                        'Returns skill names, descriptions, and match scores for the given query.'),
         'parameters': {
-            'query': 'Search query or task description to match against available skills. Leave empty to list all registered skills.'
+            'query':
+                'Search query or task description to match against available skills. Leave empty to list all registered skills.'
         }
     },
     'propose_skill': {
-        'description': (
-            'Propose a new reusable skill for future tasks. '
-            'Provide the full SKILL.md content including YAML frontmatter '
-            'with name, description, and triggers fields.'
-        ),
+        'description': ('Propose a new reusable skill for future tasks. '
+                        'Provide the full SKILL.md content including YAML frontmatter '
+                        'with name, description, and triggers fields.'),
         'parameters': {
-            'skill_content': 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
-            'test_task': 'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.'
+            'skill_content':
+                'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
+            'test_task':
+                'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.'
         }
     },
     'load_skill': {
-        'description': (
-            'Load registered skill instructions into your current context at runtime. '
-            'Use this when you need specialized expertise for your task. '
-            'Takes one or more skill names and injects their full instructions as guidelines.'
-        ),
+        'description': ('Load registered skill instructions into your current context at runtime. '
+                        'Use this when you need specialized expertise for your task. '
+                        'Takes one or more skill names and injects their full instructions as guidelines.'),
         'parameters': {
             'skill_names': {
-                'oneOf': [
-                    {
-                        'type': 'string',
-                        'description': 'A single skill name to load.',
+                'oneOf': [{
+                    'type': 'string',
+                    'description': 'A single skill name to load.',
+                }, {
+                    'type': 'array',
+                    'items': {
+                        'type': 'string'
                     },
-                    {
-                        'type': 'array',
-                        'items': {'type': 'string'},
-                        'description': 'List of skill names to load (e.g., ["code-review", "docker-best-practices"]).',
-                    }
-                ],
+                    'description': 'List of skill names to load (e.g., ["code-review", "docker-best-practices"]).',
+                }],
                 'description': 'Skill name(s) to load into your context.',
             },
         },
