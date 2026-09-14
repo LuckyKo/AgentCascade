@@ -113,13 +113,55 @@ def _translate_semicolons_for_cmd(command: str) -> str:
     return ''.join(result)
 
 
+def _strip_leading_ampersands_for_cmd(command: str) -> str:
+    """Strip a redundant leading ``&`` operator sequence from a user command.
+
+    The Windows wrapper prepends its own separator: ``chcp 65001 > nul 2>&1 & <command>``.
+    If the user command itself *starts* with one or more ``&`` (e.g. ``& echo hi`` or
+    ``&& echo hi``), the result is a double-``&`` such as ``chcp ... & & echo hi``, which
+    cmd.exe rejects with ``& was unexpected at this time.`` and nothing runs (audit row W11).
+
+    The leading ``&``/``&&`` is redundant with the wrapper's own single ``&`` separator, so
+    it is stripped: a user who writes ``& cmd`` or ``&& cmd`` at the very start most likely
+    means "run this command". Stripping every leading ``&`` yields ``chcp ... & <cmd>`` —
+    the same run-regardless-of-exit-status semantics as the wrapper's separator.
+
+    Quote-aware: only strip when the FIRST character is literally ``&``. A command that
+    starts with a quote (e.g. ``"foo & bar"``) or whitespace is left completely untouched,
+    since its leading ``&`` (if any) is data or not an operator in the first position.
+
+    When the first character IS ``&``, the leading run of ``&`` *and* any whitespace
+    immediately following it are removed so that the wrapper's single space after its own
+    ``&`` is the only separator — otherwise ``& echo hi`` would wrap to ``chcp ... &  echo
+    hi`` (double space). cmd.exe tolerates extra spaces, but we keep the emitted string clean.
+
+    Commands starting with other operators (``|``, ``||``, ``(``, etc.) are out of scope —
+    they are intentionally left unchanged here.
+
+    Args:
+        command: The user command string (after semicolon translation, before the chcp prefix).
+
+    Returns:
+        The command with any leading run of ``&`` (and following whitespace) removed, or the
+        original string unchanged if it does not start with ``&``.
+    """
+    if not command.startswith('&'):
+        return command
+    stripped = command.lstrip('&').lstrip()
+    return stripped if stripped else command
+
+
 def configure_windows_utf8(command: str, create_new_console: bool = False) -> tuple:
     """Prepend chcp 65001 to force CMD into UTF-8 mode on Windows.
 
     The user command is first passed through ``_translate_semicolons_for_cmd`` so
     that unquoted ``;`` separators (Unix idiom) become cmd.exe ``&`` chains — without
     this, cmd.exe mis-parses ``A; B`` as a single command and the second part never
-    runs. The chcp prefix itself is left untouched.
+    runs. A redundant leading ``&`` operator sequence is then stripped via
+    ``_strip_leading_ampersands_for_cmd``: because the wrapper already supplies its own
+    ``&`` separator, a user command starting with ``&``/``&&`` would otherwise produce a
+    double-``&`` (``chcp ... & & cmd``) that cmd.exe rejects (audit row W11). The chcp
+    prefix itself is left untouched.
 
     Args:
         command: Shell command string to execute.
@@ -132,4 +174,8 @@ def configure_windows_utf8(command: str, create_new_console: bool = False) -> tu
     if create_new_console:
         flags |= subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
     translated = _translate_semicolons_for_cmd(command)
+    # A leading `&`/`&&` is redundant with the wrapper's own `&` separator; strip it so
+    # we don't emit a double-`&` that cmd.exe rejects (audit row W11). Quote-aware: only
+    # strips when the first character is literally `&`.
+    translated = _strip_leading_ampersands_for_cmd(translated)
     return (f'chcp {WINDOWS_UTF8_CODE_PAGE} > nul 2>&1 & {translated}', flags)

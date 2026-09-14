@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
-from agent_cascade.shell_utils import _translate_semicolons_for_cmd, configure_windows_utf8
+from agent_cascade.shell_utils import (_strip_leading_ampersands_for_cmd, _translate_semicolons_for_cmd,
+                                       configure_windows_utf8)
 
 ON_WINDOWS = os.name == 'nt'
 
@@ -72,6 +73,42 @@ class TestTranslateSemicolonsForCmd:
         assert _translate_semicolons_for_cmd(';') == '&'
 
 
+class TestStripLeadingAmpersandsForCmd:
+    """The leading-`&` stripper is pure string logic — no Windows dependency (W11 fix)."""
+
+    def test_single_leading_amp_stripped(self):
+        assert _strip_leading_ampersands_for_cmd('& echo hi') == 'echo hi'
+
+    def test_double_leading_amp_stripped(self):
+        # `&&` is a full leading operator sequence — the whole run of `&` is stripped.
+        assert _strip_leading_ampersands_for_cmd('&& echo hi') == 'echo hi'
+
+    def test_triple_leading_amp_stripped(self):
+        assert _strip_leading_ampersands_for_cmd('&&& echo hi') == 'echo hi'
+
+    def test_only_amps_returns_original(self):
+        # A command that is only `&` (or `&&`) would become empty if stripped; keep it as-is
+        # so the wrapper still emits a valid `chcp ... & <cmd>` rather than a dangling separator.
+        assert _strip_leading_ampersands_for_cmd('&') == '&'
+        assert _strip_leading_ampersands_for_cmd('&&') == '&&'
+
+    def test_no_leading_amp_unchanged(self):
+        assert _strip_leading_ampersands_for_cmd('echo hi') == 'echo hi'
+
+    def test_amp_not_at_start_is_data(self):
+        # A `&` that is NOT the first character is an operator mid-command — untouched.
+        assert _strip_leading_ampersands_for_cmd('echo a & echo b') == 'echo a & echo b'
+
+    def test_quoted_string_not_stripped(self):
+        # Quote-aware: only strip when the FIRST character is literally `&`. A leading quote
+        # means the `&` (if any) is data — leave it alone.
+        assert _strip_leading_ampersands_for_cmd('"foo & bar"') == '"foo & bar"'
+
+    def test_whitespace_before_amp_not_stripped(self):
+        # Leading whitespace means byte 0 is not `&`; the command is left untouched.
+        assert _strip_leading_ampersands_for_cmd('  & echo hi') == '  & echo hi'
+
+
 class TestConfigureWindowsUtf8Shape:
     """The wrapper output string shape (platform-independent)."""
 
@@ -87,6 +124,32 @@ class TestConfigureWindowsUtf8Shape:
     def test_chcp_prefix_untouched_for_plain_command(self):
         wrapped, _ = configure_windows_utf8('dir /s')
         assert wrapped == 'chcp 65001 > nul 2>&1 & dir /s'
+
+    def test_leading_single_amp_stripped_in_wrapper(self):
+        # W11: `& echo hi` would otherwise wrap to a double-`&` that cmd.exe rejects.
+        wrapped, _ = configure_windows_utf8('& echo hi')
+        assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
+
+    def test_leading_double_amp_stripped_in_wrapper(self):
+        # `&&` at the start is a redundant operator sequence — stripped to a single wrapper `&`.
+        wrapped, _ = configure_windows_utf8('&& echo hi')
+        assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
+
+    def test_leading_amp_run_stripped_in_wrapper(self):
+        # A leading run of `&` (e.g. `&&&`) is fully stripped so the wrapper's single `&` separates.
+        wrapped, _ = configure_windows_utf8('&&& echo hi')
+        assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
+
+    def test_command_not_starting_with_amp_untouched(self):
+        # A mid-command `&` is a real operator and must be preserved.
+        wrapped, _ = configure_windows_utf8('echo a & echo b')
+        assert wrapped == 'chcp 65001 > nul 2>&1 & echo a & echo b'
+
+    def test_quoted_leading_string_not_stripped(self):
+        # Quote-aware: a command starting with `"` (not literally `&`) is left untouched.
+        user = '"foo & bar"'
+        wrapped, _ = configure_windows_utf8(user)
+        assert wrapped == 'chcp 65001 > nul 2>&1 & ' + user
 
     def test_flags_include_new_process_group(self):
         import subprocess
@@ -137,3 +200,11 @@ class TestWindowsSemicolonExecution:
         # `;` inside double quotes is preserved as data (both run: echo prints the literal).
         result = self._run('echo "a;b"')
         assert 'a;b' in result.stdout, f'expected a;b, got {result.stdout!r}'
+
+    def test_leading_amp_command_runs(self):
+        # W11: `& echo RAN` must strip the redundant leading `&` so cmd.exe sees
+        # `chcp 65001 > nul 2>&1 & echo RAN` (single separator) — not a double-`&`.
+        # Verified empirically: RC 0, stdout contains 'RAN'.
+        result = self._run('& echo RAN')
+        assert result.returncode == 0, f'expected RC 0, got {result.returncode} stderr={result.stderr!r}'
+        assert 'RAN' in result.stdout, f'expected RAN, got stdout={result.stdout!r} stderr={result.stderr!r}'
