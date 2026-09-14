@@ -41,34 +41,34 @@ class TestSystemInfoServer:
         assert "(all interfaces)" in out
 
     def test_server_info_none_env_port_used(self, monkeypatch):
-        """server_info None + QWEN_AGENT_PORT set -> env port appears."""
-        monkeypatch.setenv("QWEN_AGENT_PORT", "7777")
+        """server_info None + AGENT_CASCADE_PORT set -> env port appears."""
+        monkeypatch.setenv("AGENT_CASCADE_PORT", "7777")
         out = _run(None)
         assert "http://0.0.0.0:7777" in out
 
     def test_server_info_none_no_env_default(self, monkeypatch):
         """server_info None + no env var -> default 8765, tool does not raise."""
-        monkeypatch.delenv("QWEN_AGENT_PORT", raising=False)
+        monkeypatch.delenv("AGENT_CASCADE_PORT", raising=False)
         out = _run(None)
         assert "http://0.0.0.0:8765" in out
 
     def test_malformed_server_info_does_not_raise(self, monkeypatch):
         """A malformed server_info (wrong arity / falsy) falls back safely."""
-        monkeypatch.delenv("QWEN_AGENT_PORT", raising=False)
+        monkeypatch.delenv("AGENT_CASCADE_PORT", raising=False)
         for bad in [("0.0.0.0",), ("", 9999), "not-a-tuple"]:
             out = _run(bad)
             # Falls back to default port; must not crash the tool.
             assert "http://0.0.0.0:8765" in out
 
     def test_non_numeric_env_port_falls_back(self, monkeypatch):
-        """A non-numeric QWEN_AGENT_PORT does not raise; defaults to 8765."""
-        monkeypatch.setenv("QWEN_AGENT_PORT", "not-a-number")
+        """A non-numeric AGENT_CASCADE_PORT does not raise; defaults to 8765."""
+        monkeypatch.setenv("AGENT_CASCADE_PORT", "not-a-number")
         out = _run(None)
         assert "http://0.0.0.0:8765" in out
 
     def test_pool_none_does_not_raise(self, monkeypatch):
         """No agent_pool at all -> still resolves via env/default without error."""
-        monkeypatch.delenv("QWEN_AGENT_PORT", raising=False)
+        monkeypatch.delenv("AGENT_CASCADE_PORT", raising=False)
         tool = SystemInfo(agent_pool=None, agent_name="orchestrator")
         out = tool.call("")
         assert "http://0.0.0.0:8765" in out

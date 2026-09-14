@@ -1,6 +1,6 @@
 ---
 name: shell-window-suppression
-description: Ensures test harnesses don't pop cmd windows by applying QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW at launch boundary.
+description: Ensures test harnesses don't pop cmd windows by applying AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW at launch boundary.
 triggers:
   - test files that call AsyncShellTracker.launch() directly
   - debugging regression tests on Windows
@@ -15,7 +15,7 @@ triggers:
 - When verifying that environment-based window suppression is applied at the right boundary
 
 ## CONTEXT
-The test suite uses an env-var opt-out `QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW` to suppress visible cmd windows. However, this env var is only checked inside the `shell_cmd` tool (`agent_cascade/tools/custom/shell_cmd.py:261-262`). Tests that call `AsyncShellTracker.launch()` directly (bypassing the tool) are **not** protected, causing them to pop visible windows on Windows.
+The test suite uses an env-var opt-out `AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW` to suppress visible cmd windows. However, this env var is only checked inside the `shell_cmd` tool (`agent_cascade/tools/custom/shell_cmd.py:261-262`). Tests that call `AsyncShellTracker.launch()` directly (bypassing the tool) are **not** protected, causing them to pop visible windows on Windows.
 
 ## PROCEDURE
 1. **Identify direct `launch()` calls** in test files: search for `.launch(` or `tracker.launch`.
@@ -23,7 +23,7 @@ The test suite uses an env-var opt-out `QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_W
 3. **Apply the opt-out pattern inside `launch()`** before task construction (around line 327 in `async_shell.py`):
    ```python
    # Respect the test-harness opt-out so direct launch() calls never pop a visible window.
-   if console_window and os.getenv("QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+   if console_window and os.getenv("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
        console_window = False
    ```
 4. **Verify** by running affected test files on Windows and confirming no cmd window appears.

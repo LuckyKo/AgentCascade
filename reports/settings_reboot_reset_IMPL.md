@@ -29,13 +29,13 @@
 
 ```python
 startup_cfg = {}
-if args.idle_timeout is not None or os.getenv('QWEN_AGENT_IDLE_TIMEOUT') is not None:
+if args.idle_timeout is not None or os.getenv('AGENT_CASCADE_IDLE_TIMEOUT') is not None:
     startup_cfg['idle_timeout_seconds'] = idle_timeout
 if (args.system_agent_idle_timeout is not None
-        or os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT') is not None):
+        or os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT') is not None):
     startup_cfg['system_agent_idle_timeout_seconds'] = system_idle_timeout
 if (args.idle_check_interval is not None
-        or os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL') is not None):
+        or os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL') is not None):
     startup_cfg['idle_check_interval'] = idle_check_interval
 
 if startup_cfg:

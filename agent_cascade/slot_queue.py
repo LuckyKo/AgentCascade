@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 # Configuration constants (configurable via environment variables)
 # ──────────────────────────────────────────────────────────────────────────────
 
-QUEUE_WAIT_TIMEOUT: int = int(os.getenv('QWEN_AGENT_SLOT_QUEUE_TIMEOUT', 300))
-"""Default timeout for waiting in the slot queue. Configurable via QWEN_AGENT_SLOT_QUEUE_TIMEOUT."""
+QUEUE_WAIT_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_SLOT_QUEUE_TIMEOUT', 300))
+"""Default timeout for waiting in the slot queue. Configurable via AGENT_CASCADE_SLOT_QUEUE_TIMEOUT."""
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -30,13 +30,13 @@ from agent_cascade.slot_yield_utils import describe_pool_holders, yield_caller_s
 # wait as long as the previous one legitimately runs (up to ~300s first-yield + turns).
 # Set well beyond max legitimate hold time so concurrent requests queue properly.
 # The ResettableRLock dead-holder detection still recovers from truly leaked locks.
-SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = int(os.getenv('QWEN_AGENT_SECURITY_LOCK_ACQUIRE_TIMEOUT', 600))
+SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = int(os.getenv('AGENT_CASCADE_SECURITY_LOCK_ACQUIRE_TIMEOUT', 600))
 
 # Last-resort guard against an LLM generator that never yields its first token.
 # The engine watchdog only activates after the first output; this timer covers the
 # pre-first-yield gap. Generous on purpose — it must not cut off a slow-but-progressing
 # model (the turn budget handles normal completion). Only fires if NO yield at all.
-SECURITY_FIRST_YIELD_TIMEOUT_SECONDS = int(os.getenv('QWEN_AGENT_SECURITY_FIRST_YIELD_TIMEOUT', 300))
+SECURITY_FIRST_YIELD_TIMEOUT_SECONDS = int(os.getenv('AGENT_CASCADE_SECURITY_FIRST_YIELD_TIMEOUT', 300))
 
 # ── Module-level helpers used by the security handler ───────────────────────
 

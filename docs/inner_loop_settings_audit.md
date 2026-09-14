@@ -37,11 +37,11 @@ The inner loop detection system is **well-designed and mostly complete**, with a
 | 13 | `entropy_threshold` | float | 2.0 | ❌ No | ✅ Yes (line 398) |
 | 14 | `score_decay_rate` | float | 0.97 | ❌ No | ✅ Yes (line 137, `decay()`) |
 | 15 | `max_score` | int | 500 | ❌ No | ✅ Yes (line 143, `add_score()`) |
-| 16 | `char_run_enabled` | bool | True | ✅ `QWEN_AGENT_LOOP_CHAR_RUN` | ✅ Yes (line 261) |
-| 17 | `sentence_rep_enabled` | bool | True | ✅ `QWEN_AGENT_LOOP_SENTENCE_REP` | ✅ Yes (line 287) |
-| 18 | `ngram_rep_enabled` | bool | True | ✅ `QWEN_AGENT_LOOP_NGRAM_REP` | ✅ Yes (line 320) |
-| 19 | `block_rep_enabled` | bool | True | ✅ `QWEN_AGENT_LOOP_BLOCK_REP` | ✅ Yes (line 349) |
-| 20 | `entropy_collapse_enabled` | bool | True | ✅ `QWEN_AGENT_LOOP_ENTROPY` | ✅ Yes (line 389) |
+| 16 | `char_run_enabled` | bool | True | ✅ `AGENT_CASCADE_LOOP_CHAR_RUN` | ✅ Yes (line 261) |
+| 17 | `sentence_rep_enabled` | bool | True | ✅ `AGENT_CASCADE_LOOP_SENTENCE_REP` | ✅ Yes (line 287) |
+| 18 | `ngram_rep_enabled` | bool | True | ✅ `AGENT_CASCADE_LOOP_NGRAM_REP` | ✅ Yes (line 320) |
+| 19 | `block_rep_enabled` | bool | True | ✅ `AGENT_CASCADE_LOOP_BLOCK_REP` | ✅ Yes (line 349) |
+| 20 | `entropy_collapse_enabled` | bool | True | ✅ `AGENT_CASCADE_LOOP_ENTROPY` | ✅ Yes (line 389) |
 
 ### B. Agent Pool Settings (UI-Facing Configuration)
 **File**: `N:\work\WD\AgentCascade_unified\agent_cascade\agent_instance.py` (lines 598–611)
@@ -138,7 +138,7 @@ The execution engine creates an `_InnerLoopSettings` instance passing only **7 p
 **Severity**: Low  
 **Location**: `settings.py` lines 166–170 vs. `execution_engine.py` line 1798
 
-The per-mode toggle env vars (`QWEN_AGENT_LOOP_CHAR_RUN`, etc.) are evaluated at class definition time in `InnerLoopSettings`. However, when execution_engine constructs `_InnerLoopSettings()`, it explicitly overrides these with values from the agent pool settings:
+The per-mode toggle env vars (`AGENT_CASCADE_LOOP_CHAR_RUN`, etc.) are evaluated at class definition time in `InnerLoopSettings`. However, when execution_engine constructs `_InnerLoopSettings()`, it explicitly overrides these with values from the agent pool settings:
 
 ```python
 _inner_settings = _InnerLoopSettings(

@@ -14,8 +14,8 @@ working set + clear response + silent re-call). Both share the existing `MAX_AUT
 ## Files changed (with line references)
 
 ### 1. `agent_cascade/settings.py`
-- **L30–33** — added `REASONING_ONLY_CONTINUE_ATTEMPTS: int = int(os.getenv('QWEN_AGENT_REASONING_ONLY_CONTINUE_ATTEMPTS', 2))` (default 2), with a comment explaining the shared-budget semantics.
-- **L34–40** — added `SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('QWEN_AGENT_SOFT_CONTINUE_NUDGE', '0') == '1'` (default `False`), with a comment describing the deferred nudge escape hatch.
+- **L30–33** — added `REASONING_ONLY_CONTINUE_ATTEMPTS: int = int(os.getenv('AGENT_CASCADE_REASONING_ONLY_CONTINUE_ATTEMPTS', 2))` (default 2), with a comment explaining the shared-budget semantics.
+- **L34–40** — added `SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('AGENT_CASCADE_SOFT_CONTINUE_NUDGE', '0') == '1'` (default `False`), with a comment describing the deferred nudge escape hatch.
 - Placed directly under `MAX_AUTO_CONTINUE_ATTEMPTS` (L29); matches the file's existing `os.getenv` convention.
 
 ### 2. `agent_cascade/agent_instance.py`

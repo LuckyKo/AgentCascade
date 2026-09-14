@@ -273,7 +273,7 @@ truncate_tool_result(result, tool_name, messages):
     ├── Exempt tools: compress_context, read_file, write_file, edit_file, delete_file, copy_file, move_file
     ├── Token counting via Qwen tokenizer
     ├── Wild-read detection (> DEFAULT_TOOL_RESULT_MAX_CHARS chars)
-    │   └── Configurable via env var QWEN_AGENT_TOOL_RESULT_MAX_CHARS or pool.llm_cfg
+    │   └── Configurable via env var AGENT_CASCADE_TOOL_RESULT_MAX_CHARS or pool.llm_cfg
     ├── Per-tool threshold: 25% of available tokens
     └── Total threshold: 95% of max tokens (minus system message tokens)
 ```

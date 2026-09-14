@@ -245,7 +245,7 @@ Each phase is a focused method (~20-60 lines), making them independently testabl
 
 Both paths ultimately call the same underlying compression logic in `agent_cascade/compression/core.py`, but they differ in their approach: system-triggered is fast and automatic, while tool-triggered produces higher-quality summaries through deliberate agent reasoning.
 
-**Overfeeding Safeguard:** Before sending messages to the compressor, the system performs actual token counting (not rough estimates) to verify that target messages fit within 90% of the compressor's context window. If they don't — TRUE overfeeding is detected and the agent is terminated with a clear diagnostic showing exact token counts. A safety net counter (default 100 compressions, configurable via `QWEN_AGENT_DEFAULT_COMPRESSION_MAX_ATTEMPTS`) guards against infinite loops if token counting fails silently.
+**Overfeeding Safeguard:** Before sending messages to the compressor, the system performs actual token counting (not rough estimates) to verify that target messages fit within 90% of the compressor's context window. If they don't — TRUE overfeeding is detected and the agent is terminated with a clear diagnostic showing exact token counts. A safety net counter (default 100 compressions, configurable via `AGENT_CASCADE_DEFAULT_COMPRESSION_MAX_ATTEMPTS`) guards against infinite loops if token counting fails silently.
 
 ---
 
@@ -484,7 +484,7 @@ Stage 2: Actual Token Count Verification (core.py, after target messages assembl
 
 Safety Net (handler.py, default 100 compressions):
   - A high-threshold counter guards against infinite loops if token counting fails silently
-  - Configurable via env var: QWEN_AGENT_DEFAULT_COMPRESSION_MAX_ATTEMPTS (default 100)
+  - Configurable via env var: AGENT_CASCADE_DEFAULT_COMPRESSION_MAX_ATTEMPTS (default 100)
 ```
 
 **On Session Reload (crash recovery):** The system performs a single forward pass through the JSONL file, finds all compression markers, stacks them in order, and takes the tail after the last marker. This produces the same working set that would exist in memory — no backward scanning or complex reconstruction needed.
@@ -493,7 +493,7 @@ Safety Net (handler.py, default 100 compressions):
 
 When an agent accumulates many compression markers over a long session, the markers themselves become a token burden. L2 consolidation merges older markers into a single higher-level summary, reducing marker count while preserving all raw message history in the JSONL log.
 
-**Trigger:** After every successful `compress_context()` call (L1), the system checks the agent's current marker count. If it meets or exceeds `COMPRESSION_CONSOLIDATION_THRESHOLD` (default **8**, env: `QWEN_AGENT_COMPRESSION_CONSOLIDATION_THRESHOLD`), consolidation is triggered automatically. Consolidation failure is **non-fatal** — normal compression has already succeeded; markers will be consolidated on the next cycle.
+**Trigger:** After every successful `compress_context()` call (L1), the system checks the agent's current marker count. If it meets or exceeds `COMPRESSION_CONSOLIDATION_THRESHOLD` (default **8**, env: `AGENT_CASCADE_COMPRESSION_CONSOLIDATION_THRESHOLD`), consolidation is triggered automatically. Consolidation failure is **non-fatal** — normal compression has already succeeded; markers will be consolidated on the next cycle.
 
 **Strategy:** All markers except the newest are consolidated into one L2 marker. The newest marker is preserved because it represents the most recent summary boundary and may reference context not yet superseded.
 
@@ -510,7 +510,7 @@ After consolidation:
 
 **Pool mutation (authoritative):**
 1. Extract summary text from each of the N-1 markers being consolidated (parsing `<context_summary>` tags). If no valid summaries are extracted, consolidation aborts entirely (no partial writes).
-2. Token-size guard: if total summary tokens exceed `COMPRESSION_MAX_CONSOLIDATION_TOKENS` (default **100,000**, env: `QWEN_AGENT_COMPRESSION_MAX_CONSOLIDATION_TOKENS`), abort to prevent compressor failure.
+2. Token-size guard: if total summary tokens exceed `COMPRESSION_MAX_CONSOLIDATION_TOKENS` (default **100,000**, env: `AGENT_CASCADE_COMPRESSION_MAX_CONSOLIDATION_TOKENS`), abort to prevent compressor failure.
 3. Invoke the Compressor agent with a consolidation-specific prompt (summarize summaries, not raw messages; keep chronological/important events, drop details).
 4. Build new L2 marker via `build_consolidation_marker_message()` — header reads `"L2, N summaries consolidated"`.
 5. Under `_compression_lock`: re-read pool state (defensive against concurrent changes), re-verify threshold still met, then rebuild conversation:

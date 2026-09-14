@@ -26,14 +26,14 @@ def detect_workspace_dir(project_root: Path) -> str:
     Sets the env var so downstream modules can read it.
 
     Priority (identical to settings.py _resolve_default_workspace()):
-    1. QWEN_AGENT_DEFAULT_WORKSPACE env var (if set)
+    1. AGENT_CASCADE_DEFAULT_WORKSPACE env var (if set)
     2. Docker mount point /workspace (only if running inside a Docker container)
     3. Sibling AgentWorkspace directory relative to project root
     4. workspace/ under project root
 
     Returns the resolved workspace path as a string.
     """
-    env_val = os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE')
+    env_val = os.getenv('AGENT_CASCADE_DEFAULT_WORKSPACE')
     if env_val:
         workspace_dir = os.path.abspath(env_val)
     else:
@@ -65,7 +65,7 @@ def detect_workspace_dir(project_root: Path) -> str:
         workspace_dir = str((project_root / 'workspace').resolve())
         logger.warning("[INIT] Workspace not found, creating at: %s", workspace_dir)
 
-    os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = workspace_dir
+    os.environ['AGENT_CASCADE_DEFAULT_WORKSPACE'] = workspace_dir
     return workspace_dir
 
 
@@ -269,9 +269,9 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
     # Ensure config files exist before any agent/infrastructure that depends on them
     ensure_config_files(project_root)
 
-    idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 900.0))
-    system_agent_idle_timeout = float(os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))
-    idle_check_interval = float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
+    idle_timeout = float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT', 900.0))
+    system_agent_idle_timeout = float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))
+    idle_check_interval = float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL', 60.0))
 
     operation_mgr = create_operation_manager(workspace_dir)
 

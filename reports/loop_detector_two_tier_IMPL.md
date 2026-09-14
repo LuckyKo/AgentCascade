@@ -44,10 +44,10 @@
 ### Settings / flags (plan §5.3 — table followed exactly)
 | Flag | Env | Default | Status |
 |---|---|---|---|
-| `LOOP_EXACT_ROLLBACK_ENABLED` | `QWEN_AGENT_LOOP_EXACT_ROLLBACK` | 1 (on) | NEW in settings.py |
-| `LOOP_FUZZY_WARNING_ENABLED` | `QWEN_AGENT_LOOP_FUZZY_WARNING` | 1 (on) | NEW in settings.py |
-| `TOOL_LOOP_FUZZY_ROLLBACK_ENABLED` | `QWEN_AGENT_TOOL_LOOP_FUZZY_ROLLBACK` | **0 (off)** | NEW in settings.py |
-| `TOOL_LOOP_DETECTION_ENABLED` | `QWEN_AGENT_TOOL_LOOP_DETECTION` | 1 | KEPT, deprecated kill switch |
+| `LOOP_EXACT_ROLLBACK_ENABLED` | `AGENT_CASCADE_LOOP_EXACT_ROLLBACK` | 1 (on) | NEW in settings.py |
+| `LOOP_FUZZY_WARNING_ENABLED` | `AGENT_CASCADE_LOOP_FUZZY_WARNING` | 1 (on) | NEW in settings.py |
+| `TOOL_LOOP_FUZZY_ROLLBACK_ENABLED` | `AGENT_CASCADE_TOOL_LOOP_FUZZY_ROLLBACK` | **0 (off)** | NEW in settings.py |
+| `TOOL_LOOP_DETECTION_ENABLED` | `AGENT_CASCADE_TOOL_LOOP_DETECTION` | 1 | KEPT, deprecated kill switch |
 | `TOOL_LOOP_ROLLBACK_ENABLED` | — | — | **DELETED** from settings.py, agent_instance.py (field + import), config_handlers.py, state_builder.py |
 
 - `telemetry.record_loop_detected`: new optional kwarg `warned: bool = True` (backward-compatible).

@@ -43,10 +43,10 @@
 
 Plan specifies:
 ```python
-SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('QWEN_AGENT_SOFT_CONTINUE_NUDGE', '0') == '1'
+SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('AGENT_CASCADE_SOFT_CONTINUE_NUDGE', '0') == '1'
 ```
 
-This is the correct pattern for a **disabled-by-default** boolean setting in this codebase. (Compare to `CACHE_POOL_ENABLED: bool = False` or `char_run_enabled: bool = os.getenv('QWEN_AGENT_LOOP_CHAR_RUN', '1') != '0'`.) The `QWEN_AGENT_` prefix is consistent with existing settings.
+This is the correct pattern for a **disabled-by-default** boolean setting in this codebase. (Compare to `CACHE_POOL_ENABLED: bool = False` or `char_run_enabled: bool = os.getenv('AGENT_CASCADE_LOOP_CHAR_RUN', '1') != '0'`.) The `AGENT_CASCADE_` prefix is consistent with existing settings.
 
 ---
 

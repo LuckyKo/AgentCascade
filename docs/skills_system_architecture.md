@@ -275,7 +275,7 @@ The `call_agent` tool receives a new optional argument called `load_skill`. This
 - **"AUTO"**: Auto-matcher scans task+context for keywords and loads matching skills (fallback behavior)
 - **"NONE"**: No skill loading at all; only soul-declared Tier 1 metadata is used (saves tokens for simple tasks)
 
-When `load_skill` is omitted from a `call_agent` invocation, the default behavior is controlled by the `DEFAULT_LOAD_SKILL_MODE` setting in `settings.py`. This can be configured via environment variable `QWEN_AGENT_DEFAULT_LOAD_SKILL=AUTO` (default) or `NONE`. Legacy calls without the parameter will gracefully fall back to this default.
+When `load_skill` is omitted from a `call_agent` invocation, the default behavior is controlled by the `DEFAULT_LOAD_SKILL_MODE` setting in `settings.py`. This can be configured via environment variable `AGENT_CASCADE_DEFAULT_LOAD_SKILL=AUTO` (default) or `NONE`. Legacy calls without the parameter will gracefully fall back to this default.
 
 #### Activation Flow
 

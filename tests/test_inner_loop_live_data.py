@@ -21,7 +21,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Enable two-phase detector BEFORE importing any modules that read the env var.
 # ---------------------------------------------------------------------------
-os.environ["QWEN_AGENT_LOOP_TWO_PHASE_ENABLED"] = "1"
+os.environ["AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED"] = "1"
 
 # ---------------------------------------------------------------------------
 # Paths & imports — load the detector directly to avoid pulling in the full

@@ -973,7 +973,7 @@ class TestAutoAsyncMode:
 class TestConsoleWindowSuppression:
     """Guard against the env-var check in AsyncShellTracker.launch() regressing.
 
-    conftest.py sets QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1 for all
+    conftest.py sets AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1 for all
     pytest runs, so even if a caller explicitly passes console_window=True,
     the tracker must override it to False.
     """
@@ -983,8 +983,8 @@ class TestConsoleWindowSuppression:
         import os
 
         # conftest.py guarantees this is set for all tests, but assert defensively
-        assert os.environ.get("QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW") == "1", \
-            "Expected conftest to set QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1"
+        assert os.environ.get("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW") == "1", \
+            "Expected conftest to set AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1"
 
         tracker = AsyncShellTracker(pool=None)
         tool_id, _, early_output, completed_early, return_code = tracker.launch(
@@ -997,7 +997,7 @@ class TestConsoleWindowSuppression:
 
         task = tracker._get_task('test_agent', tool_id)
         assert task.console_window is False, \
-            "console_window should be forced to False when QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1"
+            "console_window should be forced to False when AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1"
 
 
 # ============================================================================

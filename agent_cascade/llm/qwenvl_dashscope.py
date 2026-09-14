@@ -222,7 +222,7 @@ class QwenVLChatAtDS(BaseFnCallModel):
                             reasoning_content=full_reasoning_content,
                             extra=msg_extra))
 
-            if os.getenv('QWEN_AGENT_OMNI_RESPONSE_SAVE_AUDIO', 'false').lower() == 'true':
+            if os.getenv('AGENT_CASCADE_OMNI_RESPONSE_SAVE_AUDIO', 'false').lower() == 'true':
                 work_dir = os.path.join(DEFAULT_WORKSPACE, 'llms')
                 os.makedirs(DEFAULT_WORKSPACE, exist_ok=True)
                 os.makedirs(work_dir, exist_ok=True)

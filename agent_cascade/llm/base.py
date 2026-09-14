@@ -156,7 +156,7 @@ class BaseChatModel(ABC):
         if 'dashscope' in self.model_type:
             self.generate_cfg['incremental_output'] = True
 
-        self.use_raw_api = os.getenv('QWEN_AGENT_USE_RAW_API', 'false').lower() == 'true'
+        self.use_raw_api = os.getenv('AGENT_CASCADE_USE_RAW_API', 'false').lower() == 'true'
         if 'use_raw_api' in generate_cfg:
             self.use_raw_api = generate_cfg.pop('use_raw_api')
         elif self.model_type == 'qwen_dashscope':

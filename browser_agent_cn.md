@@ -95,7 +95,7 @@ python start_api_server.py
 
 ```bash
 # 示例: 使用不同的端口启动 API 服务器
-set QWEN_AGENT_PORT=8765
+set AGENT_CASCADE_PORT=8765
 python start_api_server.py
 ```
 

@@ -34,9 +34,9 @@ API_SERVER = os.path.join(PROJECT_ROOT, "agent_cascade", "api_server.py")
 
 # The three env vars the startup block checks for explicit overrides.
 IDLE_ENV_VARS = (
-    "QWEN_AGENT_IDLE_TIMEOUT",
-    "QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT",
-    "QWEN_AGENT_IDLE_CHECK_INTERVAL",
+    "AGENT_CASCADE_IDLE_TIMEOUT",
+    "AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT",
+    "AGENT_CASCADE_IDLE_CHECK_INTERVAL",
 )
 
 
@@ -223,7 +223,7 @@ class TestBootClobberFix:
         argv = ["api_server.py", "--workspace", str(tmp_path)]
         env = {
             "AGENT_CASCADE_TEST_CONFIG_DIR": str(config_dir),
-            "QWEN_AGENT_IDLE_TIMEOUT": "2000",  # explicit env override
+            "AGENT_CASCADE_IDLE_TIMEOUT": "2000",  # explicit env override
         }
 
         _clear_idle_env()

@@ -148,7 +148,7 @@ def discover(self, skill_paths: List[Path]) -> None:
 **Changes to `settings.py`** (~3 lines added after line 197):
 ```python
 SKILL_CACHE_TTL_SECONDS: float = float(os.getenv(
-    'QWEN_AGENT_SKILL_CACHE_TTL', 30.0))  # Cache TTL for mtime-based discovery cache
+    'AGENT_CASCADE_SKILL_CACHE_TTL', 30.0))  # Cache TTL for mtime-based discovery cache
 ```
 
 **Changes to `agent_pool.py`** (~8 lines, lines 343–359):
@@ -328,7 +328,7 @@ Allow users to disable specific skills via config without deleting them.
 
 **Changes to `settings.py`** (~5 lines, after line 197):
 ```python
-_SKILLS_DISABLED_RAW: str = os.getenv('QWEN_AGENT_SKILLS_DISABLED', '')
+_SKILLS_DISABLED_RAW: str = os.getenv('AGENT_CASCADE_SKILLS_DISABLED', '')
 SKILLS_DISABLED: List[str] = [
     s.strip().lower() for s in _SKILLS_DISABLED_RAW.split(',') if s.strip()
 ] if _SKILLS_DISABLED_RAW else []

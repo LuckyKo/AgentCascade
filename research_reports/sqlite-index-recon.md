@@ -47,8 +47,8 @@ else:
 ## 2. Workspace / instance path resolution
 
 **Workspace root (single source of truth):**
-- `agent_cascade/settings.py:81` — `DEFAULT_WORKSPACE: str = _resolve_default_workspace()`; resolver at `:43-77`. Priority: (1) `QWEN_AGENT_DEFAULT_WORKSPACE` env, (2) Docker `/workspace` mount (if `/.dockerenv`), (3) sibling `AgentWorkspace` dir next to project root, (4) `<project_root>/workspace`.
-- `agent_cascade/shared_init.py:22-69` — `detect_workspace_dir(project_root)` re-resolves and **sets** `os.environ['QWEN_AGENT_DEFAULT_WORKSPACE']` (line 68) so downstream modules agree.
+- `agent_cascade/settings.py:81` — `DEFAULT_WORKSPACE: str = _resolve_default_workspace()`; resolver at `:43-77`. Priority: (1) `AGENT_CASCADE_DEFAULT_WORKSPACE` env, (2) Docker `/workspace` mount (if `/.dockerenv`), (3) sibling `AgentWorkspace` dir next to project root, (4) `<project_root>/workspace`.
+- `agent_cascade/shared_init.py:22-69` — `detect_workspace_dir(project_root)` re-resolves and **sets** `os.environ['AGENT_CASCADE_DEFAULT_WORKSPACE']` (line 68) so downstream modules agree.
 
 **Instance separation (`AGENT_CASCADE_INSTANCE_ID`):**
 - `agent_cascade/instance_id.py:46-52` — `get_instance_id()` reads the env var.

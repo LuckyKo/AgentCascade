@@ -33,11 +33,11 @@ Two independent loop detection systems exist:
 
 | Mode | Setting Toggle | Default Enabled | Mechanism | Score |
 |------|---------------|-----------------|-----------|-------|
-| **Character run** | `char_run_enabled` | YES (`QWEN_AGENT_LOOP_CHAR_RUN`) | Deterministic: 70 identical chars → immediate return | +100 (immediate) |
-| **Sentence repetition** | `sentence_rep_enabled` | YES (`QWEN_AGENT_LOOP_SENTENCE_REP`) | Scoring: 15 occurrences → +100 (one-time per sentence) | Accumulates to threshold 350 |
-| **N-gram repetition** | `ngram_rep_enabled` | YES (`QWEN_AGENT_LOOP_NGRAM_REP`) | Scoring: 7 occurrences of 64-token window → +90 (one-time per n-gram) | Accumulates to threshold 350 |
-| **Block repetition** | `block_rep_enabled` | YES (`QWEN_AGENT_LOOP_BLOCK_REP`) | Scoring: 6 occurrences of 128-token window → +100 (one-time per block) | Accumulates to threshold 350 |
-| **Entropy collapse** | `entropy_collapse_enabled` | YES (`QWEN_AGENT_LOOP_ENTROPY`) | Scoring: Shannon entropy < 2.0 bits in 128-token window → +50 (one-time gate) | Accumulates to threshold 350 |
+| **Character run** | `char_run_enabled` | YES (`AGENT_CASCADE_LOOP_CHAR_RUN`) | Deterministic: 70 identical chars → immediate return | +100 (immediate) |
+| **Sentence repetition** | `sentence_rep_enabled` | YES (`AGENT_CASCADE_LOOP_SENTENCE_REP`) | Scoring: 15 occurrences → +100 (one-time per sentence) | Accumulates to threshold 350 |
+| **N-gram repetition** | `ngram_rep_enabled` | YES (`AGENT_CASCADE_LOOP_NGRAM_REP`) | Scoring: 7 occurrences of 64-token window → +90 (one-time per n-gram) | Accumulates to threshold 350 |
+| **Block repetition** | `block_rep_enabled` | YES (`AGENT_CASCADE_LOOP_BLOCK_REP`) | Scoring: 6 occurrences of 128-token window → +100 (one-time per block) | Accumulates to threshold 350 |
+| **Entropy collapse** | `entropy_collapse_enabled` | YES (`AGENT_CASCADE_LOOP_ENTROPY`) | Scoring: Shannon entropy < 2.0 bits in 128-token window → +50 (one-time gate) | Accumulates to threshold 350 |
 
 ### System B Modes — Target State (after this plan)
 
@@ -208,7 +208,7 @@ class TwoPhaseLoopDetector:
         self.last_suspicion_interval: int | None = None  # Suspected loop length in chars
         
         # Feature flag — gated for safe rollout
-        self.two_phase_enabled = os.environ.get("QWEN_AGENT_LOOP_TWO_PHASE_ENABLED", "0") == "1"
+        self.two_phase_enabled = os.environ.get("AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED", "0") == "1"
 
 #### Supporting Types and Helpers
 
@@ -535,9 +535,9 @@ def feed(self, new_text: str) -> dict | None:
 | Parameter | Default | Rationale | Tunable via env var? |
 |-----------|---------|-----------|---------------------|
 | `ngram_window_size` | 64 | Same as current ngram mode; Phase 0 proved this catches semantic loops | No (fixed) |
-| `suspicion_threshold` | 7 | N-gram must appear 7+ times before suspicion (raised from 5 per production tuning — 5 was too aggressive on technical content) | Yes (`QWEN_AGENT_LOOP_SUSPICION_THRESHOLD`) |
-| `confirmed_matches_required` | 3 | Need 3 exact repetitions to confirm loop — prevents abort on coincidental similarity | Yes (`QWEN_AGENT_LOOP_CONFIRM_REQUIRED`) |
-| `cooldown_duration` | 50 feeds | ~2500 chars of suppression; enough to skip past related-but-different content | Yes (`QWEN_AGENT_LOOP_COOLDOWN_FEEDS`) |
+| `suspicion_threshold` | 7 | N-gram must appear 7+ times before suspicion (raised from 5 per production tuning — 5 was too aggressive on technical content) | Yes (`AGENT_CASCADE_LOOP_SUSPICION_THRESHOLD`) |
+| `confirmed_matches_required` | 3 | Need 3 exact repetitions to confirm loop — prevents abort on coincidental similarity | Yes (`AGENT_CASCADE_LOOP_CONFIRM_REQUIRED`) |
+| `cooldown_duration` | 50 feeds | ~2500 chars of suppression; enough to skip past related-but-different content | Yes (`AGENT_CASCADE_LOOP_COOLDOWN_FEEDS`) |
 | `max_token_buffer` | 5000 | Allows detecting loops with intervals up to ~700 tokens; very long interval loops (>2KB) caught by max_chars | No (fixed) |
 
 ### False Positive Guards
@@ -1076,10 +1076,10 @@ When removing scoring-based modes and adding two-phase detector, existing tests 
 
 | Step | Task | Details |
 |------|------|---------|
-| 6.1 | Two-phase detector ships behind env var | `QWEN_AGENT_LOOP_TWO_PHASE_ENABLED=0` by default — only char_run + max_chars active until verified |
+| 6.1 | Two-phase detector ships behind env var | `AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED=0` by default — only char_run + max_chars active until verified |
 | 6.2 | Deploy with flag disabled initially | Monitor for any unexpected gaps in loop detection vs old scoring modes |
-| 6.3 | Enable two-phase mode after verification | Set `QWEN_AGENT_LOOP_TWO_PHASE_ENABLED=1` once Phase 0 replay tests pass and no production issues observed (~1 week monitoring) |
-| 6.4 | Remove old env vars for removed modes | Clean up `QWEN_AGENT_LOOP_SENTENCE_REP`, `QWEN_AGENT_LOOP_NGRAM_REP`, etc. from settings.py |
+| 6.3 | Enable two-phase mode after verification | Set `AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED=1` once Phase 0 replay tests pass and no production issues observed (~1 week monitoring) |
+| 6.4 | Remove old env vars for removed modes | Clean up `AGENT_CASCADE_LOOP_SENTENCE_REP`, `AGENT_CASCADE_LOOP_NGRAM_REP`, etc. from settings.py |
 
 ---
 

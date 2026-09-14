@@ -1408,22 +1408,22 @@ if __name__ == "__main__":
     parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
     parser.add_argument("--idle-timeout", type=float, default=None,
                         help="Seconds of inactivity before auto-dismissing an idle agent (default: 1600). "
-                             "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
+                             "Also settable via AGENT_CASCADE_IDLE_TIMEOUT env var.")
     parser.add_argument("--system-agent-idle-timeout", type=float, default=None,
                         help="Idle timeout for system agents (Compressor/Security) (default: 60). 0=off. "
-                             "Also settable via QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT env var.")
+                             "Also settable via AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT env var.")
     parser.add_argument("--idle-check-interval", type=float, default=None,
                         help="Seconds between idle-check sweeps (default: 60). "
-                             "Also settable via QWEN_AGENT_IDLE_CHECK_INTERVAL env var.")
+                             "Also settable via AGENT_CASCADE_IDLE_CHECK_INTERVAL env var.")
     parser.add_argument("--fresh", action="store_true",
                         help="Start with a fresh session — do not load conversation history from log files.")
     args = parser.parse_args()
 
     # Initialize the global agent_pool
     initial_llm_cfg = {
-        'model': os.getenv('QWEN_AGENT_MODEL', 'gpt-4o'),
-        'api_base': os.getenv('QWEN_AGENT_API_BASE', 'https://api.openai.com/v1'),
-        'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
+        'model': os.getenv('AGENT_CASCADE_MODEL', 'gpt-4o'),
+        'api_base': os.getenv('AGENT_CASCADE_API_BASE', 'https://api.openai.com/v1'),
+        'api_key': os.getenv('AGENT_CASCADE_API_KEY', 'EMPTY'),
         # Tool output char limits (defaults from user config)
         'tool_result_max_chars': 25000,
         'wild_read_truncation_chars': DEFAULT_WILD_READ_TRUNCATION_CHARS,
@@ -1435,9 +1435,9 @@ if __name__ == "__main__":
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)
-    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 1600.0))
-    system_idle_timeout = args.system_agent_idle_timeout if args.system_agent_idle_timeout is not None else float(os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 60.0))
-    idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
+    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT', 1600.0))
+    system_idle_timeout = args.system_agent_idle_timeout if args.system_agent_idle_timeout is not None else float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT', 60.0))
+    idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL', 60.0))
 
     # Create OperationManager for blocking user approvals on mutating operations
     from agent_cascade.operation_manager import OperationManager
@@ -1471,13 +1471,13 @@ if __name__ == "__main__":
     # re-save: the values loaded from pool_settings.json in AgentPool.__init__ are the user's
     # persisted preferences and would otherwise be clobbered by the hardcoded defaults on every boot.
     startup_cfg = {}
-    if args.idle_timeout is not None or os.getenv('QWEN_AGENT_IDLE_TIMEOUT') is not None:
+    if args.idle_timeout is not None or os.getenv('AGENT_CASCADE_IDLE_TIMEOUT') is not None:
         startup_cfg['idle_timeout_seconds'] = idle_timeout
     if (args.system_agent_idle_timeout is not None
-            or os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT') is not None):
+            or os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT') is not None):
         startup_cfg['system_agent_idle_timeout_seconds'] = system_idle_timeout
     if (args.idle_check_interval is not None
-            or os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL') is not None):
+            or os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL') is not None):
         startup_cfg['idle_check_interval'] = idle_check_interval
 
     if startup_cfg:

@@ -87,7 +87,7 @@ class TwoPhaseLoopDetector:
         # Suspicion phase parameters
         self.ngram_window_size = 64  # Token window size (same as current ngram mode)
         self.suspicion_threshold = suspicion_threshold or int(
-            os.environ.get("QWEN_AGENT_LOOP_SUSPICION_THRESHOLD", "7")
+            os.environ.get("AGENT_CASCADE_LOOP_SUSPICION_THRESHOLD", "7")
         )
         self.max_counter_entries = 200  # Prune threshold for counter
 
@@ -108,14 +108,14 @@ class TwoPhaseLoopDetector:
 
         # Confirmation phase parameters
         self.confirmed_matches_required = confirmed_matches_required or int(
-            os.environ.get("QWEN_AGENT_LOOP_CONFIRM_REQUIRED", "3")
+            os.environ.get("AGENT_CASCADE_LOOP_CONFIRM_REQUIRED", "3")
         )
 
         # Cooldown state
         self.cooldown_active = False
         self.cooldown_remaining_feeds = 0
         self.cooldown_duration = cooldown_duration or int(
-            os.environ.get("QWEN_AGENT_LOOP_COOLDOWN_FEEDS", "50")
+            os.environ.get("AGENT_CASCADE_LOOP_COOLDOWN_FEEDS", "50")
         )
 
         # Tail buffer for exact comparison — no truncation needed (detector is per-response, max_chars limits total)
@@ -125,7 +125,7 @@ class TwoPhaseLoopDetector:
         if enabled is not None:
             self.two_phase_enabled = enabled
         else:
-            self.two_phase_enabled = os.environ.get("QWEN_AGENT_LOOP_TWO_PHASE_ENABLED", "0") == "1"
+            self.two_phase_enabled = os.environ.get("AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED", "0") == "1"
 
     def reset(self) -> None:
         """Clear all state so the detector can be reused for a new LLM call attempt."""

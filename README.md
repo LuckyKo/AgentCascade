@@ -88,9 +88,9 @@ For example, a coder agent might prioritize a local model for speed, with a clou
 1. Configuration: Set the required environment variables for your chosen model provider. Example configuration:
 
    ```bash
-   export QWEN_AGENT_MODEL=your-model-name
-   export QWEN_AGENT_API_BASE=https://api.openai.com/v1
-   export QWEN_AGENT_API_KEY=sk-your-api-key-here
+   export AGENT_CASCADE_MODEL=your-model-name
+   export AGENT_CASCADE_API_BASE=https://api.openai.com/v1
+   export AGENT_CASCADE_API_KEY=sk-your-api-key-here
    ```
 
 2. Launch: Start the API server by running:
@@ -124,7 +124,7 @@ For full endpoint details, request/response formats, and WebSocket protocol, see
 
 - **Docker not running / container fails**: Ensure Docker is installed and the daemon is running. Check logs with `docker ps` and `docker logs <container_id>`. If using WSL2 on Windows, make sure the WSL distro is started and Docker Desktop is running.
 - **Port already in use**: Port 12345 is used by default. Change it with `python start_api_server.py --port <PORT>` or stop the process occupying the port.
-- **API key errors**: Verify that `QWEN_AGENT_API_KEY` (and any other provider-specific keys) is set correctly and has sufficient permissions/quota for the configured model.
+- **API key errors**: Verify that `AGENT_CASCADE_API_KEY` (and any other provider-specific keys) is set correctly and has sufficient permissions/quota for the configured model.
 - **Agent not responding**: Check server logs for errors. Common causes include network issues to the model API, timeouts due to large tasks, or insufficient context memory. You can increase timeouts in your environment configuration or split very large tasks into smaller sub-tasks.
 
 ## License

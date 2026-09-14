@@ -153,7 +153,7 @@ class _CapturingStream:
 
 def setup_logger(level=None):
     if level is None:
-        if os.getenv('QWEN_AGENT_DEBUG', '0').strip().lower() in ('1', 'true'):
+        if os.getenv('AGENT_CASCADE_DEBUG', '0').strip().lower() in ('1', 'true'):
             level = logging.DEBUG
         else:
             level = logging.INFO
@@ -262,7 +262,7 @@ def init_logging(level=None) -> None:
     and installs exception hooks. Must be called once at application startup.
 
     Args:
-        level: Optional logging level (default: INFO, or DEBUG if QWEN_AGENT_DEBUG is set).
+        level: Optional logging level (default: INFO, or DEBUG if AGENT_CASCADE_DEBUG is set).
 
     Raises:
         RuntimeError: If logging has already been initialized.

@@ -22,8 +22,8 @@ Validated against both real failure samples in `loop_failure_samples/`.
   - Everything else (auto_rollback toggle, max_auto_rollbacks enforcement, inline rollback + hint via `_inline_rollback_and_hint`) is reused unchanged.
 
 ### 3. `agent_cascade/settings.py`
-- `TOOL_LOOP_DETECTION_ENABLED: bool = True` (env `QWEN_AGENT_TOOL_LOOP_DETECTION`, default `'1'`).
-- `TOOL_LOOP_ROLLBACK_ENABLED: bool = False` (env `QWEN_AGENT_TOOL_LOOP_ROLLBACK`, default `'0'`) — staged rollout: log-only until a zero-FP burn-in.
+- `TOOL_LOOP_DETECTION_ENABLED: bool = True` (env `AGENT_CASCADE_TOOL_LOOP_DETECTION`, default `'1'`).
+- `TOOL_LOOP_ROLLBACK_ENABLED: bool = False` (env `AGENT_CASCADE_TOOL_LOOP_ROLLBACK`, default `'0'`) — staged rollout: log-only until a zero-FP burn-in.
 
 ### 4. `agent_cascade/agent_instance.py`
 - `PoolSettings` fields `tool_loop_detection_enabled` / `tool_loop_rollback_enabled` defaulting to the settings constants (defaults consistent with settings.py).

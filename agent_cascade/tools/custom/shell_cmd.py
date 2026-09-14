@@ -433,7 +433,7 @@ class ShellCmd(BaseTool):
 
         # Opt-out override (e.g. test harnesses): force no console window regardless of pool state.
         # Does NOT change production defaults — only takes effect when this env var is set truthy.
-        if os.getenv("QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+        if os.getenv("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
             console_window = False
 
         start_time = time.time()

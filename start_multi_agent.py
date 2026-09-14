@@ -83,7 +83,7 @@ if __name__ == '__main__':
     from agent_cascade.splash import print_startup_banner
     print_startup_banner(
         mode='Multi-Agent',
-        port=int(os.getenv('QWEN_AGENT_PORT', 8765)),
+        port=int(os.getenv('AGENT_CASCADE_PORT', 8765)),
         host='0.0.0.0',
     )
 
@@ -160,7 +160,7 @@ if __name__ == '__main__':
         logger.error('[FATAL] Failed to create API server app: %s', e)
         raise SystemExit(1)
 
-    port = int(os.getenv('QWEN_AGENT_PORT', 8765))
+    port = int(os.getenv('AGENT_CASCADE_PORT', 8765))
     logger.info('\n[OK] API Server ready!')
     logger.info('    -> Open http://127.0.0.1:%d in your browser', port)
     logger.info('    -> WebSocket at ws://127.0.0.1:%d/ws/chat', port)
@@ -202,7 +202,7 @@ if __name__ == '__main__':
         server.run()
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error('[FATAL] Port %d is already in use. Change QWEN_AGENT_PORT env var or stop the other process.',
+            logger.error('[FATAL] Port %d is already in use. Change AGENT_CASCADE_PORT env var or stop the other process.',
                          port)
         else:
             logger.error('[FATAL] Server failed to start: %s', e)

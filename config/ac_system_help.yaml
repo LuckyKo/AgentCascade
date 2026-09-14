@@ -83,7 +83,7 @@ websocket:
 parallel_instances:
   description: "How to run and identify multiple AgentCascade instances in parallel."
   notes:
-    - "Each instance is a separate process bound to its own port. Use the QWEN_AGENT_PORT env var (start_multi_agent.py) or --port (start_api_server.py)."
+    - "Each instance is a separate process bound to its own port. Use the AGENT_CASCADE_PORT env var (start_multi_agent.py) or --port (start_api_server.py)."
     - "Set AGENT_CASCADE_INSTANCE_ID (or --instance-id) to give an instance a stable id; this names its logs and pool_settings_<id>.json."
     - "An agent can always discover ITS OWN instance's address:port from the normal system_info output (the 'AgentCascade Server' line) — it is set per-process at startup."
     - "Do not assume a fixed port across instances; read system_info rather than hardcoding one."
@@ -92,7 +92,7 @@ parallel_instances:
 settings_env:
   description: "Key environment variables and config files that shape an instance."
   notes:
-    - "QWEN_AGENT_PORT — API server port for start_multi_agent.py (default 8765)."
+    - "AGENT_CASCADE_PORT — API server port for start_multi_agent.py (default 8765)."
     - "AGENT_CASCADE_INSTANCE_ID — stable id for parallel instances (logs + per-instance pool settings)."
     - "Config dir: <AgentCascade_root>/config/ holds api_endpoints.json, pool_settings.json, image_gen.json, secrets.json."
     - "Per-instance pool settings live at config/pool_settings_<instance_id>.json when an instance id is set, else config/pool_settings.json."

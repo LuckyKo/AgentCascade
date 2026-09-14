@@ -39,7 +39,7 @@ def build_realistic_conversation() -> List[Message]:
         Message(role='user', content="Can you also check if the overhead constant is configurable via environment variable?"),
         Message(role='assistant', content=(
             "Yes, CHAT_TEMPLATE_TOKEN_OVERHEAD defaults to 5 and can be overridden with:\n"
-            "QWEN_AGENT_CHAT_TEMPLATE_TOKEN_OVERHEAD=<value>\n\n"
+            "AGENT_CASCADE_CHAT_TEMPLATE_TOKEN_OVERHEAD=<value>\n\n"
             "This accounts for llama.cpp chat template wrapper tokens per message."
         )),
         Message(role='user', content="Write a test that compares our count vs what llama.cpp actually reports in usage.prompt_tokens"),

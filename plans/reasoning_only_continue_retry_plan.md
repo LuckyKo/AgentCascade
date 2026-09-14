@@ -70,8 +70,8 @@ Other malformed cases (`"broken-json"`, `"empty-output"`) and truncation keep th
 ## Implementation plan (files & changes)
 
 ### 1. `agent_cascade/settings.py`
-- Add `REASONING_ONLY_CONTINUE_ATTEMPTS: int = int(os.getenv('QWEN_AGENT_REASONING_ONLY_CONTINUE_ATTEMPTS', 2))`.
-- Add `SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('QWEN_AGENT_SOFT_CONTINUE_NUDGE', '0') == '1'` — **default False**. When False, soft continues are pure resends (no nudge message). When True, the escalating USER nudge is injected on each soft continue. This lets us enable the nudge later without code changes.
+- Add `REASONING_ONLY_CONTINUE_ATTEMPTS: int = int(os.getenv('AGENT_CASCADE_REASONING_ONLY_CONTINUE_ATTEMPTS', 2))`.
+- Add `SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('AGENT_CASCADE_SOFT_CONTINUE_NUDGE', '0') == '1'` — **default False**. When False, soft continues are pure resends (no nudge message). When True, the escalating USER nudge is injected on each soft continue. This lets us enable the nudge later without code changes.
 
 ### 2. `agent_cascade/agent_instance.py`
 - Add TWO dataclass fields next to the other auto-continue state fields (~line 314):

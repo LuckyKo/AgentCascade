@@ -23,7 +23,7 @@ Two bugs, one cascade, one external trigger:
 
 | Constant | Value | Defined | Used as fallback at |
 |---|---|---|---|
-| `DEFAULT_MAX_INPUT_TOKENS` | **65000** (env `QWEN_AGENT_DEFAULT_MAX_INPUT_TOKENS`) | `agent_cascade/settings.py:22-23` | `llm/base.py:313` — client-side pre-check limit when merged cfg lacks the key |
+| `DEFAULT_MAX_INPUT_TOKENS` | **65000** (env `AGENT_CASCADE_DEFAULT_MAX_INPUT_TOKENS`) | `agent_cascade/settings.py:22-23` | `llm/base.py:313` — client-side pre-check limit when merged cfg lacks the key |
 | `DEFAULT_MAX_INPUT_TOKENS` (local re-import) | 65000 | `api_integration_pkg/tokens.py:49-51` | `_resolve_max_tokens` final fallback (`tokens.py:110`); local copy only if settings import fails |
 | `DEFAULT_MAX_INPUT_TOKENS` | 58000 | `test_settings.py:20-21` | Test-only drift, not shipped |
 | `FALLBACK_COMPRESSION_MAX_ROUNDS` | 5 | `engine/compression_exec.py:41` | Bounds the fallback-compression loop (`llm_call.py:588`) |

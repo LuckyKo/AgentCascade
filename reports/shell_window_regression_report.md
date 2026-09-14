@@ -19,7 +19,7 @@ cmd window on Windows. The root cause is a two-part gap:
    ("Default is False", line 299) and the `AsyncShellTask` dataclass default
    (`console_window: bool = False`, line 175).
 2. The existing test-harness opt-out env var
-   `QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW` (set in `tests/conftest.py:42`)
+   `AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW` (set in `tests/conftest.py:42`)
    is **only read inside the `shell_cmd` tool**
    (`agent_cascade/tools/custom/shell_cmd.py:261`), **not** inside
    `AsyncShellTracker.launch()`. So the conftest protection does **not** cover direct
@@ -89,7 +89,7 @@ task.console_window == True` at `launch()` time.
 |---|---|---|---|
 | Pool toggle `_enable_async_shell_console_window` | `agent_pool.py:272` | **False** | Drives the tool-level decision |
 | Tool-level read of pool toggle | `shell_cmd.py:255-257` | — | `console_window = bool(pool._enable_async_shell_console_window)` (defaults False) |
-| **Env-var opt-out** `QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW` | `shell_cmd.py:261-262` | unset | If truthy (`1`/`true`/etc.) → forces `console_window = False` regardless of pool |
+| **Env-var opt-out** `AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW` | `shell_cmd.py:261-262` | unset | If truthy (`1`/`true`/etc.) → forces `console_window = False` regardless of pool |
 | Conftest sets the env var for all tests | `tests/conftest.py:39-42` | `= "1"` | **Intended** to suppress windows in tests, but only works via the `shell_cmd` tool path |
 | `AsyncShellTask.console_window` dataclass field | `async_shell.py:175` | `False` | Per-task flag |
 | `AsyncShellTracker.launch()` parameter | `async_shell.py:286` | **`True`** | ⚠️ Default contradicts docstring ("Default is False", line 299) and the dataclass default (`False`) |
@@ -164,7 +164,7 @@ The 15 real-launch call sites in §3a pop windows **because**:
 1. They call `tracker.launch()` directly (not via the `shell_cmd` tool).
 2. They omit the `console_window` argument → the `launch()` default **`True`**
    (`async_shell.py:286`) applies.
-3. The conftest env var (`QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1`) is **not
+3. The conftest env var (`AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1`) is **not
    consulted inside `launch()`**, so it cannot suppress these.
 
 On non-Windows (`ON_WINDOWS` is False) these same tests do **not** pop windows; the
@@ -180,7 +180,7 @@ task construction, ~`async_shell.py:327`):
 ```python
 # Respect the test-harness opt-out so direct launch() calls (e.g. regression tests)
 # never pop a visible window. Only takes effect when the env var is set truthy.
-if console_window and os.getenv("QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+if console_window and os.getenv("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
     console_window = False
 ```
 Since `tests/conftest.py:42` already sets this env var for every pytest run, this

@@ -101,7 +101,7 @@ If you need to specify a custom port, set an environment variable before launchi
 
 ```bash
 # Example: Use a different port for the API server
-set QWEN_AGENT_PORT=8765
+set AGENT_CASCADE_PORT=8765
 python start_api_server.py
 ```
 

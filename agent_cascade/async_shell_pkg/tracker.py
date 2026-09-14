@@ -223,7 +223,7 @@ class AsyncShellTracker:
 
         # Opt-out override (e.g. test harnesses): force no console window regardless of caller state.
         # Does NOT change production defaults — only takes effect when this env var is set truthy.
-        if console_window and os.getenv("QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+        if console_window and os.getenv("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
             console_window = False
 
         tool_id = self._next_id(agent_name)

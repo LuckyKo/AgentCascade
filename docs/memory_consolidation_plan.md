@@ -546,9 +546,9 @@ Add tunable parameters:
 ```python
 # Hierarchical memory consolidation settings
 COMPRESSION_CONSOLIDATION_THRESHOLD: int = int(os.getenv(
-    'QWEN_AGENT_COMPRESSION_CONSOLIDATION_THRESHOLD', 8))  # Markers at which to trigger consolidation
+    'AGENT_CASCADE_COMPRESSION_CONSOLIDATION_THRESHOLD', 8))  # Markers at which to trigger consolidation
 COMPRESSION_MAX_CONSOLIDATION_TOKENS: int = int(os.getenv(
-    'QWEN_AGENT_COMPRESSION_MAX_CONSOLIDATION_TOKENS', 32000))  # Max tokens for consolidation input before aborting
+    'AGENT_CASCADE_COMPRESSION_MAX_CONSOLIDATION_TOKENS', 32000))  # Max tokens for consolidation input before aborting
 ```
 
 ---

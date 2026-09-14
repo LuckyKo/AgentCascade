@@ -41,7 +41,7 @@ os.environ["AGENT_CASCADE_INSTANCE_ID"] = _derive_test_instance_id()
 # Never pop a visible cmd window for async shell_cmd in tests.  This env var is
 # an opt-out override read by agent_cascade/tools/custom/shell_cmd.py; it does
 # NOT change production defaults (which still honor the pool toggle).
-os.environ["QWEN_AGENT_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW"] = "1"
+os.environ["AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW"] = "1"
 
 # Ensure the project root is on sys.path so top-level packages like `config`
 # are importable in xdist workers (which don't inherit CWD from the launcher).
