@@ -491,7 +491,7 @@ class ReadLogs(BaseTool):
                     line_text = json.dumps(item, ensure_ascii=False)
                 num_label = "meta" if pos == 0 else pos
                 result.append(f"{num_label}: {line_text}")
-            return f"{header}\n" + "\n".join(result)
+            return f"{header}\n```\n" + "\n".join(result) + "\n```"
 
         # simple mode: human-readable summary (using original entry positions)
         result = []
@@ -500,4 +500,4 @@ class ReadLogs(BaseTool):
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)
-        return f"{header}\n" + "\n".join(result)
+        return f"{header}\n```\n" + "\n".join(result) + "\n```"
