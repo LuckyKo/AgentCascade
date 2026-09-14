@@ -124,12 +124,12 @@ class ToolsFnAgent:
             if not isinstance(s, dict):
                 continue
             func = {
-                "name": s.get('name'),
-                "description": s.get('description', ''),
-                "parameters": s.get('parameters', {}),
+                'name': s.get('name'),
+                'description': s.get('description', ''),
+                'parameters': s.get('parameters', {}),
             }
-            if func["name"]:
-                tools.append({"type": "function", "function": func})
+            if func['name']:
+                tools.append({'type': 'function', 'function': func})
         return tools
 
     def _build_tool_config(self, tool_cls) -> Dict[str, Any]:
@@ -202,7 +202,7 @@ class ToolsFnAgent:
         """Execute tool call"""
         inst = self.tool_instances.get(name)
         if not inst:
-            return json.dumps({"error": f"tool '{name}' not found"}, ensure_ascii=False)
+            return json.dumps({'error': f"tool '{name}' not found"}, ensure_ascii=False)
         
         try:
             args = json.loads(arguments_json) if arguments_json else {}
@@ -213,7 +213,7 @@ class ToolsFnAgent:
             res = inst.call(args)
             return res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
         except Exception as e:
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return json.dumps({'error': str(e)}, ensure_ascii=False)
 
     def _call_llm(self, messages: List[Any], tools: Optional[List[Dict[str, Any]]] = None):
         """Call LLM with unified handling for all models"""
@@ -253,21 +253,21 @@ class ToolsFnAgent:
     def _extract_plan_content(self, text: str) -> str:
         """Extract content from <plan>...</plan> tags"""
         if not text:
-            return ""
+            return ''
         
         # Remove <think>...</think> sections
-        think_end_matches = list(re.finditer(r"</think>", text, flags=re.IGNORECASE))
+        think_end_matches = list(re.finditer(r'</think>', text, flags=re.IGNORECASE))
         if think_end_matches:
             last_think_end = think_end_matches[-1]
             text = text[last_think_end.end():]
         
         # Extract <plan>...</plan>
-        matches = re.findall(r"<plan>(.*?)</plan>", text, flags=re.DOTALL | re.IGNORECASE)
+        matches = re.findall(r'<plan>(.*?)</plan>', text, flags=re.DOTALL | re.IGNORECASE)
         if not matches:
-            return ""
+            return ''
         
         cleaned = [m.strip() for m in matches if m.strip()]
-        return "\n\n".join(cleaned) if cleaned else ""
+        return '\n\n'.join(cleaned) if cleaned else ''
 
     def _message_to_dict(self, msg) -> Dict[str, Any]:
         """Convert message object to serializable dictionary"""
@@ -343,8 +343,8 @@ class ToolsFnAgent:
         """
         messages: List[Dict[str, Any]] = []
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_query})
+            messages.append({'role': 'system', 'content': system_prompt})
+        messages.append({'role': 'user', 'content': user_query})
         
         llm_budget = max_llm_calls
         
@@ -361,10 +361,10 @@ class ToolsFnAgent:
                 for call in calls:
                     tool_result = self._exec_tool(call['name'], call['arguments'])
                     messages.append({
-                        "role": "tool",
-                        "tool_call_id": call['id'],
-                        "name": call['name'],
-                        "content": tool_result,
+                        'role': 'tool',
+                        'tool_call_id': call['id'],
+                        'name': call['name'],
+                        'content': tool_result,
                     })
                 continue
             
@@ -373,7 +373,7 @@ class ToolsFnAgent:
             final_content = self._extract_plan_content(msg.content or '')
             return final_content, messages
         
-        return "Reached max LLM calls without final answer.", messages
+        return 'Reached max LLM calls without final answer.', messages
 
 
 def run_agent_inference(

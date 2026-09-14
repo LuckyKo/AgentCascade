@@ -14,13 +14,13 @@ class LocationSearchTool(BaseTravelTool):
     # Language-specific field mappings
     LANG_FIELDS = {
         'zh': {
-            'db_not_loaded': "数据库未加载",
+            'db_not_loaded': '数据库未加载',
             'not_found': lambda place: f"未找到地点 {place} 的坐标信息, 请检查：1. 地点名称是否来自其他工具的返回结果; 2. 地点名称是否与工具返回结果保持完全一致，不得缩写、改名或添加额外描述",
             'db_loaded': lambda count, path: f"✓ 地点坐标数据库加载成功: {count} 条记录 (路径: {path})",
             'db_not_found': lambda path: f"⚠ 警告: 地点坐标数据库未找到于 {path}",
         },
         'en': {
-            'db_not_loaded': "Database not loaded",
+            'db_not_loaded': 'Database not loaded',
             'not_found': lambda place: f"Coordinate information not found for location {place}, please check: 1. Whether the place name comes from other tool results; 2. Whether the place name is exactly consistent with tool results, no abbreviation, renaming or additional description allowed",
             'db_loaded': lambda count, path: f"✓ Location coordinate database loaded: {count} records (path: {path})",
             'db_not_found': lambda path: f"⚠ Warning: Location coordinate database not found at {path}",
@@ -69,9 +69,9 @@ class LocationSearchTool(BaseTravelTool):
         # Build return result
         row = query_result.iloc[0]
         result = {
-            "place_name": row.get('poi_name', row.get('place_name', place_name)),
-            "latitude": str(row.get('latitude', '')),
-            "longitude": str(row.get('longitude', '')),
+            'place_name': row.get('poi_name', row.get('place_name', place_name)),
+            'latitude': str(row.get('latitude', '')),
+            'longitude': str(row.get('longitude', '')),
         }
         
         return self.format_result_as_json(result)

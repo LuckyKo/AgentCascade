@@ -462,10 +462,10 @@ class ConfigPersistMixin:
                 logger.info(f"[REFRESH] Templates changed - Added: {added}, Removed: {removed}")
             else:
                 # Content modification triggers config update, log at info level for visibility
-                logger.info("[REFRESH] Template content modified, triggering config update")
+                logger.info('[REFRESH] Template content modified, triggering config update')
             self.notify_config_changed()
         else:
-            logger.debug("[REFRESH] No changes detected in agent templates, skipping notification")
+            logger.debug('[REFRESH] No changes detected in agent templates, skipping notification')
 
     def notify_config_changed(self):
         """Signal that global configuration has changed (workspace dir, templates, etc).

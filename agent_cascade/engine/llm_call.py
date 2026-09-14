@@ -54,11 +54,11 @@ FUZZY_ESCALATION_TURNS = 2
 
 #: Final wording for the Tier-2 advisory USER message (plan §4.2 — accepted as final).
 _FUZZY_WARNING_TEMPLATE = (
-    "[SYSTEM WARNING: Possible repeating action] You appear to be repeating the same tool "
-    "action without progress — {reason}. This is a warning only; your history was NOT "
+    '[SYSTEM WARNING: Possible repeating action] You appear to be repeating the same tool '
+    'action without progress — {reason}. This is a warning only; your history was NOT '
     "modified. Change strategy: if you are polling an async shell that reports \"No running "
     "shell found\", treat it as terminal (the run has ended) and act on the last real output; "
-    "otherwise verify preconditions or use a different tool/approach before retrying."
+    'otherwise verify preconditions or use a different tool/approach before retrying.'
 )
 
 # ── Streaming UI update throttle (burst-aware) ───────────────────────────────
@@ -177,7 +177,7 @@ class LLMCallMixin:
                         if (tel := self._telemetry()) is not None:
                             try:
                                 tel.record_loop_detected(
-                                    inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type="exact",
+                                    inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type='exact',
                                 )
                             except Exception:
                                 pass
@@ -233,7 +233,7 @@ class LLMCallMixin:
                     if (tel := self._telemetry()) is not None:
                         try:
                             tel.record_loop_detected(
-                                inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type="exact",
+                                inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type='exact',
                             )
                         except Exception:
                             pass
@@ -318,7 +318,7 @@ class LLMCallMixin:
                         if (tel := self._telemetry()) is not None:
                             try:
                                 tel.record_loop_detected(
-                                    inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type="fuzzy_rollback",
+                                    inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type='fuzzy_rollback',
                                 )
                             except Exception:
                                 pass
@@ -340,7 +340,7 @@ class LLMCallMixin:
                             try:
                                 tel.record_loop_detected(
                                     inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
-                                    loop_type="fuzzy_warning", warned=False,
+                                    loop_type='fuzzy_warning', warned=False,
                                 )
                             except Exception:
                                 pass
@@ -372,7 +372,7 @@ class LLMCallMixin:
                         try:
                             tel.record_loop_detected(
                                 inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
-                                loop_type="fuzzy_warning", warned=True,
+                                loop_type='fuzzy_warning', warned=True,
                             )
                         except Exception:
                             pass
@@ -584,7 +584,7 @@ class LLMCallMixin:
                                     f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
                                     f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)"
                                 )
-                                _abort_stream("Engine watchdog: stream_stalled")
+                                _abort_stream('Engine watchdog: stream_stalled')
                                 break  # Exit loop after aborting; will retry in outer while
                         # Total timeout applies from stream start regardless of first output timing
                         if (_now - _engine_stream_start) > _engine_max_total:
@@ -592,7 +592,7 @@ class LLMCallMixin:
                                 f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
                                 f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)"
                             )
-                            _abort_stream("Engine watchdog: stream_stalled")
+                            _abort_stream('Engine watchdog: stream_stalled')
                             break  # Exit loop after aborting; will retry in outer while
                         if _engine_first_output:
                             _engine_first_output = False
@@ -970,7 +970,7 @@ class LLMCallMixin:
                                 self.compression_handler._sync_logger_after_compression(
                                     inst_name,
                                     instance.agent_class,
-                                    "fallback compression",
+                                    'fallback compression',
                                     instance,
                                 )
                             except Exception as sync_err:
@@ -1035,7 +1035,7 @@ class LLMCallMixin:
                                             notif_msg = Message(
                                                 role=USER,
                                                 content=CompressionHandler._format_compression_feedback(
-                                                    "fallback", 0, estimated, max_tokens
+                                                    'fallback', 0, estimated, max_tokens
                                                 )
                                             )
                                             self._append_and_log(instance, notif_msg)
@@ -1137,7 +1137,7 @@ class LLMCallMixin:
                         isinstance(e, RuntimeError) and 
                         len(e.args) >= 1 and 
                         e.args[0] and 
-                        "has been terminated" in str(e.args[0])
+                        'has been terminated' in str(e.args[0])
                     )
                 
                     if _is_termination_abort:
@@ -1150,7 +1150,7 @@ class LLMCallMixin:
                     if retry_count > _max_attempts:
                         # Telemetry: record LLM call end for exhausted retries (non-blocking)
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        error_msg = str(e).split('\n')[0] if e else "Unknown error"
+                        error_msg = str(e).split('\n')[0] if e else 'Unknown error'
                         # Give clearer message for loop detection failures
                         if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
                             display_msg = f"LLM generation loop detected (exceeded {_max_attempts} max attempts)"
@@ -1196,7 +1196,7 @@ class LLMCallMixin:
                     if error_type == 'fatal':
                         # Telemetry: record LLM call end for fatal error (non-blocking)
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        error_msg = str(e).split('\n')[0] if e else "Unknown error"
+                        error_msg = str(e).split('\n')[0] if e else 'Unknown error'
                         logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable error: {e}")
                         yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
                         error_already_yielded = True
@@ -1213,7 +1213,7 @@ class LLMCallMixin:
                     advancing_endpoint = isinstance(e, (MaxTokenExceeded, ContextWindowExceeded)) or (
                         isinstance(e, CharacterRunDetected) and _det_reason.startswith('character run')
                     )
-                    endpoint_str = " with new endpoint" if advancing_endpoint else ""
+                    endpoint_str = ' with new endpoint' if advancing_endpoint else ''
 
                     logger.warning(
                         f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_max_attempts}. "
@@ -1244,7 +1244,7 @@ class LLMCallMixin:
 
             if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
                 if not error_already_yielded:
-                    yield Message(role=ASSISTANT, content="[SYSTEM ERROR: Empty LLM response]")
+                    yield Message(role=ASSISTANT, content='[SYSTEM ERROR: Empty LLM response]')
             else:
                 for msg in last_output:
                     yield msg

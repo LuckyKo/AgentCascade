@@ -38,7 +38,7 @@ WORK_DIR = Path(DEFAULT_WORKSPACE)
 
 def create_test_file(path: Path, num_lines: int) -> None:
     """Create a deterministic text file for benchmarking."""
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, 'w', encoding='utf-8') as f:
         for i in range(1, num_lines + 1):
             f.write(f"Line {i:05d}: This is a test line with some meaningful content for benchmarking.\n")
 
@@ -66,9 +66,9 @@ def build_mock_dispatcher():
 
     # Mock instance retrieval
     mock_instance = MagicMock()
-    mock_instance.instance_name = "test_worker"
-    mock_instance.agent_class = "coder"
-    mock_instance.parent_instance = "orchestrator_main"
+    mock_instance.instance_name = 'test_worker'
+    mock_instance.agent_class = 'coder'
+    mock_instance.parent_instance = 'orchestrator_main'
     mock_pool.get_instance = lambda name: mock_instance
 
     # Mock _logger for workspace_dir (used by spillover file writing)
@@ -93,7 +93,7 @@ def build_mock_dispatcher():
             try:
                 return json.loads(args)
             except (json.JSONDecodeError, TypeError):
-                return {"path": args}
+                return {'path': args}
         return args
 
     mock_engine._resolve_placeholders = resolve_placeholders
@@ -114,22 +114,22 @@ def detect_sleep_calls() -> List[str]:
     found: List[str] = []
 
     files_to_check = [
-        ("agent_cascade/tools/custom/file_ops.py", "ReadFile tool"),
-        ("agent_cascade/agent.py", "Agent._call_tool"),
-        ("agent_cascade/tool_dispatcher.py", "ToolDispatcher"),
-        ("agent_cascade/execution_engine.py", "ExecutionEngine"),
-        ("agent_cascade/compression/handler.py", "CompressionHandler drains"),
+        ('agent_cascade/tools/custom/file_ops.py', 'ReadFile tool'),
+        ('agent_cascade/agent.py', 'Agent._call_tool'),
+        ('agent_cascade/tool_dispatcher.py', 'ToolDispatcher'),
+        ('agent_cascade/execution_engine.py', 'ExecutionEngine'),
+        ('agent_cascade/compression/handler.py', 'CompressionHandler drains'),
     ]
 
     for rel_path, label in files_to_check:
         src = Path(PROJECT_ROOT) / rel_path
         if not src.exists():
             continue
-        with open(src, "r", encoding="utf-8", errors="replace") as f:
+        with open(src, 'r', encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
-            if "sleep" in line.lower() and not stripped.startswith("#"):
+            if 'sleep' in line.lower() and not stripped.startswith('#'):
                 found.append(f"  {label} [{rel_path}:{i}] → {stripped}")
 
     return found
@@ -144,7 +144,7 @@ def benchmark_standalone_readfile(tool: ReadFile, test_file: Path) -> List[float
 
     for _ in range(NUM_ITERATIONS):
         t0 = time.perf_counter()
-        result = tool.call({"path": rel, "start_line": 1, "limit": TEST_FILE_LINES})
+        result = tool.call({'path': rel, 'start_line': 1, 'limit': TEST_FILE_LINES})
         elapsed = (time.perf_counter() - t0) * 1000
         times_ms.append(elapsed)
 
@@ -155,19 +155,19 @@ def benchmark_dispatcher_execute(dispatcher: ToolDispatcher, mock_template: Magi
                                   test_file: Path) -> List[float]:
     """Time the full dispatcher.execute_tool() call for read_file."""
     rel = str(test_file.relative_to(WORK_DIR))
-    tool_args = {"path": rel, "start_line": 1, "limit": TEST_FILE_LINES}
+    tool_args = {'path': rel, 'start_line': 1, 'limit': TEST_FILE_LINES}
     times_ms: List[float] = []
 
     # Wire up mock_template._call_tool to actually invoke ReadFile
     readfile_tool = ReadFile()
-    mock_template.function_map = {"read_file": readfile_tool}
+    mock_template.function_map = {'read_file': readfile_tool}
     mock_template._call_tool = lambda tool_name, args, **kw: readfile_tool.call(args)
 
     for _ in range(NUM_ITERATIONS):
         t0 = time.perf_counter()
         result = dispatcher.execute_tool(
-            instance=dispatcher.pool.get_instance("test_worker"),
-            tool_name="read_file",
+            instance=dispatcher.pool.get_instance('test_worker'),
+            tool_name='read_file',
             tool_args=tool_args,
             llm_messages=[],
             function_id=f"call_{_}"
@@ -189,12 +189,12 @@ def benchmark_drain_methods(mock_instance: MagicMock, full_result: str) -> Dict[
     drain_result_times: List[float] = []
     for _ in range(NUM_ITERATIONS):
         # Alternate between empty queue (fast path) and with notifications
-        mock_instance._pending_notifications = ["Compression completed"] if _ % 2 else []
+        mock_instance._pending_notifications = ['Compression completed'] if _ % 2 else []
         t0 = time.perf_counter()
         result = full_result
         pending = mock_instance._pending_notifications
         if pending:
-            notif_block = "\n\n".join(n for n in pending)
+            notif_block = '\n\n'.join(n for n in pending)
             result = f"{result}\n\n{notif_block}"
             mock_instance._pending_notifications = []
         elapsed = (time.perf_counter() - t0) * 1000
@@ -203,19 +203,19 @@ def benchmark_drain_methods(mock_instance: MagicMock, full_result: str) -> Dict[
     drain_warning_times: List[float] = []
     for _ in range(NUM_ITERATIONS):
         # Alternate between no warnings and with warnings
-        mock_instance._tool_warnings = ["Path resolved"] if _ % 2 else []
+        mock_instance._tool_warnings = ['Path resolved'] if _ % 2 else []
         t0 = time.perf_counter()
         text = full_result
         warnings = list(mock_instance._tool_warnings)
         if warnings:
-            warning_block = "\n\n".join(str(w) for w in warnings)
+            warning_block = '\n\n'.join(str(w) for w in warnings)
             text = f"{text}\n\n[TOOL WARNINGS]\n{warning_block}"
         elapsed = (time.perf_counter() - t0) * 1000
         drain_warning_times.append(elapsed)
 
     return {
-        "drain_pending_into_result": drain_result_times,
-        "drain_tool_warnings": drain_warning_times,
+        'drain_pending_into_result': drain_result_times,
+        'drain_tool_warnings': drain_warning_times,
     }
 
 
@@ -224,9 +224,9 @@ def benchmark_drain_methods(mock_instance: MagicMock, full_result: str) -> Dict[
 def main():
     t_start = time.perf_counter()
     
-    print("=" * 80)
-    print("  ReadFile ToolDispatcher Performance Benchmark")
-    print("=" * 80)
+    print('=' * 80)
+    print('  ReadFile ToolDispatcher Performance Benchmark')
+    print('=' * 80)
     print(f"  Project root : {PROJECT_ROOT}")
     print(f"  Iterations   : {NUM_ITERATIONS}")
 
@@ -242,9 +242,9 @@ def main():
 
     # ── Create test file ─────────────────────────────────────────────────────
     t0 = time.perf_counter()
-    tmp_dir = WORK_DIR / "_perf_test_tmp2"
+    tmp_dir = WORK_DIR / '_perf_test_tmp2'
     tmp_dir.mkdir(exist_ok=True)
-    test_file = tmp_dir / "dispatcher_bench.txt"
+    test_file = tmp_dir / 'dispatcher_bench.txt'
     create_test_file(test_file, TEST_FILE_LINES)
     print(f"\n  Test file: {test_file} ({TEST_FILE_LINES} lines) [{(time.perf_counter()-t0)*1000:.0f}ms]")
 
@@ -257,30 +257,30 @@ def main():
     try:
         # ── Test 1: Standalone ReadFile.call() (baseline) ─────────────────────
         print(f"\n{'=' * 80}")
-        print("  BENCHMARK RESULTS")
+        print('  BENCHMARK RESULTS')
         print(f"{'=' * 80}")
 
         standalone_times = benchmark_standalone_readfile(readfile_tool, test_file)
-        stats("Standalone ReadFile.call()", standalone_times)
+        stats('Standalone ReadFile.call()', standalone_times)
 
         # ── Test 2: Full dispatcher.execute_tool() path ───────────────────────
         dispatcher_times = benchmark_dispatcher_execute(dispatcher, mock_template, test_file)
-        stats("Full Dispatcher.execute_tool()", dispatcher_times)
+        stats('Full Dispatcher.execute_tool()', dispatcher_times)
 
         # ── Test 3: Compression handler drain calls ───────────────────────────
 
         # ── Test 5: Compression handler drain calls ───────────────────────────
         full_result = readfile_tool.call({
-            "path": str(test_file.relative_to(WORK_DIR)),
-            "start_line": 1, "limit": TEST_FILE_LINES
+            'path': str(test_file.relative_to(WORK_DIR)),
+            'start_line': 1, 'limit': TEST_FILE_LINES
         })
         drain_times = benchmark_drain_methods(mock_instance, full_result)
-        stats("_drain_pending_into_tool_result", drain_times["drain_pending_into_result"])
-        stats("_drain_tool_warnings", drain_times["drain_tool_warnings"])
+        stats('_drain_pending_into_tool_result', drain_times['drain_pending_into_result'])
+        stats('_drain_tool_warnings', drain_times['drain_tool_warnings'])
 
         # ── Comparison Summary ────────────────────────────────────────────────
         print(f"\n{'=' * 80}")
-        print("  COMPARISON")
+        print('  COMPARISON')
         print(f"{'=' * 80}")
 
         avg_standalone = statistics.mean(standalone_times)
@@ -289,8 +289,8 @@ def main():
         overhead_pct = (overhead / avg_standalone * 100) if avg_standalone > 0 else 0
 
         total_overhead = (overhead +
-                         statistics.mean(drain_times["drain_pending_into_result"]) +
-                         statistics.mean(drain_times["drain_tool_warnings"]))
+                         statistics.mean(drain_times['drain_pending_into_result']) +
+                         statistics.mean(drain_times['drain_tool_warnings']))
 
         print(f"  Baseline (ReadFile.call())       : {avg_standalone:>8.3f} ms")
         print(f"  Dispatcher.execute_tool()         : {avg_dispatcher:>8.3f} ms  "
@@ -301,7 +301,7 @@ def main():
 
         # ── Observations ──────────────────────────────────────────────────────
         print(f"\n{'=' * 80}")
-        print("  OBSERVATIONS")
+        print('  OBSERVATIONS')
         print(f"{'=' * 80}")
 
         if overhead_pct > 50:
@@ -326,5 +326,5 @@ def main():
         print(f"\n  Temp directory cleaned up.")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

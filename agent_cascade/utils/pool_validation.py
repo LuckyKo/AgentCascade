@@ -82,7 +82,7 @@ def validate_message_pool(messages: list[Any], agent_name: str) -> bool:
         if role == USER and content.startswith(COMPRESSION_MARKER):
             marker_count += 1
             # Check marker has a closing summary tag
-            if "<context_summary>" in content and not content.strip().endswith("</context_summary>"):
+            if '<context_summary>' in content and not content.strip().endswith('</context_summary>'):
                 compression_logger.warning(
                     f"[MSG POOL VALIDATION] Malformed compression marker at index {i} for '{agent_name}' "
                     f"(missing closing </context_summary>)"

@@ -327,7 +327,7 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
             now = time.monotonic()
             if now - _hw_last_warn >= 5.0:
                 logger.warning(
-                    "[STREAM_QUEUE] WS send queue high-watermark reached: %d/%d (>=75%% capacity). Slow client or network backlog suspected.",
+                    '[STREAM_QUEUE] WS send queue high-watermark reached: %d/%d (>=75%% capacity). Slow client or network backlog suspected.',
                     queue.qsize(), queue.maxsize,
                 )
                 _hw_last_warn = now
@@ -362,7 +362,7 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
         if len(non_stream_events) > room:
             dropped = non_stream_events[:len(non_stream_events) - room]
             logger.error(
-                "[STREAM_QUEUE] recovery: dropped %d oldest structural event(s) to fit preserved events. Types: %s",
+                '[STREAM_QUEUE] recovery: dropped %d oldest structural event(s) to fit preserved events. Types: %s',
                 len(dropped), [e.get('type', '?') if isinstance(e, dict) else type(e).__name__ for e in dropped],
             )
             non_stream_events = non_stream_events[len(dropped):]
@@ -381,8 +381,8 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
 
         if now - _qf_last_warn >= 5.0:
             logger.warning(
-                "[STREAM_QUEUE] WS send queue FULL (maxsize=%d) — purged %d stale stream_update delta(s) "
-                "and reset force_full sync for instance(s): %s. UI will resync to latest on next frame.",
+                '[STREAM_QUEUE] WS send queue FULL (maxsize=%d) — purged %d stale stream_update delta(s) '
+                'and reset force_full sync for instance(s): %s. UI will resync to latest on next frame.',
                 queue.maxsize, purged_count, sorted(purged_instances) or ['none'],
             )
             _qf_last_warn = now
@@ -391,7 +391,7 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
-            logger.error("[STREAM_QUEUE] recovery failed: could not re-insert current event (type=%s)",
+            logger.error('[STREAM_QUEUE] recovery failed: could not re-insert current event (type=%s)',
                          event.get('type', '?') if isinstance(event, dict) else type(event).__name__)
 
 def broadcast_stream_update(

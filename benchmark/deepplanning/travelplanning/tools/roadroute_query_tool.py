@@ -14,14 +14,14 @@ class RoadRouteInfoQueryTool(BaseTravelTool):
     # Language-specific field mappings
     LANG_FIELDS = {
         'zh': {
-            'db_not_loaded': "数据库未加载",
+            'db_not_loaded': '数据库未加载',
             'not_found': lambda origin, dest: f"未找到从 {origin} 到 {dest} 的交通信息",
             'coord_not_in_range': lambda coord: f"坐标 {coord} 不在查询范围内，请检查：\n1. 坐标是否源自有效的工具查询结果，而非手动输入或编造；\n2. 坐标数值精度是否与查询结果保持完全一致,6位小数",
             'db_loaded': lambda count, path: f"✓ 交通距离数据库加载成功: {count} 条记录 (路径: {path})",
             'db_not_found': lambda path: f"⚠ 警告: 交通距离数据库未找到于 {path}",
         },
         'en': {
-            'db_not_loaded': "Database not loaded",
+            'db_not_loaded': 'Database not loaded',
             'not_found': lambda origin, dest: f"No transportation information found from {origin} to {dest}",
             'coord_not_in_range': lambda coord: f"Coordinate {coord} is not in query range, please check:\n1. Whether coordinate comes from valid tool query result, not manual input or fabrication;\n2. Whether coordinate precision is exactly consistent with query result, 6 decimal places",
             'db_loaded': lambda count, path: f"✓ Road route database loaded: {count} records (path: {path})",
@@ -82,11 +82,11 @@ class RoadRouteInfoQueryTool(BaseTravelTool):
         # Build return result
         row = query_result.iloc[0]
         result = {
-            "origin": row.get('origin', origin),
-            "destination": row.get('destination', destination),
-            "distance_in_meters": int(row.get('distance_meters', 0)),
-            "duration_in_minutes": int(row.get('duration_minutes', 0)),
-            "cost": int(row.get('cost', 0))
+            'origin': row.get('origin', origin),
+            'destination': row.get('destination', destination),
+            'distance_in_meters': int(row.get('distance_meters', 0)),
+            'duration_in_minutes': int(row.get('duration_minutes', 0)),
+            'cost': int(row.get('cost', 0))
         }
         
         return self.format_result_as_json(result)
@@ -117,4 +117,4 @@ class RoadRouteInfoQueryTool(BaseTravelTool):
         if destination not in all_coords:
             return self.fields['coord_not_in_range'](destination)
         
-        return ""
+        return ''

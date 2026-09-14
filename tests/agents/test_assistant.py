@@ -40,7 +40,7 @@ def test_assistant_system_and_tool(local_llm_cfg):
     assert len(func_calls) > 0 or any('天气' in str(msg.content) for msg in last), \
         f"Expected tool call or weather-related response. Got: {[str(m.content) for m in last]}"
     # Final response should have content
-    assert len(last[-1].content) > 0, "Final response has no content"
+    assert len(last[-1].content) > 0, 'Final response has no content'
 
 
 @pytest.mark.skip_if_no_local
@@ -77,7 +77,7 @@ def test_assistant_empty_query(local_llm_cfg):
     *_, last = agent.run(messages)
     print(last)
     last_text = last[-1].content
-    assert len(last_text) > 0, "Empty response from assistant"
+    assert len(last_text) > 0, 'Empty response from assistant'
     # Local models might not mention qwen specifically; just verify non-empty meaningful content
     if not ('通义千问' in last_text or 'qwen' in last_text.lower()):
         print(f'Note: Response does not contain expected keywords. Content: {last_text[:100]}...')
@@ -99,6 +99,6 @@ def test_assistant_vl(local_vl_llm_cfg):
 
     try:
         *_, last = agent.run(messages)
-        assert len(last[-1].content) > 0, "VL assistant returned empty content"
+        assert len(last[-1].content) > 0, 'VL assistant returned empty content'
     except Exception as e:
         pytest.skip(f'VL test failed ({e}) - VL model may not be properly configured')

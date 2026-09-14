@@ -31,17 +31,17 @@ import pytest
 
 # Import settings first so that relative imports in inner_loop_detect resolve.
 _settings_spec = importlib.util.spec_from_file_location(
-    "settings",
-    str(Path(__file__).resolve().parent.parent / "agent_cascade" / "settings.py"),
+    'settings',
+    str(Path(__file__).resolve().parent.parent / 'agent_cascade' / 'settings.py'),
 )
 _settings_mod = importlib.util.module_from_spec(_settings_spec)
-sys.modules["agent_cascade.settings"] = _settings_mod  # make relative import work
+sys.modules['agent_cascade.settings'] = _settings_mod  # make relative import work
 _settings_spec.loader.exec_module(_settings_mod)
 
 # Import directly from the module file to avoid pulling in the entire agent_cascade package.
 _spec = importlib.util.spec_from_file_location(
-    "inner_loop_detect",
-    str(Path(__file__).resolve().parent.parent / "agent_cascade" / "inner_loop_detect.py"),
+    'inner_loop_detect',
+    str(Path(__file__).resolve().parent.parent / 'agent_cascade' / 'inner_loop_detect.py'),
 )
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
@@ -49,10 +49,10 @@ InnerLoopDetector = _mod.InnerLoopDetector
 
 
 # Shared test filler used across multiple test classes.
-_FILLER = " ".join(
+_FILLER = ' '.join(
     f"Word{i} has properties that are interesting for analysis."
     for i in range(1, 20)
-) + "."
+) + '.'
 
 
 # ---------------------------------------------------------------------------
@@ -88,30 +88,30 @@ class TestCharacterRunDetection:
 
     def test_single_char_run_detected(self):
         det = make_detector()
-        result = det.feed(_FILLER + "a" * 150)  # >130 limit
-        assert result is not None, "Should detect a run of 150 identical chars"
-        assert result["loop"] is True
-        assert "character run" in result["reason"].lower()
+        result = det.feed(_FILLER + 'a' * 150)  # >130 limit
+        assert result is not None, 'Should detect a run of 150 identical chars'
+        assert result['loop'] is True
+        assert 'character run' in result['reason'].lower()
 
     def test_run_at_exactly_limit_plus_one(self):
         """131 identical chars (limit=130 + 1) should trigger."""
         det = make_detector()
-        result = det.feed(_FILLER + "x" * 131)
+        result = det.feed(_FILLER + 'x' * 131)
         assert result is not None
-        assert result["loop"] is True
+        assert result['loop'] is True
     
     def test_run_at_limit_no_detection(self):
         """Exactly 130 identical chars (at the limit, not above) should NOT trigger."""
         det = make_detector()
         # char_run starts at 0; first char sets run=1. After 130 chars run==130.
         # Condition is `> self.char_run_limit` i.e. > 130, so 130 chars → no alert.
-        result = det.feed(_FILLER + "y" * 130)
+        result = det.feed(_FILLER + 'y' * 130)
         assert result is None
     
     def test_alternating_chars_no_detection(self):
         """Alternating characters should never trigger a run."""
         det = make_detector()
-        result = det.feed(_FILLER + "ab" * 50)
+        result = det.feed(_FILLER + 'ab' * 50)
         assert result is None
 
 
@@ -125,11 +125,11 @@ class TestNoLoopOnNormalText:
     def test_normal_paragraph(self):
         det = make_detector()
         paragraph = (
-            "Artificial intelligence is transforming the way we work and live. "
-            "Machine learning models can now understand natural language with impressive accuracy. "
-            "Researchers are constantly developing new architectures to improve performance. "
-            "The field has seen remarkable progress in recent years, driven by large datasets "
-            "and powerful computing resources that enable training on billions of parameters."
+            'Artificial intelligence is transforming the way we work and live. '
+            'Machine learning models can now understand natural language with impressive accuracy. '
+            'Researchers are constantly developing new architectures to improve performance. '
+            'The field has seen remarkable progress in recent years, driven by large datasets '
+            'and powerful computing resources that enable training on billions of parameters.'
         )
         result = det.feed(paragraph)
         assert result is None
@@ -138,8 +138,8 @@ class TestNoLoopOnNormalText:
         det = make_detector()
         text = (
             "Hello! How are you doing today? I'm fine, thank you for asking. "
-            "Would you like to hear about my day? Sure, tell me what happened. "
-            "Well, I went to the store and bought some groceries. The weather was nice too."
+            'Would you like to hear about my day? Sure, tell me what happened. '
+            'Well, I went to the store and bought some groceries. The weather was nice too.'
         )
         result = det.feed(text)
         assert result is None
@@ -156,18 +156,18 @@ class TestResetMethod:
         """Feed text that triggers detection, reset, feed again → both should detect."""
         det = make_detector()
         # First pass: trigger char_run detection (>130 chars)
-        result1 = det.feed(_FILLER + "a" * 150)
-        assert result1 is not None, "First pass should detect loop"
+        result1 = det.feed(_FILLER + 'a' * 150)
+        assert result1 is not None, 'First pass should detect loop'
 
         # Reset and feed the same text again
         det.reset()
-        result2 = det.feed(_FILLER + "a" * 150)
-        assert result2 is not None, "Second pass should also detect (fresh state)"
+        result2 = det.feed(_FILLER + 'a' * 150)
+        assert result2 is not None, 'Second pass should also detect (fresh state)'
 
     def test_reset_clears_fields(self):
         """Reset should clear all internal state."""
         det = make_detector()
-        det.feed("Hello world. ")
+        det.feed('Hello world. ')
         assert det.char_run > 0
         assert det._chars_fed > 0
 
@@ -179,9 +179,9 @@ class TestResetMethod:
     def test_reset_allows_reuse(self):
         """After reset, the detector should work normally for new text."""
         det = make_detector()
-        det.feed(_FILLER + "a" * 150)  # >130 chars triggers loop
+        det.feed(_FILLER + 'a' * 150)  # >130 chars triggers loop
         det.reset()
-        result = det.feed("Normal sentence. Another one. Yet another.")
+        result = det.feed('Normal sentence. Another one. Yet another.')
         assert result is None
 
 
@@ -195,20 +195,20 @@ class TestMaxCharsGuard:
     def test_max_chars_triggers(self):
         """Feed enough text to exceed max_chars → should trigger."""
         det = make_detector(max_chars=100)
-        result = det.feed("x" * 100)
+        result = det.feed('x' * 100)
         assert result is not None
-        assert "max chars exceeded" in result["reason"].lower()
+        assert 'max chars exceeded' in result['reason'].lower()
 
     def test_max_chars_at_limit(self):
         """Exactly at max_chars should trigger."""
         det = make_detector(max_chars=50)
-        result = det.feed("y" * 50)
+        result = det.feed('y' * 50)
         assert result is not None
 
     def test_max_chars_below_limit(self):
         """Below max_chars should not trigger (assuming no other detection)."""
         det = make_detector(max_chars=1000)
-        result = det.feed("Normal text that is well below the limit.")
+        result = det.feed('Normal text that is well below the limit.')
         assert result is None
 
 
@@ -224,22 +224,22 @@ class TestMultipleFeedCalls:
         det = make_detector()
         # Feed filler first to pass min_chars, then char runs across chunks
         det.feed(_FILLER)
-        det.feed("a" * 80)
-        result = det.feed("a" * 60)  # total run = 140 > 130
-        assert result is not None, "Run across chunks should trigger detection"
+        det.feed('a' * 80)
+        result = det.feed('a' * 60)  # total run = 140 > 130
+        assert result is not None, 'Run across chunks should trigger detection'
 
     def test_chars_fed_accumulates(self):
         """_chars_fed should accumulate across feed calls."""
         det = make_detector()
-        det.feed("abc")      # 3
-        det.feed("defg")     # 4
-        det.feed("hi")       # 2
+        det.feed('abc')      # 3
+        det.feed('defg')     # 4
+        det.feed('hi')       # 2
         assert det._chars_fed == 9
 
     def test_char_run_resets_on_different_char(self):
         """Char run should reset when character changes."""
         det = make_detector(char_run_limit=5)
-        result = det.feed("aaabbbccccddddddeeeeffffffgg")
+        result = det.feed('aaabbbccccddddddeeeeffffffgg')
         assert result is not None, "Run of 6 f's should trigger"
 
 
@@ -264,7 +264,7 @@ class TestMemoryBoundedness:
         det = make_detector()
         # Feed enough to create well more than 5000 tokens
         for _ in range(200):
-            det.feed(" ".join(f"word{i} " for i in range(30)) + ".")
+            det.feed(' '.join(f"word{i} " for i in range(30)) + '.')
         assert len(det._two_phase_detector.token_buffer) <= det._two_phase_detector.max_token_buffer
 
     def test_ngram_counter_bounded(self):
@@ -273,7 +273,7 @@ class TestMemoryBoundedness:
         # Feed diverse text to create many unique n-grams
         for i in range(50):
             words = [f"unique_word_{i}_{j}" for j in range(20)]
-            det.feed(" ".join(words) + ".")
+            det.feed(' '.join(words) + '.')
         assert len(det._two_phase_detector.ngram_counter) <= det._two_phase_detector.max_counter_entries
 
 
@@ -286,25 +286,25 @@ class TestEdgeCases:
 
     def test_empty_chunk(self):
         det = make_detector()
-        result = det.feed("")
+        result = det.feed('')
         assert result is None
 
     def test_whitespace_only_chunk(self):
         det = make_detector()
-        result = det.feed("   \n\t  ")
+        result = det.feed('   \n\t  ')
         assert result is None
 
     def test_multiple_empty_feeds(self):
         """Multiple empty feeds should not cause issues."""
         det = make_detector()
         for _ in range(3):
-            result = det.feed("")
+            result = det.feed('')
             assert result is None
 
     def test_newline_in_chunk(self):
         """Newlines within text should be handled gracefully."""
         det = make_detector()
-        text = "Hello world.\nGood morning.\nHow are you?"
+        text = 'Hello world.\nGood morning.\nHow are you?'
         result = det.feed(text)
         assert result is None
 
@@ -312,7 +312,7 @@ class TestEdgeCases:
         """Unicode characters should not cause errors."""
         det = make_detector()
         # Use varied Chinese text to avoid triggering detection on repeated patterns
-        text = "你好世界。这是一个测试。今天天气很好。我喜欢编程。机器学习很有趣。" * 4
+        text = '你好世界。这是一个测试。今天天气很好。我喜欢编程。机器学习很有趣。' * 4
         result = det.feed(text)
         assert result is None
 
@@ -320,7 +320,7 @@ class TestEdgeCases:
         """Characters separated by whitespace should not accumulate into a run."""
         det = make_detector(char_run_limit=5)
         # "/" + "\n\n" + "/" → char_run resets, should NOT trigger
-        result = det.feed("/\n\n/\n\n/")
+        result = det.feed('/\n\n/\n\n/')
         assert result is None
 
 
@@ -334,28 +334,28 @@ class TestIntegrationScenarios:
     def test_char_run_detection(self):
         """Char run detection should work with normal parameters."""
         det = make_detector()
-        result = det.feed(_FILLER + "a" * 150)  # >130 limit
-        assert result is not None, "Char run should trigger detection"
-        assert "character run" in result["reason"].lower()
+        result = det.feed(_FILLER + 'a' * 150)  # >130 limit
+        assert result is not None, 'Char run should trigger detection'
+        assert 'character run' in result['reason'].lower()
 
     def test_streaming_simulation_char_run(self):
         """Simulate streaming with char run appearing at the end."""
         det = make_detector()
 
         chunks = [
-            "The story begins in a small village. ",
-            "There lived a young farmer named John. ",
-            "John worked hard every day. ",
-            "He planted crops and harvested them. ",
+            'The story begins in a small village. ',
+            'There lived a young farmer named John. ',
+            'John worked hard every day. ',
+            'He planted crops and harvested them. ',
             # Degenerate output starts (>130 z's → triggers char_run)
-            "z" * 150,
+            'z' * 150,
         ]
         result = None
         for chunk in chunks:
             r = det.feed(chunk)
             if r:
                 result = r
-        assert result is not None, "Streaming char run should be detected"
+        assert result is not None, 'Streaming char run should be detected'
 
     def test_custom_parameters(self):
         """Custom constructor parameters should be respected."""
@@ -374,8 +374,8 @@ class TestIntegrationScenarios:
 
         # Create a repeating block similar to two-phase tests (~200 chars)
         block = (
-            "The system needs to validate the input parameters and ensure they are correct. "
-            "After validation, we process the request through the pipeline and generate output."
+            'The system needs to validate the input parameters and ensure they are correct. '
+            'After validation, we process the request through the pipeline and generate output.'
         )
 
         result = None
@@ -383,8 +383,8 @@ class TestIntegrationScenarios:
             r = det.feed(block)
             if r:
                 result = r
-        assert result is not None, "Two-phase should detect exact semantic repetition"
-        assert "semantic loop" in result["reason"].lower()
+        assert result is not None, 'Two-phase should detect exact semantic repetition'
+        assert 'semantic loop' in result['reason'].lower()
 
 
 # ===================================================================
@@ -403,20 +403,20 @@ class TestReturnFormat:
     def test_char_run_path_return_format(self):
         """Char-run path (inner_loop_detect.py:104-110) must return a valid dict."""
         det = make_detector()
-        result = det.feed(_FILLER + "a" * 150)  # >130 limit → char-run fires
-        assert result is not None, "Char run should be detected"
-        assert result["loop"] is True
-        assert isinstance(result["reason"], str) and len(result["reason"]) > 0
-        assert result["score"] == 100
+        result = det.feed(_FILLER + 'a' * 150)  # >130 limit → char-run fires
+        assert result is not None, 'Char run should be detected'
+        assert result['loop'] is True
+        assert isinstance(result['reason'], str) and len(result['reason']) > 0
+        assert result['score'] == 100
 
     def test_max_chars_guard_path_return_format(self):
         """Max-chars guard path (inner_loop_detect.py:89-94) must return a valid dict."""
         det = make_detector(max_chars=100)
-        result = det.feed("x" * 100)  # reaches max_chars → guard fires
-        assert result is not None, "Max chars guard should be detected"
-        assert result["loop"] is True
-        assert isinstance(result["reason"], str) and len(result["reason"]) > 0
-        assert result["score"] == 100
+        result = det.feed('x' * 100)  # reaches max_chars → guard fires
+        assert result is not None, 'Max chars guard should be detected'
+        assert result['loop'] is True
+        assert isinstance(result['reason'], str) and len(result['reason']) > 0
+        assert result['score'] == 100
 
 
 # ===================================================================
@@ -441,8 +441,8 @@ class TestConsumerContract:
         """Two-phase result passed through InnerLoopDetector must be indexable by the consumer."""
         det = make_detector()
         block = (
-            "The system needs to validate the input parameters and ensure they are correct. "
-            "After validation, we process the request through the pipeline and generate output."
+            'The system needs to validate the input parameters and ensure they are correct. '
+            'After validation, we process the request through the pipeline and generate output.'
         )
         result = None
         for _ in range(30):
@@ -451,10 +451,10 @@ class TestConsumerContract:
                 result = r
                 break
 
-        assert result is not None, "Two-phase loop was not detected"
+        assert result is not None, 'Two-phase loop was not detected'
         # Must not raise KeyError — this is the exact access llm_call.py performs.
         self._consume(result)
-        assert result["loop"] is True
+        assert result['loop'] is True
 
     def test_missing_score_key_raises_keyerror(self):
         """Negative: a dict without 'score' breaks the consumer (the original bug).
@@ -464,9 +464,9 @@ class TestConsumerContract:
         """
         class _BrokenDetector:
             def feed(self, chunk):
-                return {"loop": True, "reason": "semantic loop (fake)"}
+                return {'loop': True, 'reason': 'semantic loop (fake)'}
 
-        broken = _BrokenDetector().feed("anything")
+        broken = _BrokenDetector().feed('anything')
         with pytest.raises(KeyError):
             self._consume(broken)
 

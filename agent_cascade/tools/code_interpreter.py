@@ -178,7 +178,7 @@ def _shutdown_with_timeout(kc, kernel_id: str, timeout: float = 5.0) -> None:
         logger.debug(f"kc.shutdown() failed for {kernel_id}: {exception[0]}")
 
 
-def _shutdown_kernel_client(kc, kernel_id: str = "") -> None:
+def _shutdown_kernel_client(kc, kernel_id: str = '') -> None:
     """Safely and deterministically shut down a Jupyter KernelClient.
 
     Prevents ZMQ socket & thread leaks ("ZMQError: No buffer space available"):
@@ -979,7 +979,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             # collecting all remaining output. BlockingKernelClient has no .interrupt() method
             # (that lives on KernelManager), so we send an interrupt_request message directly.
             try:
-                msg = kc.session.msg("interrupt_request", content={})
+                msg = kc.session.msg('interrupt_request', content={})
                 kc.session.send(kc.control_channel.socket, msg)
                 for _ in range(3):
                     time.sleep(0.5)
@@ -1231,9 +1231,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Consolidate stdout/stderr into single blocks (fix output splitting bug)
         parts = []
         if stdout_buf:
-            parts.append(f'\n\nstdout:\n```\n{"".join(stdout_buf)}\n```')
+            parts.append(f'\n\nstdout:\n```\n{''.join(stdout_buf)}\n```')
         if stderr_buf:
-            parts.append(f'\n\nstderr:\n```\n{"".join(stderr_buf)}\n```')
+            parts.append(f'\n\nstderr:\n```\n{''.join(stderr_buf)}\n```')
         partial_output = ''.join(parts) if parts else ''
         if len(partial_output) > drain_max_output_bytes:
             kept = partial_output[:drain_max_output_bytes - 50]
@@ -1372,16 +1372,16 @@ class CodeInterpreter(BaseToolWithFileAccess):
         """
         mounted = []
         prefix = EXTRA_RO_MOUNT_PREFIX if is_ro else EXTRA_RW_MOUNT_PREFIX
-        label = "RO" if is_ro else "RW"
+        label = 'RO' if is_ro else 'RW'
 
         for folder_path in folders:
             resolved = os.path.realpath(folder_path)  # resolve symlinks
             if not os.path.isdir(resolved):
-                logger.warning("Extra %s mount path does not exist, skipping: %s", label, resolved)
+                logger.warning('Extra %s mount path does not exist, skipping: %s', label, resolved)
                 continue
             if not self._is_path_allowed(resolved, allowed_prefixes):
                 logger.warning(
-                    "Extra %s mount path %s is outside allowed directories, skipping", label, resolved
+                    'Extra %s mount path %s is outside allowed directories, skipping', label, resolved
                 )
                 continue
             # Normalize host path for Docker (Windows backslash → forward slash)
@@ -1417,14 +1417,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
         }
         # Mapping keys strip the leading '/' from mount points (e.g., '/extra_rw_0' → 'extra_rw_0')
         for i, m in enumerate(mounted_rw):
-            key = f'{EXTRA_RW_MOUNT_PREFIX.strip("/")}{i}'
+            key = f'{EXTRA_RW_MOUNT_PREFIX.strip('/')}{i}'
             path_mapping['host_to_container'][key] = {
                 'host': m['host'],
                 'container': m['container'],
                 'access': 'read-write',
             }
         for i, m in enumerate(mounted_ro):
-            key = f'{EXTRA_RO_MOUNT_PREFIX.strip("/")}{i}'
+            key = f'{EXTRA_RO_MOUNT_PREFIX.strip('/')}{i}'
             path_mapping['host_to_container'][key] = {
                 'host': m['host'],
                 'container': m['container'],
@@ -1546,11 +1546,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         # prepare host connection file
         host_conn_data = {
-            "ip": "127.0.0.1",
-            "key": str(uuid.uuid4()),
-            "transport": "tcp",
-            "signature_scheme": "hmac-sha256",
-            "kernel_name": ""
+            'ip': '127.0.0.1',
+            'key': str(uuid.uuid4()),
+            'transport': 'tcp',
+            'signature_scheme': 'hmac-sha256',
+            'kernel_name': ''
         }
         ports = self._get_free_ports(5)
         port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
@@ -1562,7 +1562,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Prepare container connection file: use 0.0.0.0 inside container for Windows Docker port forwarding
         # Kernel binds to all interfaces, while host-side ports are restricted to 127.0.0.1
         container_conn_data = host_conn_data.copy()
-        container_conn_data["ip"] = "0.0.0.0"
+        container_conn_data['ip'] = '0.0.0.0'
         with open(container_connection_file, 'w') as f:
             json.dump(container_conn_data, f)
 
@@ -1691,8 +1691,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
             port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
             original_ports = [old_conn_data.get(p) for p in port_names]
             if None in original_ports:
-                logger.warning("Warm restart: incomplete port data, falling back to full start")
-                raise RuntimeError("Connection file missing required ports")
+                logger.warning('Warm restart: incomplete port data, falling back to full start')
+                raise RuntimeError('Connection file missing required ports')
         except FileNotFoundError:
             pass  # No connection file yet; new ports will be assigned below
         except Exception as e:
@@ -1706,11 +1706,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         # Prepare host connection file with original ports (or new ones if not available)
         host_conn_data = {
-            "ip": "127.0.0.1",
-            "key": str(uuid.uuid4()),
-            "transport": "tcp",
-            "signature_scheme": "hmac-sha256",
-            "kernel_name": ""
+            'ip': '127.0.0.1',
+            'key': str(uuid.uuid4()),
+            'transport': 'tcp',
+            'signature_scheme': 'hmac-sha256',
+            'kernel_name': ''
         }
         port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
         if original_ports:
@@ -1727,7 +1727,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         # Prepare container connection file (use 0.0.0.0 inside container for Windows Docker port forwarding)
         container_conn_data = host_conn_data.copy()
-        container_conn_data["ip"] = "0.0.0.0"
+        container_conn_data['ip'] = '0.0.0.0'
         with open(container_connection_file, 'w') as f:
             json.dump(container_conn_data, f)
 
@@ -1785,7 +1785,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             TimeoutError: If code execution exceeds the time limit.
         """
         if kernel_id is None:
-            logger.warning("kernel_id not passed to _execute_code; using default")
+            logger.warning('kernel_id not passed to _execute_code; using default')
             # Use session-based format consistent with call() method
             kernel_id = f'ci_default_{os.getpid()}'
         if timeout is None:

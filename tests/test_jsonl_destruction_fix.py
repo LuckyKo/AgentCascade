@@ -30,20 +30,20 @@ from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
 # ──────────────────────────────────────────────
 
 def _user(content: str) -> dict:
-    return {"role": "user", "content": content}
+    return {'role': 'user', 'content': content}
 
 
 def _assistant(content: str) -> dict:
-    return {"role": "assistant", "content": content}
+    return {'role': 'assistant', 'content': content}
 
 
 @pytest.fixture
 def tmp_log(tmp_path):
     """Return (log_path, AgentInstanceLogger) for a fresh temp log file."""
-    log_file = tmp_path / "test_logger.jsonl"
+    log_file = tmp_path / 'test_logger.jsonl'
     logger_inst = AgentInstanceLogger(
-        agent_class="coder",
-        instance_name="test_worker",
+        agent_class='coder',
+        instance_name='test_worker',
         log_dir=str(tmp_path),
         log_path=str(log_file),
     )
@@ -52,11 +52,11 @@ def tmp_log(tmp_path):
 
 def _seed_file(log_path: Path, n_msgs: int):
     """Write a metadata header + n message lines to the log file."""
-    lines = [json.dumps({"metadata": {"agent_class": "coder"}})]
+    lines = [json.dumps({'metadata': {'agent_class': 'coder'}})]
     for i in range(n_msgs):
         m = _user(f"original {i}") if i % 2 == 0 else _assistant(f"reply {i}")
         lines.append(json.dumps(m))
-    log_path.write_text("\n".join(lines) + "\n")
+    log_path.write_text('\n'.join(lines) + '\n')
 
 
 def _set_tracked(logger_inst, n_msgs: int):
@@ -70,7 +70,7 @@ def _set_tracked(logger_inst, n_msgs: int):
     for i in range(n_msgs):
         m = _user(f"tracked {i}") if i % 2 == 0 else _assistant(f"tracked reply {i}")
         tracked.append(logger_inst._format_message(m))
-    logger_inst.data["history"] = tracked
+    logger_inst.data['history'] = tracked
     logger_inst._file_history_synced = True
 
 
@@ -88,7 +88,7 @@ def _count_messages(log_path: Path) -> int:
         except json.JSONDecodeError:
             count = -1  # signal corruption
             break
-        if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+        if isinstance(item, dict) and 'metadata' not in item and 'event' not in item:
             count += 1
     return count
 
@@ -107,7 +107,7 @@ def _all_lines_valid_jsonl(log_path: Path):
 
 def _temp_files(dir_path: Path):
     """List any *.tmp files left in a directory."""
-    return [p.name for p in dir_path.iterdir() if p.name.endswith(".tmp")]
+    return [p.name for p in dir_path.iterdir() if p.name.endswith('.tmp')]
 
 
 # ──────────────────────────────────────────────
@@ -122,13 +122,13 @@ class TestShrinkGuard:
         _seed_file(log_path, 10)
         _set_tracked(logger_inst, 10)          # tracked working set = 10
 
-        result = logger_inst.rewrite_log_with_history([_user("tiny")])  # incoming = 1 (< 5)
+        result = logger_inst.rewrite_log_with_history([_user('tiny')])  # incoming = 1 (< 5)
 
-        assert result is False, "shrink guard must refuse a drastic shrink"
+        assert result is False, 'shrink guard must refuse a drastic shrink'
         # File must be untouched (still the original 10 messages).
         assert _count_messages(log_path) == 10
         # Tracked working set must be unchanged.
-        assert len(logger_inst.data["history"]) == 10
+        assert len(logger_inst.data['history']) == 10
 
     def test_allows_same_size(self, tmp_log):
         log_path, logger_inst = tmp_log
@@ -137,9 +137,9 @@ class TestShrinkGuard:
 
         result = logger_inst.rewrite_log_with_history([_user(f"same {i}") for i in range(8)])
 
-        assert result is True, "same-size rewrite must be allowed"
+        assert result is True, 'same-size rewrite must be allowed'
         assert _count_messages(log_path) == 8
-        assert len(logger_inst.data["history"]) == 8
+        assert len(logger_inst.data['history']) == 8
 
     def test_allows_additive_growth(self, tmp_log):
         log_path, logger_inst = tmp_log
@@ -148,20 +148,20 @@ class TestShrinkGuard:
 
         result = logger_inst.rewrite_log_with_history([_user(f"growth {i}") for i in range(12)])
 
-        assert result is True, "additive growth must be allowed"
+        assert result is True, 'additive growth must be allowed'
         assert _count_messages(log_path) == 12
-        assert len(logger_inst.data["history"]) == 12
+        assert len(logger_inst.data['history']) == 12
 
     def test_allows_shrink_when_override(self, tmp_log):
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 10)
         _set_tracked(logger_inst, 10)          # tracked = 10
 
-        result = logger_inst.rewrite_log_with_history([_user("kept")], allow_shrink=True)
+        result = logger_inst.rewrite_log_with_history([_user('kept')], allow_shrink=True)
 
-        assert result is True, "allow_shrink=True must permit an intentional shrink"
+        assert result is True, 'allow_shrink=True must permit an intentional shrink'
         assert _count_messages(log_path) == 1
-        assert len(logger_inst.data["history"]) == 1
+        assert len(logger_inst.data['history']) == 1
 
     def test_refuses_just_under_half(self, tmp_log):
         """new_count < prev_tracked * _SHRINK_GUARD_RATIO → refused."""
@@ -171,7 +171,7 @@ class TestShrinkGuard:
 
         result = logger_inst.rewrite_log_with_history([_user(f"under {i}") for i in range(4)])  # 4 < 5
 
-        assert result is False, "just-under-half incoming history must be refused (drastic shrink)"
+        assert result is False, 'just-under-half incoming history must be refused (drastic shrink)'
         assert _count_messages(log_path) == 10
 
     def test_allows_well_above_half(self, tmp_log):
@@ -182,7 +182,7 @@ class TestShrinkGuard:
 
         result = logger_inst.rewrite_log_with_history([_user(f"above {i}") for i in range(7)])  # 7 > 5
 
-        assert result is True, "well-above-half incoming history must be allowed (not a drastic shrink)"
+        assert result is True, 'well-above-half incoming history must be allowed (not a drastic shrink)'
         assert _count_messages(log_path) == 7
 
 
@@ -211,11 +211,11 @@ class TestOriginalScenarioRegression:
 
         # The cache-rebuild path: update ONLY the in-memory system message (index 0).
         # This is exactly what core.py does — it must not touch the file at all.
-        logger_inst.data["history"][0] = logger_inst._format_message(_user("updated sys prompt"))
+        logger_inst.data['history'][0] = logger_inst._format_message(_user('updated sys prompt'))
 
         # File must still hold all 100 messages, byte-for-byte unchanged.
-        assert _count_messages(log_path) == 100, "cache-rebuild update must not shrink the full-history file"
-        assert log_path.read_text() == original_text, "file must be left completely intact"
+        assert _count_messages(log_path) == 100, 'cache-rebuild update must not shrink the full-history file'
+        assert log_path.read_text() == original_text, 'file must be left completely intact'
 
 
 # ──────────────────────────────────────────────
@@ -229,9 +229,9 @@ class TestAtomicWrite:
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 3)
 
-        new_lines = [json.dumps({"metadata": {"agent_class": "coder"}}) + "\n",
-                     json.dumps(_user("fresh a")) + "\n",
-                     json.dumps(_assistant("fresh b")) + "\n"]
+        new_lines = [json.dumps({'metadata': {'agent_class': 'coder'}}) + '\n',
+                     json.dumps(_user('fresh a')) + '\n',
+                     json.dumps(_assistant('fresh b')) + '\n']
         assert logger_inst._atomic_write_lines(new_lines) is True
         assert _count_messages(log_path) == 2
         ok, bad = _all_lines_valid_jsonl(log_path)
@@ -240,8 +240,8 @@ class TestAtomicWrite:
     def test_no_temp_leftover_on_success(self, tmp_log):
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 2)
-        logger_inst._atomic_write_lines([json.dumps(_user("x")) + "\n"])
-        assert _temp_files(log_path.parent) == [], "no .tmp files may remain after success"
+        logger_inst._atomic_write_lines([json.dumps(_user('x')) + '\n'])
+        assert _temp_files(log_path.parent) == [], 'no .tmp files may remain after success'
 
     def test_failure_leaves_previous_intact(self, tmp_log):
         """If the write fails (target path does not exist), the prior file must survive."""
@@ -250,12 +250,12 @@ class TestAtomicWrite:
         original_text = log_path.read_text()
 
         # Point the logger at a non-existent path to force os.replace/open failure.
-        unwritable_dir = log_path.parent / "no_such_dir"
-        logger_inst.log_path = str(unwritable_dir / "impossible.jsonl")
+        unwritable_dir = log_path.parent / 'no_such_dir'
+        logger_inst.log_path = str(unwritable_dir / 'impossible.jsonl')
 
-        result = logger_inst._atomic_write_lines([json.dumps(_user("x")) + "\n"])
+        result = logger_inst._atomic_write_lines([json.dumps(_user('x')) + '\n'])
 
-        assert result is False, "write to a non-existent directory must fail"
+        assert result is False, 'write to a non-existent directory must fail'
         # The ORIGINAL file is untouched.
         assert log_path.read_text() == original_text
         assert _count_messages(log_path) == 4
@@ -297,7 +297,7 @@ class TestConcurrentWrites:
         assert ok, f"JSONL corrupted at line {bad} after concurrent rewrites"
         # Exactly one metadata header + 5 messages remain (last writer wins, atomically).
         assert _count_messages(log_path) == 5
-        assert _temp_files(log_path.parent) == [], "no temp files may litter after concurrency"
+        assert _temp_files(log_path.parent) == [], 'no temp files may litter after concurrency'
 
     def test_concurrent_appends_no_corruption(self, tmp_log):
         log_path, logger_inst = tmp_log

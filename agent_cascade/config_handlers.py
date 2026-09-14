@@ -113,9 +113,9 @@ def _handle_mcp_servers(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -
             for agent_inst in agents:
                 if tool.name not in agent_inst.function_map:
                     agent_inst.function_map[tool.name] = tool
-        _logger.info("[MCP] Eagerly loaded %d tools.", len(mcp_tools))
+        _logger.info('[MCP] Eagerly loaded %d tools.', len(mcp_tools))
     except Exception as e:
-        _logger.warning("[MCP] Eager initialization failed: %s", e)
+        _logger.warning('[MCP] Eager initialization failed: %s', e)
 
 
 def _normalize_paths(paths: list) -> list:
@@ -162,7 +162,7 @@ def _handle_work_folders(ui_cfg: dict, agent_pool: Optional[Any], agents: list) 
             rw_changed = rw_new_sorted != rw_current
 
     if not ro_changed and not rw_changed:
-        _logger.debug("[work_folders] Extra work folders unchanged")
+        _logger.debug('[work_folders] Extra work folders unchanged')
         return
 
     # Build final lists — use new values only when changed, preserve existing otherwise.
@@ -190,7 +190,7 @@ def _handle_default_workspace(ui_cfg: dict, agent_pool: Optional[Any], agents: l
         if new_ws_path != agent_pool.operation_manager.base_dir:
             agent_pool.operation_manager.set_base_dir(new_ws)
         else:
-            _logger.debug("[update_config] Base workspace unchanged")
+            _logger.debug('[update_config] Base workspace unchanged')
 
 
 @register_config_handler('idle_timeout_seconds')
@@ -268,7 +268,7 @@ def _handle_max_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agents:
         if hasattr(agent_pool, '_async_registry'):
             agent_pool._async_registry.resize_executor(agent_pool.settings.max_workers)
         else:
-            _logger.debug("[THREAD_POOL] resize skipped — no _async_registry on pool")
+            _logger.debug('[THREAD_POOL] resize skipped — no _async_registry on pool')
 
 
 @register_config_handler('max_workers')
@@ -281,7 +281,7 @@ def _handle_max_workers(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -
         if hasattr(agent_pool, '_async_registry'):
             agent_pool._async_registry.resize_executor(agent_pool.settings.max_workers)
         else:
-            _logger.debug("[THREAD_POOL] resize skipped — no _async_registry on pool")
+            _logger.debug('[THREAD_POOL] resize skipped — no _async_registry on pool')
 
 
 @register_config_handler('auto_continue')
@@ -832,7 +832,7 @@ def _handle_llm_config(ui_cfg: dict, agent_pool: Optional[Any], agents: list) ->
         if new_llm_cfg != {k: current_llm_cfg.get(k) for k in new_llm_cfg}:
             agent_pool.api_router.update_default_llm_cfg(new_llm_cfg)
         else:
-            _logger.debug("[update_config] LLM config unchanged")
+            _logger.debug('[update_config] LLM config unchanged')
 
 # Each key is bound at decoration time (register_config_handler(_llm_key)), so there is
 # no late-binding closure issue — every registered handler routes to _handle_llm_config.

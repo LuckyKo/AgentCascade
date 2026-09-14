@@ -48,13 +48,13 @@ def _write_jsonl(path: str, messages: list[Message], metadata: dict | None = Non
     """Write a JSONL file with metadata header + message lines."""
     if metadata is None:
         metadata = {
-            "agent_class": "coder",
-            "instance_name": "TestAgent",
-            "start_timestamp": "2026-01-01T00:00:00",
-            "current_log_path": path,
+            'agent_class': 'coder',
+            'instance_name': 'TestAgent',
+            'start_timestamp': '2026-01-01T00:00:00',
+            'current_log_path': path,
         }
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(json.dumps({"metadata": metadata}) + '\n')
+        f.write(json.dumps({'metadata': metadata}) + '\n')
         for m in messages:
             d = m.model_dump() if hasattr(m, 'model_dump') else dict(role=m.role, content=m.content)
             f.write(json.dumps(d, ensure_ascii=False) + '\n')
@@ -80,7 +80,7 @@ def _read_jsonl_messages(path: str) -> list[dict]:
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+            if isinstance(item, dict) and 'metadata' not in item and 'event' not in item:
                 msgs.append(item)
     return msgs
 
@@ -177,11 +177,11 @@ def simulate_reset_history(path: str, pool_conv: list[Message]):
         result_msgs = []
 
     # Write back with metadata header
-    meta = {"metadata": {
-        "agent_class": "coder",
-        "instance_name": "TestAgent",
-        "start_timestamp": "2026-01-01T00:00:00",
-        "current_log_path": path,
+    meta = {'metadata': {
+        'agent_class': 'coder',
+        'instance_name': 'TestAgent',
+        'start_timestamp': '2026-01-01T00:00:00',
+        'current_log_path': path,
     }}
     with open(path, 'w', encoding='utf-8') as f:
         f.write(json.dumps(meta) + '\n')
@@ -261,7 +261,7 @@ def append_messages(pool: MockAgentPool, messages: list[Message], jsonl_path: st
 @pytest.fixture
 def tmp_jsonl(tmp_path):
     """Yield a temporary JSONL file path that is cleaned up after the test."""
-    p = str(tmp_path / "test_agent.jsonl")
+    p = str(tmp_path / 'test_agent.jsonl')
     yield p
 
 
@@ -269,15 +269,15 @@ def tmp_jsonl(tmp_path):
 def pool_with_history():
     """Pool with [SYS][U0][A0][U1][A1][U2][A2][U3][A3]."""
     history: list[Message] = [
-        _msg(SYSTEM, "You are a test agent"),
-        _msg(USER, "User message 0"),
-        _msg(ASSISTANT, "Assistant reply 0"),
-        _msg(USER, "User message 1"),
-        _msg(ASSISTANT, "Assistant reply 1"),
-        _msg(USER, "User message 2"),
-        _msg(ASSISTANT, "Assistant reply 2"),
-        _msg(USER, "User message 3"),
-        _msg(ASSISTANT, "Assistant reply 3"),
+        _msg(SYSTEM, 'You are a test agent'),
+        _msg(USER, 'User message 0'),
+        _msg(ASSISTANT, 'Assistant reply 0'),
+        _msg(USER, 'User message 1'),
+        _msg(ASSISTANT, 'Assistant reply 1'),
+        _msg(USER, 'User message 2'),
+        _msg(ASSISTANT, 'Assistant reply 2'),
+        _msg(USER, 'User message 3'),
+        _msg(ASSISTANT, 'Assistant reply 3'),
     ]
     return MockAgentPool(history)
 
@@ -286,14 +286,14 @@ def pool_with_history():
 def pool_with_function_calls():
     """Pool with [SYS][U0][A0(tc)][F1][U1][A1][U2][A2] — includes tool calls."""
     history: list[Message] = [
-        _msg(SYSTEM, "You are a test agent"),
-        _msg(USER, "User message 0"),
-        _msg(ASSISTANT, "Assistant reply 0 with tool call"),
-        _msg(FUNCTION, "Function result 1"),
-        _msg(USER, "User message 1"),
-        _msg(ASSISTANT, "Assistant reply 1"),
-        _msg(USER, "User message 2"),
-        _msg(ASSISTANT, "Assistant reply 2"),
+        _msg(SYSTEM, 'You are a test agent'),
+        _msg(USER, 'User message 0'),
+        _msg(ASSISTANT, 'Assistant reply 0 with tool call'),
+        _msg(FUNCTION, 'Function result 1'),
+        _msg(USER, 'User message 1'),
+        _msg(ASSISTANT, 'Assistant reply 1'),
+        _msg(USER, 'User message 2'),
+        _msg(ASSISTANT, 'Assistant reply 2'),
     ]
     return MockAgentPool(history)
 
@@ -312,26 +312,26 @@ class TestSingleCompression:
         After trimming: U1,A1,U2 removed; COMP1 inserted; U3,A3 kept as tail.
         """
         pool = pool_with_history
-        history_before = pool.get_conversation("TestAgent")
+        history_before = pool.get_conversation('TestAgent')
         assert len(history_before) == 9  # SYS + 4 pairs
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary of first compression", "")):
-            result = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary of first compression', '')):
+            result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
         assert result.success is True
-        conv = pool.get_conversation("TestAgent")
+        conv = pool.get_conversation('TestAgent')
 
         # Structure: [SYS][U0][COMP1][tail...]
         assert conv[0].role == SYSTEM
-        assert conv[1].role == USER and "User message 0" in conv[1].content  # U0 preserved
-        assert _is_marker(conv[2]), "Index 2 should be COMP1 marker"
+        assert conv[1].role == USER and 'User message 0' in conv[1].content  # U0 preserved
+        assert _is_marker(conv[2]), 'Index 2 should be COMP1 marker'
 
         # Tail messages after marker (U3,A3 or similar)
         tail = conv[3:]
         assert len(tail) >= 2, f"Tail should have ≥2 messages, got {len(tail)}"
         for m in tail:
-            assert not _is_marker(m), "No markers in tail zone"
+            assert not _is_marker(m), 'No markers in tail zone'
 
     def test_jsonl_state_after_single_compression(self, pool_with_history, tmp_jsonl):
         """JSONL must preserve full history with marker inserted at cut position.
@@ -341,17 +341,17 @@ class TestSingleCompression:
         original messages and inserts the new marker at a mirrored position.
         """
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
 
         # Write initial JSONL with full history
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary of first compression", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary of first compression', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
         # Simulate handler sync: preserve full history + insert marker at mirrored pos
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
 
         # Read JSONL and verify full history is preserved + marker inserted
@@ -381,14 +381,14 @@ class TestSingleCompression:
     def test_pool_smaller_than_jsonl_after_compression(self, pool_with_history, tmp_jsonl):
         """Pool working set must be strictly smaller than JSONL after compression."""
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
 
         # Simulate handler sync: preserve full history + insert marker
         simulate_reset_history(tmp_jsonl, pool_conv)
@@ -417,31 +417,31 @@ class TestMultipleCompressions:
         pool = pool_with_history
 
         # First compression
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 1", "")):
-            r1 = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 1', '')):
+            r1 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
         assert r1.success is True
 
-        conv_after_1 = pool.get_conversation("TestAgent")
+        conv_after_1 = pool.get_conversation('TestAgent')
         marker_count_1 = sum(1 for m in conv_after_1 if _is_marker(m))
         assert marker_count_1 == 1
 
         # Add more messages to build up active set again
         extra_msgs: list[Message] = [
-            _msg(USER, "User message 4"),
-            _msg(ASSISTANT, "Assistant reply 4"),
-            _msg(USER, "User message 5"),
-            _msg(ASSISTANT, "Assistant reply 5"),
+            _msg(USER, 'User message 4'),
+            _msg(ASSISTANT, 'Assistant reply 4'),
+            _msg(USER, 'User message 5'),
+            _msg(ASSISTANT, 'Assistant reply 5'),
         ]
         append_messages(pool, extra_msgs)
 
         # Second compression
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 2", "")):
-            r2 = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 2', '')):
+            r2 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
         assert r2.success is True
-        conv_after_2 = pool.get_conversation("TestAgent")
+        conv_after_2 = pool.get_conversation('TestAgent')
 
         # Verify two markers are stacked
         markers = [m for m in conv_after_2 if _is_marker(m)]
@@ -449,7 +449,7 @@ class TestMultipleCompressions:
 
         # SYS and U0 must still be at positions 0 and 1
         assert conv_after_2[0].role == SYSTEM
-        assert conv_after_2[1].role == USER and "User message 0" in conv_after_2[1].content
+        assert conv_after_2[1].role == USER and 'User message 0' in conv_after_2[1].content
 
         # Markers should appear consecutively after U0
         marker_indices = [i for i, m in enumerate(conv_after_2) if _is_marker(m)]
@@ -468,33 +468,33 @@ class TestMultipleCompressions:
         Both markers present and stacked in pool, both visible in JSONL.
         """
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # First compression
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 1", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 1', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        conv_after_1 = pool.get_conversation("TestAgent")
+        conv_after_1 = pool.get_conversation('TestAgent')
         # Simulate handler sync: preserve full history + insert marker at mirrored pos
         simulate_reset_history(tmp_jsonl, conv_after_1)
 
         # Add more messages
         extra_msgs: list[Message] = [
-            _msg(USER, "User message 4"),
-            _msg(ASSISTANT, "Assistant reply 4"),
-            _msg(USER, "User message 5"),
-            _msg(ASSISTANT, "Assistant reply 5"),
+            _msg(USER, 'User message 4'),
+            _msg(ASSISTANT, 'Assistant reply 4'),
+            _msg(USER, 'User message 5'),
+            _msg(ASSISTANT, 'Assistant reply 5'),
         ]
         append_messages(pool, extra_msgs)
 
         # Second compression
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 2", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 2', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
         # Simulate handler sync for second compression
         simulate_reset_history(tmp_jsonl, pool_conv)
 
@@ -502,7 +502,7 @@ class TestMultipleCompressions:
 
         # Verify both markers present in JSONL (or at least the latest one)
         jsonl_markers = [m for m in jsonl_msgs if _is_marker(m)]
-        assert len(jsonl_markers) >= 1, "JSONL should contain at least one marker"
+        assert len(jsonl_markers) >= 1, 'JSONL should contain at least one marker'
 
         # Full history preserved: JSONL should contain ALL original 9 + extra 4 = 13 msgs
         # plus at least the marker(s). Must NOT lose any original messages.
@@ -547,24 +547,24 @@ class TestMultipleCompressions:
         def capture_summary(*args, **kwargs):
             s = f"Summary from call {len(summaries)}"
             summaries.append(s)
-            return (s, "")
+            return (s, '')
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
                    side_effect=capture_summary):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        conv = pool.get_conversation("TestAgent")
+        conv = pool.get_conversation('TestAgent')
         # Add more messages
         for i in range(4):
             conv.append(_msg(USER if i % 2 == 0 else ASSISTANT, f"Extra msg {i}"))
-        pool.instance_conversations["TestAgent"] = conv
+        pool.instance_conversations['TestAgent'] = conv
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
                    side_effect=capture_summary):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
         assert len(summaries) == 2
-        markers = [m for m in pool.get_conversation("TestAgent") if _is_marker(m)]
+        markers = [m for m in pool.get_conversation('TestAgent') if _is_marker(m)]
         assert len(markers) == 2
         # Each marker should contain its respective summary text
         for i, marker in enumerate(markers):
@@ -587,14 +587,14 @@ class TestCrashRecovery:
         calling simulate_reset_history which preserves full history + inserts marker.
         """
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary of events", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary of events', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
 
         # Simulate handler sync: preserve full history + insert marker at mirrored pos
         simulate_reset_history(tmp_jsonl, pool_conv)
@@ -616,28 +616,28 @@ class TestCrashRecovery:
     def test_recovery_after_multiple_compressions(self, pool_with_history, tmp_jsonl):
         """Recovery must work correctly after multiple compressions."""
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # First compression
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 1", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
-        conv = pool.get_conversation("TestAgent")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 1', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+        conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, conv)
 
         # Add more messages and second compression
         extra: list[Message] = [
-            _msg(USER, "User 4"), _msg(ASSISTANT, "Reply 4"),
-            _msg(USER, "User 5"), _msg(ASSISTANT, "Reply 5"),
+            _msg(USER, 'User 4'), _msg(ASSISTANT, 'Reply 4'),
+            _msg(USER, 'User 5'), _msg(ASSISTANT, 'Reply 5'),
         ]
         append_messages(pool, extra)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 2", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 2', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
 
         # Simulate handler sync: preserve full history + insert marker at mirrored pos
         simulate_reset_history(tmp_jsonl, pool_conv)
@@ -658,27 +658,27 @@ class TestCrashRecovery:
 
     def test_recovery_with_malformed_json_lines(self, tmp_path):
         """Recovery should skip malformed JSON lines gracefully."""
-        jsonl_path = str(tmp_path / "corrupted.jsonl")
+        jsonl_path = str(tmp_path / 'corrupted.jsonl')
 
         # Write a JSONL with some malformed lines interspersed
         messages: list[Message] = [
-            _msg(SYSTEM, "System message"),
-            _msg(USER, "User 0"),
-            _msg(ASSISTANT, "Reply 0"),
-            _msg(USER, "User 1"),
-            _msg(ASSISTANT, "Reply 1"),
+            _msg(SYSTEM, 'System message'),
+            _msg(USER, 'User 0'),
+            _msg(ASSISTANT, 'Reply 0'),
+            _msg(USER, 'User 1'),
+            _msg(ASSISTANT, 'Reply 1'),
         ]
 
-        marker_content = build_marker_message("Summary of events")
+        marker_content = build_marker_message('Summary of events')
         messages.append(marker_content)
         messages.extend([
-            _msg(USER, "Tail user"),
-            _msg(ASSISTANT, "Tail reply"),
+            _msg(USER, 'Tail user'),
+            _msg(ASSISTANT, 'Tail reply'),
         ])
 
         with open(jsonl_path, 'w', encoding='utf-8') as f:
             # Metadata line
-            meta = {"metadata": {"agent_class": "coder", "instance_name": "TestAgent"}}
+            meta = {'metadata': {'agent_class': 'coder', 'instance_name': 'TestAgent'}}
             f.write(json.dumps(meta) + '\n')
             for i, m in enumerate(messages):
                 d = m.model_dump() if hasattr(m, 'model_dump') else dict(role=m.role, content=m.content)
@@ -686,7 +686,7 @@ class TestCrashRecovery:
                 if i == 1:
                     f.write('{"role": "assistant", "content": "Reply -0"}\n')  # Extra msg
                 if i == 3:
-                    f.write("not valid json at all\n")  # Malformed line
+                    f.write('not valid json at all\n')  # Malformed line
                 f.write(json.dumps(d, ensure_ascii=False) + '\n')
 
         jsonl_msgs = _read_jsonl_messages(jsonl_path)
@@ -710,20 +710,20 @@ class TestTailSyncVerification:
         from agent_cascade.logger.tail_sync_check import check_tail_sync
 
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
 
         # Simulate handler sync: preserve full history + insert marker at mirrored pos
         simulate_reset_history(tmp_jsonl, pool_conv)
 
         in_sync, pool_tail, jsonl_tail = check_tail_sync(
-            "TestAgent", pool_conv, tmp_jsonl
+            'TestAgent', pool_conv, tmp_jsonl
         )
         assert in_sync is True, \
             f"Tail sync failed: pool_tail={pool_tail}, jsonl_tail={jsonl_tail}"
@@ -733,32 +733,32 @@ class TestTailSyncVerification:
         from agent_cascade.logger.tail_sync_check import check_tail_sync
 
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # First compression
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 1", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
-        conv = pool.get_conversation("TestAgent")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 1', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+        conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, conv)
 
         # Add more messages and second compression
         extra: list[Message] = [
-            _msg(USER, "User 4"), _msg(ASSISTANT, "Reply 4"),
-            _msg(USER, "User 5"), _msg(ASSISTANT, "Reply 5"),
+            _msg(USER, 'User 4'), _msg(ASSISTANT, 'Reply 4'),
+            _msg(USER, 'User 5'), _msg(ASSISTANT, 'Reply 5'),
         ]
         append_messages(pool, extra)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 2", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 2', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
 
         in_sync, pool_tail, jsonl_tail = check_tail_sync(
-            "TestAgent", pool_conv, tmp_jsonl
+            'TestAgent', pool_conv, tmp_jsonl
         )
         assert in_sync is True, \
             f"Tail sync after 2 compressions: pool_tail={pool_tail}, jsonl_tail={jsonl_tail}"
@@ -768,14 +768,14 @@ class TestTailSyncVerification:
         from agent_cascade.logger.tail_sync_check import check_tail_sync
 
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
 
         # Write pool state to JSONL but REMOVE a tail message (simulate data loss / drift)
         marker_idx = MockAgentPool.find_last_marker(pool_conv)
@@ -784,16 +784,16 @@ class TestTailSyncVerification:
             pool_tail_msgs.pop()  # Remove one tail msg to create deficit
 
         jsonl_msgs = list(original_conv[:3])  # [SYS][U0][A0] — before compression cut
-        marker_content = build_marker_message("Summary")
+        marker_content = build_marker_message('Summary')
         jsonl_msgs.append(marker_content)
         jsonl_msgs.extend(pool_tail_msgs)
 
         _write_jsonl(tmp_jsonl, jsonl_msgs)
 
         in_sync, pool_tail, jsonl_tail = check_tail_sync(
-            "TestAgent", pool_conv, tmp_jsonl
+            'TestAgent', pool_conv, tmp_jsonl
         )
-        assert not in_sync, "Tail sync should detect drift (JSONL has fewer tail msgs)"
+        assert not in_sync, 'Tail sync should detect drift (JSONL has fewer tail msgs)'
         assert jsonl_tail < pool_tail, \
             f"Expected JSONL deficit: pool={pool_tail}, jsonl={jsonl_tail}"
 
@@ -802,11 +802,11 @@ class TestTailSyncVerification:
         from agent_cascade.logger.tail_sync_check import check_tail_sync
 
         conv = [
-            _msg(SYSTEM, "System"),
-            _msg(USER, "User 0"),
-            _msg(ASSISTANT, "Reply 0"),
-            _msg(USER, "User 1"),
-            _msg(ASSISTANT, "Reply 1"),
+            _msg(SYSTEM, 'System'),
+            _msg(USER, 'User 0'),
+            _msg(ASSISTANT, 'Reply 0'),
+            _msg(USER, 'User 1'),
+            _msg(ASSISTANT, 'Reply 1'),
         ]
 
         tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, newline='')
@@ -814,7 +814,7 @@ class TestTailSyncVerification:
         try:
             _write_jsonl(tmp.name, conv)
             in_sync, pool_tail, jsonl_tail = check_tail_sync(
-                "TestAgent", conv, tmp.name
+                'TestAgent', conv, tmp.name
             )
             assert in_sync is True
             # Without markers, tail = entire conversation length
@@ -838,40 +838,40 @@ class TestFullCycle:
         from agent_cascade.logger.tail_sync_check import check_tail_sync
 
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # Phase 1: First compression
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary phase 1", "")):
-            r1 = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary phase 1', '')):
+            r1 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
         assert r1.success is True
 
-        conv_1 = pool.get_conversation("TestAgent")
+        conv_1 = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, conv_1)
 
         # Verify tail sync after first compression
-        in_sync_1, pt1, jt1 = check_tail_sync("TestAgent", conv_1, tmp_jsonl)
+        in_sync_1, pt1, jt1 = check_tail_sync('TestAgent', conv_1, tmp_jsonl)
         assert in_sync_1 is True, f"Phase 1: pool_tail={pt1}, jsonl_tail={jt1}"
 
         # Phase 2: Add messages and second compression
         extra: list[Message] = [
-            _msg(USER, "User 4"), _msg(ASSISTANT, "Reply 4"),
-            _msg(USER, "User 5"), _msg(ASSISTANT, "Reply 5"),
-            _msg(USER, "User 6"), _msg(ASSISTANT, "Reply 6"),
+            _msg(USER, 'User 4'), _msg(ASSISTANT, 'Reply 4'),
+            _msg(USER, 'User 5'), _msg(ASSISTANT, 'Reply 5'),
+            _msg(USER, 'User 6'), _msg(ASSISTANT, 'Reply 6'),
         ]
         append_messages(pool, extra, tmp_jsonl)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary phase 2", "")):
-            r2 = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary phase 2', '')):
+            r2 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
         assert r2.success is True
 
-        conv_final = pool.get_conversation("TestAgent")
+        conv_final = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, conv_final)
 
         # Verify tail sync after second compression
-        in_sync_2, pt2, jt2 = check_tail_sync("TestAgent", conv_final, tmp_jsonl)
+        in_sync_2, pt2, jt2 = check_tail_sync('TestAgent', conv_final, tmp_jsonl)
         assert in_sync_2 is True, f"Phase 2: pool_tail={pt2}, jsonl_tail={jt2}"
 
         # Phase 3: Crash recovery — rebuild from JSONL using shared helper
@@ -904,14 +904,14 @@ class TestFullCycle:
     def test_recovery_with_function_calls(self, pool_with_function_calls, tmp_jsonl):
         """Recovery must preserve FUNCTION role messages correctly."""
         pool = pool_with_function_calls
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
 
         jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
@@ -933,13 +933,13 @@ class TestEdgeCases:
         pool = pool_with_history
 
         for i in range(3):
-            with patch("agent_cascade.compression.core.invoke_compression_agent",
-                       return_value=(f"Summary {i}", "")):
-                r = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+            with patch('agent_cascade.compression.core.invoke_compression_agent',
+                       return_value=(f"Summary {i}", '')):
+                r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
             if not r.success:
                 break  # Not enough messages — expected
 
-            conv = pool.get_conversation("TestAgent")
+            conv = pool.get_conversation('TestAgent')
             assert conv[0].role == SYSTEM, f"SYS lost at iteration {i}"
 
             # Add more messages for next compression
@@ -948,59 +948,59 @@ class TestEdgeCases:
                     _msg(USER, f"User {5+i}"), _msg(ASSISTANT, f"Reply {5+i}"),
                     _msg(USER, f"User {6+i}"), _msg(ASSISTANT, f"Reply {6+i}"),
                 ]
-                pool.instance_conversations["TestAgent"] = conv + extra
+                pool.instance_conversations['TestAgent'] = conv + extra
 
     def test_compression_preserves_u0(self, pool_with_history):
         """First user message (U0) must always be at index 1 after any compressions."""
         pool = pool_with_history
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            r = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
         assert r.success is True
 
-        conv = pool.get_conversation("TestAgent")
+        conv = pool.get_conversation('TestAgent')
         u0_content = getattr(conv[1], 'content', '') if len(conv) > 1 else ''
-        assert "User message 0" in str(u0_content), \
+        assert 'User message 0' in str(u0_content), \
             f"U0 should be at index 1, but got: {u0_content[:50]}"
 
     def test_empty_pool_no_crash(self):
         """Compression on empty pool should return gracefully."""
-        history = [_msg(SYSTEM, "System")]
+        history = [_msg(SYSTEM, 'System')]
         pool = MockAgentPool(history)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            r = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
         assert not r.success  # Not enough messages to compress
-        conv = pool.get_conversation("TestAgent")
+        conv = pool.get_conversation('TestAgent')
         assert len(conv) == 1  # Only SYSTEM remains
 
     def test_marker_role_is_user(self):
         """Compression markers must have role=USER."""
-        marker = build_marker_message("Summary text")
+        marker = build_marker_message('Summary text')
         assert marker.role == USER, f"Marker role should be USER, got {marker.role}"
         content = marker.content
-        assert COMPRESSION_MARKER in content, "Marker content missing COMPRESSION_MARKER prefix"
+        assert COMPRESSION_MARKER in content, 'Marker content missing COMPRESSION_MARKER prefix'
 
     def test_jsonl_order_preserved(self, pool_with_history, tmp_jsonl):
         """JSONL must preserve message order: earlier messages before later ones."""
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, pool_conv)
 
         jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
 
         # Verify SYSTEM is first in JSONL too
-        assert jsonl_msgs[0]['role'] == SYSTEM, "JSONL should start with SYSTEM message"
+        assert jsonl_msgs[0]['role'] == SYSTEM, 'JSONL should start with SYSTEM message'
 
 
 # ──────────────────────────────────────────────
@@ -1010,31 +1010,31 @@ class TestEdgeCases:
 class TestNCompressions:
     """Procedurally run N compressions and verify consistency at each step."""
 
-    @pytest.mark.parametrize("n_compressions", [3, 5, 7])
+    @pytest.mark.parametrize('n_compressions', [3, 5, 7])
     def test_n_compressions_tail_sync(self, n_compressions, tmp_jsonl):
         """After each of N compressions: pool tail == JSONL tail, no messages lost."""
         # Build initial conversation: SYS + U0 + pairs of user/assistant
         history: list[Message] = [
-            _msg(SYSTEM, "System"),
-            _msg(USER, "U0"),
+            _msg(SYSTEM, 'System'),
+            _msg(USER, 'U0'),
         ]
         for i in range(16):  # enough messages to compress multiple times
             history.append(_msg(USER if i % 2 == 0 else ASSISTANT, f"Msg {i}"))
 
         pool = MockAgentPool(history)
-        _write_jsonl(tmp_jsonl, list(pool.get_conversation("TestAgent")))
+        _write_jsonl(tmp_jsonl, list(pool.get_conversation('TestAgent')))
 
         all_original_contents = set(m.content for m in history)
 
         for comp_num in range(n_compressions):
             # Compress
-            with patch("agent_cascade.compression.core.invoke_compression_agent",
-                       return_value=(f"Summary {comp_num + 1}", "")):
-                result = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+            with patch('agent_cascade.compression.core.invoke_compression_agent',
+                       return_value=(f"Summary {comp_num + 1}", '')):
+                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
             assert result.success, f"Comp #{comp_num+1} failed: {result.error}"
 
-            pool_conv = pool.get_conversation("TestAgent")
+            pool_conv = pool.get_conversation('TestAgent')
             simulate_reset_history(tmp_jsonl, pool_conv)
             jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
 
@@ -1067,27 +1067,27 @@ class TestNCompressions:
                 for m in extra:
                     all_original_contents.add(m.content)
 
-    @pytest.mark.parametrize("n_compressions", [3, 5])
+    @pytest.mark.parametrize('n_compressions', [3, 5])
     def test_n_compressions_jsonl_grows(self, n_compressions, tmp_jsonl):
         """JSONL should grow with each compression (preserves full history)."""
         history: list[Message] = [
-            _msg(SYSTEM, "System"),
-            _msg(USER, "U0"),
+            _msg(SYSTEM, 'System'),
+            _msg(USER, 'U0'),
         ]
         for i in range(16):
             history.append(_msg(USER if i % 2 == 0 else ASSISTANT, f"Msg {i}"))
 
         pool = MockAgentPool(history)
-        _write_jsonl(tmp_jsonl, list(pool.get_conversation("TestAgent")))
+        _write_jsonl(tmp_jsonl, list(pool.get_conversation('TestAgent')))
         prev_jsonl_size = len(_read_jsonl_messages(tmp_jsonl))
 
         for comp_num in range(n_compressions):
-            with patch("agent_cascade.compression.core.invoke_compression_agent",
-                       return_value=(f"Summary {comp_num + 1}", "")):
-                result = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+            with patch('agent_cascade.compression.core.invoke_compression_agent',
+                       return_value=(f"Summary {comp_num + 1}", '')):
+                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
             assert result.success, f"Comp #{comp_num+1} failed: {result.error}"
 
-            pool_conv = pool.get_conversation("TestAgent")
+            pool_conv = pool.get_conversation('TestAgent')
             simulate_reset_history(tmp_jsonl, pool_conv)
             jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
 
@@ -1118,12 +1118,12 @@ class TestTailSyncModule:
         from agent_cascade.logger.tail_sync_check import _count_pool_tail
 
         conv = [
-            _msg(SYSTEM, "System"),
-            _msg(USER, "U0"),
-            build_marker_message("Summary"),
-            _msg(USER, "Tail 1"),
-            _msg(ASSISTANT, "Tail 2"),
-            _msg(USER, "Tail 3"),
+            _msg(SYSTEM, 'System'),
+            _msg(USER, 'U0'),
+            build_marker_message('Summary'),
+            _msg(USER, 'Tail 1'),
+            _msg(ASSISTANT, 'Tail 2'),
+            _msg(USER, 'Tail 3'),
         ]
 
         # Marker at index 2 → tail count = 6 - 2 - 1 = 3
@@ -1134,9 +1134,9 @@ class TestTailSyncModule:
         from agent_cascade.logger.tail_sync_check import _count_pool_tail
 
         conv = [
-            _msg(SYSTEM, "System"),
-            _msg(USER, "U0"),
-            _msg(ASSISTANT, "A0"),
+            _msg(SYSTEM, 'System'),
+            _msg(USER, 'U0'),
+            _msg(ASSISTANT, 'A0'),
         ]
 
         # No marker → entire conversation is tail
@@ -1150,19 +1150,19 @@ class TestTailSyncModule:
         tmp.close()  # Close immediately so we can write/read freely on Windows
         try:
             msgs = [
-                _msg(SYSTEM, "System"),
-                _msg(USER, "U0"),
-                _msg(ASSISTANT, "A0"),
-                build_marker_message("Summary"),
-                _msg(USER, "Tail 1"),
-                _msg(ASSISTANT, "Tail 2"),
+                _msg(SYSTEM, 'System'),
+                _msg(USER, 'U0'),
+                _msg(ASSISTANT, 'A0'),
+                build_marker_message('Summary'),
+                _msg(USER, 'Tail 1'),
+                _msg(ASSISTANT, 'Tail 2'),
             ]
             _write_jsonl(tmp.name, msgs)
 
             tail_count, total_msgs, marker_line = _count_jsonl_tail(tmp.name)
             assert tail_count == 2, f"Expected 2 tail messages, got {tail_count}"
             assert total_msgs >= 6, f"Expected ≥6 total messages, got {total_msgs}"
-            assert marker_line is not None, "Marker line should be found"
+            assert marker_line is not None, 'Marker line should be found'
         finally:
             os.unlink(tmp.name)
 
@@ -1170,17 +1170,17 @@ class TestTailSyncModule:
         from agent_cascade.logger.tail_sync_check import check_and_log
 
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, pool_conv)
 
-        result = check_and_log("TestAgent", pool_conv, tmp_jsonl, context="test_sync")
+        result = check_and_log('TestAgent', pool_conv, tmp_jsonl, context='test_sync')
         assert result is True
 
 
@@ -1194,27 +1194,27 @@ class TestForwardOnlyRecovery:
     def test_forward_pass_finds_all_markers(self, pool_with_history, tmp_jsonl):
         """Forward pass through JSONL must find all compression markers in order."""
         pool = pool_with_history
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # Two compressions to create multiple markers
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 1", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
-        conv = pool.get_conversation("TestAgent")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 1', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+        conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, conv)
 
         extra: list[Message] = [
-            _msg(USER, "User 4"), _msg(ASSISTANT, "Reply 4"),
-            _msg(USER, "User 5"), _msg(ASSISTANT, "Reply 5"),
+            _msg(USER, 'User 4'), _msg(ASSISTANT, 'Reply 4'),
+            _msg(USER, 'User 5'), _msg(ASSISTANT, 'Reply 5'),
         ]
-        pool.instance_conversations["TestAgent"] = conv + extra
+        pool.instance_conversations['TestAgent'] = conv + extra
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary 2", "")):
-            compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary 2', '')):
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool.get_conversation("TestAgent")
+        pool_conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, pool_conv)
 
         # Forward pass: scan JSONL and collect markers in order
@@ -1225,7 +1225,7 @@ class TestForwardOnlyRecovery:
                 found_markers.append(msg)
 
         # Verify markers were found in forward order (no backward scanning needed)
-        assert len(found_markers) >= 1, "Should find at least one marker"
+        assert len(found_markers) >= 1, 'Should find at least one marker'
 
         # Last marker's position determines tail boundary
         last_marker_pos = None
@@ -1249,12 +1249,12 @@ class TestForwardOnlyRecovery:
         Test with varying amounts of pre-marker history to ensure the forward pass
         correctly identifies and stacks all markers.
         """
-        jsonl_path = str(tmp_path / "recovery_test.jsonl")
+        jsonl_path = str(tmp_path / 'recovery_test.jsonl')
 
         # Build a large conversation with 3 compression cycles
         messages: list[Message] = [
-            _msg(SYSTEM, "System"),
-            _msg(USER, "U0"),
+            _msg(SYSTEM, 'System'),
+            _msg(USER, 'U0'),
         ]
 
         all_markers_content = []
@@ -1271,8 +1271,8 @@ class TestForwardOnlyRecovery:
 
         # Final tail
         messages.extend([
-            _msg(USER, "Final user"),
-            _msg(ASSISTANT, "Final reply"),
+            _msg(USER, 'Final user'),
+            _msg(ASSISTANT, 'Final reply'),
         ])
 
         _write_jsonl(jsonl_path, messages)
@@ -1306,17 +1306,17 @@ class TestMessagePreservation:
 
     def test_no_message_loss_after_compression(self, pool_with_history, tmp_jsonl):
         """Build pool, compress once, verify ALL original contents survive in JSONL."""
-        original_conv = list(pool_with_history.get_conversation("TestAgent"))
+        original_conv = list(pool_with_history.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # Track all original message contents (excluding markers)
         all_original_contents = {m.content for m in original_conv}
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary of compression", "")):
-            compress_context(pool_with_history, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary of compression', '')):
+            compress_context(pool_with_history, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool_with_history.get_conversation("TestAgent")
+        pool_conv = pool_with_history.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
 
         jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
@@ -1329,14 +1329,14 @@ class TestMessagePreservation:
         """Build pool, compress 3 times, verify ALL original contents survive in JSONL."""
         # Build a large enough conversation to support multiple compressions
         history: list[Message] = [
-            _msg(SYSTEM, "System prompt"),
-            _msg(USER, "Initial user message"),
+            _msg(SYSTEM, 'System prompt'),
+            _msg(USER, 'Initial user message'),
         ]
         for i in range(20):
             history.append(_msg(USER if i % 2 == 0 else ASSISTANT, f"Conversation turn {i}"))
 
         pool = MockAgentPool(history)
-        original_conv = list(pool.get_conversation("TestAgent"))
+        original_conv = list(pool.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # Track all message contents across the lifecycle
@@ -1344,13 +1344,13 @@ class TestMessagePreservation:
 
         n_compressions = 3
         for comp_num in range(n_compressions):
-            with patch("agent_cascade.compression.core.invoke_compression_agent",
-                       return_value=(f"Summary round {comp_num + 1}", "")):
-                result = compress_context(pool, "TestAgent", fraction=0.5, mode="auto")
+            with patch('agent_cascade.compression.core.invoke_compression_agent',
+                       return_value=(f"Summary round {comp_num + 1}", '')):
+                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
 
             assert result.success, f"Compression #{comp_num+1} failed: {result.error}"
 
-            pool_conv = pool.get_conversation("TestAgent")
+            pool_conv = pool.get_conversation('TestAgent')
             simulate_reset_history(tmp_jsonl, pool_conv)
 
             jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
@@ -1370,7 +1370,7 @@ class TestMessagePreservation:
 
     def test_message_identity_preserved(self, pool_with_history, tmp_jsonl):
         """Verify specific messages by their content survive compression intact."""
-        original_conv = list(pool_with_history.get_conversation("TestAgent"))
+        original_conv = list(pool_with_history.get_conversation('TestAgent'))
         _write_jsonl(tmp_jsonl, original_conv)
 
         # Identify specific messages we want to track by content
@@ -1379,11 +1379,11 @@ class TestMessagePreservation:
             if not _is_marker(m):
                 tracked_contents[m.content] = m.role
 
-        with patch("agent_cascade.compression.core.invoke_compression_agent",
-                   return_value=("Summary", "")):
-            compress_context(pool_with_history, "TestAgent", fraction=0.5, mode="auto")
+        with patch('agent_cascade.compression.core.invoke_compression_agent',
+                   return_value=('Summary', '')):
+            compress_context(pool_with_history, 'TestAgent', fraction=0.5, mode='auto')
 
-        pool_conv = pool_with_history.get_conversation("TestAgent")
+        pool_conv = pool_with_history.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
 
         jsonl_msgs = _read_jsonl_messages(tmp_jsonl)

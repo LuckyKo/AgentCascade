@@ -49,7 +49,7 @@ def interruptible_long_operation(pool: MockPool, instance_name: str):
 def test_dismiss_real_thread_stops_within_bound():
     """Test that dismissing an agent stops its real thread within a bounded time."""
     pool = MockPool()
-    instance_name = "test_agent_1"
+    instance_name = 'test_agent_1'
 
     result_container = []
 
@@ -69,7 +69,7 @@ def test_dismiss_real_thread_stops_within_bound():
 
     # Let it run briefly to confirm it's alive
     time.sleep(0.15)
-    assert thread.is_alive(), "Thread should be alive before dismissal"
+    assert thread.is_alive(), 'Thread should be alive before dismissal'
 
     # Dismiss: set termination signal (like terminate_instance does)
     with pool._pool_lock:
@@ -79,9 +79,9 @@ def test_dismiss_real_thread_stops_within_bound():
     thread.join(timeout=2.0)
 
     assert not thread.is_alive(), \
-        "Thread should have stopped within 2s via cooperative termination check"
-    assert len(result_container) == 1, "Operation should have returned a result"
-    assert "Stopped after" in result_container[0], \
+        'Thread should have stopped within 2s via cooperative termination check'
+    assert len(result_container) == 1, 'Operation should have returned a result'
+    assert 'Stopped after' in result_container[0], \
         f"Result should indicate cooperative stop: {result_container[0]}"
 
 
@@ -92,7 +92,7 @@ def test_dismiss_before_thread_starts_keeps_signal():
     not yet registered, the termination signal must NOT be discarded.
     """
     pool = MockPool()
-    instance_name = "test_agent_2"
+    instance_name = 'test_agent_2'
 
     result_container = []
     start_event = threading.Event()
@@ -116,14 +116,14 @@ def test_dismiss_before_thread_starts_keeps_signal():
     thread.join(timeout=2.0)
 
     assert not thread.is_alive(), \
-        "Thread should stop at first cooperative check even if dismissed during startup"
+        'Thread should stop at first cooperative check even if dismissed during startup'
 
 
 def test_no_thread_registered_signal_not_discarded():
     """Test that when no thread is registered (async executor worker case),
     the termination signal is preserved."""
     pool = MockPool()
-    instance_name = "test_async_child"
+    instance_name = 'test_async_child'
 
     # Simulate async child: no thread registered in _instance_threads
     with pool._pool_lock:
@@ -143,13 +143,13 @@ def test_no_thread_registered_signal_not_discarded():
 
     # Signal should still be present since no thread was registered
     assert instance_name in pool.terminated_instances, \
-        "Termination signal must persist when no thread was registered (async child case)"
+        'Termination signal must persist when no thread was registered (async child case)'
 
 
 def test_join_timeout_does_not_block_excessively():
     """Test that join timeout is short enough not to block dismissal for 30s."""
     pool = MockPool()
-    instance_name = "test_agent_3"
+    instance_name = 'test_agent_3'
 
     def blocking_target():
         # This thread NEVER checks termination (simulates worst-case blocked op)
@@ -177,5 +177,5 @@ def test_join_timeout_does_not_block_excessively():
     # Thread is still alive (it never checks), but dismissal didn't block 30s
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+if __name__ == '__main__':
+    pytest.main([__file__, '-v'])

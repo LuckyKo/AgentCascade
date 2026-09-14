@@ -65,10 +65,10 @@ class TestFIFOOrderingOnSharedSlot(unittest.TestCase):
 
         # Agent A acquires the conc=0 slot at lifecycle level.
         release_a = sched.acquire(
-            api_base="http://shared-api",
+            api_base='http://shared-api',
             concurrency_limit=0,
-            instance_name="A",
-            agent_class="orchestrator",
+            instance_name='A',
+            agent_class='orchestrator',
             timeout=5.0,
         )
         self.assertIsNotNone(release_a)
@@ -79,33 +79,33 @@ class TestFIFOOrderingOnSharedSlot(unittest.TestCase):
         # (the documented public contract), so assert on TimeoutError here.
         with self.assertRaises(TimeoutError):
             sched.acquire(
-                api_base="http://shared-api",
+                api_base='http://shared-api',
                 concurrency_limit=0,
-                instance_name="B",
-                agent_class="coder",
+                instance_name='B',
+                agent_class='coder',
                 timeout=0.5,
             )
 
         # A still holds the slot; B's timed-out ticket was removed.
         pool = sched._pools['_shared_sequential_slot_']
         with pool._cond:
-            self.assertIn("A", pool._running)
-            self.assertNotIn("B", pool._running)
+            self.assertIn('A', pool._running)
+            self.assertNotIn('B', pool._running)
             self.assertEqual(len(pool._waiters), 0)
 
         # Release A's slot — B can now acquire immediately (FIFO, no other waiters).
         release_a()
         release_b = sched.acquire(
-            api_base="http://shared-api",
+            api_base='http://shared-api',
             concurrency_limit=0,
-            instance_name="B",
-            agent_class="coder",
+            instance_name='B',
+            agent_class='coder',
             timeout=5.0,
         )
         self.assertIsNotNone(release_b)
         with pool._cond:
-            self.assertIn("B", pool._running)
-            self.assertNotIn("A", pool._running)
+            self.assertIn('B', pool._running)
+            self.assertNotIn('A', pool._running)
 
         release_b()
 
@@ -122,16 +122,16 @@ class TestPerCallAcquisition(unittest.TestCase):
         slot_key = '_shared_sequential_slot_'
 
         # Simulate an instance with no lifecycle slot.
-        inst = _FakeInstance(instance_name="B", slot_key=None)
+        inst = _FakeInstance(instance_name='B', slot_key=None)
 
         already_holds = (inst is not None and getattr(inst, '_slot_key', None) == slot_key)
         self.assertFalse(already_holds)
 
         release_cb = sched.acquire(
-            api_base="http://shared-api",
+            api_base='http://shared-api',
             concurrency_limit=0,
-            instance_name="B",
-            agent_class="coder",
+            instance_name='B',
+            agent_class='coder',
             timeout=5.0,
         )
         self.assertIsNotNone(release_cb)
@@ -140,7 +140,7 @@ class TestPerCallAcquisition(unittest.TestCase):
         release_cb()
         pool = sched._pools[slot_key]
         with pool._cond:
-            self.assertNotIn("B", pool._running)
+            self.assertNotIn('B', pool._running)
 
 
 class TestNoDoubleAcquisition(unittest.TestCase):
@@ -155,14 +155,14 @@ class TestNoDoubleAcquisition(unittest.TestCase):
         slot_key = '_shared_sequential_slot_'
 
         # Simulate an instance that already holds the lifecycle slot on this endpoint.
-        inst = _FakeInstance(instance_name="A", slot_key=slot_key)
+        inst = _FakeInstance(instance_name='A', slot_key=slot_key)
 
         already_holds = (inst is not None and getattr(inst, '_slot_key', None) == slot_key)
         self.assertTrue(already_holds)
 
         # Because already_holds is True, call_with_fallback skips scheduler.acquire().
         # Verify no acquisition happens: the pool starts empty and stays empty.
-        pool = sched._get_or_create_pool("http://shared-api", 0)
+        pool = sched._get_or_create_pool('http://shared-api', 0)
         with pool._cond:
             self.assertEqual(len(pool._running), 0)
 
@@ -175,7 +175,7 @@ class TestNoDoubleAcquisition(unittest.TestCase):
         sched = EndpointScheduler()
         slot_key = '_shared_sequential_slot_'
 
-        inst = _FakeInstance(instance_name="C", slot_key="http://other-api")
+        inst = _FakeInstance(instance_name='C', slot_key='http://other-api')
 
         already_holds = (inst is not None and getattr(inst, '_slot_key', None) == slot_key)
         self.assertFalse(already_holds)
@@ -189,14 +189,14 @@ class TestGeneratorFinalizationReleasesSlot(unittest.TestCase):
         release_calls = []
         release_cb = lambda: release_calls.append(1)
 
-        result_gen = _slotpool_execute(release_cb, lambda: _make_gen(["c1", "c2"]))
+        result_gen = _slotpool_execute(release_cb, lambda: _make_gen(['c1', 'c2']))
 
         # Pull first chunk — slot still held.
-        self.assertEqual(next(result_gen), "c1")
+        self.assertEqual(next(result_gen), 'c1')
         self.assertEqual(len(release_calls), 0)
 
         # Consume the rest.
-        self.assertEqual(list(result_gen), ["c2"])
+        self.assertEqual(list(result_gen), ['c2'])
         # Slot released exactly once after full iteration.
         self.assertEqual(release_calls, [1])
 
@@ -206,12 +206,12 @@ class TestGeneratorFinalizationReleasesSlot(unittest.TestCase):
         release_cb = lambda: release_calls.append(1)
 
         def failing_gen():
-            yield "ok"
-            raise ValueError("mid-stream failure")
+            yield 'ok'
+            raise ValueError('mid-stream failure')
 
         result_gen = _slotpool_execute(release_cb, lambda: failing_gen())
 
-        self.assertEqual(next(result_gen), "ok")
+        self.assertEqual(next(result_gen), 'ok')
         with self.assertRaises(ValueError):
             list(result_gen)
         # Slot released exactly once despite the exception.
@@ -227,7 +227,7 @@ class TestExceptionBeforeGenerator(unittest.TestCase):
         release_cb = lambda: release_calls.append(1)
 
         def raising_call():
-            raise RuntimeError("connection refused")
+            raise RuntimeError('connection refused')
 
         with self.assertRaises(RuntimeError):
             _slotpool_execute(release_cb, raising_call)
@@ -240,9 +240,9 @@ class TestExceptionBeforeGenerator(unittest.TestCase):
         release_calls = []
         release_cb = lambda: release_calls.append(1)
 
-        result = _slotpool_execute(release_cb, lambda: ["a", "b"])
+        result = _slotpool_execute(release_cb, lambda: ['a', 'b'])
 
-        self.assertEqual(result, ["a", "b"])
+        self.assertEqual(result, ['a', 'b'])
         # Released synchronously (not deferred to a generator).
         self.assertEqual(release_calls, [1])
 
@@ -308,10 +308,10 @@ class TestChildWaitsInFIFO(unittest.TestCase):
 
         # Caller A holds the conc=0 lifecycle slot.
         release_a = sched.acquire(
-            api_base="http://shared-api",
+            api_base='http://shared-api',
             concurrency_limit=0,
-            instance_name="A",
-            agent_class="orchestrator",
+            instance_name='A',
+            agent_class='orchestrator',
             timeout=5.0,
         )
         self.assertIsNotNone(release_a)
@@ -322,31 +322,31 @@ class TestChildWaitsInFIFO(unittest.TestCase):
         # internal SlotQueueTimeout as a plain TimeoutError (public contract).
         with self.assertRaises(TimeoutError):
             sched.acquire(
-                api_base="http://shared-api",
+                api_base='http://shared-api',
                 concurrency_limit=0,
-                instance_name="B",
-                agent_class="compressor",
+                instance_name='B',
+                agent_class='compressor',
                 timeout=0.5,
             )
 
         pool = sched._pools[slot_key]
         with pool._cond:
-            self.assertIn("A", pool._running)
-            self.assertNotIn("B", pool._running)
+            self.assertIn('A', pool._running)
+            self.assertNotIn('B', pool._running)
 
         # A releases → B is granted in FIFO order (no other waiters).
         release_a()
         release_b = sched.acquire(
-            api_base="http://shared-api",
+            api_base='http://shared-api',
             concurrency_limit=0,
-            instance_name="B",
-            agent_class="compressor",
+            instance_name='B',
+            agent_class='compressor',
             timeout=5.0,
         )
         self.assertIsNotNone(release_b)
         with pool._cond:
-            self.assertIn("B", pool._running)
-            self.assertNotIn("A", pool._running)
+            self.assertIn('B', pool._running)
+            self.assertNotIn('A', pool._running)
 
         release_b()
 
@@ -360,5 +360,5 @@ class _FakeInstance:
         self.parent_instance = None
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

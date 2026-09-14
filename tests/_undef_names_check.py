@@ -44,7 +44,7 @@ from typing import List, Optional, Set
 
 # Names that are never "undefined" — the module-level namespace every Python module starts with.
 _BUILTIN_NAMES: Set[str] = set(dir(builtins)) | {
-    "__name__", "__file__", "__doc__", "__package__", "__spec__", "__path__",
+    '__name__', '__file__', '__doc__', '__package__', '__spec__', '__path__',
 }
 
 
@@ -64,12 +64,12 @@ class Violation:
 class _Scope:
     """A lexical scope. ``kind`` is one of 'module', 'function', 'class', 'comprehension'."""
     kind: str
-    parent: Optional["_Scope"] = None
+    parent: Optional['_Scope'] = None
     bindings: Set[str] = field(default_factory=set)   # names bound in THIS scope (phase 1)
 
     def resolve(self, name: str) -> bool:
         """True if `name` is bound in this scope or any enclosing scope (or a builtin)."""
-        cur: Optional["_Scope"] = self
+        cur: Optional['_Scope'] = self
         while cur is not None:
             if name in cur.bindings:
                 return True
@@ -90,7 +90,7 @@ def _has_star_import(tree: ast.AST) -> bool:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if alias.name == "*":
+                if alias.name == '*':
                     return True
     return False
 
@@ -108,7 +108,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
     def __init__(self, relpath: str) -> None:
         self.relpath = relpath
         self.violations: List[Violation] = []
-        self._module_scope = _Scope(kind="module")
+        self._module_scope = _Scope(kind='module')
 
     # ------------------------------------------------------------------ entry
     def analyze(self, tree: ast.AST) -> List[Violation]:
@@ -139,7 +139,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
         self._check_loads(stmt, scope)
 
     def _function(self, fn: ast.FunctionDef, enclosing: _Scope) -> None:
-        func_scope = _Scope(kind="function", parent=enclosing)
+        func_scope = _Scope(kind='function', parent=enclosing)
         # Parameters bind in the function scope.
         for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs:
             func_scope.bindings.add(a.arg)
@@ -177,7 +177,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
             self._stmt(stmt, func_scope)
 
     def _class(self, cls: ast.ClassDef, enclosing: _Scope) -> None:
-        class_scope = _Scope(kind="class", parent=enclosing)
+        class_scope = _Scope(kind='class', parent=enclosing)
         # Bases / metaclass are expressions in the ENCLOSING scope.
         for base in cls.bases:
             self._collect_bindings(base, enclosing)
@@ -207,7 +207,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
 
     def _function_with_class_deco(self, fn: ast.FunctionDef, class_scope: _Scope, enclosing: _Scope) -> None:
         """Handle a method inside a class: decorators in class_scope, body through enclosing."""
-        func_scope = _Scope(kind="function", parent=enclosing)
+        func_scope = _Scope(kind='function', parent=enclosing)
         for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs:
             func_scope.bindings.add(a.arg)
         if fn.args.vararg is not None:
@@ -259,7 +259,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
         self._collect_bindings(stmt, scope)
 
     def _function_collect(self, fn: ast.FunctionDef, enclosing: _Scope) -> None:
-        func_scope = _Scope(kind="function", parent=enclosing)
+        func_scope = _Scope(kind='function', parent=enclosing)
         for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs:
             func_scope.bindings.add(a.arg)
         if fn.args.vararg is not None:
@@ -270,7 +270,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
             self._stmt_collect(stmt, func_scope)
 
     def _class_collect(self, cls: ast.ClassDef, enclosing: _Scope) -> None:
-        class_scope = _Scope(kind="class", parent=enclosing)
+        class_scope = _Scope(kind='class', parent=enclosing)
         for stmt in cls.body:
             self._stmt_collect(stmt, class_scope)
 
@@ -283,11 +283,11 @@ class _UndefinedNameChecker(ast.NodeVisitor):
         # --- top-level: node itself is a binding statement ---
         if isinstance(node, ast.Import):
             for alias in node.names:
-                scope.bindings.add(alias.asname or alias.name.split(".")[0])
+                scope.bindings.add(alias.asname or alias.name.split('.')[0])
             return
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if alias.name != "*":
+                if alias.name != '*':
                     scope.bindings.add(alias.asname or alias.name)
             return
         if isinstance(node, ast.Assign):
@@ -337,7 +337,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
         # is a compile-time SyntaxError, so it never reaches this check.)
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             # Comprehension targets bind in their OWN implicit scope, NOT the enclosing one.
-            comp_scope = _Scope(kind="comprehension", parent=scope)
+            comp_scope = _Scope(kind='comprehension', parent=scope)
             for gen in node.generators:
                 for t in _target_names(gen.target):
                     comp_scope.bindings.add(t)
@@ -359,7 +359,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
                 scope.bindings.add(child.name)
                 continue
             if isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-                comp_scope = _Scope(kind="comprehension", parent=scope)
+                comp_scope = _Scope(kind='comprehension', parent=scope)
                 for gen in child.generators:
                     for t in _target_names(gen.target):
                         comp_scope.bindings.add(t)
@@ -377,11 +377,11 @@ class _UndefinedNameChecker(ast.NodeVisitor):
             # bindings in the current scope (when they appear as children)
             if isinstance(child, ast.Import):
                 for alias in child.names:
-                    scope.bindings.add(alias.asname or alias.name.split(".")[0])
+                    scope.bindings.add(alias.asname or alias.name.split('.')[0])
                 continue
             if isinstance(child, ast.ImportFrom):
                 for alias in child.names:
-                    if alias.name != "*":
+                    if alias.name != '*':
                         scope.bindings.add(alias.asname or alias.name)
                 continue
             if isinstance(child, ast.ExceptHandler):
@@ -407,7 +407,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
         are intentionally NOT handled here — they evaluate in the enclosing scope, which each caller
         recurses into with its own phase-specific routine.
         """
-        lam_scope = _Scope(kind="function", parent=parent)
+        lam_scope = _Scope(kind='function', parent=parent)
         for a in lam.args.posonlyargs + lam.args.args + lam.args.kwonlyargs:
             lam_scope.bindings.add(a.arg)
         if lam.args.vararg is not None:
@@ -464,7 +464,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
 
     def _check_comp_loads(self, comp_node: ast.AST, enclosing: _Scope) -> None:
         """Check loads in a comprehension, honoring its implicit py3 scope."""
-        comp_scope = _Scope(kind="comprehension", parent=enclosing)
+        comp_scope = _Scope(kind='comprehension', parent=enclosing)
         generators = comp_node.generators
         if generators:
             # First iter is evaluated in the ENCLOSING scope. Collect walrus bindings first
@@ -511,7 +511,7 @@ class _UndefinedNameChecker(ast.NodeVisitor):
         self._check_loads(ann, scope)
 
 
-def check_source(source: str, relpath: str = "<source>") -> List[Violation]:
+def check_source(source: str, relpath: str = '<source>') -> List[Violation]:
     """Analyze one source string; return undefined-name violations (empty list == clean)."""
     tree = ast.parse(source)
     if _has_star_import(tree):
@@ -523,7 +523,7 @@ def check_source(source: str, relpath: str = "<source>") -> List[Violation]:
 def check_file(path: Path, root: Optional[Path] = None) -> List[Violation]:
     """Analyze a single .py file. Syntax errors surface as a violation so the gate fails loudly."""
     try:
-        source = path.read_text(encoding="utf-8")
+        source = path.read_text(encoding='utf-8')
     except (OSError, UnicodeDecodeError) as exc:  # pragma: no cover - defensive
         return [Violation(str(path), 0, 0, f"<unreadable: {exc}>")]
     rel = str(path.relative_to(root)) if root else str(path)
@@ -535,7 +535,7 @@ def check_file(path: Path, root: Optional[Path] = None) -> List[Violation]:
 
 def find_python_files(root: Path) -> List[Path]:
     """All .py files under `root`, recursively, sorted for deterministic output."""
-    return sorted(p for p in root.rglob("*.py") if p.is_file())
+    return sorted(p for p in root.rglob('*.py') if p.is_file())
 
 
 def check_package(root: Path) -> List[Violation]:
@@ -550,7 +550,7 @@ def default_package_root() -> Path:
     """Locate the agent_cascade package relative to this file (tests/_undef_names_check.py)."""
     here = Path(__file__).resolve()
     # tests/ -> project root -> agent_cascade/
-    return here.parent.parent / "agent_cascade"
+    return here.parent.parent / 'agent_cascade'
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -558,9 +558,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Detect undefined names (ruff F821 equivalent) in agent_cascade.")
-    parser.add_argument("path", nargs="?", default=None,
-                        help="Directory to scan (default: the agent_cascade package).")
+        description='Detect undefined names (ruff F821 equivalent) in agent_cascade.')
+    parser.add_argument('path', nargs='?', default=None,
+                        help='Directory to scan (default: the agent_cascade package).')
     args = parser.parse_args(argv)
 
     root = Path(args.path).resolve() if args.path else default_package_root()
@@ -586,5 +586,5 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

@@ -48,10 +48,10 @@ class TestSecurityTurnBudget:
 
         # Runtime attribute check (robust to comments mentioning the old name).
         assert not hasattr(sh, 'SECURITY_LLM_TIMEOUT_SECONDS'), (
-            "old wall-clock constant should be removed"
+            'old wall-clock constant should be removed'
         )
-        assert "max_turns = SECURITY_AGENT_MAX_TURNS" in inspect.getsource(sh), (
-            "security_handler should bound the Security advisor via max_turns"
+        assert 'max_turns = SECURITY_AGENT_MAX_TURNS' in inspect.getsource(sh), (
+            'security_handler should bound the Security advisor via max_turns'
         )
 
 
@@ -90,13 +90,13 @@ class TestReentrantSecurityLock:
         lock = threading.RLock()
 
         # First acquire (simulates outer security check)
-        assert lock.acquire(timeout=1), "First acquire should succeed"
+        assert lock.acquire(timeout=1), 'First acquire should succeed'
         try:
             # Second acquire from same thread (simulates nested security check)
-            assert lock.acquire(timeout=1), "Second acquire by same thread should succeed (reentrant)"
+            assert lock.acquire(timeout=1), 'Second acquire by same thread should succeed (reentrant)'
             try:
                 # Third acquire for good measure
-                assert lock.acquire(timeout=1), "Third acquire by same thread should succeed"
+                assert lock.acquire(timeout=1), 'Third acquire by same thread should succeed'
                 lock.release()
             finally:
                 lock.release()
@@ -119,7 +119,7 @@ class TestReentrantSecurityLock:
         t.start()
         t.join(timeout=2)
 
-        assert blocked.is_set(), "Second thread should have attempted and timed out"
+        assert blocked.is_set(), 'Second thread should have attempted and timed out'
         # Lock is still held by main thread
         lock.release()
 
@@ -129,8 +129,8 @@ class TestReentrantSecurityLock:
         from agent_cascade import security_handler
 
         source = inspect.getsource(security_handler)
-        assert "RLock()" in source, (
-            "security_handler should use threading.RLock() for reentrant safety"
+        assert 'RLock()' in source, (
+            'security_handler should use threading.RLock() for reentrant safety'
         )
 
     def test_both_security_locks_are_reentrant(self):
@@ -146,20 +146,20 @@ class TestReentrantSecurityLock:
 
         lock1 = _get_security_check_lock(app)
         assert isinstance(lock1, type(threading.RLock())), (
-            "_get_security_check_lock must return RLock for reentrant prompt building"
+            '_get_security_check_lock must return RLock for reentrant prompt building'
         )
 
         lock2 = _get_security_execution_lock(app)
         from agent_cascade.security_handler import ResettableRLock
         # Accept either a plain RLock or the ResettableRLock wrapper (which wraps one).
         assert isinstance(lock2, (type(threading.RLock()), ResettableRLock)), (
-            "_get_security_execution_lock must return a reentrant lock (RLock or ResettableRLock)"
+            '_get_security_execution_lock must return a reentrant lock (RLock or ResettableRLock)'
         )
 
         # Behavioral check: same-thread double acquire must not deadlock (reentrancy).
-        assert lock2.acquire(timeout=1), "First acquire should succeed"
+        assert lock2.acquire(timeout=1), 'First acquire should succeed'
         try:
-            assert lock2.acquire(timeout=1), "Reentrant second acquire by same thread must succeed"
+            assert lock2.acquire(timeout=1), 'Reentrant second acquire by same thread must succeed'
         finally:
             lock2.release()
             lock2.release()
@@ -169,8 +169,8 @@ class TestReentrantSecurityLock:
         import inspect
         from agent_cascade import api_server
         source = inspect.getsource(api_server)
-        assert "security_check_semaphore" not in source, (
-            "Unused security_check_semaphore should be removed from api_server.py"
+        assert 'security_check_semaphore' not in source, (
+            'Unused security_check_semaphore should be removed from api_server.py'
         )
 
 
@@ -215,7 +215,7 @@ class TestSecurityLockAcquireTimeout:
         release_later.set()
         holder.join(timeout=2)
 
-        assert not result, "Acquire should fail when lock is held by another thread"
+        assert not result, 'Acquire should fail when lock is held by another thread'
         assert 0.3 <= elapsed <= 1.5, f"Timeout should fire in ~0.5s, got {elapsed:.2f}s"
 
     def test_acquire_timeout_error_message_includes_context(self):
@@ -226,8 +226,8 @@ class TestSecurityLockAcquireTimeout:
             f"A previous check may have crashed without releasing. "
             f"Manual restart may be required."
         )
-        assert "request" in msg.lower(), "Error message should reference the request for debugging"
-        assert "test_rid" in msg, "Error message should include request_id"
+        assert 'request' in msg.lower(), 'Error message should reference the request for debugging'
+        assert 'test_rid' in msg, 'Error message should include request_id'
 
 
 class TestResettableRLock:
@@ -244,13 +244,13 @@ class TestResettableRLock:
         from agent_cascade.security_handler import ResettableRLock
 
         lock = ResettableRLock()
-        assert not lock.owner_is_alive, "Fresh lock should have no live owner"
+        assert not lock.owner_is_alive, 'Fresh lock should have no live owner'
         assert lock.acquire(timeout=1)
         try:
-            assert lock.owner_is_alive, "Owner should be alive while held by this thread"
+            assert lock.owner_is_alive, 'Owner should be alive while held by this thread'
         finally:
             lock.release()
-        assert not lock.owner_is_alive, "Owner should be cleared after release"
+        assert not lock.owner_is_alive, 'Owner should be cleared after release'
 
     def test_reentrant_same_thread(self):
         """Same-thread nested acquire must not deadlock (RLock reentrancy preserved)."""
@@ -259,7 +259,7 @@ class TestResettableRLock:
         lock = ResettableRLock()
         assert lock.acquire(timeout=1)
         try:
-            assert lock.acquire(timeout=1), "Reentrant acquire by same thread must succeed"
+            assert lock.acquire(timeout=1), 'Reentrant acquire by same thread must succeed'
             lock.release()
         finally:
             lock.release()
@@ -281,7 +281,7 @@ class TestResettableRLock:
         t.start()
         t.join(timeout=2)
         assert not result.get('acquired', True), (
-            "Second thread should time out while a live thread holds the lock"
+            'Second thread should time out while a live thread holds the lock'
         )
         lock.release()
 
@@ -300,20 +300,20 @@ class TestResettableRLock:
 
         holder = threading.Thread(target=hold_and_die)
         holder.start()
-        assert acquired_flag.wait(timeout=2), "Holder should have acquired the lock"
+        assert acquired_flag.wait(timeout=2), 'Holder should have acquired the lock'
         holder.join(timeout=2)
-        assert not holder.is_alive(), "Holder thread must be dead for the leak scenario"
+        assert not holder.is_alive(), 'Holder thread must be dead for the leak scenario'
 
         # Now the lock is leaked: owner thread is dead, but the internal RLock is still held.
-        assert not lock.owner_is_alive, "Dead holder should report owner_is_alive=False"
+        assert not lock.owner_is_alive, 'Dead holder should report owner_is_alive=False'
 
         # A fresh acquirer cannot get the (leaked) lock — it times out.
-        assert not lock.acquire(timeout=0.3), "Should not acquire a leaked lock from a dead holder"
+        assert not lock.acquire(timeout=0.3), 'Should not acquire a leaked lock from a dead holder'
 
         # force_reset swaps in a fresh RLock → now acquirable.
-        was_held = lock.force_reset(reason="test: dead-holder leak")
-        assert was_held, "force_reset should report it reset a held lock"
-        assert lock.acquire(timeout=1), "After force_reset, the fresh lock must be acquirable"
+        was_held = lock.force_reset(reason='test: dead-holder leak')
+        assert was_held, 'force_reset should report it reset a held lock'
+        assert lock.acquire(timeout=1), 'After force_reset, the fresh lock must be acquirable'
         lock.release()
 
     def test_force_reset_noop_when_free(self):
@@ -321,8 +321,8 @@ class TestResettableRLock:
         from agent_cascade.security_handler import ResettableRLock
 
         lock = ResettableRLock()
-        was_held = lock.force_reset(reason="test: nothing held")
-        assert not was_held, "force_reset should report False when the lock was free"
+        was_held = lock.force_reset(reason='test: nothing held')
+        assert not was_held, 'force_reset should report False when the lock was free'
         # Still fully usable after a no-op reset.
         assert lock.acquire(timeout=1)
         lock.release()
@@ -347,10 +347,10 @@ class TestResettableRLock:
         deadline = time.monotonic() + 2.0
         while not lock.owner_is_alive and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert lock.owner_is_alive, "Live holder should be reported alive"
+        assert lock.owner_is_alive, 'Live holder should be reported alive'
 
         # A second thread times out (live holder present) — must NOT reset it.
-        assert not lock.acquire(timeout=0.3), "Should time out while live holder holds the lock"
+        assert not lock.acquire(timeout=0.3), 'Should time out while live holder holds the lock'
         # The live holder is still the owner (we did not steal it).
         assert lock.owner_is_alive, "Live holder's ownership must be preserved after a timeout"
 
@@ -376,15 +376,15 @@ class TestResettableRLock:
         holder.start()
         assert acquired_flag.wait(timeout=2)
         holder.join(timeout=2)
-        assert not holder.is_alive(), "Holder must be dead for the leak scenario"
+        assert not holder.is_alive(), 'Holder must be dead for the leak scenario'
 
         # Leaked: internal RLock still held (count=1) by a dead thread.
-        assert not lock.owner_is_alive, "Dead holder should report owner_is_alive=False"
-        assert not lock.acquire(timeout=0.3), "Cannot acquire a leaked nested lock"
+        assert not lock.owner_is_alive, 'Dead holder should report owner_is_alive=False'
+        assert not lock.acquire(timeout=0.3), 'Cannot acquire a leaked nested lock'
 
         # Recovery swaps in a fresh RLock → acquirable again.
-        lock.force_reset(reason="test: nested leak")
-        assert lock.acquire(timeout=1), "Fresh lock must be acquirable after nested-leak reset"
+        lock.force_reset(reason='test: nested leak')
+        assert lock.acquire(timeout=1), 'Fresh lock must be acquirable after nested-leak reset'
         lock.release()
 
     def test_concurrent_acquirers_after_leak_serialize(self):
@@ -416,7 +416,7 @@ class TestResettableRLock:
                     lock.release()
 
         # Reset to clear the leaked state, then let 3 threads contend.
-        lock.force_reset(reason="test: pre-leak reset")
+        lock.force_reset(reason='test: pre-leak reset')
 
         timeline = []
         timeline_lock = threading.Lock()
@@ -427,13 +427,13 @@ class TestResettableRLock:
         for t in threads:
             t.join(timeout=5)
 
-        assert sorted(results) == ["w0", "w1", "w2"], f"All 3 waiters should complete, got {results}"
+        assert sorted(results) == ['w0', 'w1', 'w2'], f"All 3 waiters should complete, got {results}"
 
         # Verify serialization: no IN before the previous OUT.
         events = sorted(timeline, key=lambda x: x[0])
         for i in range(1, len(events)):
-            if events[i][1].endswith("_IN"):
-                prev_out = [e for e in events[:i] if e[1].endswith("_OUT")]
+            if events[i][1].endswith('_IN'):
+                prev_out = [e for e in events[:i] if e[1].endswith('_OUT')]
                 assert prev_out, f"An IN event ({events[i][1]}) occurred with no prior OUT — not serialized"
 
     def test_live_short_hold_not_reported_dead(self):
@@ -459,15 +459,15 @@ class TestResettableRLock:
 
         t = threading.Thread(target=short_hold, daemon=True)
         t.start()
-        assert holding.wait(timeout=2), "Holder should have acquired the lock"
+        assert holding.wait(timeout=2), 'Holder should have acquired the lock'
 
         # While the (live) holder holds the lock, owner_is_alive must be True.
         assert lock.owner_is_alive, (
-            "A live thread holding the lock must be reported alive (not stale)"
+            'A live thread holding the lock must be reported alive (not stale)'
         )
         # A competing acquirer must time out (the holder is genuinely running).
         assert not lock.acquire(timeout=0.3), (
-            "Competing acquire should time out while a live short-hold is in progress"
+            'Competing acquire should time out while a live short-hold is in progress'
         )
         # Ownership must still be intact after the timeout — no spurious reset.
         assert lock.owner_is_alive, (
@@ -476,7 +476,7 @@ class TestResettableRLock:
 
         release.set()
         t.join(timeout=2)
-        assert not lock.owner_is_alive, "Owner cleared after the live holder released"
+        assert not lock.owner_is_alive, 'Owner cleared after the live holder released'
 
     def test_context_manager_protocol(self):
         """ResettableRLock supports the `with` statement (context manager)."""
@@ -484,8 +484,8 @@ class TestResettableRLock:
 
         lock = ResettableRLock()
         with lock:
-            assert lock.owner_is_alive, "Owner alive inside the with-block"
-        assert not lock.owner_is_alive, "Owner cleared after the with-block"
+            assert lock.owner_is_alive, 'Owner alive inside the with-block'
+        assert not lock.owner_is_alive, 'Owner cleared after the with-block'
 
 
 # ── Integration tests with real threading ───────────────────────────────────
@@ -495,7 +495,7 @@ def _make_minimal_pool():
     """Create a minimal mock AgentPool for integration tests."""
     pool = MagicMock()
     pool.stopped = False
-    pool.operation_manager.base_dir = "/tmp/test"
+    pool.operation_manager.base_dir = '/tmp/test'
     pool.operation_manager.extra_work_folders_ro = []
     pool.operation_manager.extra_work_folders_rw = []
     pool.operation_manager.enable_timeout = True
@@ -528,7 +528,7 @@ class TestConcurrentSecurityChecks:
         timeline_lock = threading.Lock()
 
         def quick_gen():
-            yield ("[YES] Safe", False)
+            yield ('[YES] Safe', False)
 
         template = MagicMock()
         template.llm = MagicMock()
@@ -567,8 +567,8 @@ class TestConcurrentSecurityChecks:
                 errors.append(f"{rid}: {e}")
 
         # Run two checks concurrently
-        t1 = threading.Thread(target=run_check, args=("check_A", 200))
-        t2 = threading.Thread(target=run_check, args=("check_B", 200))
+        t1 = threading.Thread(target=run_check, args=('check_A', 200))
+        t2 = threading.Thread(target=run_check, args=('check_B', 200))
 
         t1.start()
         time.sleep(0.05)  # Small delay so check_A gets lock first
@@ -582,9 +582,9 @@ class TestConcurrentSecurityChecks:
 
         # Verify serialization: check_A should complete before check_B starts
         events = sorted(timeline, key=lambda x: x[0])
-        a_start = next(t for t, e in events if e == "check_A_START")
-        a_end = next(t for t, e in events if e == "check_A_END")
-        b_start = next(t for t, e in events if e == "check_B_START")
+        a_start = next(t for t, e in events if e == 'check_A_START')
+        a_end = next(t for t, e in events if e == 'check_A_END')
+        b_start = next(t for t, e in events if e == 'check_B_START')
 
         assert b_start >= a_end - 0.05, (
             f"Checks should serialize: check_B started at {b_start:.3f} but check_A ended at {a_end:.3f}"
@@ -614,7 +614,7 @@ class TestNestedSecurityCheckReentrancy:
                 # Inner check tries to acquire the same lock
                 acquired = app.security_execution_lock.acquire(timeout=2)
                 if not acquired:
-                    raise RuntimeError("Inner check failed to acquire lock — possible deadlock")
+                    raise RuntimeError('Inner check failed to acquire lock — possible deadlock')
                 try:
                     inner_completed.set()
                     time.sleep(0.05)  # Simulate work
@@ -628,7 +628,7 @@ class TestNestedSecurityCheckReentrancy:
             try:
                 acquired = app.security_execution_lock.acquire(timeout=2)
                 if not acquired:
-                    raise RuntimeError("Outer check failed to acquire lock")
+                    raise RuntimeError('Outer check failed to acquire lock')
                 try:
                     # Simulate nested security check (same thread re-acquires)
                     inner_check()
@@ -645,10 +645,10 @@ class TestNestedSecurityCheckReentrancy:
 
         # Wait with timeout — if we hit this, it's a deadlock
         assert outer_completed.wait(timeout=5), (
-            "Outer check did not complete within 5s — RLock reentrancy failed (deadlock)"
+            'Outer check did not complete within 5s — RLock reentrancy failed (deadlock)'
         )
-        assert inner_completed.is_set(), "Inner check should have completed"
-        assert not deadlock_detected.is_set(), "Deadlock was detected during nested check"
+        assert inner_completed.is_set(), 'Inner check should have completed'
+        assert not deadlock_detected.is_set(), 'Deadlock was detected during nested check'
 
         t.join(timeout=2)
 
@@ -664,7 +664,7 @@ class TestTimerCleanupOnException:
         """
         pool = _make_minimal_pool()
         app = _make_minimal_app()
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
 
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
@@ -678,11 +678,11 @@ class TestTimerCleanupOnException:
             timers_created.append(self)
 
         ap = {
-            "request_id": "test_rid_timer",
-            "tool_name": "shell_cmd",
-            "description": "test",
-            "tool_args": {},
-            "agent_name": "Maine",
+            'request_id': 'test_rid_timer',
+            'tool_name': 'shell_cmd',
+            'description': 'test',
+            'tool_args': {},
+            'agent_name': 'Maine',
         }
 
         # Hold execution lock in another thread so acquire times out
@@ -704,11 +704,11 @@ class TestTimerCleanupOnException:
                         handler._execute_check(
                             ap=ap,
                             sec_inst=None,
-                            rid="test_rid_timer",
+                            rid='test_rid_timer',
                             auto_apply=True,
-                            instance_name="Maine",
-                            caller_agent="Maine",
-                            prompt_template="Test {tool_name}",
+                            instance_name='Maine',
+                            caller_agent='Maine',
+                            prompt_template='Test {tool_name}',
                             timeout_seconds=3600,
                             warning_seconds=2400,
                         )
@@ -747,17 +747,17 @@ class TestFirstYieldSafetyNet:
         """A generator that never yields its first token within the window must auto-reject."""
         pool = _make_minimal_pool()
         app = _make_minimal_app()
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
 
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
 
         ap = {
-            "request_id": "test_rid_firstyield",
-            "tool_name": "shell_cmd",
-            "description": "test",
-            "tool_args": {},
-            "agent_name": "Maine",
+            'request_id': 'test_rid_firstyield',
+            'tool_name': 'shell_cmd',
+            'description': 'test',
+            'tool_args': {},
+            'agent_name': 'Maine',
         }
 
         # A generator that simulates a hung model: it blocks for longer than the
@@ -765,7 +765,7 @@ class TestFirstYieldSafetyNet:
         # loop's first-iteration check should see the timer's event set and break.
         def _stalled_generator():
             time.sleep(2.0)          # longer than the 0.5s timeout → timer fires first
-            yield ("", False)        # only now does it "yield"; loop detects timeout, breaks
+            yield ('', False)        # only now does it "yield"; loop detects timeout, breaks
 
         # _create_system_agent must return an object supporting attribute assignment
         # (sec_instance.max_turns = ...) and .conversation access downstream.
@@ -791,11 +791,11 @@ class TestFirstYieldSafetyNet:
                 handler._execute_check(
                     ap=ap,
                     sec_inst=None,
-                    rid="test_rid_firstyield",
+                    rid='test_rid_firstyield',
                     auto_apply=True,
-                    instance_name="Maine",
-                    caller_agent="Maine",
-                    prompt_template="Test {tool_name}",
+                    instance_name='Maine',
+                    caller_agent='Maine',
+                    prompt_template='Test {tool_name}',
                     timeout_seconds=3600,
                     warning_seconds=2400,
                 )
@@ -803,18 +803,18 @@ class TestFirstYieldSafetyNet:
 
         # The check must have auto-rejected via the timeout path.
         assert pool.operation_manager.user_reject.called, (
-            "user_reject should be called when the first-yield timeout fires"
+            'user_reject should be called when the first-yield timeout fires'
         )
         args = pool.operation_manager.user_reject.call_args.args
-        assert args[0] == "test_rid_firstyield", (
+        assert args[0] == 'test_rid_firstyield', (
             f"user_reject should target the request id, got {args[0]!r}"
         )
-        assert "SECURITY ADVISOR TIMEOUT" in args[1], (
+        assert 'SECURITY ADVISOR TIMEOUT' in args[1], (
             f"reject message should carry the timeout marker, got {args[1]!r}"
         )
 
         # The Security instance should have been halted as part of _handle_timeout.
-        pool.halt_instance.assert_called_once_with("Security_test_rid_firstyield")
+        pool.halt_instance.assert_called_once_with('Security_test_rid_firstyield')
 
         # Sanity: the run was gated by the 2.0s stalled-generator sleep (not instant),
         # confirming we actually exercised the blocking path. Keep loose to avoid flakiness.
@@ -834,7 +834,7 @@ class TestActiveChecksCleanupOnLockTimeout:
         """
         pool = _make_minimal_pool()
         app = _make_minimal_app()
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
 
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
@@ -843,16 +843,16 @@ class TestActiveChecksCleanupOnLockTimeout:
         from agent_cascade.security_handler import _get_active_checks_state
         active_checks, checks_lock = _get_active_checks_state(app)
         with checks_lock:
-            active_checks.add("test_rid_leak")
+            active_checks.add('test_rid_leak')
 
-        assert "test_rid_leak" in active_checks
+        assert 'test_rid_leak' in active_checks
 
         ap = {
-            "request_id": "test_rid_leak",
-            "tool_name": "shell_cmd",
-            "description": "test",
-            "tool_args": {},
-            "agent_name": "Maine",
+            'request_id': 'test_rid_leak',
+            'tool_name': 'shell_cmd',
+            'description': 'test',
+            'tool_args': {},
+            'agent_name': 'Maine',
         }
 
         # Hold execution lock in another thread so acquire times out (RLock blocks different threads)
@@ -872,25 +872,25 @@ class TestActiveChecksCleanupOnLockTimeout:
                 handler._execute_check(
                     ap=ap,
                     sec_inst=None,
-                    rid="test_rid_leak",
+                    rid='test_rid_leak',
                     auto_apply=True,
-                    instance_name="Maine",
-                    caller_agent="Maine",
-                    prompt_template="Test {tool_name}",
+                    instance_name='Maine',
+                    caller_agent='Maine',
+                    prompt_template='Test {tool_name}',
                     timeout_seconds=3600,
                     warning_seconds=2400,
                 )
-                assert False, "Should have raised RuntimeError on lock acquire failure"
+                assert False, 'Should have raised RuntimeError on lock acquire failure'
         except RuntimeError as e:
-            assert "Failed to acquire" in str(e), f"Expected lock acquire error, got: {e}"
+            assert 'Failed to acquire' in str(e), f"Expected lock acquire error, got: {e}"
         finally:
             release_event.set()
             holder.join(timeout=2)
 
         # Verify active_checks was cleaned up despite the exception
         with checks_lock:
-            assert "test_rid_leak" not in active_checks, (
-                "active_checks should be cleaned up even when lock acquire times out"
+            assert 'test_rid_leak' not in active_checks, (
+                'active_checks should be cleaned up even when lock acquire times out'
             )
 
 
@@ -913,21 +913,21 @@ class TestSlotYieldBeforeSecurityCheck:
         pool.get_template.return_value = template
 
         sec_instance_mock = MagicMock()
-        sec_instance_mock.conversation = [{"role": "assistant", "content": "[YES] Safe operation"}]
+        sec_instance_mock.conversation = [{'role': 'assistant', 'content': '[YES] Safe operation'}]
 
         engine_instance = MagicMock()
-        engine_instance.run.return_value = iter([("[YES] Safe operation", False)])
+        engine_instance.run.return_value = iter([('[YES] Safe operation', False)])
         engine_instance._create_system_agent.return_value = sec_instance_mock
         engine_instance._telemetry.return_value = None
         mock_engine_cls = MagicMock(return_value=engine_instance)
 
         # Caller instance with a real _state_lock and a live slot release callback.
         caller_inst = MagicMock()
-        caller_inst.agent_class = "Maine"
-        caller_inst.instance_name = "Maine"
+        caller_inst.agent_class = 'Maine'
+        caller_inst.instance_name = 'Maine'
         caller_inst._state_lock = threading.Lock()
         caller_inst._slot_release = lambda: None  # Simulates a held slot
-        caller_inst._slot_key = "http://test:8080"
+        caller_inst._slot_key = 'http://test:8080'
         pool.get_instance.return_value = caller_inst
 
         return pool, app, mock_engine_cls, caller_inst
@@ -937,23 +937,23 @@ class TestSlotYieldBeforeSecurityCheck:
         pool, app, mock_engine_cls, caller_inst = self._make_pool_with_fast_engine()
         engine_instance = mock_engine_cls.return_value
 
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
         ap = {
-            "request_id": "test_rid_release",
-            "tool_name": "shell_cmd",
-            "description": "test",
-            "tool_args": {},
-            "agent_name": "Maine",
+            'request_id': 'test_rid_release',
+            'tool_name': 'shell_cmd',
+            'description': 'test',
+            'tool_args': {},
+            'agent_name': 'Maine',
         }
 
         with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.5):
             with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
                 handler._execute_check(
-                    ap=ap, sec_inst=None, rid="test_rid_release", auto_apply=True,
-                    instance_name="Maine", caller_agent="Maine",
-                    prompt_template="Test {tool_name}",
+                    ap=ap, sec_inst=None, rid='test_rid_release', auto_apply=True,
+                    instance_name='Maine', caller_agent='Maine',
+                    prompt_template='Test {tool_name}',
                     timeout_seconds=3600, warning_seconds=2400,
                 )
 
@@ -972,7 +972,7 @@ class TestSlotYieldBeforeSecurityCheck:
             c.args and c.args[0] is caller_inst
             for c in engine_instance.reacquire_for.call_args_list
         ), (
-            "reacquire_for should be called with the caller instance"
+            'reacquire_for should be called with the caller instance'
         )
 
     def test_skip_path_when_no_slot_held(self):
@@ -986,25 +986,25 @@ class TestSlotYieldBeforeSecurityCheck:
         # force-release path (Path 2) would fire on the MagicMock router.
         caller_inst._slot_release = None
         caller_inst._slot_key = None
-        pool.api_router.get_agent_slot_info.return_value = {"needs_slot": False}
+        pool.api_router.get_agent_slot_info.return_value = {'needs_slot': False}
 
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
         ap = {
-            "request_id": "test_rid_noslot",
-            "tool_name": "shell_cmd",
-            "description": "test",
-            "tool_args": {},
-            "agent_name": "Maine",
+            'request_id': 'test_rid_noslot',
+            'tool_name': 'shell_cmd',
+            'description': 'test',
+            'tool_args': {},
+            'agent_name': 'Maine',
         }
 
         with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.5):
             with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
                 handler._execute_check(
-                    ap=ap, sec_inst=None, rid="test_rid_noslot", auto_apply=True,
-                    instance_name="Maine", caller_agent="Maine",
-                    prompt_template="Test {tool_name}",
+                    ap=ap, sec_inst=None, rid='test_rid_noslot', auto_apply=True,
+                    instance_name='Maine', caller_agent='Maine',
+                    prompt_template='Test {tool_name}',
                     timeout_seconds=3600, warning_seconds=2400,
                 )
 
@@ -1014,7 +1014,7 @@ class TestSlotYieldBeforeSecurityCheck:
         )
         # No reacquire either (nothing was yielded)
         assert not engine_instance.reacquire_for.called, (
-            "reacquire_for should NOT be called when nothing was yielded"
+            'reacquire_for should NOT be called when nothing was yielded'
         )
 
 
@@ -1049,11 +1049,11 @@ class TestLeakedLockRecoveryEndToEnd:
         sec_instance_mock = MagicMock()
         # The real engine.run() appends the model's response to conversation. We seed it
         # so extract_instance_output finds the [YES] verdict after the run loop completes.
-        sec_instance_mock.conversation = [{"role": "assistant", "content": "[YES] Safe operation"}]
+        sec_instance_mock.conversation = [{'role': 'assistant', 'content': '[YES] Safe operation'}]
 
         engine_instance = MagicMock()
         # Immediate single yield → loop runs once, then exhausts (no stall).
-        engine_instance.run.return_value = iter([("[YES] Safe operation", False)])
+        engine_instance.run.return_value = iter([('[YES] Safe operation', False)])
         engine_instance._create_system_agent.return_value = sec_instance_mock
         engine_instance._telemetry.return_value = None
         mock_engine_cls = MagicMock(return_value=engine_instance)
@@ -1065,16 +1065,16 @@ class TestLeakedLockRecoveryEndToEnd:
         from agent_cascade.security_handler import ResettableRLock
 
         pool, app, mock_engine_cls = self._make_pool_with_fast_engine()
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
 
         ap = {
-            "request_id": "test_rid_recover",
-            "tool_name": "shell_cmd",
-            "description": "test",
-            "tool_args": {},
-            "agent_name": "Maine",
+            'request_id': 'test_rid_recover',
+            'tool_name': 'shell_cmd',
+            'description': 'test',
+            'tool_args': {},
+            'agent_name': 'Maine',
         }
 
         # Seed the execution lock as a ResettableRLock (as production does) and leak it:
@@ -1089,12 +1089,12 @@ class TestLeakedLockRecoveryEndToEnd:
 
         leaker = threading.Thread(target=leak_holder, daemon=True)
         leaker.start()
-        assert acquired_flag.wait(timeout=2), "Leaker should have acquired the lock"
+        assert acquired_flag.wait(timeout=2), 'Leaker should have acquired the lock'
         leaker.join(timeout=2)
-        assert not leaker.is_alive(), "Leaker thread must be dead (simulating a killed daemon)"
+        assert not leaker.is_alive(), 'Leaker thread must be dead (simulating a killed daemon)'
         # Confirm the leak: the internal RLock is held by a now-dead thread.
         assert not app.security_execution_lock.owner_is_alive, (
-            "After the holder dies, owner_is_alive must be False (leak detected)"
+            'After the holder dies, owner_is_alive must be False (leak detected)'
         )
 
         # Now run a NEW check. It should detect the dead holder, force-reset, and proceed.
@@ -1103,21 +1103,21 @@ class TestLeakedLockRecoveryEndToEnd:
                 handler._execute_check(
                     ap=ap,
                     sec_inst=None,
-                    rid="test_rid_recover",
+                    rid='test_rid_recover',
                     auto_apply=True,
-                    instance_name="Maine",
-                    caller_agent="Maine",
-                    prompt_template="Test {tool_name}",
+                    instance_name='Maine',
+                    caller_agent='Maine',
+                    prompt_template='Test {tool_name}',
                     timeout_seconds=3600,
                     warning_seconds=2400,
                 )
 
         # The check ran to completion (no RuntimeError) and auto-approved the [YES] verdict.
         assert pool.operation_manager.user_approve.called, (
-            "After recovering a leaked lock, the check should proceed and auto-approve"
+            'After recovering a leaked lock, the check should proceed and auto-approve'
         )
         args = pool.operation_manager.user_approve.call_args.args
-        assert args[0] == "test_rid_recover", (
+        assert args[0] == 'test_rid_recover', (
             f"user_approve should target the request id, got {args[0]!r}"
         )
 
@@ -1130,16 +1130,16 @@ class TestLeakedLockRecoveryEndToEnd:
         from agent_cascade.security_handler import ResettableRLock
 
         pool, app, mock_engine_cls = self._make_pool_with_fast_engine()
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
 
         ap = {
-            "request_id": "test_rid_live",
-            "tool_name": "shell_cmd",
-            "description": "test",
-            "tool_args": {},
-            "agent_name": "Maine",
+            'request_id': 'test_rid_live',
+            'tool_name': 'shell_cmd',
+            'description': 'test',
+            'tool_args': {},
+            'agent_name': 'Maine',
         }
 
         # Seed a ResettableRLock and hold it from a LIVE thread (waits on an event).
@@ -1157,7 +1157,7 @@ class TestLeakedLockRecoveryEndToEnd:
 
         holder = threading.Thread(target=live_holder, daemon=True)
         holder.start()
-        assert acquired_flag.wait(timeout=2), "Live holder should have acquired the lock"
+        assert acquired_flag.wait(timeout=2), 'Live holder should have acquired the lock'
 
         try:
             with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.3):
@@ -1165,20 +1165,20 @@ class TestLeakedLockRecoveryEndToEnd:
                     handler._execute_check(
                         ap=ap,
                         sec_inst=None,
-                        rid="test_rid_live",
+                        rid='test_rid_live',
                         auto_apply=True,
-                        instance_name="Maine",
-                        caller_agent="Maine",
-                        prompt_template="Test {tool_name}",
+                        instance_name='Maine',
+                        caller_agent='Maine',
+                        prompt_template='Test {tool_name}',
                         timeout_seconds=3600,
                         warning_seconds=2400,
                     )
-                assert False, "Should have raised RuntimeError for a live holder"
+                assert False, 'Should have raised RuntimeError for a live holder'
         except RuntimeError as e:
-            assert "Failed to acquire" in str(e), f"Expected lock-acquire error, got: {e}"
+            assert 'Failed to acquire' in str(e), f"Expected lock-acquire error, got: {e}"
             # The check must NOT have proceeded (no approve/reject side effects).
             assert not pool.operation_manager.user_approve.called, (
-                "Check must not auto-approve when it could not acquire a live-held lock"
+                'Check must not auto-approve when it could not acquire a live-held lock'
             )
         finally:
             release_event.set()
@@ -1194,7 +1194,7 @@ class TestLeakedLockRecoveryEndToEnd:
         from agent_cascade.security_handler import ResettableRLock
 
         pool, app, mock_engine_cls = self._make_pool_with_fast_engine()
-        session = {"session_name": "Maine", "generate_cfg": {}}
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
 
@@ -1216,18 +1216,18 @@ class TestLeakedLockRecoveryEndToEnd:
             assert not t.is_alive()
 
             ap = {
-                "request_id": rid,
-                "tool_name": "shell_cmd",
-                "description": "test",
-                "tool_args": {},
-                "agent_name": "Maine",
+                'request_id': rid,
+                'tool_name': 'shell_cmd',
+                'description': 'test',
+                'tool_args': {},
+                'agent_name': 'Maine',
             }
             with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 0.5):
                 with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
                     handler._execute_check(
                         ap=ap, sec_inst=None, rid=rid, auto_apply=True,
-                        instance_name="Maine", caller_agent="Maine",
-                        prompt_template="Test {tool_name}",
+                        instance_name='Maine', caller_agent='Maine',
+                        prompt_template='Test {tool_name}',
                         timeout_seconds=3600, warning_seconds=2400,
                     )
 

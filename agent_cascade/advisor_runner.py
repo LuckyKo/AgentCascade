@@ -27,11 +27,11 @@ _VERDICT_RE = re.compile(r'\[VERDICT\]\s*(APPROVE|DENY)', re.IGNORECASE)
 class AdvisorResult:
     """Structured result from an advisor agent invocation."""
 
-    output_text: str = ""       # Raw text output from the agent (empty on timeout/error)
-    was_timeout: bool = False   # True if first-yield timeout fired before any yield
-    was_error: bool = False     # True if engine.run() raised or instance creation failed
-    error_msg: str = ""         # Exception message if was_error
-    latency_ms: float = 0.0     # Wall-clock time for the advisor call (ms)
+    output_text: str = ''  # Raw text output from the agent (empty on timeout/error)
+    was_timeout: bool = False  # True if first-yield timeout fired before any yield
+    was_error: bool = False  # True if engine.run() raised or instance creation failed
+    error_msg: str = ''  # Exception message if was_error
+    latency_ms: float = 0.0  # Wall-clock time for the advisor call (ms)
 
     @property
     def ok(self) -> bool:
@@ -88,7 +88,8 @@ def run_lightweight_advisor(
     def _first_yield_timeout_trigger():
         logger.warning(
             "[ADVISOR] First-yield timeout trigger fired for '%s' after %.0fs — model has not yielded.",
-            instance_name, first_yield_timeout,
+            instance_name,
+            first_yield_timeout,
         )
         first_yield_event.set()
 
@@ -116,9 +117,8 @@ def run_lightweight_advisor(
         if 'disabled_tools' in ui_cfg:
             llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
         existing_disabled = llm_safe_cfg.get('disabled_tools', [])
-        llm_safe_cfg['disabled_tools'] = merge_disabled_tools_for_auto_agent(
-            existing_disabled, agent_class, DEFAULT_SECURITY_DISABLED_TOOLS
-        )
+        llm_safe_cfg['disabled_tools'] = merge_disabled_tools_for_auto_agent(existing_disabled, agent_class,
+                                                                             DEFAULT_SECURITY_DISABLED_TOOLS)
 
         template = pool.get_template(agent_class) if hasattr(pool, 'get_template') else None
         if template is not None and hasattr(template, 'llm'):
@@ -127,9 +127,7 @@ def run_lightweight_advisor(
             instance._generate_cfg_override = cfg
         else:
             logger.warning("[ADVISOR] Template missing for '%s' — using minimal config", agent_class)
-            instance._generate_cfg_override = {
-                'disabled_tools': llm_safe_cfg.get('disabled_tools', [])
-            }
+            instance._generate_cfg_override = {'disabled_tools': llm_safe_cfg.get('disabled_tools', [])}
 
         # ── 5. First-yield timeout guard (threading.Timer + Event) ───────────
         first_yield_timer = threading.Timer(first_yield_timeout, _first_yield_timeout_trigger)
@@ -161,7 +159,8 @@ def run_lightweight_advisor(
                         result.was_timeout = True
                         logger.warning(
                             "[ADVISOR] First-yield timeout after %.0fs for '%s'. Generator did not yield in time.",
-                            time.monotonic() - start_time, instance_name,
+                            time.monotonic() - start_time,
+                            instance_name,
                         )
                         break
 
@@ -204,8 +203,7 @@ def run_lightweight_advisor(
                 if _conv:
                     _last = _conv[-1]
                     if getattr(_last, 'role', '') == 'assistant' and _VERDICT_RE.search(
-                        getattr(_last, 'content', '') or ''
-                    ):
+                            getattr(_last, 'content', '') or ''):
                         logger.debug(
                             "[ADVISOR] Verdict detected in output — stopping early for '%s'",
                             instance_name,
@@ -222,7 +220,7 @@ def run_lightweight_advisor(
         # ── 7. Extract output ────────────────────────────────────────────────
         if not result.was_timeout:
             from agent_cascade.compression.helpers import extract_instance_output
-            result.output_text = extract_instance_output(instance.conversation, instance_name) or ""
+            result.output_text = extract_instance_output(instance.conversation, instance_name) or ''
 
     except Exception as e:  # noqa: BLE001 — advisor must never crash the caller
         result.was_error = True
@@ -238,7 +236,10 @@ def run_lightweight_advisor(
             if tel is not None:
                 try:
                     tel.record_agent_instance_call(
-                        instance_name, agent_class, caller, latency_ms=latency_ms,
+                        instance_name,
+                        agent_class,
+                        caller,
+                        latency_ms=latency_ms,
                     )
                 except Exception:
                     pass

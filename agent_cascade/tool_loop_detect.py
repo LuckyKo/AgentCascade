@@ -41,50 +41,50 @@ from agent_cascade.llm.schema import ASSISTANT, FUNCTION, ROLE, Message
 # NOT shared between them.
 
 #: Arg keys that vary per call but carry no semantic weight for loop purposes.
-VOLATILE_ARG_KEYS = frozenset({"justification"})
+VOLATILE_ARG_KEYS = frozenset({'justification'})
 
 #: shell_cmd control directives reduced to (directive, tool_id).
-SHELL_DIRECTIVES = frozenset({"__status", "__wait", "__kill", "__ctrl_c"})
+SHELL_DIRECTIVES = frozenset({'__status', '__wait', '__kill', '__ctrl_c'})
 
 #: Output patterns that indicate a terminal (no-retry) error condition.
 #: INTENTIONALLY MINIMAL — each pattern must be high-precision (a hit means the
 #: retry will never succeed). Extend from field telemetry only: when a new
 #: terminal-error phrasing shows up in loop incidents, add it here with a test.
 TERMINAL_ERROR_RES = (
-    re.compile(r"No running shell found"),
+    re.compile(r'No running shell found'),
     re.compile(r"'[^']+' is not recognized as an internal or external command"),
-    re.compile(r"Connection refused"),
-    re.compile(r"No such process"),
+    re.compile(r'Connection refused'),
+    re.compile(r'No such process'),
 )
 
 #: "Command exited with return code N" — failure when N != 0.
-_EXIT_CODE_RE = re.compile(r"Command exited with return code (\d+)")
+_EXIT_CODE_RE = re.compile(r'Command exited with return code (\d+)')
 
 #: pytest FAILED banner (a line like "FAILED path::Test::test_x").
-_FAILED_BANNER_RE = re.compile(r"(?m)^\s*FAILED\s+\S+::\S+")
+_FAILED_BANNER_RE = re.compile(r'(?m)^\s*FAILED\s+\S+::\S+')
 
 #: Python traceback header — a failing output for any tool that raises an
 #: exception (code_interpreter, etc.) but prints no exit code / FAILED banner.
-_TRACEBACK_RE = re.compile(r"\bTraceback \(most recent call last\)")
+_TRACEBACK_RE = re.compile(r'\bTraceback \(most recent call last\)')
 
 #: Output patterns that indicate a *failing* tool result (used to exclude
 #: successful stable-output streaks from Layer 1). A pair whose output matches
 #: none of these is considered a success and cannot form a Layer 1 run.
 _FAILURE_OUTPUT_RES = (
-    re.compile(r"Command exited with return code [1-9]"),
-    re.compile(r"No running shell found"),
-    re.compile(r"is not recognized as an internal or external command"),
-    re.compile(r"(?m)^\s*FAILED\s+\S+::\S+"),
+    re.compile(r'Command exited with return code [1-9]'),
+    re.compile(r'No running shell found'),
+    re.compile(r'is not recognized as an internal or external command'),
+    re.compile(r'(?m)^\s*FAILED\s+\S+::\S+'),
     _TRACEBACK_RE,
-    re.compile(r"^\s*(Error|Exception)\s*:", re.M),
+    re.compile(r'^\s*(Error|Exception)\s*:', re.M),
 )
 
 #: Generic error indicators (exception class names at line start). Used by the
 #: Layer 1 generic branch to distinguish failing from successful byte-identical
 #: outputs for NON-shell tools. Conservative: only well-known exception/errno
 #: prefixes — a bare "Error" word in prose does not qualify.
-_GENERIC_ERRNO_RE = re.compile(r"\[Errno \d+\]")
-_GENERIC_ERROR_LINE_RE = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception)\b")
+_GENERIC_ERRNO_RE = re.compile(r'\[Errno \d+\]')
+_GENERIC_ERROR_LINE_RE = re.compile(r'[A-Za-z_][\w.]*(?:Error|Exception)\b')
 
 
 def _is_failing_output(content: str) -> bool:
@@ -126,16 +126,16 @@ def _as_dict(m) -> dict:
     """
     if isinstance(m, dict):
         return m
-    if hasattr(m, "model_dump"):
+    if hasattr(m, 'model_dump'):
         try:
             return m.model_dump()
         except (AttributeError, TypeError):
             pass
     return {
-        ROLE: getattr(m, "role", ""),
-        "content": getattr(m, "content", ""),
-        "name": getattr(m, "name", None),
-        "function_call": getattr(m, "function_call", None),
+        ROLE: getattr(m, 'role', ''),
+        'content': getattr(m, 'content', ''),
+        'name': getattr(m, 'name', None),
+        'function_call': getattr(m, 'function_call', None),
     }
 
 
@@ -149,53 +149,53 @@ def _text_of(content) -> str:
         parts = []
         for item in content:
             if isinstance(item, dict):
-                text = item.get("text") or ""
+                text = item.get('text') or ''
             else:
-                text = getattr(item, "text", None) or ""
+                text = getattr(item, 'text', None) or ''
             parts.append(str(text))
-        return " ".join(p for p in parts if p)
-    return str(content or "")
+        return ' '.join(p for p in parts if p)
+    return str(content or '')
 
 
 def _fc_info(m: dict):
     """Return (tool_name, args_json_str) for a function_call message, else None."""
-    fc = m.get("function_call")
+    fc = m.get('function_call')
     if not fc:
         return None
     if isinstance(fc, dict):
-        name = fc.get("name") or ""
-        args = fc.get("arguments", "")
+        name = fc.get('name') or ''
+        args = fc.get('arguments', '')
     else:
-        name = getattr(fc, "name", "") or ""
-        args = getattr(fc, "arguments", "") or ""
+        name = getattr(fc, 'name', '') or ''
+        args = getattr(fc, 'arguments', '') or ''
     return str(name), (args if isinstance(args, str) else json.dumps(args))
 
 
 # ── FUNCTION output normalization ───────────────────────────────────────────
 
 #: Security verdict prefix ("APPROVED:"/"AUTO-APPROVED:"/"REJECTED:") — system noise; the status sentence after it (exit-code info) must survive.
-_VERDICT_BANNER_RE = re.compile(r"^(?:AUTO-)?(?:APPROVED|REJECTED):\s*", re.M)
+_VERDICT_BANNER_RE = re.compile(r'^(?:AUTO-)?(?:APPROVED|REJECTED):\s*', re.M)
 
 #: "(elapsed 12.3s)" markers appended by shell.py / shell_cmd.py — vary on every call.
-_ELAPSED_MARKER_RE = re.compile(r"\s*\(elapsed \d+(?:\.\d+)?s\)")
+_ELAPSED_MARKER_RE = re.compile(r'\s*\(elapsed \d+(?:\.\d+)?s\)')
 
 #: "Completed in 12.3 s (" prefix from ⟨shell_cmd completed⟩ async messages — elapsed figure varies per call.
-_COMPLETED_IN_RE = re.compile(r"Completed in \d+(?:\.\d+)? s \(")
+_COMPLETED_IN_RE = re.compile(r'Completed in \d+(?:\.\d+)? s \(')
 
 #: "Security Justification: <prose>" block — regenerated every call, no loop signal; the whole paragraph is dropped. Continuation lines are consumed ONLY while they do not look like a section marker (STDOUT/STDERR/Output:) or a pytest FAILED banner — swallowing one would destroy Layer 2's TESTFAIL class.
 _SECURITY_JUST_RE = re.compile(
-    r"(?m)^Security Justification:[^\n]*"
-    r"(?:\n(?!\s*$)(?!(?:STDOUT|STDERR|Output):)(?!FAILED\s)[^\n]*)*"
+    r'(?m)^Security Justification:[^\n]*'
+    r'(?:\n(?!\s*$)(?!(?:STDOUT|STDERR|Output):)(?!FAILED\s)[^\n]*)*'
 )
 
 #: Spillover/truncation notices — char count and saved path vary per run.
 _TRUNCATION_NOTICE_RE = re.compile(
-    r"(?m)^\s*\[(?:TRUNCATED|SPILL FILE TRUNCATED)[^\n]*\]\s*$"
-    r"|^\s*\[\.\.\. \d+ chars omitted \.\.\.\]\s*$"
+    r'(?m)^\s*\[(?:TRUNCATED|SPILL FILE TRUNCATED)[^\n]*\]\s*$'
+    r'|^\s*\[\.\.\. \d+ chars omitted \.\.\.\]\s*$'
 )
 
 #: ISO 8601 timestamps — system-injected in log-style outputs, vary on every line.
-_ISO_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+_ISO_TIMESTAMP_RE = re.compile(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?')
 
 
 def _normalize_output(content: str) -> str:
@@ -211,19 +211,19 @@ def _normalize_output(content: str) -> str:
         surrounding text — only the parenthesized marker itself is removed.
     """
     if not content:
-        return ""
-    s = _VERDICT_BANNER_RE.sub("", content)
-    s = _ELAPSED_MARKER_RE.sub("", s)
-    s = _COMPLETED_IN_RE.sub("Completed in (", s)
-    s = _SECURITY_JUST_RE.sub("", s)
-    s = _TRUNCATION_NOTICE_RE.sub("", s)
-    s = _ISO_TIMESTAMP_RE.sub("", s)
+        return ''
+    s = _VERDICT_BANNER_RE.sub('', content)
+    s = _ELAPSED_MARKER_RE.sub('', s)
+    s = _COMPLETED_IN_RE.sub('Completed in (', s)
+    s = _SECURITY_JUST_RE.sub('', s)
+    s = _TRUNCATION_NOTICE_RE.sub('', s)
+    s = _ISO_TIMESTAMP_RE.sub('', s)
     # Collapse whitespace runs (dropped blocks leave blank-line gaps that would
     # break byte-identity), then restore line structure for patterns that are
     # line-anchored (e.g. the pytest FAILED banner regex): a dropped wrapper
     # block must not glue two lines together and hide a line-start marker.
-    s = " ".join(s.split())
-    return re.sub(r" (?=FAILED\s)", "\n", s)
+    s = ' '.join(s.split())
+    return re.sub(r' (?=FAILED\s)', '\n', s)
 
 
 # ── Pair extraction ─────────────────────────────────────────────────────────
@@ -253,7 +253,7 @@ def _extract_pairs(
 
     for i in range(window_start, len(messages)):
         m = _as_dict(messages[i])
-        role = m.get(ROLE) or ""
+        role = m.get(ROLE) or ''
         if role == ASSISTANT:
             info = _fc_info(m)
             if info and pending is None:
@@ -261,7 +261,7 @@ def _extract_pairs(
         elif role == FUNCTION:
             if pending is not None:
                 pairs.append((pending[0], i, pending[1], pending[2],
-                              _normalize_output(_text_of(m.get("content", "")))))
+                              _normalize_output(_text_of(m.get('content', '')))))
                 pending = None
 
     return pairs
@@ -283,8 +283,8 @@ def _norm_action(tool_name: str, args_json: str) -> Optional[str]:
     if not isinstance(args, dict):
         return None
 
-    if tool_name == "shell_cmd":
-        cmd = args.get("command", "")
+    if tool_name == 'shell_cmd':
+        cmd = args.get('command', '')
         if isinstance(cmd, str) and cmd in SHELL_DIRECTIVES:
             return f"shell_cmd:{cmd}:{args.get('tool_id', '')}"
 
@@ -304,7 +304,7 @@ def _is_terminal_output(content: str) -> bool:
 #: this, or detection would be suppressed on benign stable outputs.
 _NOISY_OUTPUT_MARKERS = (
     _TRACEBACK_RE,
-    re.compile(r"(?m)^\s*(Error|Exception)\s*:\s*\S"),
+    re.compile(r'(?m)^\s*(Error|Exception)\s*:\s*\S'),
 )
 
 
@@ -321,10 +321,10 @@ def _core_command(args_json: str) -> Optional[str]:
         args = json.loads(args_json) if isinstance(args_json, str) else dict(args_json)
     except (json.JSONDecodeError, TypeError):
         return None
-    cmd = args.get("command", "") if isinstance(args, dict) else ""
+    cmd = args.get('command', '') if isinstance(args, dict) else ''
     if not isinstance(cmd, str) or not cmd.strip():
         return None
-    return cmd.split("|")[0].strip()
+    return cmd.split('|')[0].strip()
 
 
 def _targets(args_json: str) -> frozenset:
@@ -333,7 +333,7 @@ def _targets(args_json: str) -> frozenset:
         args = json.loads(args_json) if isinstance(args_json, str) else dict(args_json)
     except (json.JSONDecodeError, TypeError):
         return frozenset()
-    cmd = args.get("command", "") if isinstance(args, dict) else ""
+    cmd = args.get('command', '') if isinstance(args, dict) else ''
     if not isinstance(cmd, str):
         return frozenset()
     found = set()
@@ -354,11 +354,11 @@ def _fail_class(content: str) -> Optional[str]:
     if m and int(m.group(1)) != 0:
         return f"EXIT:{m.group(1)}"
     if not content.strip():
-        return "NOOUT"
+        return 'NOOUT'
     if _FAILED_BANNER_RE.search(content):
-        return "TESTFAIL"
+        return 'TESTFAIL'
     if _TRACEBACK_RE.search(content):
-        return "TRACEBACK"
+        return 'TRACEBACK'
     return None
 
 
@@ -453,7 +453,7 @@ def _layer2_trailing_run(
         return None
 
     last = pairs[-1]
-    is_shell = last[2] == "shell_cmd"
+    is_shell = last[2] == 'shell_cmd'
     fail_cls = _fail_class(last[4])
     if fail_cls is None:
         return None

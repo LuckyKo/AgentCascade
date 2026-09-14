@@ -86,31 +86,31 @@ class TestSendMessageInputValidation:
         tool = SendMessage(agent_pool=None)
         params = json.dumps({'destination': 'user', 'message': 'hello'})
         result = tool.call(params)
-        assert "No agent pool available" in result
+        assert 'No agent pool available' in result
 
     def test_empty_destination_returns_error(self, send_message_tool):
         """Empty destination string returns a clear error."""
         params = json.dumps({'destination': '', 'message': 'hello'})
         result = send_message_tool.call(params)
-        assert "Failed" in result and "Destination cannot be empty" in result
+        assert 'Failed' in result and 'Destination cannot be empty' in result
 
     def test_whitespace_only_destination_returns_error(self, send_message_tool):
         """Whitespace-only destination is treated as empty."""
         params = json.dumps({'destination': '   ', 'message': 'hello'})
         result = send_message_tool.call(params)
-        assert "Failed" in result and "Destination cannot be empty" in result
+        assert 'Failed' in result and 'Destination cannot be empty' in result
 
     def test_empty_message_returns_error(self, send_message_tool):
         """Empty message content returns a clear error."""
         params = json.dumps({'destination': 'user', 'message': ''})
         result = send_message_tool.call(params)
-        assert "Failed" in result and "Message content cannot be empty" in result
+        assert 'Failed' in result and 'Message content cannot be empty' in result
 
     def test_whitespace_only_message_returns_error(self, send_message_tool):
         """Whitespace-only message is treated as empty."""
         params = json.dumps({'destination': 'user', 'message': '   \t\n  '})
         result = send_message_tool.call(params)
-        assert "Failed" in result and "Message content cannot be empty" in result
+        assert 'Failed' in result and 'Message content cannot be empty' in result
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ class TestSendMessageAgentToAgent:
         })
         result = send_message_tool.call(params)
 
-        assert "sent successfully" in result.lower() and "'agentB'" in result
+        assert 'sent successfully' in result.lower() and "'agentB'" in result
 
         # Verify the queued message has the sender tag
         msgs = agent_pool_with_agents.drain_queue('agentB')
@@ -158,7 +158,7 @@ class TestSendMessageAgentToAgent:
         })
         result = send_message_tool.call(params)
 
-        assert "Failed" in result and "yourself" in result.lower()
+        assert 'Failed' in result and 'yourself' in result.lower()
         # No message should be queued
         assert agent_pool_with_agents.drain_queue('agentA') == []
 
@@ -170,7 +170,7 @@ class TestSendMessageAgentToAgent:
         })
         result = send_message_tool.call(params)
 
-        assert "Failed" in result and "'nonexistent'" in result and "exists" in result.lower()
+        assert 'Failed' in result and "'nonexistent'" in result and 'exists' in result.lower()
 
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
     def test_inactive_agent_destination_rejected(self, mock_get_name, send_message_tool, agent_pool_with_agents):
@@ -187,7 +187,7 @@ class TestSendMessageAgentToAgent:
         })
         result = send_message_tool.call(params)
 
-        assert "Failed" in result and "IDLE" in result
+        assert 'Failed' in result and 'IDLE' in result
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ class TestSendMessageAgentToUser:
         result = send_message_tool.call(params)
 
         # Should degrade gracefully with a warning
-        assert "Warning" in result or "sent" in result.lower()
+        assert 'Warning' in result or 'sent' in result.lower()
 
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='worker1')
     def test_send_to_user_event_format(self, mock_get_name, send_message_tool, agent_pool_with_agents):
@@ -235,7 +235,7 @@ class TestSendMessageAgentToUser:
         })
         result = send_message_tool.call(params)
 
-        assert "sent successfully" in result.lower()
+        assert 'sent successfully' in result.lower()
 
         # Read the event from the queue using run_coroutine_threadsafe since loop is running in another thread
         def get_with_timeout():
@@ -245,7 +245,7 @@ class TestSendMessageAgentToUser:
             future = asyncio.run_coroutine_threadsafe(get_with_timeout(), ws_loop)
             event = future.result(timeout=3.0)
         except (asyncio.TimeoutError, TimeoutError):
-            pytest.fail("Expected an event to be queued for WebSocket")
+            pytest.fail('Expected an event to be queued for WebSocket')
 
         assert event['type'] == 'agent_message_to_user'
         assert event['sender'] == 'worker1'
@@ -283,4 +283,4 @@ class TestSendMessageEdgeCases:
         """Malformed JSON input should raise or return an error (BaseTool behavior)."""
         # BaseTool._verify_json_format_args raises ValueError on bad JSON
         with pytest.raises((ValueError, Exception)):
-            send_message_tool.call("not json at all {{{")
+            send_message_tool.call('not json at all {{{')

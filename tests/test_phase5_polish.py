@@ -198,7 +198,7 @@ class TestSubAgentStateMainSession:
         instance = create_main_agent_instance(
             pool=pool,
             instance_name='Maine',
-            system_message_content="You are Maine",
+            system_message_content='You are Maine',
         )
         
         # instance_state should be populated under the actual instance name 'Maine'

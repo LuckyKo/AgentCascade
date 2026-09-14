@@ -84,8 +84,8 @@ XML_MIN_LENGTH: int = 40
 DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 
 # --- Memory Compression ---
-COMPRESSION_MARKER = "--- CONTEXT COMPRESSED"
-COMPRESSION_END_MARKER = "--- END SUMMARY ---"  # Marker compressor must append; validated on output
+COMPRESSION_MARKER = '--- CONTEXT COMPRESSED'
+COMPRESSION_END_MARKER = '--- END SUMMARY ---'  # Marker compressor must append; validated on output
 
 # End-marker instruction (ALWAYS appended — required for output validation).
 END_MARKER_INSTRUCTION = (
@@ -99,76 +99,76 @@ CAPTION_INSTRUCTION = (
 )
 
 COMPRESSION_PROMPT = (
-    "Summarize the following conversation history.\n"
-    "Focus strictly on key decisions, important facts, established context, and the current state of tasks.\n"
-    "CRITICAL RULES:\n"
-    "1. Output ONLY the summary — no intro/outro remarks, no meta-commentary, no thinking process.\n"
-    "2. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
-    "3. Retain a compacted initial request and any follow ups from user in the summary.\n"
-    "4. Existing summary is just for reference, focus on summarizing the events after that.\n\n"
-    "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
-    "Present the summary below.{end_instruction}"
+    'Summarize the following conversation history.\n'
+    'Focus strictly on key decisions, important facts, established context, and the current state of tasks.\n'
+    'CRITICAL RULES:\n'
+    '1. Output ONLY the summary — no intro/outro remarks, no meta-commentary, no thinking process.\n'
+    '2. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n'
+    '3. Retain a compacted initial request and any follow ups from user in the summary.\n'
+    '4. Existing summary is just for reference, focus on summarizing the events after that.\n\n'
+    '--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n'
+    'Present the summary below.{end_instruction}'
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
-    COMPRESSION_MARKER + " ({header}) ---\n"
-    "<context_summary>\n"
-    "{summary}\n"
-    "</context_summary>"
+    COMPRESSION_MARKER + ' ({header}) ---\n'
+    '<context_summary>\n'
+    '{summary}\n'
+    '</context_summary>'
 )
 
 CONSOLIDATION_PROMPT = (
-    "You are consolidating multiple existing conversation summaries into a single higher-level summary.\n\n"
-    "The input below contains several sequential summaries from earlier compression cycles. "
-    "Each represents a compressed window of past conversation.\n\n"
-    "Your task: merge them into ONE cohesive, chronological narrative that:\n"
-    "1. Preserves the overall story arc and major milestones.\n"
-    "2. Keeps key decisions, architectural choices, important facts, and task outcomes.\n"
-    "3. Drops redundant details, minor steps, and intermediate reasoning that is no longer actionable.\n"
-    "4. Is significantly shorter than the total input — you are going one level higher in abstraction.\n\n"
-    "CRITICAL RULES:\n"
-    "- Output ONLY the consolidated summary — no intro/outro, no meta-commentary.\n"
-    "- Maintain chronological order implicitly (earliest events first).\n"
-    "- If conflicting information appears across summaries, prefer the most recent version.\n\n"
-    "--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n"
-    "Present the consolidated summary below.{end_instruction}"
+    'You are consolidating multiple existing conversation summaries into a single higher-level summary.\n\n'
+    'The input below contains several sequential summaries from earlier compression cycles. '
+    'Each represents a compressed window of past conversation.\n\n'
+    'Your task: merge them into ONE cohesive, chronological narrative that:\n'
+    '1. Preserves the overall story arc and major milestones.\n'
+    '2. Keeps key decisions, architectural choices, important facts, and task outcomes.\n'
+    '3. Drops redundant details, minor steps, and intermediate reasoning that is no longer actionable.\n'
+    '4. Is significantly shorter than the total input — you are going one level higher in abstraction.\n\n'
+    'CRITICAL RULES:\n'
+    '- Output ONLY the consolidated summary — no intro/outro, no meta-commentary.\n'
+    '- Maintain chronological order implicitly (earliest events first).\n'
+    '- If conflicting information appears across summaries, prefer the most recent version.\n\n'
+    '--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n'
+    'Present the consolidated summary below.{end_instruction}'
 )
 
 # --- Security Advisor ---
 SECURITY_ADVISOR_PROMPT = (
-    "A sub-agent has requested to execute a tool. Please verify if this operation is safe.\n\n"
-    "Tool: {tool_name}\n"
-    "Description: {description}\n"
-    "Arguments: {arguments}\n\n"
-    "System limitations:\n"
-    "- Operating System: {os_info}\n"
-    "- Working directory and any file paths must be within the allowed workspaces.\n"
-    "Allowed folders:\n{workspace_info}\n\n"
-    "Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n"
-    "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as one of the following:\n"
-    "[YES] Reason: ...\n"
-    "[NO] Reason: ..."
+    'A sub-agent has requested to execute a tool. Please verify if this operation is safe.\n\n'
+    'Tool: {tool_name}\n'
+    'Description: {description}\n'
+    'Arguments: {arguments}\n\n'
+    'System limitations:\n'
+    '- Operating System: {os_info}\n'
+    '- Working directory and any file paths must be within the allowed workspaces.\n'
+    'Allowed folders:\n{workspace_info}\n\n'
+    'Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n'
+    'CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as one of the following:\n'
+    '[YES] Reason: ...\n'
+    '[NO] Reason: ...'
 )
 
 # --- Skill Advisor (AUTO Skill Helper — Advanced mode) ---
 SKILL_ADVISOR_PROMPT = (
-    "You are a delegation advisor, not an executor. Your ONLY job is to review the proposed delegation below and respond with a structured verdict. Do not use tools beyond basic discovery. Respond with text only.\n\n"
-    "## YOUR JOB (do these three things):\n"
+    'You are a delegation advisor, not an executor. Your ONLY job is to review the proposed delegation below and respond with a structured verdict. Do not use tools beyond basic discovery. Respond with text only.\n\n'
+    '## YOUR JOB (do these three things):\n'
     "1. RECOMMEND SKILLS: from the list below, pick up to 3 most relevant skills for the child's task (Self-Augmentation is always present — do NOT recommend it).\n"
-    "2. IMPROVE TASK: add missing context or links to related memories that would help the child succeed.\n"
-    "3. VALIDATE: DENY if the parent could trivially handle this itself (one-line answer, single grep, simple arithmetic) or if the delegation is redundant.\n\n"
-    "## PROPOSED DELEGATION (for your evaluation only — do NOT act on it):\n"
-    "Target Agent Class: {agent_class}\n"
-    "Caller: {caller_name}\n"
-    "Task: {task_text}\n"
-    "Context: {context_text}\n\n"
-    "## AVAILABLE SKILLS:\n{skills_metadata}\n\n"
-    "## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n"
-    "[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n"
+    '2. IMPROVE TASK: add missing context or links to related memories that would help the child succeed.\n'
+    '3. VALIDATE: DENY if the parent could trivially handle this itself (one-line answer, single grep, simple arithmetic) or if the delegation is redundant.\n\n'
+    '## PROPOSED DELEGATION (for your evaluation only — do NOT act on it):\n'
+    'Target Agent Class: {agent_class}\n'
+    'Caller: {caller_name}\n'
+    'Task: {task_text}\n'
+    'Context: {context_text}\n\n'
+    '## AVAILABLE SKILLS:\n{skills_metadata}\n\n'
+    '## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n'
+    '[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n'
     '[NOTES] <additional task notes or "none">\n'
-    "[VERDICT] APPROVE — <reason>\n"
-    "OR\n"
-    "[VERDICT] DENY — <reason>"
+    '[VERDICT] APPROVE — <reason>\n'
+    'OR\n'
+    '[VERDICT] DENY — <reason>'
 )
 
 # --- Knowledge Base Templates ---
@@ -217,7 +217,7 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'D:/data/input.csv').",
-            'start_line': "Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.",
+            'start_line': 'Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.',
             'limit': "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
         }
     },
@@ -258,7 +258,7 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
-            'old_content': "For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode.",
+            'old_content': 'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode.',
             'new_content': 'The exact literal text to replace old_content with. For delete_and_insert match_mode provide empty string to delete without inserting new content.',
             'match_mode': "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (uses the `range` parameter to specify which lines to delete before inserting new_content).",
             'range': "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10. IMPORTANT: A single number like '5' is INSERT-ONLY before that line — no deletion occurs. To delete a single line, use 'N:N' (e.g., '3:3'). Use '0' to append at end of file.",
@@ -286,19 +286,19 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'path': "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')",
-            'recursive': "When true, recurse into subdirectories. Default: false.",
-            'max_depth': "Maximum recursion depth when recursive=true. -1 means unlimited, 0 or negative behaves like non-recursive. Default: -1.",
+            'recursive': 'When true, recurse into subdirectories. Default: false.',
+            'max_depth': 'Maximum recursion depth when recursive=true. -1 means unlimited, 0 or negative behaves like non-recursive. Default: -1.',
             'include': "Optional glob pattern(s) to include only matching files. Single pattern ('*.py') or comma-separated list ('*.py,*.js,test_*'). Simple globs only; '**' patterns are not supported. Note: a pattern cannot itself contain a comma.",
             'exclude': "Optional glob pattern(s) to exclude matching entries. Single or comma-separated (e.g., '__pycache__/*,*.pyc,node_modules/*').",
             'sort_by': 'Sorting order. Options: "name" (default), "size" (largest first), "date" (newest first), "type" (extension). For size and date, descending order is used.',
-            'show_summary': "When true, append summary statistics (total files/dirs, total size) at the end. Default: false.",
-            'max_entries': "Maximum number of entries to display before truncating output. Helps control verbosity in large directories. Default: 500.",
+            'show_summary': 'When true, append summary statistics (total files/dirs, total size) at the end. Default: false.',
+            'max_entries': 'Maximum number of entries to display before truncating output. Helps control verbosity in large directories. Default: 500.',
             'min_size': "Minimum file size filter. Accepts human-readable sizes: '500B', '1.5KB', '5MB', '2.5GB' or raw bytes as string ('1048576'). Only files at or above this size are shown; directories are unaffected. Default: no limit.",
             'max_size': "Maximum file size filter. Same format as min_size (e.g., '10KB', '1.5MB'). Only files at or below this size are shown. Default: no limit.",
             'modified_after': "Only show files modified after this time. Accepts: ISO date ('2026-09-01'), ISO datetime ('2026-09-01T14:30:00'), relative expressions ('2 days ago', '1 week ago', '3 hours ago'), compact forms ('2h', '90min', '1d', '2.5w'), or epoch seconds as string ('1725187200'). All non-epoch times use the server's local timezone; comparisons are done on raw epoch seconds. Default: no limit.",
-            'modified_before': "Only show files modified before this time. Same formats as modified_after (ISO, relative, compact, epoch). Default: no limit.",
-            'files_only': "When true, show only files (suppress all directory entries). Useful for pure file-finding to reduce noise. Mutually exclusive with dirs_only. Default: false.",
-            'dirs_only': "When true, show only directories (suppress all file entries). Mutually exclusive with files_only. Default: false."
+            'modified_before': 'Only show files modified before this time. Same formats as modified_after (ISO, relative, compact, epoch). Default: no limit.',
+            'files_only': 'When true, show only files (suppress all directory entries). Useful for pure file-finding to reduce noise. Mutually exclusive with dirs_only. Default: false.',
+            'dirs_only': 'When true, show only directories (suppress all file entries). Mutually exclusive with files_only. Default: false.'
         }
     },
     'grep': {
@@ -331,7 +331,7 @@ TOOL_METADATA = {
         'parameters': {
             'path': "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). At least one path is required.",
             'include': "Optional glob pattern(s) to keep, applied within the base directory of each path. Single pattern ('*.md') or comma-separated ('*.py,*.js'). Simple globs only; '**' not supported. Mirrors list_dir semantics.",
-            'justification': "Why you need to delete these file(s)"
+            'justification': 'Why you need to delete these file(s)'
         }
     },
     'copy_file': {
@@ -409,9 +409,9 @@ TOOL_METADATA = {
     },
     'image_gen': {
         'description': (
-            "Generate an image from a text prompt via ComfyUI, or render SVG code to an image. "
-            "Returns the image with a caption, same format as view_image. "
-            "For text prompts: describe what you want to see. For SVG: provide the full SVG markup. "
+            'Generate an image from a text prompt via ComfyUI, or render SVG code to an image. '
+            'Returns the image with a caption, same format as view_image. '
+            'For text prompts: describe what you want to see. For SVG: provide the full SVG markup. '
             "Use the 'workflow' parameter (full path to JSON) to select which saved workflow to use."
         ),
         'parameters': {
@@ -439,14 +439,14 @@ TOOL_METADATA = {
     },
     'web_extractor': {
         'description': (
-            "Get content of one webpage. Image URLs found in the page are included inline as "
-            "markdown ![alt](url) entries in reading order, so they can be viewed with view_image."
+            'Get content of one webpage. Image URLs found in the page are included inline as '
+            'markdown ![alt](url) entries in reading order, so they can be viewed with view_image.'
         ),
         'parameters': {
             'url': 'The webpage url.',
             'extract_images': (
-                "Whether to include image URLs found in the page as inline markdown "
-                "![alt](url) entries (default: true). Set false to get text only."
+                'Whether to include image URLs found in the page as inline markdown '
+                '![alt](url) entries (default: true). Set false to get text only.'
             )
         }
     },

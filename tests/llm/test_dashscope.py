@@ -127,8 +127,8 @@ def test_llm_retry_failure(stream, delta_stream):
     # at 0 for backwards compat only; see tests/test_retry_baseline.py::TestLLayerRetryBehavior.
     assert llm.max_retries == 0
     assert 'max_retries' not in llm.generate_cfg, \
-        "max_retries must be stripped from generate_cfg (L1 retries disabled)"
-    assert llm.use_raw_api, "DashScope models should use raw API (streaming)"
+        'max_retries must be stripped from generate_cfg (L1 retries disabled)'
+    assert llm.use_raw_api, 'DashScope models should use raw API (streaming)'
 
     messages = [Message('user', 'hello')]
     with pytest.raises(ModelServiceError):
@@ -147,8 +147,8 @@ def test_llm_retry_failure_delta(delta_stream):
     # propagated from generate_cfg (see test_llm_retry_failure above).
     assert llm.max_retries == 0
     assert 'max_retries' not in llm.generate_cfg, \
-        "max_retries must be stripped from generate_cfg (L1 retries disabled)"
-    assert not llm.use_raw_api, "Should use non-raw API when explicitly disabled"
+        'max_retries must be stripped from generate_cfg (L1 retries disabled)'
+    assert not llm.use_raw_api, 'Should use non-raw API when explicitly disabled'
 
     messages = [Message('user', 'hello')]
     with pytest.raises(ModelServiceError):

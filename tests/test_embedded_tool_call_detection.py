@@ -29,7 +29,7 @@ class TestExtractToolCallsQwenFormat:
         assert result[1][0] == 'grep_search'
 
     def test_tool_call_with_return(self):
-        text = "✿FUNCTION✿: shell_cmd\n✿ARGS✿: git status\n✿RETURN✿"
+        text = '✿FUNCTION✿: shell_cmd\n✿ARGS✿: git status\n✿RETURN✿'
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'shell_cmd'
@@ -41,7 +41,7 @@ class TestExtractToolCallsQwenFormat:
         assert result[0][0] == 'read_file'
 
     def test_no_tool_call(self):
-        text = "Just some regular text without tool calls"
+        text = 'Just some regular text without tool calls'
         result = _extract_tool_calls_from_text(text)
         assert result == []
 
@@ -65,7 +65,7 @@ class TestExtractToolCallsPegFormat:
 
     def test_multiple_function_tags(self):
         text = (
-            "<function=shell_cmd><parameter>git status</parameter></function>"
+            '<function=shell_cmd><parameter>git status</parameter></function>'
             "<function=read_file><parameter>{'path': 'x'}</parameter></function>"
         )
         result = _extract_tool_calls_from_text(text)
@@ -75,16 +75,16 @@ class TestExtractToolCallsPegFormat:
 
     def test_nested_in_reasoning(self):
         text = (
-            "Let me check the file first...\n"
+            'Let me check the file first...\n'
             "<function=read_file><parameter>{'path': 'todo.md'}</parameter></function>\n"
-            "That should give us the content we need."
+            'That should give us the content we need.'
         )
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'read_file'
 
     def test_case_insensitive(self):
-        text = "<FUNCTION=shell_cmd><PARAMETER>ls</PARAMETER></FUNCTION>"
+        text = '<FUNCTION=shell_cmd><PARAMETER>ls</PARAMETER></FUNCTION>'
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'shell_cmd'
@@ -106,14 +106,14 @@ class TestExtractToolCallsEdgeCases:
         """Qwen format should be detected first if both exist."""
         text = (
             "✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'a'}\n"
-            "<function=shell_cmd><parameter>ls</parameter></function>"
+            '<function=shell_cmd><parameter>ls</parameter></function>'
         )
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'read_file'
 
     def test_tool_name_with_underscore(self):
-        text = "<function=code_interpreter><parameter>x</parameter></function>"
+        text = '<function=code_interpreter><parameter>x</parameter></function>'
         result = _extract_tool_calls_from_text(text)
         assert result[0][0] == 'code_interpreter'
 
@@ -137,7 +137,7 @@ class TestExtractToolCallsEdgeCases:
 
     def test_empty_function_body(self):
         """Function tags with empty body should be skipped."""
-        text = "<function=read_file></function>"
+        text = '<function=read_file></function>'
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 0
 
@@ -161,7 +161,7 @@ class TestExtractToolCallsEdgeCases:
         # so we test the logic via _extract_tool_calls_from_text directly.
         text = (
             "✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'first'}\n"
-            "✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls"
+            '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls'
         )
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 2
@@ -173,7 +173,7 @@ class TestExtractToolCallsEdgeCases:
         """Verify _detect_tool uses only the first match from peg-native calls."""
         text = (
             "<function=read_file><parameter>{'path': 'first'}</parameter></function>"
-            "<function=shell_cmd><parameter>ls</parameter></function>"
+            '<function=shell_cmd><parameter>ls</parameter></function>'
         )
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 2
@@ -183,7 +183,7 @@ class TestExtractToolCallsEdgeCases:
 
     def test_whitespace_in_tool_name(self):
         """Tool names with leading/trailing whitespace should be stripped."""
-        text = "<function=read_file><parameter>x</parameter></function>"
+        text = '<function=read_file><parameter>x</parameter></function>'
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'read_file'
@@ -208,8 +208,8 @@ class TestCheckForToolCallsInOutput:
         engine = ExecutionEngine(MockPool())
 
         response = [
-            Message(role=USER, content="Hello"),
-            Message(role=ASSISTANT, content="Hi there! No tool calls here.")
+            Message(role=USER, content='Hello'),
+            Message(role=ASSISTANT, content='Hi there! No tool calls here.')
         ]
         assert not engine._check_for_tool_calls_in_output(None, response)
 
@@ -223,9 +223,9 @@ class TestCheckForToolCallsInOutput:
 
         # Standard tool call that was executed:
         response = [
-            Message(role=ASSISTANT, content="Let me run shell status.", function_call={"name": "shell_status", "arguments": ""}),
-            Message(role=FUNCTION, name="shell_status", content="All systems green"),
-            Message(role=ASSISTANT, content="The status is all systems green.")
+            Message(role=ASSISTANT, content='Let me run shell status.', function_call={'name': 'shell_status', 'arguments': ''}),
+            Message(role=FUNCTION, name='shell_status', content='All systems green'),
+            Message(role=ASSISTANT, content='The status is all systems green.')
         ]
 
         # The last assistant message has no tool call, so it should return False
@@ -241,9 +241,9 @@ class TestCheckForToolCallsInOutput:
 
         # Embedded Qwen format tool call that was executed:
         response = [
-            Message(role=ASSISTANT, content="✿FUNCTION✿: shell_status\n✿ARGS✿: {}"),
-            Message(role=FUNCTION, name="shell_status", content="All systems green"),
-            Message(role=ASSISTANT, content="The status is all systems green.")
+            Message(role=ASSISTANT, content='✿FUNCTION✿: shell_status\n✿ARGS✿: {}'),
+            Message(role=FUNCTION, name='shell_status', content='All systems green'),
+            Message(role=ASSISTANT, content='The status is all systems green.')
         ]
         assert not engine._check_for_tool_calls_in_output(None, response)
 
@@ -257,7 +257,7 @@ class TestCheckForToolCallsInOutput:
 
         # Embedded Qwen format tool call that has NOT been executed:
         response = [
-            Message(role=ASSISTANT, content="✿FUNCTION✿: shell_status\n✿ARGS✿: {}")
+            Message(role=ASSISTANT, content='✿FUNCTION✿: shell_status\n✿ARGS✿: {}')
         ]
         assert engine._check_for_tool_calls_in_output(None, response)
 
@@ -272,9 +272,9 @@ class TestCheckForToolCallsInOutput:
 
         # Tool executed as lowercase, but content has mixed case
         response = [
-            Message(role=ASSISTANT, content="✿FUNCTION✿: Shell_Cmd\n✿ARGS✿: {}"),
-            Message(role=FUNCTION, name="shell_cmd", content="done"),
-            Message(role=ASSISTANT, content="Result is done.")
+            Message(role=ASSISTANT, content='✿FUNCTION✿: Shell_Cmd\n✿ARGS✿: {}'),
+            Message(role=FUNCTION, name='shell_cmd', content='done'),
+            Message(role=ASSISTANT, content='Result is done.')
         ]
         # shell_cmd was executed, Shell_Cmd in last msg should match
         assert not engine._check_for_tool_calls_in_output(None, response)
@@ -289,9 +289,9 @@ class TestCheckForToolCallsInOutput:
         engine = ExecutionEngine(MockPool())
 
         response = [
-            Message(role=ASSISTANT, content="<function=Read_File><parameter>x</parameter></function>"),
-            Message(role=FUNCTION, name="read_file", content="content"),
-            Message(role=ASSISTANT, content="Got it.")
+            Message(role=ASSISTANT, content='<function=Read_File><parameter>x</parameter></function>'),
+            Message(role=FUNCTION, name='read_file', content='content'),
+            Message(role=ASSISTANT, content='Got it.')
         ]
         assert not engine._check_for_tool_calls_in_output(None, response)
 
@@ -315,11 +315,11 @@ class TestReasoningBlockIgnored:
 
         msg = Message(
             role=ASSISTANT,
-            content="Here is my answer.",
+            content='Here is my answer.',
             reasoning_content="✿FUNCTION✿: code_interpreter\n✿ARGS✿: {'code': 'print(1)'}"
         )
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
-        assert not use_tool, "Tool call in reasoning_content should be ignored"
+        assert not use_tool, 'Tool call in reasoning_content should be ignored'
         assert tool_name is None
 
     def test_detect_tool_ignores_peg_in_reasoning(self):
@@ -335,18 +335,18 @@ class TestReasoningBlockIgnored:
         # inside a reasoning block
         msg = Message(
             role=ASSISTANT,
-            content="",
+            content='',
             reasoning_content=(
-                "Let me fix the code and run it properly:\n"
-                "<function=code_interpreter>\n"
-                "<parameter=code>\n"
+                'Let me fix the code and run it properly:\n'
+                '<function=code_interpreter>\n'
+                '<parameter=code>\n'
                 "print('hello')\n"
-                "</parameter>\n"
-                "</function>"
+                '</parameter>\n'
+                '</function>'
             )
         )
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
-        assert not use_tool, "Tool call in reasoning_content should be ignored"
+        assert not use_tool, 'Tool call in reasoning_content should be ignored'
 
     def test_detect_tool_ignores_reasoning_but_finds_content(self):
         """If both reasoning and content have tool calls, only content is detected."""
@@ -359,12 +359,12 @@ class TestReasoningBlockIgnored:
 
         msg = Message(
             role=ASSISTANT,
-            content="✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la",
+            content='✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la',
             reasoning_content="✿FUNCTION✿: code_interpreter\n✿ARGS✿: {'code': 'print(1)'}"
         )
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
         assert use_tool
-        assert tool_name == 'shell_cmd', "Should detect the content tool call, not the reasoning one"
+        assert tool_name == 'shell_cmd', 'Should detect the content tool call, not the reasoning one'
 
     def test_check_output_ignores_reasoning_only_tool_calls(self):
         """_check_for_tool_calls_in_output must return False when tool calls
@@ -381,16 +381,16 @@ class TestReasoningBlockIgnored:
                 role=ASSISTANT,
                 content="I've analyzed the situation.",
                 reasoning_content=(
-                    "<function=code_interpreter>"
+                    '<function=code_interpreter>'
                     "<parameter>dangerous_variants = {'stash': ['pop']}</parameter>"
-                    "</function>"
+                    '</function>'
                 )
             )
         ]
         result = engine._check_for_tool_calls_in_output(None, response)
         assert not result, (
-            "_check_for_tool_calls_in_output should return False when tool calls "
-            "are only in reasoning_content — this was the infinite loop bug"
+            '_check_for_tool_calls_in_output should return False when tool calls '
+            'are only in reasoning_content — this was the infinite loop bug'
         )
 
     def test_real_function_call_still_detected_with_reasoning_noise(self):
@@ -405,9 +405,9 @@ class TestReasoningBlockIgnored:
 
         msg = Message(
             role=ASSISTANT,
-            content="Running the command.",
-            reasoning_content="<function=code_interpreter><parameter>x</parameter></function>",
-            function_call={"name": "shell_cmd", "arguments": "git status"}
+            content='Running the command.',
+            reasoning_content='<function=code_interpreter><parameter>x</parameter></function>',
+            function_call={'name': 'shell_cmd', 'arguments': 'git status'}
         )
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
         assert use_tool
@@ -422,7 +422,7 @@ class TestMixedFormat:
         """Qwen args should stop at <function= tags, not consume PEG content."""
         text = (
             "✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'a'}\n"
-            "✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls\n"
+            '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls\n'
             "<function=code_interpreter><parameter>{'code': 'print(1)'}</parameter></function>"
         )
         result = _extract_tool_calls_from_text(text)
@@ -434,7 +434,7 @@ class TestMixedFormat:
     def test_qwen_args_stop_at_peg_function_tag(self):
         """Qwen args should stop at <function= in the same text block."""
         text = (
-            "✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la\n"
+            '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la\n'
             "<function=read_file><parameter>{'path': 'x'}</parameter></function>"
         )
         result = _extract_tool_calls_from_text(text)
@@ -446,9 +446,9 @@ class TestMixedFormat:
     def test_peg_args_contain_function_string(self):
         """PEG arguments containing '<function=' string in JSON should work."""
         text = (
-            "<function=read_file>"
+            '<function=read_file>'
             "<parameter>{'path': 'src/main.py', 'filter': '<function=main>'}</parameter>"
-            "</function>"
+            '</function>'
         )
         result = _extract_tool_calls_from_text(text)
         # Nested <function= in args is filtered, so expect empty result

@@ -79,17 +79,17 @@ class LoadSkill(BaseTool):
         elif isinstance(skill_names_raw, list):
             skill_names = skill_names_raw
         else:
-            return "Invalid skill_names parameter. Provide a string or list of strings."
+            return 'Invalid skill_names parameter. Provide a string or list of strings.'
 
         if not skill_names:
-            return "No skill names provided."
+            return 'No skill names provided.'
 
         # Get SkillManager from pool
         if self.agent_pool is None:
-            return "No agent pool available."
+            return 'No agent pool available.'
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
         if skill_manager is None:
-            return "No skills system available. Skills may not have been initialized."
+            return 'No skills system available. Skills may not have been initialized.'
 
         # Trigger discovery so new/recent skills are visible (matches scan_skills behavior)
         skill_manager._ensure_discovered()
@@ -128,7 +128,7 @@ class LoadSkill(BaseTool):
             # Validate skill name (Fix #3)
             name = raw_name.strip() if isinstance(raw_name, str) else ''
             if not name:
-                logger.warning("[SKILLS] Runtime load: empty skill name skipped")
+                logger.warning('[SKILLS] Runtime load: empty skill name skipped')
                 failed.append(raw_name)
                 continue
             if not VALID_SKILL_NAME_RE.match(name):
@@ -166,7 +166,7 @@ class LoadSkill(BaseTool):
             _tel = getattr(self.agent_pool, 'telemetry', None)
             if _tel is not None:
                 _agent_class = getattr(inst, 'agent_class', '') or ''
-                _tel.record_skills_loaded(_agent_class, loaded, "runtime")
+                _tel.record_skills_loaded(_agent_class, loaded, 'runtime')
 
         # Build summary
         lines = []

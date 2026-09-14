@@ -42,7 +42,7 @@ class MockSkillManager:
         return list(self._names)
 
     def get_all_metadata(self):
-        return [{"name": n, "description": f"desc for {n}"} for n in self._names]
+        return [{'name': n, 'description': f"desc for {n}"} for n in self._names]
 
     def load_full_instructions(self, name):
         # Case-insensitive match, mirrors the real manager.
@@ -68,81 +68,81 @@ def _make_pool(**overrides):
 
 class TestParseAdvisorOutput:
     def test_valid_approve_with_skills_and_notes(self):
-        sm = MockSkillManager(["docker-best-practices", "httpx-connection-pooling"])
+        sm = MockSkillManager(['docker-best-practices', 'httpx-connection-pooling'])
         out = (
-            "[SKILLS] docker-best-practices, httpx-connection-pooling\n"
-            "[NOTES] Use --rm flag and pin image tags.\n"
-            "[VERDICT] APPROVE — needs both skills"
+            '[SKILLS] docker-best-practices, httpx-connection-pooling\n'
+            '[NOTES] Use --rm flag and pin image tags.\n'
+            '[VERDICT] APPROVE — needs both skills'
         )
         r = parse_advisor_output(out, sm)
-        assert r.verdict == "approve"
-        assert r.recommended_skills == ["docker-best-practices", "httpx-connection-pooling"]
-        assert r.task_notes == "Use --rm flag and pin image tags."
-        assert r.reason == "needs both skills"
+        assert r.verdict == 'approve'
+        assert r.recommended_skills == ['docker-best-practices', 'httpx-connection-pooling']
+        assert r.task_notes == 'Use --rm flag and pin image tags.'
+        assert r.reason == 'needs both skills'
 
     def test_deny_returns_reason_and_no_skills(self):
-        sm = MockSkillManager(["a", "b"])
-        out = "[SKILLS] none\n[NOTES] none\n[VERDICT] DENY — trivial single-file read"
+        sm = MockSkillManager(['a', 'b'])
+        out = '[SKILLS] none\n[NOTES] none\n[VERDICT] DENY — trivial single-file read'
         r = parse_advisor_output(out, sm)
-        assert r.verdict == "deny"
+        assert r.verdict == 'deny'
         assert r.recommended_skills == []
-        assert r.reason == "trivial single-file read"
+        assert r.reason == 'trivial single-file read'
 
     def test_missing_verdict_is_ambiguous(self):
-        sm = MockSkillManager(["a"])
-        r = parse_advisor_output("[SKILLS] a\n[NOTES] something", sm)
-        assert r.verdict == "ambiguous"
-        assert "VERDICT" in r.reason
+        sm = MockSkillManager(['a'])
+        r = parse_advisor_output('[SKILLS] a\n[NOTES] something', sm)
+        assert r.verdict == 'ambiguous'
+        assert 'VERDICT' in r.reason
 
     def test_empty_output_is_ambiguous(self):
-        sm = MockSkillManager(["a"])
-        r = parse_advisor_output("", sm)
-        assert r.verdict == "ambiguous"
+        sm = MockSkillManager(['a'])
+        r = parse_advisor_output('', sm)
+        assert r.verdict == 'ambiguous'
 
     def test_case_insensitive_markers_and_names(self):
-        sm = MockSkillManager(["docker-best-practices"])
+        sm = MockSkillManager(['docker-best-practices'])
         out = (
-            "[skills] Docker-Best-Practices\n"
-            "[notes] NONE\n"
-            "[verdict] approve - looks fine"
+            '[skills] Docker-Best-Practices\n'
+            '[notes] NONE\n'
+            '[verdict] approve - looks fine'
         )
         r = parse_advisor_output(out, sm)
-        assert r.verdict == "approve"
+        assert r.verdict == 'approve'
         # Canonical (registered) name is returned, not the LLM's casing.
-        assert r.recommended_skills == ["docker-best-practices"]
-        assert r.task_notes == ""  # "NONE" → empty
+        assert r.recommended_skills == ['docker-best-practices']
+        assert r.task_notes == ''  # "NONE" → empty
 
     def test_unknown_skills_filtered_out(self):
-        sm = MockSkillManager(["real-skill"])
-        out = "[SKILLS] real-skill, not-a-real-skill\n[VERDICT] APPROVE — ok"
+        sm = MockSkillManager(['real-skill'])
+        out = '[SKILLS] real-skill, not-a-real-skill\n[VERDICT] APPROVE — ok'
         r = parse_advisor_output(out, sm)
-        assert r.recommended_skills == ["real-skill"]
+        assert r.recommended_skills == ['real-skill']
 
     def test_self_augmentation_never_recommended(self):
-        sm = MockSkillManager(["self-augmentation", "docker-best-practices"])
-        out = "[SKILLS] self-augmentation, docker-best-practices\n[VERDICT] APPROVE — ok"
+        sm = MockSkillManager(['self-augmentation', 'docker-best-practices'])
+        out = '[SKILLS] self-augmentation, docker-best-practices\n[VERDICT] APPROVE — ok'
         r = parse_advisor_output(out, sm)
-        assert "self-augmentation" not in r.recommended_skills
-        assert r.recommended_skills == ["docker-best-practices"]
+        assert 'self-augmentation' not in r.recommended_skills
+        assert r.recommended_skills == ['docker-best-practices']
 
     def test_unrecognized_verdict_line_is_ambiguous(self):
-        sm = MockSkillManager(["a"])
-        out = "[SKILLS] a\n[VERDICT] MAYBE — not sure"
+        sm = MockSkillManager(['a'])
+        out = '[SKILLS] a\n[VERDICT] MAYBE — not sure'
         r = parse_advisor_output(out, sm)
-        assert r.verdict == "ambiguous"
+        assert r.verdict == 'ambiguous'
 
     def test_duplicate_skills_deduplicated(self):
-        sm = MockSkillManager(["a", "b"])
-        out = "[SKILLS] a, b, a\n[VERDICT] APPROVE — ok"
+        sm = MockSkillManager(['a', 'b'])
+        out = '[SKILLS] a, b, a\n[VERDICT] APPROVE — ok'
         r = parse_advisor_output(out, sm)
-        assert r.recommended_skills == ["a", "b"]
+        assert r.recommended_skills == ['a', 'b']
 
     def test_verdict_reason_split_on_em_dash(self):
-        sm = MockSkillManager(["a"])
-        out = "[SKILLS] none\n[VERDICT] DENY — parent could do this itself"
+        sm = MockSkillManager(['a'])
+        out = '[SKILLS] none\n[VERDICT] DENY — parent could do this itself'
         r = parse_advisor_output(out, sm)
-        assert r.verdict == "deny"
-        assert r.reason == "parent could do this itself"
+        assert r.verdict == 'deny'
+        assert r.reason == 'parent could do this itself'
 
 
 # ===========================================================================
@@ -151,41 +151,41 @@ class TestParseAdvisorOutput:
 
 class TestBuildSkillAdvisorPrompt:
     def test_excludes_self_augmentation_from_skills_list(self):
-        sm = MockSkillManager(["self-augmentation", "docker-best-practices"])
-        prompt = build_skill_advisor_prompt(sm, "Set up docker", "ctx", "coder", "Maine")
-        skill_lines = [l for l in prompt.splitlines() if l.startswith("- ")]
-        assert any("docker-best-practices" in l for l in skill_lines)
-        assert not any("self-augmentation" in l for l in skill_lines)
+        sm = MockSkillManager(['self-augmentation', 'docker-best-practices'])
+        prompt = build_skill_advisor_prompt(sm, 'Set up docker', 'ctx', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        assert any('docker-best-practices' in l for l in skill_lines)
+        assert not any('self-augmentation' in l for l in skill_lines)
 
     def test_includes_task_context_agent_and_caller(self):
-        sm = MockSkillManager(["a"])
-        prompt = build_skill_advisor_prompt(sm, "MY_TASK", "MY_CTX", "coder", "Maine")
-        assert "MY_TASK" in prompt
-        assert "MY_CTX" in prompt
-        assert "coder" in prompt
-        assert "Maine" in prompt
+        sm = MockSkillManager(['a'])
+        prompt = build_skill_advisor_prompt(sm, 'MY_TASK', 'MY_CTX', 'coder', 'Maine')
+        assert 'MY_TASK' in prompt
+        assert 'MY_CTX' in prompt
+        assert 'coder' in prompt
+        assert 'Maine' in prompt
 
     def test_empty_registry_shows_none(self):
         sm = MockSkillManager([])
-        prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
-        assert "(none)" in prompt
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        assert '(none)' in prompt
 
     def test_braces_in_task_text_do_not_crash(self):
         """Regression: task text with {braces} must not raise KeyError from .format()."""
-        sm = MockSkillManager(["a"])
+        sm = MockSkillManager(['a'])
         prompt = build_skill_advisor_prompt(
-            sm, "Create {filename}.py with {config}", "use {var} here", "coder", "Maine"
+            sm, 'Create {filename}.py with {config}', 'use {var} here', 'coder', 'Maine'
         )
-        assert "{filename}" in prompt
-        assert "{config}" in prompt
-        assert "{var}" in prompt
+        assert '{filename}' in prompt
+        assert '{config}' in prompt
+        assert '{var}' in prompt
 
     def test_braces_in_context_text_do_not_crash(self):
-        sm = MockSkillManager(["a"])
+        sm = MockSkillManager(['a'])
         prompt = build_skill_advisor_prompt(
-            sm, "task", "Context with {placeholder} and }braces{", "coder", "Maine"
+            sm, 'task', 'Context with {placeholder} and }braces{', 'coder', 'Maine'
         )
-        assert "{placeholder}" in prompt
+        assert '{placeholder}' in prompt
 
 
 # ===========================================================================
@@ -205,32 +205,32 @@ class TestBuildSkillAdvisorPromptFreshness:
 
         # Scan a dedicated subdirectory (not tmp_path itself) so pytest's marker file
         # never enters the scanned tree — keeps the scan signature deterministic.
-        skills_root = tmp_path / "skills"
+        skills_root = tmp_path / 'skills'
 
         # Skill A: on disk so the real discover() re-scans and keeps it in the registry.
-        a_dir = skills_root / "skill-a"
+        a_dir = skills_root / 'skill-a'
         a_dir.mkdir(parents=True)
-        (a_dir / "SKILL.md").write_text(
-            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        (a_dir / 'SKILL.md').write_text(
+            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
         )
 
         sm = SkillManager()
         sm.discover([skills_root])        # warm cache → registry has {skill-a}
-        assert set(sm.get_skill_names()) == {"skill-a"}
+        assert set(sm.get_skill_names()) == {'skill-a'}
 
         # Skill B: added to disk AFTER the initial scan, then invalidate so a re-scan is forced.
-        b_dir = skills_root / "skill-b"
+        b_dir = skills_root / 'skill-b'
         b_dir.mkdir()
-        (b_dir / "SKILL.md").write_text(
-            "---\nname: skill-b\ndescription: second skill\n---\nbody B\n", encoding="utf-8"
+        (b_dir / 'SKILL.md').write_text(
+            '---\nname: skill-b\ndescription: second skill\n---\nbody B\n', encoding='utf-8'
         )
         sm.invalidate_cache()
 
-        prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
 
         # The fresh discovery picked up skill B from disk.
-        assert "skill-b" in prompt
-        assert "skill-a" in prompt
+        assert 'skill-b' in prompt
+        assert 'skill-a' in prompt
 
     def test_no_forced_rescan_when_cache_warm(self, tmp_path):
         """With a warm cache (TTL not expired, signature unchanged), the advisor must NOT
@@ -248,46 +248,46 @@ class TestBuildSkillAdvisorPromptFreshness:
         # created when the fixture is set up) never enters the scanned tree — otherwise it
         # changes the scan signature between the warm scan and the advisor call and forces
         # a legitimate re-scan, defeating what this test is trying to prove.
-        skills_root = tmp_path / "skills"
-        a_dir = skills_root / "skill-a"
+        skills_root = tmp_path / 'skills'
+        a_dir = skills_root / 'skill-a'
         a_dir.mkdir(parents=True)
-        (a_dir / "SKILL.md").write_text(
-            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        (a_dir / 'SKILL.md').write_text(
+            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
         )
 
         sm = SkillManager()
         sm.discover([skills_root])        # warm cache; _skill_paths set; TTL clock started
 
-        with patch.object(mgr_mod, "parse_skill_file") as mock_parse:
-            prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
+        with patch.object(mgr_mod, 'parse_skill_file') as mock_parse:
+            prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
 
         # Warm cache → no re-scan (the scan body never runs).
         mock_parse.assert_not_called()
         # The cached list is still served correctly.
-        assert "skill-a" in prompt
+        assert 'skill-a' in prompt
 
     def test_ensure_discovered_failure_isolated(self, tmp_path):
         """If _ensure_discovered() raises, build_skill_advisor_prompt must still return a
         valid prompt from the cached list — no exception propagates."""
         from agent_cascade.skills.manager import SkillManager
 
-        a_dir = tmp_path / "skill-a"
+        a_dir = tmp_path / 'skill-a'
         a_dir.mkdir()
-        (a_dir / "SKILL.md").write_text(
-            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        (a_dir / 'SKILL.md').write_text(
+            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
         )
 
         sm = SkillManager()
         sm.discover([tmp_path])           # warm cache with skill-a in the registry
 
         def _boom():
-            raise RuntimeError("discovery blew up")
+            raise RuntimeError('discovery blew up')
 
-        with patch.object(sm, "_ensure_discovered", side_effect=_boom):
-            prompt = build_skill_advisor_prompt(sm, "task", "", "coder", "Maine")
+        with patch.object(sm, '_ensure_discovered', side_effect=_boom):
+            prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
 
         # No exception propagated; cached skill-a still present in the prompt.
-        assert "skill-a" in prompt
+        assert 'skill-a' in prompt
 
     def test_get_skill_names_is_lock_protected(self, tmp_path):
         """Regression: get_skill_names() must read under the write lock so a concurrent
@@ -299,16 +299,16 @@ class TestBuildSkillAdvisorPromptFreshness:
         → test fails."""
         from agent_cascade.skills.manager import SkillManager
 
-        skills_root = tmp_path / "skills"
-        a_dir = skills_root / "skill-a"
+        skills_root = tmp_path / 'skills'
+        a_dir = skills_root / 'skill-a'
         a_dir.mkdir(parents=True)
-        (a_dir / "SKILL.md").write_text(
-            "---\nname: skill-a\ndescription: first skill\n---\nbody A\n", encoding="utf-8"
+        (a_dir / 'SKILL.md').write_text(
+            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
         )
 
         sm = SkillManager()
         sm.discover([skills_root])
-        assert set(sm.get_skill_names()) == {"skill-a"}
+        assert set(sm.get_skill_names()) == {'skill-a'}
 
         # Replace _write_lock with a spy that records acquisitions. We cannot patch acquire()
         # on the real lock — _thread.RLock.acquire is a read-only C attribute, so we wrap it.
@@ -334,10 +334,10 @@ class TestBuildSkillAdvisorPromptFreshness:
             def __exit__(self, *a):
                 self.release()
 
-        with patch.object(sm, "_write_lock", _SpyLock()):
+        with patch.object(sm, '_write_lock', _SpyLock()):
             sm.get_skill_names()
 
-        assert len(acquires) >= 1, "get_skill_names() must read the registry under _write_lock"
+        assert len(acquires) >= 1, 'get_skill_names() must read the registry under _write_lock'
 
 
 # ===========================================================================
@@ -346,13 +346,13 @@ class TestBuildSkillAdvisorPromptFreshness:
 
 class TestRegistryValidation:
     def test_run_skill_advisor_validates_names(self):
-        sm = MockSkillManager(["docker-best-practices", "httpx-connection-pooling"])
+        sm = MockSkillManager(['docker-best-practices', 'httpx-connection-pooling'])
         pool = _make_pool(skill_manager=sm)
 
         advisor_output = (
-            "[SKILLS] docker-best-practices, bogus-skill\n"
-            "[NOTES] pin tags\n"
-            "[VERDICT] APPROVE — good"
+            '[SKILLS] docker-best-practices, bogus-skill\n'
+            '[NOTES] pin tags\n'
+            '[VERDICT] APPROVE — good'
         )
         fake_result = MagicMock()
         fake_result.was_timeout = False
@@ -360,27 +360,27 @@ class TestRegistryValidation:
         fake_result.output_text = advisor_output
         fake_result.latency_ms = 12.0
 
-        with patch("agent_cascade.advisor_runner.run_lightweight_advisor", return_value=fake_result):
-            r = run_skill_advisor(pool, sm, "task", "ctx", "coder", "Maine")
+        with patch('agent_cascade.advisor_runner.run_lightweight_advisor', return_value=fake_result):
+            r = run_skill_advisor(pool, sm, 'task', 'ctx', 'coder', 'Maine')
 
-        assert r.verdict == "approve"
-        assert r.recommended_skills == ["docker-best-practices"]  # bogus filtered
+        assert r.verdict == 'approve'
+        assert r.recommended_skills == ['docker-best-practices']  # bogus filtered
 
     def test_passes_dedicated_turn_budget(self):
         """run_skill_advisor must pass SKILL_ADVISOR_MAX_TURNS explicitly (decoupled from SECURITY_AGENT_MAX_TURNS)."""
-        sm = MockSkillManager(["a"])
+        sm = MockSkillManager(['a'])
         pool = _make_pool(skill_manager=sm)
         fake_result = MagicMock()
         fake_result.was_timeout = False
         fake_result.was_error = False
-        fake_result.output_text = ""
+        fake_result.output_text = ''
         fake_result.latency_ms = 1.0
 
-        with patch("agent_cascade.advisor_runner.run_lightweight_advisor", return_value=fake_result) as m:
-            run_skill_advisor(pool, sm, "task", "ctx", "coder", "Maine")
+        with patch('agent_cascade.advisor_runner.run_lightweight_advisor', return_value=fake_result) as m:
+            run_skill_advisor(pool, sm, 'task', 'ctx', 'coder', 'Maine')
 
         from agent_cascade.settings import SKILL_ADVISOR_MAX_TURNS
-        assert m.call_args.kwargs.get("max_turns") == SKILL_ADVISOR_MAX_TURNS
+        assert m.call_args.kwargs.get('max_turns') == SKILL_ADVISOR_MAX_TURNS
 
 
 # ===========================================================================
@@ -389,42 +389,42 @@ class TestRegistryValidation:
 
 class TestFallbackBehavior:
     def test_timeout_returns_ambiguous(self):
-        sm = MockSkillManager(["a"])
+        sm = MockSkillManager(['a'])
         pool = _make_pool(skill_manager=sm)
         fake_result = MagicMock()
         fake_result.was_timeout = True
         fake_result.was_error = False
-        fake_result.output_text = ""
+        fake_result.output_text = ''
         fake_result.latency_ms = 30000.0
 
-        with patch("agent_cascade.advisor_runner.run_lightweight_advisor", return_value=fake_result):
-            r = run_skill_advisor(pool, sm, "task", "ctx", "coder", "Maine")
+        with patch('agent_cascade.advisor_runner.run_lightweight_advisor', return_value=fake_result):
+            r = run_skill_advisor(pool, sm, 'task', 'ctx', 'coder', 'Maine')
 
-        assert r.verdict == "ambiguous"
+        assert r.verdict == 'ambiguous'
         assert not r.is_usable
 
     def test_error_returns_ambiguous(self):
-        sm = MockSkillManager(["a"])
+        sm = MockSkillManager(['a'])
         pool = _make_pool(skill_manager=sm)
         fake_result = MagicMock()
         fake_result.was_timeout = False
         fake_result.was_error = True
-        fake_result.error_msg = "boom"
-        fake_result.output_text = ""
+        fake_result.error_msg = 'boom'
+        fake_result.output_text = ''
         fake_result.latency_ms = 5.0
 
-        with patch("agent_cascade.advisor_runner.run_lightweight_advisor", return_value=fake_result):
-            r = run_skill_advisor(pool, sm, "task", "ctx", "coder", "Maine")
+        with patch('agent_cascade.advisor_runner.run_lightweight_advisor', return_value=fake_result):
+            r = run_skill_advisor(pool, sm, 'task', 'ctx', 'coder', 'Maine')
 
-        assert r.verdict == "ambiguous"
+        assert r.verdict == 'ambiguous'
         assert not r.is_usable
 
     def test_runner_raises_returns_ambiguous(self):
-        sm = MockSkillManager(["a"])
+        sm = MockSkillManager(['a'])
         pool = _make_pool(skill_manager=sm)
-        with patch("agent_cascade.advisor_runner.run_lightweight_advisor", side_effect=RuntimeError("x")):
-            r = run_skill_advisor(pool, sm, "task", "ctx", "coder", "Maine")
-        assert r.verdict == "ambiguous"
+        with patch('agent_cascade.advisor_runner.run_lightweight_advisor', side_effect=RuntimeError('x')):
+            r = run_skill_advisor(pool, sm, 'task', 'ctx', 'coder', 'Maine')
+        assert r.verdict == 'ambiguous'
 
 # ===========================================================================
 # 5. Deny path — engine returns error string, no child instance created
@@ -436,13 +436,13 @@ class TestDenyPath:
         from agent_cascade.llm.schema import FUNCTION, Message
 
         advisor_result = SkillAdvisorResult(
-            verdict="deny", reason="trivial single-file read",
-            recommended_skills=[], task_notes="",
+            verdict='deny', reason='trivial single-file read',
+            recommended_skills=[], task_notes='',
         )
-        instance_name = "worker1"
+        instance_name = 'worker1'
 
         # Replicate the exact return shape used by engine/core.py on DENY.
-        if advisor_result.verdict == "deny":
+        if advisor_result.verdict == 'deny':
             result_tuple = (None, [Message(role=FUNCTION, content=(
                 f"Error: Skill Advisor denied this delegation — {advisor_result.reason}. "
                 f"Consider handling this task yourself or rephrasing with more specific context."
@@ -452,22 +452,22 @@ class TestDenyPath:
         assert inst is None  # no child instance allocated
         assert len(conv) == 1
         assert conv[0].role == FUNCTION
-        assert "Skill Advisor denied" in conv[0].content
+        assert 'Skill Advisor denied' in conv[0].content
         assert advisor_result.reason in conv[0].content
 
     def test_deny_error_is_not_a_system_error(self):
         """The deny message must NOT start with '[SYSTEM ERROR' (child_runner raises on that)."""
         from agent_cascade.llm.schema import FUNCTION, Message
         msg = Message(role=FUNCTION, content=(
-            "Error: Skill Advisor denied this delegation — trivial. "
-            "Consider handling this task yourself or rephrasing with more specific context."
+            'Error: Skill Advisor denied this delegation — trivial. '
+            'Consider handling this task yourself or rephrasing with more specific context.'
         ))
-        assert not msg.content.strip().startswith("[SYSTEM ERROR")
+        assert not msg.content.strip().startswith('[SYSTEM ERROR')
 
-    @pytest.mark.parametrize("verdict,expected", [
-        ("approve", True),
-        ("deny", True),
-        ("ambiguous", False),
+    @pytest.mark.parametrize('verdict,expected', [
+        ('approve', True),
+        ('deny', True),
+        ('ambiguous', False),
     ])
     def test_is_usable_property(self, verdict, expected):
         """is_usable drives the fallback mechanism in engine/core.py."""
@@ -482,22 +482,22 @@ class TestAdvisorGateCondition:
     """Replicates the exact should_run_advisor expression from engine/core.py."""
 
     @pytest.mark.parametrize(
-        "load_skill_mode,auto_skill_mode,force_fresh,log_file,n_skills,expected",
+        'load_skill_mode,auto_skill_mode,force_fresh,log_file,n_skills,expected',
         [
-            ("AUTO", "advanced", False, None, 0, False),   # zero skills → skip
-            ("AUTO", "advanced", False, None, 1, True),    # all conditions met
-            ("AUTO", "basic",    False, None, 1, False),   # basic mode never runs advisor
-            ("AUTO", "none",     False, None, 1, False),   # none mode never runs advisor
-            ("NONE", "advanced", False, None, 1, False),   # not AUTO mode
-            ("AUTO", "advanced", True,  None, 1, False),   # force_fresh → skip
-            ("AUTO", "advanced", False, "x.jsonl", 1, False),  # external load → skip
+            ('AUTO', 'advanced', False, None, 0, False),   # zero skills → skip
+            ('AUTO', 'advanced', False, None, 1, True),    # all conditions met
+            ('AUTO', 'basic',    False, None, 1, False),   # basic mode never runs advisor
+            ('AUTO', 'none',     False, None, 1, False),   # none mode never runs advisor
+            ('NONE', 'advanced', False, None, 1, False),   # not AUTO mode
+            ('AUTO', 'advanced', True,  None, 1, False),   # force_fresh → skip
+            ('AUTO', 'advanced', False, 'x.jsonl', 1, False),  # external load → skip
         ],
     )
     def test_should_run_advisor(self, load_skill_mode, auto_skill_mode, force_fresh, log_file, n_skills, expected):
         sm = MockSkillManager([f"s{i}" for i in range(n_skills)])
         should_run_advisor = (
-            load_skill_mode == "AUTO"
-            and auto_skill_mode == "advanced"
+            load_skill_mode == 'AUTO'
+            and auto_skill_mode == 'advanced'
             and not force_fresh
             and log_file is None
             and sm is not None
@@ -523,8 +523,8 @@ class TestAdvisorRunner:
         import agent_cascade.execution_engine as ee_mod
         import agent_cascade.compression.helpers as ch_mod
         return (
-            patch.object(ee_mod, "ExecutionEngine", return_value=fake_engine),
-            patch.object(ch_mod, "extract_instance_output", return_value="OUTPUT"),
+            patch.object(ee_mod, 'ExecutionEngine', return_value=fake_engine),
+            patch.object(ch_mod, 'extract_instance_output', return_value='OUTPUT'),
             fake_inst,
         )
 
@@ -533,26 +533,26 @@ class TestAdvisorRunner:
         import agent_cascade.execution_engine as ee_mod
 
         pool = _make_pool()
-        with patch.object(ee_mod, "ExecutionEngine", side_effect=RuntimeError("engine boom")):
+        with patch.object(ee_mod, 'ExecutionEngine', side_effect=RuntimeError('engine boom')):
             result = run_lightweight_advisor(
-                pool, "Security", "Security_op_test1234", "task", "caller"
+                pool, 'Security', 'Security_op_test1234', 'task', 'caller'
             )
         assert result.was_error is True
-        assert "engine boom" in result.error_msg
+        assert 'engine boom' in result.error_msg
         assert not result.ok
 
     def test_success_path_returns_output(self):
         from agent_cascade.advisor_runner import run_lightweight_advisor
 
         pool = _make_pool()
-        p1, p2, fake_inst = self._patch_engine([["turn1"]])
+        p1, p2, fake_inst = self._patch_engine([['turn1']])
         with p1, p2:
             result = run_lightweight_advisor(
-                pool, "Security", "Security_op_test5678", "task", "caller"
+                pool, 'Security', 'Security_op_test5678', 'task', 'caller'
             )
         assert result.was_error is False
         assert result.was_timeout is False
-        assert result.output_text == "OUTPUT"
+        assert result.output_text == 'OUTPUT'
         assert result.ok is True
 
     def test_early_exit_on_verdict(self):
@@ -564,21 +564,21 @@ class TestAdvisorRunner:
         pool = _make_pool()
         # Generator that would yield 3 turns if not stopped early.
         # After the first turn, the conversation contains a verdict message.
-        call_count = {"n": 0}
+        call_count = {'n': 0}
 
         def _gen(inst):
             # Turn 1: assistant produces verdict + (hypothetical) tool calls
             inst.conversation.append(
-                Message(role=ASSISTANT, content="[SKILLS] none\n[NOTES] ok\n[VERDICT] APPROVE — fine")
+                Message(role=ASSISTANT, content='[SKILLS] none\n[NOTES] ok\n[VERDICT] APPROVE — fine')
             )
-            call_count["n"] += 1
-            yield [["turn1"]]
+            call_count['n'] += 1
+            yield [['turn1']]
             # Turns 2-3: should NEVER be reached if early-exit works
-            inst.conversation.append(Message(role=ASSISTANT, content="continuing work..."))
-            call_count["n"] += 1
-            yield [["turn2"]]
-            call_count["n"] += 1
-            yield [["turn3"]]
+            inst.conversation.append(Message(role=ASSISTANT, content='continuing work...'))
+            call_count['n'] += 1
+            yield [['turn2']]
+            call_count['n'] += 1
+            yield [['turn3']]
 
         fake_inst = MagicMock()
         fake_inst.conversation = []
@@ -589,12 +589,12 @@ class TestAdvisorRunner:
 
         import agent_cascade.execution_engine as ee_mod
         import agent_cascade.compression.helpers as ch_mod
-        with patch.object(ee_mod, "ExecutionEngine", return_value=fake_engine), \
-             patch.object(ch_mod, "extract_instance_output", return_value="VERDICT OUTPUT"):
+        with patch.object(ee_mod, 'ExecutionEngine', return_value=fake_engine), \
+             patch.object(ch_mod, 'extract_instance_output', return_value='VERDICT OUTPUT'):
             result = run_lightweight_advisor(
-                pool, "Security", "Security_op_early01", "task", "caller"
+                pool, 'Security', 'Security_op_early01', 'task', 'caller'
             )
         # Only 1 turn should have been consumed (early exit on verdict)
-        assert call_count["n"] == 1, f"Expected 1 turn, got {call_count['n']}"
+        assert call_count['n'] == 1, f"Expected 1 turn, got {call_count['n']}"
         assert result.was_error is False
         assert result.ok is True

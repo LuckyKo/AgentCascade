@@ -21,7 +21,7 @@ All tests use concurrency_limit=0 (sequential pool) for real slot contention.
 import os as _os
 from pathlib import Path
 
-_os.environ.setdefault("AGENT_CASCADE_INSTANCE_ID", "test_e2e")
+_os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', 'test_e2e')
 
 import json
 import re
@@ -43,7 +43,7 @@ pytestmark = pytest.mark.timeout(90)
 
 # ── Config Isolation Fixture ──────────────────────────────────────────────────
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope='module', autouse=True)
 def e2e_config_isolation(tmp_path_factory):
     """Sets AGENT_CASCADE_TEST_CONFIG_DIR before agent_cascade server initialization,
     ensuring isolation from production config.
@@ -51,8 +51,8 @@ def e2e_config_isolation(tmp_path_factory):
     Uses tmp_path_factory for parallel-safe unique directories per test module run.
     Must be autouse + module scope so it runs before ac_server fixture.
     """
-    test_config = tmp_path_factory.mktemp("e2e_test_config")
-    _os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = str(test_config)
+    test_config = tmp_path_factory.mktemp('e2e_test_config')
+    _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(test_config)
     yield test_config
     # pytest auto-cleans tmp_path_factory dirs
 
@@ -62,7 +62,7 @@ def e2e_config_isolation(tmp_path_factory):
 class MockRequest:
     """Represents a logged request to the mock LLM server."""
 
-    __slots__ = ("seq", "path", "method", "body_summary", "timestamp")
+    __slots__ = ('seq', 'path', 'method', 'body_summary', 'timestamp')
 
     def __init__(self, seq: int, path: str, method: str, body_summary: str, timestamp: float):
         self.seq = seq
@@ -91,16 +91,16 @@ class ProgrammableMockLLMHandler(BaseHTTPRequestHandler):
         pass  # Suppress request logging
 
     def do_GET(self):
-        if self.path == "/v1/models":
-            self._send_json(200, {"data": [{"id": "mock-model", "object": "model"}]})
+        if self.path == '/v1/models':
+            self._send_json(200, {'data': [{'id': 'mock-model', 'object': 'model'}]})
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
         try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8', errors='replace')
 
             print(f"[MOCK-SERVER] POST {self.path}, body_len={len(body)}", flush=True)
 
@@ -110,56 +110,56 @@ class ProgrammableMockLLMHandler(BaseHTTPRequestHandler):
                 seq = self._seq_counter
                 try:
                     parsed = json.loads(body) if body else {}
-                    messages = parsed.get("messages", [])
+                    messages = parsed.get('messages', [])
 
                     # Extract agent identity from system prompt (first message, "You are <name>.")
-                    agent_id = ""
+                    agent_id = ''
                     if messages:
-                        raw_content = messages[0].get("content", "") if isinstance(messages[0], dict) else ""
+                        raw_content = messages[0].get('content', '') if isinstance(messages[0], dict) else ''
                         # Handle multimodal format: content can be a list of {"type": "text", "text": "..."} dicts
                         if isinstance(raw_content, list):
-                            sys_content = "".join(
-                                item.get("text", "") for item in raw_content if isinstance(item, dict) and item.get("type") == "text"
+                            sys_content = ''.join(
+                                item.get('text', '') for item in raw_content if isinstance(item, dict) and item.get('type') == 'text'
                             )
                         else:
                             sys_content = str(raw_content)
-                        m = re.match(r"You are ([^\n.]+)", sys_content.strip())
+                        m = re.match(r'You are ([^\n.]+)', sys_content.strip())
                         if m:
                             agent_id = m.group(1).strip()
 
                     # Also capture last message content for context
                     try:
                         last_msg_obj = messages[-1]
-                        last_msg = last_msg_obj.get("content", "")[:80] if isinstance(last_msg_obj, dict) else str(last_msg_obj)[:80]
+                        last_msg = last_msg_obj.get('content', '')[:80] if isinstance(last_msg_obj, dict) else str(last_msg_obj)[:80]
                     except Exception:
-                        last_msg = ""
+                        last_msg = ''
                     summary = f"agent='{agent_id}' msgs={len(messages)} last='{last_msg}'"
                 except Exception as e:
                     summary = f"PARSE_ERROR({type(e).__name__}): {body[:100]}"
 
-                self._request_log.append(MockRequest(seq, self.path, "POST", summary, time.time()))
+                self._request_log.append(MockRequest(seq, self.path, 'POST', summary, time.time()))
                 print(f"[MOCK-SERVER] Logged request #{seq}: {summary[:60]}, log_len={len(self._request_log)}", flush=True)
 
-            if self.path == "/v1/chat/completions":
+            if self.path == '/v1/chat/completions':
                 with self._lock:
                     if self._response_queue:
                         script = self._response_queue.pop(0)
                     else:
-                        script = {"text": "[MOCK: no more scripts]"}
+                        script = {'text': '[MOCK: no more scripts]'}
 
                 print(f"[MOCK-SERVER] Got script keys={list(script.keys())}", flush=True)
-                delay = script.get("delay", 0)
+                delay = script.get('delay', 0)
                 if delay > 0:
                     time.sleep(delay)
 
                 stream = self._build_stream(script)
 
                 self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")  # Close after sending all chunks
-                encoded = stream.encode("utf-8")
-                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Connection', 'close')  # Close after sending all chunks
+                encoded = stream.encode('utf-8')
+                self.send_header('Content-Length', str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
                 self.wfile.flush()
@@ -181,87 +181,87 @@ class ProgrammableMockLLMHandler(BaseHTTPRequestHandler):
         """Build SSE stream from a response script."""
         lines = []
 
-        if "tool_calls" in script:
-            tool_calls = script["tool_calls"]
+        if 'tool_calls' in script:
+            tool_calls = script['tool_calls']
             for i, tc in enumerate(tool_calls):
-                name = tc.get("name", "unknown")
-                args = tc.get("args", {})
+                name = tc.get('name', 'unknown')
+                args = tc.get('args', {})
                 tool_id = f"call_{i}"
 
                 chunk = {
-                    "id": f"mock-{tool_id}",
-                    "object": "chat.completion.chunk",
-                    "model": "mock-model",
-                    "created": 0,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": i,
-                                "id": tool_id,
-                                "function": {"name": name}
+                    'id': f"mock-{tool_id}",
+                    'object': 'chat.completion.chunk',
+                    'model': 'mock-model',
+                    'created': 0,
+                    'choices': [{
+                        'index': 0,
+                        'delta': {
+                            'tool_calls': [{
+                                'index': i,
+                                'id': tool_id,
+                                'function': {'name': name}
                             }]
                         },
-                        "finish_reason": None
+                        'finish_reason': None
                     }]
                 }
                 lines.append(f'data: {json.dumps(chunk)}\n\n')
 
                 args_str = json.dumps(args) if isinstance(args, dict) else str(args)
                 chunk = {
-                    "id": f"mock-{tool_id}",
-                    "object": "chat.completion.chunk",
-                    "model": "mock-model",
-                    "created": 0,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": i,
-                                "function": {"arguments": args_str}
+                    'id': f"mock-{tool_id}",
+                    'object': 'chat.completion.chunk',
+                    'model': 'mock-model',
+                    'created': 0,
+                    'choices': [{
+                        'index': 0,
+                        'delta': {
+                            'tool_calls': [{
+                                'index': i,
+                                'function': {'arguments': args_str}
                             }]
                         },
-                        "finish_reason": None if i < len(tool_calls) - 1 else "tool_calls"
+                        'finish_reason': None if i < len(tool_calls) - 1 else 'tool_calls'
                     }]
                 }
                 lines.append(f'data: {json.dumps(chunk)}\n\n')
 
-        elif "text" in script:
-            content = script["text"]
+        elif 'text' in script:
+            content = script['text']
             chunk = {
-                "id": "mock-text",
-                "object": "chat.completion.chunk",
-                "model": "mock-model",
-                "created": 0,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": content},
-                    "finish_reason": "stop"
+                'id': 'mock-text',
+                'object': 'chat.completion.chunk',
+                'model': 'mock-model',
+                'created': 0,
+                'choices': [{
+                    'index': 0,
+                    'delta': {'content': content},
+                    'finish_reason': 'stop'
                 }]
             }
             lines.append(f'data: {json.dumps(chunk)}\n\n')
         else:
             chunk = {
-                "id": "mock-empty",
-                "object": "chat.completion.chunk",
-                "model": "mock-model",
-                "created": 0,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": ""},
-                    "finish_reason": "stop"
+                'id': 'mock-empty',
+                'object': 'chat.completion.chunk',
+                'model': 'mock-model',
+                'created': 0,
+                'choices': [{
+                    'index': 0,
+                    'delta': {'content': ''},
+                    'finish_reason': 'stop'
                 }]
             }
             lines.append(f'data: {json.dumps(chunk)}\n\n')
 
-        lines.append("data: [DONE]\n\n")
-        return "".join(lines)
+        lines.append('data: [DONE]\n\n')
+        return ''.join(lines)
 
     def _send_json(self, status_code: int, data: Any):
-        body = json.dumps(data).encode("utf-8")
+        body = json.dumps(data).encode('utf-8')
         self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -282,10 +282,10 @@ class ProgrammableMockLLMHandler(BaseHTTPRequestHandler):
             cls._seq_counter = 0
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def mock_llm_server():
     """Start a programmable mock LLM HTTP server on a random port."""
-    server = HTTPServer(("127.0.0.1", 0), ProgrammableMockLLMHandler)
+    server = HTTPServer(('127.0.0.1', 0), ProgrammableMockLLMHandler)
     host, port = server.server_address
     base_url = f"http://{host}:{port}/v1"
 
@@ -301,14 +301,14 @@ def mock_llm_server():
             time.sleep(0.1)
     else:
         server.shutdown()
-        pytest.fail("Mock LLM server failed to start")
+        pytest.fail('Mock LLM server failed to start')
 
     yield base_url
 
     server.shutdown()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope='function')
 def ac_server(mock_llm_server):
     """Boot the full AgentCascade app via uvicorn on a real port.
 
@@ -323,12 +323,12 @@ def ac_server(mock_llm_server):
         sys.path.insert(0, str(project_root))
 
     # Ensure AgentCascade root is on path for config imports (config.secrets_loader, etc.)
-    ac_root = Path(project_root).parent / "AgentCascade"
+    ac_root = Path(project_root).parent / 'AgentCascade'
     if str(ac_root) not in sys.path:
         sys.path.insert(0, str(ac_root))
 
     # Fixed session name for test runs so tests can target the orchestrator instance.
-    TEST_SESSION_NAME = "E2ETestSession"
+    TEST_SESSION_NAME = 'E2ETestSession'
 
     from agent_cascade.api_server import create_app
     from agent_cascade.agent_pool import AgentPool
@@ -337,15 +337,15 @@ def ac_server(mock_llm_server):
     from uvicorn import Config, Server
 
     llm_cfg = {
-        "model": "mock-model",
-        "model_server": mock_llm_server,
-        "api_key": "EMPTY",
-        "model_type": "qwenvl_oai",
-        "max_input_tokens": 8192,
+        'model': 'mock-model',
+        'model_server': mock_llm_server,
+        'api_key': 'EMPTY',
+        'model_type': 'qwenvl_oai',
+        'max_input_tokens': 8192,
     }
 
     # Use AgentCascade agents dir (has templates) rather than project_root/agents (empty in workspace)
-    agents_dir = ac_root / "agents" if (ac_root / "agents").exists() else project_root / "agents"
+    agents_dir = ac_root / 'agents' if (ac_root / 'agents').exists() else project_root / 'agents'
     pool = AgentPool(llm_cfg, agents_dir=str(agents_dir))
 
     # CRITICAL: Clear persisted endpoints/priorities so tests use only our mock endpoint.
@@ -357,10 +357,10 @@ def ac_server(mock_llm_server):
 
     # CRITICAL: conc=0 forces shared sequential SlotPool with real contention.
     mock_ep = APIEndpoint(
-        id="mock-endpoint",
-        name="Mock LLM Server",
+        id='mock-endpoint',
+        name='Mock LLM Server',
         api_base=mock_llm_server,  # fixture yields base_url string directly
-        model="mock-model",
+        model='mock-model',
         concurrency_limit=0,  # Sequential — real FIFO contention
         enabled=True,
     )
@@ -380,17 +380,17 @@ def ac_server(mock_llm_server):
         agents=agents,
         agent_pool=pool,
         config={
-            "session_name": TEST_SESSION_NAME,  # Fixed name — tests target this instance directly
-            "fresh_session": True,              # Don't load stale conversation history from logs
+            'session_name': TEST_SESSION_NAME,  # Fixed name — tests target this instance directly
+            'fresh_session': True,              # Don't load stale conversation history from logs
         },
     )
 
     import socket
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind(('127.0.0.1', 0))
         ac_port = s.getsockname()[1]
 
-    config = Config(app=app, host="127.0.0.1", port=ac_port, log_level="warning", lifespan="on")
+    config = Config(app=app, host='127.0.0.1', port=ac_port, log_level='warning', lifespan='on')
     server = Server(config=config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -419,7 +419,7 @@ def ac_server(mock_llm_server):
         # Clean up session logs to avoid polluting production zone.
         # Tests must never leave trash on HDD.
         import glob
-        log_pattern = str(project_root / "logs" / f"orchestrator_{TEST_SESSION_NAME}_*.jsonl")
+        log_pattern = str(project_root / 'logs' / f"orchestrator_{TEST_SESSION_NAME}_*.jsonl")
         for log_file in glob.glob(log_pattern):
             try:
                 Path(log_file).unlink()
@@ -445,7 +445,7 @@ def _is_transient_conn_error(exc: Exception) -> bool:
     return False
 
 
-def handshake_and_send(base_url: str, text: str, target: str = "E2ETestSession", _retries: int = 3) -> Tuple[str, str]:
+def handshake_and_send(base_url: str, text: str, target: str = 'E2ETestSession', _retries: int = 3) -> Tuple[str, str]:
     """Perform E2E handshake and send a message. Returns (session_token, shared_secret).
 
     Retries up to `_retries` times on transient connection errors (socket buffer
@@ -456,34 +456,34 @@ def handshake_and_send(base_url: str, text: str, target: str = "E2ETestSession",
         try:
             resp = requests.get(f"{base_url}/api/keys", timeout=5)
             assert resp.status_code == 200, f"Failed to get keys: {resp.text}"
-            server_public_b64 = resp.json()["public_key"]
+            server_public_b64 = resp.json()['public_key']
 
             client_private, client_public_b64 = generate_client_keypair()
             shared_secret = derive_shared_secret(client_private, server_public_b64)
 
             resp = requests.post(
                 f"{base_url}/api/handshake",
-                json={"public_key": client_public_b64},
+                json={'public_key': client_public_b64},
                 timeout=5,
             )
             assert resp.status_code == 200, f"Handshake failed: {resp.text}"
-            session_token = resp.json()["session_token"]
+            session_token = resp.json()['session_token']
 
-            payload = {"target": target, "text": text}
+            payload = {'target': target, 'text': text}
             encrypted_b64, nonce_b64 = encrypt_payload(shared_secret, payload)
 
             resp = requests.post(
                 f"{base_url}/api/message",
                 json={
-                    "session_token": session_token,
-                    "payload": encrypted_b64,
-                    "nonce": nonce_b64,
+                    'session_token': session_token,
+                    'payload': encrypted_b64,
+                    'nonce': nonce_b64,
                 },
                 timeout=5,
             )
             assert resp.status_code == 200, f"Message send failed: {resp.text}"
             data = resp.json()
-            assert data.get("status") == "success", f"Unexpected status: {data}"
+            assert data.get('status') == 'success', f"Unexpected status: {data}"
 
             return session_token, shared_secret
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, OSError) as exc:
@@ -502,12 +502,12 @@ def wait_for_completion(base_url: str, session_token: str, timeout: float = 90.0
         try:
             resp = requests.get(
                 f"{base_url}/api/status",
-                params={"token": session_token},
+                params={'token': session_token},
                 timeout=5,
             )
             if resp.status_code == 200:
                 status = resp.json()
-                if not status.get("generating", True):
+                if not status.get('generating', True):
                     return True
         except (requests.RequestException, json.JSONDecodeError):
             pass
@@ -517,7 +517,7 @@ def wait_for_completion(base_url: str, session_token: str, timeout: float = 90.0
 
 def get_agent_states(base_url: str, session_token: str) -> Dict[str, Any]:
     """Get current agent states from /api/state."""
-    resp = requests.get(f"{base_url}/api/state", params={"token": session_token}, timeout=5)
+    resp = requests.get(f"{base_url}/api/state", params={'token': session_token}, timeout=5)
     if resp.status_code == 200:
         return resp.json()
     return {}
@@ -532,7 +532,7 @@ def extract_agent_identity(body_summary: str) -> str:
     m = re.search(r"agent='([^']+)'", body_summary)
     if m:
         return m.group(1)
-    return ""
+    return ''
 
 
 def extract_identities(log: List[MockRequest]) -> List[str]:
@@ -593,7 +593,7 @@ def assert_sentinel_in_last_requests(log: List[MockRequest], sentinel: str, coun
     """
     if count == -1:
         search_range = log
-        desc = "any request"
+        desc = 'any request'
     else:
         search_range = log[-count:]
         desc = f"last {count} request(s)"
@@ -632,27 +632,27 @@ class TestAgentCallSchedulingStress:
         responses = [
             # Turn 1: Maine calls two async children
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "researcher", "instance_name": "A", "task": "Research task A", "async_mode": True}},
-                    {"name": "call_agent", "args": {"agent_class": "reviewer", "instance_name": "B", "task": "Review task B", "async_mode": True}}
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'researcher', 'instance_name': 'A', 'task': 'Research task A', 'async_mode': True}},
+                    {'name': 'call_agent', 'args': {'agent_class': 'reviewer', 'instance_name': 'B', 'task': 'Review task B', 'async_mode': True}}
                 ]
             },
             # Turn 2: A completes (instant)
-            {"text": "SENTINEL_A_COMPLETE_T1"},
+            {'text': 'SENTINEL_A_COMPLETE_T1'},
             # Turn 3: B completes with delay to create contention window
-            {"text": "SENTINEL_B_COMPLETE_T1", "delay": 1.5},
+            {'text': 'SENTINEL_B_COMPLETE_T1', 'delay': 1.5},
             # Turn 4: Maine resumes with both results
-            {"text": "SENTINEL_MAINE_FINAL_T1 both tasks done"},
+            {'text': 'SENTINEL_MAINE_FINAL_T1 both tasks done'},
         ]
 
         ProgrammableMockLLMHandler.set_responses(responses)
         ProgrammableMockLLMHandler.clear_request_log()
 
         test_start = time.perf_counter()
-        session_token, _ = handshake_and_send(base_url, "Run A and B concurrently.")
+        session_token, _ = handshake_and_send(base_url, 'Run A and B concurrently.')
 
         completed = wait_for_completion(base_url, session_token, timeout=90.0)
-        assert completed, "Test timed out — possible deadlock with concurrent async children"
+        assert completed, 'Test timed out — possible deadlock with concurrent async children'
 
         log = ProgrammableMockLLMHandler.get_request_log()
         identities = extract_identities(log)
@@ -661,8 +661,8 @@ class TestAgentCallSchedulingStress:
         assert len(log) >= 4, f"Expected >= 4 LLM requests for concurrent serialization, got {len(log)}: {identities}"
 
         # Both children must appear in the log (observable completion)
-        assert "A" in identities, f"Child A not found in request log. Identities: {identities}"
-        assert "B" in identities, f"Child B not found in request log. Identities: {identities}"
+        assert 'A' in identities, f"Child A not found in request log. Identities: {identities}"
+        assert 'B' in identities, f"Child B not found in request log. Identities: {identities}"
 
         # Timing-based serialization check: A(instant) + B(delay=1.5s) serialized on conc=0
         # must take >1.7s wall-clock. Concurrent execution would complete in ~1.5s.
@@ -674,11 +674,11 @@ class TestAgentCallSchedulingStress:
 
         # Verify final sentinel was consumed by checking the resume request contains child completion sentinels
         # (Maine's own final response sentinel is never in a request body since there's no subsequent request)
-        resume_reqs = [r for r in log if "E2ETestSession" in r.body_summary and len(r.body_summary) > 50]
+        resume_reqs = [r for r in log if 'E2ETestSession' in r.body_summary and len(r.body_summary) > 50]
         assert len(resume_reqs) >= 1, f"No Maine resume request found. Log: {[r.body_summary[:60] for r in log]}"
         # The resume request should contain at least one child's completion sentinel as tool result
         maine_resume = resume_reqs[-1]
-        assert "SENTINEL_A_COMPLETE_T1" in maine_resume.body_summary or "SENTINEL_B_COMPLETE_T1" in maine_resume.body_summary, (
+        assert 'SENTINEL_A_COMPLETE_T1' in maine_resume.body_summary or 'SENTINEL_B_COMPLETE_T1' in maine_resume.body_summary, (
             f"Maine resume request missing child sentinels: {maine_resume.body_summary[:150]}"
         )
 
@@ -696,26 +696,26 @@ class TestAgentCallSchedulingStress:
         responses = [
             # Turn 1: Maine calls slow async A then sync B
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "researcher", "instance_name": "A_slow", "task": "Slow research", "async_mode": True}},
-                    {"name": "call_agent", "args": {"agent_class": "reviewer", "instance_name": "B_sync", "task": "Quick review"}}
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'researcher', 'instance_name': 'A_slow', 'task': 'Slow research', 'async_mode': True}},
+                    {'name': 'call_agent', 'args': {'agent_class': 'reviewer', 'instance_name': 'B_sync', 'task': 'Quick review'}}
                 ]
             },
             # Turn 2: B (sync) completes quickly — MUST NOT be starved by A's pending async
-            {"text": "SENTINEL_B_SYNC_FAST_T2"},
+            {'text': 'SENTINEL_B_SYNC_FAST_T2'},
             # Turn 3: A (async) completes after delay
-            {"text": "SENTINEL_A_COMPLETE_T2", "delay": 2.5},
+            {'text': 'SENTINEL_A_COMPLETE_T2', 'delay': 2.5},
             # Turn 4: Maine resumes with both results
-            {"text": "SENTINEL_MAINE_FINAL_T2"},
+            {'text': 'SENTINEL_MAINE_FINAL_T2'},
         ]
 
         ProgrammableMockLLMHandler.set_responses(responses)
         ProgrammableMockLLMHandler.clear_request_log()
 
-        session_token, _ = handshake_and_send(base_url, "Run slow async and quick sync.")
+        session_token, _ = handshake_and_send(base_url, 'Run slow async and quick sync.')
 
         completed = wait_for_completion(base_url, session_token, timeout=90.0)
-        assert completed, "Test timed out — possible reservation starvation (6ee94ce regression)"
+        assert completed, 'Test timed out — possible reservation starvation (6ee94ce regression)'
 
         log = ProgrammableMockLLMHandler.get_request_log()
         identities = extract_identities(log)
@@ -727,15 +727,15 @@ class TestAgentCallSchedulingStress:
 
         for req in log:
             agent = extract_agent_identity(req.body_summary)
-            if maine_start is None and "Maine" in agent:
+            if maine_start is None and 'Maine' in agent:
                 maine_start = req.timestamp
-            elif "B_sync" in agent and b_sync_req_time is None:
+            elif 'B_sync' in agent and b_sync_req_time is None:
                 b_sync_req_time = req.timestamp
-            elif "A_slow" in agent and a_complete_time is None:
+            elif 'A_slow' in agent and a_complete_time is None:
                 a_complete_time = req.timestamp
 
         # B_sync must appear in log (it ran)
-        assert "B_sync" in identities, f"Sync child B not found — starved by spawn reservation? Identities: {identities}"
+        assert 'B_sync' in identities, f"Sync child B not found — starved by spawn reservation? Identities: {identities}"
 
         # Critical: B's request should happen relatively quickly after Maine starts,
         # NOT delayed ~300s by a stale reservation. With A having 2.5s delay, if B is
@@ -749,15 +749,15 @@ class TestAgentCallSchedulingStress:
             )
 
         # A_slow must also complete (async didn't interfere)
-        assert "A_slow" in identities, f"Async child A not found. Identities: {identities}"
+        assert 'A_slow' in identities, f"Async child A not found. Identities: {identities}"
 
         # Verify final resume request consumed child results (sentinels injected as tool results).
         # The orchestrator's own final response sentinel is never in a request body since there's no subsequent request.
-        resume_reqs = [r for r in log if "E2ETestSession" in r.body_summary and len(r.body_summary) > 50]
+        resume_reqs = [r for r in log if 'E2ETestSession' in r.body_summary and len(r.body_summary) > 50]
         assert len(resume_reqs) >= 1, f"No E2ETestSession resume request found. Log: {[r.body_summary[:60] for r in log]}"
         maine_resume = resume_reqs[-1]
         # At least one child sentinel should appear in the resume request as a tool result
-        has_sentinel = any(s in maine_resume.body_summary for s in ["SENTINEL_B_SYNC_FAST_T2", "SENTINEL_A_COMPLETE_T2"])
+        has_sentinel = any(s in maine_resume.body_summary for s in ['SENTINEL_B_SYNC_FAST_T2', 'SENTINEL_A_COMPLETE_T2'])
         assert has_sentinel, (
             f"E2ETestSession resume request missing child sentinels: {maine_resume.body_summary[:150]}"
         )
@@ -773,23 +773,23 @@ class TestAgentCallSchedulingStress:
         responses = [
             # Turn 1: Maine calls A async with delay
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "researcher", "instance_name": "A", "task": "Async task needing pool", "async_mode": True}}
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'researcher', 'instance_name': 'A', 'task': 'Async task needing pool', 'async_mode': True}}
                 ]
             },
             # Turn 2: A completes after delay — requires Maine to have released slot while sleeping
-            {"text": "SENTINEL_A_COMPLETE_T3", "delay": 1.5},
+            {'text': 'SENTINEL_A_COMPLETE_T3', 'delay': 1.5},
             # Turn 3: Maine resumes with result
-            {"text": "SENTINEL_MAINE_FINAL_T3 success"},
+            {'text': 'SENTINEL_MAINE_FINAL_T3 success'},
         ]
 
         ProgrammableMockLLMHandler.set_responses(responses)
         ProgrammableMockLLMHandler.clear_request_log()
 
-        session_token, _ = handshake_and_send(base_url, "Run async task A.")
+        session_token, _ = handshake_and_send(base_url, 'Run async task A.')
 
         completed = wait_for_completion(base_url, session_token, timeout=90.0)
-        assert completed, "Test timed out — possible release-on-sleep deadlock"
+        assert completed, 'Test timed out — possible release-on-sleep deadlock'
 
         log = ProgrammableMockLLMHandler.get_request_log()
         identities = extract_identities(log)
@@ -798,17 +798,17 @@ class TestAgentCallSchedulingStress:
         assert len(log) >= 3, f"Expected >= 3 requests for release-on-sleep test, got {len(log)}: {identities}"
 
         # Verify proper ordering: E2ETestSession starts, A runs after, E2ETestSession resumes last
-        assert_identity_subsequence(identities, ["E2ETestSession", "A", "E2ETestSession"])
+        assert_identity_subsequence(identities, ['E2ETestSession', 'A', 'E2ETestSession'])
 
         # A must appear in log (it got the slot after Maine released)
-        assert "A" in identities, f"Child A not found — parent may have held slot while sleeping. Identities: {identities}"
+        assert 'A' in identities, f"Child A not found — parent may have held slot while sleeping. Identities: {identities}"
 
         # Final resume request should contain child's completion sentinel (injected as tool result).
         # The orchestrator's own final response sentinel is never in a request body since there's no subsequent request.
-        resume_reqs = [r for r in log if "E2ETestSession" in r.body_summary and len(r.body_summary) > 50]
+        resume_reqs = [r for r in log if 'E2ETestSession' in r.body_summary and len(r.body_summary) > 50]
         assert len(resume_reqs) >= 1, f"No E2ETestSession resume request found. Log: {[r.body_summary[:60] for r in log]}"
         maine_resume = resume_reqs[-1]
-        assert "SENTINEL_A_COMPLETE_T3" in maine_resume.body_summary, (
+        assert 'SENTINEL_A_COMPLETE_T3' in maine_resume.body_summary, (
             f"E2ETestSession resume request missing child sentinel: {maine_resume.body_summary[:150]}"
         )
 
@@ -825,20 +825,20 @@ class TestAgentCallSchedulingStress:
         maine_responses = [
             # Turn 1: Maine calls A async with long delay
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "researcher", "instance_name": "A_slow", "task": "Very slow research", "async_mode": True}}
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'researcher', 'instance_name': 'A_slow', 'task': 'Very slow research', 'async_mode': True}}
                 ]
             },
             # Turn 2: A completes after delay
-            {"text": "SENTINEL_A_COMPLETE_T4", "delay": 3.0},
+            {'text': 'SENTINEL_A_COMPLETE_T4', 'delay': 3.0},
             # Turn 3: Maine resumes
-            {"text": "SENTINEL_MAINE_FINAL_T4"},
+            {'text': 'SENTINEL_MAINE_FINAL_T4'},
         ]
 
         # Session 2 responses (independent agent — must complete while Maine sleeps)
         independent_responses = [
             # Independent agent completes quickly
-            {"text": "SENTINEL_INDEPENDENT_T4 done"},
+            {'text': 'SENTINEL_INDEPENDENT_T4 done'},
         ]
 
         # Combine all responses in the order they'll be consumed:
@@ -852,22 +852,22 @@ class TestAgentCallSchedulingStress:
         ProgrammableMockLLMHandler.clear_request_log()
 
         # Start Session 1: Maine with slow async child
-        session1_token, _ = handshake_and_send(base_url, "Run slow async task.")
+        session1_token, _ = handshake_and_send(base_url, 'Run slow async task.')
 
         # Give Maine time to start and enter SLEEPING state
         time.sleep(1.0)
 
         # Start Session 2: independent agent — must complete while Maine sleeps
-        session2_token, _ = handshake_and_send(base_url, "Quick independent task.")
+        session2_token, _ = handshake_and_send(base_url, 'Quick independent task.')
 
         # Both sessions should complete within timeout
         completed1 = wait_for_completion(base_url, session1_token, timeout=90.0)
-        assert completed1, "Session 1 (Maine) timed out"
+        assert completed1, 'Session 1 (Maine) timed out'
 
         completed2 = wait_for_completion(base_url, session2_token, timeout=30.0)
         assert completed2, (
-            "Session 2 (independent agent) timed out — likely blocked by stale SLEEPING reservation "
-            "(783a3fd regression). Independent agents should not be starved by unrelated sleepers."
+            'Session 2 (independent agent) timed out — likely blocked by stale SLEEPING reservation '
+            '(783a3fd regression). Independent agents should not be starved by unrelated sleepers.'
         )
 
         log = ProgrammableMockLLMHandler.get_request_log()
@@ -879,14 +879,14 @@ class TestAgentCallSchedulingStress:
         # Verify session 2's message was processed (appears in resume request body_summary).
         # Both sessions target the same E2ETestSession instance, so session 2's text gets queued
         # and appears when E2ETestSession resumes after A_slow completes.
-        session2_processed = any("Quick independent" in r.body_summary for r in log)
+        session2_processed = any('Quick independent' in r.body_summary for r in log)
         assert session2_processed, (
             f"Session 2 message not processed — may have been blocked by sleeping reservation. "
             f"Summaries: {[r.body_summary[:80] for r in log]}"
         )
 
         # Verify A_slow completed (its identity appears in the request log)
-        assert "A_slow" in identities, f"A_slow not found in request log — did not get slot after Maine slept. Identities: {identities}"
+        assert 'A_slow' in identities, f"A_slow not found in request log — did not get slot after Maine slept. Identities: {identities}"
 
         # Find timestamps to verify E2ETestSession resumed after A_slow completed
         maine_start_time = None
@@ -894,13 +894,13 @@ class TestAgentCallSchedulingStress:
 
         for req in log:
             agent = extract_agent_identity(req.body_summary)
-            if maine_start_time is None and "E2ETestSession" in agent:
+            if maine_start_time is None and 'E2ETestSession' in agent:
                 maine_start_time = req.timestamp
-            elif "A_slow" in agent and a_slow_complete_time is None:
+            elif 'A_slow' in agent and a_slow_complete_time is None:
                 a_slow_complete_time = req.timestamp
 
-        assert maine_start_time is not None, "E2ETestSession start not found in log"
-        assert a_slow_complete_time is not None, "A_slow request not found in log"
+        assert maine_start_time is not None, 'E2ETestSession start not found in log'
+        assert a_slow_complete_time is not None, 'A_slow request not found in log'
 
     def test_t5_deep_nesting_under_contention(self, ac_server):
         """T5 — Deep nesting under contention: chain with dependency-respecting order.
@@ -913,40 +913,40 @@ class TestAgentCallSchedulingStress:
         responses = [
             # Turn 1: Maine calls A async
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "researcher", "instance_name": "A", "task": "Level 1 research", "async_mode": True}}
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'researcher', 'instance_name': 'A', 'task': 'Level 1 research', 'async_mode': True}}
                 ]
             },
             # Turn 2: A starts, calls B sync
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "coder", "instance_name": "B", "task": "Level 2 implement"}}
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'coder', 'instance_name': 'B', 'task': 'Level 2 implement'}}
                 ]
             },
             # Turn 3: B completes with delay
-            {"text": "SENTINEL_B_COMPLETE_T5", "delay": 0.8},
+            {'text': 'SENTINEL_B_COMPLETE_T5', 'delay': 0.8},
             # Turn 4: A resumes, calls C async
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "reviewer", "instance_name": "C", "task": "Level 3 review", "async_mode": True}}
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'reviewer', 'instance_name': 'C', 'task': 'Level 3 review', 'async_mode': True}}
                 ]
             },
             # Turn 5: C completes with delay
-            {"text": "SENTINEL_C_COMPLETE_T5", "delay": 1.0},
+            {'text': 'SENTINEL_C_COMPLETE_T5', 'delay': 1.0},
             # Turn 6: A resumes with C's result, completes
-            {"text": "SENTINEL_A_FINAL_T5"},
+            {'text': 'SENTINEL_A_FINAL_T5'},
             # Turn 7: Maine resumes with A's result, finishes
-            {"text": "SENTINEL_MAINE_FINAL_T5 chain complete"},
+            {'text': 'SENTINEL_MAINE_FINAL_T5 chain complete'},
         ]
 
         ProgrammableMockLLMHandler.set_responses(responses)
         ProgrammableMockLLMHandler.clear_request_log()
 
         test_start = time.perf_counter()
-        session_token, _ = handshake_and_send(base_url, "Deep nested chain task.")
+        session_token, _ = handshake_and_send(base_url, 'Deep nested chain task.')
 
         completed = wait_for_completion(base_url, session_token, timeout=90.0)
-        assert completed, "Test timed out — possible deadlock in deep nesting under contention"
+        assert completed, 'Test timed out — possible deadlock in deep nesting under contention'
 
         log = ProgrammableMockLLMHandler.get_request_log()
         identities = extract_identities(log)
@@ -955,12 +955,12 @@ class TestAgentCallSchedulingStress:
         assert len(log) >= 6, f"Expected >= 6 requests for deep nesting, got {len(log)}: {identities}"
 
         # Dependency ordering: A before B's work, B before C, Maine last
-        assert "A" in identities, f"A not found. Identities: {identities}"
-        assert "B" in identities, f"B not found. Identities: {identities}"
-        assert "C" in identities, f"C not found. Identities: {identities}"
+        assert 'A' in identities, f"A not found. Identities: {identities}"
+        assert 'B' in identities, f"B not found. Identities: {identities}"
+        assert 'C' in identities, f"C not found. Identities: {identities}"
 
         # Verify dependency-respecting subsequence: A appears before B, B before C, E2ETestSession resumes last
-        assert_identity_subsequence(identities, ["A", "B", "C", "E2ETestSession"])
+        assert_identity_subsequence(identities, ['A', 'B', 'C', 'E2ETestSession'])
 
         # Timing-based serialization check: the real correctness property is the
         # dependency ordering asserted above via assert_identity_subsequence. This
@@ -978,10 +978,10 @@ class TestAgentCallSchedulingStress:
 
         # Final resume request should contain child completion sentinels (injected as tool results).
         # The orchestrator's own final response sentinel is never in a request body since there's no subsequent request.
-        resume_reqs = [r for r in log if "E2ETestSession" in r.body_summary and len(r.body_summary) > 50]
+        resume_reqs = [r for r in log if 'E2ETestSession' in r.body_summary and len(r.body_summary) > 50]
         assert len(resume_reqs) >= 1, f"No E2ETestSession resume request found. Log: {[r.body_summary[:60] for r in log]}"
         maine_resume = resume_reqs[-1]
-        has_sentinel = any(s in maine_resume.body_summary for s in ["SENTINEL_A_FINAL_T5", "SENTINEL_B_COMPLETE_T5", "SENTINEL_C_COMPLETE_T5"])
+        has_sentinel = any(s in maine_resume.body_summary for s in ['SENTINEL_A_FINAL_T5', 'SENTINEL_B_COMPLETE_T5', 'SENTINEL_C_COMPLETE_T5'])
         assert has_sentinel, (
             f"E2ETestSession resume request missing child sentinels: {maine_resume.body_summary[:150]}"
         )
@@ -996,32 +996,32 @@ class TestAgentCallSchedulingStress:
         responses = [
             # Turn 1: Maine calls 5 async children
             {
-                "tool_calls": [
-                    {"name": "call_agent", "args": {"agent_class": "researcher", "instance_name": "B1", "task": "Task 1", "async_mode": True}},
-                    {"name": "call_agent", "args": {"agent_class": "coder", "instance_name": "B2", "task": "Task 2", "async_mode": True}},
-                    {"name": "call_agent", "args": {"agent_class": "reviewer", "instance_name": "B3", "task": "Task 3", "async_mode": True}},
-                    {"name": "call_agent", "args": {"agent_class": "researcher", "instance_name": "B4", "task": "Task 4", "async_mode": True}},
-                    {"name": "call_agent", "args": {"agent_class": "coder", "instance_name": "B5", "task": "Task 5", "async_mode": True}},
+                'tool_calls': [
+                    {'name': 'call_agent', 'args': {'agent_class': 'researcher', 'instance_name': 'B1', 'task': 'Task 1', 'async_mode': True}},
+                    {'name': 'call_agent', 'args': {'agent_class': 'coder', 'instance_name': 'B2', 'task': 'Task 2', 'async_mode': True}},
+                    {'name': 'call_agent', 'args': {'agent_class': 'reviewer', 'instance_name': 'B3', 'task': 'Task 3', 'async_mode': True}},
+                    {'name': 'call_agent', 'args': {'agent_class': 'researcher', 'instance_name': 'B4', 'task': 'Task 4', 'async_mode': True}},
+                    {'name': 'call_agent', 'args': {'agent_class': 'coder', 'instance_name': 'B5', 'task': 'Task 5', 'async_mode': True}},
                 ]
             },
             # Turns 2-6: Each child completes with small distinct delays for contention window
-            {"text": "SENTINEL_B1_T6", "delay": 0.3},
-            {"text": "SENTINEL_B2_T6", "delay": 0.4},
-            {"text": "SENTINEL_B3_T6", "delay": 0.5},
-            {"text": "SENTINEL_B4_T6", "delay": 0.6},
-            {"text": "SENTINEL_B5_T6", "delay": 0.7},
+            {'text': 'SENTINEL_B1_T6', 'delay': 0.3},
+            {'text': 'SENTINEL_B2_T6', 'delay': 0.4},
+            {'text': 'SENTINEL_B3_T6', 'delay': 0.5},
+            {'text': 'SENTINEL_B4_T6', 'delay': 0.6},
+            {'text': 'SENTINEL_B5_T6', 'delay': 0.7},
             # Turn 7: Maine resumes with all results
-            {"text": "SENTINEL_MAINE_FINAL_T6 all five done"},
+            {'text': 'SENTINEL_MAINE_FINAL_T6 all five done'},
         ]
 
         ProgrammableMockLLMHandler.set_responses(responses)
         ProgrammableMockLLMHandler.clear_request_log()
 
         test_start = time.perf_counter()
-        session_token, _ = handshake_and_send(base_url, "Run five tasks concurrently.")
+        session_token, _ = handshake_and_send(base_url, 'Run five tasks concurrently.')
 
         completed = wait_for_completion(base_url, session_token, timeout=90.0)
-        assert completed, "Test timed out — possible starvation or deadlock with mass contention"
+        assert completed, 'Test timed out — possible starvation or deadlock with mass contention'
 
         log = ProgrammableMockLLMHandler.get_request_log()
         identities = extract_identities(log)
@@ -1030,7 +1030,7 @@ class TestAgentCallSchedulingStress:
         assert len(log) >= 7, f"Expected >= 7 requests for mass contention, got {len(log)}: {identities}"
 
         # All 5 children must appear (no starvation)
-        for child in ["B1", "B2", "B3", "B4", "B5"]:
+        for child in ['B1', 'B2', 'B3', 'B4', 'B5']:
             assert child in identities, f"Child {child} not found — starved? Identities: {identities}"
 
         # Timing-based serialization check: 5 children with delays (0.3+0.4+0.5+0.6+0.7=2.5s)
@@ -1044,7 +1044,7 @@ class TestAgentCallSchedulingStress:
 
         # Final resume request should contain child completion sentinels (injected as tool results).
         # The orchestrator's own final response sentinel is never in a request body since there's no subsequent request.
-        resume_reqs = [r for r in log if "E2ETestSession" in r.body_summary and len(r.body_summary) > 50]
+        resume_reqs = [r for r in log if 'E2ETestSession' in r.body_summary and len(r.body_summary) > 50]
         assert len(resume_reqs) >= 1, f"No E2ETestSession resume request found. Log: {[r.body_summary[:60] for r in log]}"
         maine_resume = resume_reqs[-1]
         # At least one child sentinel should appear in the resume request as a tool result
@@ -1104,7 +1104,7 @@ class TestSecuritySlotYieldOnSharedSlot:
         from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
         # Isolate config dir for the router's api_endpoints.json.
-        _os2.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = str(tmp_path)
+        _os2.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(tmp_path)
 
         # The shared-slot acquire timeout is a module-level constant captured at
         # import time (default 300s). Patching os.environ has NO effect here, so
@@ -1121,15 +1121,15 @@ class TestSecuritySlotYieldOnSharedSlot:
 
         try:
             # ── Real router with a conc=0 endpoint → real shared sequential SlotPool ──
-            llm_cfg = {"model": "mock", "api_base": "http://127.0.0.1:9/v1",
-                       "model_server": "http://127.0.0.1:9/v1", "api_key": "EMPTY"}
+            llm_cfg = {'model': 'mock', 'api_base': 'http://127.0.0.1:9/v1',
+                       'model_server': 'http://127.0.0.1:9/v1', 'api_key': 'EMPTY'}
             router = APIRouter(default_llm_cfg=llm_cfg, config_dir=str(tmp_path))
             with router._lock:
                 router.endpoints.clear()
                 router.agent_priorities.clear()
                 router._agent_types_with_priorities.clear()
-            ep = APIEndpoint(id="ep0", name="conc0", api_base=llm_cfg["api_base"],
-                             model="mock", concurrency_limit=0, enabled=True)
+            ep = APIEndpoint(id='ep0', name='conc0', api_base=llm_cfg['api_base'],
+                             model='mock', concurrency_limit=0, enabled=True)
             router.add_endpoint(ep)
             router.default_llm_cfg = ep.to_llm_cfg()
 
@@ -1139,10 +1139,10 @@ class TestSecuritySlotYieldOnSharedSlot:
             security_llm_called = threading.Event()   # Security got the slot, entered its LLM stage
             caller_may_finish = threading.Event()     # main thread: halt verified → caller stream may end
             results = {
-                "caller_exc": None,
-                "sec_exc": None,
-                "caller_done": threading.Event(),
-                "sec_done": threading.Event(),
+                'caller_exc': None,
+                'sec_exc': None,
+                'caller_done': threading.Event(),
+                'sec_done': threading.Event(),
             }
 
             def _make_agent(name: str, agent_class: str) -> AgentInstance:
@@ -1170,39 +1170,39 @@ class TestSecuritySlotYieldOnSharedSlot:
                 """Block until `name` holds a live ticket in the shared FIFO."""
                 deadline = _time.monotonic() + timeout
                 while _time.monotonic() < deadline:
-                    for t in list(getattr(slot_pool, "_waiters", {}).values()):
+                    for t in list(getattr(slot_pool, '_waiters', {}).values()):
                         if t.instance_name == name and not t.cancelled.is_set():
                             return True
                     _time.sleep(0.02)
                 return False
 
-            caller = _make_agent("caller", "coder")
-            pool.instances["caller"] = caller
-            sec = _make_agent("Security_repro", "Security")
-            pool.instances["Security_repro"] = sec
+            caller = _make_agent('caller', 'coder')
+            pool.instances['caller'] = caller
+            sec = _make_agent('Security_repro', 'Security')
+            pool.instances['Security_repro'] = sec
 
             engine_caller = ExecutionEngine(pool)
-            _patch_fake_stream(engine_caller, "CALLER DONE", gate=caller_may_finish)
+            _patch_fake_stream(engine_caller, 'CALLER DONE', gate=caller_may_finish)
 
             def run_security():
                 engine_sec = ExecutionEngine(pool)
-                _patch_fake_stream(engine_sec, "SECURITY DONE", on_enter=security_llm_called.set)
+                _patch_fake_stream(engine_sec, 'SECURITY DONE', on_enter=security_llm_called.set)
                 try:
                     for _chunk in engine_sec.run(sec):
                         pass  # drain yields; completion is what matters
                 except Exception as e:  # noqa: BLE001 — capture for assertions
-                    results["sec_exc"] = e
+                    results['sec_exc'] = e
                 finally:
-                    results["sec_done"].set()
+                    results['sec_done'].set()
 
             def run_caller():
                 try:
                     for _chunk in engine_caller.run(caller):
                         pass
                 except Exception as e:  # noqa: BLE001 — capture for assertions
-                    results["caller_exc"] = e
+                    results['caller_exc'] = e
                 finally:
-                    results["caller_done"].set()
+                    results['caller_done'].set()
 
             # ── Step 1: caller acquires + holds the shared permit (inside run()) ──
             th_caller = threading.Thread(target=run_caller, daemon=True)
@@ -1211,17 +1211,17 @@ class TestSecuritySlotYieldOnSharedSlot:
             deadline = _time.monotonic() + 5.0
             shared = None
             while _time.monotonic() < deadline:
-                shared = router.scheduler._pools.get("_shared_sequential_slot_")
-                if shared is not None and "caller" in shared._running:
+                shared = router.scheduler._pools.get('_shared_sequential_slot_')
+                if shared is not None and 'caller' in shared._running:
                     break
-                if results["caller_exc"] is not None or results["caller_done"].is_set():
+                if results['caller_exc'] is not None or results['caller_done'].is_set():
                     break
                 _time.sleep(0.02)
             assert shared is not None, (
                 f"Shared sequential SlotPool was never created (conc=0 not in effect?); "
                 f"caller_exc={results['caller_exc']!r}"
             )
-            assert "caller" in shared._running and not results["caller_done"].is_set(), (
+            assert 'caller' in shared._running and not results['caller_done'].is_set(), (
                 f"caller did not hold the shared slot (holders={list(shared._running)}, "
                 f"exc={results['caller_exc']!r})"
             )
@@ -1229,17 +1229,17 @@ class TestSecuritySlotYieldOnSharedSlot:
             # ── Step 2: Security queues FIFO on the SAME shared pool ─────────────
             th_sec = threading.Thread(target=run_security, daemon=True)
             th_sec.start()
-            assert _wait_queued(shared, "Security_repro"), (
-                "Security never queued on the shared sequential slot"
+            assert _wait_queued(shared, 'Security_repro'), (
+                'Security never queued on the shared sequential slot'
             )
-            assert "caller" in shared._running, (
+            assert 'caller' in shared._running, (
                 f"caller unexpectedly lost the slot before suspension: {list(shared._running)}"
             )
 
             # ── Step 3: suspend the caller EXACTLY like forced compression does ──
             t0 = time.perf_counter()
-            pool.halt_all_instances(except_instances=["Security_repro"])
-            assert "caller" in pool._halted_instances, "caller was not halted by halt_all_instances"
+            pool.halt_all_instances(except_instances=['Security_repro'])
+            assert 'caller' in pool._halted_instances, 'caller was not halted by halt_all_instances'
             caller_may_finish.set()  # caller may end its turn → hits its next checkpoint
 
             # ── FIXED BEHAVIOR: Security acquires promptly (old code: 3s timeout) ──
@@ -1253,8 +1253,8 @@ class TestSecuritySlotYieldOnSharedSlot:
             # parallel-suite load that can exceed 3s even when the fix works correctly,
             # producing a flaky failure (see .agent_lessons/endpoint-slot-deadlock-...).
             assert security_llm_called.wait(timeout=10), (
-                "Security never acquired the shared slot after the suspended caller "
-                "yielded it — BUG-1 regression (slot starvation/deadlock is back)"
+                'Security never acquired the shared slot after the suspended caller '
+                'yielded it — BUG-1 regression (slot starvation/deadlock is back)'
             )
             elapsed = time.perf_counter() - t0
             if elapsed >= 3.0:
@@ -1268,39 +1268,39 @@ class TestSecuritySlotYieldOnSharedSlot:
                 )
 
             # ── Step 4: resume → caller re-acquires at the FIFO tail, both complete ──
-            assert "caller" in pool._compression_halted, (
-                "caller suspension was not tracked as compression-halted"
+            assert 'caller' in pool._compression_halted, (
+                'caller suspension was not tracked as compression-halted'
             )
             pool.resume_all_instances()
-            assert not pool._compression_halted, "resume_all_instances left compression halts behind"
+            assert not pool._compression_halted, 'resume_all_instances left compression halts behind'
 
-            assert results["sec_done"].wait(timeout=15), "Security run did not finish"
-            assert results["caller_done"].wait(timeout=15), "Caller run did not finish"
+            assert results['sec_done'].wait(timeout=15), 'Security run did not finish'
+            assert results['caller_done'].wait(timeout=15), 'Caller run did not finish'
             th_sec.join(timeout=5)
             th_caller.join(timeout=5)
 
-            assert results["sec_exc"] is None, f"Security raised: {results['sec_exc']!r}"
-            assert results["caller_exc"] is None, f"Caller raised: {results['caller_exc']!r}"
+            assert results['sec_exc'] is None, f"Security raised: {results['sec_exc']!r}"
+            assert results['caller_exc'] is None, f"Caller raised: {results['caller_exc']!r}"
 
             # Neither agent may surface a slot-acquire failure in its transcript…
             for inst in (caller, sec):
                 for m in inst.conversation:
-                    c = getattr(m, "content", "") or ""
-                    assert not ("[SYSTEM ERROR" in c and ("Timed out" in c or "endpoint slot" in c)), (
+                    c = getattr(m, 'content', '') or ''
+                    assert not ('[SYSTEM ERROR' in c and ('Timed out' in c or 'endpoint slot' in c)), (
                         f"{inst.instance_name} surfaced a slot-acquire failure: {c[:160]}"
                     )
             # …and both turns must have committed their expected assistant output
             # (proof that Security genuinely RAN, not just acquired-and-died).
             def _committed(inst, needle):
                 return any(
-                    getattr(m, "role", "") == ASSISTANT and needle in (getattr(m, "content", "") or "")
+                    getattr(m, 'role', '') == ASSISTANT and needle in (getattr(m, 'content', '') or '')
                     for m in inst.conversation
                 )
-            assert _committed(caller, "CALLER DONE"), (
+            assert _committed(caller, 'CALLER DONE'), (
                 f"caller never committed its final turn: "
                 f"{[str(getattr(m, 'content', ''))[:40] for m in caller.conversation]}"
             )
-            assert _committed(sec, "SECURITY DONE"), (
+            assert _committed(sec, 'SECURITY DONE'), (
                 f"Security never committed its final turn: "
                 f"{[str(getattr(m, 'content', ''))[:40] for m in sec.conversation]}"
             )

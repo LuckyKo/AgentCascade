@@ -237,8 +237,8 @@ class TestAtomicProbeClaim:
 class TestPerModelCooldownIndependence:
     def test_shared_base_different_models_independent(self, router):
         base = 'http://127.0.0.1:1234/v1'
-        id_m1 = _add_endpoint(router, "m1", base, model='model-a')
-        id_m2 = _add_endpoint(router, "m2", base, model='model-b')
+        id_m1 = _add_endpoint(router, 'm1', base, model='model-a')
+        id_m2 = _add_endpoint(router, 'm2', base, model='model-b')
         router.set_agent_priorities('coder', [id_m1, id_m2])
 
         now = time.time()
@@ -248,12 +248,12 @@ class TestPerModelCooldownIndependence:
 
         chain = router.get_endpoint_chain('coder')
         models = [c['model'] for c in chain]
-        assert 'model-b' in models, "healthy model on shared base must remain in chain"
-        assert 'model-a' not in models, "cooling-down (base,model) must be filtered out"
+        assert 'model-b' in models, 'healthy model on shared base must remain in chain'
+        assert 'model-a' not in models, 'cooling-down (base,model) must be filtered out'
 
     def test_same_model_different_base_independent(self, router):
-        id_s1 = _add_endpoint(router, "s1", 'http://127.0.0.1:1234/v1', model='shared-model')
-        id_s2 = _add_endpoint(router, "s2", 'http://192.168.1.5:1234/v1', model='shared-model')
+        id_s1 = _add_endpoint(router, 's1', 'http://127.0.0.1:1234/v1', model='shared-model')
+        id_s2 = _add_endpoint(router, 's2', 'http://192.168.1.5:1234/v1', model='shared-model')
         router.set_agent_priorities('coder', [id_s1, id_s2])
 
         with router._lock:
@@ -289,14 +289,14 @@ class TestChainFilteringWithBreaker:
 
             with pytest.raises(ServerBusyError):
                 router.call_with_fallback('coder', fn)
-            assert calls == [], "no HTTP call may be fired at a breaker-open base"
+            assert calls == [], 'no HTTP call may be fired at a breaker-open base'
         finally:
             router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = orig_cap
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
 
     def test_failover_to_different_physical_server(self, router):
         import agent_cascade.api_router_pkg.router as router_mod
-        id_h = _add_endpoint(router, "healthy", 'http://healthy-host:9/v1', model='hm')
+        id_h = _add_endpoint(router, 'healthy', 'http://healthy-host:9/v1', model='hm')
         router.set_agent_priorities('coder', [id_h])
         # Busy base = the default's base.
         router._record_server_busy('http://default-api', _busy_error())
@@ -322,7 +322,7 @@ class TestChainFilteringWithBreaker:
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
             router_mod.SANITY_PROBE_ENABLED = orig_probe_enabled
         assert result == 'ok-healthy'
-        assert calls == ['http://healthy-host:9/v1'], "must failover immediately, zero calls to busy base"
+        assert calls == ['http://healthy-host:9/v1'], 'must failover immediately, zero calls to busy base'
 
 
 # ============================================================================
@@ -357,10 +357,10 @@ class TestD1FailFast:
             router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = orig_cap
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
 
-        assert calls == [], "zero HTTP requests while the breaker is open"
+        assert calls == [], 'zero HTTP requests while the breaker is open'
         assert elapsed >= 0.9, f"expected a bounded wait (~1s cap), got {elapsed:.2f}s"
         assert not isinstance(exc_info.value, FallbackCompressionRequired)
-        assert "Server busy" in str(exc_info.value)
+        assert 'Server busy' in str(exc_info.value)
 
     def test_wait_is_termination_aware(self, router):
         """Terminating the instance mid-wait aborts promptly with AgentTerminatedError."""
@@ -460,7 +460,7 @@ class TestBypassGates:
 
         with patch('agent_cascade.llm.oai.requests.get') as mock_get:
             model._detect_context_window('http://127.0.0.1:1234/v1', 'EMPTY')
-            assert mock_get.call_count == 0, "no /models GET may be fired at a busy base"
+            assert mock_get.call_count == 0, 'no /models GET may be fired at a busy base'
 
     def test_detect_context_window_fires_when_closed(self, router):
         """Breaker closed → detection proceeds normally (gate is not over-blocking)."""
@@ -475,7 +475,7 @@ class TestBypassGates:
             assert mock_get.call_count == 1
 
     def test_caption_images_does_not_fire_at_busy_base(self, router):
-        id_v = _add_endpoint(router, "vision", 'http://busy-vision:9/v1', model='v-model')
+        id_v = _add_endpoint(router, 'vision', 'http://busy-vision:9/v1', model='v-model')
         router.set_agent_priorities('coder', [id_v])
         router._record_server_busy('http://busy-vision:9/v1', _busy_error())
 
@@ -483,7 +483,7 @@ class TestBypassGates:
         msgs = [Message(role='user', content=[ContentItem(image='data:image/png;base64,AAAA')])]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
             router.caption_images(msgs, agent_type='coder')
-            assert mock_gcm.call_count == 0, "no captioning call may fire at a busy base"
+            assert mock_gcm.call_count == 0, 'no captioning call may fire at a busy base'
         # Image got the placeholder caption.
         item = msgs[0].content[0]
         cap = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
@@ -562,7 +562,7 @@ class TestIntegrationMockServers:
 
         # N models on ONE physical (busy) server + one healthy endpoint elsewhere.
         ids = [_add_endpoint(router, f"busy_m{i}", busy_base, model=f'model-{i}') for i in range(3)]
-        id_h = _add_endpoint(router, "healthy", healthy_base, model='hm')
+        id_h = _add_endpoint(router, 'healthy', healthy_base, model='hm')
         router.set_agent_priorities('coder', ids + [id_h])
 
         # Monkeypatch execute_api_call's underlying call_fn to hit the mock servers.
@@ -607,14 +607,14 @@ class TestIntegrationMockServers:
         # Zero hammering: at most one attempt per model before the breaker trips (3) +
         # the single probe after the window (1). Hard bound — NOT one call per model per cycle.
         assert busy_hits <= 4, f"busy base was hammered {busy_hits} times"
-        assert healthy_hits >= 1, "failover to the healthy base must have happened"
+        assert healthy_hits >= 1, 'failover to the healthy base must have happened'
 
         # ── Recovery: after the open window elapses, exactly ONE probe fires at the
         # busy base; once it succeeds (server flipped healthy) the breaker closes and
         # service resumes there.
         with router._lock:
             br = router._server_breakers.get(normalize_api_base(busy_base))
-            assert br is not None, "breaker must still be open after the first call"
+            assert br is not None, 'breaker must still be open after the first call'
             # Elapse the window so the next consult transitions to half_open.
             br['opened_at'] -= (br['window'] + 1)
         mock_servers['busy_ref']['busy'] = False   # server recovered
@@ -684,7 +684,7 @@ class TestIntegrationMockServers:
         router.default_llm_cfg = {
             'api_base': busy_base, 'model': 'default-model', 'max_tokens': 2048,
         }
-        id_b = _add_endpoint(router, "busy_m0", busy_base, model='model-0')
+        id_b = _add_endpoint(router, 'busy_m0', busy_base, model='model-0')
         router.set_agent_priorities('coder', [id_b])
 
         import agent_cascade.api_router_pkg.router as router_mod
@@ -707,8 +707,8 @@ class TestIntegrationMockServers:
             router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = orig_cap
             object.__setattr__(router.policy, 'endpoint_max_retries', orig_max_retries)
 
-        assert elapsed >= 0.9, "bounded wait must be honored"
-        assert hits_after == hits_before, "zero HTTP to the busy base while held open"
+        assert elapsed >= 0.9, 'bounded wait must be honored'
+        assert hits_after == hits_before, 'zero HTTP to the busy base while held open'
 
 
 # ============================================================================
@@ -718,14 +718,14 @@ class TestIntegrationMockServers:
 
 def _det_error():
     """A deterministic client error: carries a 4xx code recognized by is_deterministic_client_error."""
-    return ModelServiceError(code='400', message="Function tools with reasoning_effort are not supported")
+    return ModelServiceError(code='400', message='Function tools with reasoning_effort are not supported')
 
 
 class TestEndpointBlacklist:
     def test_blacklist_after_threshold_deterministic_failures(self, router):
         """3 consecutive deterministic failures to one endpoint → blacklisted for ENDPOINT_BLACKLIST_SECONDS."""
         base = 'http://127.0.0.1:1234/v1'
-        id_m = _add_endpoint(router, "det", base, model='det-model')
+        id_m = _add_endpoint(router, 'det', base, model='det-model')
         router.set_agent_priorities('coder', [id_m])
 
         key = (normalize_api_base(base), 'det-model')
@@ -754,7 +754,7 @@ class TestEndpointBlacklist:
     def test_non_deterministic_error_resets_counter(self, router):
         """A non-deterministic failure (network/timeout) deletes the counter for that key."""
         base = 'http://127.0.0.1:1234/v1'
-        id_m = _add_endpoint(router, "det", base, model='det-model')
+        id_m = _add_endpoint(router, 'det', base, model='det-model')
         router.set_agent_priorities('coder', [id_m])
 
         key = (normalize_api_base(base), 'det-model')
@@ -762,7 +762,7 @@ class TestEndpointBlacklist:
             router._endpoint_deterministic_failures[key] = 2
 
         # Simulate the else-branch of the per-endpoint except block: non-deterministic → reset.
-        err = Exception("connection timed out")
+        err = Exception('connection timed out')
         assert not is_deterministic_client_error(err)
         with router._lock:
             if key in router._endpoint_deterministic_failures:
@@ -775,7 +775,7 @@ class TestEndpointBlacklist:
     def test_get_endpoint_chain_skips_blacklisted(self, router):
         """A blacklisted endpoint is filtered out of the chain (pure dict lookup under lock)."""
         base = 'http://127.0.0.1:1234/v1'
-        id_m = _add_endpoint(router, "det", base, model='det-model')
+        id_m = _add_endpoint(router, 'det', base, model='det-model')
         router.set_agent_priorities('coder', [id_m])
 
         key = (normalize_api_base(base), 'det-model')
@@ -784,7 +784,7 @@ class TestEndpointBlacklist:
 
         chain = router.get_endpoint_chain('coder')
         models = [c['model'] for c in chain]
-        assert 'det-model' not in models, "blacklisted endpoint must be skipped"
+        assert 'det-model' not in models, 'blacklisted endpoint must be skipped'
         # Tier-4 default is still appended as last resort.
         assert 'default-model' in models
 
@@ -796,7 +796,7 @@ class TestEndpointBlacklist:
         exercises the success-path cleanup.
         """
         base = 'http://127.0.0.1:1234/v1'
-        id_m = _add_endpoint(router, "det", base, model='det-model')
+        id_m = _add_endpoint(router, 'det', base, model='det-model')
         router.set_agent_priorities('coder', [id_m])
 
         key = (normalize_api_base(base), 'det-model')
@@ -815,5 +815,5 @@ class TestEndpointBlacklist:
 
         assert result == 'ok'
         with router._lock:
-            assert key not in router._endpoint_blacklist, "blacklist entry must be cleared on success"
-            assert key not in router._endpoint_deterministic_failures, "failure count must be cleared on success"
+            assert key not in router._endpoint_blacklist, 'blacklist entry must be cleared on success'
+            assert key not in router._endpoint_deterministic_failures, 'failure count must be cleared on success'

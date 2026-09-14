@@ -15,15 +15,15 @@ def _format_agent_status(state_name: str, is_halted: bool) -> Tuple[str, str]:
         Tuple[str, str]: (emoji, status_text) for display.
     """
     base = {
-        "IDLE": ("⚪", "Idle"),
-        "RUNNING": ("🟢", "Running"),
-        "SLEEPING": ("🟡", "Sleeping"),
-        "COMPLETING": ("🔵", "Completing"),
-        "TERMINATED": ("🔴", "Terminated"),
-    }.get(state_name, ("⚫", state_name))
+        'IDLE': ('⚪', 'Idle'),
+        'RUNNING': ('🟢', 'Running'),
+        'SLEEPING': ('🟡', 'Sleeping'),
+        'COMPLETING': ('🔵', 'Completing'),
+        'TERMINATED': ('🔴', 'Terminated'),
+    }.get(state_name, ('⚫', state_name))
 
-    if is_halted and state_name not in ("TERMINATED",):
-        return ("🟣", f"{base[1]} (Halted)")
+    if is_halted and state_name not in ('TERMINATED',):
+        return ('🟣', f"{base[1]} (Halted)")
     return base
 
 
@@ -44,38 +44,38 @@ class ListAgents(BaseTool):
 
     def call(self, params: str, **kwargs) -> str:
         if not self.agent_pool:
-            return "Error: No agent pool available."
+            return 'Error: No agent pool available.'
 
         from agent_cascade.utils.utils import get_history_stats
         from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
         import datetime
 
-        lines = ["# Agent Management Inventory\n"]
-        lines.append("Use this list to monitor context usage and status of your workers. "
-                     "To delegate a new task, use `call_agent`. To free up resources, use `dismiss_agent`.\n")
+        lines = ['# Agent Management Inventory\n']
+        lines.append('Use this list to monitor context usage and status of your workers. '
+                     'To delegate a new task, use `call_agent`. To free up resources, use `dismiss_agent`.\n')
 
         # 1. Available Agent Templates
-        lines.append("## 1. Agent Templates (Available Classes)")
+        lines.append('## 1. Agent Templates (Available Classes)')
         for agent_name in self.agent_pool.list_agents():
             info = self.agent_pool.get_agent_info(agent_name)
             tagline = (info.get('tagline') or 'No tagline available.') if info else 'No template info available.'
             lines.append(f"- **{agent_name}**: {tagline}")
-        lines.append("")
+        lines.append('')
 
         # 2. Active & Persistent Instances
-        lines.append("## 2. Active Instances (Sessions)")
+        lines.append('## 2. Active Instances (Sessions)')
 
         # Get all known instances from classes or conversations
         all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) |
                                     set(self.agent_pool.instance_conversations.keys())))
 
         if not all_instances:
-            lines.append("- No active or persistent instances.")
+            lines.append('- No active or persistent instances.')
         else:
             for inst_name in all_instances:
-                cls_name = self.agent_pool.instance_classes.get(inst_name, "Unknown")
+                cls_name = self.agent_pool.instance_classes.get(inst_name, 'Unknown')
                 inst_obj = self.agent_pool.instances.get(inst_name)
-                state_name = inst_obj.get_state_name() if inst_obj else "UNKNOWN"
+                state_name = inst_obj.get_state_name() if inst_obj else 'UNKNOWN'
                 is_halted = self.agent_pool.is_instance_halted(inst_name) if self.agent_pool else False
 
                 status_emoji, status_text = _format_agent_status(state_name, is_halted)
@@ -98,21 +98,21 @@ class ListAgents(BaseTool):
 
                 # Metadata & Traceability
                 logger_inst = self.agent_pool.instance_loggers.get(inst_name)
-                log_path = logger_inst.log_path if logger_inst and hasattr(logger_inst, 'log_path') else "N/A"
+                log_path = logger_inst.log_path if logger_inst and hasattr(logger_inst, 'log_path') else 'N/A'
 
-                last_active = "Unknown"
+                last_active = 'Unknown'
                 if logger_inst and hasattr(logger_inst, 'data'):
                     ts_str = logger_inst.data['metadata'].get('last_update')
                     if ts_str:
                         try:
                             dt = datetime.datetime.fromisoformat(ts_str)
-                            last_active = dt.strftime("%Y-%m-%d %H:%M:%S")
+                            last_active = dt.strftime('%Y-%m-%d %H:%M:%S')
                         except:
                             last_active = ts_str
 
-                summary = self.agent_pool.instance_summaries.get(inst_name, "None")
+                summary = self.agent_pool.instance_summaries.get(inst_name, 'None')
                 if len(summary) > 150:
-                    summary = summary[:147] + "..."
+                    summary = summary[:147] + '...'
 
                 # Format context usage as used/total with a percentage when the effective
                 # limit is known; fall back to the bare token count when it cannot be resolved.
@@ -128,9 +128,9 @@ class ListAgents(BaseTool):
                 lines.append(f"  - **Last Activity**: {last_active}")
                 lines.append(f"  - **Summary**: {summary}")
                 lines.append(f"  - **Log Path**: `{log_path}`")
-                lines.append("")
+                lines.append('')
 
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
 
 

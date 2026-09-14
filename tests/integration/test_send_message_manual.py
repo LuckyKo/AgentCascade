@@ -80,8 +80,8 @@ def pool():
 
 def test_agent_to_agent(pool):
     """Agent A sends message to Agent B → verify queue entry with sender tag."""
-    print("\n[TEST] Agent-to-Agent Messaging")
-    print("-" * 40)
+    print('\n[TEST] Agent-to-Agent Messaging')
+    print('-' * 40)
 
     from agent_cascade.tools.custom.send_message import SendMessage
 
@@ -102,13 +102,13 @@ def test_agent_to_agent(pool):
         print(f"  send_message result: {result}")
 
         # Verify success response
-        assert "sent successfully" in result.lower(), f"Expected success, got: {result}"
+        assert 'sent successfully' in result.lower(), f"Expected success, got: {result}"
 
         # Drain and verify queued message
         msgs = pool.drain_queue('agentB')
         assert len(msgs) == 1, f"Expected 1 message in queue, got {len(msgs)}"
 
-        expected_tag = "[MESSAGE from agentA]: Integration test message from agentA."
+        expected_tag = '[MESSAGE from agentA]: Integration test message from agentA.'
         assert msgs[0] == expected_tag, f"Unexpected message format: {msgs[0]}"
 
         print(f"  ✓ Message queued correctly: {msgs[0]}")
@@ -123,8 +123,8 @@ def test_agent_to_agent(pool):
 
 def test_agent_to_user(pool):
     """Agent sends message to user → verify WebSocket event format."""
-    print("\n[TEST] Agent-to-User Messaging (WebSocket)")
-    print("-" * 40)
+    print('\n[TEST] Agent-to-User Messaging (WebSocket)')
+    print('-' * 40)
 
     from agent_cascade.tools.custom.send_message import SendMessage
 
@@ -157,7 +157,7 @@ def test_agent_to_user(pool):
         result = tool.call(params)
 
         print(f"  send_message result: {result}")
-        assert "sent successfully" in result.lower(), f"Expected success, got: {result}"
+        assert 'sent successfully' in result.lower(), f"Expected success, got: {result}"
 
         # Read event from queue
         def get_with_timeout():
@@ -171,9 +171,9 @@ def test_agent_to_user(pool):
         assert event['type'] == 'agent_message_to_user', f"Wrong event type: {event.get('type')}"
         assert event['sender'] == 'agentA', f"Wrong sender: {event.get('sender')}"
         assert event['message'] == 'Build completed successfully!', f"Wrong message: {event.get('message')}"
-        assert 'timestamp' in event, "Missing timestamp in event"
+        assert 'timestamp' in event, 'Missing timestamp in event'
 
-        print("  ✓ WebSocket event format verified")
+        print('  ✓ WebSocket event format verified')
         return True
     finally:
         if original_name is not None:
@@ -186,9 +186,9 @@ def test_agent_to_user(pool):
 
 
 def main():
-    print("=" * 50)
-    print("send_message Integration Test Suite")
-    print("=" * 50)
+    print('=' * 50)
+    print('send_message Integration Test Suite')
+    print('=' * 50)
 
     pool = None
     passed = 0
@@ -196,7 +196,7 @@ def main():
 
     try:
         pool = setup_agent_pool()
-        print("\n✓ FakeAgentPool created with agents: agentA, agentB")
+        print('\n✓ FakeAgentPool created with agents: agentA, agentB')
 
         # Test 1: Agent-to-Agent
         try:
@@ -225,9 +225,9 @@ def main():
     finally:
         pool = None
 
-    print("\n" + "=" * 50)
+    print('\n' + '=' * 50)
     print(f"Results: {passed} passed, {failed} failed")
-    print("=" * 50)
+    print('=' * 50)
 
     return 0 if failed == 0 else 1
 

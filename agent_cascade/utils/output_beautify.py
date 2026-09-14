@@ -32,14 +32,14 @@ def typewriter_print(messages: List[dict], text: str) -> str:
         if msg['role'] == ASSISTANT:
             if msg.get('reasoning_content'):
                 assert isinstance(msg['reasoning_content'], str), 'Now only supports text messages'
-                content.append(f'{THOUGHT_S}\n{msg["reasoning_content"]}')
+                content.append(f'{THOUGHT_S}\n{msg['reasoning_content']}')
             if msg.get('content'):
                 assert isinstance(msg['content'], str), 'Now only supports text messages'
-                content.append(f'{ANSWER_S}\n{msg["content"]}')
+                content.append(f'{ANSWER_S}\n{msg['content']}')
             if msg.get('function_call'):
-                content.append(f'{TOOL_CALL_S} {msg["function_call"]["name"]}\n{msg["function_call"]["arguments"]}')
+                content.append(f'{TOOL_CALL_S} {msg['function_call']['name']}\n{msg['function_call']['arguments']}')
         elif msg['role'] == FUNCTION:
-            content.append(f'{TOOL_RESULT_S} {msg["name"]}\n{msg["content"]}')
+            content.append(f'{TOOL_RESULT_S} {msg['name']}\n{msg['content']}')
         else:
             raise TypeError
     if content:
@@ -113,15 +113,15 @@ def multimodal_typewriter_print(messages: List[dict], text: str = '') -> str:
         if msg['role'] == ASSISTANT:
             if msg.get('reasoning_content'):
                 assert isinstance(msg['reasoning_content'], str), 'Now only supports text messages'
-                content_parts.append(f'{THOUGHT_S}\n{msg["reasoning_content"]}')
+                content_parts.append(f'{THOUGHT_S}\n{msg['reasoning_content']}')
             if msg.get('content'):
                 assert isinstance(msg['content'], str), 'Now only supports text messages'
-                content_parts.append(f'{ANSWER_S}\n{msg["content"]}')
+                content_parts.append(f'{ANSWER_S}\n{msg['content']}')
             if msg.get('function_call'):
-                content_parts.append(f'{TOOL_CALL_S} {msg["function_call"]["name"]}\n{msg["function_call"]["arguments"]}')
+                content_parts.append(f'{TOOL_CALL_S} {msg['function_call']['name']}\n{msg['function_call']['arguments']}')
         elif msg['role'] == FUNCTION:
-            tool_name = msg.get("name", "unknown_tool")
-            tool_content = msg.get("content", "")
+            tool_name = msg.get('name', 'unknown_tool')
+            tool_content = msg.get('content', '')
             
             # Parse tool content for both text and images
             text_parts, image_paths = parse_tool_response_content(tool_content)

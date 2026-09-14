@@ -37,8 +37,8 @@ def _make_instance() -> AgentInstance:
     """Construct a minimal real AgentInstance for engine-method tests."""
     now = time.monotonic()
     return AgentInstance(
-        instance_name="TestAgent",
-        agent_class="coder",
+        instance_name='TestAgent',
+        agent_class='coder',
         conversation=[],
         created_at=now,
         last_activity=now,
@@ -48,12 +48,12 @@ def _make_instance() -> AgentInstance:
 
 def _reasoning_only_msg() -> Message:
     """A reasoning-only assistant message (has reasoning, no content, no tool call)."""
-    return Message(role=ASSISTANT, content="", reasoning_content="let me think about this carefully")
+    return Message(role=ASSISTANT, content='', reasoning_content='let me think about this carefully')
 
 
 def _empty_output_msg() -> Message:
     """An empty-output assistant message (nothing at all)."""
-    return Message(role=ASSISTANT, content="")
+    return Message(role=ASSISTANT, content='')
 
 
 def _broken_json_msg() -> dict:
@@ -66,9 +66,9 @@ def _broken_json_msg() -> dict:
     detection with the shape it actually handles.
     """
     return {
-        "role": ASSISTANT,
-        "content": "",
-        "function_call": {"name": "some_tool", "arguments": '{"a": 1'},
+        'role': ASSISTANT,
+        'content': '',
+        'function_call': {'name': 'some_tool', 'arguments': '{"a": 1'},
     }
 
 
@@ -88,10 +88,10 @@ class _FakePool:
         self.nudge_enabled = nudge_enabled
         # tail_sync_check_enabled=False keeps _inject_soft_continue_nudge off the
         # real logger / tail-sync path (no shell windows, no filesystem).
-        self.settings = type("Settings", (), {
-            "auto_continue": auto_continue,
-            "SOFT_CONTINUE_NUDGE_ENABLED": nudge_enabled,
-            "tail_sync_check_enabled": False,
+        self.settings = type('Settings', (), {
+            'auto_continue': auto_continue,
+            'SOFT_CONTINUE_NUDGE_ENABLED': nudge_enabled,
+            'tail_sync_check_enabled': False,
         })()
         self.stopped = False
         self._run_generation = 0
@@ -178,25 +178,25 @@ class TestIsIncompleteStateRegression:
     """The detection helper must keep classifying the right shapes."""
 
     def test_reasoning_only(self):
-        assert _is_incomplete_state([_reasoning_only_msg()]) == "reasoning-only"
+        assert _is_incomplete_state([_reasoning_only_msg()]) == 'reasoning-only'
 
     def test_empty_output(self):
-        assert _is_incomplete_state([_empty_output_msg()]) == "empty-output"
+        assert _is_incomplete_state([_empty_output_msg()]) == 'empty-output'
 
     def test_broken_json(self):
         # Dict-shaped message (the shape _is_incomplete_state actually inspects — see helper note).
-        assert _is_incomplete_state([_broken_json_msg()]) == "broken-json"
+        assert _is_incomplete_state([_broken_json_msg()]) == 'broken-json'
 
     def test_broken_json_message_object_not_flagged(self):
         """Regression guard for a pre-existing quirk: a pydantic FunctionCall object's arguments
         are read as '' by helpers.py:338, so it is NOT flagged broken-json. We must not change this
         behavior (out of scope); the test documents it so a future fix is deliberate."""
         from agent_cascade.llm.schema import FunctionCall
-        msg = Message(role=ASSISTANT, content="", function_call=FunctionCall(name="t", arguments='{"a": 1'))
+        msg = Message(role=ASSISTANT, content='', function_call=FunctionCall(name='t', arguments='{"a": 1'))
         assert _is_incomplete_state([msg]) is None
 
     def test_complete_content_is_none(self):
-        msg = Message(role=ASSISTANT, content="here is the answer")
+        msg = Message(role=ASSISTANT, content='here is the answer')
         assert _is_incomplete_state([msg]) is None
 
 
@@ -320,7 +320,7 @@ class TestNormalCompletionResets:
         instance._reasoning_only_pending_nudges = 0
         instance._auto_continue_count = 1
 
-        clean_msg = Message(role=ASSISTANT, content="done")
+        clean_msg = Message(role=ASSISTANT, content='done')
         result = _run(engine, instance, [clean_msg])
 
         assert result is False  # no continue injected for a complete turn
@@ -373,7 +373,7 @@ class TestOtherMalformedCasesUnchanged:
         engine = _Engine(_FakePool(nudge_enabled=False))
         instance = _make_instance()
         # A complete message that is also flagged truncated → truncation path.
-        result = _run(engine, instance, [Message(role=ASSISTANT, content="partial")], is_truncated=True)
+        result = _run(engine, instance, [Message(role=ASSISTANT, content='partial')], is_truncated=True)
 
         assert result is True
         assert engine.pool._rollback_calls == [1]
@@ -395,8 +395,8 @@ class TestNudgeOnPath:
         import agent_cascade.engine.core as core_mod
         # Enable the nudge flag AND raise N to 3 so the soft→full transition is reachable under
         # cap=5 (with the default N=2 the cap fires on attempt 3 before any full retry occurs).
-        monkeypatch.setattr(core_mod, "SOFT_CONTINUE_NUDGE_ENABLED", True)
-        monkeypatch.setattr(core_mod, "REASONING_ONLY_CONTINUE_ATTEMPTS", 3)
+        monkeypatch.setattr(core_mod, 'SOFT_CONTINUE_NUDGE_ENABLED', True)
+        monkeypatch.setattr(core_mod, 'REASONING_ONLY_CONTINUE_ATTEMPTS', 3)
         yield
 
     def _engine(self):
@@ -502,12 +502,12 @@ class TestNudgeOnPath:
 class TestReasoningOnlyContinueText:
     def test_attempt_one_text(self):
         text = ExecutionEngine._reasoning_only_continue_text(1)
-        assert "continue" in text.lower()
-        assert "STOP thinking" not in text
+        assert 'continue' in text.lower()
+        assert 'STOP thinking' not in text
 
     def test_attempt_two_escalates(self):
         text = ExecutionEngine._reasoning_only_continue_text(2)
-        assert "STOP thinking" in text
+        assert 'STOP thinking' in text
 
     def test_deterministic(self):
         assert ExecutionEngine._reasoning_only_continue_text(1) == ExecutionEngine._reasoning_only_continue_text(1)

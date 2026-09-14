@@ -47,7 +47,7 @@ def parse_functions(filename):
             snippet = content[max(0, start-200):end+200]
             print(f"\n--- Snippet for {name} ---")
             print(snippet[:1000])
-            print("--- End snippet ---\n")
+            print('--- End snippet ---\n')
 
 if __name__ == '__main__':
     parse_functions('N:\\work\\WD\\AgentCascade\\web_ui\\app.js')

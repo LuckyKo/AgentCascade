@@ -81,9 +81,9 @@ def setup_paths(args):
     return args
 def print_config(args):
     """Print configuration summary"""
-    print("=" * 80)
-    print("ShoppingBench Integrated Runner")
-    print("=" * 80)
+    print('=' * 80)
+    print('ShoppingBench Integrated Runner')
+    print('=' * 80)
     print(f"Model:              {args.model}")
     print(f"Level:              {args.level}")
     print(f"Workers:            {args.workers}")
@@ -91,7 +91,7 @@ def print_config(args):
     print(f"Test data:          {args.test_data}")
     print(f"Database directory: {args.database_dir}")
     print(f"Tool schema:        {args.tool_schema_path}")
-    print("=" * 80)
+    print('=' * 80)
     print()
 def run_step_inference(args):
     """Run agent inference to generate trajectories"""
@@ -159,14 +159,14 @@ def main():
     success, inference_results = run_step_inference(args)
     
     if not success:
-        print("\n❌ Inference failed")
+        print('\n❌ Inference failed')
         sys.exit(1)
     
     # Print final summary
     overall_elapsed = time.time() - overall_start_time
     print(f"\nTotal time: {overall_elapsed:.2f}s ({overall_elapsed/60:.1f} minutes)")
     
-    print("\n✅ Pipeline completed successfully!")
+    print('\n✅ Pipeline completed successfully!')
 if __name__ == '__main__':
     main()
 

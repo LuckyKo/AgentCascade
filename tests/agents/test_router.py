@@ -61,4 +61,4 @@ def test_router(local_llm_cfg, local_vl_llm_cfg):
             f"Expected web_search call, got {[str(fc.function_call.name) for fc in func_calls]}"
     else:
         # No tool call — just verify the response has content about weather
-        assert len(last[-1].content) > 0, "Final response has no content"
+        assert len(last[-1].content) > 0, 'Final response has no content'

@@ -41,42 +41,42 @@ class MockLLMHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/v1/models":
-            self._send_json(200, {"data": [{"id": "mock-model", "object": "model"}]})
+        if self.path == '/v1/models':
+            self._send_json(200, {'data': [{'id': 'mock-model', 'object': 'model'}]})
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
-        if self.path == "/v1/chat/completions":
-            content_length = int(self.headers.get("Content-Length", 0))
+        if self.path == '/v1/chat/completions':
+            content_length = int(self.headers.get('Content-Length', 0))
             self.rfile.read(content_length)  # consume body
 
             # Return streaming SSE response
             self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
             self.end_headers()
-            self.wfile.write(MOCK_STREAMING_RESPONSE.encode("utf-8"))
+            self.wfile.write(MOCK_STREAMING_RESPONSE.encode('utf-8'))
             self.wfile.flush()
         else:
             self.send_response(404)
             self.end_headers()
 
     def _send_json(self, status_code: int, data: Any):
-        body = json.dumps(data).encode("utf-8")
+        body = json.dumps(data).encode('utf-8')
         self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def mock_llm_server():
     """Start a mock LLM HTTP server on a random port and yield its base URL."""
-    server = HTTPServer(("127.0.0.1", 0), MockLLMHandler)
+    server = HTTPServer(('127.0.0.1', 0), MockLLMHandler)
     host, port = server.server_address
     base_url = f"http://{host}:{port}/v1"
 
@@ -93,14 +93,14 @@ def mock_llm_server():
             time.sleep(0.1)
     else:
         server.shutdown()
-        pytest.fail("Mock LLM server failed to start")
+        pytest.fail('Mock LLM server failed to start')
 
     yield base_url
 
     server.shutdown()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope='function')
 def ac_server(mock_llm_server):
     """Boot the full AgentCascade app via uvicorn on a real port. Yields base URL.
 
@@ -118,36 +118,36 @@ def ac_server(mock_llm_server):
     from uvicorn import Config, Server
 
     llm_cfg = {
-        "model": "mock-model",
-        "model_server": mock_llm_server,
-        "api_key": "EMPTY",
-        "model_type": "qwenvl_oai",
-        "max_input_tokens": 8192,
+        'model': 'mock-model',
+        'model_server': mock_llm_server,
+        'api_key': 'EMPTY',
+        'model_type': 'qwenvl_oai',
+        'max_input_tokens': 8192,
     }
 
-    pool = AgentPool(llm_cfg, agents_dir=str(project_root / "agents"))
+    pool = AgentPool(llm_cfg, agents_dir=str(project_root / 'agents'))
     orchestrator = load_orchestrator_agent(pool, llm_cfg)
     agents = [orchestrator]
 
     app = create_app(
         agents=agents,
         agent_pool=pool,
-        config={"session_name": "StartupTestSession"},
+        config={'session_name': 'StartupTestSession'},
     )
 
     # Pick a free port and start uvicorn in a thread
     import socket
 
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind(('127.0.0.1', 0))
         ac_port = s.getsockname()[1]
 
     config = Config(
         app=app,
-        host="127.0.0.1",
+        host='127.0.0.1',
         port=ac_port,
-        log_level="warning",
-        lifespan="on",
+        log_level='warning',
+        lifespan='on',
     )
     server = Server(config=config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -200,7 +200,7 @@ class TestStartupIntegration:
         # Step 1: Get server public key
         resp = requests.get(f"{base_url}/api/keys", timeout=5)
         assert resp.status_code == 200, f"Failed to get keys: {resp.text}"
-        server_public_b64 = resp.json()["public_key"]
+        server_public_b64 = resp.json()['public_key']
 
         # Step 2: Handshake to get session token
         client_private, client_public_b64 = generate_client_keypair()
@@ -208,40 +208,40 @@ class TestStartupIntegration:
 
         resp = requests.post(
             f"{base_url}/api/handshake",
-            json={"public_key": client_public_b64},
+            json={'public_key': client_public_b64},
             timeout=5,
         )
         assert resp.status_code == 200, f"Handshake failed: {resp.text}"
-        session_token = resp.json()["session_token"]
+        session_token = resp.json()['session_token']
 
         # Step 3: Send an encrypted message
-        payload = {"target": "Maine", "text": "Test startup message"}
+        payload = {'target': 'Maine', 'text': 'Test startup message'}
         encrypted_b64, nonce_b64 = encrypt_payload(shared_secret, payload)
 
         resp = requests.post(
             f"{base_url}/api/message",
             json={
-                "session_token": session_token,
-                "payload": encrypted_b64,
-                "nonce": nonce_b64,
+                'session_token': session_token,
+                'payload': encrypted_b64,
+                'nonce': nonce_b64,
             },
             timeout=5,
         )
         assert resp.status_code == 200, f"Message send failed: {resp.text}"
         data = resp.json()
-        assert data.get("status") == "success", f"Unexpected status: {data}"
-        assert data.get("queued") is True, "Message was not queued"
+        assert data.get('status') == 'success', f"Unexpected status: {data}"
+        assert data.get('queued') is True, 'Message was not queued'
 
         # Step 4: Verify /api/status responds with valid structure
         status_resp = requests.get(
             f"{base_url}/api/status",
-            params={"token": session_token},
+            params={'token': session_token},
             timeout=5,
         )
         assert status_resp.status_code == 200, f"Status failed: {status_resp.text}"
         status = status_resp.json()
-        assert "generating" in status, "Missing 'generating' field in status"
-        assert "agents" in status, "Missing 'agents' field in status"
+        assert 'generating' in status, "Missing 'generating' field in status"
+        assert 'agents' in status, "Missing 'agents' field in status"
 
         # If we reach here, the startup flow worked end-to-end:
         # - Server started cleanly with mock endpoint (no import/config crashes)

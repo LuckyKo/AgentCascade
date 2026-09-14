@@ -83,7 +83,7 @@ def _fire_usage_callback(usage_data: Optional[Dict]) -> None:
         merged = {**c, **p}
         _on_usage_cb(pt, ct, merged if merged else None)
     except Exception as e:
-        logger.debug("Telemetry usage callback failed: %s", e)  # Never break streaming
+        logger.debug('Telemetry usage callback failed: %s', e)  # Never break streaming
 
 
 def register_llm(model_type):
@@ -977,7 +977,7 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, a
             if not is_last_turn:
                 # Single-message non-last turn: happens with notification-injected consecutive USER messages.
                 # Truncate the message to fit the budget instead of asserting.
-                logger.debug("Truncating single-message non-last turn")
+                logger.debug('Truncating single-message non-last turn')
             # very long user — only one message in the turn
             idx, msg = indexed_messages1[0]
             msg = _truncate_message(msg=msg, max_tokens=message_tokens1[idx] - exceedance, keep_both_sides=True)

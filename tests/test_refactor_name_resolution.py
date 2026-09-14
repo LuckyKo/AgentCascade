@@ -94,7 +94,7 @@ def test_build_stream_update_reaches_token_stats_path():
 
         # Patch the real home (streaming). state_builder's lazy import resolves there.
         with patch.object(streaming, '_calc_stream_token_stats', sentinel):
-            result = state_builder.build_stream_update_from_pool(pool, "Maine")
+            result = state_builder.build_stream_update_from_pool(pool, 'Maine')
 
         assert isinstance(result, dict)
         assert calls.get('hit') is True  # proves the name resolved and was invoked
@@ -125,7 +125,7 @@ def test_config_persist_poolsettings_resolves_to_real_class():
     assert config_persist.PoolSettings is RealPoolSettings
     # It must be a usable class (the regression was `PoolSettings.from_dict(data)`).
     assert isinstance(config_persist.PoolSettings, type)
-    assert hasattr(config_persist.PoolSettings, "from_dict")
+    assert hasattr(config_persist.PoolSettings, 'from_dict')
 
 
 # ---------------------------------------------------------------------------
@@ -145,15 +145,15 @@ def test_engine_agentinstance_annotations_resolve():
 
     # _check_and_trigger_compression(self, instance: AgentInstance, ...)
     hints = typing.get_type_hints(CompressionExecMixin._check_and_trigger_compression)
-    assert hints["instance"] is AgentInstance
+    assert hints['instance'] is AgentInstance
 
     # tool_execution._execute_detected_tools(self, instance: AgentInstance, ...)
     hints = typing.get_type_hints(ToolExecMixin._execute_detected_tools)
-    assert hints["instance"] is AgentInstance
+    assert hints['instance'] is AgentInstance
 
     # llm_call._execute_llm_call(self, instance: AgentInstance, ...)
     hints = typing.get_type_hints(LLMCallMixin._execute_llm_call)
-    assert hints["instance"] is AgentInstance
+    assert hints['instance'] is AgentInstance
 
 
 def test_pool_agentpool_annotations_are_resolvable_forward_refs():
@@ -175,12 +175,12 @@ def test_pool_agentpool_annotations_are_resolvable_forward_refs():
     for cls in (
         _InstanceConversationMapping, IdleManager, LoggerManager, ParallelAgentManager,
     ):
-        ann = cls.__init__.__annotations__.get("pool")
+        ann = cls.__init__.__annotations__.get('pool')
         # Under `from __future__ import annotations` this is the forward-ref string. Some
         # sites already wrap it in source quotes ('AgentPool'), others don't (AgentPool) —
         # both stringify to a name; normalize by stripping any surrounding quotes.
         assert isinstance(ann, str), f"{cls.__name__} pool annotation {ann!r} not a string"
-        assert ann.strip("'\"") == "AgentPool", f"{cls.__name__} pool annotation is {ann!r}"
+        assert ann.strip("'\"") == 'AgentPool', f"{cls.__name__} pool annotation is {ann!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ def test_router_endpoint_annotation_resolves():
     from agent_cascade.api_router_pkg.endpoints import APIEndpoint
 
     hints = typing.get_type_hints(APIRouter._resolve_own_endpoints)
-    ret = hints["return"]
+    ret = hints['return']
     # Return type is Tuple[List[Tuple[str, APIEndpoint]], bool]. Walk down to the inner
     # endpoint element and assert it is the real APIEndpoint (the old phantom
     # 'EndpointConfig' was unresolvable and would have raised here).

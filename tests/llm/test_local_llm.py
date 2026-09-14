@@ -95,7 +95,7 @@ def test_local_vl_llm_basic(local_vl_llm_cfg):
 @pytest.mark.skip_if_no_local
 def test_models_available(local_llm_models):
     """Verify the detected server actually returned model IDs."""
-    assert len(local_llm_models) > 0, "Server reported zero models"
+    assert len(local_llm_models) > 0, 'Server reported zero models'
 
 
 # ---------------------------------------------------------------------------
@@ -106,4 +106,4 @@ def test_models_available(local_llm_models):
 def test_retry_cfg(local_llm_cfg_with_retry):
     """Ensure retry-aware config is properly shaped."""
     llm = get_chat_model(local_llm_cfg_with_retry)
-    assert llm.max_retries == 2, "Retry fixture should set max_retries=2"
+    assert llm.max_retries == 2, 'Retry fixture should set max_retries=2'

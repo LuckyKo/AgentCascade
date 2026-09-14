@@ -35,7 +35,7 @@ class TestConcurrentDispatchRespectsLimits:
 
     def test_parallel_endpoint_never_exceeds_limit(self, scheduler):
         """50 agents dispatching to concurrency=3 endpoint — peak active ≤ 3."""
-        api_base = "http://test-api"
+        api_base = 'http://test-api'
         concurrency_limit = 3
         num_agents = 50
 
@@ -46,7 +46,7 @@ class TestConcurrentDispatchRespectsLimits:
         blocked_lock = threading.Lock()
 
         def worker(agent_id):
-            release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", "coder")
+            release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", 'coder')
             try:
                 with peak_lock:
                     current = scheduler.count_active(api_base, concurrency_limit)
@@ -80,7 +80,7 @@ class TestConcurrentDispatchRespectsLimits:
 
     def test_sequential_endpoint_strictly_serialized(self, scheduler):
         """Concurrency=0 endpoint: only 1 agent active at a time under contention."""
-        api_base = "http://sequential-api"
+        api_base = 'http://sequential-api'
         concurrency_limit = 0
         num_agents = 30
 
@@ -88,7 +88,7 @@ class TestConcurrentDispatchRespectsLimits:
         peak_lock = threading.Lock()
 
         def worker(agent_id):
-            release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", "coder")
+            release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", 'coder')
             try:
                 with peak_lock:
                     current = scheduler.count_active(api_base, concurrency_limit)
@@ -108,14 +108,14 @@ class TestConcurrentDispatchRespectsLimits:
 
     def test_no_slot_leaks_under_concurrent_dispatch(self, scheduler):
         """50 rapid acquire/release cycles — no leaked slots."""
-        api_base = "http://test-api"
+        api_base = 'http://test-api'
         concurrency_limit = 5
         num_agents = 50
         errors = []
 
         def worker(agent_id):
             try:
-                release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", "coder")
+                release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", 'coder')
                 time.sleep(0.005)
                 release()
             except Exception as e:
@@ -144,17 +144,17 @@ class TestSharedSequentialSlot:
 
     def test_shared_sequential_blocks_cross_endpoint(self, scheduler):
         """Agent A holds seq endpoint 1 → Agent B blocks on seq endpoint 2."""
-        api_base_1 = "http://seq-api-1"
-        api_base_2 = "http://seq-api-2"
+        api_base_1 = 'http://seq-api-1'
+        api_base_2 = 'http://seq-api-2'
 
-        release1 = scheduler.acquire(api_base_1, 0, "agent_a", "coder")
+        release1 = scheduler.acquire(api_base_1, 0, 'agent_a', 'coder')
 
         acquired = [False]
 
         def try_acquire():
             try:
                 # Explicit timeout (honored directly by acquire()) guards against deadlock.
-                release2 = scheduler.acquire(api_base_2, 0, "agent_b", "researcher", timeout=5.0)
+                release2 = scheduler.acquire(api_base_2, 0, 'agent_b', 'researcher', timeout=5.0)
                 acquired[0] = True
                 release2()
             except TimeoutError:
@@ -163,11 +163,11 @@ class TestSharedSequentialSlot:
         t = threading.Thread(target=try_acquire)
         t.start()
         time.sleep(0.1)
-        assert not acquired[0], "Second sequential endpoint should block (shared slot)"
+        assert not acquired[0], 'Second sequential endpoint should block (shared slot)'
 
         release1()
         t.join(timeout=5)
-        assert acquired[0], "Should succeed after first releases"
+        assert acquired[0], 'Should succeed after first releases'
 
 
 # ============================================================================
@@ -179,18 +179,18 @@ class TestSlotAcquisitionSemantics:
 
     def test_fifo_grant_order_under_contention(self, scheduler):
         """Agents waiting for a limited endpoint are granted in FIFO order."""
-        api_base = "http://test-api"
+        api_base = 'http://test-api'
         concurrency_limit = 1
 
         # Occupy the single slot
-        holder_release = scheduler.acquire(api_base, concurrency_limit, "holder", "orchestrator")
+        holder_release = scheduler.acquire(api_base, concurrency_limit, 'holder', 'orchestrator')
 
         grant_order = []
         lock = threading.Lock()
-        acquired_events = {n: threading.Event() for n in ["T1", "T2", "T3"]}
+        acquired_events = {n: threading.Event() for n in ['T1', 'T2', 'T3']}
 
         def waiter(name):
-            release = scheduler.acquire(api_base, concurrency_limit, name, "coder")
+            release = scheduler.acquire(api_base, concurrency_limit, name, 'coder')
             with lock:
                 grant_order.append(name)
             acquired_events[name].set()
@@ -198,7 +198,7 @@ class TestSlotAcquisitionSemantics:
             release()
 
         threads = []
-        for name in ["T1", "T2", "T3"]:
+        for name in ['T1', 'T2', 'T3']:
             t = threading.Thread(target=waiter, args=(name,))
             t.start()
             time.sleep(0.05)  # Ensure FIFO enqueue order
@@ -210,34 +210,34 @@ class TestSlotAcquisitionSemantics:
         for t in threads:
             t.join(timeout=10)
 
-        assert grant_order == ["T1", "T2", "T3"], \
+        assert grant_order == ['T1', 'T2', 'T3'], \
             f"FIFO order violated: {grant_order}"
 
     def test_release_wakes_next_waiter_immediately(self, scheduler):
         """Releasing a slot wakes the next waiter without delay."""
-        api_base = "http://test-api"
+        api_base = 'http://test-api'
         concurrency_limit = 1
 
-        holder_release = scheduler.acquire(api_base, concurrency_limit, "holder", "orchestrator")
+        holder_release = scheduler.acquire(api_base, concurrency_limit, 'holder', 'orchestrator')
 
         b_acquired = threading.Event()
 
         def waiter_b():
-            release = scheduler.acquire(api_base, concurrency_limit, "B", "coder")
+            release = scheduler.acquire(api_base, concurrency_limit, 'B', 'coder')
             b_acquired.set()
             release()
 
         t_b = threading.Thread(target=waiter_b)
         t_b.start()
         time.sleep(0.1)  # Let B enqueue
-        assert not b_acquired.is_set(), "B should be waiting"
+        assert not b_acquired.is_set(), 'B should be waiting'
 
         start = time.monotonic()
         holder_release()
         t_b.join(timeout=5)
         elapsed = time.monotonic() - start
 
-        assert b_acquired.is_set(), "B should have acquired after release"
+        assert b_acquired.is_set(), 'B should have acquired after release'
         assert elapsed < 1.0, f"B took {elapsed:.2f}s to wake (expected near-instant)"
 
 
@@ -250,7 +250,7 @@ class TestUnlimitedEndpointBypass:
 
     def test_unlimited_no_blocking(self, scheduler):
         """All agents on unlimited endpoint acquire immediately with no contention."""
-        api_base = "http://unlimited-api"
+        api_base = 'http://unlimited-api'
         concurrency_limit = -1
 
         num_agents = 50
@@ -258,7 +258,7 @@ class TestUnlimitedEndpointBypass:
         lock = threading.Lock()
 
         def worker(agent_id):
-            release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", "coder")
+            release = scheduler.acquire(api_base, concurrency_limit, f"agent_{agent_id}", 'coder')
             with lock:
                 acquired.append(agent_id)
             # Unlimited returns None — no release needed
@@ -276,11 +276,11 @@ class TestUnlimitedEndpointBypass:
 
     def test_unlimited_no_slot_tracking(self, scheduler):
         """Unlimited endpoint does not appear in scheduler status."""
-        api_base = "http://unlimited-api"
+        api_base = 'http://unlimited-api'
         concurrency_limit = -1
 
-        release = scheduler.acquire(api_base, concurrency_limit, "agent_x", "coder")
-        assert release is None, "Unlimited endpoint should return None (no slot)"
+        release = scheduler.acquire(api_base, concurrency_limit, 'agent_x', 'coder')
+        assert release is None, 'Unlimited endpoint should return None (no slot)'
 
         status = scheduler.get_status()
         assert api_base not in status, \

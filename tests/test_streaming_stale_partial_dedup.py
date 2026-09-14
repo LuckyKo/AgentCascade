@@ -56,8 +56,8 @@ class FakePool:
 def _make_instance(conversation):
     now = time.monotonic()
     return AgentInstance(
-        instance_name="stale-sub",
-        agent_class="researcher",
+        instance_name='stale-sub',
+        agent_class='researcher',
         conversation=conversation,
         max_turns=None,
         parent_instance=None,
@@ -69,7 +69,7 @@ def _make_instance(conversation):
 
 
 def _assistant_msgs(frame):
-    return [m for m in frame.get("messages", []) if m.get("role") == ASSISTANT]
+    return [m for m in frame.get('messages', []) if m.get('role') == ASSISTANT]
 
 
 # ── 1. The bug: stale prefix partial must NOT be appended ────────────────────
@@ -81,12 +81,12 @@ def test_stale_prefix_partial_not_appended():
     """
     # Non-trivial history so the delta tail-cut is active (original_history_count > 0).
     conv = [
-        Message(role=USER, content="initial prompt " + ("x" * 60)),
-        Message(role=ASSISTANT, content="earlier answer " + ("y" * 40),
-                reasoning_content="earlier reasoning " + ("z" * 30)),
+        Message(role=USER, content='initial prompt ' + ('x' * 60)),
+        Message(role=ASSISTANT, content='earlier answer ' + ('y' * 40),
+                reasoning_content='earlier reasoning ' + ('z' * 30)),
     ]
-    final_reasoning = "full final reasoning block " + ("R" * 200)
-    final_content = "full final answer text " + ("A" * 120)
+    final_reasoning = 'full final reasoning block ' + ('R' * 200)
+    final_content = 'full final answer text ' + ('A' * 120)
     conv.append(Message(role=ASSISTANT, content=final_content,
                         reasoning_content=final_reasoning))
 
@@ -100,15 +100,15 @@ def test_stale_prefix_partial_not_appended():
     frame = _serialize_instance(inst, FakePool(), include_messages=True, streaming=True,
                                 streaming_responses=list(inst._streaming_responses))
 
-    assert frame.get("is_partial") is True, "expected a partial (streaming) frame"
+    assert frame.get('is_partial') is True, 'expected a partial (streaming) frame'
     assist = _assistant_msgs(frame)
     # The stale prefix must NOT be appended as a second assistant message.
     assert len(assist) == 1, (
         f"BUG: expected exactly 1 assistant message, got {len(assist)}: "
-        + ", ".join(f"content_len={len(m.get('content') or '')}" for m in assist)
+        + ', '.join(f"content_len={len(m.get('content') or '')}" for m in assist)
     )
     # The one assistant message is the committed FINAL (full content), not the stale prefix.
-    assert len(assist[0].get("content") or "") == len(final_content)
+    assert len(assist[0].get('content') or '') == len(final_content)
 
 
 # ── 2. SAFETY: legitimate streaming growth must NOT be suppressed ─────────────
@@ -121,32 +121,32 @@ def test_normal_growth_not_suppressed():
     does not exist yet.
     """
     conv = [
-        Message(role=USER, content="initial prompt " + ("x" * 60)),
-        Message(role=ASSISTANT, content="earlier answer " + ("y" * 40),
-                reasoning_content="earlier reasoning " + ("z" * 30)),
+        Message(role=USER, content='initial prompt ' + ('x' * 60)),
+        Message(role=ASSISTANT, content='earlier answer ' + ('y' * 40),
+                reasoning_content='earlier reasoning ' + ('z' * 30)),
     ]
     inst = _make_instance(conv)
 
     # A FRESH in-flight partial for the CURRENT turn. Its content is NOT a prefix of (and is not
     # contained by) any committed message -- it's brand new text still being generated.
     fresh = Message(role=ASSISTANT,
-                    content="brand new answer being streamed " + ("B" * 90),
-                    reasoning_content="fresh reasoning being streamed " + ("Q" * 70))
+                    content='brand new answer being streamed ' + ('B' * 90),
+                    reasoning_content='fresh reasoning being streamed ' + ('Q' * 70))
     inst._streaming_responses = [fresh]
 
     frame = _serialize_instance(inst, FakePool(), include_messages=True, streaming=True,
                                 streaming_responses=list(inst._streaming_responses))
 
-    assert frame.get("is_partial") is True, "expected a partial (streaming) frame"
+    assert frame.get('is_partial') is True, 'expected a partial (streaming) frame'
     assist = _assistant_msgs(frame)
     # The fresh in-flight partial MUST be appended alongside the committed earlier answer.
     assert len(assist) == 2, (
         f"SAFETY VIOLATION: expected the growing partial to be appended (2 assistant msgs), "
         f"got {len(assist)}: "
-        + ", ".join(f"content_len={len(m.get('content') or '')}" for m in assist)
+        + ', '.join(f"content_len={len(m.get('content') or '')}" for m in assist)
     )
     # The growing partial's full content is present verbatim.
-    assert any((m.get("content") or "") == fresh.content for m in assist), (
+    assert any((m.get('content') or '') == fresh.content for m in assist), (
         "the fresh in-flight partial's content was not appended -- growth was suppressed"
     )
 
@@ -160,16 +160,16 @@ def test_content_prefix_alone_not_suppressed():
     against a false-positive that would suppress unrelated short strings.
     """
     conv = [
-        Message(role=USER, content="initial prompt " + ("x" * 60)),
-        Message(role=ASSISTANT, content="full final answer text " + ("A" * 120),
-                reasoning_content="committed reasoning block " + ("C" * 100)),
+        Message(role=USER, content='initial prompt ' + ('x' * 60)),
+        Message(role=ASSISTANT, content='full final answer text ' + ('A' * 120),
+                reasoning_content='committed reasoning block ' + ('C' * 100)),
     ]
     inst = _make_instance(conv)
 
     # Content IS a prefix of the committed content, but reasoning is NOT (different text).
     partial = Message(role=ASSISTANT,
-                      content="full final answer text " + ("A" * 40),   # prefix of committed content
-                      reasoning_content="completely different reasoning")  # NOT a prefix
+                      content='full final answer text ' + ('A' * 40),   # prefix of committed content
+                      reasoning_content='completely different reasoning')  # NOT a prefix
     inst._streaming_responses = [partial]
 
     frame = _serialize_instance(inst, FakePool(), include_messages=True, streaming=True,
@@ -186,42 +186,42 @@ def test_is_stale_prefix_helper_unit():
     """Unit-level checks on _is_stale_prefix_of_serialized semantics."""
     from agent_cascade.api_integration_pkg.state_builder import _is_stale_prefix_of_serialized
 
-    committed = [{"role": ASSISTANT, "content": "abcdef", "reasoning_content": "123456"}]
-    other_role = [{"role": USER, "content": "abcdef", "reasoning_content": "123456"}]
+    committed = [{'role': ASSISTANT, 'content': 'abcdef', 'reasoning_content': '123456'}]
+    other_role = [{'role': USER, 'content': 'abcdef', 'reasoning_content': '123456'}]
 
     # Exact prefix on both -> stale.
-    assert _is_stale_prefix_of_serialized("abc", "123", committed) is True
+    assert _is_stale_prefix_of_serialized('abc', '123', committed) is True
     # Equal on both -> stale (a partial equal to the committed msg).
-    assert _is_stale_prefix_of_serialized("abcdef", "123456", committed) is True
+    assert _is_stale_prefix_of_serialized('abcdef', '123456', committed) is True
     # Content prefix but reasoning NOT a prefix -> not stale.
-    assert _is_stale_prefix_of_serialized("abc", "999", committed) is False
+    assert _is_stale_prefix_of_serialized('abc', '999', committed) is False
     # Reasoning prefix but content NOT a prefix -> not stale.
-    assert _is_stale_prefix_of_serialized("zzz", "123", committed) is False
+    assert _is_stale_prefix_of_serialized('zzz', '123', committed) is False
     # LAST-ONLY: an OLDER assistant that contains the partial is IGNORED because a NEWER one is
     # the last serialized assistant. The newer (last) message must itself contain the partial for
     # it to be stale. This is what prevents a fresh turn's partial from being suppressed by an
     # older committed answer.
-    older_contains = [{"role": ASSISTANT, "content": "abcdef", "reasoning_content": "123456"}]
-    newer_differs = [{"role": ASSISTANT, "content": "totally different", "reasoning_content": "999999"}]
-    assert _is_stale_prefix_of_serialized("abc", "123", older_contains + newer_differs) is False
+    older_contains = [{'role': ASSISTANT, 'content': 'abcdef', 'reasoning_content': '123456'}]
+    newer_differs = [{'role': ASSISTANT, 'content': 'totally different', 'reasoning_content': '999999'}]
+    assert _is_stale_prefix_of_serialized('abc', '123', older_contains + newer_differs) is False
 
     # NO universal-prefix matching: an empty field on the partial side requires the committed
     # message to be EMPTY in that same field. A both-empty partial does NOT match a committed
     # message that has content/reasoning (the old "both-empty rule" was a false-positive hole).
-    assert _is_stale_prefix_of_serialized("", "", committed) is False
+    assert _is_stale_prefix_of_serialized('', '', committed) is False
     # Empty reasoning + content prefix of the last assistant, but the last assistant HAS
     # reasoning -> not stale (empty-field fix; the old code treated empty sr as a universal
     # prefix and wrongly matched here).
-    assert _is_stale_prefix_of_serialized("abc", "", committed) is False
+    assert _is_stale_prefix_of_serialized('abc', '', committed) is False
     # Empty content + reasoning prefix of the last assistant, but the last assistant HAS
     # content -> not stale (symmetric empty-field fix).
-    assert _is_stale_prefix_of_serialized("", "123", committed) is False
+    assert _is_stale_prefix_of_serialized('', '123', committed) is False
     # Both fields empty AND both committed fields empty -> stale (the only legitimate
     # both-empty match under the no-universal-prefix rule).
-    committed_empty = [{"role": ASSISTANT, "content": "", "reasoning_content": ""}]
-    assert _is_stale_prefix_of_serialized("", "", committed_empty) is True
+    committed_empty = [{'role': ASSISTANT, 'content': '', 'reasoning_content': ''}]
+    assert _is_stale_prefix_of_serialized('', '', committed_empty) is True
     # Only assistant messages are considered; a USER msg with the same text does not subsume.
-    assert _is_stale_prefix_of_serialized("abc", "123", other_role) is False
+    assert _is_stale_prefix_of_serialized('abc', '123', other_role) is False
 
 
 # ── 5. SAFETY: a NEW turn's partial prefixing an OLDER answer must NOT be suppressed ────
@@ -239,26 +239,26 @@ def test_new_turn_partial_prefixing_older_answer_not_suppressed():
 
     Either way the new partial must still be appended. This test locks in that safety property.
     """
-    old_answer = "The quick brown fox jumps over the lazy dog " + ("OLD" * 50)
+    old_answer = 'The quick brown fox jumps over the lazy dog ' + ('OLD' * 50)
     conv = [
-        Message(role=USER, content="prompt " + ("x" * 60)),
+        Message(role=USER, content='prompt ' + ('x' * 60)),
         Message(role=ASSISTANT, content=old_answer,
-                reasoning_content="turn1 reasoning " + ("R" * 80)),
-        Message(role=USER, content="followup question " + ("q" * 40)),
+                reasoning_content='turn1 reasoning ' + ('R' * 80)),
+        Message(role=USER, content='followup question ' + ('q' * 40)),
     ]
     inst = _make_instance(conv)
     # New turn's in-flight partial: content is a prefix of the OLD answer, but its reasoning is
     # brand new (NOT a prefix of the old answer's reasoning).
     new_partial = Message(role=ASSISTANT,
                           content=old_answer[:50],
-                          reasoning_content="brand new turn2 reasoning")
+                          reasoning_content='brand new turn2 reasoning')
     inst._streaming_responses = [new_partial]
 
     frame = _serialize_instance(inst, FakePool(), include_messages=True, streaming=True,
                                 streaming_responses=list(inst._streaming_responses))
     assist = _assistant_msgs(frame)
     # The new partial MUST be appended (not suppressed by the older answer).
-    assert any((m.get("content") or "") == new_partial.content for m in assist), (
+    assert any((m.get('content') or '') == new_partial.content for m in assist), (
         "SAFETY VIOLATION: a new turn's partial that prefixes an OLDER answer was wrongly "
         f"suppressed. assistant msgs = {[(m.get('index'), len(m.get('content') or '')) for m in assist]}"
     )
@@ -286,12 +286,12 @@ def test_new_turn_both_fields_prefix_unserialized_older_answer_not_suppressed():
     fresh partial -- with TAIL_COMMITTED=1 the older answer is simply not serialized during a
     streaming turn, and the core.py atomicity fix closes the commit-race on the main path.
     """
-    old_answer = "The quick brown fox jumps over the lazy dog " + ("OLD" * 50)
-    old_reasoning = "turn1 reasoning block " + ("R" * 80)
+    old_answer = 'The quick brown fox jumps over the lazy dog ' + ('OLD' * 50)
+    old_reasoning = 'turn1 reasoning block ' + ('R' * 80)
     conv = [
-        Message(role=USER, content="prompt " + ("x" * 60)),
+        Message(role=USER, content='prompt ' + ('x' * 60)),
         Message(role=ASSISTANT, content=old_answer, reasoning_content=old_reasoning),
-        Message(role=USER, content="followup question " + ("q" * 40)),
+        Message(role=USER, content='followup question ' + ('q' * 40)),
     ]
     inst = _make_instance(conv)
     # New turn's partial: BOTH fields are strict prefixes of the OLDER answer.
@@ -302,16 +302,16 @@ def test_new_turn_both_fields_prefix_unserialized_older_answer_not_suppressed():
 
     frame = _serialize_instance(inst, FakePool(), include_messages=True, streaming=True,
                                 streaming_responses=list(inst._streaming_responses))
-    msgs = frame.get("messages", [])
+    msgs = frame.get('messages', [])
     assist = _assistant_msgs(frame)
     # The older answer is NOT in the serialized tail (TAIL_COMMITTED=1 cut it off). This is why
     # the helper has no assistant candidate and cannot suppress the fresh partial.
-    assert not any((m.get("content") or "") == old_answer for m in msgs), (
+    assert not any((m.get('content') or '') == old_answer for m in msgs), (
         f"expected the older answer to be cut from the delta tail, but it was serialized: "
         f"{[(m.get('index'), len(m.get('content') or '')) for m in msgs]}"
     )
     # The fresh partial MUST be appended (not suppressed by the unserialized older answer).
-    assert any((m.get("content") or "") == new_partial.content for m in assist), (
+    assert any((m.get('content') or '') == new_partial.content for m in assist), (
         "SAFETY VIOLATION: a new turn's partial whose BOTH fields prefix an OLDER (unserialized) "
         f"answer was wrongly suppressed. assistant msgs = {[(m.get('index'), len(m.get('content') or '')) for m in assist]}"
     )
@@ -328,27 +328,27 @@ def test_empty_reasoning_prefix_of_answer_with_reasoning_not_suppressed():
     stream_reasoning requires the committed reasoning to ALSO be empty; since it is not, the guard
     must NOT suppress -> the partial is appended.
     """
-    old_answer = "The quick brown fox jumps over the lazy dog " + ("OLD" * 50)
+    old_answer = 'The quick brown fox jumps over the lazy dog ' + ('OLD' * 50)
     conv = [
-        Message(role=USER, content="prompt " + ("x" * 60)),
+        Message(role=USER, content='prompt ' + ('x' * 60)),
         # Last committed assistant: HAS reasoning (non-empty).
         Message(role=ASSISTANT, content=old_answer,
-                reasoning_content="committed reasoning block " + ("C" * 80)),
-        Message(role=USER, content="followup question " + ("q" * 40)),
+                reasoning_content='committed reasoning block ' + ('C' * 80)),
+        Message(role=USER, content='followup question ' + ('q' * 40)),
     ]
     inst = _make_instance(conv)
     # New turn's partial: EMPTY reasoning, content is a prefix of the last answer's content.
     new_partial = Message(role=ASSISTANT,
                           content=old_answer[:50],
-                          reasoning_content="")  # empty reasoning
+                          reasoning_content='')  # empty reasoning
     inst._streaming_responses = [new_partial]
 
     frame = _serialize_instance(inst, FakePool(), include_messages=True, streaming=True,
                                 streaming_responses=list(inst._streaming_responses))
     assist = _assistant_msgs(frame)
     # The fresh partial MUST be appended (empty-field fix prevents false-positive suppression).
-    assert any((m.get("content") or "") == new_partial.content for m in assist), (
-        "SAFETY VIOLATION: a new turn with EMPTY reasoning whose content prefixes the last "
+    assert any((m.get('content') or '') == new_partial.content for m in assist), (
+        'SAFETY VIOLATION: a new turn with EMPTY reasoning whose content prefixes the last '
         "answer's content was wrongly suppressed by an answer that HAS reasoning. "
         f"assistant msgs = {[(m.get('index'), len(m.get('content') or '')) for m in assist]}"
     )
@@ -365,17 +365,17 @@ def test_new_turn_prefixing_older_non_last_assistant_not_suppressed():
     partial, the fresh partial MUST be appended. This is the clean proof that comparing against
     an older non-last answer can no longer suppress legitimate growth.
     """
-    old_answer = "The quick brown fox jumps over the lazy dog " + ("OLD" * 50)
-    old_reasoning = "turn1 reasoning block " + ("R" * 80)
+    old_answer = 'The quick brown fox jumps over the lazy dog ' + ('OLD' * 50)
+    old_reasoning = 'turn1 reasoning block ' + ('R' * 80)
     conv = [
-        Message(role=USER, content="prompt " + ("x" * 60)),
+        Message(role=USER, content='prompt ' + ('x' * 60)),
         # OLDER answer: the partial will prefix THIS one.
         Message(role=ASSISTANT, content=old_answer, reasoning_content=old_reasoning),
-        Message(role=USER, content="followup question " + ("q" * 40)),
+        Message(role=USER, content='followup question ' + ('q' * 40)),
         # NEWER (last) assistant: does NOT contain the new partial's text.
-        Message(role=ASSISTANT, content="brand new committed answer " + ("N" * 60),
-                reasoning_content="brand new committed reasoning " + ("M" * 40)),
-        Message(role=USER, content="another followup " + ("w" * 30)),
+        Message(role=ASSISTANT, content='brand new committed answer ' + ('N' * 60),
+                reasoning_content='brand new committed reasoning ' + ('M' * 40)),
+        Message(role=USER, content='another followup ' + ('w' * 30)),
     ]
     inst = _make_instance(conv)
     # New turn's partial: BOTH fields are prefixes of the OLDER answer (not the newer one).
@@ -388,7 +388,7 @@ def test_new_turn_prefixing_older_non_last_assistant_not_suppressed():
                                 streaming_responses=list(inst._streaming_responses))
     assist = _assistant_msgs(frame)
     # The fresh partial MUST be appended: last-only means the older non-last answer is ignored.
-    assert any((m.get("content") or "") == new_partial.content for m in assist), (
+    assert any((m.get('content') or '') == new_partial.content for m in assist), (
         "SAFETY VIOLATION: a new turn's partial that prefixes an OLDER (non-last) committed "
         f"answer was wrongly suppressed by all-messages scanning. "
         f"assistant msgs = {[(m.get('index'), len(m.get('content') or '')) for m in assist]}"

@@ -135,7 +135,7 @@ def test_fix_a_slow_client_does_not_stall_healthy(monkeypatch):
     # Lower the per-send timeout so the test stays fast. This is the REAL module
     # global read at call time inside broadcast(); we expose it to the core via a
     # zero-arg ref so the change takes effect live — no production code change.
-    monkeypatch.setattr(api_server, "WS_SEND_TIMEOUT", 0.2)
+    monkeypatch.setattr(api_server, 'WS_SEND_TIMEOUT', 0.2)
 
     ws_connections = set()
     broadcast = _build_broadcast_core(ws_connections, lambda: api_server.WS_SEND_TIMEOUT)
@@ -149,7 +149,7 @@ def test_fix_a_slow_client_does_not_stall_healthy(monkeypatch):
 
     async def scenario():
         t0 = time.perf_counter()
-        await broadcast({"type": "state", "n": 1})
+        await broadcast({'type': 'state', 'n': 1})
         elapsed_total = time.perf_counter() - t0
         return elapsed_total
 
@@ -159,8 +159,8 @@ def test_fix_a_slow_client_does_not_stall_healthy(monkeypatch):
     elapsed_total = asyncio.run(scenario())
 
     # (a) Healthy client received the frame quickly — well under the slow sleep.
-    assert healthy_received, "healthy client never received the frame"
-    assert len(healthy_received) == 1, "healthy client should receive exactly one frame"
+    assert healthy_received, 'healthy client never received the frame'
+    assert len(healthy_received) == 1, 'healthy client should receive exactly one frame'
 
     # (c) The whole broadcast was bounded by the timeout, not the 5s slow sleep.
     assert elapsed_total < 2.0, (
@@ -169,13 +169,13 @@ def test_fix_a_slow_client_does_not_stall_healthy(monkeypatch):
     )
 
     # (b) The slow/wedged conn was closed AND discarded from ws_connections.
-    assert slow_conn.closed, "slow client connection was not closed"
-    assert healthy_conn.closed is False, "healthy client should NOT have been closed"
-    assert slow_conn not in ws_connections, "slow client was not discarded from ws_connections"
-    assert healthy_conn in ws_connections, "healthy client must remain connected"
+    assert slow_conn.closed, 'slow client connection was not closed'
+    assert healthy_conn.closed is False, 'healthy client should NOT have been closed'
+    assert slow_conn not in ws_connections, 'slow client was not discarded from ws_connections'
+    assert healthy_conn in ws_connections, 'healthy client must remain connected'
 
     # The healthy frame content round-trips as JSON.
-    assert json.loads(healthy_received[0]) == {"type": "state", "n": 1}
+    assert json.loads(healthy_received[0]) == {'type': 'state', 'n': 1}
 
 
 def test_fix_a_per_client_fifo_preserved(monkeypatch):
@@ -188,7 +188,7 @@ def test_fix_a_per_client_fifo_preserved(monkeypatch):
     """
     import agent_cascade.api_server as api_server
 
-    monkeypatch.setattr(api_server, "WS_SEND_TIMEOUT", 0.15)
+    monkeypatch.setattr(api_server, 'WS_SEND_TIMEOUT', 0.15)
 
     ws_connections = set()
     broadcast = _build_broadcast_core(ws_connections, lambda: api_server.WS_SEND_TIMEOUT)
@@ -202,19 +202,19 @@ def test_fix_a_per_client_fifo_preserved(monkeypatch):
     ws_connections.add(slow_conn)
 
     async def scenario():
-        await broadcast({"n": 1})
+        await broadcast({'n': 1})
         # After frame 1 the slow client is discarded; frame 2 goes only to healthy.
-        await broadcast({"n": 2})
+        await broadcast({'n': 2})
 
     asyncio.run(scenario())
 
     # Healthy client got both frames, in order (FIFO preserved).
-    assert [json.loads(x)["n"] for x in healthy_received] == [1, 2], (
+    assert [json.loads(x)['n'] for x in healthy_received] == [1, 2], (
         f"healthy client FIFO violated: {healthy_received}"
     )
     # Slow client never received anything (reaped on the first timed-out send).
-    assert slow_received == [], "slow client should have been reaped before receiving"
-    assert slow_conn not in ws_connections, "slow client must be discarded"
+    assert slow_received == [], 'slow client should have been reaped before receiving'
+    assert slow_conn not in ws_connections, 'slow client must be discarded'
 
 
 def test_fix_a_empty_connections_is_noop(monkeypatch):
@@ -226,14 +226,14 @@ def test_fix_a_empty_connections_is_noop(monkeypatch):
     """
     import agent_cascade.api_server as api_server
 
-    monkeypatch.setattr(api_server, "WS_SEND_TIMEOUT", 0.2)
+    monkeypatch.setattr(api_server, 'WS_SEND_TIMEOUT', 0.2)
 
     ws_connections = set()  # intentionally empty
     broadcast = _build_broadcast_core(ws_connections, lambda: api_server.WS_SEND_TIMEOUT)
 
     async def scenario():
         t0 = time.perf_counter()
-        await broadcast({"type": "state", "n": 1})
+        await broadcast({'type': 'state', 'n': 1})
         return time.perf_counter() - t0
 
     elapsed = asyncio.run(scenario())
@@ -241,7 +241,7 @@ def test_fix_a_empty_connections_is_noop(monkeypatch):
     # Completed quickly — gather(*[]) returns immediately, no client to wait on.
     assert elapsed < 0.2, f"empty broadcast took {elapsed:.3f}s; expected a fast no-op"
     # Nothing was discarded (there was nothing to discard).
-    assert ws_connections == set(), "ws_connections should remain empty after a no-op broadcast"
+    assert ws_connections == set(), 'ws_connections should remain empty after a no-op broadcast'
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +252,7 @@ def _make_handler(build_state_fn, broadcast_fn):
     from agent_cascade.ws_handlers import WsMessageHandler
 
     return WsMessageHandler(
-        session={"agent_index": 0},
+        session={'agent_index': 0},
         agent_pool=None,
         agents=[],
         send_queue=asyncio.Queue(),
@@ -272,9 +272,9 @@ def test_fix_b_build_state_runs_off_event_loop():
     def fake_build_state(generating=None):
         # Record which thread ran us + the arg, then yield control briefly.
         time.sleep(0.01)
-        recorded["thread"] = threading.current_thread()
-        recorded["generating"] = generating
-        return {"instances": {}, "marker": 42}
+        recorded['thread'] = threading.current_thread()
+        recorded['generating'] = generating
+        return {'instances': {}, 'marker': 42}
 
     broadcast_payloads = []
 
@@ -285,23 +285,23 @@ def test_fix_b_build_state_runs_off_event_loop():
 
     async def scenario():
         loop_thread = threading.current_thread()
-        await handler._broadcast(ws_type="state", generating=True)
+        await handler._broadcast(ws_type='state', generating=True)
         return loop_thread
 
     loop_thread = asyncio.run(scenario())
 
     # build_state ran in a worker thread, NOT the main/event-loop thread.
-    assert "thread" in recorded, "build_state_fn was never invoked"
-    assert recorded["thread"] is not loop_thread, (
+    assert 'thread' in recorded, 'build_state_fn was never invoked'
+    assert recorded['thread'] is not loop_thread, (
         f"build_state_fn ran on the event-loop thread ({loop_thread.name}); "
-        "the offload to run_in_executor did not happen"
+        'the offload to run_in_executor did not happen'
     )
     # The generating override was forwarded.
-    assert recorded["generating"] is True
+    assert recorded['generating'] is True
     # The return value of build_state was merged into the broadcast payload.
     assert len(broadcast_payloads) == 1
-    assert broadcast_payloads[0]["type"] == "state"
-    assert broadcast_payloads[0]["marker"] == 42
+    assert broadcast_payloads[0]['type'] == 'state'
+    assert broadcast_payloads[0]['marker'] == 42
 
 
 def test_fix_b_concurrent_broadcast_burst_off_loop():
@@ -312,7 +312,7 @@ def test_fix_b_concurrent_broadcast_burst_off_loop():
     def fake_build_state(generating=None):
         time.sleep(0.005)  # simulate O(N) work
         threads_seen.append(threading.current_thread())
-        return {"n": len(threads_seen)}
+        return {'n': len(threads_seen)}
 
     broadcast_payloads = []
 
@@ -329,7 +329,7 @@ def test_fix_b_concurrent_broadcast_burst_off_loop():
             for _ in range(20):
                 await asyncio.sleep(0.001)
 
-        tasks = [handler._broadcast(ws_type="state", generating=False) for _ in range(15)]
+        tasks = [handler._broadcast(ws_type='state', generating=False) for _ in range(15)]
         tasks.append(producer())
         await asyncio.gather(*tasks, return_exceptions=False)
         return loop_thread
@@ -337,12 +337,12 @@ def test_fix_b_concurrent_broadcast_burst_off_loop():
     loop_thread = asyncio.run(scenario())
 
     assert len(broadcast_payloads) == 15, f"expected 15 broadcasts, got {len(broadcast_payloads)}"
-    assert threads_seen, "build_state_fn never ran during the burst"
+    assert threads_seen, 'build_state_fn never ran during the burst'
     for t in threads_seen:
         assert t is not loop_thread, (
             f"a build_state call ran on the event-loop thread ({loop_thread.name})"
         )
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+if __name__ == '__main__':
+    sys.exit(pytest.main([__file__, '-v']))

@@ -84,10 +84,10 @@ class QueueTicket:
     """
     ticket_id: int = field(default_factory=lambda: next(_ticket_counter))
     seq: int = 0
-    agent_name: str = ""
-    instance_name: str = ""
-    agent_class: str = ""
-    slot_key: str = ""
+    agent_name: str = ''
+    instance_name: str = ''
+    agent_class: str = ''
+    slot_key: str = ''
     created_at: float = field(default_factory=time.monotonic)
     deadline: float = 0.0
     cancelled: threading.Event = field(default_factory=threading.Event)
@@ -122,8 +122,8 @@ class SlotPool:
     the single threading.Condition (_cond).
     """
     
-    __slots__ = ("key", "capacity", "_waiters", "_running", 
-                 "_cond", "_seq_counter", "_acquisition_counter")
+    __slots__ = ('key', 'capacity', '_waiters', '_running', 
+                 '_cond', '_seq_counter', '_acquisition_counter')
     
     def __init__(self, key: str, capacity: int):
         self.key = key
@@ -346,27 +346,27 @@ class SlotPool:
         now = time.monotonic()
         with self._cond:
             return {
-                "key": self.key,
-                "capacity": self.capacity if self.capacity != float('inf') else -1,
-                "running_count": len(self._running),
-                "waiting_count": len(self._waiters),
-                "waiters": [
+                'key': self.key,
+                'capacity': self.capacity if self.capacity != float('inf') else -1,
+                'running_count': len(self._running),
+                'waiting_count': len(self._waiters),
+                'waiters': [
                     {
-                        "ticket_id": t.ticket_id,
-                        "seq": t.seq,
-                        "instance_name": t.instance_name,
-                        "agent_class": t.agent_class,
-                        "wait_time": round(now - t.created_at, 2),
-                        "remaining_timeout": max(0, round(t.deadline - now, 2)),
+                        'ticket_id': t.ticket_id,
+                        'seq': t.seq,
+                        'instance_name': t.instance_name,
+                        'agent_class': t.agent_class,
+                        'wait_time': round(now - t.created_at, 2),
+                        'remaining_timeout': max(0, round(t.deadline - now, 2)),
                     }
                     for t in self._waiters.values()
                 ],
-                "holders": [
+                'holders': [
                     {
-                        "instance_name": h.instance_name,
-                        "agent_name": h.agent_name,
-                        "acquisition_id": h.acquisition_id,
-                        "held_duration": round(now - h.granted_at, 2),
+                        'instance_name': h.instance_name,
+                        'agent_name': h.agent_name,
+                        'acquisition_id': h.acquisition_id,
+                        'held_duration': round(now - h.granted_at, 2),
                     }
                     for h in self._running.values()
                 ],
@@ -427,7 +427,7 @@ def release_slot_permit(
     if not hasattr(holder, '_slot_release'):
         return False
 
-    context_suffix = f" during {context}" if context else ""
+    context_suffix = f" during {context}" if context else ''
     slot_key: Optional[str] = None
     release_callback: Optional[Callable[[], None]] = None
 
@@ -511,7 +511,7 @@ def _grant(pool: SlotPool, instance_name: str, agent_class: str,
     logger.debug(
         f"[SLOTPOOL] Granted on '{pool.key}': agent={instance_name} ({agent_class}) "
         f"acquisition={holder.acquisition_id}"
-        + (f" ticket={ticket.ticket_id} waited={waited:.1f}s" if ticket else " (fast-path)")
+        + (f" ticket={ticket.ticket_id} waited={waited:.1f}s" if ticket else ' (fast-path)')
     )
     return holder
 

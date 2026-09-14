@@ -35,7 +35,7 @@ class StreamingTokenizer:
     """
 
     def __init__(self) -> None:
-        self.pending: str = ""  # Partial word waiting for completion
+        self.pending: str = ''  # Partial word waiting for completion
 
     def tokenize_chunk(self, text: str) -> list[str]:
         """Tokenize a chunk of text, buffering any incomplete trailing word.
@@ -45,7 +45,7 @@ class StreamingTokenizer:
         """
         tokens: list[str] = []
         buffer = self.pending + text
-        self.pending = ""
+        self.pending = ''
 
         current_start = 0
         i = 0
@@ -66,7 +66,7 @@ class StreamingTokenizer:
 
     def reset(self) -> None:
         """Clear pending state."""
-        self.pending = ""
+        self.pending = ''
 
 
 class TwoPhaseLoopDetector:
@@ -87,7 +87,7 @@ class TwoPhaseLoopDetector:
         # Suspicion phase parameters
         self.ngram_window_size = 64  # Token window size (same as current ngram mode)
         self.suspicion_threshold = suspicion_threshold or int(
-            os.environ.get("AGENT_CASCADE_LOOP_SUSPICION_THRESHOLD", "7")
+            os.environ.get('AGENT_CASCADE_LOOP_SUSPICION_THRESHOLD', '7')
         )
         self.max_counter_entries = 200  # Prune threshold for counter
 
@@ -108,24 +108,24 @@ class TwoPhaseLoopDetector:
 
         # Confirmation phase parameters
         self.confirmed_matches_required = confirmed_matches_required or int(
-            os.environ.get("AGENT_CASCADE_LOOP_CONFIRM_REQUIRED", "3")
+            os.environ.get('AGENT_CASCADE_LOOP_CONFIRM_REQUIRED', '3')
         )
 
         # Cooldown state
         self.cooldown_active = False
         self.cooldown_remaining_feeds = 0
         self.cooldown_duration = cooldown_duration or int(
-            os.environ.get("AGENT_CASCADE_LOOP_COOLDOWN_FEEDS", "50")
+            os.environ.get('AGENT_CASCADE_LOOP_COOLDOWN_FEEDS', '50')
         )
 
         # Tail buffer for exact comparison — no truncation needed (detector is per-response, max_chars limits total)
-        self.tail_buffer: str = ""
+        self.tail_buffer: str = ''
 
         # Feature flag — gated for safe rollout (env var fallback if not explicitly set)
         if enabled is not None:
             self.two_phase_enabled = enabled
         else:
-            self.two_phase_enabled = os.environ.get("AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED", "0") == "1"
+            self.two_phase_enabled = os.environ.get('AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED', '0') == '1'
 
     def reset(self) -> None:
         """Clear all state so the detector can be reused for a new LLM call attempt."""
@@ -135,7 +135,7 @@ class TwoPhaseLoopDetector:
         self.ngram_positions.clear()
         self.cooldown_active = False
         self.cooldown_remaining_feeds = 0
-        self.tail_buffer = ""
+        self.tail_buffer = ''
         self.tokenizer.reset()
 
     def _prune_counters(self) -> None:
@@ -379,10 +379,10 @@ class TwoPhaseLoopDetector:
 
             if confirmed_count >= self.confirmed_matches_required:
                 return {
-                    "loop": True,
-                    "reason": f"semantic loop ({suspicion.interval_length} chars repeating)",
-                    "confirmed_repetitions": confirmed_count,
-                    "score": 100,
+                    'loop': True,
+                    'reason': f"semantic loop ({suspicion.interval_length} chars repeating)",
+                    'confirmed_repetitions': confirmed_count,
+                    'score': 100,
                 }
             else:
                 self._apply_cooldown()

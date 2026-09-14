@@ -27,7 +27,7 @@ try:
     try:
         import jsparser
         jsparser.parse(content)
-        print("Parsed successfully with jsparser")
+        print('Parsed successfully with jsparser')
     except Exception as e:
         print(f"jsparser failed: {e}")
 

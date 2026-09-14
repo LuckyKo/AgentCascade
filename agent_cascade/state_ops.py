@@ -42,32 +42,32 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
             endpoint_cfg = instance._last_endpoint_config
         
         if not endpoint_cfg or not isinstance(endpoint_cfg, dict):
-            logger.debug("No cached endpoint config for %s", instance.instance_name)
+            logger.debug('No cached endpoint config for %s', instance.instance_name)
             return False
         
         if not endpoint_cfg.get('state_save_enabled'):
-            logger.debug("State save not enabled for %s (%s)", instance.instance_name, instance.agent_class)
+            logger.debug('State save not enabled for %s (%s)', instance.instance_name, instance.agent_class)
             return False
 
         api_base = endpoint_cfg.get('api_base', '')
         model = endpoint_cfg.get('model', '')
 
         if not api_base or not model or not is_autoloader_endpoint(api_base):
-            logger.debug("Not an autoloader endpoint for state save on %s", instance.instance_name)
+            logger.debug('Not an autoloader endpoint for state save on %s', instance.instance_name)
             return False
 
         label = save_state(api_base, model, instance.instance_name)
         if label:
             with instance._state_lock:
                 instance._state_label = label
-            logger.debug("Saved state %s for instance %s", label, instance.instance_name)
+            logger.debug('Saved state %s for instance %s', label, instance.instance_name)
             return True
 
-        logger.debug("State save returned no label for %s", instance.instance_name)
+        logger.debug('State save returned no label for %s', instance.instance_name)
         return False
 
     except Exception as e:
-        logger.warning("Unexpected error during state save for %s: %s", instance.instance_name, e)
+        logger.warning('Unexpected error during state save for %s: %s', instance.instance_name, e)
         return False
 
 
@@ -98,10 +98,10 @@ def restore_instance_state(instance: 'AgentInstance',
             label = instance._state_label
             endpoint_cfg = instance._last_endpoint_config
 
-        logger.debug("Attempting restore for %s, label=%s", instance.instance_name, label)
+        logger.debug('Attempting restore for %s, label=%s', instance.instance_name, label)
 
         if not label:
-            logger.debug("No state label to restore for %s", instance.instance_name)
+            logger.debug('No state label to restore for %s', instance.instance_name)
             return False
 
         # Prefer the endpoint the caller confirmed we currently hold a slot on.
@@ -110,14 +110,14 @@ def restore_instance_state(instance: 'AgentInstance',
             endpoint_cfg = held_endpoint_cfg
 
         if not endpoint_cfg or not isinstance(endpoint_cfg, dict):
-            logger.debug("No cached endpoint config for %s", instance.instance_name)
+            logger.debug('No cached endpoint config for %s', instance.instance_name)
             return False
 
         api_base = endpoint_cfg.get('api_base', '')
         model = endpoint_cfg.get('model', '')
 
         if not api_base or not model or not is_autoloader_endpoint(api_base):
-            logger.debug("Not an autoloader endpoint for state restore on %s", instance.instance_name)
+            logger.debug('Not an autoloader endpoint for state restore on %s', instance.instance_name)
             return False
 
         success = restore_state(api_base, model, label)
@@ -125,14 +125,14 @@ def restore_instance_state(instance: 'AgentInstance',
             # Restore failed — clear the label to avoid retrying stale state
             with instance._state_lock:
                 instance._state_label = None
-            logger.warning("State restore failed for %s (label=%s), cleared label", 
+            logger.warning('State restore failed for %s (label=%s), cleared label', 
                           instance.instance_name, label)
             return False
 
         # Clear the label after successful restore to prevent double-restore.
         with instance._state_lock:
             instance._state_label = None
-        logger.debug("Restored state for %s (label=%s)", instance.instance_name, label)
+        logger.debug('Restored state for %s (label=%s)', instance.instance_name, label)
         return True
 
     except Exception as e:
@@ -142,7 +142,7 @@ def restore_instance_state(instance: 'AgentInstance',
                 instance._state_label = None
         except Exception:
             pass
-        logger.warning("Unexpected error during state restore for %s: %s", instance.instance_name, e)
+        logger.warning('Unexpected error during state restore for %s: %s', instance.instance_name, e)
         return False
 
 
@@ -151,8 +151,8 @@ def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
     try:
         # Defensive check: reject obviously dangerous instance_names (belt-and-suspenders).
         # Autoloader also sanitizes labels via _sanitize_label().
-        if "../" in instance_name or "..\\" in instance_name:
-            logger.debug("Rejected state save for instance with unsafe name: %s", instance_name)
+        if '../' in instance_name or '..\\' in instance_name:
+            logger.debug('Rejected state save for instance with unsafe name: %s', instance_name)
             return None
 
         base = _normalize_api_base(api_base)
@@ -162,16 +162,16 @@ def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
         # Autoloader's _sanitize_label() strips \, /, .. to prevent path traversal.
         label = instance_name
         url = f"{base}/v1/models/{model}/state/save"
-        resp = httpx.post(url, json={"label": label}, timeout=30)
+        resp = httpx.post(url, json={'label': label}, timeout=30)
 
         if resp.status_code == 200:
             # Cleanup old states for this instance after successful save
             _cleanup_old_states(base, model, instance_name)
             return label
-        logger.debug("State save returned status %d for %s", resp.status_code, instance_name)
+        logger.debug('State save returned status %d for %s', resp.status_code, instance_name)
         return None
     except Exception as e:
-        logger.debug("State save failed for %s: %s", instance_name, e)
+        logger.debug('State save failed for %s: %s', instance_name, e)
         return None
 
 
@@ -181,12 +181,12 @@ def restore_state(api_base: str, model: str, label: str) -> bool:
         base = _normalize_api_base(api_base)
 
         url = f"{base}/v1/models/{model}/state/load"
-        resp = httpx.post(url, json={"label": label}, timeout=30)
+        resp = httpx.post(url, json={'label': label}, timeout=30)
         if resp.status_code != 200:
-            logger.debug("State restore returned status %d for label %s", resp.status_code, label)
+            logger.debug('State restore returned status %d for label %s', resp.status_code, label)
         return resp.status_code == 200
     except Exception as e:
-        logger.debug("State restore failed for label %s: %s", label, e)
+        logger.debug('State restore failed for label %s: %s', label, e)
         return False
 
 
@@ -207,11 +207,11 @@ def unload_all_models(api_base: str) -> bool:
         base = _normalize_api_base(api_base)
         resp = httpx.post(f"{base}/v1/unload_all", timeout=60)
         if resp.status_code != 200:
-            logger.warning("[state_ops] unload_all returned status %d", resp.status_code)
+            logger.warning('[state_ops] unload_all returned status %d', resp.status_code)
             return False
         return True
     except Exception as e:
-        logger.warning("[state_ops] unload_all failed for %s: %s", api_base, e)
+        logger.warning('[state_ops] unload_all failed for %s: %s', api_base, e)
         return False
 
 
@@ -240,10 +240,10 @@ def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
             return
 
         data = resp.json()
-        labels = data.get("labels", [])
+        labels = data.get('labels', [])
 
         # Only match legacy timestamped format: instance_name_TIMESTAMP
-        legacy_pattern = instance_name + "_"
+        legacy_pattern = instance_name + '_'
         legacy_states = [l for l in labels if l.startswith(legacy_pattern)]
 
         # Delete all legacy timestamped states — the current stable label file is kept.
@@ -255,7 +255,7 @@ def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
             _legacy_cleanup_done_instances.add(instance_name)
 
     except Exception as e:
-        logger.debug("Legacy state cleanup failed for %s: %s", instance_name, e)
+        logger.debug('Legacy state cleanup failed for %s: %s', instance_name, e)
 
 
 def _delete_state(api_base_no_v1: str, model: str, label: str):
@@ -267,4 +267,4 @@ def _delete_state(api_base_no_v1: str, model: str, label: str):
         url = f"{api_base_no_v1}/v1/models/{model}/state/{label}"
         httpx.delete(url, timeout=10)
     except Exception as e:
-        logger.debug("State delete failed for label %s: %s", label, e)
+        logger.debug('State delete failed for label %s: %s', label, e)

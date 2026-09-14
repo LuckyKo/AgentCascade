@@ -53,7 +53,7 @@ class ToolDispatcher:
     def engine(self) -> 'ExecutionEngine':
         """Get engine reference, raising RuntimeError if not set."""
         if self._engine is None:
-            raise RuntimeError("ToolDispatcher._engine not set — call set_engine() first")
+            raise RuntimeError('ToolDispatcher._engine not set — call set_engine() first')
         return self._engine
     
     def set_engine(self, engine: 'ExecutionEngine') -> None:
@@ -69,7 +69,7 @@ class ToolDispatcher:
         try:
             return save_instance_state(instance)
         except Exception as e:
-            logger.warning("[STATE_SAVE] Exception saving state for %s: %s", 
+            logger.warning('[STATE_SAVE] Exception saving state for %s: %s', 
                           instance.instance_name, e)
             return False
 
@@ -151,9 +151,9 @@ class ToolDispatcher:
         if tool_name == 'call_agent':
             resolved = self.engine._resolve_placeholders(tool_args, instance.instance_name, tool_name)
             if resolved is None:
-                logger.warning("_resolve_placeholders returned None for %s", instance.instance_name)
+                logger.warning('_resolve_placeholders returned None for %s', instance.instance_name)
             result = self.handle_call_agent(resolved, llm_messages, instance, function_id=function_id)
-            logger.debug("handle_call_agent returned type=%s", type(result).__name__)
+            logger.debug('handle_call_agent returned type=%s', type(result).__name__)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
         elif tool_name == 'dismiss_agent':
@@ -244,7 +244,7 @@ class ToolDispatcher:
                 count = sum(1 for n, _depth in self.pool._execution.active_stack if n == instance_name)
                 original_instance = instance_name
                 instance_name = f"{instance_name}_child{count}"
-                logger.debug("Stacked duplicate - cloning %s to %s", original_instance, instance_name)
+                logger.debug('Stacked duplicate - cloning %s to %s', original_instance, instance_name)
 
         # P5: Resurrection identity-mismatch guard — reject when an existing instance
         # under the resolved canonical name has a persisted identity that differs from
@@ -319,7 +319,7 @@ class ToolDispatcher:
             
             if target_state in ACTIVE_STATES:
                 logger.debug(
-                    "Active instance guard rejected: %s trying to call active instance %s (state=%s)",
+                    'Active instance guard rejected: %s trying to call active instance %s (state=%s)',
                     caller_name, instance_name, target_state.name
                 )
                 return (
@@ -416,7 +416,7 @@ class ToolDispatcher:
         """
         if args is None:
             # JSON parsing failed in _resolve_placeholders — return error
-            return "[status=error] Invalid JSON arguments."
+            return '[status=error] Invalid JSON arguments.'
 
         target_name = (args.get('instance_name') or '').strip()
         all_idle = args.get('all_idle', False)
@@ -465,15 +465,15 @@ class ToolDispatcher:
                 dismissed.append((inst_name, log_path))
 
             if not dismissed:
-                return "[status=no_idle_agents] No idle agents found to dismiss."
+                return '[status=no_idle_agents] No idle agents found to dismiss.'
 
             # Build human-readable summary with per-agent log paths
-            agent_names = ", ".join(name for name, _ in dismissed)
+            agent_names = ', '.join(name for name, _ in dismissed)
             lines = [f"[status=dismissed_all_idle] Successfully dismissed {len(dismissed)} idle agents: {agent_names}"]
             for name, lp in dismissed:
                 if lp is not None:
                     lines.append(f"  {name} → {lp}")
-            return "\n".join(lines)
+            return '\n'.join(lines)
 
         # ── Single-instance dismissal ──
         if not target_name:
@@ -508,7 +508,7 @@ class ToolDispatcher:
         lines = [f"[status=dismissed] Agent '{target_name}' dismissed successfully."]
         if log_path is not None:
             lines.append(f"Log file: {log_path}")
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
 
@@ -549,7 +549,7 @@ class ToolDispatcher:
             )
             # Structured drop-handoff event (sticky slot plan change #10): parent yields its
             # slot so the sync child can acquire at FIFO tail; parent re-acquires at tail after.
-            self.engine._release_slot(caller_slot_holder, caller_name, "sync child", action="drop-handoff")
+            self.engine._release_slot(caller_slot_holder, caller_name, 'sync child', action='drop-handoff')
             logger.debug(
                 f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
             )
@@ -564,7 +564,7 @@ class ToolDispatcher:
                 args=args,
                 caller_name=caller_name,
                 child_depth=child_depth,
-                prefix="Agent",
+                prefix='Agent',
             )
 
             # Save child's state before restoring parent (state save/restore flow step 4).
@@ -574,7 +574,7 @@ class ToolDispatcher:
                 if child_inst:
                     save_instance_state(child_inst)
             except Exception as e:
-                logger.debug("Failed to save child state for %s: %s", instance_name, e)
+                logger.debug('Failed to save child state for %s: %s', instance_name, e)
 
             logger.debug(
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"
@@ -597,7 +597,7 @@ class ToolDispatcher:
             logger.debug(
                 f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child"
             )
-            if not self._reacquire_caller_slot(caller_slot_holder, caller_name, "sync child"):
+            if not self._reacquire_caller_slot(caller_slot_holder, caller_name, 'sync child'):
                 logger.warning(
                     f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
                     f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"
@@ -608,9 +608,9 @@ class ToolDispatcher:
                     with caller_slot_holder._state_lock:
                         if caller_slot_holder._state_label is not None:
                             caller_slot_holder._state_label = None
-                            logger.debug("Cleared orphaned state label for %s (re-acquire failed)", caller_name)
+                            logger.debug('Cleared orphaned state label for %s (re-acquire failed)', caller_name)
                 except Exception as e:
-                    logger.debug("Failed to clear state label for %s: %s", caller_name, e)
+                    logger.debug('Failed to clear state label for %s: %s', caller_name, e)
             else:
                 # Restore parent's state ONLY AFTER re-acquiring the slot.
                 # This avoids evicting another agent's model while they're still running
@@ -619,9 +619,9 @@ class ToolDispatcher:
                     from agent_cascade.state_ops import restore_instance_state
                     restored = restore_instance_state(caller_slot_holder)
                     if restored:
-                        logger.debug("Restored caller KV state for %s", caller_name)
+                        logger.debug('Restored caller KV state for %s', caller_name)
                 except Exception as e:
-                    logger.debug("Failed to restore caller state for %s: %s", caller_name, e)
+                    logger.debug('Failed to restore caller state for %s: %s', caller_name, e)
 
                 logger.debug(
                     f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
@@ -647,7 +647,7 @@ class ToolDispatcher:
         Returns:
             Async confirmation message
         """
-        logger.debug("Taking ASYNC path - %s calls %s/%s at depth %d", 
+        logger.debug('Taking ASYNC path - %s calls %s/%s at depth %d', 
                     caller_name, instance_name, agent_class, child_depth)
         
         # Register and launch agent asynchronously via AsyncToolRegistry.
@@ -661,7 +661,7 @@ class ToolDispatcher:
             nest_depth=child_depth,
         )
 
-        logger.debug("ASYNC - %s launched by %s", instance_name, caller_name)
+        logger.debug('ASYNC - %s launched by %s', instance_name, caller_name)
         
         # Get the logger to include filename in the response
         try:
@@ -702,7 +702,7 @@ class ToolDispatcher:
             error_message is None if validation passed
         """
         if args is None:
-            logger.warning("call_agent early exit - %s (args is None)", caller_name)
+            logger.warning('call_agent early exit - %s (args is None)', caller_name)
             return None, None, 'Error: Invalid JSON arguments.'
 
         instance_name = (args.get('instance_name') or '').strip()
@@ -711,7 +711,7 @@ class ToolDispatcher:
         if not instance_name or not agent_class:
             logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", 
                           caller_name, instance_name, agent_class)
-            return instance_name, agent_class, "Error: call_agent requires instance_name and agent_class."
+            return instance_name, agent_class, 'Error: call_agent requires instance_name and agent_class.'
 
         return instance_name, agent_class, None
 
@@ -733,9 +733,9 @@ class ToolDispatcher:
         """
         max_depth = self.pool.settings.max_nesting_depth if hasattr(self.pool, 'settings') else 10
         caller_name = instance.instance_name
-        logger.debug("call_agent nesting - %s depth=%d/%d", caller_name, child_depth, max_depth)
+        logger.debug('call_agent nesting - %s depth=%d/%d', caller_name, child_depth, max_depth)
         if child_depth > max_depth:
-            logger.warning("call_agent depth exceeded - %s at depth %d (max=%d)", 
+            logger.warning('call_agent depth exceeded - %s at depth %d (max=%d)', 
                           caller_name, child_depth, max_depth)
             return (f"Error: Nesting depth limit ({max_depth}) exceeded. "
                     f"The caller '{instance.instance_name}' is at depth {child_depth - 1}. "

@@ -32,8 +32,8 @@ class AddProductToCartTool(BaseShoppingTool):
     def _load_cart(self, path: Path):
         """Load cart data from JSON file."""
         default_cart = {
-            "items": [],
-            "summary": {"total_items_count": 0, "total_price": 0.0},
+            'items': [],
+            'summary': {'total_items_count': 0, 'total_price': 0.0},
         }
 
         try:
@@ -50,8 +50,8 @@ class AddProductToCartTool(BaseShoppingTool):
                         self.cart_data['items'] = []
                     if 'summary' not in self.cart_data:
                         self.cart_data['summary'] = {
-                            "total_items_count": len(self.cart_data.get('items', [])),
-                            "total_price": 0.0
+                            'total_items_count': len(self.cart_data.get('items', [])),
+                            'total_price': 0.0
                         }
                 else:
                     self.cart_data = default_cart
@@ -101,26 +101,26 @@ class AddProductToCartTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         product_id = params_dict.get('product_id')
         quantity = params_dict.get('quantity', 1)
 
         if not product_id:
             return self.format_result_as_json({
-                "error": "product_id is required",
+                'error': 'product_id is required',
             })
 
         if not isinstance(quantity, (int, float)) or quantity <= 0:
             return self.format_result_as_json({
-                "error": "quantity must be a positive number",
+                'error': 'quantity must be a positive number',
             })
 
         quantity = int(quantity)
 
         if product_id not in self.products_map:
             return self.format_result_as_json({
-                "error": f"Product not found: product_id '{product_id}'",
+                'error': f"Product not found: product_id '{product_id}'",
             })
 
         product = self.products_map[product_id]
@@ -141,7 +141,7 @@ class AddProductToCartTool(BaseShoppingTool):
         total_needed = existing_quantity + quantity
         if total_needed > stock_quantity:
             return self.format_result_as_json({
-                "error": f"Insufficient stock: Product '{product_name}' (ID: {product_id}) has {stock_quantity} in stock, cart already has {existing_quantity}, cannot add {quantity} more",
+                'error': f"Insufficient stock: Product '{product_name}' (ID: {product_id}) has {stock_quantity} in stock, cart already has {existing_quantity}, cannot add {quantity} more",
             })
 
         if existing_item_index >= 0:
@@ -149,10 +149,10 @@ class AddProductToCartTool(BaseShoppingTool):
             items[existing_item_index]['price'] = product_price
         else:
             items.append({
-                "product_id": product_id,
-                "name": product_name,
-                "quantity": quantity,
-                "price": product_price
+                'product_id': product_id,
+                'name': product_name,
+                'quantity': quantity,
+                'price': product_price
             })
 
         self.cart_data['items'] = items
@@ -162,7 +162,7 @@ class AddProductToCartTool(BaseShoppingTool):
             self._save_cart()
         except Exception as e:
             return self.format_result_as_json({
-                "error": f"Failed to save cart: {str(e)}",
+                'error': f"Failed to save cart: {str(e)}",
             })
 
         return self.format_result_as_json(self.cart_data)

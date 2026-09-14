@@ -87,7 +87,7 @@ class AsyncToolRegistry:
         self._worker_count = max_workers
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
-            thread_name_prefix="async_tool"
+            thread_name_prefix='async_tool'
         )
 
     def resize_executor(self, max_workers: int) -> bool:
@@ -115,7 +115,7 @@ class AsyncToolRegistry:
             try:
                 new = ThreadPoolExecutor(
                     max_workers=max_workers,
-                    thread_name_prefix="async_tool"
+                    thread_name_prefix='async_tool'
                 )
             except Exception as e:
                 logger.error(f"[ASYNC_REGISTRY] Failed to construct executor for resize to {max_workers}: {e}")
@@ -223,7 +223,7 @@ class AsyncToolRegistry:
                         elif entry.result:
                             result_msg = f"[Background Tool Result]:\n{entry.result}"
                         else:
-                            result_msg = "[Background Tool Result]: (no output)"
+                            result_msg = '[Background Tool Result]: (no output)'
                     try:
                         self.pool.enqueue_message(entry.agent_instance_name, result_msg)
                     except Exception as e:

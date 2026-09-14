@@ -64,7 +64,7 @@ def set_active_mappings(host_to_container: dict):
     """
     global _ACTIVE_PATH_MAPPINGS
     if not host_to_container:
-        raise ValueError("set_active_mappings called with empty dict — no mounts available")
+        raise ValueError('set_active_mappings called with empty dict — no mounts available')
 
     new_mappings = {}
     for mount_key, mapping in host_to_container.items():
@@ -75,12 +75,12 @@ def set_active_mappings(host_to_container: dict):
         host_path = mapping['host']
         container_path = mapping['container']
         # Normalize host path to forward slashes for consistent matching
-        normalized_host = host_path.replace("\\", "/")
+        normalized_host = host_path.replace('\\', '/')
 
         if normalized_host in new_mappings:
             _logger.warning(
                 "Duplicate normalized host path '%s' from mount keys '%s' and '%s'. "
-                "The earlier entry will be overwritten.",
+                'The earlier entry will be overwritten.',
                 normalized_host, list(new_mappings.keys())[-1], mount_key,
             )
 
@@ -113,7 +113,7 @@ def _resolve_single_path(path: str) -> str:
         '/workspace/data.csv'
     """
     # Normalize to forward slashes for consistent matching
-    normalized = path.replace("\\", "/")
+    normalized = path.replace('\\', '/')
     
     # Sort by length descending so longer prefixes match first
     sorted_mappings = sorted(
@@ -123,11 +123,11 @@ def _resolve_single_path(path: str) -> str:
     )
     
     for host_prefix, container_prefix in sorted_mappings:
-        normalized_host = host_prefix.replace("\\", "/")
+        normalized_host = host_prefix.replace('\\', '/')
         
         if normalized.startswith(normalized_host):
             # Extract relative part after the mapped prefix
-            relative_part = normalized[len(normalized_host):].lstrip("/")
+            relative_part = normalized[len(normalized_host):].lstrip('/')
             
             if relative_part:
                 return f"{container_prefix}/{relative_part}"
@@ -189,13 +189,13 @@ def resolve_code_paths(code_str: str) -> Tuple[str, int]:
     global _warnings_issued
     if not _ACTIVE_PATH_MAPPINGS and not _warnings_issued:
         _logger.warning(
-            "resolve_code_paths called with no active path mappings. "
-            "set_active_mappings() has not been called — paths will not be translated."
+            'resolve_code_paths called with no active path mappings. '
+            'set_active_mappings() has not been called — paths will not be translated.'
         )
         _warnings_issued = True
 
     total_replaced = 0
-    lines = code_str.split("\n")
+    lines = code_str.split('\n')
     resolved_lines = []
     
     for line in lines:
@@ -208,7 +208,7 @@ def resolve_code_paths(code_str: str) -> Tuple[str, int]:
         total_replaced += count
         resolved_lines.append(new_line)
     
-    return "\n".join(resolved_lines), total_replaced
+    return '\n'.join(resolved_lines), total_replaced
 
 
 def _process_single_line(line: str) -> Tuple[str, int]:
@@ -305,7 +305,7 @@ def _process_string_literal(string_literal: str) -> Tuple[str, int]:
     if not prefix_match:
         return string_literal, 0
     
-    prefix = prefix_match.group(1) or ""
+    prefix = prefix_match.group(1) or ''
     quote_char = prefix_match.group(2)
     
     # Extract content between quotes
@@ -328,7 +328,7 @@ def _process_string_literal(string_literal: str) -> Tuple[str, int]:
         matched_path = path_match.group(0)
         
         # Skip if it's already a container path (starts with /)
-        if matched_path.startswith("/"):
+        if matched_path.startswith('/'):
             return matched_path
         
         resolved_path = _resolve_single_path(matched_path)
@@ -369,7 +369,7 @@ def build_path_resolution_notice(count: int) -> str:
         '[SYSTEM] 5 path(s) auto-resolved before execution. If this interfered with your intended code, please use fix_paths=false'
     """
     if count <= 0:
-        return ""
+        return ''
     
     return f"[SYSTEM] {count} path(s) auto-resolved before execution. If this interfered with your intended code, please use fix_paths=false"
 
@@ -379,8 +379,8 @@ def build_path_resolution_notice(count: int) -> str:
 # ============================================================================
 
 __all__ = [
-    "resolve_code_paths",
-    "build_path_resolution_notice",
-    "set_active_mappings",
-    "get_active_mappings",
+    'resolve_code_paths',
+    'build_path_resolution_notice',
+    'set_active_mappings',
+    'get_active_mappings',
 ]

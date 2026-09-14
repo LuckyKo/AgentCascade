@@ -77,11 +77,11 @@ def create_main_agent_instance(
     # Only log initial messages if the history was empty (new session).
     try:
         # FIX (todo.md:117): Root agent's supervisor is "User", not "System"
-        log_inst = pool.get_logger(instance_name, 'orchestrator', base_metadata={"supervisor": "User"})
+        log_inst = pool.get_logger(instance_name, 'orchestrator', base_metadata={'supervisor': 'User'})
         # Load existing history from file so in-memory count matches disk state
         log_inst.load_history_from_file()
         # Only log initial messages for new sessions (no existing history loaded)
-        if not log_inst.data.get("history"):
+        if not log_inst.data.get('history'):
             for msg in conversation:
                 if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
                     try:
@@ -95,7 +95,7 @@ def create_main_agent_instance(
                     from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
                     with instance._compression_lock:
                         conv = list(instance.conversation)
-                    _check_tail(instance_name, conv, log_inst.log_path, context="api_integration_init")
+                    _check_tail(instance_name, conv, log_inst.log_path, context='api_integration_init')
             except Exception:
                 pass  # Non-critical diagnostic check
     except Exception as e:
@@ -245,7 +245,7 @@ def run_agent_in_pool_with_recovery(
             return
 
     # Fallback: should not reach here but guard against infinite loops
-    yield [Message(role=USER, content="[SYSTEM]: Loop recovery exhausted")]
+    yield [Message(role=USER, content='[SYSTEM]: Loop recovery exhausted')]
 
 def execute_agent_turn(
     pool: AgentPool,

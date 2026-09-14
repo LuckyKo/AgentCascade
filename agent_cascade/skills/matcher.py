@@ -41,7 +41,7 @@ class SkillMatcher:
                             Each dict should have 'name' and 'description' keys.
         """
         self._inverted_index.clear()
-        logger.debug("[SKILLS] Building inverted index from %d skills", len(skills_metadata))
+        logger.debug('[SKILLS] Building inverted index from %d skills', len(skills_metadata))
 
         for meta in skills_metadata:
             skill_name = meta.get('name', '')
@@ -61,7 +61,7 @@ class SkillMatcher:
                     self._inverted_index[kw].append(skill_name)
 
         total_keywords = len(self._inverted_index)
-        logger.debug("[SKILLS] Inverted index built: %d unique keywords", total_keywords)
+        logger.debug('[SKILLS] Inverted index built: %d unique keywords', total_keywords)
 
     # ── Matching ─────────────────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ class SkillMatcher:
             Only skills with score > 0 are returned.
         """
         if not self._inverted_index:
-            logger.debug("[SKILLS] Empty index — no matches possible")
+            logger.debug('[SKILLS] Empty index — no matches possible')
             return []
 
         query_tokens = set(_TOKEN_RE.findall(query.lower()))

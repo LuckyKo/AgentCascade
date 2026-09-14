@@ -66,7 +66,7 @@ class GroupChat(Agent, MultiAgentHub):
             llm: The LLM for inputting to the host.
         """
         super().__init__(**kwargs)
-        assert agent_selection_method in self._VALID_AGENT_SELECTION_METHODS, f'You must choose agent_selection_method from {", ".join(self._VALID_AGENT_SELECTION_METHODS)}'
+        assert agent_selection_method in self._VALID_AGENT_SELECTION_METHODS, f'You must choose agent_selection_method from {', '.join(self._VALID_AGENT_SELECTION_METHODS)}'
         self.agent_selection_method = agent_selection_method
 
         if isinstance(agents, dict):
@@ -283,7 +283,7 @@ class GroupChat(Agent, MultiAgentHub):
         agents = []
         groupchat_background = '你在一个群聊中，'
         if cfgs.get('background', ''):
-            groupchat_background += f'群聊背景为：{cfgs["background"]}'
+            groupchat_background += f'群聊背景为：{cfgs['background']}'
 
         for cfg in cfgs['agents']:
             system, knowledge_files, selected_tools = _build_system_from_role_config(cfg)
@@ -299,7 +299,7 @@ class GroupChat(Agent, MultiAgentHub):
                 agents.append(
                     Assistant(llm=llm,
                               system_message=groupchat_background + system +
-                              f'\n\n群里其他成员包括：{", ".join(other_agents)}，如果你想和别人对话，可以@成员名字。\n' +
+                              f'\n\n群里其他成员包括：{', '.join(other_agents)}，如果你想和别人对话，可以@成员名字。\n' +
                               '\n\n讲话时请直接输出内容，不要输出你的名字。\n\n其他群友的发言历史以如下格式展示：\n角色名: 说话内容',
                               files=knowledge_files,
                               function_list=selected_tools,

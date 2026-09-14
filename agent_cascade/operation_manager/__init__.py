@@ -98,7 +98,7 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
             return True
         else:
             from agent_cascade.log import logger
-            logger.debug("[Workspace] Base dir unchanged (%s), skipping notification", new_path)
+            logger.debug('[Workspace] Base dir unchanged (%s), skipping notification', new_path)
         return False
 
     def set_extra_work_folders(self, folders_ro: List[str], folders_rw: List[str]):
@@ -114,7 +114,7 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
                 p = Path(folder.strip()).resolve()
                 new_folders_ro.append(p)
             except Exception as e:
-                logger.warning("Failed to resolve extra RO work folder %s: %s", folder, e)
+                logger.warning('Failed to resolve extra RO work folder %s: %s', folder, e)
 
         new_folders_rw = []
         for folder in (folders_rw or []):
@@ -124,7 +124,7 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
                 p = Path(folder.strip()).resolve()
                 new_folders_rw.append(p)
             except Exception as e:
-                logger.warning("Failed to resolve extra RW work folder %s: %s", folder, e)
+                logger.warning('Failed to resolve extra RW work folder %s: %s', folder, e)
 
         folders_changed = (frozenset(new_folders_ro) != frozenset(self.extra_work_folders_ro) or
                           frozenset(new_folders_rw) != frozenset(self.extra_work_folders_rw))
@@ -132,11 +132,11 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
         if folders_changed:
             self.extra_work_folders_ro = new_folders_ro
             self.extra_work_folders_rw = new_folders_rw
-            logger.info("[Workspace] Tiered folders updated: RO=%d, RW=%d", len(self.extra_work_folders_ro), len(self.extra_work_folders_rw))
+            logger.info('[Workspace] Tiered folders updated: RO=%d, RW=%d', len(self.extra_work_folders_ro), len(self.extra_work_folders_rw))
             if self.agent_pool:
                 self.agent_pool.notify_config_changed()
         else:
-            logger.debug("[Workspace] Tiered folders unchanged, skipping config notification")
+            logger.debug('[Workspace] Tiered folders unchanged, skipping config notification')
 
     # ─── File ownership helpers (thread-safe, normalized) ──────────────────
 

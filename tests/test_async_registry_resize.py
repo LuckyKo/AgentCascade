@@ -38,7 +38,7 @@ def _wait_pending_false(registry, instance_name, timeout=10.0):
 
 def _count_async_tool_threads():
     """Count live threads named like the async_tool executor prefix."""
-    return sum(1 for t in threading.enumerate() if t.name.startswith("async_tool"))
+    return sum(1 for t in threading.enumerate() if t.name.startswith('async_tool'))
 
 
 @pytest.fixture
@@ -102,13 +102,13 @@ class TestResizeSwapsExecutor:
             # Occupy an old-pool worker so we can force a queued state on the old pool.
             started.set()
             release.wait(timeout=10)
-            return "gated"
+            return 'gated'
 
         # 3 workers by default; occupy all of them then queue one more on OLD pool.
         for i in range(AGENT_MAX_WORKERS):
             registry.register(f"w{i}", gated_tool, function_id=f"c{i}")
         started.wait(timeout=5)
-        queued_entry = registry.register("queued", gated_tool, function_id="cq")
+        queued_entry = registry.register('queued', gated_tool, function_id='cq')
 
         # Now resize to a larger pool. The queued task is on the OLD pool.
         assert registry.resize_executor(AGENT_MAX_WORKERS + 2) is True
@@ -118,8 +118,8 @@ class TestResizeSwapsExecutor:
         deadline = time.monotonic() + 10
         while not queued_entry.completed and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert queued_entry.completed is True, "Queued task on old pool was lost (cancel_futures?)"
-        assert queued_entry.result == "gated"
+        assert queued_entry.completed is True, 'Queued task on old pool was lost (cancel_futures?)'
+        assert queued_entry.result == 'gated'
 
 
 # ============================================================================
@@ -153,7 +153,7 @@ class TestClampAndNoop:
         deadline = time.monotonic() + 5
         while _count_async_tool_threads() < AGENT_MAX_WORKERS and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert _count_async_tool_threads() <= AGENT_MAX_WORKERS, "same-size resize leaked threads"
+        assert _count_async_tool_threads() <= AGENT_MAX_WORKERS, 'same-size resize leaked threads'
 
 
 # ============================================================================
@@ -179,10 +179,10 @@ class TestRegisterAfterResize:
         new_exec = registry._executor
         assert new_exec is not old_exec
 
-        entry = registry.register("worker1", lambda: "hi", function_id="c1")
+        entry = registry.register('worker1', lambda: 'hi', function_id='c1')
 
         # The old pool must NOT have been used for the new registration.
-        assert old_submits == [], "register() submitted to the OLD executor after resize"
+        assert old_submits == [], 'register() submitted to the OLD executor after resize'
         # And the returned future is a real, pending/completable Future on the new pool.
         assert entry.future is not None
         deadline = time.monotonic() + 5
@@ -225,7 +225,7 @@ class TestResetPreservesSize:
 
         # Recreate exactly as lifecycle.py does: AsyncToolRegistry(pool=self).
         second = AsyncToolRegistry(pool=pool)
-        assert second._worker_count == 5, "reset did not preserve configured size"
+        assert second._worker_count == 5, 'reset did not preserve configured size'
 
 
 # ============================================================================
@@ -283,7 +283,7 @@ class TestThreadedRace:
         deadline = time.monotonic() + 10
         while _count_async_tool_threads() > 0 and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert _count_async_tool_threads() == 0, "async_tool threads leaked after race"
+        assert _count_async_tool_threads() == 0, 'async_tool threads leaked after race'
 
 
 # ============================================================================
@@ -305,7 +305,7 @@ class TestNoDanglingParentAfterResize:
             return f"child-{i}"
 
         # Submit all children; only 2 run at once, rest queue on the old pool.
-        entries = [reg.register("parent", lambda i=i: child(i), function_id=f"c{i}") for i in range(N)]
+        entries = [reg.register('parent', lambda i=i: child(i), function_id=f"c{i}") for i in range(N)]
         time.sleep(0.1)  # let a couple start and the rest queue
 
         # Resize while some are still queued on the OLD pool.
@@ -314,7 +314,7 @@ class TestNoDanglingParentAfterResize:
         deadline = time.monotonic() + 15
         while not all(e.completed for e in entries) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert all(e.completed for e in entries), "some children did not complete after resize"
+        assert all(e.completed for e in entries), 'some children did not complete after resize'
         assert sorted(done) == list(range(N)), f"lost children: {sorted(done)}"
 
 
@@ -329,25 +329,25 @@ class TestIntegrationWithRealPoolShapedObject:
         assert reg._worker_count == 3
 
         # Register a couple of tools.
-        e1 = reg.register("worker1", lambda: "one", function_id="c1")
-        e2 = reg.register("worker1", lambda: "two", function_id="c2")
+        e1 = reg.register('worker1', lambda: 'one', function_id='c1')
+        e2 = reg.register('worker1', lambda: 'two', function_id='c2')
 
         # Live-resize (as the UI slider would).
         assert reg.resize_executor(5) is True
         assert reg._worker_count == 5
 
         # Register after resize; everything must complete and enqueue.
-        e3 = reg.register("worker1", lambda: "three", function_id="c3")
+        e3 = reg.register('worker1', lambda: 'three', function_id='c3')
 
         deadline = time.monotonic() + 10
         while not all(e.completed for e in (e1, e2, e3)) and time.monotonic() < deadline:
             time.sleep(0.02)
         assert all(e.completed for e in (e1, e2, e3))
-        assert e1.result == "one" and e2.result == "two" and e3.result == "three"
+        assert e1.result == 'one' and e2.result == 'two' and e3.result == 'three'
 
         # Results enqueued to the pool's message queue.
         assert len(pool.messages) == 3
         payloads = [m for _, m in pool.messages]
-        assert any("one" in p for p in payloads)
-        assert any("two" in p for p in payloads)
-        assert any("three" in p for p in payloads)
+        assert any('one' in p for p in payloads)
+        assert any('two' in p for p in payloads)
+        assert any('three' in p for p in payloads)

@@ -65,7 +65,7 @@ class CompressContext(BaseTool):
         precomputed_summary = kwargs.get('precomputed_summary')
 
         if not self.agent_pool:
-            return "ERROR: agent_pool not connected to tool"
+            return 'ERROR: agent_pool not connected to tool'
 
         # Resolve the target agent name from kwargs or fallback
         agent_obj = kwargs.get('agent_obj')
@@ -152,7 +152,7 @@ class CompressContext(BaseTool):
             target_inst = self.agent_pool.get_instance(agent_name)
             if target_inst is not None:
                 max_tokens = getattr(target_inst, '_allocated_max_input_tokens', 0) or 0
-            comp_type = "manual" if mode == "manual" else "auto"
+            comp_type = 'manual' if mode == 'manual' else 'auto'
             return CompressionHandler._format_compression_feedback(
                 comp_type, result.messages_discarded, result.tokens_after, max_tokens
             )

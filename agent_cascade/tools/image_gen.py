@@ -78,7 +78,7 @@ def _image_gen_config_path() -> Path:
     ``parent.parent`` would resolve to a stray ``agent_cascade/config/``; the real
     config dir sits one level higher.
     """
-    return Path(__file__).resolve().parent.parent.parent / "config" / "image_gen.json"
+    return Path(__file__).resolve().parent.parent.parent / 'config' / 'image_gen.json'
 
 
 def _get_image_gen_config() -> dict:
@@ -100,7 +100,7 @@ def _get_image_gen_config() -> dict:
                 data = {}
             _config_cache = {**data, '_ts': now}
         except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-            logger.debug("image_gen config read failed (%s): %s", config_path, e)
+            logger.debug('image_gen config read failed (%s): %s', config_path, e)
             _config_cache = {'_ts': now}
         return {k: v for k, v in _config_cache.items() if k != '_ts'}
 
@@ -146,13 +146,13 @@ def _render_svg_to_png_bytes(svg_text: str) -> bytes:
         import cairosvg
     except ImportError as e:
         raise ImportError(
-            "cairosvg is required to render SVG. Install it with: pip install cairosvg"
+            'cairosvg is required to render SVG. Install it with: pip install cairosvg'
         ) from e
     except OSError as e:
         raise OSError(
             f"cairosvg native library error: {e}. On Windows you may need the GTK3 "
-            "runtime (https://github.com/tschoonj/GTK3-Runtime-for-Windows/releases) "
-            "or set GTK_LIBS."
+            'runtime (https://github.com/tschoonj/GTK3-Runtime-for-Windows/releases) '
+            'or set GTK_LIBS.'
         ) from e
     return cairosvg.svg2png(bytestring=svg_text.encode('utf-8'))
 
@@ -202,12 +202,12 @@ def _list_workflows(workflow_dir: str) -> List[dict]:
     d = Path(workflow_dir)
     if not d.exists() or not d.is_dir():
         return []
-    workflows = [{"name": f.stem, "path": str(f)} for f in d.glob("*.json")]
-    workflows.sort(key=lambda w: (w["name"], w["path"]))
+    workflows = [{'name': f.stem, 'path': str(f)} for f in d.glob('*.json')]
+    workflows.sort(key=lambda w: (w['name'], w['path']))
     return workflows
 
 
-def _inject_params(workflow: dict, prompt: str, negative_prompt: str = "",
+def _inject_params(workflow: dict, prompt: str, negative_prompt: str = '',
                    width: Optional[int] = None, height: Optional[int] = None,
                    seed: Optional[int] = None) -> Tuple[dict, List[str]]:
     """Inject generation parameters into a ComfyUI workflow (mutates in place).
@@ -231,11 +231,11 @@ def _inject_params(workflow: dict, prompt: str, negative_prompt: str = "",
     for node_id, node in workflow.items():
         if not isinstance(node, dict):
             continue
-        inputs = node.get("inputs", {}) or {}
-        ct = node.get("class_type")
-        if ct == "CLIPTextEncode" and "text" in inputs:
+        inputs = node.get('inputs', {}) or {}
+        ct = node.get('class_type')
+        if ct == 'CLIPTextEncode' and 'text' in inputs:
             clip_nodes.append((node_id, node))
-        elif ct == "PrimitiveStringMultiline" and "value" in inputs:
+        elif ct == 'PrimitiveStringMultiline' and 'value' in inputs:
             prim_nodes.append((node_id, node))
 
     # 2. Inject the positive prompt.
@@ -244,25 +244,25 @@ def _inject_params(workflow: dict, prompt: str, negative_prompt: str = "",
     positive_node_id = None
     if prim_nodes:
         nid, node = prim_nodes[0]
-        node["inputs"]["value"] = prompt
+        node['inputs']['value'] = prompt
         positive_node_id = nid
         report.append(f"prompt → {nid} (PrimitiveStringMultiline)")
     elif clip_nodes:
         target = None
         for nid, node in clip_nodes:
-            if node["inputs"]["text"]:  # non-empty ⇒ likely the positive slot
+            if node['inputs']['text']:  # non-empty ⇒ likely the positive slot
                 target = (nid, node)
                 break
         if target is None:
             target = clip_nodes[0]
         positive_node_id = target[0]
-        target[1]["inputs"]["text"] = prompt
+        target[1]['inputs']['text'] = prompt
         report.append(f"prompt → {positive_node_id} (CLIPTextEncode)")
 
     if positive_node_id is None:
         raise ValueError(
-            "Could not inject prompt into workflow. No CLIPTextEncode or "
-            "PrimitiveStringMultiline nodes found — check the workflow format."
+            'Could not inject prompt into workflow. No CLIPTextEncode or '
+            'PrimitiveStringMultiline nodes found — check the workflow format.'
         )
 
     # 3. Inject the negative prompt (a CLIPTextEncode that is NOT the positive one).
@@ -270,13 +270,13 @@ def _inject_params(workflow: dict, prompt: str, negative_prompt: str = "",
         placed = False
         for nid, node in clip_nodes:
             if nid != positive_node_id:
-                node["inputs"]["text"] = negative_prompt
+                node['inputs']['text'] = negative_prompt
                 report.append(f"negative → {nid} (CLIPTextEncode)")
                 placed = True
                 break
         if not placed:
             logger.debug(
-                "image_gen: negative prompt ignored — no secondary CLIPTextEncode node found"
+                'image_gen: negative prompt ignored — no secondary CLIPTextEncode node found'
             )
 
     # 4. Override width/height (direct ints and/or node references).
@@ -284,49 +284,49 @@ def _inject_params(workflow: dict, prompt: str, negative_prompt: str = "",
         for node_id, node in workflow.items():
             if not isinstance(node, dict):
                 continue
-            inputs = node.get("inputs", {}) or {}
-            ct = node.get("class_type", "")
+            inputs = node.get('inputs', {}) or {}
+            ct = node.get('class_type', '')
 
             # Direct integer dims (zimg_turbo pattern).
-            if "width" in inputs and isinstance(inputs["width"], int) and width:
-                inputs["width"] = width
+            if 'width' in inputs and isinstance(inputs['width'], int) and width:
+                inputs['width'] = width
                 report.append(f"width={width} → {node_id}")
-            if "height" in inputs and isinstance(inputs["height"], int) and height:
-                inputs["height"] = height
+            if 'height' in inputs and isinstance(inputs['height'], int) and height:
+                inputs['height'] = height
                 report.append(f"height={height} → {node_id}")
 
             # Node references like ["75:68", 0] (flux2 pattern): follow to the
             # PrimitiveInt node and set its scalar value.
-            for dim_key in ("width", "height"):
+            for dim_key in ('width', 'height'):
                 val = inputs.get(dim_key)
                 if isinstance(val, list) and len(val) == 2 and isinstance(val[0], str):
                     ref_node_id = val[0]
                     ref_node = workflow.get(ref_node_id)
-                    new_val = width if dim_key == "width" else height
+                    new_val = width if dim_key == 'width' else height
                     if (ref_node is not None
-                            and ref_node.get("class_type") == "PrimitiveInt"
+                            and ref_node.get('class_type') == 'PrimitiveInt'
                             and isinstance(new_val, int)):
-                        ref_node["inputs"]["value"] = new_val
+                        ref_node['inputs']['value'] = new_val
                         report.append(f"{dim_key}={new_val} → {ref_node_id} (PrimitiveInt)")
 
             # CR Aspect Ratio node: force custom mode so our dims take effect.
-            if ct == "CR Aspect Ratio":
-                if "aspect_ratio" in inputs:
-                    inputs["aspect_ratio"] = "custom"
-                if "swap_dimensions" in inputs:
-                    inputs["swap_dimensions"] = "Off"
+            if ct == 'CR Aspect Ratio':
+                if 'aspect_ratio' in inputs:
+                    inputs['aspect_ratio'] = 'custom'
+                if 'swap_dimensions' in inputs:
+                    inputs['swap_dimensions'] = 'Off'
                 report.append(f"CR Aspect Ratio → {node_id} (forced custom)")
 
     # 5. Set the seed on every node that carries a seed input.
     for node_id, node in workflow.items():
         if not isinstance(node, dict):
             continue
-        inputs = node.get("inputs", {}) or {}
-        if "seed" in inputs:
-            inputs["seed"] = seed
+        inputs = node.get('inputs', {}) or {}
+        if 'seed' in inputs:
+            inputs['seed'] = seed
             report.append(f"seed={seed} → {node_id}")
-        if "noise_seed" in inputs:
-            inputs["noise_seed"] = seed
+        if 'noise_seed' in inputs:
+            inputs['noise_seed'] = seed
             report.append(f"noise_seed={seed} → {node_id}")
 
     return workflow, report
@@ -339,11 +339,11 @@ def _extract_seed(workflow: dict) -> Optional[int]:
     for node in workflow.values():
         if not isinstance(node, dict):
             continue
-        inputs = node.get("inputs", {}) or {}
-        if "seed" in inputs and isinstance(inputs["seed"], int):
-            return inputs["seed"]
-        if "noise_seed" in inputs and isinstance(inputs["noise_seed"], int):
-            return inputs["noise_seed"]
+        inputs = node.get('inputs', {}) or {}
+        if 'seed' in inputs and isinstance(inputs['seed'], int):
+            return inputs['seed']
+        if 'noise_seed' in inputs and isinstance(inputs['noise_seed'], int):
+            return inputs['noise_seed']
     return None
 
 
@@ -372,7 +372,7 @@ def _comfyui_generate(url: str, workflow: dict, timeout: int = 180,
     try:
         # 1. Submit the prompt.
         try:
-            resp = client.post(f"{url}/prompt", json={"prompt": workflow}, timeout=30)
+            resp = client.post(f"{url}/prompt", json={'prompt': workflow}, timeout=30)
         except httpx.ConnectError as e:
             raise RuntimeError(f"ComfyUI server not reachable at {url}. Is it running?") from e
         except httpx.TimeoutException as e:
@@ -384,7 +384,7 @@ def _comfyui_generate(url: str, workflow: dict, timeout: int = 180,
             )
 
         try:
-            prompt_id = resp.json()["prompt_id"]
+            prompt_id = resp.json()['prompt_id']
         except (ValueError, KeyError) as e:
             raise RuntimeError(
                 f"ComfyUI submit response missing 'prompt_id': {resp.text[:200]}"
@@ -408,29 +408,29 @@ def _comfyui_generate(url: str, workflow: dict, timeout: int = 180,
             if not entry:
                 continue
 
-            status = entry.get("status", {}) or {}
+            status = entry.get('status', {}) or {}
 
-            if status.get("status_str") == "error":
+            if status.get('status_str') == 'error':
                 raise RuntimeError(f"ComfyUI generation error: {json.dumps(status)[:300]}")
 
-            if status.get("completed"):
+            if status.get('completed'):
                 # 3. Extract the first image from the node outputs and download it.
-                outputs = entry.get("outputs", {}) or {}
+                outputs = entry.get('outputs', {}) or {}
                 for _node_id, node_out in outputs.items():
-                    images = (node_out or {}).get("images", []) or []
+                    images = (node_out or {}).get('images', []) or []
                     if images:
                         img_info = images[0]
-                        filename = img_info["filename"]
-                        subfolder = img_info.get("subfolder", "")
-                        folder_type = img_info.get("type", "output")
+                        filename = img_info['filename']
+                        subfolder = img_info.get('subfolder', '')
+                        folder_type = img_info.get('type', 'output')
                         view_url = (
                             f"{url}/view?filename={filename}"
                             f"&subfolder={subfolder}&type={folder_type}"
                         )
                         img_resp = client.get(view_url, timeout=30)
                         if img_resp.status_code == 200 and img_resp.content:
-                            return img_resp.content, {"seed": _extract_seed(workflow)}
-                raise RuntimeError("ComfyUI completed but no image found in outputs")
+                            return img_resp.content, {'seed': _extract_seed(workflow)}
+                raise RuntimeError('ComfyUI completed but no image found in outputs')
 
         raise TimeoutError(f"ComfyUI generation timed out after {timeout}s")
     finally:
@@ -457,23 +457,23 @@ class ImageGen(BaseTool):
             'prompt': {
                 'type': 'string',
                 'description': (
-                    "Text prompt for image generation, or SVG code to render to an image."
+                    'Text prompt for image generation, or SVG code to render to an image.'
                 ),
             },
             'negative_prompt': {
                 'type': 'string',
-                'description': "Negative prompt to exclude elements (API generation only).",
+                'description': 'Negative prompt to exclude elements (API generation only).',
             },
             'workflow': {
                 'type': 'string',
                 'description': (
-                    "Full path to a ComfyUI workflow JSON file. If omitted, uses the "
-                    "default workflow selected in UI settings."
+                    'Full path to a ComfyUI workflow JSON file. If omitted, uses the '
+                    'default workflow selected in UI settings.'
                 ),
             },
-            'width': {'type': 'integer', 'description': "Output width in pixels (overrides workflow default)."},
-            'height': {'type': 'integer', 'description': "Output height in pixels (overrides workflow default)."},
-            'seed': {'type': 'integer', 'description': "Random seed for reproducibility (random if omitted)."},
+            'width': {'type': 'integer', 'description': 'Output width in pixels (overrides workflow default).'},
+            'height': {'type': 'integer', 'description': 'Output height in pixels (overrides workflow default).'},
+            'seed': {'type': 'integer', 'description': 'Random seed for reproducibility (random if omitted).'},
         },
         'required': ['prompt'],
     }
@@ -535,7 +535,7 @@ class ImageGen(BaseTool):
             # captioning is best-effort side work — a failed/terminated caption must
             # never block returning the generated image. (A termination during this
             # short call is rare; if it happens we simply return the image uncaptioned.)
-            logger.warning("image_gen: captioning failed (non-fatal): %s", e)
+            logger.warning('image_gen: captioning failed (non-fatal): %s', e)
             return None
 
     def call(self, params: Union[str, dict], **kwargs) -> List[ContentItem]:
@@ -567,13 +567,13 @@ class ImageGen(BaseTool):
         except OSError as e:
             return [ContentItem(text=f"ERROR: {e}")]
         except Exception as e:
-            logger.exception("SVG render failed")
+            logger.exception('SVG render failed')
             return [ContentItem(text=f"ERROR: SVG parse/render error: {e}")]
 
         try:
-            media_path = save_image_to_media(image_source=png_bytes, source_name="svg_render")
+            media_path = save_image_to_media(image_source=png_bytes, source_name='svg_render')
         except Exception as e:
-            logger.exception("Failed to save rendered SVG image")
+            logger.exception('Failed to save rendered SVG image')
             return [ContentItem(text=f"ERROR: Failed to save rendered image: {e}")]
 
         w, h = _svg_dimensions(svg_text)
@@ -595,8 +595,8 @@ class ImageGen(BaseTool):
         url = config.get('url')
         if not url:
             return [ContentItem(text=(
-                "ERROR: No ComfyUI server configured. Set the image generation "
-                "server URL in UI settings (config/image_gen.json)."
+                'ERROR: No ComfyUI server configured. Set the image generation '
+                'server URL in UI settings (config/image_gen.json).'
             ))]
         try:
             timeout = int(config.get('timeout', 180))
@@ -609,9 +609,9 @@ class ImageGen(BaseTool):
             available = _list_workflows(config.get('workflow_dir', ''))
             names = ', '.join(w['name'] for w in available) if available else 'none'
             return [ContentItem(text=(
-                "ERROR: No workflow specified and no default workflow configured. "
+                'ERROR: No workflow specified and no default workflow configured. '
                 f"Available workflows: {names}. Pass a full path via the 'workflow' "
-                "parameter or set a default in UI settings."
+                'parameter or set a default in UI settings.'
             ))]
 
         # Load + inject BEFORE touching VRAM, so config/format errors don't leave
@@ -629,14 +629,14 @@ class ImageGen(BaseTool):
             workflow, report = _inject_params(
                 workflow,
                 prompt=params['prompt'],
-                negative_prompt=params.get('negative_prompt') or "",
+                negative_prompt=params.get('negative_prompt') or '',
                 width=params.get('width'),
                 height=params.get('height'),
                 seed=params.get('seed'),
             )
         except ValueError as e:
             return [ContentItem(text=f"ERROR: {e}")]
-        logger.info("image_gen injection for %s: %s", Path(workflow_path).name, '; '.join(report))
+        logger.info('image_gen injection for %s: %s', Path(workflow_path).name, '; '.join(report))
 
         # ── VRAM management: save → unload → (ComfyUI) → [caption] → restore ──
         # Restore is NOT in a finally block. It is called explicitly at the end (after
@@ -669,7 +669,7 @@ class ImageGen(BaseTool):
                         }
                         if not unload_all_models(endpoint_cfg['api_base']):
                             logger.warning(
-                                "[ImageGen] VRAM may be constrained; model was not unloaded before ComfyUI"
+                                '[ImageGen] VRAM may be constrained; model was not unloaded before ComfyUI'
                             )
 
             image_bytes, _meta = _comfyui_generate(url, workflow, timeout=timeout)
@@ -679,16 +679,16 @@ class ImageGen(BaseTool):
                 self._restore_vram_state(instance, held)
             return [ContentItem(text=f"ERROR: Image generation failed: {e}")]
         except Exception as e:
-            logger.exception("Unexpected error during image generation")
+            logger.exception('Unexpected error during image generation')
             if _state_saved and instance is not None:
                 self._restore_vram_state(instance, held)
             return [ContentItem(text=f"ERROR: Unexpected image generation error: {e}")]
 
         # Save the result through the media pipeline.
         try:
-            media_path = save_image_to_media(image_source=image_bytes, source_name="comfyui_gen")
+            media_path = save_image_to_media(image_source=image_bytes, source_name='comfyui_gen')
         except Exception as e:
-            logger.exception("Failed to save generated image")
+            logger.exception('Failed to save generated image')
             if _state_saved and instance is not None:
                 self._restore_vram_state(instance, held)
             return [ContentItem(text=f"ERROR: Failed to save generated image: {e}")]
@@ -730,9 +730,9 @@ class ImageGen(BaseTool):
                 return
             except Exception as e:
                 if attempt == 0:
-                    logger.warning("[ImageGen] Restore attempt 1 failed, retrying: %s", e)
+                    logger.warning('[ImageGen] Restore attempt 1 failed, retrying: %s', e)
                     time.sleep(2)
                 else:
                     logger.error(
-                        "[ImageGen] State restore FAILED after ComfyUI — model may not be loaded: %s", e
+                        '[ImageGen] State restore FAILED after ComfyUI — model may not be loaded: %s', e
                     )

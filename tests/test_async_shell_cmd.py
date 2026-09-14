@@ -385,7 +385,7 @@ class TestWaitCommand:
     def test_wait_consumes_already_queued_heartbeat(self, shell_cmd_tool, mock_task_running):
         """RC2 core fix: an ALREADY-queued heartbeat is consumed immediately (no timeout wait)."""
         self._wait_env_queue(shell_cmd_tool, mock_task_running)
-        msg = "⟨shell_cmd heartbeat⟩ Beat 1 (30s), Tool ID: 1 | No new output (still running)"
+        msg = '⟨shell_cmd heartbeat⟩ Beat 1 (30s), Tool ID: 1 | No new output (still running)'
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg)
 
         start = time.time()
@@ -401,8 +401,8 @@ class TestWaitCommand:
         returns the DEFAULT wake-up string (NOT the shell msg) and leaves BOTH messages queued
         in original order for the normal drain. Would FAIL if the code still consumed/skipped."""
         self._wait_env_queue(shell_cmd_tool, mock_task_running)
-        user_msg = "hello from user"
-        shell_msg = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\nout"
+        user_msg = 'hello from user'
+        shell_msg = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\nout'
         # Enqueue the non-shell message FIRST so it sits at the FRONT of the shared queue.
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', user_msg)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', shell_msg)
@@ -411,7 +411,7 @@ class TestWaitCommand:
 
         # Front is the user msg (not this shell) → default wake-up string, NOT the shell msg.
         assert 'Woken by queued message (not this shell)' in result, f"expected default wake-up: {result!r}"
-        assert result != shell_msg, "default wake-up case must not return the shell msg verbatim"
+        assert result != shell_msg, 'default wake-up case must not return the shell msg verbatim'
         # BOTH messages remain queued, in original order (user first), for the normal drain.
         remaining = shell_cmd_tool.agent_pool.get_queue_messages('test_agent')
         assert remaining == [user_msg, shell_msg], \
@@ -422,8 +422,8 @@ class TestWaitCommand:
         wake-up (user is at front), and BOTH remain queued in original order so the normal drain
         delivers them one after another as usual."""
         self._wait_env_queue(shell_cmd_tool, mock_task_running)
-        user_msg = "supervisor note"
-        heartbeat = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\nout"
+        user_msg = 'supervisor note'
+        heartbeat = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\nout'
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', user_msg)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', heartbeat)
 
@@ -440,8 +440,8 @@ class TestWaitCommand:
         returns the default wake-up (not ours) and leaves BOTH queued in order; tool 2's own
         __wait will later consume it when it reaches the front."""
         self._wait_env_queue(shell_cmd_tool, mock_task_running)
-        msg1 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na"
-        msg2 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 2 | 1 line since last tick\nb"
+        msg1 = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na'
+        msg2 = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 2 | 1 line since last tick\nb'
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg2)  # other tool at FRONT
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg1)
 
@@ -490,7 +490,7 @@ class TestWaitCommand:
         assert len(queued2) == 1
         second_msg = queued2[0]
         assert 'No new output (still running)' in second_msg
-        assert 'dup line A' not in second_msg, "RC3 regression: lines re-sent after __wait consumed them"
+        assert 'dup line A' not in second_msg, 'RC3 regression: lines re-sent after __wait consumed them'
         assert 'dup line B' not in second_msg
 
     def test_wait_fallback_uses_polling_for_mock_pool(self, shell_cmd_tool, mock_task_running):
@@ -502,7 +502,7 @@ class TestWaitCommand:
         _make_tool_with_tracker(shell_cmd_tool, tracker)  # wires a bare MagicMock pool
 
         assert not _has_real_wait_for_message(shell_cmd_tool.agent_pool), \
-            "MagicMock pool must be rejected by _has_real_wait_for_message"
+            'MagicMock pool must be rejected by _has_real_wait_for_message'
         # And the fake real pool must be accepted (proves the new path is reachable).
         assert _has_real_wait_for_message(_FakePoolWithWait())
 
@@ -516,8 +516,8 @@ class TestWaitCommand:
         queued. (If the old substring predicate were used, the 12-msg would be wrongly consumed.)
         """
         self._wait_env_queue(shell_cmd_tool, mock_task_running)
-        msg_12 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 12 | 1 line since last tick\nb"
-        msg_1 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na"
+        msg_12 = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 12 | 1 line since last tick\nb'
+        msg_1 = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na'
         # Enqueue the LONGER id first so it sits at the FRONT of the shared queue.
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_12)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_1)
@@ -536,8 +536,8 @@ class TestWaitCommand:
         FRONT it IS consumed verbatim — and a longer-id message queued behind it stays put. Pairs
         with test_wait_predicate_does_not_match_longer_tool_id to pin the 1-vs-12 boundary both ways."""
         self._wait_env_queue(shell_cmd_tool, mock_task_running)
-        msg_1 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na"
-        msg_12 = "⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 12 | 1 line since last tick\nb"
+        msg_1 = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 1 | 1 line since last tick\na'
+        msg_12 = '⟨shell_cmd heartbeat⟩ Beat 1 (5s), Tool ID: 12 | 1 line since last tick\nb'
         # Ours at the FRONT, longer id behind it.
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_1)
         shell_cmd_tool.agent_pool.enqueue_message('test_agent', msg_12)
@@ -983,8 +983,8 @@ class TestConsoleWindowSuppression:
         import os
 
         # conftest.py guarantees this is set for all tests, but assert defensively
-        assert os.environ.get("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW") == "1", \
-            "Expected conftest to set AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1"
+        assert os.environ.get('AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW') == '1', \
+            'Expected conftest to set AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1'
 
         tracker = AsyncShellTracker(pool=None)
         tool_id, _, early_output, completed_early, return_code = tracker.launch(
@@ -997,7 +997,7 @@ class TestConsoleWindowSuppression:
 
         task = tracker._get_task('test_agent', tool_id)
         assert task.console_window is False, \
-            "console_window should be forced to False when AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1"
+            'console_window should be forced to False when AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW=1'
 
 
 # ============================================================================
@@ -1066,7 +1066,7 @@ class TestRealExecution:
             time.sleep(1.0)
             task = tracker._get_task('test_agent', tool_id)
             with task._lock:
-                assert task.completed is True, "Task should be completed"
+                assert task.completed is True, 'Task should be completed'
                 assert task.return_code == 0, f"Expected exit code 0, got {task.return_code}"
                 all_output = task.stdout_lines + (task.stderr_lines if hasattr(task, 'stderr_lines') else [])
                 assert any(expected in line for line in all_output), \

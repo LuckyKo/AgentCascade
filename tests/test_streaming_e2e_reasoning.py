@@ -54,14 +54,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_cascade.llm.schema import Message, ASSISTANT  # noqa: E402
 
-INSTANCE_NAME = "Maine"
-AGENT_CLASS = "coder"
+INSTANCE_NAME = 'Maine'
+AGENT_CLASS = 'coder'
 
 # Real example session log (same format the WS 'load_session' / REST resume command
 # consumes). Used as a fallback fixture when present; the test otherwise builds an
 # equivalent synthetic JSONL so it is self-contained and deterministic in CI.
 EXAMPLE_SESSION_LOG = Path(
-    r"N:\work\WD\AgentWorkspace\logs\researcher_stream-probe-analyst_20260903_093608.jsonl"
+    r'N:\work\WD\AgentWorkspace\logs\researcher_stream-probe-analyst_20260903_093608.jsonl'
 )
 
 # ── Mock LLM timing profile (deterministic, fast) ─────────────────────────────
@@ -104,16 +104,16 @@ def _make_mock_execute_llm_call(self, instance, template, messages, active_funct
         time.sleep(REASONING_GAP)
         reasoning_parts.append(f"thought_{i:02d}_")
         yield [
-            _msg(role=ASSISTANT, content="", reasoning_content="".join(reasoning_parts))
+            _msg(role=ASSISTANT, content='', reasoning_content=''.join(reasoning_parts))
         ]
 
     # Short content phase: reasoning frozen, content grows.
-    final_reasoning = "".join(reasoning_parts)
+    final_reasoning = ''.join(reasoning_parts)
     for i in range(CONTENT_DELTAS):
         time.sleep(CONTENT_GAP)
         content_parts.append(f" answer_{i}")
         yield [
-            _msg(role=ASSISTANT, content="".join(content_parts),
+            _msg(role=ASSISTANT, content=''.join(content_parts),
                  reasoning_content=final_reasoning)
         ]
 
@@ -129,12 +129,12 @@ def _make_mock_execute_llm_call(self, instance, template, messages, active_funct
 
 # Total synthetic reasoning length shared by the burst profiles (kept identical so the
 # scenarios differ ONLY in arrival cadence, not payload size).
-_BURST_REASONING_TOTAL = 45 * len("thought_00_")   # == REASONING_DELTAS deltas' worth
-_BURST_CONTENT = " answer" * 4
+_BURST_REASONING_TOTAL = 45 * len('thought_00_')   # == REASONING_DELTAS deltas' worth
+_BURST_CONTENT = ' answer' * 4
 
 def _full_reasoning(n_chars=_BURST_REASONING_TOTAL):
     """Deterministic reasoning string of exactly n_chars (repeated unit)."""
-    unit = "thought_"
+    unit = 'thought_'
     return (unit * ((n_chars // len(unit)) + 1))[:n_chars]
 
 
@@ -157,7 +157,7 @@ def _mock_chunked(self, instance, template, messages, active_functions):
         # Append a big slice of the total reasoning each batch (accumulated).
         reasoning_parts.append(_full_reasoning(_BURST_REASONING_TOTAL // n_batches))
         yield [
-            _msg(role=ASSISTANT, content="", reasoning_content="".join(reasoning_parts))
+            _msg(role=ASSISTANT, content='', reasoning_content=''.join(reasoning_parts))
         ]
     # Final chunk carries the content.
     yield [
@@ -171,12 +171,12 @@ def _mock_single_reasoning_blob(self, instance, template, messages, active_funct
     time.sleep(0.4)
     full_reasoning = _full_reasoning()
     # One big reasoning blob, no intermediate reasoning yields.
-    yield [_msg(role=ASSISTANT, content="", reasoning_content=full_reasoning)]
+    yield [_msg(role=ASSISTANT, content='', reasoning_content=full_reasoning)]
     # Then content grows in a couple of small deltas (reasoning frozen).
     for i in range(2):
         time.sleep(0.4)
         yield [
-            _msg(role=ASSISTANT, content=" answer" * (i + 1), reasoning_content=full_reasoning)
+            _msg(role=ASSISTANT, content=' answer' * (i + 1), reasoning_content=full_reasoning)
         ]
 
 
@@ -203,47 +203,47 @@ def _build_synthetic_session_log(dest: Path) -> Path:
     # deliberately SMALL so engine.run() does NOT trigger the real compression path
     # (which would spawn a Compressor agent and break this streaming-focused test).
     meta = {
-        "agent_class": "researcher",
-        "instance_name": INSTANCE_NAME,
-        "start_timestamp": "2026-09-03T09:00:00.000000",
-        "last_update": "2026-09-03T09:10:00.000000",
-        "current_log_path": str(dest),
-        "working_dir": str(PROJECT_ROOT),
-        "supervisor": "Maine",
+        'agent_class': 'researcher',
+        'instance_name': INSTANCE_NAME,
+        'start_timestamp': '2026-09-03T09:00:00.000000',
+        'last_update': '2026-09-03T09:10:00.000000',
+        'current_log_path': str(dest),
+        'working_dir': str(PROJECT_ROOT),
+        'supervisor': 'Maine',
     }
-    lines = [json.dumps({"metadata": meta})]
+    lines = [json.dumps({'metadata': meta})]
 
     def _line(role, content, **extra):
-        d = {"role": role, "content": content}
+        d = {'role': role, 'content': content}
         d.update(extra)
-        d["timestamp"] = "2026-09-03T09:00:01.000000"
+        d['timestamp'] = '2026-09-03T09:00:01.000000'
         lines.append(json.dumps(d))
 
-    _line("system", f"You are {INSTANCE_NAME}. Senior software engineer.")
-    _line("user", "Explain how the streaming pipeline works.")
+    _line('system', f"You are {INSTANCE_NAME}. Senior software engineer.")
+    _line('user', 'Explain how the streaming pipeline works.')
     # Prior assistant turn WITH non-trivial reasoning_content — the trigger condition.
     _line(
-        "assistant",
-        "(prior answer)",
+        'assistant',
+        '(prior answer)',
         reasoning_content=(
-            "Let me think carefully about the pipeline: the LLM emits deltas, the engine "
-            "forwards them, and the broadcast loop pushes them to the UI. " * 3
+            'Let me think carefully about the pipeline: the LLM emits deltas, the engine '
+            'forwards them, and the broadcast loop pushes them to the UI. ' * 3
         ),
     )
     # A compression marker so the working-set builder takes the [SYS][U0][markers][tail] branch.
     _line(
-        "user",
-        "--- CONTEXT COMPRESSED (2026-09-06 10:14 → 2026-09-06 11:02, 48m) ---\n<context_summary>\n"
-        "- Prior investigation of the streaming pipeline.\n- Confirmed backend path healthy.\n"
-        "</context_summary>",
+        'user',
+        '--- CONTEXT COMPRESSED (2026-09-06 10:14 → 2026-09-06 11:02, 48m) ---\n<context_summary>\n'
+        '- Prior investigation of the streaming pipeline.\n- Confirmed backend path healthy.\n'
+        '</context_summary>',
     )
-    _line("user", "[COMPRESSION] forced compression complete. 12 messages summarized.")
+    _line('user', '[COMPRESSION] forced compression complete. 12 messages summarized.')
     # Tail after the last marker (recent turns).
-    _line("assistant", "(tail answer)", reasoning_content="tail reasoning about next steps.")
-    _line("user", "Now continue with the streaming test.")
+    _line('assistant', '(tail answer)', reasoning_content='tail reasoning about next steps.')
+    _line('user', 'Now continue with the streaming test.')
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    dest.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return dest
 
 
@@ -262,11 +262,11 @@ def _resolve_session_log(tmp_path: Path) -> Path:
     streaming_harness) so the test stays focused on streaming while keeping the load.
     """
     if EXAMPLE_SESSION_LOG.exists():
-        target = tmp_path / "session" / EXAMPLE_SESSION_LOG.name
+        target = tmp_path / 'session' / EXAMPLE_SESSION_LOG.name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(EXAMPLE_SESSION_LOG, target)
         return target
-    return _build_synthetic_session_log(tmp_path / "session" / f"researcher_{INSTANCE_NAME}.jsonl")
+    return _build_synthetic_session_log(tmp_path / 'session' / f"researcher_{INSTANCE_NAME}.jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -283,15 +283,15 @@ def _extract_live_assistant(event):
     """
     if not isinstance(event, dict):
         return None
-    instances = event.get("instances") or event.get("agent_instances") or {}
+    instances = event.get('instances') or event.get('agent_instances') or {}
     inst = instances.get(INSTANCE_NAME)
     if not isinstance(inst, dict):
         return None
-    msgs = inst.get("messages")
+    msgs = inst.get('messages')
     if not msgs:
         return None
     for m in reversed(msgs):
-        if isinstance(m, dict) and m.get("role") == ASSISTANT:
+        if isinstance(m, dict) and m.get('role') == ASSISTANT:
             return m
     return None
 
@@ -299,14 +299,14 @@ def _extract_live_assistant(event):
 def _reasoning_len(m):
     if not m:
         return 0
-    r = m.get("reasoning_content") or ""
+    r = m.get('reasoning_content') or ''
     return len(r) if isinstance(r, str) else 0
 
 
 def _content_len(m):
     if not m:
         return 0
-    c = m.get("content") or ""
+    c = m.get('content') or ''
     return len(c) if isinstance(c, str) else 0
 
 
@@ -319,24 +319,24 @@ def _measure_events(events, diag, label):
       n_updates, max_gap, reasoning_lens, content_lens, distinct_reasoning,
       first/last reasoning+content, summary (human-readable string), stream_events count.
     """
-    stream_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get("type") == "stream_update"]
+    stream_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get('type') == 'stream_update']
 
     # Content may arrive via a stream_update OR the trailing type='done' frame. Under the
     # 100ms broadcast throttle the last content chunk is throttled away as a stream_update;
     # production delivers it via the separate done frame (run_agent_unified.py L256-272),
     # which _drive_pipeline now emits. So we fold the done frame's committed content into
     # content_lens (but NOT into arrivals/gaps/reasoning — those measure live streaming).
-    done_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get("type") == "done"]
+    done_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get('type') == 'done']
 
     arrivals = []  # (arrival_time, reasoning_len, content_len)
     for arrival, ev in events:
-        if not (isinstance(ev, dict) and ev.get("type") == "stream_update"):
+        if not (isinstance(ev, dict) and ev.get('type') == 'stream_update'):
             continue
         m = _extract_live_assistant(ev)
         arrivals.append((arrival, _reasoning_len(m), _content_len(m)))
 
     gaps = [arrivals[i + 1][0] - arrivals[i][0] for i in range(len(arrivals) - 1)]
-    max_gap = max(gaps) if gaps else float("inf")
+    max_gap = max(gaps) if gaps else float('inf')
 
     reasoning_lens = [r for (_t, r, _c) in arrivals]
     content_lens = [c for (_t, _r, c) in arrivals]
@@ -363,15 +363,15 @@ def _measure_events(events, diag, label):
     )
 
     return {
-        "label": label,
-        "stream_events": len(stream_events),
-        "arrivals": arrivals,
-        "n_updates": len(arrivals),
-        "max_gap": max_gap,
-        "reasoning_lens": reasoning_lens,
-        "content_lens": content_lens,
-        "distinct_reasoning": distinct_reasoning,
-        "summary": summary,
+        'label': label,
+        'stream_events': len(stream_events),
+        'arrivals': arrivals,
+        'n_updates': len(arrivals),
+        'max_gap': max_gap,
+        'reasoning_lens': reasoning_lens,
+        'content_lens': content_lens,
+        'distinct_reasoning': distinct_reasoning,
+        'summary': summary,
     }
 
 
@@ -401,13 +401,13 @@ def _drive_pipeline(pool, engine, instance):
     ev_lock = threading.Lock()
     gen_error = {}        # {"exc": ...} if the generator raised
     done = asyncio.Event()  # set by the consumer when engine.run() is exhausted
-    diag = {"ticks": 0, "streaming_ticks": 0, "sr_lens": []}
+    diag = {'ticks': 0, 'streaming_ticks': 0, 'sr_lens': []}
 
     def _consumer():
         """Consume engine.run() and broadcast per tick — mirrors run_agent_unified."""
         try:
             last_send = 0.0
-            exec_state = {"last_resp_len": 0}
+            exec_state = {'last_resp_len': 0}
             tick_num = 0
             for turn_output_raw in engine.run(instance):
                 if isinstance(turn_output_raw, tuple) and len(turn_output_raw) == 2:
@@ -415,15 +415,15 @@ def _drive_pipeline(pool, engine, instance):
                 else:
                     turn_output, is_streaming_tick = turn_output_raw, False
 
-                diag["ticks"] += 1
+                diag['ticks'] += 1
                 if is_streaming_tick:
-                    diag["streaming_ticks"] += 1
+                    diag['streaming_ticks'] += 1
                 with instance._compression_lock:
                     sr = list(instance._streaming_responses)
-                diag["sr_lens"].append(sum(len(m.get("reasoning_content") or "") for m in sr))
+                diag['sr_lens'].append(sum(len(m.get('reasoning_content') or '') for m in sr))
 
                 now = time.monotonic()
-                last_send, exec_state["last_resp_len"] = broadcast_stream_update(
+                last_send, exec_state['last_resp_len'] = broadcast_stream_update(
                     pool=pool,
                     instance_name=INSTANCE_NAME,
                     turn_output=turn_output,
@@ -431,7 +431,7 @@ def _drive_pipeline(pool, engine, instance):
                     tick_num=tick_num,
                     now_sec=now,
                     last_send=last_send,
-                    last_resp_len=exec_state["last_resp_len"],
+                    last_resp_len=exec_state['last_resp_len'],
                 )
                 tick_num += 1
 
@@ -455,7 +455,7 @@ def _drive_pipeline(pool, engine, instance):
                 })
         except Exception as e:  # surface generator errors to the test
             import traceback
-            gen_error["exc"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            gen_error['exc'] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         finally:
             loop.call_soon_threadsafe(done.set)
 
@@ -513,15 +513,15 @@ def streaming_harness(tmp_path):
     from agent_cascade.agent_instance import AgentInstance
     from agent_cascade.llm.schema import Message, USER, ASSISTANT
 
-    cfg_dir = tmp_path / "cfg"
+    cfg_dir = tmp_path / 'cfg'
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = str(cfg_dir)
+    os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(cfg_dir)
 
     llm_cfg = {
-        "model": "mock",
-        "api_base": "http://127.0.0.1:9/v1",
-        "model_server": "http://127.0.0.1:9/v1",
-        "api_key": "EMPTY",
+        'model': 'mock',
+        'api_base': 'http://127.0.0.1:9/v1',
+        'model_server': 'http://127.0.0.1:9/v1',
+        'api_key': 'EMPTY',
     }
 
     try:
@@ -531,7 +531,7 @@ def streaming_harness(tmp_path):
 
     # No live router needed: we mock the LLM generator and there is no slot to
     # acquire (a minimal pool has no _acquire_slot, so run() skips slot logic).
-    if getattr(pool, "api_router", None) is not None:
+    if getattr(pool, 'api_router', None) is not None:
         try:
             pool.api_router = None
         except Exception:
@@ -544,7 +544,7 @@ def streaming_harness(tmp_path):
     from agent_cascade.agents.assistant import Assistant
 
     def _register_template(agent_class: str):
-        t = Assistant(llm=dict(llm_cfg), name=agent_class, description="test streaming template")
+        t = Assistant(llm=dict(llm_cfg), name=agent_class, description='test streaming template')
         pool.templates[agent_class] = t
         pool.templates[agent_class.lower()] = t
 
@@ -553,7 +553,7 @@ def streaming_harness(tmp_path):
     # generator is mocked, so these templates' llm is never actually called — they just
     # need to exist with a .llm attribute for _call_llm_with_injection.
     _register_template(AGENT_CLASS)
-    _register_template("researcher")
+    _register_template('researcher')
 
     # ── Load a REAL session via the PRODUCTION loader ────────────────────────
     # This is the same path the WS 'load_session' command and REST resume route use
@@ -567,7 +567,7 @@ def streaming_harness(tmp_path):
         target_instance=INSTANCE_NAME,
         clear_sub_agents_before_load=False,  # fresh pool: nothing to dismiss
     )
-    assert not status.startswith("Error"), f"load_session_from_log failed: {status}"
+    assert not status.startswith('Error'), f"load_session_from_log failed: {status}"
 
     instance = pool.get_instance(INSTANCE_NAME)
     assert instance is not None, (
@@ -581,7 +581,7 @@ def streaming_harness(tmp_path):
         f"loader may have dropped history. status={status!r}"
     )
     has_prior_reasoning = any(
-        getattr(m, "role", None) == ASSISTANT and len(getattr(m, "reasoning_content", "") or "") > 20
+        getattr(m, 'role', None) == ASSISTANT and len(getattr(m, 'reasoning_content', '') or '') > 20
         for m in instance.conversation
     )
     assert has_prior_reasoning, (
@@ -598,18 +598,18 @@ def streaming_harness(tmp_path):
     # compression never fires, yet the heavy reasoning-heavy context is still loaded. This
     # simulates a high-limit model endpoint: we stress the streaming pipeline with a big
     # history without tripping compression.
-    instance._generate_cfg_override = {"max_input_tokens": 1_000_000}
+    instance._generate_cfg_override = {'max_input_tokens': 1_000_000}
 
     # Ensure the pool exposes an execution state lock (run_agent_unified uses it).
-    if getattr(pool, "_execution", None) is None:
+    if getattr(pool, '_execution', None) is None:
         from unittest.mock import MagicMock
         pool._execution = MagicMock()
     pool._execution._state_lock = threading.Lock()
 
-    yield {"pool": pool, "instance": instance}
+    yield {'pool': pool, 'instance': instance}
 
     try:
-        if hasattr(pool, "stop"):
+        if hasattr(pool, 'stop'):
             pool.stop()
     except Exception:
         pass
@@ -638,8 +638,8 @@ def test_streaming_e2e_reasoning_incremental(streaming_harness):
     from agent_cascade.engine.core import ExecutionEngine
     from agent_cascade.llm.schema import ASSISTANT  # noqa: F401 (used in mock)
 
-    pool = streaming_harness["pool"]
-    instance = streaming_harness["instance"]
+    pool = streaming_harness['pool']
+    instance = streaming_harness['instance']
     engine = ExecutionEngine(pool)
 
     # Mock ONLY the LLM generator. Everything downstream is real.
@@ -658,26 +658,26 @@ def test_streaming_e2e_reasoning_incremental(streaming_harness):
     assert not gen_error, f"engine.run() raised during the pipeline: {gen_error.get('exc')}"
 
     # ── Collect timing + reasoning-length samples from stream_update events ──
-    stream_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get("type") == "stream_update"]
+    stream_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get('type') == 'stream_update']
     assert stream_events, (
         f"NO stream_update events reached the send_queue (got {len(events)} total events: "
         f"{[ev.get('type') if isinstance(ev, dict) else type(ev).__name__ for _t, ev in events][:10]}). "
-        "The broadcast path never fired — check pool._ws_send_queue/_ws_loop wiring."
+        'The broadcast path never fired — check pool._ws_send_queue/_ws_loop wiring.'
     )
 
     arrivals = []            # (arrival_time, reasoning_len, content_len)
     for arrival, ev in events:
-        if not (isinstance(ev, dict) and ev.get("type") == "stream_update"):
+        if not (isinstance(ev, dict) and ev.get('type') == 'stream_update'):
             continue
         m = _extract_live_assistant(ev)
         arrivals.append((arrival, _reasoning_len(m), _content_len(m)))
 
-    assert arrivals, "No stream_update events carried a parseable instance payload."
+    assert arrivals, 'No stream_update events carried a parseable instance payload.'
 
     # ── Measure inter-arrival gaps (only while the mock is actively emitting) ──
     gen_wall = REASONING_DELTAS * REASONING_GAP + CONTENT_DELTAS * CONTENT_GAP  # ~2.05s
     gaps = [arrivals[i + 1][0] - arrivals[i][0] for i in range(len(arrivals) - 1)]
-    max_gap = max(gaps) if gaps else float("inf")
+    max_gap = max(gaps) if gaps else float('inf')
 
     reasoning_lens = [r for (_t, r, _c) in arrivals]
     content_lens = [c for (_t, _r, c) in arrivals]
@@ -745,8 +745,8 @@ def _run_scenario(streaming_harness, mock_fn, label):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = streaming_harness["pool"]
-    instance = streaming_harness["instance"]
+    pool = streaming_harness['pool']
+    instance = streaming_harness['instance']
     engine = ExecutionEngine(pool)
 
     original = ExecutionEngine._execute_llm_call
@@ -771,28 +771,28 @@ def test_streaming_e2e_all_burst(streaming_harness):
     incremental (distinct reasoning stays 1) and it must stay a small count (not grow into a
     real stream). If the backend ever starts synthesizing intermediate ticks here, this fails
     loudly so we re-baseline."""
-    m = _run_scenario(streaming_harness, _mock_all_burst, "all-burst")
-    print(m["summary"])
+    m = _run_scenario(streaming_harness, _mock_all_burst, 'all-burst')
+    print(m['summary'])
 
     # OBSERVED: a small fixed number of end-of-turn updates (measured: 2). Lock in the ceiling.
-    assert m["n_updates"] <= 3, (
+    assert m['n_updates'] <= 3, (
         f"ALL-BURST produced {m['n_updates']} updates — far more than the ~2 observed "
         f"end-of-turn ticks. The backend is now synthesizing intermediate ticks for a "
         f"single-yield response. Re-baseline.\n{m['summary']}"
     )
     # The final answer MUST still arrive (no data loss). If n_updates==0, WORST case — loud.
-    assert m["n_updates"] >= 1, (
+    assert m['n_updates'] >= 1, (
         f"ALL-BURST produced ZERO stream_updates — the user gets NOTHING (not even the final "
         f"answer). This is a severe backend bug.\n{m['summary']}"
     )
     # The extreme burst must NOT be surfaced incrementally: every update carries the same
     # full blob → distinct reasoning stays 1. This is the key 'no streaming' signature.
-    assert m["distinct_reasoning"] == 1, (
+    assert m['distinct_reasoning'] == 1, (
         f"ALL-BURST showed {m['distinct_reasoning']} distinct reasoning values — the backend "
         f"is now splitting a single-yield response into increments it doesn't have. "
         f"Re-baseline.\n{m['summary']}"
     )
-    assert max(m["reasoning_lens"]) > 0 and max(m["content_lens"]) > 0, (
+    assert max(m['reasoning_lens']) > 0 and max(m['content_lens']) > 0, (
         f"ALL-BURST end-of-turn update lost reasoning/content. "
         f"reasoning={m['reasoning_lens']} content={m['content_lens']}\n{m['summary']}"
     )
@@ -803,28 +803,28 @@ def test_streaming_e2e_chunked(streaming_harness):
 
     Measures whether reasoning is surfaced incrementally BETWEEN batches (it should be —
     each batch is an accumulated yield, so the pipeline sees distinct growing values)."""
-    m = _run_scenario(streaming_harness, _mock_chunked, "chunked")
-    print(m["summary"])
+    m = _run_scenario(streaming_harness, _mock_chunked, 'chunked')
+    print(m['summary'])
 
     # Each of the 4 reasoning batches + 1 content batch is a distinct accumulated yield, so
     # the backend should surface several updates with GROWING reasoning (not one blob).
-    assert m["n_updates"] >= 3, (
+    assert m['n_updates'] >= 3, (
         f"CHUNKED produced only {m['n_updates']} updates — batches are being collapsed into "
         f"a single end-of-turn event.\n{m['summary']}"
     )
     # Reasoning must be surfaced incrementally across the batches (more than one distinct value).
-    assert m["distinct_reasoning"] >= 3, (
+    assert m['distinct_reasoning'] >= 3, (
         f"CHUNKED reasoning only took {m['distinct_reasoning']} distinct values — partial "
         f"reasoning is NOT surfaced between batches. lengths={m['reasoning_lens']}\n{m['summary']}"
     )
-    assert max(m["reasoning_lens"]) > min(m["reasoning_lens"]), (
+    assert max(m['reasoning_lens']) > min(m['reasoning_lens']), (
         f"CHUNKED reasoning never grew across batches: {m['reasoning_lens']}\n{m['summary']}"
     )
     # Content arrives in the final batch. Under the 100ms broadcast throttle the last
     # content chunk is throttled away as a stream_update; production delivers it via the
     # trailing type='done' frame (run_agent_unified.py L256-272), which _drive_pipeline now
     # emits and _measure_events folds into content_lens. So this reads from either source.
-    assert max(m["content_lens"]) > 0, (
+    assert max(m['content_lens']) > 0, (
         f"CHUNKED content was never surfaced: {m['content_lens']}\n{m['summary']}"
     )
 
@@ -835,28 +835,28 @@ def test_streaming_e2e_single_reasoning_blob(streaming_harness):
     The reported trigger ('reasoning arrives as one blob'). Documents whether partial
     reasoning EVER surfaces (it should NOT — it's a single yield) and that the final answer
     still arrives."""
-    m = _run_scenario(streaming_harness, _mock_single_reasoning_blob, "single-reasoning-blob")
-    print(m["summary"])
+    m = _run_scenario(streaming_harness, _mock_single_reasoning_blob, 'single-reasoning-blob')
+    print(m['summary'])
 
     # The whole reasoning is ONE yield → the backend can only surface it as a single value.
     # Lock in that partial reasoning does NOT appear incrementally (it's a blob by input).
-    assert m["distinct_reasoning"] <= 1, (
+    assert m['distinct_reasoning'] <= 1, (
         f"SINGLE-REASONING-BLOB showed {m['distinct_reasoning']} distinct reasoning values — "
         f"the backend is splitting a single-yield blob into increments it doesn't have. "
         f"Re-baseline.\n{m['summary']}"
     )
     # The final answer MUST still arrive (reasoning blob + content present at turn end).
-    assert m["n_updates"] >= 1, (
+    assert m['n_updates'] >= 1, (
         f"SINGLE-REASONING-BLOB produced ZERO stream_updates — user gets nothing. Severe bug."
         f"\n{m['summary']}"
     )
-    assert max(m["reasoning_lens"]) > 0, (
+    assert max(m['reasoning_lens']) > 0, (
         f"SINGLE-REASONING-BLOB reasoning was lost: {m['reasoning_lens']}\n{m['summary']}"
     )
-    assert max(m["content_lens"]) > 0, (
+    assert max(m['content_lens']) > 0, (
         f"SINGLE-REASONING-BLOB content was never surfaced: {m['content_lens']}\n{m['summary']}"
     )
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+if __name__ == '__main__':
+    sys.exit(pytest.main([__file__, '-v']))

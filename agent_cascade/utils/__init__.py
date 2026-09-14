@@ -31,7 +31,7 @@ from agent_cascade.utils.disabled_tools import (
 
 def merge_disabled_tools_for_auto_agent(
     existing_disabled: list[str] | dict[str, list[str]] | None = None,
-    agent_key: str = "",
+    agent_key: str = '',
     default_disabled_tools: frozenset[str] | set[str] | list[str] = (),
 ) -> list[str] | dict[str, list[str]]:
     """Merge default disabled tools for an auto-launched agent.

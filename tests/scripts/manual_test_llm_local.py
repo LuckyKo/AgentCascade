@@ -1,12 +1,12 @@
 import requests
 import json
 
-url = "http://localhost:5000/v1/chat/completions"
-headers = {"Content-Type": "application/json"}
+url = 'http://localhost:5000/v1/chat/completions'
+headers = {'Content-Type': 'application/json'}
 payload = {
-    "model": "local-model",
-    "messages": [{"role": "user", "content": "hi"}],
-    "stream": False
+    'model': 'local-model',
+    'messages': [{'role': 'user', 'content': 'hi'}],
+    'stream': False
 }
 
 try:

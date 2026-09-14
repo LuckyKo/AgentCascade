@@ -30,7 +30,7 @@ class RollbackMixin:
                 preserve_system_user=False,   # Allow exact length including full reset
                 refine_function_boundary=False,  # Avoid altering the target length
                 sync_logger=True,
-                reason=f"Snapshot rollback: {reason}" if reason else "Snapshot rollback",
+                reason=f"Snapshot rollback: {reason}" if reason else 'Snapshot rollback',
             )
     @staticmethod
     def _msg_field(msg, field, default=''):
@@ -84,7 +84,7 @@ class RollbackMixin:
         if not inst:
             logger.warning(
                 f"Rollback for '{instance_name}' failed — instance not found in pool"
-                + (f" ({reason})" if reason else "")
+                + (f" ({reason})" if reason else '')
             )
             return 0
 
@@ -135,7 +135,7 @@ class RollbackMixin:
                     # ── Tail sync check after rollback (design doc §5.2 — D1 fix) ──
                     if tail_sync_check and getattr(self.settings, 'tail_sync_check_enabled', True):
                         from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                        _check_tail(instance_name, list(inst.conversation), log_inst.log_path, context="rollback")
+                        _check_tail(instance_name, list(inst.conversation), log_inst.log_path, context='rollback')
                 except Exception as e:
                     logger.debug(f"Logger truncation failed during rollback for {instance_name} (non-critical): {e}")
 

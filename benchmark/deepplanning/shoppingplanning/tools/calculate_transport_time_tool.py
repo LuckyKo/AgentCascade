@@ -144,34 +144,34 @@ class CalculateTransportTimeTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         product_id = params_dict.get('product_id')
         destination_address = params_dict.get('destination_address')
         product = self.products_map.get(product_id)
         if not product:
-            return self.format_result_as_json({"error": f"Product with ID '{product_id}' not found."})
+            return self.format_result_as_json({'error': f"Product with ID '{product_id}' not found."})
 
         shipping_info = product.get('shipping_info', {})
         origin_address = shipping_info.get('origin')
         provider = shipping_info.get('provider', 'default').lower()
 
         if not origin_address:
-            return self.format_result_as_json({"error": f"Shipping origin not found for product '{product_id}'."})
+            return self.format_result_as_json({'error': f"Shipping origin not found for product '{product_id}'."})
 
         origin_province = self._normalize_province(origin_address)
         destination_province = self._normalize_province(destination_address)
 
         if not origin_province:
-            return self.format_result_as_json({"error": f"Could not determine a valid province from origin address: '{origin_address}'."})
+            return self.format_result_as_json({'error': f"Could not determine a valid province from origin address: '{origin_address}'."})
         if not destination_province:
-            return self.format_result_as_json({"error": f"Could not determine a valid province from destination address: '{destination_address}'. Please provide a valid Chinese province name."})
+            return self.format_result_as_json({'error': f"Could not determine a valid province from destination address: '{destination_address}'. Please provide a valid Chinese province name."})
 
         origin_region = self.REGION_MAP.get(origin_province)
         dest_region = self.REGION_MAP.get(destination_province)
 
         if not origin_region or not dest_region:
-            return self.format_result_as_json({"error": "Could not map provinces to geographical regions."})
+            return self.format_result_as_json({'error': 'Could not map provinces to geographical regions.'})
 
         base_days = self.BASE_REGION_TIME[origin_region][dest_region]
 
@@ -188,10 +188,10 @@ class CalculateTransportTimeTool(BaseShoppingTool):
         final_days = max(1, estimated_days)
 
         result = {
-            "product_id": product_id,
-            "origin": origin_address,
-            "destination": destination_address,
-            "estimated_delivery_days": final_days
+            'product_id': product_id,
+            'origin': origin_address,
+            'destination': destination_address,
+            'estimated_delivery_days': final_days
         }
 
         return self.format_result_as_json(result)

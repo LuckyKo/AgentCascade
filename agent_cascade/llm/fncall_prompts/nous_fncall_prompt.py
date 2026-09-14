@@ -220,7 +220,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
                     fn_name = match.group(1)
                     args_str = match.group(2)
                     if not args_str.strip():
-                        args_str = "{}"
+                        args_str = '{}'
                     return f'<tool_call>\n{{"name": "{fn_name}", "arguments": {args_str}}}\n</tool_call>'
                 # Support both <tool_call> and <|tool_call|> (Gemma/Qwen style)
                 text = item_text
@@ -241,7 +241,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
                     if tag_pos != -1:
                         # Auto-wrap the rest of the text as a tool call
                         text = text[:tag_pos] + '<tool_call>' + text[tag_pos:] + '</tool_call>'
-                        logger.info("Auto-wrapped unwrapped tool call in model output.")
+                        logger.info('Auto-wrapped unwrapped tool call in model output.')
 
                 i = text.find('<tool_call>')
                 # If no function call:

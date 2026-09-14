@@ -35,9 +35,9 @@ class TestViewImageDirectiveRouting:
         tool = ViewImage()
         return tool
 
-    @pytest.mark.parametrize("directive,capture_func,expected_pid,text_contains", [
-        ("__screen_capture", "capture_screen", None, "Viewing image: __screen_capture"),
-        ("__window_capture:1234", "capture_window_by_pid", 1234, "Viewing image: __window_capture:1234"),
+    @pytest.mark.parametrize('directive,capture_func,expected_pid,text_contains', [
+        ('__screen_capture', 'capture_screen', None, 'Viewing image: __screen_capture'),
+        ('__window_capture:1234', 'capture_window_by_pid', 1234, 'Viewing image: __window_capture:1234'),
     ])
     def test_capture_directive_parsed(self, view_image_tool, directive, capture_func, expected_pid, text_contains):
         """Mock capture functions, verify correct routing for screen and window capture directives."""
@@ -71,10 +71,10 @@ class TestViewImageDirectiveRouting:
                             assert 'image' in result[0].__dict__
                             assert text_contains in result[1].text
 
-    @pytest.mark.parametrize("directive,expected_monitor_index,text_contains", [
-        ("__screen_capture:0", 0, "Viewing image: __screen_capture:0"),
-        ("__screen_capture:1", 1, "Viewing image: __screen_capture:1"),
-        ("__screen_capture:5", 5, "Viewing image: __screen_capture:5"),
+    @pytest.mark.parametrize('directive,expected_monitor_index,text_contains', [
+        ('__screen_capture:0', 0, 'Viewing image: __screen_capture:0'),
+        ('__screen_capture:1', 1, 'Viewing image: __screen_capture:1'),
+        ('__screen_capture:5', 5, 'Viewing image: __screen_capture:5'),
     ])
     def test_per_monitor_capture_directive(self, view_image_tool, directive, expected_monitor_index, text_contains):
         """Mock capture_screen(), verify correct routing for __screen_capture:N directives."""
@@ -177,7 +177,7 @@ class TestViewImageDirectiveRouting:
                         # After temp file write, save_image_to_media is called which opens the file via PIL
                         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
                             from agent_cascade.utils.media_utils import _get_media_root
-                            test_media_path = str((_get_media_root() / "images" / "img_20260101_120000_abcd.jpg")).replace("\\", "/")
+                            test_media_path = str((_get_media_root() / 'images' / 'img_20260101_120000_abcd.jpg')).replace('\\', '/')
                             mock_save.return_value = test_media_path
                             result = view_image_tool.call(json.dumps({'path': '__screen_capture'}))
 
@@ -252,7 +252,7 @@ class TestScreenCaptureModule:
 
         # Patch ImageGrab to fail, mss module in sys.modules, and Image.frombytes/BytesIO
         with patch('PIL.ImageGrab', create=True) as mock_grab_actual:
-            mock_grab_actual.grab.side_effect = OSError("No display found")
+            mock_grab_actual.grab.side_effect = OSError('No display found')
             with patch.dict(sys.modules, {'mss': MagicMock(mss=MagicMock(return_value=mock_mss_context))}):
                 with patch.object(screen_capture.Image, 'frombytes', return_value=mock_image_frombytes):
                     with patch.object(screen_capture.io, 'BytesIO', return_value=mock_buf):
@@ -322,7 +322,7 @@ class TestScreenCaptureModule:
             # Test out-of-range index
             with pytest.raises(ValueError) as exc_info:
                 screen_capture.capture_screen(monitor_index=5)
-            assert "out of range" in str(exc_info.value).lower()
+            assert 'out of range' in str(exc_info.value).lower()
 
     def test_capture_window_by_pid_dispatches_windows(self):
         """On win32 platform, calls _capture_window_windows."""

@@ -198,7 +198,7 @@ def app_create(history, now_cfgs):
                         else:
                             new_cfgs['agents'].append(cfg)
 
-                        display_content += f'\n\n{cfg["name"]}: {cfg["description"]}\n{cfg["instructions"]}'
+                        display_content += f'\n\n{cfg['name']}: {cfg['description']}\n{cfg['instructions']}'
                     elif rsp.name == 'background':
                         new_cfgs['background'] = rsp.content
                         display_content += f'\n群聊背景：{rsp.content}'

@@ -19,7 +19,7 @@ from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 from agent_cascade.compression.helpers import compute_discard_count
 
 
-def _make_msg(role, content="text", function_call=None, extra=None):
+def _make_msg(role, content='text', function_call=None, extra=None):
     """Create a test message with optional function_call and extra dict."""
     if role == ASSISTANT and function_call:
         fc = {'name': function_call, 'arguments': '{}'}
@@ -49,10 +49,10 @@ class TestIndependentPairsVsChains:
         Cut at position 2 (start of second pair) → should include both A(fc1)+F(res1).
         """
         msgs = [
-            _make_assistant("tool_0"),
-            _make_function("result_0", "call_tool_0"),
-            _make_assistant("tool_1"),
-            _make_function("result_1", "call_tool_1"),
+            _make_assistant('tool_0'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_assistant('tool_1'),
+            _make_function('result_1', 'call_tool_1'),
         ]
         # fraction=0.5 → discard=int(4*0.5)=2, max_discard=2 (keep 2 tail)
         # At pos 2: A with tool_call → advance past F(res1) matching call_tool_1
@@ -85,10 +85,10 @@ class TestIndependentPairsVsChains:
         Cut at position 2 (at first F) → skip past Fs → discard=4 > max_discard(2) → -1.
         """
         msgs = [
-            _make_assistant("tool_0"),
-            _make_assistant("tool_1"),
-            _make_function("result_0", "call_tool_0"),
-            _make_function("result_1", "call_tool_1"),
+            _make_assistant('tool_0'),
+            _make_assistant('tool_1'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_function('result_1', 'call_tool_1'),
         ]
         
         count = compute_discard_count(msgs, 0.5, False)
@@ -99,12 +99,12 @@ class TestIndependentPairsVsChains:
     def test_batched_chain_with_plain_tail(self):
         """A→A→F→F with plain tail messages: should complete the chain."""
         msgs = [
-            _make_assistant("tool_0"),
-            _make_assistant("tool_1"),
-            _make_function("result_0", "call_tool_0"),
-            _make_function("result_1", "call_tool_1"),
-            _make_msg(ASSISTANT, "done"),
-            _make_msg(USER, "next"),
+            _make_assistant('tool_0'),
+            _make_assistant('tool_1'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_function('result_1', 'call_tool_1'),
+            _make_msg(ASSISTANT, 'done'),
+            _make_msg(USER, 'next'),
         ]
         
         count = compute_discard_count(msgs, 0.5, False)
@@ -113,12 +113,12 @@ class TestIndependentPairsVsChains:
     def test_independent_pairs_with_plain_separators(self):
         """A→F→a→U→A→F pattern: independent pairs separated by plain messages."""
         msgs = [
-            _make_assistant("tool_0"),
-            _make_function("result_0", "call_tool_0"),
-            _make_msg(ASSISTANT, "thinking"),
-            _make_msg(USER, "next query"),
-            _make_assistant("tool_1"),
-            _make_function("result_1", "call_tool_1"),
+            _make_assistant('tool_0'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_msg(ASSISTANT, 'thinking'),
+            _make_msg(USER, 'next query'),
+            _make_assistant('tool_1'),
+            _make_function('result_1', 'call_tool_1'),
         ]
         
         count = compute_discard_count(msgs, 0.5, False)
@@ -127,12 +127,12 @@ class TestIndependentPairsVsChains:
     def test_mixed_pattern_independent_then_batched(self):
         """Mixed pattern where refinement pushes past keep zone returns -1."""
         msgs = [
-            _make_assistant("tool_0"),
-            _make_function("result_0", "call_tool_0"),
-            _make_assistant("tool_1"),
-            _make_assistant("tool_2"),
-            _make_function("result_1", "call_tool_1"),
-            _make_function("result_2", "call_tool_2"),
+            _make_assistant('tool_0'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_assistant('tool_1'),
+            _make_assistant('tool_2'),
+            _make_function('result_1', 'call_tool_1'),
+            _make_function('result_2', 'call_tool_2'),
         ]
         
         count = compute_discard_count(msgs, 0.5, False)
@@ -147,16 +147,16 @@ class TestIndependentPairsVsChains:
             msgs.append(_make_function(f"result_{i}", f"call_tool_{i}"))
         
         count = compute_discard_count(msgs, 0.5, False)
-        assert count != -1, "Independent pairs should not cause compression failure"
-        assert count > 0, "Should discard some messages"
+        assert count != -1, 'Independent pairs should not cause compression failure'
+        assert count > 0, 'Should discard some messages'
 
     def test_true_chain_causes_failure_when_no_clean_split(self):
         """Batched chain with no room to split returns -1."""
         msgs = [
-            _make_assistant("tool_0"),
-            _make_assistant("tool_1"),
-            _make_function("result_0", "call_tool_0"),
-            _make_function("result_1", "call_tool_1"),
+            _make_assistant('tool_0'),
+            _make_assistant('tool_1'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_function('result_1', 'call_tool_1'),
         ]
         
         # fraction=1.0 → discard=int(4*1.0)=2, max_discard=min(2, 4-2)=2
@@ -171,11 +171,11 @@ class TestEdgeCases:
     def test_single_pair(self):
         """Active set with just one A→F pair."""
         msgs = [
-            _make_assistant("tool_0"),
-            _make_function("result_0", "call_tool_0"),
+            _make_assistant('tool_0'),
+            _make_function('result_0', 'call_tool_0'),
         ]
         count = compute_discard_count(msgs, 0.5, False)
-        assert count == 0, "Should keep the pair as tail"
+        assert count == 0, 'Should keep the pair as tail'
 
     def test_three_pairs_fraction_half(self):
         """Three independent pairs at 50%."""
@@ -194,10 +194,10 @@ class TestEdgeCases:
     def test_force_mode_independent_pairs(self):
         """Force mode with independent pairs should still work."""
         msgs = [
-            _make_assistant("tool_0"),
-            _make_function("result_0", "call_tool_0"),
-            _make_assistant("tool_1"),
-            _make_function("result_1", "call_tool_1"),
+            _make_assistant('tool_0'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_assistant('tool_1'),
+            _make_function('result_1', 'call_tool_1'),
         ]
         
         count = compute_discard_count(msgs, 0.5, force=True)
@@ -212,12 +212,12 @@ class TestRefinementLogic:
         from agent_cascade.compression.helpers import _refine_tool_call_boundary
         
         msgs = [
-            _make_assistant("tool_0"),
-            _make_function("result_0", "call_tool_0"),
-            _make_assistant("tool_1"),
-            _make_function("result_1", "call_tool_1"),
-            _make_assistant("tool_2"),
-            _make_function("result_2", "call_tool_2"),
+            _make_assistant('tool_0'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_assistant('tool_1'),
+            _make_function('result_1', 'call_tool_1'),
+            _make_assistant('tool_2'),
+            _make_function('result_2', 'call_tool_2'),
         ]
         
         # Start at position 0 (A with tool_call), max_discard=4
@@ -229,12 +229,12 @@ class TestRefinementLogic:
         from agent_cascade.compression.helpers import _refine_tool_call_boundary
         
         msgs = [
-            _make_assistant("tool_0"),
-            _make_function("result_0", "call_tool_0"),
-            _make_assistant("tool_1"),
-            _make_function("result_1", "call_tool_1"),
-            _make_assistant("tool_2"),
-            _make_function("result_2", "call_tool_2"),
+            _make_assistant('tool_0'),
+            _make_function('result_0', 'call_tool_0'),
+            _make_assistant('tool_1'),
+            _make_function('result_1', 'call_tool_1'),
+            _make_assistant('tool_2'),
+            _make_function('result_2', 'call_tool_2'),
         ]
         
         # Start at position 2 (A with tool_1), max_discard=4

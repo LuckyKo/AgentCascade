@@ -101,7 +101,7 @@ def test_inject_compression_does_not_double_trigger():
 def test_inject_compression_triggers_when_over_95():
     """When context is genuinely over 95%, compression SHOULD be triggered."""
     max_tokens = 10_000
-    messages = [MagicMock(content="x" * 100, role='user', name='TestAgent')]
+    messages = [MagicMock(content='x' * 100, role='user', name='TestAgent')]
 
     mock_compressor = MagicMock()
     mock_agent = MagicMock()
@@ -143,7 +143,7 @@ def test_inject_compression_no_double_trigger_with_stale_llm_messages():
 
     # Tool result message (added after compress_context runs)
     tool_result_msg = MagicMock()
-    tool_result_msg.content = "Compression successful."
+    tool_result_msg.content = 'Compression successful.'
     tool_result_msg.role = 'function'
     tool_result_msg.name = 'compress_context'
     type(tool_result_msg).reasoning_content = PropertyMock(return_value=None)

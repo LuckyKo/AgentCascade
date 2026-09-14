@@ -27,9 +27,9 @@ from agent_cascade.tool_dispatcher import ToolDispatcher
 @pytest.fixture
 def router_with_endpoints(tmp_path_factory):
     """APIRouter with multiple endpoints for testing various sync/async scenarios."""
-    test_config_dir = str(tmp_path_factory.mktemp("call_agent_test"))
+    test_config_dir = str(tmp_path_factory.mktemp('call_agent_test'))
 
-    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_config_dir}):
+    with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_config_dir}):
         r = APIRouter(default_llm_cfg={
             'api_base': 'http://default-api',
             'model': 'default-model',
@@ -38,8 +38,8 @@ def router_with_endpoints(tmp_path_factory):
 
         # Sequential endpoint (concurrency=1) — default for most agents
         seq_ep = APIEndpoint(
-            id="ep_sequential",
-            name="Sequential",
+            id='ep_sequential',
+            name='Sequential',
             api_base='http://sequential-api',
             model='seq-model',
             enabled=True,
@@ -49,8 +49,8 @@ def router_with_endpoints(tmp_path_factory):
 
         # Parallel endpoint (concurrency=3) — for high-concurrency agents
         parallel_ep = APIEndpoint(
-            id="ep_parallel",
-            name="Parallel",
+            id='ep_parallel',
+            name='Parallel',
             api_base='http://parallel-api',
             model='par-model',
             enabled=True,
@@ -60,8 +60,8 @@ def router_with_endpoints(tmp_path_factory):
 
         # Unlimited endpoint (concurrency=-1) — no slot management needed
         unlimited_ep = APIEndpoint(
-            id="ep_unlimited",
-            name="Unlimited",
+            id='ep_unlimited',
+            name='Unlimited',
             api_base='http://unlimited-api',
             model='unlim-model',
             enabled=True,
@@ -71,8 +71,8 @@ def router_with_endpoints(tmp_path_factory):
 
         # Zero-concurrency endpoint (concurrency=0) — shared sequential slot
         zero_ep = APIEndpoint(
-            id="ep_zero",
-            name="ZeroConcurrency",
+            id='ep_zero',
+            name='ZeroConcurrency',
             api_base='http://zero-api',
             model='zero-model',
             enabled=True,
@@ -84,10 +84,10 @@ def router_with_endpoints(tmp_path_factory):
 
 
 def _make_mock_instance(
-    instance_name: str = "caller1",
-    agent_class: str = "coder",
+    instance_name: str = 'caller1',
+    agent_class: str = 'coder',
     slot_release: Optional[callable] = None,
-    state="RUNNING",
+    state='RUNNING',
     nest_depth: int = 0,
 ):
     """Minimal mock AgentInstance with configurable slot state."""
@@ -162,50 +162,50 @@ class TestSequentialChildForcesSync:
         blocking the entire pool.
         """
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="researcher",
+            instance_name='caller1',
+            agent_class='researcher',
             slot_release=None,  # No slot held
         )
 
-        router_with_endpoints.set_agent_priorities("researcher", ["ep_unlimited"])
-        router_with_endpoints.set_agent_priorities("security", ["ep_zero"])
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
+        router_with_endpoints.set_agent_priorities('security', ['ep_zero'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={"instance_name": "child1", "agent_class": "security", "task": "test"},
+            args={'instance_name': 'child1', 'agent_class': 'security', 'task': 'test'},
             messages=[],
             instance=caller,
         )
 
         # SYNC path: register_async_call should NOT be called
         pool.register_async_call.assert_not_called()
-        assert "launched asynchronously" not in result.lower(), \
+        assert 'launched asynchronously' not in result.lower(), \
             f"Expected sync for conc=0 child but got async: {result}"
 
     def test_sync_when_child_concurrency_zero_with_caller_slot(self, router_with_endpoints):
         """Child with concurrency=0 forces SYNC even when caller holds a slot."""
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="coder",
+            instance_name='caller1',
+            agent_class='coder',
             slot_release=lambda: None,  # Holds a slot
         )
 
-        router_with_endpoints.set_agent_priorities("coder", ["ep_sequential"])
-        router_with_endpoints.set_agent_priorities("security", ["ep_zero"])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('security', ['ep_zero'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={"instance_name": "child1", "agent_class": "security", "task": "test"},
+            args={'instance_name': 'child1', 'agent_class': 'security', 'task': 'test'},
             messages=[],
             instance=caller,
         )
 
         pool.register_async_call.assert_not_called()
-        assert "launched asynchronously" not in result.lower(), \
+        assert 'launched asynchronously' not in result.lower(), \
             f"Expected sync for conc=0 child but got async: {result}"
 
 
@@ -219,43 +219,43 @@ class TestUnlimitedChildAlwaysAsync:
     def test_async_when_child_unlimited_caller_holds_slot(self, router_with_endpoints):
         """Caller holds a slot but child on unlimited endpoint → ASYNC (no collision)."""
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="coder",
+            instance_name='caller1',
+            agent_class='coder',
             slot_release=lambda: None,  # Holds a slot
         )
 
-        router_with_endpoints.set_agent_priorities("coder", ["ep_sequential"])
-        router_with_endpoints.set_agent_priorities("researcher", ["ep_unlimited"])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={"instance_name": "child1", "agent_class": "researcher", "task": "test"},
+            args={'instance_name': 'child1', 'agent_class': 'researcher', 'task': 'test'},
             messages=[],
             instance=caller,
         )
 
         pool.register_async_call.assert_called()
-        assert "launched asynchronously" in result.lower(), \
+        assert 'launched asynchronously' in result.lower(), \
             f"Expected async for unlimited child but got sync: {result}"
 
     def test_async_when_child_unlimited_caller_no_slot(self, router_with_endpoints):
         """Caller has no slot, child on unlimited → ASYNC."""
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="researcher",
+            instance_name='caller1',
+            agent_class='researcher',
             slot_release=None,
         )
 
-        router_with_endpoints.set_agent_priorities("researcher", ["ep_unlimited"])
-        router_with_endpoints.set_agent_priorities("coder", ["ep_unlimited"])
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_unlimited'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={"instance_name": "child1", "agent_class": "coder", "task": "test"},
+            args={'instance_name': 'child1', 'agent_class': 'coder', 'task': 'test'},
             messages=[],
             instance=caller,
         )
@@ -273,19 +273,19 @@ class TestDifferentSlotPoolsAsync:
     def test_async_when_different_endpoints_caller_holds_slot(self, router_with_endpoints):
         """Caller holds sequential slot, child uses parallel endpoint → ASYNC (different pools)."""
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="coder",
+            instance_name='caller1',
+            agent_class='coder',
             slot_release=lambda: None,
         )
 
-        router_with_endpoints.set_agent_priorities("coder", ["ep_sequential"])
-        router_with_endpoints.set_agent_priorities("reviewer", ["ep_parallel"])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={"instance_name": "child1", "agent_class": "reviewer", "task": "test"},
+            args={'instance_name': 'child1', 'agent_class': 'reviewer', 'task': 'test'},
             messages=[],
             instance=caller,
         )
@@ -304,25 +304,25 @@ class TestSamePoolCollisionSync:
     def test_sync_when_same_sequential_endpoint(self, router_with_endpoints):
         """Caller holds sequential slot, child uses same endpoint → SYNC (collision)."""
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="coder",
+            instance_name='caller1',
+            agent_class='coder',
             slot_release=lambda: None,
         )
 
         # Both use the same sequential endpoint
-        router_with_endpoints.set_agent_priorities("coder", ["ep_sequential"])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={"instance_name": "child1", "agent_class": "coder", "task": "test"},
+            args={'instance_name': 'child1', 'agent_class': 'coder', 'task': 'test'},
             messages=[],
             instance=caller,
         )
 
         pool.register_async_call.assert_not_called()
-        assert "launched asynchronously" not in result.lower(), \
+        assert 'launched asynchronously' not in result.lower(), \
             f"Expected sync for same-pool collision but got async: {result}"
 
 
@@ -336,13 +336,13 @@ class TestEffectiveConcurrencyDecision:
     def test_queries_child_effective_concurrency(self, router_with_endpoints):
         """get_effective_concurrency is called for the child agent class during dispatch."""
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="coder",
+            instance_name='caller1',
+            agent_class='coder',
             slot_release=lambda: None,
         )
 
-        router_with_endpoints.set_agent_priorities("coder", ["ep_sequential"])
-        router_with_endpoints.set_agent_priorities("reviewer", ["ep_parallel"])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
@@ -357,31 +357,31 @@ class TestEffectiveConcurrencyDecision:
 
         with patch.object(router_with_endpoints, 'get_effective_concurrency', side_effect=tracking_get_eff):
             dispatcher.handle_call_agent(
-                args={"instance_name": "child1", "agent_class": "reviewer", "task": "test"},
+                args={'instance_name': 'child1', 'agent_class': 'reviewer', 'task': 'test'},
                 messages=[],
                 instance=caller,
             )
 
-        assert "reviewer" in calls_to_child_class or "Reviewer" in calls_to_child_class, \
+        assert 'reviewer' in calls_to_child_class or 'Reviewer' in calls_to_child_class, \
             f"Expected get_effective_concurrency for child class 'reviewer'. Calls: {calls_to_child_class}"
 
     def test_guard_only_triggers_for_concurrency_zero(self, router_with_endpoints):
         """Sequential Endpoint Guard only forces sync for conc=0, not conc=1 or higher."""
         caller = _make_mock_instance(
-            instance_name="caller1",
-            agent_class="researcher",
+            instance_name='caller1',
+            agent_class='researcher',
             slot_release=None,  # No slot held
         )
 
-        router_with_endpoints.set_agent_priorities("researcher", ["ep_unlimited"])
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
         # Child uses conc=1 endpoint (sequential but NOT zero)
-        router_with_endpoints.set_agent_priorities("coder", ["ep_sequential"])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={"instance_name": "child1", "agent_class": "coder", "task": "test"},
+            args={'instance_name': 'child1', 'agent_class': 'coder', 'task': 'test'},
             messages=[],
             instance=caller,
         )

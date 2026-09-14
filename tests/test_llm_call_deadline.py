@@ -63,7 +63,7 @@ def _make_pool_and_engine():
     compression_lock.__exit__ = MagicMock()
     instance._compression_lock = compression_lock
     instance._streaming_responses = []
-    instance.instance_name = "test-agent"
+    instance.instance_name = 'test-agent'
 
     # _is_terminal_stop() reads self.pool.stopped, self._my_generation,
     # self.pool._run_generation and self.pool.is_instance_terminated().
@@ -99,7 +99,7 @@ def _make_pool_and_engine():
 def _make_template():
     """Minimal template object accepted by _execute_llm_call_with_retry."""
     template = MagicMock()
-    template.llm_cfg = {"model": "test"}
+    template.llm_cfg = {'model': 'test'}
     template.function_map = {}
     template.llm = MagicMock()
     template.llm.generate_cfg = {}
@@ -111,7 +111,7 @@ def _extract_system_errors(results):
     errors = []
     for item in results:
         if isinstance(item, Message) and isinstance(item.content, str) \
-                and item.content.startswith("[SYSTEM ERROR"):
+                and item.content.startswith('[SYSTEM ERROR'):
             errors.append(item.content)
     return errors
 
@@ -122,20 +122,20 @@ def _run_with_deadline(engine, instance, deadline_seconds, mock_execute, clock):
     ``clock.deadline`` is set to (capture time + deadline_seconds) before the call
     so FakeClock.sleep can record how much of each backoff actually elapses.
     """
-    with patch.object(engine, "_execute_llm_call", side_effect=mock_execute):
-        with patch("agent_cascade.engine.llm_call.LLM_CALL_DEADLINE_SECONDS", deadline_seconds):
+    with patch.object(engine, '_execute_llm_call', side_effect=mock_execute):
+        with patch('agent_cascade.engine.llm_call.LLM_CALL_DEADLINE_SECONDS', deadline_seconds):
             # The deadline is captured as (monotonic() + LLM_CALL_DEADLINE_SECONDS).
             clock.deadline = clock.monotonic() + deadline_seconds
-            with patch("agent_cascade.engine.llm_call.time.monotonic", side_effect=clock.monotonic), \
-                 patch("agent_cascade.engine.llm_call.time.sleep", side_effect=clock.sleep):
+            with patch('agent_cascade.engine.llm_call.time.monotonic', side_effect=clock.monotonic), \
+                 patch('agent_cascade.engine.llm_call.time.sleep', side_effect=clock.sleep):
                 return list(engine._execute_llm_call_with_retry(
-                    instance, [Message(role=USER, content="test")], _make_template(), []))
+                    instance, [Message(role=USER, content='test')], _make_template(), []))
 
 
 def _always_fail():
     """Mock _execute_llm_call that always raises (a transient error)."""
     def mock_execute(*args, **kwargs):
-        raise ConnectionError("Simulated failure")
+        raise ConnectionError('Simulated failure')
         yield  # pragma: no cover (turns this into a generator)
     return mock_execute
 
@@ -155,10 +155,10 @@ class TestDeadlineFires:
         results = _run_with_deadline(engine, instance, 0.3, _always_fail(), clock)
 
         system_errors = _extract_system_errors(results)
-        assert any("wall-clock deadline" in e for e in system_errors), \
+        assert any('wall-clock deadline' in e for e in system_errors), \
             f"Expected a wall-clock deadline SYSTEM ERROR, got: {system_errors}"
         # The generic empty-response error must be suppressed (error_already_yielded=True).
-        assert not any("Empty LLM response" in e for e in system_errors), \
+        assert not any('Empty LLM response' in e for e in system_errors), \
             f"Deadline error should suppress the empty-response error, got: {system_errors}"
 
     def test_deadline_error_message_mentions_seconds(self):
@@ -174,7 +174,7 @@ class TestDeadlineFires:
         results = _run_with_deadline(engine, instance, 7, _always_fail(), clock)
 
         system_errors = _extract_system_errors(results)
-        assert any("exceeded 7s wall-clock deadline" in e for e in system_errors), \
+        assert any('exceeded 7s wall-clock deadline' in e for e in system_errors), \
             f"Expected 'exceeded 7s wall-clock deadline', got: {system_errors}"
 
 
@@ -191,7 +191,7 @@ class TestDeadlineNotFired:
         clock = FakeClock()
 
         def mock_execute(*args, **kwargs):
-            yield [Message(role=ASSISTANT, content="ok")]
+            yield [Message(role=ASSISTANT, content='ok')]
 
         # Large deadline — plenty of headroom.
         results = _run_with_deadline(engine, instance, 900, mock_execute, clock)
@@ -201,7 +201,7 @@ class TestDeadlineNotFired:
         # The successful assistant message should be present in the output.
         flat = [m for item in results if isinstance(item, list) for m in item] + \
                [item for item in results if isinstance(item, Message)]
-        assert any(getattr(m, "content", None) == "ok" for m in flat), \
+        assert any(getattr(m, 'content', None) == 'ok' for m in flat), \
             f"Expected the 'ok' assistant message in output, got: {results}"
 
     def test_no_deadline_error_when_exhausting_attempts_within_limit(self):
@@ -213,7 +213,7 @@ class TestDeadlineNotFired:
 
         results = _run_with_deadline(engine, instance, 900, _always_fail(), clock)
 
-        assert not any("wall-clock deadline" in e for e in _extract_system_errors(results)), \
+        assert not any('wall-clock deadline' in e for e in _extract_system_errors(results)), \
             f"No deadline SYSTEM ERROR expected on attempt exhaustion, got: {_extract_system_errors(results)}"
 
 
@@ -233,10 +233,10 @@ class TestBackoffRespectsDeadline:
         results = _run_with_deadline(engine, instance, deadline_seconds, _always_fail(), clock)
 
         # The deadline must have been hit (loop aborted by it, not by attempt cap).
-        assert any("wall-clock deadline" in e for e in _extract_system_errors(results)), \
+        assert any('wall-clock deadline' in e for e in _extract_system_errors(results)), \
             f"Expected deadline SYSTEM ERROR, got: {_extract_system_errors(results)}"
         # Every requested sleep must be non-negative and bounded by the deadline budget.
-        assert clock.sleep_calls, "Expected at least one backoff sleep to be requested"
+        assert clock.sleep_calls, 'Expected at least one backoff sleep to be requested'
         for requested, _ in clock.sleep_calls:
             assert 0 <= requested <= deadline_seconds + 1e-9, \
                 f"Backoff sleep {requested}s exceeded the remaining deadline budget ({deadline_seconds}s)"
@@ -250,7 +250,7 @@ class TestBackoffRespectsDeadline:
         # top-of-loop check fires before any further sleep is requested.
         results = _run_with_deadline(engine, instance, 0.05, _always_fail(), clock)
 
-        assert any("wall-clock deadline" in e for e in _extract_system_errors(results)), \
+        assert any('wall-clock deadline' in e for e in _extract_system_errors(results)), \
             f"Expected deadline SYSTEM ERROR, got: {_extract_system_errors(results)}"
         # The loop must have aborted via the deadline, not by exhausting all 5 attempts.
         # (With retry_max_attempts=5 and only a 0.05s budget, it cannot reach attempt 5.)

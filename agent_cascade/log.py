@@ -171,7 +171,7 @@ def setup_logger(level=None):
     formatter = logging.Formatter('%(asctime)s - %(filename)s - %(lineno)d - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
 
-    _logger_name = "agent_cascade_logger"
+    _logger_name = 'agent_cascade_logger'
     if instance_id:
         _logger_name += f".{instance_id}"
     _logger = logging.getLogger(_logger_name)
@@ -188,7 +188,7 @@ def setup_logger(level=None):
         except OSError as e:
             raise RuntimeError(f"Cannot create log directory {log_dir}: {e}") from e
 
-        log_filename = f"console_{instance_id}.log" if instance_id else "console.log"
+        log_filename = f"console_{instance_id}.log" if instance_id else 'console.log'
 
         try:
             file_handler = _WindowsSafeRotatingFileHandler(
@@ -215,13 +215,13 @@ _init_lock = threading.Lock()  # Protects check-then-act in init_logging()
 
 # Public logger reference — assigned by init_logging(). Safe to import before
 # calling init_logging(); calls will use a basic logger until initialized.
-logger = logging.getLogger("agent_cascade_logger")
+logger = logging.getLogger('agent_cascade_logger')
 
 
 def _logging_excepthook(exc_type, exc_value, exc_tb):
     """Replace sys.excepthook to log uncaught main-thread exceptions."""
     try:
-        logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+        logger.error('Uncaught exception', exc_info=(exc_type, exc_value, exc_tb))
     except Exception:
         # During interpreter shutdown logger may be unavailable; fall back to sys.__excepthook__
         import traceback
@@ -231,7 +231,7 @@ def _logging_excepthook(exc_type, exc_value, exc_tb):
 def _threading_excepthook(args):
     """Replace threading.excepthook to log uncaught thread exceptions."""
     try:
-        thread_name = args.thread.name if args.thread else "unknown"
+        thread_name = args.thread.name if args.thread else 'unknown'
         # Python 3.12+ renamed exc_tb -> exc_traceback in _thread._ExceptHookArgs
         if hasattr(args, 'exc_traceback'):
             tb = args.exc_traceback
@@ -240,11 +240,11 @@ def _threading_excepthook(args):
         else:
             tb = None
         logger.error(
-            "Uncaught exception in thread %s", thread_name,
+            'Uncaught exception in thread %s', thread_name,
             exc_info=(args.exc_type, args.exc_value, tb)
         )
         if tb is None:
-            logger.warning("Uncaught exception in thread %s — no traceback available", thread_name)
+            logger.warning('Uncaught exception in thread %s — no traceback available', thread_name)
     except Exception:
         # During interpreter shutdown logger may be unavailable; fall back to sys.__excepthook__
         try:
@@ -271,7 +271,7 @@ def init_logging(level=None) -> None:
 
     with _init_lock:
         if _initialized:
-            raise RuntimeError("Logging has already been initialized")
+            raise RuntimeError('Logging has already been initialized')
 
         _logger, _original_stdout, _original_stderr = setup_logger(level)
         logger = _logger

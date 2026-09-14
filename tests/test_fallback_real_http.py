@@ -232,7 +232,7 @@ def _http_call(llm_cfg, *a, **k):
 def _probe_on():
     """Ensure the sanity probe is ENABLED for these tests (the whole point of the fix)."""
     assert router_mod.SANITY_PROBE_ENABLED is True, \
-        "these tests require SANITY_PROBE_ENABLED to be True"
+        'these tests require SANITY_PROBE_ENABLED to be True'
 
 
 # ============================================================================
@@ -331,7 +331,7 @@ class TestNoReprobeCommitted:
         r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='commitA')
         assert r2 == 'head-model'
         assert sm['head_ref']['probes'] == 1, \
-            "a committed live endpoint must NOT be re-probed on the next turn"
+            'a committed live endpoint must NOT be re-probed on the next turn'
 
         # Simulated engine retry while still committed: a flaky call that fails once
         # (non-deterministic) then succeeds. The re-entry into call_with_fallback must
@@ -347,7 +347,7 @@ class TestNoReprobeCommitted:
         r3 = router.call_with_fallback('coder', flaky, agent_instance_name='commitA')
         assert r3 == 'head-model'
         assert sm['head_ref']['probes'] == 1, \
-            "engine retry of a still-committed connection must not re-probe"
+            'engine retry of a still-committed connection must not re-probe'
 
         # And one more plain turn: still zero probes.
         r4 = router.call_with_fallback('coder', _http_call, agent_instance_name='commitA')
@@ -408,14 +408,14 @@ class TestPrioritySwapDoesNotHang:
 
         # Wait for the worker to actually reach its retry point (Event sync — no sleep).
         assert reached_retry_point.wait(timeout=10), \
-            "worker never reached its retry point within 10s"
+            'worker never reached its retry point within 10s'
 
         # Mid-flight: the REAL set_agent_priorities reorders the chain.
         router.set_agent_priorities('coder', [second_id, head_id, third_id])
 
         t.join(timeout=15)
         assert not t.is_alive(), \
-            "PRIORITY-SWAP HANG: worker did not complete within 15s after a live reorder"
+            'PRIORITY-SWAP HANG: worker did not complete within 15s after a live reorder'
         assert not errors, f"worker raised: {errors}"
         # The success must be on an endpoint of the (possibly reordered) chain.
         assert results and results[0] in ('head-model', 'second-model', 'third-model')
@@ -453,14 +453,14 @@ class TestPrioritySwapDoesNotHang:
 
         t = threading.Thread(target=worker, daemon=True)
         t.start()
-        assert reached_retry_point.wait(timeout=10), "worker never reached its retry point"
+        assert reached_retry_point.wait(timeout=10), 'worker never reached its retry point'
 
         # Reorder to a shorter chain (2 endpoints instead of 3).
         router.set_agent_priorities('coder', [second_id, head_id])
 
         t.join(timeout=15)
         assert not t.is_alive(), \
-            "PRIORITY-SWAP HANG: worker did not complete within 15s after swap to shorter chain"
+            'PRIORITY-SWAP HANG: worker did not complete within 15s after swap to shorter chain'
         assert not errors, f"worker raised: {errors}"
 
 
@@ -487,23 +487,23 @@ class TestWalkUntilLiveOrdering:
         total_probes = sm['head_ref']['probes'] + sm['second_ref']['probes']
         assert total_probes == 2, \
             f"total probes must equal endpoints tried (2), got {total_probes}"
-        assert sm['head_ref']['probes'] == 1, "down head probed exactly once"
-        assert sm['second_ref']['probes'] == 1, "live second probed exactly once"
+        assert sm['head_ref']['probes'] == 1, 'down head probed exactly once'
+        assert sm['second_ref']['probes'] == 1, 'live second probed exactly once'
 
         # Head entered cooldown → NOT re-probed immediately on the next acquisition.
         from agent_cascade.api_router_pkg.normalization import normalize_api_base
         with router._lock:
             in_cooldown = (normalize_api_base(sm['head'].base), 'head-model') \
                           in router._endpoint_failure_times
-        assert in_cooldown, "probe-failed head must enter cooldown"
+        assert in_cooldown, 'probe-failed head must enter cooldown'
 
         # Second acquisition: head cooled down (no re-probe), second committed (no probe).
         r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='walkA')
         assert r2 == 'second-model'
         assert sm['head_ref']['probes'] == 1, \
-            "cooled-down head must not be re-probed immediately"
+            'cooled-down head must not be re-probed immediately'
         assert sm['second_ref']['probes'] == 1, \
-            "committed second must not be re-probed"
+            'committed second must not be re-probed'
 
     def test_head_down_post_only_probe_passes(self, router, stubs):
         """Variant: head's probe PASSES but its POST hangs (timeout). The walk still lands
@@ -526,4 +526,4 @@ class TestWalkUntilLiveOrdering:
         with router._lock:
             in_cooldown = (normalize_api_base(sm['head'].base), 'head-model') \
                           in router._endpoint_failure_times
-        assert in_cooldown, "timeout-exhausted head must enter cooldown"
+        assert in_cooldown, 'timeout-exhausted head must enter cooldown'

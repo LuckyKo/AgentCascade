@@ -34,9 +34,9 @@ def _make_instance(max_turns: int) -> AgentInstance:
     """Minimal real AgentInstance with a pre-seeded conversation (so _setup_turn works)."""
     now = time.monotonic()
     inst = AgentInstance(
-        instance_name="BudgetAgent",
-        agent_class="coder",
-        conversation=[Message(role=USER, content="do the task")],
+        instance_name='BudgetAgent',
+        agent_class='coder',
+        conversation=[Message(role=USER, content='do the task')],
         created_at=now,
         last_activity=now,
         latest_marker_index=-1,
@@ -47,21 +47,21 @@ def _make_instance(max_turns: int) -> AgentInstance:
 
 def _truncated_msg() -> Message:
     """Assistant message flagged truncated (finish_reason == 'length')."""
-    return Message(role=ASSISTANT, content="partial answer ...", extra={"finish_reason": "length"})
+    return Message(role=ASSISTANT, content='partial answer ...', extra={'finish_reason': 'length'})
 
 
 def _clean_msg() -> Message:
     """A complete assistant message (no truncation, real content)."""
-    return Message(role=ASSISTANT, content="here is the final answer")
+    return Message(role=ASSISTANT, content='here is the final answer')
 
 
 class _FakeLogger:
     def __init__(self):
         self.log_path = None
-        self.data = {"history": []}
+        self.data = {'history': []}
 
     def log_message(self, msg):
-        self.data["history"].append(msg)
+        self.data['history'].append(msg)
 
 
 class _FakeCompressionHandler:
@@ -79,14 +79,14 @@ class _FakePool:
 
     def __init__(self):
         self.auto_continue = True
-        self.settings = type("Settings", (), {
-            "auto_continue": True,
-            "tail_sync_check_enabled": False,          # keep tail-sync off the filesystem path
-            "compression_force_threshold": 96.0,      # force-compress threshold (token %)
-            "compression_warning_threshold": 90.0,    # warn threshold (token %)
-            "compression_context_reserve_tokens": 2048,
-            "auto_rollback_on_loop": True,            # loop-detection inline rollback toggle
-            "max_auto_rollbacks": 5,                  # max loop-recovery retries
+        self.settings = type('Settings', (), {
+            'auto_continue': True,
+            'tail_sync_check_enabled': False,          # keep tail-sync off the filesystem path
+            'compression_force_threshold': 96.0,      # force-compress threshold (token %)
+            'compression_warning_threshold': 90.0,    # warn threshold (token %)
+            'compression_context_reserve_tokens': 2048,
+            'auto_rollback_on_loop': True,            # loop-detection inline rollback toggle
+            'max_auto_rollbacks': 5,                  # max loop-recovery retries
         })()
         self.stopped = False
         self._run_generation = 0
@@ -173,7 +173,7 @@ class _ScriptedLLM:
         if self._script:
             yield self._script.pop(0)
         else:
-            raise AssertionError("LLM called more times than scripted")
+            raise AssertionError('LLM called more times than scripted')
 
 
 def _build_engine(pool: _FakePool, instance: AgentInstance, llm: _ScriptedLLM) -> ExecutionEngine:
@@ -197,7 +197,7 @@ def _last_turn_had_final_notice(llm: _ScriptedLLM) -> bool:
     if not llm.calls:
         return False
     return any(
-        isinstance(m, Message) and "Final turn" in (m.content or "")
+        isinstance(m, Message) and 'Final turn' in (m.content or '')
         for m in llm.calls[-1]
     )
 
@@ -230,7 +230,7 @@ class TestAutoContinueConsumesTurns:
         # The final-turn warning must have been injected before the last call,
         # proving the loop reached turns_available == 1 (not reset back to max).
         assert _last_turn_had_final_notice(llm), (
-            "Final-turn notice missing from the last LLM call — turn budget accounting is off"
+            'Final-turn notice missing from the last LLM call — turn budget accounting is off'
         )
 
     def test_truncated_twice_then_clean_stops_at_max_turns(self):
@@ -275,8 +275,8 @@ class TestAutoContinueConsumesTurns:
                 content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
                 last_assistant_content = content
                 break
-        assert last_assistant_content is not None and "Turn limit reached" in last_assistant_content, (
-            "Turn-limit notice not found on last assistant message — budget exhaustion path not exercised"
+        assert last_assistant_content is not None and 'Turn limit reached' in last_assistant_content, (
+            'Turn-limit notice not found on last assistant message — budget exhaustion path not exercised'
         )
 
     def test_clean_only_completes_in_one_call(self):

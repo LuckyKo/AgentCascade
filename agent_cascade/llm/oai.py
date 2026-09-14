@@ -143,14 +143,14 @@ def _should_send_include_usage(api_base: Optional[str]) -> bool:
     Pure and total: any parse failure degrades to False (never send).
     """
     try:
-        flag = os.environ.get("AC_SEND_INCLUDE_USAGE")
+        flag = os.environ.get('AC_SEND_INCLUDE_USAGE')
         if flag is not None:
-            return flag.strip().lower() in ("1", "true", "yes", "on")
+            return flag.strip().lower() in ('1', 'true', 'yes', 'on')
         if not api_base:
             return False
         from urllib.parse import urlparse
-        host = (urlparse(api_base).hostname or "").strip("[]").lower()
-        return host in ("127.0.0.1", "localhost", "::1")
+        host = (urlparse(api_base).hostname or '').strip('[]').lower()
+        return host in ('127.0.0.1', 'localhost', '::1')
     except Exception:
         return False
 
@@ -363,7 +363,7 @@ class TextChatAtOAI(BaseFnCallModel):
             return
         try:
             models_url = f"{api_base.rstrip('/')}/models"
-            headers = {"Authorization": f"Bearer {api_key}"} if api_key != 'EMPTY' else {}
+            headers = {'Authorization': f"Bearer {api_key}"} if api_key != 'EMPTY' else {}
             response = requests.get(models_url, headers=headers, timeout=5)
             if response.status_code == 200:
                 models_data = response.json()
@@ -516,9 +516,9 @@ class TextChatAtOAI(BaseFnCallModel):
         # TTFB. Gated to our own backend only — never sent to third-party endpoints.
         try:
             if _should_send_include_usage(cur_base):
-                generate_cfg['stream_options'] = {"include_usage": True}
+                generate_cfg['stream_options'] = {'include_usage': True}
         except Exception as e:
-            logger.debug("Failed to set stream_options include_usage: %s", e)
+            logger.debug('Failed to set stream_options include_usage: %s', e)
 
         if log_api_post:
             try:
@@ -528,7 +528,7 @@ class TextChatAtOAI(BaseFnCallModel):
                 debug_dir = Path(DEFAULT_WORKSPACE) / 'logs' / 'debug'
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 dump_file = debug_dir / f"api_post_{int(time.time()*1000)}.json"
-                dump_data = {"model": request_model, "messages": messages, **generate_cfg}
+                dump_data = {'model': request_model, 'messages': messages, **generate_cfg}
                 with open(dump_file, 'w', encoding='utf-8') as f:
                     json.dump(dump_data, f, indent=2, ensure_ascii=False)
             except Exception as e:
@@ -549,9 +549,9 @@ class TextChatAtOAI(BaseFnCallModel):
                     response._iter_events(),
                     STREAM_MAX_SILENCE_SECONDS,
                     STREAM_MAX_TOTAL_SECONDS,
-                    error_message_prefix="OpenAI",
+                    error_message_prefix='OpenAI',
                 ):
-                    if sse.data == "[DONE]":
+                    if sse.data == '[DONE]':
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
 
@@ -582,9 +582,9 @@ class TextChatAtOAI(BaseFnCallModel):
                     response._iter_events(),
                     STREAM_MAX_SILENCE_SECONDS,
                     STREAM_MAX_TOTAL_SECONDS,
-                    error_message_prefix="OpenAI",
+                    error_message_prefix='OpenAI',
                 ):
-                    if sse.data == "[DONE]":
+                    if sse.data == '[DONE]':
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
 
@@ -788,7 +788,7 @@ class TextChatAtOAI(BaseFnCallModel):
                 debug_dir = Path(DEFAULT_WORKSPACE) / 'logs' / 'debug'
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 dump_file = debug_dir / f"api_post_{int(time.time()*1000)}.json"
-                dump_data = {"model": request_model, "messages": messages, **generate_cfg}
+                dump_data = {'model': request_model, 'messages': messages, **generate_cfg}
                 with open(dump_file, 'w', encoding='utf-8') as f:
                     json.dump(dump_data, f, indent=2, ensure_ascii=False)
             except Exception as e:

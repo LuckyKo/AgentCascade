@@ -47,7 +47,7 @@ def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance:
             content_lines = sys_msg.content.split('\n')
             # Insert after identity line; skip extra blank/comment lines
             # (matches execution_engine.py line 943)
-            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
+            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith('#') else 1
             for i, ml in enumerate(meta_block.split('\n')):
                 content_lines.insert(insert_pos + i, ml)
             sys_msg.content = '\n'.join(content_lines)
@@ -82,7 +82,7 @@ class AgentLifecycleManager:
     def engine(self) -> 'ExecutionEngine':
         """Get engine reference (raises if not set)."""
         if self._engine is None:
-            raise RuntimeError("AgentLifecycleManager._engine not set. Call ExecutionEngine.initialize().")
+            raise RuntimeError('AgentLifecycleManager._engine not set. Call ExecutionEngine.initialize().')
         return self._engine
 
     def set_engine(self, engine: 'ExecutionEngine') -> None:
@@ -193,7 +193,7 @@ class AgentLifecycleManager:
         if not is_reuse:
             self.pool.instances[instance_name] = inst
             logger.debug(
-                "[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for %s",
+                '[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for %s',
                 instance_name
             )
 
@@ -214,7 +214,7 @@ class AgentLifecycleManager:
         if log_file:
             # Don't dismiss all instances — we're just loading history into an existing instance
             status = self.pool.load_session_from_log(log_file, target_instance=instance_name, clear_sub_agents_before_load=False, caller_name=caller)
-            if status.startswith("Error"):
+            if status.startswith('Error'):
                 logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
             else:
                 # load_session_from_log creates a new instance in the pool,
@@ -247,7 +247,7 @@ class AgentLifecycleManager:
         """
         template = self.pool.get_template(agent_class)
         if not template:
-            logger.error("NO TEMPLATE for %s/%s", agent_class, instance_name)
+            logger.error('NO TEMPLATE for %s/%s', agent_class, instance_name)
             raise ValueError(f"No template for agent class {agent_class}")
 
         sys_content = getattr(template, 'base_system_message',
@@ -258,7 +258,7 @@ class AgentLifecycleManager:
         if lines and f" {instance_name}" not in lines[0]:
             lines[0] = f"You are {instance_name}."
 
-        return Message(role=SYSTEM, content="\n".join(lines))
+        return Message(role=SYSTEM, content='\n'.join(lines))
 
     def build_task_message(
         self,
@@ -302,7 +302,7 @@ class AgentLifecycleManager:
 
         # Fallback for empty message (match main AC branch behavior)
         if not task_text.strip():
-            task_text = "Please proceed with your task."
+            task_text = 'Please proceed with your task.'
 
         return Message(role=USER, content=task_text)
 
@@ -350,12 +350,12 @@ class AgentLifecycleManager:
         # - Existing loggers (recall/reuse): patch in-memory via update_supervisor().
         #   The on-disk value retains the original spawner (historically accurate).
         try:
-            expected_supervisor = instance.parent_instance or "User"
+            expected_supervisor = instance.parent_instance or 'User'
             log_inst = self.pool.get_logger(
                 instance_name, agent_class,
-                base_metadata={"supervisor": expected_supervisor}
+                base_metadata={'supervisor': expected_supervisor}
             )
-            if log_inst.data["metadata"].get("supervisor") != expected_supervisor:
+            if log_inst.data['metadata'].get('supervisor') != expected_supervisor:
                 log_inst.update_supervisor(expected_supervisor)
         except (AttributeError, KeyError, OSError) as e:
             logger.warning(f"Logger supervisor metadata update failed for {instance_name}: {e}")
@@ -396,8 +396,8 @@ class AgentLifecycleManager:
                         _reuse_pool = _sched._pools.get(_held_key) if _held_key else None
                 except Exception:
                     pass
-                release_slot_permit(instance, instance.instance_name, action="drop-reuse",
-                                    context="on reuse", pool=_reuse_pool)
+                release_slot_permit(instance, instance.instance_name, action='drop-reuse',
+                                    context='on reuse', pool=_reuse_pool)
 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always
@@ -460,7 +460,7 @@ class AgentLifecycleManager:
                     from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
                     with instance._compression_lock:
                         current_conv = list(instance.conversation)
-                    _check_tail(instance_name, current_conv, log_inst.log_path, context="reused_instance_init")
+                    _check_tail(instance_name, current_conv, log_inst.log_path, context='reused_instance_init')
             except Exception as e:
                 logger.debug(f"Logging task message for reused {instance_name} failed (non-critical): {e}")
         else:
@@ -501,7 +501,7 @@ class AgentLifecycleManager:
                     from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
                     with instance._compression_lock:
                         conv = list(instance.conversation)
-                    _check_tail(instance_name, conv, log_inst.log_path, context="session_init")
+                    _check_tail(instance_name, conv, log_inst.log_path, context='session_init')
             except Exception as e:
                 logger.debug(f"Logging messages for {instance_name} failed (non-critical): {e}")
 
@@ -538,7 +538,7 @@ class AgentLifecycleManager:
         """
         # FIX
         if not hasattr(self.pool, 'api_router') or not self.pool.api_router:
-            logger.debug("Settings propagation skipped — no api_router on pool")
+            logger.debug('Settings propagation skipped — no api_router on pool')
             return
 
         try:

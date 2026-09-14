@@ -61,7 +61,7 @@ class FilterByRangeTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         condition_key = params_dict.get('condition_key')
         operator = params_dict.get('operator')
@@ -70,7 +70,7 @@ class FilterByRangeTool(BaseShoppingTool):
 
         if not all([condition_key, operator, value is not None]):
             return self.format_result_as_json({
-                "error": "Missing required parameters: condition_key, operator, or value."
+                'error': 'Missing required parameters: condition_key, operator, or value.'
             })
 
         if product_ids:
@@ -78,7 +78,7 @@ class FilterByRangeTool(BaseShoppingTool):
             missing_ids = [pid for pid in product_ids if pid not in self.products_map]
             if missing_ids:
                 return self.format_result_as_json({
-                    "error": f"Some product_ids not found in database: {missing_ids}"
+                    'error': f"Some product_ids not found in database: {missing_ids}"
                 })
         else:
             search_space = self.products
@@ -89,7 +89,7 @@ class FilterByRangeTool(BaseShoppingTool):
 
             # Make sure values are comparable
             if product_value is None:
-                raise ValueError("condition_key cannot be found in product data, please check again.")
+                raise ValueError('condition_key cannot be found in product data, please check again.')
 
             try:
                 # Try to convert both values to float for comparison
@@ -113,7 +113,7 @@ class FilterByRangeTool(BaseShoppingTool):
                 # Skip values if they cannot be cast to float for comparison
                 continue
 
-        output_data = [p.get("product_id") for p in filtered_ids]
+        output_data = [p.get('product_id') for p in filtered_ids]
 
-        return self.format_result_as_json({"filtered_products_ids": output_data})
+        return self.format_result_as_json({'filtered_products_ids': output_data})
 

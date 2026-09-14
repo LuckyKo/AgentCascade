@@ -25,7 +25,7 @@ def _format_result(
     result: str,
     was_terminated: bool = False,
     was_stopped: bool = False,
-    prefix: str = "Agent",
+    prefix: str = 'Agent',
 ) -> str:
     """Format child agent result string with explicit prefix."""
     if was_stopped:
@@ -79,7 +79,7 @@ def run_child_core(
     caller_name: str,
     child_depth: int,
     force_fresh: bool = False,
-    prefix: str = "Agent",
+    prefix: str = 'Agent',
     max_auto_retries: int = 3,
 ) -> str:
     """Core child agent execution logic shared by sync and async paths.
@@ -115,7 +115,7 @@ def run_child_core(
         if inst is None and conv:
             # Structured rejection: the engine returned an explanatory message
             # without creating an instance (e.g., advisor denied the delegation).
-            rejection_msg = extract_instance_output(conv, instance_name) or ""
+            rejection_msg = extract_instance_output(conv, instance_name) or ''
             if rejection_msg:
                 logger.warning(
                     f"{prefix} path REJECTED - {instance_name}: {rejection_msg[:200]}"

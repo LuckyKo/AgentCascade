@@ -44,7 +44,7 @@ def _make_fake_pool(pending_approvals):
     instance.conversation = []                # empty -> no cached version match
     instance._streaming_responses = None
     instance._compression_lock = threading.Lock()
-    instance.compression_summary = ""
+    instance.compression_summary = ''
 
     pool = MagicMock()
     pool.get_instance.return_value = instance
@@ -59,7 +59,7 @@ def _make_fake_pool(pending_approvals):
     om.list_pending_approvals.return_value = pending_approvals
     om.extra_work_folders_ro = []
     om.extra_work_folders_rw = []
-    om.base_dir = "/tmp/fake-workspace"
+    om.base_dir = '/tmp/fake-workspace'
     pool.operation_manager = om
 
     return pool
@@ -85,7 +85,7 @@ def _build_stream_update(pool):
             return ({'tokens': 0, 'words': 0}, {'tokens': 0, 'words': 0})
 
         with patch.object(streaming, '_calc_stream_token_stats', sentinel):
-            result = state_builder.build_stream_update_from_pool(pool, "Maine")
+            result = state_builder.build_stream_update_from_pool(pool, 'Maine')
     finally:
         with state_builder._cache_mgr._lock:
             state_builder._cache_mgr.stream_token_stats.clear()
@@ -100,7 +100,7 @@ def _build_full_state(pool):
     """Drive build_state_from_pool to its return dict (no streaming cache involved)."""
     from agent_cascade.api_integration_pkg import state_builder
 
-    return state_builder.build_state_from_pool(pool, "Maine", generating=True)
+    return state_builder.build_state_from_pool(pool, 'Maine', generating=True)
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +117,11 @@ def test_stream_update_omits_approvals_key():
     pool = _make_fake_pool(pending_approvals=[{'request_id': 'r1', 'tool': 'shell_cmd'}])
     result = _build_stream_update(pool)
 
-    assert isinstance(result, dict), "expected a stream-update dict, got %r" % type(result)
+    assert isinstance(result, dict), 'expected a stream-update dict, got %r' % type(result)
     assert 'approvals' not in result, (
         "stream update must NOT include an 'approvals' key — approvals are delivered "
         "exclusively via the dedicated {'type':'approvals'} WS message from _approval_loop; "
-        "including them here allows stale ticks to clobber live approval state."
+        'including them here allows stale ticks to clobber live approval state.'
     )
 
 
@@ -135,7 +135,7 @@ def test_full_state_includes_approvals_key():
     pool = _make_fake_pool(pending_approvals=sentinel)
     result = _build_full_state(pool)
 
-    assert isinstance(result, dict), "expected a full-state dict, got %r" % type(result)
+    assert isinstance(result, dict), 'expected a full-state dict, got %r' % type(result)
     assert 'approvals' in result, (
         "full state MUST include an 'approvals' key — initial load / refresh relies on it."
     )
@@ -189,8 +189,8 @@ def test_serialize_message_caches_pydantic_message_object():
     assert first['content'] == 'stable committed history turn'
     # The store branch must have populated the instance-attached cache.
     assert getattr(msg, '_ui_cache', None) is not None, (
-        "BUG_0005 regression: serialize_message() did not store a Pydantic "
-        "Message object in the UI cache on tick 1 — caching is broken."
+        'BUG_0005 regression: serialize_message() did not store a Pydantic '
+        'Message object in the UI cache on tick 1 — caching is broken.'
     )
 
     # Tick 2: same stable object. Mutate the instance-attached cache so we can
@@ -199,8 +199,8 @@ def test_serialize_message_caches_pydantic_message_object():
 
     second = state_builder.serialize_message(msg, index=5, for_ui=True)
     assert second['content'] == '__CACHED_SENTINEL__', (
-        "BUG_0005 regression: tick 2 did not hit the UI cache — it re-serialized "
-        "the Message object instead of serving the cached dict."
+        'BUG_0005 regression: tick 2 did not hit the UI cache — it re-serialized '
+        'the Message object instead of serving the cached dict.'
     )
 
 
@@ -219,8 +219,8 @@ def test_serialize_message_does_not_cache_latest_turn():
     assert result['content'] == 'latest in-flight turn'
     # Directly verify that _ui_cache was NOT set for index=0 messages
     assert getattr(msg, '_ui_cache', None) is None, (
-        "BUG_0005 guard violated: index=0 (latest turn) message was cached — it "
-        "is still mutating during streaming and must always be serialized fresh."
+        'BUG_0005 guard violated: index=0 (latest turn) message was cached — it '
+        'is still mutating during streaming and must always be serialized fresh.'
     )
 
 
@@ -296,15 +296,15 @@ def test_stream_token_stats_no_double_count_of_partial():
 
     # h_stats must equal stats over the COMMITTED history only (no partial).
     assert h_stats['tokens'] == get_history_stats(committed)['tokens'], (
-        "BUG_0004 regression: h_stats must be computed over the committed conversation ONLY "
-        "(no streaming partial); got %d, expected %d"
+        'BUG_0004 regression: h_stats must be computed over the committed conversation ONLY '
+        '(no streaming partial); got %d, expected %d'
         % (h_stats['tokens'], get_history_stats(committed)['tokens'])
     )
 
     # r_stats must equal stats over the IN-FLIGHT PARTIAL only.
     assert r_stats['tokens'] == get_history_stats(partial)['tokens'], (
-        "BUG_0004 regression: r_stats must be computed over the streaming partial ONLY; "
-        "got %d, expected %d"
+        'BUG_0004 regression: r_stats must be computed over the streaming partial ONLY; '
+        'got %d, expected %d'
         % (r_stats['tokens'], get_history_stats(partial)['tokens'])
     )
 
@@ -312,8 +312,8 @@ def test_stream_token_stats_no_double_count_of_partial():
     total = h_stats['tokens'] + r_stats['tokens']
     expected_total = get_history_stats(committed)['tokens'] + get_history_stats(partial)['tokens']
     assert total == expected_total, (
-        "BUG_0004 regression: total_tokens (%d) must equal stats(C)+stats(P) (%d) with no "
-        "double-counting of the streaming partial" % (total, expected_total)
+        'BUG_0004 regression: total_tokens (%d) must equal stats(C)+stats(P) (%d) with no '
+        'double-counting of the streaming partial' % (total, expected_total)
     )
 
     # Sanity: the partial is non-trivial so a double-count would actually be visible.
@@ -334,6 +334,6 @@ def test_stream_token_stats_empty_partial_is_zero():
     )
 
     assert r_stats == {'tokens': 0, 'words': 0}, (
-        "r_stats must be zero when there is no streaming partial; got %r" % r_stats
+        'r_stats must be zero when there is no streaming partial; got %r' % r_stats
     )
     assert h_stats['tokens'] + r_stats['tokens'] == get_history_stats(committed)['tokens']

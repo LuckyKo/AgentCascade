@@ -78,8 +78,8 @@ class EndpointScheduler:
         self,
         api_base: str,
         concurrency_limit: int,
-        instance_name: str = "unknown",
-        agent_class: str = "unknown",
+        instance_name: str = 'unknown',
+        agent_class: str = 'unknown',
         pool=None,
         timeout: Optional[float] = None,
         **kwargs,
@@ -165,7 +165,7 @@ class EndpointScheduler:
             
         except TimeoutError as e:
             # Wrap with holder info for diagnostics.
-            holder_info = ""
+            holder_info = ''
             holders = list(sched_pool._running.values())
             if holders:
                 holder_names = [f"{h.instance_name} ({h.agent_name})" for h in holders]

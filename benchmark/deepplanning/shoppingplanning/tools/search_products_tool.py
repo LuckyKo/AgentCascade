@@ -51,7 +51,7 @@ class SearchProductsTool(BaseShoppingTool):
                         self.products.append(product)
 
                         # Create a "rich text" document for each product by concatenating key fields
-                        searchable_text = " ".join([
+                        searchable_text = ' '.join([
                             product.get('brand', ''),
                             product.get('color', ''),
                             product.get('size', ''),
@@ -80,19 +80,19 @@ class SearchProductsTool(BaseShoppingTool):
         """
         if not self.bm25:
             return self.format_result_as_json({
-                "error": "BM25 index is not available. Check database loading."
+                'error': 'BM25 index is not available. Check database loading.'
             })
 
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         query = params_dict.get('query')
         limit = params_dict.get('limit', 20)
 
         if not query:
-            return self.format_result_as_json({"product_ids": []})
+            return self.format_result_as_json({'product_ids': []})
 
         # Tokenize and lowercase query for case-insensitive search
         tokenized_query = query.lower().split()
@@ -105,9 +105,9 @@ class SearchProductsTool(BaseShoppingTool):
         for i, score in enumerate(doc_scores):
             if score > BM25_SCORE_THRESHOLD:
                 results_with_scores.append({
-                    "product_id": self.products[i]['product_id'],
-                    "name": self.products[i]['name'],
-                    "score": score
+                    'product_id': self.products[i]['product_id'],
+                    'name': self.products[i]['name'],
+                    'score': score
                 })
 
         # Sort by score descending, then limit result count
@@ -116,5 +116,5 @@ class SearchProductsTool(BaseShoppingTool):
 
         final_product_ids = [item['product_id'] for item in limited_results]
 
-        return self.format_result_as_json({"product_ids": final_product_ids})
+        return self.format_result_as_json({'product_ids': final_product_ids})
 

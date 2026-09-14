@@ -46,7 +46,7 @@ def _make_pool_and_engine():
     real_lock = threading.Lock()
     instance._state_lock = real_lock
     instance.state = AgentState.SLEEPING
-    instance.instance_name = "test-agent"
+    instance.instance_name = 'test-agent'
 
     # The waiting branch (cap NOT fired) proceeds to periodic logging, which does
     # float arithmetic on these throttling timestamps — set them to floats so the
@@ -93,7 +93,7 @@ def _call_sleeping(engine, instance, cap_seconds, sleeping_duration):
         instance.sleeping_since = time.monotonic() - sleeping_duration
 
     with patch(
-        "agent_cascade.engine.core.AGENT_SLEEPING_MAX_WAIT_SECONDS", cap_seconds
+        'agent_cascade.engine.core.AGENT_SLEEPING_MAX_WAIT_SECONDS', cap_seconds
     ):
         return engine._handle_sleeping_state(instance, [], [], [])
 
@@ -128,13 +128,13 @@ class TestSleepingCapFires:
 
         pool.enqueue_message.assert_called_once()
         args = pool.enqueue_message.call_args[0]
-        assert args[0] == "test-agent"
+        assert args[0] == 'test-agent'
         msg = args[1]
         assert isinstance(msg, str)
-        assert "[SYSTEM]" in msg
-        assert "SLEEPING timeout" in msg
+        assert '[SYSTEM]' in msg
+        assert 'SLEEPING timeout' in msg
         # The message explains that pending background tools didn't complete.
-        assert "background tools" in msg
+        assert 'background tools' in msg
 
     def test_cap_fires_at_exact_boundary(self):
         """sleeping_duration >= cap uses >=, so the boundary value fires."""

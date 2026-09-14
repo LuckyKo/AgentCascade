@@ -22,7 +22,7 @@ def _msg(ts=None):
 class TestBackfillTsFromDict:
 
     def test_valid_iso_timestamp_sets_float_ts(self):
-        iso = "2026-09-07T12:54:00.071151"
+        iso = '2026-09-07T12:54:00.071151'
         msg = _msg(ts=None)
         SessionIOMixin._backfill_ts_from_dict(msg, {'timestamp': iso})
 
@@ -35,7 +35,7 @@ class TestBackfillTsFromDict:
         # A message that already carries a ts must keep it, even with a valid timestamp.
         original = 1234567890.5
         msg = _msg(ts=original)
-        SessionIOMixin._backfill_ts_from_dict(msg, {'timestamp': "2026-09-07T12:54:00.071151"})
+        SessionIOMixin._backfill_ts_from_dict(msg, {'timestamp': '2026-09-07T12:54:00.071151'})
 
         assert msg.ts == original
 
@@ -47,14 +47,14 @@ class TestBackfillTsFromDict:
 
     def test_empty_string_timestamp_leaves_ts_none(self):
         msg = _msg(ts=None)
-        SessionIOMixin._backfill_ts_from_dict(msg, {'timestamp': ""})
+        SessionIOMixin._backfill_ts_from_dict(msg, {'timestamp': ''})
 
         assert msg.ts is None
 
     def test_malformed_timestamp_leaves_ts_none_and_does_not_raise(self):
         msg = _msg(ts=None)
         # Non-parseable string: must not raise and must leave ts unchanged.
-        SessionIOMixin._backfill_ts_from_dict(msg, {'timestamp': "not-a-real-date"})
+        SessionIOMixin._backfill_ts_from_dict(msg, {'timestamp': 'not-a-real-date'})
 
         assert msg.ts is None
 

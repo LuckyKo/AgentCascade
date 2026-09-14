@@ -14,7 +14,7 @@ def load_validation_cases(json_path: Path) -> Dict[str, Any]:
         return {}
 
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
+        with open(json_path, 'r', encoding='utf-8') as f:
             content = f.read().strip()
             if not content:
                 return {}
@@ -30,7 +30,7 @@ def load_cart(cart_path: Path) -> Dict[str, Any]:
         return {}
 
     try:
-        with open(cart_path, "r", encoding="utf-8") as f:
+        with open(cart_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
         print(f"❌ Error: Failed to load cart file {cart_path}: {e}")
@@ -53,10 +53,10 @@ def check_case_completion(messages_path: Path) -> bool:
         return False
     
     try:
-        with open(messages_path, "r", encoding="utf-8") as f:
+        with open(messages_path, 'r', encoding='utf-8') as f:
             messages_data = json.load(f)
         
-        messages = messages_data.get("messages", [])
+        messages = messages_data.get('messages', [])
         if not messages:
             # Empty messages, consider incomplete
             return False
@@ -65,12 +65,12 @@ def check_case_completion(messages_path: Path) -> bool:
         last_message = messages[-1]
         
         # If last message is a tool response, case is incomplete (waiting for assistant response)
-        if last_message.get("role") == "tool":
+        if last_message.get('role') == 'tool':
             return False
         
         # If last message is assistant with tool_calls, case is incomplete (still calling tools)
-        if last_message.get("role") == "assistant":
-            tool_calls = last_message.get("tool_calls", [])
+        if last_message.get('role') == 'assistant':
+            tool_calls = last_message.get('tool_calls', [])
             if tool_calls:
                 return False
         
@@ -89,9 +89,9 @@ def evaluate_single_case(case_dir: Path) -> Dict[str, Any]:
     print(f"📊 Start evaluation: {case_name}")
     print(f"{'='*80}\n")
 
-    cart_path = case_dir / "cart.json"
-    validation_path = case_dir / "validation_cases.json"
-    messages_path = case_dir / "messages.json"
+    cart_path = case_dir / 'cart.json'
+    validation_path = case_dir / 'validation_cases.json'
+    messages_path = case_dir / 'messages.json'
 
     cart = load_cart(cart_path)
     validation_cases = load_validation_cases(validation_path)
@@ -102,16 +102,16 @@ def evaluate_single_case(case_dir: Path) -> Dict[str, Any]:
     if not cart or not validation_cases:
         print(f"⚠️  Warning: {case_name} is missing required files, skipping evaluation")
         return {
-            "case_name": case_name,
-            "success": False,
-            "error": "Missing required files",
-            "score": 0.0,
-            "details": [],
-            "is_completed": False,
+            'case_name': case_name,
+            'success': False,
+            'error': 'Missing required files',
+            'score': 0.0,
+            'details': [],
+            'is_completed': False,
         }
 
-    cart_items = cart.get("items", [])
-    ground_truth_products = validation_cases.get("ground_truth_products", [])
+    cart_items = cart.get('items', [])
+    ground_truth_products = validation_cases.get('ground_truth_products', [])
 
     print(f"  Number of cart items: {len(cart_items)}")
     print(f"  Number of expected products: {len(ground_truth_products)}\n")
@@ -119,22 +119,22 @@ def evaluate_single_case(case_dir: Path) -> Dict[str, Any]:
     # Extract product_ids from cart (remove duplicates)
     cart_product_ids = set()
     for cart_item in cart_items:
-        product_id = cart_item.get("product_id")
+        product_id = cart_item.get('product_id')
         if product_id:
             cart_product_ids.add(product_id)
 
     # Extract product_ids from ground truth
     ground_truth_product_ids = set()
     for gt_product in ground_truth_products:
-        product_id = gt_product.get("product_id")
+        product_id = gt_product.get('product_id')
         if product_id:
             ground_truth_product_ids.add(product_id)
 
     # Find matches
     matched_product_ids = cart_product_ids & ground_truth_product_ids
 
-    ground_truth_coupons = validation_cases.get("ground_truth_coupons", {})
-    cart_coupons = cart.get("used_coupons", [])
+    ground_truth_coupons = validation_cases.get('ground_truth_coupons', {})
+    cart_coupons = cart.get('used_coupons', [])
     expected_coupons = len(ground_truth_coupons)
     matched_coupons = 0
     matched_coupon_names = set()
@@ -154,10 +154,10 @@ def evaluate_single_case(case_dir: Path) -> Dict[str, Any]:
             matched_coupon_names.add(coupon_name)
         # Always save coupon detail for the report
         matched_coupons_list.append({
-            "coupon_name": coupon_name,
-            "quantity": quantity,
-            "expected_quantity": ground_truth_coupons.get(coupon_name, 0),
-            "match": match_flag
+            'coupon_name': coupon_name,
+            'quantity': quantity,
+            'expected_quantity': ground_truth_coupons.get(coupon_name, 0),
+            'match': match_flag
         })
 
     ground_truth_coupon_names = set(ground_truth_coupons.keys())
@@ -180,50 +180,50 @@ def evaluate_single_case(case_dir: Path) -> Dict[str, Any]:
     matched_products = list(matched_product_ids)
     unmatched_ground_truth_products = [
         {
-            "product_id": gt_product.get("product_id"),
-            "name": gt_product.get("name", ""),
+            'product_id': gt_product.get('product_id'),
+            'name': gt_product.get('name', ''),
         }
         for gt_product in ground_truth_products
-        if gt_product.get("product_id") in unmatched_ground_truth_ids
+        if gt_product.get('product_id') in unmatched_ground_truth_ids
     ]
 
     extra_products = [
         {
-            "product_id": cart_item.get("product_id"),
-            "name": cart_item.get("name", ""),
-            "quantity": cart_item.get("quantity", 0),
-            "price": cart_item.get("price", 0),
+            'product_id': cart_item.get('product_id'),
+            'name': cart_item.get('name', ''),
+            'quantity': cart_item.get('quantity', 0),
+            'price': cart_item.get('price', 0),
         }
         for cart_item in cart_items
-        if cart_item.get("product_id") and cart_item.get("product_id") in extra_product_ids
+        if cart_item.get('product_id') and cart_item.get('product_id') in extra_product_ids
     ]
 
     # For reporting of ground_truth_coupons, we store as list of dicts for clearer output
     ground_truth_coupon_info = [
         {
-            "coupon_name": coupon_name,
-            "expected_quantity": quantity
+            'coupon_name': coupon_name,
+            'expected_quantity': quantity
         }
         for coupon_name, quantity in ground_truth_coupons.items()
     ]
     
     result = {
-        "case_name": case_name,
-        "success": True,
-        "score": score,
-        "case_score": 1.0 if matched_count == expected_count else 0.0,
-        "matched_count": matched_count,
-        "expected_count": expected_count,
-        "extra_products_count": len(extra_products),
-        "matched_products": matched_products,
-        "unmatched_ground_truth_products": unmatched_ground_truth_products,
-        "extra_products": extra_products,
-        "query": validation_cases.get("query", ""),
-        "ground_truth_products": ground_truth_products,
-        "matched_coupons": matched_coupons_list,  # Save matched coupon details for report
-        "ground_truth_coupons": ground_truth_coupon_info,  # Save for report
-        "coupon_score": coupon_score,
-        "is_completed": is_completed,  # Whether the case completed (no tool_calls in last message)
+        'case_name': case_name,
+        'success': True,
+        'score': score,
+        'case_score': 1.0 if matched_count == expected_count else 0.0,
+        'matched_count': matched_count,
+        'expected_count': expected_count,
+        'extra_products_count': len(extra_products),
+        'matched_products': matched_products,
+        'unmatched_ground_truth_products': unmatched_ground_truth_products,
+        'extra_products': extra_products,
+        'query': validation_cases.get('query', ''),
+        'ground_truth_products': ground_truth_products,
+        'matched_coupons': matched_coupons_list,  # Save matched coupon details for report
+        'ground_truth_coupons': ground_truth_coupon_info,  # Save for report
+        'coupon_score': coupon_score,
+        'is_completed': is_completed,  # Whether the case completed (no tool_calls in last message)
     }
 
     print(f"  Cart product IDs: {sorted(cart_product_ids)}")
@@ -241,34 +241,34 @@ def evaluate_single_case(case_dir: Path) -> Dict[str, Any]:
 
 
 def generate_case_report(evaluation_result: Dict[str, Any], output_dir: Path) -> Path:
-    case_name = evaluation_result["case_name"]
+    case_name = evaluation_result['case_name']
     report_path = output_dir / f"{case_name}_report.json"
 
     report_data = {
-        "case_name": case_name,
-        "evaluation_time": datetime.now().isoformat(),
-        "summary": {
-            "score": evaluation_result["score"],
-            "matched_count": evaluation_result["matched_count"],
-            "expected_count": evaluation_result["expected_count"],
-            "extra_products_count": evaluation_result["extra_products_count"],
-            "coupon_score": evaluation_result.get("coupon_score", 0.0),
+        'case_name': case_name,
+        'evaluation_time': datetime.now().isoformat(),
+        'summary': {
+            'score': evaluation_result['score'],
+            'matched_count': evaluation_result['matched_count'],
+            'expected_count': evaluation_result['expected_count'],
+            'extra_products_count': evaluation_result['extra_products_count'],
+            'coupon_score': evaluation_result.get('coupon_score', 0.0),
         },
-        "query": evaluation_result.get("query", ""),
-        "matched_products": evaluation_result.get("matched_products", []),
-        "matched_coupons": evaluation_result.get("matched_coupons", []),
-        "ground_truth_coupons": evaluation_result.get("ground_truth_coupons", []),
-        "unmatched_ground_truth_products": evaluation_result.get("unmatched_ground_truth_products", []),
-        "extra_products": evaluation_result.get("extra_products", []),
-        "ground_truth_products": evaluation_result.get("ground_truth_products", []),
+        'query': evaluation_result.get('query', ''),
+        'matched_products': evaluation_result.get('matched_products', []),
+        'matched_coupons': evaluation_result.get('matched_coupons', []),
+        'ground_truth_coupons': evaluation_result.get('ground_truth_coupons', []),
+        'unmatched_ground_truth_products': evaluation_result.get('unmatched_ground_truth_products', []),
+        'extra_products': evaluation_result.get('extra_products', []),
+        'ground_truth_products': evaluation_result.get('ground_truth_products', []),
     }
 
     # Save all case-report content into the result
     # Optionally: update the evaluation_result with a copy as report_data
-    evaluation_result["case_report"] = report_data  # this will also show up in summary if needed
+    evaluation_result['case_report'] = report_data  # this will also show up in summary if needed
 
     try:
-        with open(report_path, "w", encoding="utf-8") as f:
+        with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"  ❌ Failed to save report: {e}")
@@ -277,66 +277,66 @@ def generate_case_report(evaluation_result: Dict[str, Any], output_dir: Path) ->
 
 
 def generate_summary_report(all_results: List[Dict[str, Any]], output_dir: Path) -> Path:
-    summary_path = output_dir / "summary_report.json"
+    summary_path = output_dir / 'summary_report.json'
 
     total_cases = len(all_results)
-    successful_cases = sum(1 for r in all_results if r.get("case_score", 0.0) == 1.0)
+    successful_cases = sum(1 for r in all_results if r.get('case_score', 0.0) == 1.0)
     failed_cases = total_cases - successful_cases
 
-    scores = [r.get("case_score", 0.0) for r in all_results]
+    scores = [r.get('case_score', 0.0) for r in all_results]
     avg_score = sum(scores) / len(scores) if scores else 0.0
     max_score = max(scores) if scores else 0.0
     min_score = min(scores) if scores else 0.0
-    average_case_score = sum(r.get("case_score", 0.0) for r in all_results) / len(all_results) if all_results else 0.0
+    average_case_score = sum(r.get('case_score', 0.0) for r in all_results) / len(all_results) if all_results else 0.0
 
-    total_matched = sum(r.get("matched_count", 0) for r in all_results)
-    total_expected = sum(r.get("expected_count", 0) for r in all_results)
-    total_extra = sum(r.get("extra_products_count", 0) for r in all_results)
+    total_matched = sum(r.get('matched_count', 0) for r in all_results)
+    total_expected = sum(r.get('expected_count', 0) for r in all_results)
+    total_extra = sum(r.get('extra_products_count', 0) for r in all_results)
     
     # Count incomplete cases (cases that didn't complete)
-    incomplete_cases = sum(1 for r in all_results if not r.get("is_completed", True))
+    incomplete_cases = sum(1 for r in all_results if not r.get('is_completed', True))
     incomplete_rate = incomplete_cases / total_cases if total_cases > 0 else 0.0
     # Model is valid if incomplete rate is <= 10%
     is_valid = incomplete_rate <= 0.1
 
     # Optionally, detailed_results can include the full evaluation_result including case_report
     summary_data = {
-        "evaluation_time": datetime.now().isoformat(),
-        "overall_statistics": {
-            "total_cases": total_cases,
-            "successful_cases": successful_cases,
-            "failed_cases": failed_cases,
-            "average_score": avg_score,
-            "average_case_score": average_case_score,
-            "max_score": max_score,
-            "min_score": min_score,
-            "total_matched_products": total_matched,
-            "total_expected_products": total_expected,
-            "total_extra_products": total_extra,
-            "overall_match_rate": total_matched / total_expected if total_expected > 0 else 0.0,
-            "incomplete_cases": incomplete_cases,
-            "incomplete_rate": incomplete_rate,
-            "valid": is_valid,
+        'evaluation_time': datetime.now().isoformat(),
+        'overall_statistics': {
+            'total_cases': total_cases,
+            'successful_cases': successful_cases,
+            'failed_cases': failed_cases,
+            'average_score': avg_score,
+            'average_case_score': average_case_score,
+            'max_score': max_score,
+            'min_score': min_score,
+            'total_matched_products': total_matched,
+            'total_expected_products': total_expected,
+            'total_extra_products': total_extra,
+            'overall_match_rate': total_matched / total_expected if total_expected > 0 else 0.0,
+            'incomplete_cases': incomplete_cases,
+            'incomplete_rate': incomplete_rate,
+            'valid': is_valid,
         },
-        "case_results": [
+        'case_results': [
             {
-                "case_name": r["case_name"],
-                "success": r.get("case_score", 0.0) == 1.0,
-                "score": r.get("score", 0.0),
-                "matched_count": r.get("matched_count", 0),
-                "expected_count": r.get("expected_count", 0),
-                "extra_products_count": r.get("extra_products_count", 0),
-                "error": r.get("error", None),
-                "case_score": r.get("case_score", 0.0),
-                "is_completed": r.get("is_completed", True),
+                'case_name': r['case_name'],
+                'success': r.get('case_score', 0.0) == 1.0,
+                'score': r.get('score', 0.0),
+                'matched_count': r.get('matched_count', 0),
+                'expected_count': r.get('expected_count', 0),
+                'extra_products_count': r.get('extra_products_count', 0),
+                'error': r.get('error', None),
+                'case_score': r.get('case_score', 0.0),
+                'is_completed': r.get('is_completed', True),
             }
             for r in all_results
         ],
-        "detailed_results": all_results,
+        'detailed_results': all_results,
     }
 
     try:
-        with open(summary_path, "w", encoding="utf-8") as f:
+        with open(summary_path, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, ensure_ascii=False, indent=2)
 
         print(f"\n{'='*80}")
@@ -365,24 +365,24 @@ def generate_summary_report(all_results: List[Dict[str, Any]], output_dir: Path)
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Evaluate shopping agent performance.")
+    parser = argparse.ArgumentParser(description='Evaluate shopping agent performance.')
     parser.add_argument(
-        "--database_dir",
+        '--database_dir',
         type=str,
-        default="database_1202_wrong",
-        help="Name of the database directory (under database_infered/), can be relative or absolute.",
+        default='database_1202_wrong',
+        help='Name of the database directory (under database_infered/), can be relative or absolute.',
     )
     parser.add_argument(
-        "--output_dir",
+        '--output_dir',
         type=str,
         default=None,
-        help="Directory for evaluation report output (optional, defaults to database_dir name).",
+        help='Directory for evaluation report output (optional, defaults to database_dir name).',
     )
     parser.add_argument(
-        "--case_filter",
+        '--case_filter',
         type=str,
-        nargs="+",
-        help="Only evaluate the specified cases (e.g. case_1 case_2), evaluate all if not specified.",
+        nargs='+',
+        help='Only evaluate the specified cases (e.g. case_1 case_2), evaluate all if not specified.',
     )
 
     args = parser.parse_args()
@@ -396,7 +396,7 @@ def main():
         database_dir = database_dir_path
         database_dir_name = database_dir_path.name
     else:
-        database_dir = script_dir / "database_infered" / args.database_dir
+        database_dir = script_dir / 'database_infered' / args.database_dir
         database_dir_name = args.database_dir
 
     # If output_dir arg is not set, use database_dir name
@@ -404,7 +404,7 @@ def main():
 
     # Output directory is always under result_report
     # Note: We'll create it only if the model is valid
-    output_dir = script_dir / "result_report" / output_dir_name
+    output_dir = script_dir / 'result_report' / output_dir_name
 
     if not database_dir.exists():
         print(f"❌ Error: Database directory does not exist: {database_dir}")
@@ -414,7 +414,7 @@ def main():
 
     # Get all case directories
     case_dirs = sorted(
-        [d for d in database_dir.iterdir() if d.is_dir() and d.name.startswith("case_")]
+        [d for d in database_dir.iterdir() if d.is_dir() and d.name.startswith('case_')]
     )
 
     if args.case_filter:
@@ -441,16 +441,16 @@ def main():
             traceback.print_exc()
             all_results.append(
                 {
-                    "case_name": case_dir.name,
-                    "success": False,
-                    "error": str(e),
-                    "score": 0.0,
-                    "is_completed": False,
+                    'case_name': case_dir.name,
+                    'success': False,
+                    'error': str(e),
+                    'score': 0.0,
+                    'is_completed': False,
                 }
             )
 
     # Calculate if model is valid
-    incomplete_cases = sum(1 for r in all_results if not r.get("is_completed", True))
+    incomplete_cases = sum(1 for r in all_results if not r.get('is_completed', True))
     total_cases = len(all_results)
     incomplete_rate = incomplete_cases / total_cases if total_cases > 0 else 0.0
     is_valid = incomplete_rate <= 0.1
@@ -461,7 +461,7 @@ def main():
     
     # Generate per-case reports
     for result in all_results:
-        if result.get("success"):
+        if result.get('success'):
             generate_case_report(result, output_dir)
     
     # Generate summary report (includes is_valid flag)
@@ -472,8 +472,8 @@ def main():
         print(f"\n⚠️  Warning: Model is invalid (incomplete rate {incomplete_rate:.2%} > 10%)")
         print(f"   Reports are still saved for debugging purposes.")
 
-    print("✅ All evaluations completed!")
+    print('✅ All evaluations completed!')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

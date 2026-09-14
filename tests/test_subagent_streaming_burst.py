@@ -37,11 +37,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from agent_cascade.llm.schema import Message, USER, ASSISTANT, FUNCTION
 
 # ── Constants ───────────────────────────────────────────────────────────────
-INSTANCE_NAME = "stream-sub"
-CALLER = "Maine"
-AGENT_CLASS_FROM_LOG = "researcher"
+INSTANCE_NAME = 'stream-sub'
+CALLER = 'Maine'
+AGENT_CLASS_FROM_LOG = 'researcher'
 
-EXAMPLE_SESSION_LOG = Path(r"N:\work\WD\AgentWorkspace\logs\researcher_stream-probe-analyst_20260903_093608.jsonl")
+EXAMPLE_SESSION_LOG = Path(r'N:\work\WD\AgentWorkspace\logs\researcher_stream-probe-analyst_20260903_093608.jsonl')
 
 # ── Mock LLM profiles (deterministic, fast) ───────────────────────────────
 # Simulate a ~20k-token reasoning turn: 120 deltas of ~50 chars each = ~6000 chars
@@ -63,13 +63,13 @@ def _mock_reasoning_turn(self, instance, template, messages, active_functions):
         gap = 0.005 if i >= REASONING_DELTAS - 5 else REASONING_GAP
         time.sleep(gap)
         reasoning_parts.append(f"thought_{i:03d}_analysis_fragment_")
-        yield [_msg(role=ASSISTANT, content="", reasoning_content="".join(reasoning_parts))]
-    final_reasoning = "".join(reasoning_parts)
+        yield [_msg(role=ASSISTANT, content='', reasoning_content=''.join(reasoning_parts))]
+    final_reasoning = ''.join(reasoning_parts)
     content_parts = []
     for i in range(CONTENT_DELTAS):
         time.sleep(CONTENT_GAP)
         content_parts.append(f" answer_{i}")
-        yield [_msg(role=ASSISTANT, content="".join(content_parts), reasoning_content=final_reasoning)]
+        yield [_msg(role=ASSISTANT, content=''.join(content_parts), reasoning_content=final_reasoning)]
 
 # NON-REASONING: identical total char volume + cadence, but as plain content.
 def _mock_nonreasoning_turn(self, instance, template, messages, active_functions):
@@ -78,7 +78,7 @@ def _mock_nonreasoning_turn(self, instance, template, messages, active_functions
     for i in range(total_deltas):
         gap = 0.005 if i >= total_deltas - 5 else REASONING_GAP
         time.sleep(gap)
-        yield [_msg(role=ASSISTANT, content=f"chunk_{i:03d}_".ljust(chunk_size), reasoning_content="")]
+        yield [_msg(role=ASSISTANT, content=f"chunk_{i:03d}_".ljust(chunk_size), reasoning_content='')]
 
 # ── Session log resolution ────────────────────────────────────────────────
 def _build_synthetic_session_log(dest: Path) -> Path:
@@ -86,81 +86,81 @@ def _build_synthetic_session_log(dest: Path) -> Path:
     The loader's working set will include [SYS][U0][markers][tail] ≈ 57 msgs.
     """
     meta = {
-        "agent_class": AGENT_CLASS_FROM_LOG,
-        "instance_name": INSTANCE_NAME,
-        "start_timestamp": "2026-09-03T09:00:00.000000",
-        "last_update": "2026-09-03T09:10:00.000000",
-        "current_log_path": str(dest),
-        "working_dir": str(PROJECT_ROOT),
-        "supervisor": "Maine",
+        'agent_class': AGENT_CLASS_FROM_LOG,
+        'instance_name': INSTANCE_NAME,
+        'start_timestamp': '2026-09-03T09:00:00.000000',
+        'last_update': '2026-09-03T09:10:00.000000',
+        'current_log_path': str(dest),
+        'working_dir': str(PROJECT_ROOT),
+        'supervisor': 'Maine',
     }
-    lines = [json.dumps({"metadata": meta})]
+    lines = [json.dumps({'metadata': meta})]
     def _line(role, content, **extra):
-        d = {"role": role, "content": content}
+        d = {'role': role, 'content': content}
         d.update(extra)
-        d["timestamp"] = "2026-09-03T09:00:01.000000"
+        d['timestamp'] = '2026-09-03T09:00:01.000000'
         lines.append(json.dumps(d))
-    _line("system", f"You are {INSTANCE_NAME}. Senior software engineer.")
-    _line("user", "Explain how the streaming pipeline works.")
+    _line('system', f"You are {INSTANCE_NAME}. Senior software engineer.")
+    _line('user', 'Explain how the streaming pipeline works.')
     # Prior assistant turn WITH reasoning_content — the trigger condition.
     _line(
-        "assistant",
-        "(prior answer)",
+        'assistant',
+        '(prior answer)',
         reasoning_content=(
-            "Let me think carefully about the pipeline: the LLM emits deltas, the engine "
-            "forwards them, and the broadcast loop pushes them to the UI. " * 3
+            'Let me think carefully about the pipeline: the LLM emits deltas, the engine '
+            'forwards them, and the broadcast loop pushes them to the UI. ' * 3
         ),
     )
     # A compression marker so the loader takes [SYS][U0][markers][tail].
     _line(
-        "user",
-        "--- CONTEXT COMPRESSED (2026-09-06 10:14 → 2026-09-06 11:02, 48m) ---\n"
-        "<context_summary>\n- Prior investigation of the streaming pipeline.\n"
-        "- Confirmed backend path healthy.\n</context_summary>",
+        'user',
+        '--- CONTEXT COMPRESSED (2026-09-06 10:14 → 2026-09-06 11:02, 48m) ---\n'
+        '<context_summary>\n- Prior investigation of the streaming pipeline.\n'
+        '- Confirmed backend path healthy.\n</context_summary>',
     )
-    _line("user", "[COMPRESSION] forced compression complete. 12 messages summarized.")
+    _line('user', '[COMPRESSION] forced compression complete. 12 messages summarized.')
     # Tail after last marker: ~54 alternating assistant-with-reasoning / user turns.
     for i in range(54):
         if i % 2 == 0:
             _line(
-                "assistant",
+                'assistant',
                 f"(tail answer part {i})",
                 reasoning_content=f"tail reasoning about step {i} of the pipeline.",
             )
         else:
-            _line("user", f"[USER question {i}]: Continue the analysis.")
+            _line('user', f"[USER question {i}]: Continue the analysis.")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    dest.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return dest
 
 def _resolve_session_log(tmp_path: Path) -> Path:
     if EXAMPLE_SESSION_LOG.exists():
-        target = tmp_path / "session" / EXAMPLE_SESSION_LOG.name
+        target = tmp_path / 'session' / EXAMPLE_SESSION_LOG.name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(EXAMPLE_SESSION_LOG, target)
         return target
-    return _build_synthetic_session_log(tmp_path / "session" / f"{AGENT_CLASS_FROM_LOG}_{INSTANCE_NAME}.jsonl")
+    return _build_synthetic_session_log(tmp_path / 'session' / f"{AGENT_CLASS_FROM_LOG}_{INSTANCE_NAME}.jsonl")
 
 # ── Payload extraction helpers ────────────────────────────────────────────
 def _extract_instance(event: dict, name: str = INSTANCE_NAME):
     if not isinstance(event, dict):
         return None
-    instances = event.get("instances") or event.get("agent_instances") or {}
+    instances = event.get('instances') or event.get('agent_instances') or {}
     return instances.get(name)
 
 def _last_assistant_message(inst: dict):
-    msgs = inst.get("messages") or []
+    msgs = inst.get('messages') or []
     for m in reversed(msgs):
-        if isinstance(m, dict) and m.get("role") == ASSISTANT:
+        if isinstance(m, dict) and m.get('role') == ASSISTANT:
             return m
     return None
 
 def _reasoning_len(m: dict):
-    r = m.get("reasoning_content") or ""
+    r = m.get('reasoning_content') or ''
     return len(r) if isinstance(r, str) else 0
 
 def _content_len(m: dict):
-    c = m.get("content") or ""
+    c = m.get('content') or ''
     return len(c) if isinstance(c, str) else 0
 
 def _payload_bytes(event: dict):
@@ -193,7 +193,7 @@ def _drive_subagent_pipeline(pool, engine, instance, mock_fn):
     gen_error = {}
     done = asyncio.Event()
     tick_decisions = []
-    diag = {"ticks": 0, "streaming_ticks": 0, "final_resp_lens": []}
+    diag = {'ticks': 0, 'streaming_ticks': 0, 'final_resp_lens': []}
 
     def _consumer():
         try:
@@ -218,9 +218,9 @@ def _drive_subagent_pipeline(pool, engine, instance, mock_fn):
                         else:
                             final_resp, is_streaming_tick = resp, False
 
-                        diag["ticks"] += 1
+                        diag['ticks'] += 1
                         if is_streaming_tick:
-                            diag["streaming_ticks"] += 1
+                            diag['streaming_ticks'] += 1
 
                         # Decompose broadcast decision (mirrors broadcast_stream_update).
                         resp_len = len(final_resp) if final_resp else 0
@@ -241,14 +241,14 @@ def _drive_subagent_pipeline(pool, engine, instance, mock_fn):
                         _last_tick_suppressed = not broadcasted
 
                         tick_decisions.append({
-                            "tick": _tick_num,
-                            "t": now_mono,
-                            "phase": "loop",
-                            "resp_len": resp_len,
-                            "len_changed": (resp_len != _sub_last_resp_len),
-                            "throttle_ok": (now_mono - _in_last_send > 0.1),
-                            "broadcasted": broadcasted,
-                            "streaming": is_streaming_tick,
+                            'tick': _tick_num,
+                            't': now_mono,
+                            'phase': 'loop',
+                            'resp_len': resp_len,
+                            'len_changed': (resp_len != _sub_last_resp_len),
+                            'throttle_ok': (now_mono - _in_last_send > 0.1),
+                            'broadcasted': broadcasted,
+                            'streaming': is_streaming_tick,
                         })
                         _tick_num += 1
                 finally:
@@ -285,11 +285,11 @@ def _drive_subagent_pipeline(pool, engine, instance, mock_fn):
             else:
                 final_bcasted = False  # skipped — loop already delivered equivalent state <100ms ago
             tick_decisions.append({
-                "tick": _tick_num,
-                "t": now_mono,
-                "phase": "final",
-                "need_final": need_final,
-                "broadcasted": final_bcasted,
+                'tick': _tick_num,
+                't': now_mono,
+                'phase': 'final',
+                'need_final': need_final,
+                'broadcasted': final_bcasted,
             })
 
             # SECOND FINAL frame — push_final_state (Core.py L3253).
@@ -299,15 +299,15 @@ def _drive_subagent_pipeline(pool, engine, instance, mock_fn):
             except Exception as e:
                 pass  # best-effort; if it fails (e.g., caller not in pool), we note it.
             tick_decisions.append({
-                "tick": _tick_num + 1,
-                "t": now_mono,
-                "phase": "push_final",
-                "caller": CALLER,
+                'tick': _tick_num + 1,
+                't': now_mono,
+                'phase': 'push_final',
+                'caller': CALLER,
             })
 
         except Exception as e:
             import traceback
-            gen_error["exc"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            gen_error['exc'] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         finally:
             loop.call_soon_threadsafe(done.set)
 
@@ -349,24 +349,24 @@ def _drive_subagent_pipeline(pool, engine, instance, mock_fn):
 # ── Measurement functions ──────────────────────────────────────────────────
 def _measure(events, tick_decisions, label, diag=None):
     if diag is None:
-        diag = {"ticks": 0, "streaming_ticks": 0}
-    stream_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get("type") == "stream_update"]
+        diag = {'ticks': 0, 'streaming_ticks': 0}
+    stream_events = [ev for (_t, ev) in events if isinstance(ev, dict) and ev.get('type') == 'stream_update']
     if not stream_events:
         return {
-            "label": label,
-            "n_stream_updates": 0,
-            "arrivals": [],
-            "gaps": [],
-            "sub_10ms_count": 0,
-            "sub_100ms_count": 0,
-            "final_200ms_frames": 0,
-            "burst_summary": f"[{label}] NO stream_updates captured — check pool wiring.",
+            'label': label,
+            'n_stream_updates': 0,
+            'arrivals': [],
+            'gaps': [],
+            'sub_10ms_count': 0,
+            'sub_100ms_count': 0,
+            'final_200ms_frames': 0,
+            'burst_summary': f"[{label}] NO stream_updates captured — check pool wiring.",
         }
 
     # Extract per-frame metrics.
     arrivals = []  # (arrival_time, is_partial, history_count, r_len, c_len, total_tokens, payload_bytes)
     for arrival, ev in events:
-        if not (isinstance(ev, dict) and ev.get("type") == "stream_update"):
+        if not (isinstance(ev, dict) and ev.get('type') == 'stream_update'):
             continue
         inst = _extract_instance(ev, INSTANCE_NAME)
         if not inst:
@@ -374,22 +374,22 @@ def _measure(events, tick_decisions, label, diag=None):
         last_msg = _last_assistant_message(inst)
         r_len = _reasoning_len(last_msg)
         c_len = _content_len(last_msg)
-        history_count = inst.get("history_count", 0)
-        is_partial = inst.get("is_partial", False)
-        total_tokens = ev.get("total_tokens", 0)
+        history_count = inst.get('history_count', 0)
+        is_partial = inst.get('is_partial', False)
+        total_tokens = ev.get('total_tokens', 0)
         payload_bytes = _payload_bytes(ev)
         arrivals.append((arrival, is_partial, history_count, r_len, c_len, total_tokens, payload_bytes))
 
     if not arrivals:
         return {
-            "label": label,
-            "n_stream_updates": len(stream_events),
-            "arrivals": [],
-            "gaps": [],
-            "sub_10ms_count": 0,
-            "sub_100ms_count": 0,
-            "final_200ms_frames": 0,
-            "burst_summary": f"[{label}] NO stream_update carried a parseable instance payload.",
+            'label': label,
+            'n_stream_updates': len(stream_events),
+            'arrivals': [],
+            'gaps': [],
+            'sub_10ms_count': 0,
+            'sub_100ms_count': 0,
+            'final_200ms_frames': 0,
+            'burst_summary': f"[{label}] NO stream_update carried a parseable instance payload.",
         }
 
     # Compute gaps and sub-10/100ms counts.
@@ -408,13 +408,13 @@ def _measure(events, tick_decisions, label, diag=None):
     bypass_fired = False
     push_final_fired = False
     for td in tick_decisions:
-        if td["phase"] == "loop":
+        if td['phase'] == 'loop':
             loop_broadcasts += 1
-        elif td["phase"] == "final":
+        elif td['phase'] == 'final':
             # FIX A: final frame is now conditional (need_final) — record both.
-            bypass_fired = td.get("broadcasted", False)
-            final_need = td.get("need_final", None)
-        elif td["phase"] == "push_final":
+            bypass_fired = td.get('broadcasted', False)
+            final_need = td.get('need_final', None)
+        elif td['phase'] == 'push_final':
             push_final_fired = True
     tick_summary.append(f"  loop ticks (broadcasted): {loop_broadcasts}")
     tick_summary.append(f"  final frame (FIX A, need_final={final_need}) fired: {bypass_fired}")
@@ -447,20 +447,20 @@ def _measure(events, tick_decisions, label, diag=None):
     )
 
     return {
-        "label": label,
-        "n_stream_updates": len(stream_events),
-        "arrivals": arrivals,
-        "gaps": gaps,
-        "sub_10ms_count": sub_10ms,
-        "sub_100ms_count": sub_100ms,
-        "final_200ms_frames": final_200ms_count,
-        "tick_summary": tick_summary,
-        "r_lens": r_lens,
-        "c_lens": c_lens,
-        "max_r": max_r,
-        "min_r": min_r,
-        "distinct_r": distinct_r,
-        "summary": summary,
+        'label': label,
+        'n_stream_updates': len(stream_events),
+        'arrivals': arrivals,
+        'gaps': gaps,
+        'sub_10ms_count': sub_10ms,
+        'sub_100ms_count': sub_100ms,
+        'final_200ms_frames': final_200ms_count,
+        'tick_summary': tick_summary,
+        'r_lens': r_lens,
+        'c_lens': c_lens,
+        'max_r': max_r,
+        'min_r': min_r,
+        'distinct_r': distinct_r,
+        'summary': summary,
     }
 
 # ── Harness fixture ────────────────────────────────────────────────────────
@@ -472,15 +472,15 @@ def subagent_harness(tmp_path):
     import agent_cascade.agent_pool as ap_mod
     from agent_cascade.agent_instance import AgentInstance
 
-    cfg_dir = tmp_path / "cfg"
+    cfg_dir = tmp_path / 'cfg'
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = str(cfg_dir)
+    os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(cfg_dir)
 
     llm_cfg = {
-        "model": "mock",
-        "api_base": "http://127.0.0.1:9/v1",
-        "model_server": "http://127.0.0.1:9/v1",
-        "api_key": "EMPTY",
+        'model': 'mock',
+        'api_base': 'http://127.0.0.1:9/v1',
+        'model_server': 'http://127.0.0.1:9/v1',
+        'api_key': 'EMPTY',
     }
 
     try:
@@ -488,7 +488,7 @@ def subagent_harness(tmp_path):
     except Exception as e:
         pytest.skip(f"Could not construct AgentPool: {e}")
 
-    if getattr(pool, "api_router", None) is not None:
+    if getattr(pool, 'api_router', None) is not None:
         try:
             pool.api_router = None
         except Exception:
@@ -498,13 +498,13 @@ def subagent_harness(tmp_path):
     from agent_cascade.agents.assistant import Assistant
 
     def _register_template(agent_class: str):
-        t = Assistant(llm=dict(llm_cfg), name=agent_class, description="test streaming template")
+        t = Assistant(llm=dict(llm_cfg), name=agent_class, description='test streaming template')
         pool.templates[agent_class] = t
         pool.templates[agent_class.lower()] = t
 
-    _register_template("researcher")
-    _register_template("orchestrator")
-    _register_template("coder")
+    _register_template('researcher')
+    _register_template('orchestrator')
+    _register_template('coder')
 
     # Load a REAL session via the PRODUCTION loader.
     session_log = _resolve_session_log(tmp_path)
@@ -513,7 +513,7 @@ def subagent_harness(tmp_path):
         target_instance=INSTANCE_NAME,
         clear_sub_agents_before_load=False,
     )
-    assert not status.startswith("Error"), f"load_session_from_log failed: {status}"
+    assert not status.startswith('Error'), f"load_session_from_log failed: {status}"
 
     instance = pool.get_instance(INSTANCE_NAME)
     assert instance is not None, (
@@ -524,7 +524,7 @@ def subagent_harness(tmp_path):
         f"Loaded conversation too small ({len(instance.conversation)} msgs)"
     )
     has_prior_reasoning = any(
-        getattr(m, "role", None) == ASSISTANT and len(getattr(m, "reasoning_content", "") or "") > 20
+        getattr(m, 'role', None) == ASSISTANT and len(getattr(m, 'reasoning_content', '') or '') > 20
         for m in instance.conversation
     )
     assert has_prior_reasoning, (
@@ -532,12 +532,12 @@ def subagent_harness(tmp_path):
     )
 
     # Suppress compression while keeping the heavy context.
-    instance._generate_cfg_override = {"max_input_tokens": 1_000_000}
+    instance._generate_cfg_override = {'max_input_tokens': 1_000_000}
     # Set max_turns=1 for a single-turn run.
     instance.max_turns = 1
 
     # Ensure pool has _execution (required by engine.run and broadcast).
-    if getattr(pool, "_execution", None) is None:
+    if getattr(pool, '_execution', None) is None:
         from unittest.mock import MagicMock
         pool._execution = MagicMock()
     pool._execution._state_lock = threading.Lock()
@@ -546,7 +546,7 @@ def subagent_harness(tmp_path):
     now = time.monotonic()
     pool.instances[CALLER] = AgentInstance(
         instance_name=CALLER,
-        agent_class="orchestrator",
+        agent_class='orchestrator',
         conversation=[],
         created_at=now,
         last_activity=now,
@@ -554,14 +554,14 @@ def subagent_harness(tmp_path):
     )
 
     yield {
-        "pool": pool,
-        "engine": None,  # create per-test from pool
-        "load_fresh": lambda name: (lambda inst: inst)(pool.get_instance(name)) if pool.get_instance(name) else None,
-        "session_log": session_log,
+        'pool': pool,
+        'engine': None,  # create per-test from pool
+        'load_fresh': lambda name: (lambda inst: inst)(pool.get_instance(name)) if pool.get_instance(name) else None,
+        'session_log': session_log,
     }
 
     try:
-        if hasattr(pool, "stop"):
+        if hasattr(pool, 'stop'):
             pool.stop()
     except Exception:
         pass
@@ -579,7 +579,7 @@ def test_subagent_burst_reasoning(subagent_harness):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = subagent_harness["pool"]
+    pool = subagent_harness['pool']
     engine = ExecutionEngine(pool)
 
     events, tick_decisions, gen_error, diag = _drive_subagent_pipeline(
@@ -588,15 +588,15 @@ def test_subagent_burst_reasoning(subagent_harness):
 
     assert not gen_error, f"engine.run() raised: {gen_error.get('exc')}"
 
-    m = _measure(events, tick_decisions, "REASONING", diag)
-    print(m["summary"])
+    m = _measure(events, tick_decisions, 'REASONING', diag)
+    print(m['summary'])
 
     # Basic sanity assertions (this is a measurement harness; we don't fail on the burst itself).
-    assert m["n_stream_updates"] >= 1, (
+    assert m['n_stream_updates'] >= 1, (
         f"REASONING: no stream_update events captured. {m['arrivals'][:5]}"
     )
     # The sub-agent path should emit at least one frame per tick (plus final).
-    assert m["tick_summary"][0].startswith("  loop ticks"), (
+    assert m['tick_summary'][0].startswith('  loop ticks'), (
         f"Tick breakdown missing. {m['tick_summary']}"
     )
 
@@ -605,7 +605,7 @@ def test_subagent_burst_nonreasoning(subagent_harness):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = subagent_harness["pool"]
+    pool = subagent_harness['pool']
     engine = ExecutionEngine(pool)
 
     events, tick_decisions, gen_error, diag = _drive_subagent_pipeline(
@@ -614,10 +614,10 @@ def test_subagent_burst_nonreasoning(subagent_harness):
 
     assert not gen_error, f"engine.run() raised: {gen_error.get('exc')}"
 
-    m = _measure(events, tick_decisions, "NON-REASONING", diag)
-    print(m["summary"])
+    m = _measure(events, tick_decisions, 'NON-REASONING', diag)
+    print(m['summary'])
 
-    assert m["n_stream_updates"] >= 1, (
+    assert m['n_stream_updates'] >= 1, (
         f"NON-REASONING: no stream_update events captured."
     )
 
@@ -626,7 +626,7 @@ def test_subagent_burst_comparison(subagent_harness):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = subagent_harness["pool"]
+    pool = subagent_harness['pool']
     engine = ExecutionEngine(pool)
 
     # Run reasoning profile.
@@ -634,20 +634,20 @@ def test_subagent_burst_comparison(subagent_harness):
         pool, engine, pool.get_instance(INSTANCE_NAME), _mock_reasoning_turn
     )
     assert not err_r, f"REASONING engine.run() raised: {err_r.get('exc')}"
-    m_r = _measure(events_r, td_r, "REASONING", diag_r)
+    m_r = _measure(events_r, td_r, 'REASONING', diag_r)
 
     # Run non-reasoning profile on a FRESH instance (reload).
     # Need to reload from log to get a clean conversation.
-    session_log = subagent_harness["session_log"]
+    session_log = subagent_harness['session_log']
     status_nr = pool.load_session_from_log(
         str(session_log),
-        target_instance=INSTANCE_NAME + "_nr",
+        target_instance=INSTANCE_NAME + '_nr',
         clear_sub_agents_before_load=False,
     )
-    assert not status_nr.startswith("Error"), f"Reload for NR failed: {status_nr}"
-    inst_nr = pool.get_instance(INSTANCE_NAME + "_nr")
+    assert not status_nr.startswith('Error'), f"Reload for NR failed: {status_nr}"
+    inst_nr = pool.get_instance(INSTANCE_NAME + '_nr')
     assert inst_nr is not None, f"NR instance not found after reload. {status_nr}"
-    inst_nr._generate_cfg_override = {"max_input_tokens": 1_000_000}
+    inst_nr._generate_cfg_override = {'max_input_tokens': 1_000_000}
     inst_nr.max_turns = 1
 
     engine2 = ExecutionEngine(pool)
@@ -655,32 +655,32 @@ def test_subagent_burst_comparison(subagent_harness):
         pool, engine2, inst_nr, _mock_nonreasoning_turn
     )
     assert not err_nr, f"NON-REASONING engine.run() raised: {err_nr.get('exc')}"
-    m_nr = _measure(events_nr, td_nr, "NON-REASONING", diag_nr)
+    m_nr = _measure(events_nr, td_nr, 'NON-REASONING', diag_nr)
 
     # Print side-by-side comparison.
-    print("\n" + "=" * 80)
-    print("SUB-AGENT STREAMING BURST COMPARISON: REASONING vs NON-REASONING")
-    print("=" * 80)
+    print('\n' + '=' * 80)
+    print('SUB-AGENT STREAMING BURST COMPARISON: REASONING vs NON-REASONING')
+    print('=' * 80)
     def fmt_summary(m):
-        s = m["summary"]
+        s = m['summary']
         # Trim to the core metrics.
         lines = [l for l in s.splitlines() if any(kw in l for kw in
-            ["stream_update events", "parseable arrivals", "max inter-arrival gap",
-             "sub-10ms gaps", "sub-100ms gaps", "frames in last 200ms",
-             "loop broadcasted ticks", "final frame (FIX A) fired", "push_final_state",
-             "reasoning_content lengths", "content lengths"])
+            ['stream_update events', 'parseable arrivals', 'max inter-arrival gap',
+             'sub-10ms gaps', 'sub-100ms gaps', 'frames in last 200ms',
+             'loop broadcasted ticks', 'final frame (FIX A) fired', 'push_final_state',
+             'reasoning_content lengths', 'content lengths'])
         ]
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
-    print("\n" + "-" * 40 + " REASONING " + "-" * 40)
+    print('\n' + '-' * 40 + ' REASONING ' + '-' * 40)
     print(fmt_summary(m_r))
-    print("\n" + "-" * 40 + " NON-REASONING " + "-" * 40)
+    print('\n' + '-' * 40 + ' NON-REASONING ' + '-' * 40)
     print(fmt_summary(m_nr))
 
     # Compare key metrics.
-    print("\n" + "=" * 80)
-    print("COMPARISON")
-    print("=" * 80)
+    print('\n' + '=' * 80)
+    print('COMPARISON')
+    print('=' * 80)
     comp = []
     comp.append(f"REASONING stream_updates: {m_r['n_stream_updates']} vs NON-REASONING: {m_nr['n_stream_updates']}")
     comp.append(f"REASONING sub-10ms gaps: {m_r['sub_10ms_count']} vs NON-REASONING: {m_nr['sub_10ms_count']}")
@@ -692,13 +692,13 @@ def test_subagent_burst_comparison(subagent_harness):
         print(c)
 
     # Conclude: does reasoning produce more sub-throttle frames?
-    burst_delta = m_r["sub_10ms_count"] - m_nr["sub_10ms_count"]
+    burst_delta = m_r['sub_10ms_count'] - m_nr['sub_10ms_count']
     if burst_delta > 0:
         print(f"\n[OBSERVATION] REASONING showed {burst_delta} more sub-10ms gaps than NON-REASONING.")
     elif burst_delta < 0:
         print(f"\n[OBSERVATION] NON-REASONING showed {-burst_delta} more sub-10ms gaps than REASONING.")
     else:
-        print("\n[OBSERVATION] No difference in sub-10ms gap counts between profiles.")
+        print('\n[OBSERVATION] No difference in sub-10ms gap counts between profiles.')
 
 # ── FIX A regression tests ───────────────────────────────────────────────────
 def _subagent_frames(events, name=INSTANCE_NAME):
@@ -706,7 +706,7 @@ def _subagent_frames(events, name=INSTANCE_NAME):
     parseable payload for the given sub-agent instance."""
     out = []
     for arrival, ev in events:
-        if not (isinstance(ev, dict) and ev.get("type") == "stream_update"):
+        if not (isinstance(ev, dict) and ev.get('type') == 'stream_update'):
             continue
         if _extract_instance(ev, name):
             out.append((arrival, ev))
@@ -737,10 +737,10 @@ def test_fix_a_no_same_timestamp_subagent_frames(subagent_harness):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = subagent_harness["pool"]
+    pool = subagent_harness['pool']
     engine = ExecutionEngine(pool)
 
-    for label, mock in (("REASONING", _mock_reasoning_turn), ("NON-REASONING", _mock_nonreasoning_turn)):
+    for label, mock in (('REASONING', _mock_reasoning_turn), ('NON-REASONING', _mock_nonreasoning_turn)):
         inst = pool.get_instance(INSTANCE_NAME)
         assert inst is not None, f"{label}: no instance {INSTANCE_NAME}"
         events, tick_decisions, gen_error, diag = _drive_subagent_pipeline(pool, engine, inst, mock)
@@ -754,7 +754,7 @@ def test_fix_a_no_same_timestamp_subagent_frames(subagent_harness):
         # conditional broadcast. Exclude push_final (root-caller full-state push).
         own_bcasts = [
             td for td in tick_decisions
-            if td.get("phase") in ("loop", "final") and td.get("broadcasted") is True
+            if td.get('phase') in ('loop', 'final') and td.get('broadcasted') is True
         ]
         # Vacuity guard: the assertion must have something to check. A turn always produces at
         # least one broadcast (the first loop tick always passes throttle from last_send=0.0), so
@@ -764,7 +764,7 @@ def test_fix_a_no_same_timestamp_subagent_frames(subagent_harness):
             f"(harness regression?): {tick_decisions}"
         )
 
-        own_ts = sorted(td["t"] for td in own_bcasts)
+        own_ts = sorted(td['t'] for td in own_bcasts)
         gaps = [own_ts[i + 1] - own_ts[i] for i in range(len(own_ts) - 1)]
         # The original burst was a TRUE same-instant pair (0ms gap). Allow up to 1ms of slack:
         # clock-resolution/scheduler jitter can produce sub-millisecond gaps between legitimately-
@@ -790,7 +790,7 @@ def test_fix_a_final_delivered_when_last_tick_throttled(subagent_harness):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = subagent_harness["pool"]
+    pool = subagent_harness['pool']
     engine = ExecutionEngine(pool)
     inst = pool.get_instance(INSTANCE_NAME)
     assert inst is not None
@@ -806,31 +806,31 @@ def test_fix_a_final_delivered_when_last_tick_throttled(subagent_harness):
         for i in range(20):
             time.sleep(0.005)  # fast deltas; engine yields UI ticks on its own cadence
             parts.append(f"part{i:02d}_final-committed-message_")
-            yield [_msg(role=ASSISTANT, content="".join(parts), reasoning_content="")]
+            yield [_msg(role=ASSISTANT, content=''.join(parts), reasoning_content='')]
 
     events, tick_decisions, gen_error, diag = _drive_subagent_pipeline(pool, engine, inst, _mock_throttled_final)
     assert not gen_error, f"engine.run() raised: {gen_error.get('exc')}"
 
     # Confirm the loop's last tick was indeed suppressed (throttled out): len unchanged AND
     # <100ms since the previous actual send.
-    loop_ticks = [td for td in tick_decisions if td["phase"] == "loop"]
+    loop_ticks = [td for td in tick_decisions if td['phase'] == 'loop']
     assert len(loop_ticks) >= 2, f"expected >=2 loop ticks, got {len(loop_ticks)}: {loop_ticks}"
     last_loop = loop_ticks[-1]
-    assert not last_loop.get("broadcasted", False), (
+    assert not last_loop.get('broadcasted', False), (
         f"test precondition failed: last loop tick was NOT throttled out: {last_loop}"
     )
 
     frames = _subagent_frames(events)
-    assert frames, "no sub-agent frames captured"
+    assert frames, 'no sub-agent frames captured'
     # The final committed message must be present in the LAST frame delivered for the instance.
     last_ev = frames[-1][1]
     last_inst = _extract_instance(last_ev, INSTANCE_NAME)
     last_msg = _last_assistant_message(last_inst)
-    assert last_msg is not None, "final frame has no assistant message"
+    assert last_msg is not None, 'final frame has no assistant message'
     # The fully accumulated content must be present. (A "[Turn limit reached...]" notice may be
     # appended after it because max_turns=1, so we check membership rather than endswith.)
-    final_content = (last_msg.get("content") or "")
-    assert "part19_final-committed-message_" in final_content, (
+    final_content = (last_msg.get('content') or '')
+    assert 'part19_final-committed-message_' in final_content, (
         f"final committed message lost — last frame content tail={final_content[-80:]!r}"
     )
 
@@ -848,7 +848,7 @@ def test_fix_a_fast_suppressed_finalization_delivered(subagent_harness):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = subagent_harness["pool"]
+    pool = subagent_harness['pool']
     engine = ExecutionEngine(pool)
     inst = pool.get_instance(INSTANCE_NAME)
     assert inst is not None
@@ -856,27 +856,27 @@ def test_fix_a_fast_suppressed_finalization_delivered(subagent_harness):
     def _mock_fast_suppressed(self, instance, template, messages, active_functions):
         # First delta: short. Second delta: large (>150 chars) → forces a 2nd UI tick with no sleep.
         # Content is made unique per delta (no repetition) to avoid tripping the engine's inner-loop detector.
-        yield [_msg(role=ASSISTANT, content="fast-start", reasoning_content="")]
-        yield [_msg(role=ASSISTANT, content="fast-start" + "y0123456789abcdef" * 25, reasoning_content="")]
+        yield [_msg(role=ASSISTANT, content='fast-start', reasoning_content='')]
+        yield [_msg(role=ASSISTANT, content='fast-start' + 'y0123456789abcdef' * 25, reasoning_content='')]
 
     events, tick_decisions, gen_error, diag = _drive_subagent_pipeline(pool, engine, inst, _mock_fast_suppressed)
     assert not gen_error, f"engine.run() raised: {gen_error.get('exc')}"
 
-    loop_ticks = [td for td in tick_decisions if td["phase"] == "loop"]
+    loop_ticks = [td for td in tick_decisions if td['phase'] == 'loop']
     assert len(loop_ticks) >= 2, f"expected >=2 loop ticks, got {len(loop_ticks)}: {loop_ticks}"
     # The last loop tick must have been suppressed (throttled out).
-    assert not loop_ticks[-1].get("broadcasted", False), (
+    assert not loop_ticks[-1].get('broadcasted', False), (
         f"test precondition failed: last loop tick was NOT suppressed: {loop_ticks[-1]}"
     )
 
     frames = _subagent_frames(events)
-    assert frames, "no sub-agent frames captured"
+    assert frames, 'no sub-agent frames captured'
     # The full final content must be present in the LAST delivered frame.
     last_inst = _extract_instance(frames[-1][1], INSTANCE_NAME)
     last_msg = _last_assistant_message(last_inst)
-    assert last_msg is not None, "final frame has no assistant message"
-    final_content = (last_msg.get("content") or "")
-    assert len(final_content) > 420 and "fast-start" in final_content, (
+    assert last_msg is not None, 'final frame has no assistant message'
+    final_content = (last_msg.get('content') or '')
+    assert len(final_content) > 420 and 'fast-start' in final_content, (
         f"fast-turn final content lost — last frame content len={len(final_content)} tail={final_content[-60:]!r}"
     )
 
@@ -886,7 +886,7 @@ def test_fix_a_push_final_state_present(subagent_harness):
     _async_loop_works()
     from agent_cascade.engine.core import ExecutionEngine
 
-    pool = subagent_harness["pool"]
+    pool = subagent_harness['pool']
     engine = ExecutionEngine(pool)
     inst = pool.get_instance(INSTANCE_NAME)
     assert inst is not None
@@ -897,18 +897,18 @@ def test_fix_a_push_final_state_present(subagent_harness):
     assert not gen_error, f"engine.run() raised: {gen_error.get('exc')}"
 
     # The driver records a push_final decision for every run.
-    push_decisions = [td for td in tick_decisions if td["phase"] == "push_final"]
+    push_decisions = [td for td in tick_decisions if td['phase'] == 'push_final']
     assert len(push_decisions) == 1, f"expected exactly one push_final_state call: {push_decisions}"
-    assert push_decisions[0].get("caller") == CALLER
+    assert push_decisions[0].get('caller') == CALLER
 
     # And a root/caller-keyed stream_update frame must actually be present on the queue.
     root_frames = []
     for arrival, ev in events:
-        if not (isinstance(ev, dict) and ev.get("type") == "stream_update"):
+        if not (isinstance(ev, dict) and ev.get('type') == 'stream_update'):
             continue
         if _extract_instance(ev, CALLER):
             root_frames.append((arrival, ev))
     assert root_frames, f"no caller({CALLER})-keyed stream_update frame on queue — push_final_state missing"
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+if __name__ == '__main__':
+    sys.exit(pytest.main([__file__, '-v']))

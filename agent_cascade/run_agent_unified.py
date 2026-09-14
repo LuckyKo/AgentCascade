@@ -228,7 +228,7 @@ def run_agent_thread_unified(
 
         if inst and skill_manager:
             # Extract task_text from first user message for auto-skill proposal context
-            task_text = ""
+            task_text = ''
             if inst.conversation:
                 for msg in inst.conversation:
                     role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')

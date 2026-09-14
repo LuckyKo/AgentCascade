@@ -76,9 +76,9 @@ def _priority_for_root(root: Path) -> int:
 
 # Platform filtering: maps frontmatter platform names to sys.platform values
 _PLATFORM_MAP = {
-    "macos": "darwin",
-    "linux": "linux",
-    "windows": "win32",
+    'macos': 'darwin',
+    'linux': 'linux',
+    'windows': 'win32',
 }
 
 
@@ -87,7 +87,7 @@ def _skill_matches_platform(frontmatter: dict) -> bool:
 
     If 'platforms' field is absent or empty, skill is compatible with all.
     """
-    platforms = frontmatter.get("platforms")
+    platforms = frontmatter.get('platforms')
     if not platforms:
         return True
     if not isinstance(platforms, list):
@@ -119,7 +119,7 @@ class SkillManager:
         self._skill_paths: List[Path] = []  # stored for _ensure_discovered()
 
         # Metrics infrastructure (batched activation tracking)
-        self._metrics_file = Path("agents/global/skills-metrics.json")
+        self._metrics_file = Path('agents/global/skills-metrics.json')
         self._metrics: Dict[str, Dict[str, Any]] = {}  # skill_name -> {total_loads, by_version}
         self._metrics_lock = threading.Lock()
         self._pending_flush_count = 0       # tracks buffered increments
@@ -136,10 +136,10 @@ class SkillManager:
             return
         try:
             data = _json.loads(self._metrics_file.read_text(encoding='utf-8'))
-            self._metrics = data.get("skills", {})
-            logger.debug("[SKILLS] Loaded metrics for %d skills", len(self._metrics))
+            self._metrics = data.get('skills', {})
+            logger.debug('[SKILLS] Loaded metrics for %d skills', len(self._metrics))
         except Exception as e:
-            logger.warning("[SKILLS] Failed to load metrics file: %s — starting fresh", e)
+            logger.warning('[SKILLS] Failed to load metrics file: %s — starting fresh', e)
             self._metrics = {}
 
     def _flush_metrics_to_disk(self) -> None:
@@ -154,7 +154,7 @@ class SkillManager:
             self._metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
             tmp_path = self._metrics_file.with_suffix('.tmp')
-            data = {"schema_version": "1.0", "skills": self._metrics}
+            data = {'schema_version': '1.0', 'skills': self._metrics}
 
             # Open temp file for writing with exclusive lock (POSIX only)
             fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
@@ -171,7 +171,7 @@ class SkillManager:
             # Atomic rename (cross-platform via os.replace)
             _os.replace(str(tmp_path), str(self._metrics_file))
         except Exception as e:
-            logger.warning("[SKILLS] Failed to flush metrics to disk: %s", e)
+            logger.warning('[SKILLS] Failed to flush metrics to disk: %s', e)
             # Clean up orphaned temp file if it exists
             try:
                 tmp_path.unlink(missing_ok=True)
@@ -184,9 +184,9 @@ class SkillManager:
         Flushes to disk when pending count reaches threshold OR 30 seconds have elapsed.
         """
         with self._metrics_lock:
-            entry = self._metrics.setdefault(skill_name, {"total_loads": 0, "by_version": {}})
-            entry["total_loads"] += 1
-            entry["by_version"][version] = entry["by_version"].get(version, 0) + 1
+            entry = self._metrics.setdefault(skill_name, {'total_loads': 0, 'by_version': {}})
+            entry['total_loads'] += 1
+            entry['by_version'][version] = entry['by_version'].get(version, 0) + 1
 
             self._pending_flush_count += 1
             now = time.monotonic()
@@ -244,16 +244,16 @@ class SkillManager:
         # Cache check: TTL first (cheap), then signature (expensive)
         now = time.monotonic()
         if (now - self._cache_timestamp) < self._cache_ttl:
-            logger.debug("[SKILLS] Cache hit — skipping discovery (age=%.1fs)",
+            logger.debug('[SKILLS] Cache hit — skipping discovery (age=%.1fs)',
                          now - self._cache_timestamp)
             return
         current_sig = compute_scan_signature(skill_paths, frozenset(self._disabled_names))
         if current_sig == self._cache_signature:
-            logger.debug("[SKILLS] Cache hit — signature unchanged (age=%.1fs)",
+            logger.debug('[SKILLS] Cache hit — signature unchanged (age=%.1fs)',
                          now - self._cache_timestamp)
             return
 
-        logger.info("[SKILLS] Starting skill discovery across %d paths", len(skill_paths))
+        logger.info('[SKILLS] Starting skill discovery across %d paths', len(skill_paths))
 
         # Store paths for _ensure_discovered() hot-reload support
         self._skill_paths = list(skill_paths)
@@ -265,7 +265,7 @@ class SkillManager:
 
         for root in skill_paths:
             if not root.exists():
-                logger.debug("[SKILLS] Skill directory does not exist, skipping: %s", root)
+                logger.debug('[SKILLS] Skill directory does not exist, skipping: %s', root)
                 continue
 
             # Derive the tier priority for every skill found under this root.
@@ -282,7 +282,7 @@ class SkillManager:
                     try:
                         parsed = parse_skill_file(skill_file)
                     except (FileNotFoundError, OSError) as e:
-                        logger.warning("[SKILLS] Failed to read skill file %s: %s",
+                        logger.warning('[SKILLS] Failed to read skill file %s: %s',
                                        skill_file, e)
                         skipped_count += 1
                         continue
@@ -304,7 +304,7 @@ class SkillManager:
                     collected.append((skill_file, parsed, root_priority))
                     found_count += 1
             except OSError as e:
-                logger.warning("[SKILLS] Error scanning %s: %s", root, e)
+                logger.warning('[SKILLS] Error scanning %s: %s', root, e)
 
         # Phase 2: Clear stale + register + rebuild atomically under lock
         with self._write_lock:
@@ -317,7 +317,7 @@ class SkillManager:
             self._rebuild_index()
 
         logger.info(
-            "[SKILLS] Discovery complete: %d found, %d skipped, %d in registry",
+            '[SKILLS] Discovery complete: %d found, %d skipped, %d in registry',
             found_count, skipped_count, len(self._skills_registry),
         )
 
@@ -341,7 +341,7 @@ class SkillManager:
             try:
                 parsed = parse_skill_file(skill_file)
             except (FileNotFoundError, OSError) as e:
-                logger.warning("[SKILLS] Failed to read skill file %s: %s",
+                logger.warning('[SKILLS] Failed to read skill file %s: %s',
                                skill_file, e)
                 return
 
@@ -379,7 +379,7 @@ class SkillManager:
                          name, priority, existing_priority)
 
         # Store parsed data in registry (Tier 1: frontmatter only; body is lazy-loaded)
-        version = parsed.get("version", "1.0.0")  # Already normalized by parser
+        version = parsed.get('version', '1.0.0')  # Already normalized by parser
         self._skills_registry[name] = {
             'name': name,
             'description': frontmatter.get('description', ''),
@@ -400,7 +400,7 @@ class SkillManager:
             metadata = self.get_all_metadata()
             self._matcher.build_index(metadata)
         except Exception as e:
-            logger.debug("[SKILLS] Failed to rebuild matcher index: %s", e)
+            logger.debug('[SKILLS] Failed to rebuild matcher index: %s', e)
 
     # ── Tier 1 Queries (Metadata Only) ───────────────────────────────────────
 
@@ -474,7 +474,7 @@ class SkillManager:
         """
         with self._metrics_lock:
             if skill_name:
-                return self._metrics.get(skill_name, {"total_loads": 0, "by_version": {}})
+                return self._metrics.get(skill_name, {'total_loads': 0, 'by_version': {}})
             return dict(self._metrics)
 
     # ── Tier 2 Loading (Full Instructions) ───────────────────────────────────
@@ -548,8 +548,8 @@ class SkillManager:
     def _resolve_skill_names(
         self,
         load_skill_value: Union[List[str], str, None],
-        task_text: str = "",
-        context_text: str = "",
+        task_text: str = '',
+        context_text: str = '',
     ) -> List[str]:
         """Compute the names of skills that WILL actually load for a given
         ``load_skill`` value, filtered by loadability.
@@ -569,7 +569,7 @@ class SkillManager:
         # native list; without this it falls through to the "Unknown string"
         # branch and skills are silently dropped. Bare "AUTO"/"NONE" strings do
         # not start with '[' so they are left untouched.
-        if isinstance(load_skill_value, str) and load_skill_value.strip().startswith("["):
+        if isinstance(load_skill_value, str) and load_skill_value.strip().startswith('['):
             try:
                 _decoded = _json.loads(load_skill_value)
             except (ValueError, TypeError):
@@ -602,7 +602,7 @@ class SkillManager:
                 # Use public API (match_skills) which handles lazy index rebuild
                 matches = self.match_skills(query)
                 if not matches:
-                    logger.debug("[SKILLS] AUTO mode — no matching skills for query")
+                    logger.debug('[SKILLS] AUTO mode — no matching skills for query')
                     return []
 
                 names = []
@@ -617,7 +617,7 @@ class SkillManager:
                 return names
 
             # Unknown string value — treat as NONE
-            logger.debug("[SKILLS] Unknown load_skill value: %s", load_skill_value)
+            logger.debug('[SKILLS] Unknown load_skill value: %s', load_skill_value)
             return []
 
         return []
@@ -625,8 +625,8 @@ class SkillManager:
     def resolve_load_skill_names(
         self,
         load_skill_value: Union[List[str], str, None],
-        task_text: str = "",
-        context_text: str = "",
+        task_text: str = '',
+        context_text: str = '',
     ) -> List[str]:
         """Return the names of skills that ``resolve_load_skill`` would load for
         the given arguments (loadability-filtered). Additive helper used by the
@@ -638,8 +638,8 @@ class SkillManager:
     def resolve_load_skill(
         self,
         load_skill_value: Union[List[str], str, None],
-        task_text: str = "",
-        context_text: str = "",
+        task_text: str = '',
+        context_text: str = '',
     ) -> List[str]:
         """Resolve the load_skill argument value to actual skill content.
 
@@ -670,8 +670,8 @@ class SkillManager:
     def register_skill_from_content(
         self,
         skill_content: str,
-        source: str = "auto-generated",
-        task_text: str = "",
+        source: str = 'auto-generated',
+        task_text: str = '',
         auto_promote: bool = True,
     ) -> Tuple[bool, List[str]]:
         """Register a skill from raw SKILL.md content.
@@ -688,12 +688,12 @@ class SkillManager:
         Returns:
             Tuple of (success, error_messages).
         """
-        logger.info("[SKILLS] Registering skill from content (source=%s)", source)
+        logger.info('[SKILLS] Registering skill from content (source=%s)', source)
 
         skill_id = uuid.uuid4().hex
         pending_dir = Path(f"agents/global/pending-skills/{skill_id}")
         pending_dir.mkdir(parents=True, exist_ok=True)
-        pending_file = pending_dir / "SKILL.md"
+        pending_file = pending_dir / 'SKILL.md'
         pending_file.write_text(skill_content, encoding='utf-8')
 
         try:
@@ -738,7 +738,7 @@ class SkillManager:
                     'description': frontmatter.get('description', ''),
                     'source': source,
                     'triggers': frontmatter.get('triggers', []),
-                    'version': parsed.get("version", "1.0.0"),
+                    'version': parsed.get('version', '1.0.0'),
                     'file_path': str(pending_file),
                     '_priority': _PRIORITY_SYSTEM,
                     '_parsed_data': parsed,
@@ -748,7 +748,7 @@ class SkillManager:
                 if auto_promote and AUTO_SKILL_AUTO_PROMOTE:
                     target_dir = Path(f"agents/global/skills/{name}")
                     target_dir.mkdir(parents=True, exist_ok=True)
-                    target_file = target_dir / "SKILL.md"
+                    target_file = target_dir / 'SKILL.md'
                     if target_file.exists():
                         target_file.unlink()
                     pending_file.rename(target_file)
@@ -764,7 +764,7 @@ class SkillManager:
             return True, []
 
         except Exception as e:
-            logger.warning("[SKILLS] Failed to register skill from content: %s", e)
+            logger.warning('[SKILLS] Failed to register skill from content: %s', e)
             # Clean up pending file on error
             if pending_file.exists():
                 pending_file.unlink()
@@ -776,7 +776,7 @@ class SkillManager:
         self,
         name: str,
         skill_content: str,
-        source: str = "auto-generated",
+        source: str = 'auto-generated',
     ) -> Tuple[bool, List[str]]:
         """Update an existing skill's content and version in-place.
 
@@ -812,7 +812,7 @@ class SkillManager:
                 import uuid as _uuid
                 tmp_dir = Path(f"agents/global/pending-skills/{_uuid.uuid4().hex}")
                 tmp_dir.mkdir(parents=True, exist_ok=True)
-                tmp_file = tmp_dir / "SKILL.md"
+                tmp_file = tmp_dir / 'SKILL.md'
                 tmp_file.write_text(skill_content, encoding='utf-8')
 
                 parsed = parse_skill_file(tmp_file)
@@ -830,7 +830,7 @@ class SkillManager:
             # Clean up temp directory after successful parse
             if tmp_dir and tmp_dir.exists():
                 try:
-                    (tmp_dir / "SKILL.md").unlink(missing_ok=True)
+                    (tmp_dir / 'SKILL.md').unlink(missing_ok=True)
                     tmp_dir.rmdir()
                 except OSError:
                     pass  # Best-effort cleanup
@@ -902,7 +902,7 @@ class SkillManager:
                 return False
 
         matches = self.match_skills(task_text) if task_text else []
-        logger.debug("[AUTO-SKILL] Check: tool_count=%d, matches=%d",
+        logger.debug('[AUTO-SKILL] Check: tool_count=%d, matches=%d',
                      total_tool_calls, len(matches))
 
         if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS:
@@ -910,11 +910,11 @@ class SkillManager:
         if matches and matches[0][1] > SKILL_MATCH_THRESHOLD:
             return False
 
-        creator = self.load_full_instructions("skill-creator")
+        creator = self.load_full_instructions('skill-creator')
         if not creator:
             return False
 
-        logger.info("[AUTO-SKILL] Trigger fired for %s (%d tools)", instance_name, total_tool_calls)
+        logger.info('[AUTO-SKILL] Trigger fired for %s (%d tools)', instance_name, total_tool_calls)
         prompt = (f"## Skill Reflection\n\n{creator}\n\n"
                   f"You completed a task using {total_tool_calls} tool calls. "
                   f"If the approach could help future similar tasks, "
@@ -966,20 +966,20 @@ class SkillManager:
                         if state_name in ('SLEEPING', 'COMPLETING'):
                             from agent_cascade.agent_instance import AgentState
                             inst._transition(AgentState.IDLE)
-                            logger.debug("[AUTO-SKILL] State reset to IDLE for %s", instance_name)
+                            logger.debug('[AUTO-SKILL] State reset to IDLE for %s', instance_name)
                     if actual_len > snapshot_length + 1:
-                        logger.warning("[AUTO-SKILL] Rollback verification failed for %s: "
-                                       "expected <=%d, got %d",
+                        logger.warning('[AUTO-SKILL] Rollback verification failed for %s: '
+                                       'expected <=%d, got %d',
                                        instance_name, snapshot_length, actual_len)
                         rollback_ok = False
                     else:
-                        logger.debug("[AUTO-SKILL] Rolled back %d messages for %s",
+                        logger.debug('[AUTO-SKILL] Rolled back %d messages for %s',
                                      pop_count, instance_name)
                 elif current_len < snapshot_length:
-                    logger.debug("[AUTO-SKILL] Compression removed %d messages during extra turns for %s",
+                    logger.debug('[AUTO-SKILL] Compression removed %d messages during extra turns for %s',
                                  snapshot_length - current_len, instance_name)
             except Exception as e:
-                logger.warning("[AUTO-SKILL] Rollback error for %s: %s", instance_name, e)
+                logger.warning('[AUTO-SKILL] Rollback error for %s: %s', instance_name, e)
                 rollback_ok = False
 
         # Discover which skills were created (only if rollback succeeded)
@@ -988,13 +988,13 @@ class SkillManager:
             try:
                 created_skills = check_skill_created_fn()
             except Exception as e:
-                logger.debug("[AUTO-SKILL] Skill check error for %s: %s", instance_name, e)
+                logger.debug('[AUTO-SKILL] Skill check error for %s: %s', instance_name, e)
 
         if created_skills:
             with inst._compression_lock:
                 inst._auto_skill_proposed = True
                 inst._auto_skill_proposed_count = getattr(inst, '_auto_skill_proposed_count', 0) + 1
-            logger.info("[AUTO-SKILL] Created skills: %s", created_skills)
+            logger.info('[AUTO-SKILL] Created skills: %s', created_skills)
 
         return created_skills
 
@@ -1010,6 +1010,6 @@ def inject_skill_notice(inst, created_skills: List[str]) -> None:
     notice = f"\n\n[Auto-skill created: {', '.join(created_skills)}]"
     last = inst.conversation[-1]
     if isinstance(last, dict):
-        last["content"] = str(last.get("content", "")) + notice
+        last['content'] = str(last.get('content', '')) + notice
     else:
         last.content = str(getattr(last, 'content', '')) + notice

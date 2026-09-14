@@ -560,7 +560,7 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                     abs_src = _resolve_image_src(child.get('src'))
                     if abs_src and abs_src not in seen_images:
                         seen_images.add(abs_src)
-                        content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
+                        content.append({'image': f'![{child.get('alt', '').strip()}]({abs_src})'})
                 elif name == 'table' and not extract_image:
                     # Table path: emit compact rows directly (one entry per row), bypassing
                     # the text buffer so cells don't splay. Flush any pending text first.
@@ -606,7 +606,7 @@ def parse_html_bs(path: str, extract_image: bool = False, base_url: Optional[str
                 abs_src = _resolve_image_src(child.get('src'))
                 if abs_src and abs_src not in seen_images:
                     seen_images.add(abs_src)
-                    content.append({'image': f'![{child.get("alt", "").strip()}]({abs_src})'})
+                    content.append({'image': f'![{child.get('alt', '').strip()}]({abs_src})'})
             elif name == 'table' and not extract_image:
                 _emit_table_rows(child)
             elif name == 'pre':
@@ -779,8 +779,8 @@ PARSER_SUPPORTED_FILE_TYPES = ['pdf', 'docx', 'pptx', 'md', 'txt', 'html', 'csv'
 
 def get_plain_doc(doc: list):
     paras = []
-    title_line = ""
-    title = ""
+    title_line = ''
+    title = ''
     if doc and doc[0].get('title'):
         title = doc[0]['title'].strip()
         title_line = f"Title: {doc[0]['title']}\n"

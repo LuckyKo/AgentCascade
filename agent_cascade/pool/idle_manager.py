@@ -37,7 +37,7 @@ class IdleManager:
         self._stop_event.clear()
         self._checker_thread = threading.Thread(
             target=self._checker_loop,
-            name="IdleAgentChecker",
+            name='IdleAgentChecker',
             daemon=True,
         )
         self._checker_thread.start()
@@ -66,7 +66,7 @@ class IdleManager:
             join_timeout = timeout if timeout is not None else self.pool.settings.idle_check_interval + 5.0
             self._checker_thread.join(timeout=join_timeout)
             if self._checker_thread.is_alive():
-                logger.warning("Idle checker thread did not exit in time.")
+                logger.warning('Idle checker thread did not exit in time.')
         self._checker_thread = None
 
     @staticmethod
@@ -167,7 +167,7 @@ class IdleManager:
         except Exception as e:
             logger.debug(f"Idle checker log path lookup failed for {instance_name} (non-critical): {e}")
 
-        agent_type_label = f"system agent ({inst.agent_class})" if is_system_agent else "agent"
+        agent_type_label = f"system agent ({inst.agent_class})" if is_system_agent else 'agent'
         logger.info(
             f"[idle_checker] Auto-dismissing idle {agent_type_label} '{instance_name}' "
             f"(idle for {idle_secs:.0f}s, threshold={effective_timeout:.0f}s)"

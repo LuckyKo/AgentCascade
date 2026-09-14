@@ -47,17 +47,17 @@ class GetProductDetailsTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         product_ids = params_dict.get('product_ids', [])
 
         if not product_ids:
-            return self.format_result_as_json({"products": []})
+            return self.format_result_as_json({'products': []})
 
         # Find all requested products that exist in the database
         detailed_products = [
             self.products_map[pid] for pid in product_ids if pid in self.products_map
         ]
         
-        return self.format_result_as_json({"products": detailed_products})
+        return self.format_result_as_json({'products': detailed_products})
 

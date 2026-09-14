@@ -39,8 +39,8 @@ def calculate_weighted_score(commonsense_results: Dict[str, Tuple[bool, Optional
     total_weighted_score = 0.0
     
     for dim_name, dim_config in EVALUATION_DIMENSIONS.items():
-        weight = dim_config["weight"]
-        checks = dim_config["checks"]
+        weight = dim_config['weight']
+        checks = dim_config['checks']
         
         passed_count = 0
         total_count = 0
@@ -54,9 +54,9 @@ def calculate_weighted_score(commonsense_results: Dict[str, Tuple[bool, Optional
                     if passed:
                         passed_count += 1
                     check_details.append({
-                        "name": check_name,
-                        "passed": passed,
-                        "message": msg
+                        'name': check_name,
+                        'passed': passed,
+                        'message': msg
                     })
         
         # One-vote veto: all checks must pass for dimension score = 1.0
@@ -64,20 +64,20 @@ def calculate_weighted_score(commonsense_results: Dict[str, Tuple[bool, Optional
         dimension_scores[dim_name] = dim_score
         
         dimension_details[dim_name] = {
-            "passed": passed_count,
-            "total": total_count,
-            "weight": weight,
-            "score": dim_score,
-            "weighted_score": dim_score * weight,
-            "checks": check_details
+            'passed': passed_count,
+            'total': total_count,
+            'weight': weight,
+            'score': dim_score,
+            'weighted_score': dim_score * weight,
+            'checks': check_details
         }
         
         total_weighted_score += dim_score * weight
     
     return {
-        "total_weighted_score": total_weighted_score,
-        "dimension_scores": dimension_scores,
-        "dimension_details": dimension_details
+        'total_weighted_score': total_weighted_score,
+        'dimension_scores': dimension_scores,
+        'dimension_details': dimension_details
     }
 
 
@@ -106,8 +106,8 @@ def calculate_hard_score(hard_results: Dict[str, Tuple[bool, Optional[str]]]) ->
             continue
         total += 1
         constraints[constraint_name] = {
-            "passed": ok,
-            "message": msg
+            'passed': ok,
+            'message': msg
         }
         if ok:
             passed_count += 1
@@ -116,8 +116,8 @@ def calculate_hard_score(hard_results: Dict[str, Tuple[bool, Optional[str]]]) ->
     score = 1.0 if (total > 0 and passed_count == total) else 0.0
     
     return {
-        "score": score,
-        "constraints": constraints
+        'score': score,
+        'constraints': constraints
     }
 
 
@@ -184,11 +184,11 @@ def process_single_evaluation(
         
         # Calculate weighted commonsense score
         weighted_result = calculate_weighted_score(commonsense)
-        commonsense_score = weighted_result["total_weighted_score"]
+        commonsense_score = weighted_result['total_weighted_score']
         
         # Calculate hard constraint score (one-vote veto)
         hard_result = calculate_hard_score(hard)
-        personalized_score = hard_result["score"]
+        personalized_score = hard_result['score']
         
         # Calculate composite score (average of commonsense and personalized)
         composite_score = (commonsense_score + personalized_score) / 2
@@ -198,16 +198,16 @@ def process_single_evaluation(
         
         # Build evaluation result
         eval_result = {
-            "sample_id": sample_id,
-            "scores": {
-                "commonsense_weighted_score": commonsense_score,
-                "personalized_score": personalized_score,
-                "composite_score": composite_score,
-                "case_acc": case_acc,
+            'sample_id': sample_id,
+            'scores': {
+                'commonsense_weighted_score': commonsense_score,
+                'personalized_score': personalized_score,
+                'composite_score': composite_score,
+                'case_acc': case_acc,
             },
-            "commonsense_dimension_scores": weighted_result["dimension_scores"],
-            "commonsense_dimension_details": weighted_result["dimension_details"],
-            "personalized_dimension_score": hard_result,
+            'commonsense_dimension_scores': weighted_result['dimension_scores'],
+            'commonsense_dimension_details': weighted_result['dimension_details'],
+            'personalized_dimension_score': hard_result,
         }
         
         # Save evaluation result
@@ -215,8 +215,8 @@ def process_single_evaluation(
         output_file.write_text(json.dumps(eval_result, ensure_ascii=False, indent=2), encoding='utf-8')
         
         # Count hard constraints for display
-        hard_passed = sum(1 for c in hard_result["constraints"].values() if c["passed"])
-        hard_total = len(hard_result["constraints"])
+        hard_passed = sum(1 for c in hard_result['constraints'].values() if c['passed'])
+        hard_total = len(hard_result['constraints'])
         
         with print_lock:
             print(f"✅ Sample {sample_id} evaluation completed")
@@ -281,7 +281,7 @@ def evaluate_plans(
     elif isinstance(test_data, list):
         test_samples = test_data
     else:
-        raise ValueError("test_data.json format error: should be a dict or list")
+        raise ValueError('test_data.json format error: should be a dict or list')
     
     total_test_samples = len(test_samples)
     
@@ -486,7 +486,7 @@ def evaluate_plans(
     print(f"   - Evaluation success: {success_count}")
     print(f"   - Evaluation failed: {failed_count}")
     print(f"   - Total Time: {elapsed_time:.2f} seconds")
-    print(f"   - Average Time: {elapsed_time/len(plan_files):.2f} seconds/sample" if plan_files else "   - N/A")
+    print(f"   - Average Time: {elapsed_time/len(plan_files):.2f} seconds/sample" if plan_files else '   - N/A')
     print(f"\n📈 Evaluation Metrics:")
     print(f"   Delivery Rate: {delivery_rate:.2%} ({len(plan_files)}/{total_test_samples} samples)")
     print(f"   ")
@@ -510,7 +510,7 @@ def evaluate_plans(
         for i, (error_type, error_info) in enumerate(sorted_errors[:10], 1):  # Show top 10
             print(f"{i}. {error_type}")
             print(f"   Occurrences: {error_info['count']}")
-            print(f"   Affected Samples: {', '.join(error_info['samples'][:5])}", end="")
+            print(f"   Affected Samples: {', '.join(error_info['samples'][:5])}", end='')
             if len(error_info['samples']) > 5:
                 print(f" (and {len(error_info['samples']) - 5} more)")
             else:
@@ -519,7 +519,7 @@ def evaluate_plans(
             if error_info['messages']:
                 sample_msg = error_info['messages'][0]
                 if len(sample_msg) > 100:
-                    sample_msg = sample_msg[:100] + "..."
+                    sample_msg = sample_msg[:100] + '...'
                 print(f"   Example Message: {sample_msg}")
             print()
     else:
@@ -576,7 +576,7 @@ def evaluate_plans(
     }
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='Evaluate converted travel plans')

@@ -31,10 +31,10 @@ class TestVisionToolCallAssembleResult:
         mock_instance._tool_warnings = []
         
         # Create tool result exactly like view_image returns
-        file_url = "file:///N:/work/WD/AgentWorkspace/no_thx.jpg"
+        file_url = 'file:///N:/work/WD/AgentWorkspace/no_thx.jpg'
         tool_result = [
             ContentItem(image=file_url),
-            ContentItem(text="Viewing image: no_thx.jpg")
+            ContentItem(text='Viewing image: no_thx.jpg')
         ]
         
         # Create compression handler with vision-capable llm_cfg
@@ -44,17 +44,17 @@ class TestVisionToolCallAssembleResult:
         
         # Call _assemble_tool_result with qwenvl_oai config (vision-capable)
         llm_cfg = {
-            "model_service_type": "qwenvl_oai",
-            "max_input_tokens": 8192,
+            'model_service_type': 'qwenvl_oai',
+            'max_input_tokens': 8192,
         }
         
         result = handler._assemble_tool_result(
             instance=mock_instance,
             raw_tool_result=tool_result,
             char_limit=10000,
-            instance_name="Maine",
-            tool_name="view_image",
-            base_dir=Path("."),
+            instance_name='Maine',
+            tool_name='view_image',
+            base_dir=Path('.'),
             llm_cfg=llm_cfg,
         )
         
@@ -63,8 +63,8 @@ class TestVisionToolCallAssembleResult:
             f"Expected ContentItem list for vision agent, got {type(result).__name__}: {str(result)[:200]}"
         
         assert len(result) == 2, f"Expected 2 ContentItems, got {len(result)}"
-        assert result[0].image == file_url, "First item should be image ContentItem"
-        assert result[1].text == "Viewing image: no_thx.jpg", "Second item should be text ContentItem"
+        assert result[0].image == file_url, 'First item should be image ContentItem'
+        assert result[1].text == 'Viewing image: no_thx.jpg', 'Second item should be text ContentItem'
     
     def test_non_vision_agent_stringifies_contentitem_list(self):
         """For non-vision agents (oai), view_image's ContentItem list SHOULD be stringified to markdown."""
@@ -75,10 +75,10 @@ class TestVisionToolCallAssembleResult:
         mock_instance._cache_notifications = []
         mock_instance._tool_warnings = []
         
-        file_url = "file:///N:/work/WD/AgentWorkspace/no_thx.jpg"
+        file_url = 'file:///N:/work/WD/AgentWorkspace/no_thx.jpg'
         tool_result = [
             ContentItem(image=file_url),
-            ContentItem(text="Viewing image: no_thx.jpg")
+            ContentItem(text='Viewing image: no_thx.jpg')
         ]
         
         from agent_cascade.compression.handler import CompressionHandler
@@ -87,17 +87,17 @@ class TestVisionToolCallAssembleResult:
         
         # Call with plain oai config (NOT vision-capable)
         llm_cfg = {
-            "model_service_type": "oai",
-            "max_input_tokens": 8192,
+            'model_service_type': 'oai',
+            'max_input_tokens': 8192,
         }
         
         result = handler._assemble_tool_result(
             instance=mock_instance,
             raw_tool_result=tool_result,
             char_limit=10000,
-            instance_name="Maine",
-            tool_name="view_image",
-            base_dir=Path("."),
+            instance_name='Maine',
+            tool_name='view_image',
+            base_dir=Path('.'),
             llm_cfg=llm_cfg,
         )
         
@@ -106,8 +106,8 @@ class TestVisionToolCallAssembleResult:
             f"Expected markdown string for non-vision agent, got {type(result).__name__}"
         
         # Should contain markdown image link with file:// URI (since we can't encode images)
-        assert "![" in result or "file://" in result, \
-            "Non-vision agent result should contain markdown image link"
+        assert '![' in result or 'file://' in result, \
+            'Non-vision agent result should contain markdown image link'
 
 
 class TestVisionToolCallMessageConversion:
@@ -148,7 +148,7 @@ class TestVisionToolCallMessageConversion:
             0x00, 0x00, 0x3F, 0x00, 0xFB, 0xD5, 0xDB, 0x20, 0xA8, 0xF9, 0xFF, 0xD9
         ])
         
-        img_path = tmp_path / "test_image.jpg"
+        img_path = tmp_path / 'test_image.jpg'
         img_path.write_bytes(jpeg_bytes)
         return img_path
     
@@ -161,11 +161,11 @@ class TestVisionToolCallMessageConversion:
         file_url = test_image_path.as_uri()  # file:///path/to/test_image.jpg
         
         messages = [
-            Message(role="user", content="Please look at this image"),
-            Message(role="assistant", content="I'll use view_image to see it"),
+            Message(role='user', content='Please look at this image'),
+            Message(role='assistant', content="I'll use view_image to see it"),
             Message(
-                role="function",
-                name="view_image",
+                role='function',
+                name='view_image',
                 content=[
                     ContentItem(image=file_url),
                     ContentItem(text=f"Viewing image: {test_image_path.name}")
@@ -174,7 +174,7 @@ class TestVisionToolCallMessageConversion:
         ]
         
         # Create a QwenVLChatAtOai instance (doesn't need real API config for this test)
-        llm = QwenVLChatAtOAI(cfg={"model": "test-model", "api_base": "http://localhost:9999/v1"})
+        llm = QwenVLChatAtOAI(cfg={'model': 'test-model', 'api_base': 'http://localhost:9999/v1'})
         
         # Convert messages to dicts (this is called before the actual API call)
         converted = llm.convert_messages_to_dicts(messages)
@@ -184,48 +184,48 @@ class TestVisionToolCallMessageConversion:
         # Look for tool messages that contain view_image-related content (image_url items or Viewing image text).
         func_msg = None
         for msg in converted:
-            if msg.get("role") == "tool":
-                content = msg.get("content", "")
+            if msg.get('role') == 'tool':
+                content = msg.get('content', '')
                 has_view_image_content = False
                 if isinstance(content, list):
                     for item in content:
                         if isinstance(item, dict):
-                            if item.get("type") == "image_url":
+                            if item.get('type') == 'image_url':
                                 has_view_image_content = True
                                 break
-                            text = item.get("text", "")
-                            if isinstance(text, str) and "Viewing image" in text:
+                            text = item.get('text', '')
+                            if isinstance(text, str) and 'Viewing image' in text:
                                 has_view_image_content = True
                                 break
                 if has_view_image_content:
                     func_msg = msg
                     break
         
-        assert func_msg is not None, "Function message not found in converted messages"
+        assert func_msg is not None, 'Function message not found in converted messages'
         
-        content = func_msg.get("content")
+        content = func_msg.get('content')
         assert isinstance(content, list), \
             f"Function message content should be a list, got {type(content).__name__}"
         
         # Find the image_url item
         image_item = None
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "image_url":
+            if isinstance(item, dict) and item.get('type') == 'image_url':
                 image_item = item
                 break
         
         assert image_item is not None, \
             f"No image_url item found in function message content. Content: {content}"
         
-        url = image_item.get("image_url", {}).get("url", "")
+        url = image_item.get('image_url', {}).get('url', '')
         
         # Verify it's a base64 data URI (not a file:// URI)
-        assert url.startswith("data:image"), \
+        assert url.startswith('data:image'), \
             f"Expected base64 data URI, got: {url[:100]}"
         
         # Extract and verify the base64 part
-        b64_data = url.split(",", 1)[1]
-        assert len(b64_data) > 50, "Base64 data too short — image may not have been read correctly"
+        b64_data = url.split(',', 1)[1]
+        assert len(b64_data) > 50, 'Base64 data too short — image may not have been read correctly'
         
         # Verify it's valid base64 by decoding
         decoded = base64.b64decode(b64_data)
@@ -269,7 +269,7 @@ class TestVisionToolCallFullFlow:
             0x00, 0x00, 0x3F, 0x00, 0xFB, 0xD5, 0xDB, 0x20, 0xA8, 0xF9, 0xFF, 0xD9
         ])
         
-        img_path = tmp_path / "no_thx.jpg"
+        img_path = tmp_path / 'no_thx.jpg'
         img_path.write_bytes(jpeg_bytes)
         return img_path
     
@@ -298,15 +298,15 @@ class TestVisionToolCallFullFlow:
         mock_instance._cache_notifications = []
         mock_instance._tool_warnings = []
         
-        llm_cfg = {"model_service_type": "qwenvl_oai"}
+        llm_cfg = {'model_service_type': 'qwenvl_oai'}
         
         assembled = handler._assemble_tool_result(
             instance=mock_instance,
             raw_tool_result=tool_result,
             char_limit=10000,
-            instance_name="Maine",
-            tool_name="view_image",
-            base_dir=Path("."),
+            instance_name='Maine',
+            tool_name='view_image',
+            base_dir=Path('.'),
             llm_cfg=llm_cfg,
         )
         
@@ -316,51 +316,51 @@ class TestVisionToolCallFullFlow:
         
         # Step 3: execution_engine.py creates a function Message with this content
         fn_msg = Message(
-            role="function",
-            name="view_image",
+            role='function',
+            name='view_image',
             content=assembled,
         )
         
         # Verify Message stored ContentItem instances
-        assert isinstance(fn_msg.content, list), "Message.content should be a list"
+        assert isinstance(fn_msg.content, list), 'Message.content should be a list'
         assert any(hasattr(item, 'image') for item in fn_msg.content), \
-            "ContentItem instances lost — got plain dicts instead"
+            'ContentItem instances lost — got plain dicts instead'
         
         # Step 4: Build conversation with the function message
         messages = [
-            Message(role="user", content="Please look at this image"),
-            Message(role="assistant", content="I'll check it"),
+            Message(role='user', content='Please look at this image'),
+            Message(role='assistant', content="I'll check it"),
             fn_msg,
         ]
         
         # Step 5: qwenvl_oai converts to dicts for API call — images become base64
-        llm = QwenVLChatAtOAI(cfg={"model": "test-model", "api_base": "http://localhost:9999/v1"})
+        llm = QwenVLChatAtOAI(cfg={'model': 'test-model', 'api_base': 'http://localhost:9999/v1'})
         converted = llm.convert_messages_to_dicts(messages)
         
         # Verify function message in converted output has base64 image.
         # After _conv_agent_cascade_messages_to_oai(), FUNCTION role becomes "tool" with no "name".
         func_msg = None
         for msg in converted:
-            if msg.get("role") == "tool":
-                content = msg.get("content", "")
+            if msg.get('role') == 'tool':
+                content = msg.get('content', '')
                 has_view_image_content = False
                 if isinstance(content, list):
                     for item in content:
                         if isinstance(item, dict):
-                            if item.get("type") == "image_url":
+                            if item.get('type') == 'image_url':
                                 has_view_image_content = True
                                 break
-                            text = item.get("text", "")
-                            if isinstance(text, str) and "Viewing image" in text:
+                            text = item.get('text', '')
+                            if isinstance(text, str) and 'Viewing image' in text:
                                 has_view_image_content = True
                                 break
                 if has_view_image_content:
                     func_msg = msg
                     break
         
-        assert func_msg is not None, "Function message lost during conversion"
+        assert func_msg is not None, 'Function message lost during conversion'
         
-        content = func_msg.get("content")
+        content = func_msg.get('content')
         assert isinstance(content, list), f"Content should be list, got {type(content).__name__}"
         
         # Find image_url item with base64 data
@@ -370,16 +370,16 @@ class TestVisionToolCallFullFlow:
         
         for item in content:
             if isinstance(item, dict):
-                if item.get("type") == "image_url":
-                    url = item.get("image_url", {}).get("url", "")
-                    if url.startswith("data:image"):
+                if item.get('type') == 'image_url':
+                    url = item.get('image_url', {}).get('url', '')
+                    if url.startswith('data:image'):
                         has_base64_image = True
-                    elif url.startswith("file://"):
+                    elif url.startswith('file://'):
                         has_file_uri_bug = True
                 
-                if item.get("type") == "text":
-                    text = item.get("text", "")
-                    if "![" in text and ".jpg)" in text:
+                if item.get('type') == 'text':
+                    text = item.get('text', '')
+                    if '![' in text and '.jpg)' in text:
                         has_markdown_bug = True
         
         # Core assertion: base64 image must be present
@@ -388,7 +388,7 @@ class TestVisionToolCallFullFlow:
         
         # Negative assertions: these indicate the bug is present
         assert not has_file_uri_bug, \
-            "BUG DETECTED: file:// URI leaked into converted message (images not encoded)"
+            'BUG DETECTED: file:// URI leaked into converted message (images not encoded)'
         
         assert not has_markdown_bug, \
-            "BUG DETECTED: Markdown image link found (ContentItem list was stringified)"
+            'BUG DETECTED: Markdown image link found (ContentItem list was stringified)'

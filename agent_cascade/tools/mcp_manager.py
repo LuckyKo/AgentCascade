@@ -86,11 +86,11 @@ class MCPManager:
                 # Silently handle cross-task exceptions from MCP SSE connections
                 if (isinstance(exception, RuntimeError) and
                         'Attempted to exit cancel scope in a different task' in str(exception)):
-                    logger.debug("Silently ignoring MCP cross-task exception: %s", str(exception))
+                    logger.debug('Silently ignoring MCP cross-task exception: %s', str(exception))
                     return  # Silently ignore this type of exception
                 if (isinstance(exception, BaseExceptionGroup) and  # noqa
                         'Attempted to exit cancel scope in a different task' in str(exception)):  # noqa
-                    logger.debug("Silently ignoring MCP cross-task exception: %s", str(exception))
+                    logger.debug('Silently ignoring MCP cross-task exception: %s', str(exception))
                     return  # Silently ignore this type of exception
 
             # Other exceptions are handled normally
@@ -474,7 +474,7 @@ class MCPClient:
                 elif content.type == 'image':
                     # MCP SDK returns image as ImageContent with base64 data + mimeType
                     texts.append(
-                        f'![{content.mimeType or "image"}]({content.data})'
+                        f'![{content.mimeType or 'image'}]({content.data})'
                     )
             if texts:
                 return '\n\n'.join(texts)

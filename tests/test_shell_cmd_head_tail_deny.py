@@ -22,28 +22,28 @@ def shell_cmd_tool():
 class TestDetectHeadTailPipe:
     """Direct unit tests of the detection helper."""
 
-    @pytest.mark.parametrize("command", [
-        "ls -R | head -20",
-        "dir /s | tail -5",
-        "git log --oneline | head -10",
-        "cd /workspace && git log --oneline | head -10",  # cd prefix
-        "somecmd | HEAD -n 5",                            # case-insensitive
-        "foo | tail -f",                                  # flag after name
-        "bar | tail --lines=10",                          # long-flag form
-        "a | b | head -3",                                # multi-stage, head not first stage
+    @pytest.mark.parametrize('command', [
+        'ls -R | head -20',
+        'dir /s | tail -5',
+        'git log --oneline | head -10',
+        'cd /workspace && git log --oneline | head -10',  # cd prefix
+        'somecmd | HEAD -n 5',                            # case-insensitive
+        'foo | tail -f',                                  # flag after name
+        'bar | tail --lines=10',                          # long-flag form
+        'a | b | head -3',                                # multi-stage, head not first stage
     ])
     def test_must_deny(self, command):
         from agent_cascade.tools.custom.shell_cmd import ShellCmd
         result = ShellCmd._detect_head_tail_pipe(command)
         assert result is not None, f"expected denial for {command!r}"
-        assert result.startswith("DENIED"), f"denial should be actionable: {result!r}"
+        assert result.startswith('DENIED'), f"denial should be actionable: {result!r}"
 
-    @pytest.mark.parametrize("command", [
-        "ls -la",                                        # no pipe
-        "git show-ref --head",                           # git subcommand, no pipe
+    @pytest.mark.parametrize('command', [
+        'ls -la',                                        # no pipe
+        'git show-ref --head',                           # git subcommand, no pipe
         "find . -name '*.py' | grep 'test'",             # other safe pipe
-        "find . -type f | wc -l",
-        "git diff --stat | sort",
+        'find . -type f | wc -l',
+        'git diff --stat | sort',
         "dir /s | findstr 'python'",
     ])
     def test_must_not_deny(self, command):
@@ -53,15 +53,15 @@ class TestDetectHeadTailPipe:
 
     def test_empty_and_none(self):
         from agent_cascade.tools.custom.shell_cmd import ShellCmd
-        assert ShellCmd._detect_head_tail_pipe("") is None
+        assert ShellCmd._detect_head_tail_pipe('') is None
 
 
 class TestSyncDenialEndToEnd:
     """_execute_sync must return the denial and never call execute_shell_command."""
 
-    @pytest.mark.parametrize("command", [
-        "ls -R | head -20",
-        "cd /workspace && git log --oneline | tail -5",
+    @pytest.mark.parametrize('command', [
+        'ls -R | head -20',
+        'cd /workspace && git log --oneline | tail -5',
     ])
     def test_sync_denies_and_does_not_execute(self, shell_cmd_tool, command):
         mock_pool = MagicMock()
@@ -74,16 +74,16 @@ class TestSyncDenialEndToEnd:
             justification='test', cwd=None, timeout=None,
         )
 
-        assert result.startswith("DENIED"), f"expected denial string, got: {result!r}"
+        assert result.startswith('DENIED'), f"expected denial string, got: {result!r}"
         mock_pool.operation_manager.execute_shell_command.assert_not_called()
 
 
 class TestAsyncDenialEndToEnd:
     """_launch_async must return the denial and never call tracker.launch."""
 
-    @pytest.mark.parametrize("command", [
-        "ls -R | head -20",
-        "git log --oneline | tail -5",
+    @pytest.mark.parametrize('command', [
+        'ls -R | head -20',
+        'git log --oneline | tail -5',
     ])
     def test_async_denies_and_does_not_launch(self, shell_cmd_tool, command):
         mock_pool = MagicMock()
@@ -98,5 +98,5 @@ class TestAsyncDenialEndToEnd:
             justification='test', cwd=None, timeout=None, heartbeat_interval=-1,
         )
 
-        assert result.startswith("DENIED"), f"expected denial string, got: {result!r}"
+        assert result.startswith('DENIED'), f"expected denial string, got: {result!r}"
         tracker.launch.assert_not_called()

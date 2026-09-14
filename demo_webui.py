@@ -156,9 +156,9 @@ chatbot_config = {
     'input.placeholder': 'Ask me anything! Try weather, search, or website visits...',
     'prompt.suggestions': [
         "What's the weather in London?",
-        "Search for latest AI news",
+        'Search for latest AI news',
         "Visit https://example.com and tell me what's on it",
-        "Who won the latest football match?",
+        'Who won the latest football match?',
     ],
     'user.name': 'You',
 }

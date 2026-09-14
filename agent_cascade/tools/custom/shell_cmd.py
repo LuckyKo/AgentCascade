@@ -178,7 +178,7 @@ class ShellCmd(BaseTool):
         shell_char_limit as other async shell output paths for consistency.
         """
         if not text:
-            return ""
+            return ''
         try:
             llm_cfg = getattr(agent_pool, 'llm_cfg', {}) if agent_pool else {}
             char_limit = llm_cfg.get('shell_char_limit', 2048) if isinstance(llm_cfg, dict) else 2048
@@ -313,10 +313,10 @@ class ShellCmd(BaseTool):
     # ────────────────────────────────────────────────────────────────
     _HEAD_TAIL_DENIAL = (
         "DENIED: shell_cmd auto-rejects '| head' / '| tail' pipe stages — they are not "
-        "available on Windows and are redundant: AgentCascade already truncates shell "
+        'available on Windows and are redundant: AgentCascade already truncates shell '
         "output with spillover. Remove the '| head ...' / '| tail ...' segment and run "
-        "the base command; large output is truncated automatically (use read_file/grep "
-        "for targeted extraction)."
+        'the base command; large output is truncated automatically (use read_file/grep '
+        'for targeted extraction).'
     )
 
     @staticmethod
@@ -375,7 +375,7 @@ class ShellCmd(BaseTool):
         # ── Resolve cwd using the same resolver as file tools ────────
         try:
             from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-            resolved_cwd = resolve_tool_path(cwd, mode="rw", agent_pool=self.agent_pool)
+            resolved_cwd = resolve_tool_path(cwd, mode='rw', agent_pool=self.agent_pool)
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
 
@@ -417,11 +417,11 @@ class ShellCmd(BaseTool):
                 return f"REJECTED: {reason}"
             justification_text = reason
         else:
-            justification_text = ""
+            justification_text = ''
 
         tracker = self._get_tracker()
         if tracker is None:
-            return "[shell_cmd] Async shell not available (tracker not initialized)."
+            return '[shell_cmd] Async shell not available (tracker not initialized).'
 
         # Default timeout for async mode is much longer (ASYNC_SHELL_DEFAULT_TIMEOUT, 1 hour)
         effective_timeout = timeout if timeout else ASYNC_SHELL_DEFAULT_TIMEOUT
@@ -433,7 +433,7 @@ class ShellCmd(BaseTool):
 
         # Opt-out override (e.g. test harnesses): force no console window regardless of pool state.
         # Does NOT change production defaults — only takes effect when this env var is set truthy.
-        if os.getenv("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+        if os.getenv('AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW', '').strip() not in ('', '0', 'false', 'False'):
             console_window = False
 
         start_time = time.time()
@@ -453,8 +453,8 @@ class ShellCmd(BaseTool):
         if completed_early:
             elapsed = time.time() - start_time
             rc = return_code if return_code is not None else 0
-            status = "success" if (rc == 0) else f"exit code {rc}"
-            approval_line = "AUTO-APPROVED\n" if is_safe else "APPROVED\n"
+            status = 'success' if (rc == 0) else f"exit code {rc}"
+            approval_line = 'AUTO-APPROVED\n' if is_safe else 'APPROVED\n'
             if not is_safe and justification_text:
                 approval_line += f"Security Justification: {justification_text}\n"
             result = (
@@ -482,8 +482,8 @@ class ShellCmd(BaseTool):
             return result
 
         # Case 2 & 3: Still running — return launched message, with early output appended if available
-        console_line = "A console window has been opened for inspection (Windows).\n" if console_window else ""
-        approval_line = "AUTO-APPROVED\n" if is_safe else "APPROVED\n"
+        console_line = 'A console window has been opened for inspection (Windows).\n' if console_window else ''
+        approval_line = 'AUTO-APPROVED\n' if is_safe else 'APPROVED\n'
         if not is_safe and justification_text:
             approval_line += f"Security Justification: {justification_text}\n"
         launched_msg = (
@@ -541,21 +541,21 @@ class ShellCmd(BaseTool):
         """
         tracker = self._get_tracker()
         if tracker is None:
-            return "[shell_cmd] Async shell not available (tracker not initialized)."
+            return '[shell_cmd] Async shell not available (tracker not initialized).'
 
         # Parse special command prefixes
         if command == '__kill':
-            return tracker.kill_task(agent_name, tool_id) or "No action taken."
+            return tracker.kill_task(agent_name, tool_id) or 'No action taken.'
         elif command == '__status':
-            return tracker.get_status(agent_name, tool_id) or "No status available."
+            return tracker.get_status(agent_name, tool_id) or 'No status available.'
         elif command.startswith('__heartbeat='):
             try:
                 new_interval = float(command.split('=')[1])
-                return tracker.update_heartbeat(agent_name, tool_id, new_interval) or "No action taken."
+                return tracker.update_heartbeat(agent_name, tool_id, new_interval) or 'No action taken.'
             except (ValueError, IndexError):
                 return f"[shell_cmd] Invalid heartbeat value in command: {command}"
         elif command == '__ctrl_c':
-            return tracker.send_ctrl_c(agent_name, tool_id) or "No action taken."
+            return tracker.send_ctrl_c(agent_name, tool_id) or 'No action taken.'
         elif command == '__wait':
             # If there's no known task, fail fast.
             task = tracker._get_task(agent_name, tool_id)
@@ -608,7 +608,7 @@ class ShellCmd(BaseTool):
                         text = str(m)
                     except Exception as e:
                         # Non-string message whose __str__ failed — treat as "not ours".
-                        logger.debug("[shell_cmd] _is_our_shell_msg: failed to str() message: %s", e)
+                        logger.debug('[shell_cmd] _is_our_shell_msg: failed to str() message: %s', e)
                         return False
                 if not text.startswith('⟨shell_cmd'):
                     return False

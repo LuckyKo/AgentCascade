@@ -52,14 +52,14 @@ from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
 
 DUMMY_LLM_CFG = {
-    "model": "qwen/qwen3-4b",
-    "model_server": "http://127.0.0.1:1234/v1",
-    "api_key": "EMPTY",
-    "model_type": "qwenvl_oai",
+    'model': 'qwen/qwen3-4b',
+    'model_server': 'http://127.0.0.1:1234/v1',
+    'api_key': 'EMPTY',
+    'model_type': 'qwenvl_oai',
 }
 
 
-def compress_and_sync(pool, inst_name, agent_class="coder", **kwargs):
+def compress_and_sync(pool, inst_name, agent_class='coder', **kwargs):
     """Call compress_context() then sync pool to JSONL via reset_history.
     This mimics the production flow:
       1. compress_context() modifies the pool (core.py line 391)
@@ -93,18 +93,18 @@ def build_mixed_conversation(num_pairs=20, include_tool_chains=True):
         nonlocal ts_counter
         ts_counter += 1
         return f"2025-06-15T10:00:{ts_counter:02d}.{ts_counter*3:06d}"
-    msgs.append(Message(role=SYSTEM, content="You are a helpful coding assistant."))
+    msgs.append(Message(role=SYSTEM, content='You are a helpful coding assistant.'))
     for i in range(num_pairs):
         user_content = f"Question {i}: What is Python feature {i}? Explain with examples."
         msgs.append(Message(role=USER, content=user_content))
         if include_tool_chains and i % 5 == 0:
-            fc = FunctionCall(name="search_code", arguments=json.dumps({"query": f"feature {i}"}))
+            fc = FunctionCall(name='search_code', arguments=json.dumps({'query': f"feature {i}"}))
             msgs.append(Message(role=ASSISTANT, content=f"Let me search for information about feature {i}.", function_call=fc))
             # Function response
             func_msg = Message(
                 role=FUNCTION,
                 content=f"Found: Python feature {i} is a built-in capability introduced in 3.{i % 12}.",
-                name="search_code"
+                name='search_code'
                 )
             msgs.append(func_msg)
             msgs.append(Message(role=ASSISTANT, content=f"Based on the search results, feature {i} is useful because {'x' * 30}"))
@@ -125,11 +125,11 @@ def build_tool_chain_conversation(num_chains=5):
     Returns:
         List[Message] — conversation with dense tool chains.
     """
-    msgs = [Message(role=SYSTEM, content="You are a coding assistant with tool access.")]
+    msgs = [Message(role=SYSTEM, content='You are a coding assistant with tool access.')]
     for chain_idx in range(num_chains):
         fc = FunctionCall(
             name=f"tool_{chain_idx}",
-            arguments=json.dumps({"action": f"analyze_file_{chain_idx}"})
+            arguments=json.dumps({'action': f"analyze_file_{chain_idx}"})
         )
         msgs.append(Message(
             role=ASSISTANT,
@@ -158,11 +158,11 @@ def build_batched_tool_chain_conversation(num_batches=5):
     Returns:
         List[Message] — conversation with batched tool chains.
     """
-    msgs = [Message(role=SYSTEM, content="You are a coding assistant with parallel tool access.")]
+    msgs = [Message(role=SYSTEM, content='You are a coding assistant with parallel tool access.')]
     for batch_idx in range(num_batches):
         fc1 = FunctionCall(
-            name="read_file",
-            arguments=json.dumps({"file": f"src/module_{batch_idx}_a.py"})
+            name='read_file',
+            arguments=json.dumps({'file': f"src/module_{batch_idx}_a.py"})
         )
         msgs.append(Message(
             role=ASSISTANT,
@@ -170,8 +170,8 @@ def build_batched_tool_chain_conversation(num_batches=5):
             function_call=fc1
         ))
         fc2 = FunctionCall(
-            name="read_file",
-            arguments=json.dumps({"file": f"src/module_{batch_idx}_b.py"})
+            name='read_file',
+            arguments=json.dumps({'file': f"src/module_{batch_idx}_b.py"})
         )
         msgs.append(Message(
             role=ASSISTANT,
@@ -181,12 +181,12 @@ def build_batched_tool_chain_conversation(num_batches=5):
         msgs.append(Message(
             role=FUNCTION,
             content=f"File A (module {batch_idx})",
-            name="read_file"
+            name='read_file'
         ))
         msgs.append(Message(
             role=FUNCTION,
             content=f"File B (module {batch_idx})",
-            name="read_file"
+            name='read_file'
         ))
         msgs.append(Message(
             role=ASSISTANT,
@@ -202,11 +202,11 @@ def build_multi_call_conversation(num_rounds=5):
     Returns:
         List[Message] — conversation with multi-call patterns.
     """
-    msgs = [Message(role=SYSTEM, content="You are a coding assistant with parallel tool access.")]
+    msgs = [Message(role=SYSTEM, content='You are a coding assistant with parallel tool access.')]
     for round_idx in range(num_rounds):
         tool_calls = [
-            {"id": f"call_a_{round_idx}", "type": "function", "function": {"name": "read_file", "arguments": json.dumps({"file": f"a_{round_idx}.py"})}},
-            {"id": f"call_b_{round_idx}", "type": "function", "function": {"name": "read_file", "arguments": json.dumps({"file": f"b_{round_idx}.py"})}},
+            {'id': f"call_a_{round_idx}", 'type': 'function', 'function': {'name': 'read_file', 'arguments': json.dumps({'file': f"a_{round_idx}.py"})}},
+            {'id': f"call_b_{round_idx}", 'type': 'function', 'function': {'name': 'read_file', 'arguments': json.dumps({'file': f"b_{round_idx}.py"})}},
         ]
         msgs.append(Message(
             role=ASSISTANT,
@@ -216,14 +216,14 @@ def build_multi_call_conversation(num_rounds=5):
         msgs.append(Message(
             role=FUNCTION,
             content=f"File a_{round_idx}.py: OK",
-            name="read_file",
-            extra={"function_id": f"call_a_{round_idx}"}
+            name='read_file',
+            extra={'function_id': f"call_a_{round_idx}"}
         ))
         msgs.append(Message(
             role=FUNCTION,
             content=f"File b_{round_idx}.py: Found issue at line {round_idx * 10}",
-            name="read_file",
-            extra={"function_id": f"call_b_{round_idx}"}
+            name='read_file',
+            extra={'function_id': f"call_b_{round_idx}"}
         ))
         msgs.append(Message(
             role=ASSISTANT,
@@ -240,11 +240,11 @@ def build_mixed_tool_conversation(num_simple=10, num_batched=5, num_multi=3):
     Returns:
         List[Message] — mixed conversation ready for testing.
     """
-    msgs = [Message(role=SYSTEM, content="You are a coding assistant.")]
+    msgs = [Message(role=SYSTEM, content='You are a coding assistant.')]
     for i in range(num_simple):
         user_msg = f"Step {i}: Check component {i}."
         msgs.append(Message(role=USER, content=user_msg))
-        fc = FunctionCall(name="analyze", arguments=json.dumps({"target": f"comp_{i}"}))
+        fc = FunctionCall(name='analyze', arguments=json.dumps({'target': f"comp_{i}"}))
         msgs.append(Message(
             role=ASSISTANT,
             content=f"Analyzing component {i}...",
@@ -253,7 +253,7 @@ def build_mixed_tool_conversation(num_simple=10, num_batched=5, num_multi=3):
         msgs.append(Message(
             role=FUNCTION,
             content=f"Component {i}: Status OK. {'detail' * 5}",
-            name="analyze"
+            name='analyze'
         ))
         msgs.append(Message(
             role=ASSISTANT,
@@ -262,12 +262,12 @@ def build_mixed_tool_conversation(num_simple=10, num_batched=5, num_multi=3):
     for i in range(num_batched):
         user_msg = f"Batch step {i}: Compare two files."
         msgs.append(Message(role=USER, content=user_msg))
-        fc1 = FunctionCall(name="read", arguments=json.dumps({"file": f"f_{i}_a.py"}))
-        fc2 = FunctionCall(name="read", arguments=json.dumps({"file": f"f_{i}_b.py"}))
+        fc1 = FunctionCall(name='read', arguments=json.dumps({'file': f"f_{i}_a.py"}))
+        fc2 = FunctionCall(name='read', arguments=json.dumps({'file': f"f_{i}_b.py"}))
         msgs.append(Message(role=ASSISTANT, content=f"Reading file A for batch {i}...", function_call=fc1))
         msgs.append(Message(role=ASSISTANT, content=f"Reading file B for batch {i}...", function_call=fc2))
-        msgs.append(Message(role=FUNCTION, content=f"File A batch {i}: {'content_a' * 3}", name="read"))
-        msgs.append(Message(role=FUNCTION, content=f"File B batch {i}: {'content_b' * 3}", name="read"))
+        msgs.append(Message(role=FUNCTION, content=f"File A batch {i}: {'content_a' * 3}", name='read'))
+        msgs.append(Message(role=FUNCTION, content=f"File B batch {i}: {'content_b' * 3}", name='read'))
         msgs.append(Message(
             role=ASSISTANT,
             content=f"Comparison complete for batch {i}. Files differ in imports."
@@ -276,15 +276,15 @@ def build_mixed_tool_conversation(num_simple=10, num_batched=5, num_multi=3):
         user_msg = f"Multi step {i}: Check multiple targets."
         msgs.append(Message(role=USER, content=user_msg))
         tool_calls = [
-            {"id": f"call_x_{i}", "type": "function", "function": {"name": "check", "arguments": json.dumps({"target": f"x_{i}"})}},
-            {"id": f"call_y_{i}", "type": "function", "function": {"name": "check", "arguments": json.dumps({"target": f"y_{i}"})}},
+            {'id': f"call_x_{i}", 'type': 'function', 'function': {'name': 'check', 'arguments': json.dumps({'target': f"x_{i}"})}},
+            {'id': f"call_y_{i}", 'type': 'function', 'function': {'name': 'check', 'arguments': json.dumps({'target': f"y_{i}"})}},
         ]
         msgs.append(Message(
             role=ASSISTANT,
             content=f"Checking targets for multi-step {i}...",
             tool_calls=tool_calls
         ))
-        msgs.append(Message(role=FUNCTION, content=f"x_{i}: OK", name="check", extra={"function_id": f"call_x_{i}"}))
+        msgs.append(Message(role=FUNCTION, content=f"x_{i}: OK", name='check', extra={'function_id': f"call_x_{i}"}))
         msgs.append(Message(
             role=ASSISTANT,
             content=f"Multi-step {i} done. x is fine, y has a warning."
@@ -299,7 +299,7 @@ def build_compressed_history(num_rounds=3, tail_pairs_per_round=6):
     Returns:
         List[Message] — pre-compressed history ready for JSONL writing.
     """
-    msgs = [Message(role=SYSTEM, content="You are a helpful assistant.")]
+    msgs = [Message(role=SYSTEM, content='You are a helpful assistant.')]
     for round_num in range(num_rounds):
         start = round_num * tail_pairs_per_round
         for i in range(tail_pairs_per_round):
@@ -323,13 +323,13 @@ def write_jsonl(path, messages, metadata=None):
     """Write a JSONL file with metadata header + message lines."""
     if metadata is None:
         metadata = {
-            "agent_class": "coder",
-            "instance_name": "TestAgent",
-            "start_timestamp": datetime.now().isoformat(),
-            "current_log_path": path,
+            'agent_class': 'coder',
+            'instance_name': 'TestAgent',
+            'start_timestamp': datetime.now().isoformat(),
+            'current_log_path': path,
         }
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(json.dumps({"metadata": metadata}) + '\n')
+        f.write(json.dumps({'metadata': metadata}) + '\n')
         for m in messages:
             d = m.model_dump() if hasattr(m, 'model_dump') else dict(role=m.role, content=m.content)
             f.write(json.dumps(d, ensure_ascii=False) + '\n')
@@ -345,7 +345,7 @@ def read_jsonl_messages(path):
                 continue
             try:
                 item = json.loads(line)
-                if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                if isinstance(item, dict) and 'metadata' not in item and 'event' not in item:
                     msgs.append(item)
             except json.JSONDecodeError:
                 continue
@@ -365,8 +365,8 @@ def check_duplicates(msgs, prefix_len=200):
     """
     counts = {}
     for m in msgs:
-        c = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
-        r = m.get("role", "") if isinstance(m, dict) else getattr(m, "role", "")
+        c = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
+        r = m.get('role', '') if isinstance(m, dict) else getattr(m, 'role', '')
         key = (r, str(c)[:prefix_len])
         counts[key] = counts.get(key, 0) + 1
     return {k: v for k, v in counts.items() if v > 1}
@@ -380,9 +380,9 @@ def check_timestamp_overlap(msgs):
     ts_positions = {}  # timestamp -> [list of indices]
     for i, m in enumerate(msgs):
         if isinstance(m, dict):
-            ts = m.get("timestamp", "")
+            ts = m.get('timestamp', '')
         else:
-            ts = getattr(m, "timestamp", "")
+            ts = getattr(m, 'timestamp', '')
         if ts:
             ts_positions.setdefault(ts, []).append(i)
     overlaps = []
@@ -399,7 +399,7 @@ def count_compression_markers(msgs):
     """Count compression marker messages in a message list."""
     count = 0
     for m in msgs:
-        c = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+        c = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
         if isinstance(c, str) and c.startswith(COMPRESSION_MARKER):
             count += 1
     return count
@@ -412,7 +412,7 @@ def get_tail_after_last_marker(msgs):
     """
     last_marker_idx = -1
     for i, m in enumerate(msgs):
-        c = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+        c = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
         if isinstance(c, str) and c.startswith(COMPRESSION_MARKER):
             last_marker_idx = i
     return msgs[last_marker_idx + 1:]
@@ -426,7 +426,7 @@ def get_pool_tail(conv):
     last_marker_idx = -1
     for i, m in enumerate(conv):
         role = m.get('role', '') if isinstance(m, dict) else getattr(m, 'role', '')
-        c = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+        c = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
         if role == USER and isinstance(c, str) and c.startswith(COMPRESSION_MARKER):
             last_marker_idx = i
     return conv[last_marker_idx + 1:]
@@ -442,7 +442,7 @@ class TestSingleCompressionCycle:
         """
         import uuid
         from agent_cascade.agent_pool import AgentPool
-        log_path = str(tmp_path / "single_compress.jsonl")
+        log_path = str(tmp_path / 'single_compress.jsonl')
         full_msgs = build_mixed_conversation(num_pairs=20, include_tool_chains=True)
         assert len(full_msgs) >= 35, f"Expected at least 35 messages, got {len(full_msgs)}"
 
@@ -451,15 +451,15 @@ class TestSingleCompressionCycle:
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"SingleComp_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         loaded_msgs = read_jsonl_messages(log_inst.log_path)
         dups_before = check_duplicates(loaded_msgs)
         assert not dups_before, f"Duplicates before compression: {dups_before}"
 
-        result = compress_and_sync(pool, inst_name, fraction=0.5, mode="manual",
-            summary_text="First 10 exchanges about Python features summarized.")
+        result = compress_and_sync(pool, inst_name, fraction=0.5, mode='manual',
+            summary_text='First 10 exchanges about Python features summarized.')
         assert result.success, f"Compression failed: {result.error}"
 
         post_msgs = read_jsonl_messages(log_inst.log_path)
@@ -475,17 +475,17 @@ class TestSingleCompressionCycle:
         """Verify tool call chains aren't split by compression."""
         import uuid
         from agent_cascade.agent_pool import AgentPool
-        log_path = str(tmp_path / "tool_pairs.jsonl")
+        log_path = str(tmp_path / 'tool_pairs.jsonl')
         msgs = build_tool_chain_conversation(num_chains=8)  # ~26 messages
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"ToolPairs_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        result = compress_and_sync(pool, inst_name, fraction=0.5, mode="manual",
-            summary_text="Tool chain analysis of 8 files summarized.")
+        result = compress_and_sync(pool, inst_name, fraction=0.5, mode='manual',
+            summary_text='Tool chain analysis of 8 files summarized.')
         assert result.success, f"Compression failed: {result.error}"
 
         conv = pool.get_conversation(inst_name)
@@ -496,8 +496,8 @@ class TestSingleCompressionCycle:
                 fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
                 has_tool_call = fc is not None
             elif role == FUNCTION:
-                assert has_tool_call or True, "Found FUNCTION without preceding ASSISTANT tool call"
-        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, "coder").log_path)
+                assert has_tool_call or True, 'Found FUNCTION without preceding ASSISTANT tool call'
+        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, 'coder').log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates with tool chains: {dups}"
 
@@ -521,24 +521,24 @@ class TestMultipleCompressionCycles:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "multi_compress.jsonl")
+        log_path = str(tmp_path / 'multi_compress.jsonl')
         full_msgs = build_mixed_conversation(num_pairs=30, include_tool_chains=True)
         write_jsonl(log_path, full_msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"MultiComp_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         fractions = [0.4, 0.5, 0.6]
         summaries = [
-            "Early Python features discussed.",
-            "Mid-conversation analysis continued.",
-            "Advanced topics and tool results summarized.",
+            'Early Python features discussed.',
+            'Mid-conversation analysis continued.',
+            'Advanced topics and tool results summarized.',
         ]
         for cycle in range(3):
-            result = compress_and_sync(pool, inst_name, fraction=fractions[cycle], mode="manual",
+            result = compress_and_sync(pool, inst_name, fraction=fractions[cycle], mode='manual',
                 summary_text=summaries[cycle])
             assert result.success, f"Cycle {cycle}: Compression failed: {result.error}"
 
@@ -563,20 +563,20 @@ class TestMultipleCompressionCycles:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "stress_compress.jsonl")
+        log_path = str(tmp_path / 'stress_compress.jsonl')
         full_msgs = build_mixed_conversation(num_pairs=40, include_tool_chains=True)
         write_jsonl(log_path, full_msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"StressComp_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         for cycle in range(6):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Round {cycle + 1} summary: conversations compressed.",
                 force=True)
             if not result.success:
@@ -600,21 +600,21 @@ class TestCompressionReloadCycle:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "reload_test.jsonl")
+        log_path = str(tmp_path / 'reload_test.jsonl')
         full_msgs = build_mixed_conversation(num_pairs=25, include_tool_chains=True)
         write_jsonl(log_path, full_msgs)
 
         pool1 = AgentPool(DUMMY_LLM_CFG)
         inst_name1 = f"ReloadPhase1_{uuid.uuid4().hex[:8]}"
         status = pool1.load_session_from_log(log_path, target_instance=inst_name1)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
         for i in range(2):
             result = compress_and_sync(pool1, inst_name1,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Phase 1 round {i + 1} compressed.")
             assert result.success, f"Phase 1 compress {i}: {result.error}"
-        log_inst = pool1.get_logger(inst_name1, "coder")
+        log_inst = pool1.get_logger(inst_name1, 'coder')
         phase1_jsonl = read_jsonl_messages(log_inst.log_path)
         dups_p1 = check_duplicates(phase1_jsonl)
         assert not dups_p1, f"Phase 1 duplicates: {dups_p1}"
@@ -622,17 +622,17 @@ class TestCompressionReloadCycle:
         pool2 = AgentPool(DUMMY_LLM_CFG)
         inst_name2 = f"ReloadPhase2_{uuid.uuid4().hex[:8]}"
         status2 = pool2.load_session_from_log(log_inst.log_path, target_instance=inst_name2)
-        assert not status2.startswith("Error"), f"Reload failed: {status2}"
+        assert not status2.startswith('Error'), f"Reload failed: {status2}"
 
-        log_inst2 = pool2.get_logger(inst_name2, "coder")
+        log_inst2 = pool2.get_logger(inst_name2, 'coder')
         reloaded_jsonl = read_jsonl_messages(log_inst2.log_path)
         dups_reload = check_duplicates(reloaded_jsonl)
         assert not dups_reload, f"Duplicates after reload: {dups_reload}"
 
         result3 = compress_and_sync(pool1, inst_name1,
             fraction=0.5,
-            mode="manual",
-            summary_text="Phase 2 post-reload compression.")
+            mode='manual',
+            summary_text='Phase 2 post-reload compression.')
         assert result3.success, f"Post-reload compress failed: {result3.error}"
 
         final_jsonl = read_jsonl_messages(log_inst2.log_path)
@@ -654,30 +654,30 @@ class TestCompressionReloadCycle:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "tail_test.jsonl")
+        log_path = str(tmp_path / 'tail_test.jsonl')
         msgs = build_mixed_conversation(num_pairs=25, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool1 = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"TailTest_{uuid.uuid4().hex[:8]}"
         status = pool1.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
         for i in range(2):
             result = compress_and_sync(pool1, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Summary round {i + 1}.")
-        log_inst = pool1.get_logger(inst_name, "coder")
+        log_inst = pool1.get_logger(inst_name, 'coder')
         pool2 = AgentPool(DUMMY_LLM_CFG)
         inst_name2 = f"TailReload_{uuid.uuid4().hex[:8]}"
         status2 = pool2.load_session_from_log(log_inst.log_path, target_instance=inst_name2)
-        assert not status2.startswith("Error")
+        assert not status2.startswith('Error')
 
         result = compress_and_sync(pool1, inst_name,
             fraction=0.5,
-            mode="manual",
-            summary_text="Post-reload summary.")
-        log_inst2 = pool2.get_logger(inst_name2, "coder")
+            mode='manual',
+            summary_text='Post-reload summary.')
+        log_inst2 = pool2.get_logger(inst_name2, 'coder')
         final_jsonl = read_jsonl_messages(log_inst2.log_path)
         dups = check_duplicates(final_jsonl)
         assert not dups, f"Tail message duplicates: {dups}"
@@ -686,19 +686,19 @@ class TestCompressionReloadCycle:
         """Create conversation with tool call chains. Compress through the middle."""
         import uuid
         from agent_cascade.agent_pool import AgentPool
-        log_path = str(tmp_path / "tool_chain.jsonl")
+        log_path = str(tmp_path / 'tool_chain.jsonl')
         msgs = build_tool_chain_conversation(num_chains=10)  # ~32 messages
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"ToolChain_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error")
+        assert not status.startswith('Error')
 
         result = compress_and_sync(pool, inst_name,
             fraction=0.5,
-            mode="manual",
-            summary_text="Tool chain analysis of 10 files summarized.")
+            mode='manual',
+            summary_text='Tool chain analysis of 10 files summarized.')
         assert result.success, f"Compression failed: {result.error}"
 
         conv = pool.get_conversation(inst_name)
@@ -710,9 +710,9 @@ class TestCompressionReloadCycle:
                 prev_assistant_has_tool_call = True
             elif role == FUNCTION:
                 assert prev_assistant_has_tool_call or count_compression_markers(conv[:conv.index(msg)]) > 0, \
-                    "Found orphaned FUNCTION message"
+                    'Found orphaned FUNCTION message'
                 prev_assistant_has_tool_call = False
-        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, "coder").log_path)
+        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, 'coder').log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates with tool chains: {dups}"
 
@@ -724,19 +724,19 @@ class TestCompressionReloadCycle:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "batched_chain.jsonl")
+        log_path = str(tmp_path / 'batched_chain.jsonl')
         msgs = build_batched_tool_chain_conversation(num_batches=8)  # ~49 messages
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"Batched_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error")
+        assert not status.startswith('Error')
 
         result = compress_and_sync(pool, inst_name,
             fraction=0.5,
-            mode="manual",
-            summary_text="Batched file analysis summarized.")
+            mode='manual',
+            summary_text='Batched file analysis summarized.')
         assert result.success, f"Compression failed: {result.error}"
 
         conv = pool.get_conversation(inst_name)
@@ -751,12 +751,12 @@ class TestCompressionReloadCycle:
                 if tc and len(tc) > 0:
                     tool_call_budget += len(tc)
             elif role == FUNCTION:
-                assert tool_call_budget > 0, "Found orphaned FUNCTION in batched chain"
+                assert tool_call_budget > 0, 'Found orphaned FUNCTION in batched chain'
 
                 tool_call_budget -= 1
         # No duplicates
 
-        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, "coder").log_path)
+        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, 'coder').log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates with batched chains: {dups}"
 
@@ -768,19 +768,19 @@ class TestCompressionReloadCycle:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "multi_call.jsonl")
+        log_path = str(tmp_path / 'multi_call.jsonl')
         msgs = build_multi_call_conversation(num_rounds=8)  # ~33 messages
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"MultiCall_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error")
+        assert not status.startswith('Error')
 
         result = compress_and_sync(pool, inst_name,
             fraction=0.5,
-            mode="manual",
-            summary_text="Multi-call analysis summarized.")
+            mode='manual',
+            summary_text='Multi-call analysis summarized.')
         assert result.success, f"Compression failed: {result.error}"
 
         conv = pool.get_conversation(inst_name)
@@ -795,12 +795,12 @@ class TestCompressionReloadCycle:
                 if tc and len(tc) > 0:
                     tool_call_budget += len(tc)
             elif role == FUNCTION:
-                assert tool_call_budget > 0, "Found orphaned FUNCTION in multi-call chain"
+                assert tool_call_budget > 0, 'Found orphaned FUNCTION in multi-call chain'
 
                 tool_call_budget -= 1
         # No duplicates
 
-        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, "coder").log_path)
+        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, 'coder').log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates with multi-calls: {dups}"
 
@@ -812,18 +812,18 @@ class TestCompressionReloadCycle:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "mixed_tools.jsonl")
+        log_path = str(tmp_path / 'mixed_tools.jsonl')
         msgs = build_mixed_tool_conversation(num_simple=10, num_batched=5, num_multi=3)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"MixedTools_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
         for cycle in range(3):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Mixed tool chain round {cycle + 1}.")
             assert result.success, f"Cycle {cycle}: Compression failed: {result.error}"
 
@@ -842,7 +842,7 @@ class TestCompressionReloadCycle:
                     assert tool_call_budget > 0, f"Cycle {cycle}: Orphaned FUNCTION in mixed chain"
 
                     tool_call_budget -= 1
-            log_inst = pool.get_logger(inst_name, "coder")
+            log_inst = pool.get_logger(inst_name, 'coder')
             jsonl_msgs = read_jsonl_messages(log_inst.log_path)
             dups = check_duplicates(jsonl_msgs)
             assert not dups, f"Cycle {cycle}: Duplicates with mixed tools: {dups}"
@@ -852,52 +852,52 @@ class TestCompressionReloadCycle:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "all_roles.jsonl")
+        log_path = str(tmp_path / 'all_roles.jsonl')
         msgs = build_mixed_conversation(num_pairs=20, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"AllRoles_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error")
+        assert not status.startswith('Error')
 
         result = compress_and_sync(pool, inst_name,
             fraction=0.5,
-            mode="manual",
-            summary_text="All message types preserved.")
+            mode='manual',
+            summary_text='All message types preserved.')
         conv = pool.get_conversation(inst_name)
         roles_present = set()
         for msg in conv:
             role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
             roles_present.add(role)
-        assert SYSTEM in roles_present, "System message missing after compression"
-        assert USER in roles_present, "User messages missing after compression"
-        assert ASSISTANT in roles_present, "Assistant messages missing after compression"
+        assert SYSTEM in roles_present, 'System message missing after compression'
+        assert USER in roles_present, 'User messages missing after compression'
+        assert ASSISTANT in roles_present, 'Assistant messages missing after compression'
 
     def test_compression_marker_uniqueness(self, tmp_path):
         """Each compression marker should be unique (different summary text)."""
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "marker_unique.jsonl")
+        log_path = str(tmp_path / 'marker_unique.jsonl')
         msgs = build_mixed_conversation(num_pairs=25, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"MarkerUnique_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
         summaries = [f"Summary round {i} with unique content {'x' * i}." for i in range(4)]
         for summary in summaries:
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=summary)
-        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, "coder").log_path)
-        markers = [m for m in jsonl_msgs if isinstance(m.get("content", ""), str) and
-                   m["content"].startswith(COMPRESSION_MARKER)]
-        marker_contents = [m["content"] for m in markers]
+        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, 'coder').log_path)
+        markers = [m for m in jsonl_msgs if isinstance(m.get('content', ''), str) and
+                   m['content'].startswith(COMPRESSION_MARKER)]
+        marker_contents = [m['content'] for m in markers]
         assert len(marker_contents) == len(set(marker_contents)), \
             f"Duplicate compression markers found: {len(markers)} total, {len(set(marker_contents))} unique"
 
@@ -910,19 +910,19 @@ class TestCompressionReloadCycle:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "through_chain.jsonl")
+        log_path = str(tmp_path / 'through_chain.jsonl')
         msgs = build_mixed_tool_conversation(num_simple=15, num_batched=8, num_multi=4)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"ThroughChain_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error")
+        assert not status.startswith('Error')
 
         result = compress_and_sync(pool, inst_name,
             fraction=0.6,  # Aggressive compression to force cutting through chains
-            mode="manual",
-            summary_text="Compressed through tool chain middle.")
+            mode='manual',
+            summary_text='Compressed through tool chain middle.')
         assert result.success or result.messages_discarded > 0, f"Compression failed: {result.error}"
 
         conv = pool.get_conversation(inst_name)
@@ -937,12 +937,12 @@ class TestCompressionReloadCycle:
                 if tc and len(tc) > 0:
                     tool_call_budget += len(tc)
             elif role == FUNCTION:
-                assert tool_call_budget > 0, "Orphaned FUNCTION — tool chain was split by compression"
+                assert tool_call_budget > 0, 'Orphaned FUNCTION — tool chain was split by compression'
 
                 tool_call_budget -= 1
         # No duplicates
 
-        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, "coder").log_path)
+        jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, 'coder').log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates after cutting through tool chains: {dups}"
 
@@ -963,21 +963,21 @@ class TestStressTest:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "stress_full.jsonl")
+        log_path = str(tmp_path / 'stress_full.jsonl')
         full_msgs = build_mixed_tool_conversation(num_simple=15, num_batched=8, num_multi=4)
         initial_count = len(full_msgs)
         write_jsonl(log_path, full_msgs)
         current_pool = AgentPool(DUMMY_LLM_CFG)
         current_inst_name = f"StressFull_{uuid.uuid4().hex[:8]}"
         status = current_pool.load_session_from_log(log_path, target_instance=current_inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = current_pool.get_logger(current_inst_name, "coder")
+        log_inst = current_pool.get_logger(current_inst_name, 'coder')
         reload_happened = False
         for round_num in range(5):
             result = compress_and_sync(current_pool, current_inst_name,
                 fraction=0.4,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Stress test round {round_num + 1} summary.")
             assert result.success, f"Round {round_num}: Compression failed: {result.error}"
 
@@ -1009,16 +1009,16 @@ class TestStressTest:
                 current_inst_name = f"StressReload_{uuid.uuid4().hex[:8]}"
                 status2 = new_pool.load_session_from_log(
                     log_inst.log_path, target_instance=current_inst_name)
-                assert not status2.startswith("Error")
+                assert not status2.startswith('Error')
 
                 current_pool = new_pool
 
-                log_inst = current_pool.get_logger(current_inst_name, "coder")
+                log_inst = current_pool.get_logger(current_inst_name, 'coder')
                 reload_happened = True
                 reloaded_jsonl = read_jsonl_messages(log_inst.log_path)
                 reload_dups = check_duplicates(reloaded_jsonl)
                 assert not reload_dups, f"Round {round_num} post-reload: Duplicates: {reload_dups}"
-        assert reload_happened, "Expected at least one reload to occur during stress test"
+        assert reload_happened, 'Expected at least one reload to occur during stress test'
 
         final_jsonl = read_jsonl_messages(log_inst.log_path)
         final_conv = current_pool.get_conversation(current_inst_name)
@@ -1035,20 +1035,20 @@ class TestStressTest:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "timestamp_test.jsonl")
+        log_path = str(tmp_path / 'timestamp_test.jsonl')
         msgs = build_mixed_tool_conversation(num_simple=15, num_batched=6, num_multi=3)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"Timestamp_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
         for i in range(3):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Timestamp test round {i + 1}.")
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         jsonl_msgs = read_jsonl_messages(log_inst.log_path)
         overlaps = check_timestamp_overlap(jsonl_msgs)
         assert not overlaps, f"Non-consecutive timestamp overlaps: {overlaps[:5]}"
@@ -1061,20 +1061,20 @@ class TestStressTest:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "heavy_tools.jsonl")
+        log_path = str(tmp_path / 'heavy_tools.jsonl')
         msgs = build_batched_tool_chain_conversation(num_batches=12)  # ~73 messages, most are tool-related
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"HeavyTools_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         for cycle in range(4):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Heavy tool round {cycle + 1}.")
             if not result.success:
                 break
@@ -1113,14 +1113,14 @@ class TestBoundaryRefinement:
         """Rule 1: Cut lands on FUNCTION — should skip past consecutive Fs."""
         from agent_cascade.compression.helpers import _refine_tool_call_boundary, compute_discard_count
         active = [
-            Message(role=SYSTEM, content="sys"),
-            Message(role=USER, content="u0"),
-            Message(role=ASSISTANT, content="a1", function_call=FunctionCall("tool", "{}")),
-            Message(role=FUNCTION, content="r1", name="tool"),
-            Message(role=ASSISTANT, content="a2", function_call=FunctionCall("tool", "{}")),
-            Message(role=FUNCTION, content="r2", name="tool"),
-            Message(role=ASSISTANT, content="a3 plain"),
-            Message(role=USER, content="u1"),
+            Message(role=SYSTEM, content='sys'),
+            Message(role=USER, content='u0'),
+            Message(role=ASSISTANT, content='a1', function_call=FunctionCall('tool', '{}')),
+            Message(role=FUNCTION, content='r1', name='tool'),
+            Message(role=ASSISTANT, content='a2', function_call=FunctionCall('tool', '{}')),
+            Message(role=FUNCTION, content='r2', name='tool'),
+            Message(role=ASSISTANT, content='a3 plain'),
+            Message(role=USER, content='u1'),
         ]
         refined = _refine_tool_call_boundary(active, 3, len(active))
         assert refined >= 4, f"Rule 1 failed: didn't skip past FUNCTIONs (got {refined})"
@@ -1129,18 +1129,18 @@ class TestBoundaryRefinement:
         """Rule 2: Cut lands on intermediate A in batched chain [A,A,F,F]."""
         from agent_cascade.compression.helpers import _refine_tool_call_boundary
         active = [
-            Message(role=SYSTEM, content="sys"),
-            Message(role=USER, content="u0"),
-            Message(role=ASSISTANT, content="a1", function_call=FunctionCall("read", "{}")),
-            Message(role=ASSISTANT, content="a2", function_call=FunctionCall("read", "{}")),
-            Message(role=FUNCTION, content="r1", name="read"),
-            Message(role=FUNCTION, content="r2", name="read"),
-            Message(role=ASSISTANT, content="a3", function_call=FunctionCall("read", "{}")),
-            Message(role=ASSISTANT, content="a4", function_call=FunctionCall("read", "{}")),
-            Message(role=FUNCTION, content="r3", name="read"),
-            Message(role=FUNCTION, content="r4", name="read"),
-            Message(role=ASSISTANT, content="summary"),
-            Message(role=USER, content="u1"),
+            Message(role=SYSTEM, content='sys'),
+            Message(role=USER, content='u0'),
+            Message(role=ASSISTANT, content='a1', function_call=FunctionCall('read', '{}')),
+            Message(role=ASSISTANT, content='a2', function_call=FunctionCall('read', '{}')),
+            Message(role=FUNCTION, content='r1', name='read'),
+            Message(role=FUNCTION, content='r2', name='read'),
+            Message(role=ASSISTANT, content='a3', function_call=FunctionCall('read', '{}')),
+            Message(role=ASSISTANT, content='a4', function_call=FunctionCall('read', '{}')),
+            Message(role=FUNCTION, content='r3', name='read'),
+            Message(role=FUNCTION, content='r4', name='read'),
+            Message(role=ASSISTANT, content='summary'),
+            Message(role=USER, content='u1'),
         ]
         refined = _refine_tool_call_boundary(active, 5, len(active))
         assert refined == 6, f"Rule 1->3 failed: expected 6 (first A of batch 2), got {refined}"
@@ -1152,8 +1152,8 @@ class TestBoundaryRefinement:
         """Test compute_discard_count returns valid values."""
         from agent_cascade.compression.helpers import compute_discard_count
         active = [
-            Message(role=SYSTEM, content="sys"),
-            Message(role=USER, content="u0"),
+            Message(role=SYSTEM, content='sys'),
+            Message(role=USER, content='u0'),
         ] + [Message(role=ASSISTANT, content=f"a{i}") for i in range(10)] + \
               [Message(role=USER, content=f"u{i}") for i in range(5)]
         discard = compute_discard_count(active, 0.5, force=False)
@@ -1163,14 +1163,14 @@ class TestBoundaryRefinement:
         """Test that compute_discard_count doesn't split tool chains."""
         from agent_cascade.compression.helpers import compute_discard_count
         active = [
-            Message(role=SYSTEM, content="sys"),
-            Message(role=USER, content="u0"),
-            Message(role=ASSISTANT, content="a1", function_call=FunctionCall("tool", "{}")),
-            Message(role=FUNCTION, content="r1", name="tool"),
-            Message(role=ASSISTANT, content="a2", function_call=FunctionCall("tool", "{}")),
-            Message(role=FUNCTION, content="r2", name="tool"),
-            Message(role=ASSISTANT, content="plain1"),
-            Message(role=USER, content="u1"),
+            Message(role=SYSTEM, content='sys'),
+            Message(role=USER, content='u0'),
+            Message(role=ASSISTANT, content='a1', function_call=FunctionCall('tool', '{}')),
+            Message(role=FUNCTION, content='r1', name='tool'),
+            Message(role=ASSISTANT, content='a2', function_call=FunctionCall('tool', '{}')),
+            Message(role=FUNCTION, content='r2', name='tool'),
+            Message(role=ASSISTANT, content='plain1'),
+            Message(role=USER, content='u1'),
         ]
         discard = compute_discard_count(active, 0.5, force=False)
         assert discard >= 0, f"Discard failed: {discard}"
@@ -1193,17 +1193,17 @@ class TestDirectLogMessagePath:
         """
         import uuid
         from agent_cascade.agent_pool import AgentPool
-        log_path = str(tmp_path / "log_msg_test.jsonl")
+        log_path = str(tmp_path / 'log_msg_test.jsonl')
         msgs = build_mixed_conversation(num_pairs=15, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"LogMsg_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
-        task_msg = Message(role=USER, content="Please analyze this code.")
+        log_inst = pool.get_logger(inst_name, 'coder')
+        task_msg = Message(role=USER, content='Please analyze this code.')
         response_msg = Message(role=ASSISTANT, content="Here's my analysis: the code has issues.")
 
         log_inst.log_message(task_msg)
@@ -1215,24 +1215,24 @@ class TestDirectLogMessagePath:
         jsonl_msgs = read_jsonl_messages(log_inst.log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Direct log_message duplicates: {dups}"
-        assert jsonl_msgs[-1]["content"] == "Here's my analysis: the code has issues."
-        assert jsonl_msgs[-2]["content"] == "Please analyze this code."
+        assert jsonl_msgs[-1]['content'] == "Here's my analysis: the code has issues."
+        assert jsonl_msgs[-2]['content'] == 'Please analyze this code.'
 
     def test_log_message_then_compress(self, tmp_path):
         """Load session, append via log_message(), compress. Verify no dups."""
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "log_msg_compress.jsonl")
+        log_path = str(tmp_path / 'log_msg_compress.jsonl')
         msgs = build_mixed_conversation(num_pairs=20, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"LogMsgComp_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         for i in range(5):
             task_msg = Message(role=USER, content=f"New task after load: item {i}")
             response_msg = Message(role=ASSISTANT, content=f"Response to task {i}: done.")
@@ -1241,8 +1241,8 @@ class TestDirectLogMessagePath:
             log_inst.log_message(response_msg)
         result = compress_and_sync(pool, inst_name,
             fraction=0.5,
-            mode="manual",
-            summary_text="Post-load tasks and responses summarized.")
+            mode='manual',
+            summary_text='Post-load tasks and responses summarized.')
         assert result.success, f"Compression failed: {result.error}"
 
         jsonl_msgs = read_jsonl_messages(log_inst.log_path)
@@ -1258,30 +1258,30 @@ class TestJSONLFileIntegrity:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "jsonl_valid.jsonl")
+        log_path = str(tmp_path / 'jsonl_valid.jsonl')
         msgs = build_mixed_conversation(num_pairs=20, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"JSONLValid_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
         for i in range(3):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Integrity check round {i + 1}.")
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         with open(log_inst.log_path, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f if line.strip()]
-        assert len(lines) >= 2, "JSONL should have at least metadata + 1 message"
+        assert len(lines) >= 2, 'JSONL should have at least metadata + 1 message'
 
         first = json.loads(lines[0])
-        assert "metadata" in first, "First line should contain metadata"
+        assert 'metadata' in first, 'First line should contain metadata'
         for i, line in enumerate(lines[1:], start=2):
             msg = json.loads(line)
-            assert "role" in msg, f"Line {i}: missing 'role' field"
-            assert "content" in msg, f"Line {i}: missing 'content' field"
+            assert 'role' in msg, f"Line {i}: missing 'role' field"
+            assert 'content' in msg, f"Line {i}: missing 'content' field"
 
     def test_message_count_decreases_in_pool(self, tmp_path):
         """Verify pool message count decreases monotonically with each compression.
@@ -1291,21 +1291,21 @@ class TestJSONLFileIntegrity:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "count_test.jsonl")
+        log_path = str(tmp_path / 'count_test.jsonl')
         msgs = build_mixed_conversation(num_pairs=30, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"CountTest_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         prev_conv_len = len(pool.get_conversation(inst_name))
         for i in range(4):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Count test round {i + 1}.")
             if not result.success:
                 break
@@ -1326,16 +1326,16 @@ class TestPreCompressedHistory:
         """Load a pre-compressed session (with existing markers). Verify no dups."""
         import uuid
         from agent_cascade.agent_pool import AgentPool
-        log_path = str(tmp_path / "precomp.jsonl")
+        log_path = str(tmp_path / 'precomp.jsonl')
         msgs = build_compressed_history(num_rounds=4, tail_pairs_per_round=5)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"PreComp_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         jsonl_msgs = read_jsonl_messages(log_inst.log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates in pre-compressed load: {dups}"
@@ -1348,7 +1348,7 @@ class TestPreCompressedHistory:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "precomp_compress.jsonl")
+        log_path = str(tmp_path / 'precomp_compress.jsonl')
         msgs = build_compressed_history(num_rounds=3, tail_pairs_per_round=6)
         for i in range(8):
             idx = 18 + i
@@ -1362,15 +1362,15 @@ class TestPreCompressedHistory:
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"PreCompC_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error")
+        assert not status.startswith('Error')
 
         result = compress_and_sync(pool, inst_name,
             fraction=0.5,
-            mode="manual",
-            summary_text="Additional compression on pre-compressed history.",)
+            mode='manual',
+            summary_text='Additional compression on pre-compressed history.',)
         assert result.success, f"Compression failed: {result.error}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         jsonl_msgs = read_jsonl_messages(log_inst.log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates after compressing pre-compressed history: {dups}"
@@ -1390,20 +1390,20 @@ class TestTailSyncVerification:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "tail_sync.jsonl")
+        log_path = str(tmp_path / 'tail_sync.jsonl')
         msgs = build_mixed_conversation(num_pairs=25, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"TailSync_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         for cycle in range(3):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Tail sync round {cycle + 1}.")
             assert result.success, f"Cycle {cycle}: Compression failed: {result.error}"
 
@@ -1421,30 +1421,30 @@ class TestTailSyncVerification:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "tail_sync_reload.jsonl")
+        log_path = str(tmp_path / 'tail_sync_reload.jsonl')
         msgs = build_mixed_conversation(num_pairs=20, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool1 = AgentPool(DUMMY_LLM_CFG)
         inst_name1 = f"TailSyncR1_{uuid.uuid4().hex[:8]}"
         status1 = pool1.load_session_from_log(log_path, target_instance=inst_name1)
-        assert not status1.startswith("Error"), f"Load failed: {status1}"
+        assert not status1.startswith('Error'), f"Load failed: {status1}"
         for i in range(2):
             result = compress_and_sync(pool1, inst_name1,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Pre-reload round {i + 1}.")
-        log_inst = pool1.get_logger(inst_name1, "coder")
+        log_inst = pool1.get_logger(inst_name1, 'coder')
         pool2 = AgentPool(DUMMY_LLM_CFG)
         inst_name2 = f"TailSyncR2_{uuid.uuid4().hex[:8]}"
         status2 = pool2.load_session_from_log(log_inst.log_path, target_instance=inst_name2)
-        assert not status2.startswith("Error"), f"Reload failed: {status2}"
+        assert not status2.startswith('Error'), f"Reload failed: {status2}"
 
-        log_inst2 = pool2.get_logger(inst_name2, "coder")
+        log_inst2 = pool2.get_logger(inst_name2, 'coder')
         result = compress_and_sync(pool1, inst_name1,
             fraction=0.5,
-            mode="manual",
-            summary_text="Post-reload compression.")
+            mode='manual',
+            summary_text='Post-reload compression.')
         jsonl_msgs = read_jsonl_messages(log_inst2.log_path)
         conv = pool2.get_conversation(inst_name2)
 
@@ -1464,29 +1464,29 @@ class TestConsecutiveMarkers:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "consec_markers.jsonl")
+        log_path = str(tmp_path / 'consec_markers.jsonl')
         msgs = build_mixed_conversation(num_pairs=25, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"Consec_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         all_marker_contents = []
         for i in range(5):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.4,
-                mode="manual",
+                mode='manual',
                 summary_text=f"Marker content {i} with unique padding {'M' * (i + 1)}")
             if not result.success:
                 break
             jsonl_msgs = read_jsonl_messages(log_inst.log_path)
-            markers = [m for m in jsonl_msgs if isinstance(m.get("content", ""), str) and
-                       m["content"].startswith(COMPRESSION_MARKER)]
+            markers = [m for m in jsonl_msgs if isinstance(m.get('content', ''), str) and
+                       m['content'].startswith(COMPRESSION_MARKER)]
             new_markers = markers[len(all_marker_contents):]
-            all_marker_contents.extend(m["content"] for m in new_markers)
+            all_marker_contents.extend(m['content'] for m in new_markers)
         assert len(all_marker_contents) == len(set(all_marker_contents)), \
             f"Duplicate markers across compressions: {len(all_marker_contents)} total, " \
             f"{len(set(all_marker_contents))}"
@@ -1500,18 +1500,18 @@ class TestSystemMessageUniqueness:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "sys_unique.jsonl")
+        log_path = str(tmp_path / 'sys_unique.jsonl')
         msgs = build_mixed_conversation(num_pairs=20, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"SysUnique_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
         for i in range(3):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"System test round {i + 1}.")
         conv = pool.get_conversation(inst_name)
         sys_msgs = [m for m in conv if
@@ -1523,20 +1523,20 @@ class TestSystemMessageUniqueness:
         import uuid
         from agent_cascade.agent_pool import AgentPool
         from agent_cascade.compression.core import compress_context as _compress
-        log_path = str(tmp_path / "sys_unique_jsonl.jsonl")
+        log_path = str(tmp_path / 'sys_unique_jsonl.jsonl')
         msgs = build_mixed_conversation(num_pairs=20, include_tool_chains=True)
         write_jsonl(log_path, msgs)
 
         pool = AgentPool(DUMMY_LLM_CFG)
         inst_name = f"SysUniqueJ_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
         for i in range(3):
             result = compress_and_sync(pool, inst_name,
                 fraction=0.5,
-                mode="manual",
+                mode='manual',
                 summary_text=f"JSONL system test round {i + 1}.")
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         jsonl_msgs = read_jsonl_messages(log_inst.log_path)
-        sys_count = sum(1 for m in jsonl_msgs if m["role"] == SYSTEM)
+        sys_count = sum(1 for m in jsonl_msgs if m['role'] == SYSTEM)
         assert sys_count == 1, f"Expected exactly 1 system message in JSONL, found {sys_count}"

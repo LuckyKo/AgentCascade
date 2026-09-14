@@ -58,7 +58,7 @@ class FilterByBrandTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         brand_names = params_dict.get('brand_names', [])
         product_ids = params_dict.get('product_ids')
@@ -68,7 +68,7 @@ class FilterByBrandTool(BaseShoppingTool):
             missing_ids = [pid for pid in product_ids if pid not in self.products_map]
             if missing_ids:
                 return self.format_result_as_json({
-                    "error": f"Some product_ids not found in database: {missing_ids}"
+                    'error': f"Some product_ids not found in database: {missing_ids}"
                 })
         else:
             search_space = self.products
@@ -80,7 +80,7 @@ class FilterByBrandTool(BaseShoppingTool):
             if p.get('brand', '').lower() in brand_set
         ]
 
-        output_data = [p.get("product_id") for p in filtered_results]
+        output_data = [p.get('product_id') for p in filtered_results]
 
-        return self.format_result_as_json({"filtered_products_ids": output_data})
+        return self.format_result_as_json({'filtered_products_ids': output_data})
 

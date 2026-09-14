@@ -94,7 +94,7 @@ class QwenVLChatAtDS(BaseFnCallModel):
             response,
             STREAM_MAX_SILENCE_SECONDS,
             STREAM_MAX_TOTAL_SECONDS,
-            error_message_prefix="DashScope",
+            error_message_prefix='DashScope',
         ):
             # print(chunk)
             if chunk.status_code == HTTPStatus.OK:

@@ -341,7 +341,7 @@ def build_state_from_pool(
     max_tokens = _get_max_tokens_for_instance(pool, instance)
 
     # Extract compression summary from conversation markers
-    current_summary = instance.compression_summary or ""
+    current_summary = instance.compression_summary or ''
 
     # Build sub-agent state snapshot (C3: take snapshot before iterating)
     instance_snapshot = dict(pool.instances)
@@ -1351,10 +1351,10 @@ def _apply_ui_config(
 
         except AttributeError:
             # pool._execution or _state_lock doesn't exist — skip safely
-            logger.debug("Execution engine not available for pool config update")
+            logger.debug('Execution engine not available for pool config update')
         except Exception as e:
             # Lock access should always work, but don't let it break generation
-            logger.exception("Unexpected error updating pool.llm_cfg: %s", e)
+            logger.exception('Unexpected error updating pool.llm_cfg: %s', e)
 
 def get_agent_state_from_pool(
     pool: AgentPool,

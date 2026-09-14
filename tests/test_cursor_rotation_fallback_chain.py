@@ -60,9 +60,9 @@ def _disable_sanity_probe():
 @pytest.fixture
 def router(tmp_path_factory):
     """Create an isolated APIRouter instance with its own config dir."""
-    test_config_dir = str(tmp_path_factory.mktemp("api_router_test"))
+    test_config_dir = str(tmp_path_factory.mktemp('api_router_test'))
     
-    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_config_dir}):
+    with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_config_dir}):
         r = APIRouter(default_llm_cfg={
             'api_base': 'http://default-api',
             'model': 'default-model',
@@ -105,8 +105,8 @@ class TestFourTierFallbackChain:
 
     def test_chain_includes_all_tiers(self, router):
         """Chain includes agent-specific (T1), last-successful (T3), and default (T4)."""
-        _add_endpoint(router, "agent_ep", "http://agent-api")
-        _set_agent_priorities(router, "coder", ["ep_agent_ep"])
+        _add_endpoint(router, 'agent_ep', 'http://agent-api')
+        _set_agent_priorities(router, 'coder', ['ep_agent_ep'])
 
         # Set last successful endpoint (Tier 3)
         with router._lock:
@@ -116,7 +116,7 @@ class TestFourTierFallbackChain:
             }
             router._agent_types_with_priorities.add('coder')
 
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
 
         # Should have: agent_ep (T1), last-successful (T3), default (T4)
         assert len(chain) >= 2, f"Expected at least 2 endpoints, got {len(chain)}"
@@ -126,10 +126,10 @@ class TestFourTierFallbackChain:
 
     def test_tier1_agent_specific_first(self, router):
         """Agent-specific endpoints (Tier 1) are tried first."""
-        _add_endpoint(router, "coder_ep", "http://coder-api")
-        _set_agent_priorities(router, "coder", ["ep_coder_ep"])
+        _add_endpoint(router, 'coder_ep', 'http://coder-api')
+        _set_agent_priorities(router, 'coder', ['ep_coder_ep'])
 
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
 
         assert chain[0]['api_base'] == 'http://coder-api', \
             f"Tier 1 endpoint should be first, got {chain[0].get('api_base')}"
@@ -141,11 +141,11 @@ class TestFourTierFallbackChain:
         resolved endpoint pool (single FIFO slot system). An agent with no own priorities must not
         pick up a caller's endpoint; it resolves through its own chain (Tier 3/Tier 4) only.
         """
-        _add_endpoint(router, "caller_ep", "http://caller-api")
-        _set_agent_priorities(router, "orchestrator", ["ep_caller_ep"])
+        _add_endpoint(router, 'caller_ep', 'http://caller-api')
+        _set_agent_priorities(router, 'orchestrator', ['ep_caller_ep'])
 
         # 'generalist' has no configured priorities — must NOT inherit caller's endpoint
-        chain = router.get_endpoint_chain("generalist")
+        chain = router.get_endpoint_chain('generalist')
 
         api_bases = [cfg.get('api_base') for cfg in chain]
         assert 'http://caller-api' not in api_bases, \
@@ -155,9 +155,9 @@ class TestFourTierFallbackChain:
 
     def test_tier3_last_successful_endpoint(self, router):
         """Last successful endpoint (Tier 3) is used when agent-specific endpoints are exhausted."""
-        _add_endpoint(router, "coder_ep", "http://coder-api")
-        _add_endpoint(router, "recovery_ep", "http://recovery-api")  # The recovery endpoint must exist
-        _set_agent_priorities(router, "Coder", ["ep_coder_ep"])
+        _add_endpoint(router, 'coder_ep', 'http://coder-api')
+        _add_endpoint(router, 'recovery_ep', 'http://recovery-api')  # The recovery endpoint must exist
+        _set_agent_priorities(router, 'Coder', ['ep_coder_ep'])
         
         # Simulate: agent_ep fails, last-successful was the recovery endpoint
         with router._lock:
@@ -170,7 +170,7 @@ class TestFourTierFallbackChain:
         with router._lock:
             router.endpoints['ep_coder_ep'].enabled = False
         
-        chain = router.get_endpoint_chain("Coder")
+        chain = router.get_endpoint_chain('Coder')
         
         api_bases = [cfg.get('api_base') for cfg in chain]
         assert 'http://recovery-api' in api_bases, \
@@ -178,18 +178,18 @@ class TestFourTierFallbackChain:
 
     def test_tier4_default_always_last(self, router):
         """Default endpoint is always the last in the chain."""
-        _add_endpoint(router, "ep1", "http://ep1")
-        _add_endpoint(router, "ep2", "http://ep2")
-        _set_agent_priorities(router, "coder", ["ep_ep1", "ep_ep2"])
+        _add_endpoint(router, 'ep1', 'http://ep1')
+        _add_endpoint(router, 'ep2', 'http://ep2')
+        _set_agent_priorities(router, 'coder', ['ep_ep1', 'ep_ep2'])
         
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
         
         assert chain[-1]['api_base'] == 'http://default-api', \
             f"Default should be last, got {chain[-1].get('api_base')}"
 
     def test_no_configured_endpoints_falls_back_to_default(self, router):
         """Agent with no configured endpoints gets only the default."""
-        chain = router.get_endpoint_chain("unknown_agent")
+        chain = router.get_endpoint_chain('unknown_agent')
         
         assert len(chain) == 1
         assert chain[0]['api_base'] == 'http://default-api'
@@ -204,8 +204,8 @@ class TestSimulatedFailuresPerTier:
 
     def test_tier1_failure_falls_to_next(self, router):
         """When Tier 1 endpoint fails, call_with_fallback tries next in chain."""
-        _add_endpoint(router, "failing_ep", "http://failing-api", max_retries=0)
-        _set_agent_priorities(router, "coder", ["ep_failing_ep"])
+        _add_endpoint(router, 'failing_ep', 'http://failing-api', max_retries=0)
+        _set_agent_priorities(router, 'coder', ['ep_failing_ep'])
         
         call_count = [0]
         
@@ -213,18 +213,18 @@ class TestSimulatedFailuresPerTier:
             call_count[0] += 1
             api_base = llm_cfg.get('api_base')
             if api_base == 'http://failing-api':
-                raise ConnectionError("Tier 1 failed")
-            return "success from fallback"
+                raise ConnectionError('Tier 1 failed')
+            return 'success from fallback'
         
-        result = router.call_with_fallback("coder", mock_call)
+        result = router.call_with_fallback('coder', mock_call)
         
-        assert result == "success from fallback"
+        assert result == 'success from fallback'
         assert call_count[0] >= 2, f"Should have tried at least 2 endpoints, got {call_count[0]}"
 
     def test_all_tiers_fail_raises_runtime_error(self, router):
         """When all endpoints fail, RuntimeError is raised with all errors."""
-        _add_endpoint(router, "bad_ep", "http://bad-api", max_retries=0)
-        _set_agent_priorities(router, "coder", ["ep_bad_ep"])
+        _add_endpoint(router, 'bad_ep', 'http://bad-api', max_retries=0)
+        _set_agent_priorities(router, 'coder', ['ep_bad_ep'])
         
         # Override default to also fail
         router.default_llm_cfg['api_base'] = 'http://also-bad'
@@ -233,9 +233,9 @@ class TestSimulatedFailuresPerTier:
             raise ConnectionError(f"Failed at {llm_cfg.get('api_base')}")
         
         with pytest.raises(RuntimeError) as exc_info:
-            router.call_with_fallback("coder", always_fail)
+            router.call_with_fallback('coder', always_fail)
         
-        assert "All API endpoints exhausted" in str(exc_info.value)
+        assert 'All API endpoints exhausted' in str(exc_info.value)
 
 
 # ============================================================================
@@ -247,67 +247,67 @@ class TestInstanceCursorPersistence:
 
     def test_cursor_advanced_on_inner_loop(self, router):
         """advance_instance_endpoint increments cursor for the instance."""
-        pos = router.advance_instance_endpoint("worker1")
+        pos = router.advance_instance_endpoint('worker1')
         assert pos == 1
         
-        pos = router.advance_instance_endpoint("worker1")
+        pos = router.advance_instance_endpoint('worker1')
         assert pos == 2
 
     def test_cursor_is_per_instance(self, router):
         """Each instance has its own independent cursor."""
-        router.advance_instance_endpoint("worker1")
-        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint('worker1')
+        router.advance_instance_endpoint('worker1')
         
         # worker1 at position 2
         # worker2 should be at 0 (default)
         with router._lock:
-            assert router._instance_endpoint_position.get("worker1", 0) == 2
-            assert router._instance_endpoint_position.get("worker2", 0) == 0
+            assert router._instance_endpoint_position.get('worker1', 0) == 2
+            assert router._instance_endpoint_position.get('worker2', 0) == 0
 
     def test_cursor_rotates_chain_on_retry(self, router):
         """Chain is rotated based on instance cursor position."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _add_endpoint(router, "ep_b", "http://b-api")
-        _add_endpoint(router, "ep_c", "http://c-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b", "ep_ep_c"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _add_endpoint(router, 'ep_b', 'http://b-api')
+        _add_endpoint(router, 'ep_c', 'http://c-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a', 'ep_ep_b', 'ep_ep_c'])
         
         # First call — cursor at 0, chain starts with ep_a
-        chain1 = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain1 = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain1[0]['api_base'] == 'http://a-api'
         
         # Advance cursor (simulating inner-loop detection)
-        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint('worker1')
         
         # Next call — chain should start with ep_b
-        chain2 = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain2 = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain2[0]['api_base'] == 'http://b-api', \
             f"Expected chain to rotate to ep_b, got {chain2[0].get('api_base')}"
 
     def test_cursor_wraps_around(self, router):
         """Cursor wraps around when advanced past the number of endpoints."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _add_endpoint(router, "ep_b", "http://b-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _add_endpoint(router, 'ep_b', 'http://b-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a', 'ep_ep_b'])
         
         # Advance past the number of endpoints
         for _ in range(5):
-            router.advance_instance_endpoint("worker1")
+            router.advance_instance_endpoint('worker1')
         
         # Cursor should wrap (5 % 2 = 1)
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain[0]['api_base'] == 'http://b-api', \
             f"Expected wrapped cursor to start at ep_b, got {chain[0].get('api_base')}"
 
     def test_cursor_not_advanced_for_other_instances(self, router):
         """Advancing one instance's cursor doesn't affect others."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _add_endpoint(router, "ep_b", "http://b-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _add_endpoint(router, 'ep_b', 'http://b-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a', 'ep_ep_b'])
         
-        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint('worker1')
         
         # worker2 should still get unrotated chain
-        chain = router.get_endpoint_chain("coder", instance_name="worker2")
+        chain = router.get_endpoint_chain('coder', instance_name='worker2')
         assert chain[0]['api_base'] == 'http://a-api'
 
 
@@ -320,35 +320,35 @@ class TestCursorResetAfterSuccess:
 
     def test_reset_clears_cursor(self, router):
         """reset_instance_endpoint clears the cursor for an instance."""
-        router.advance_instance_endpoint("worker1")
-        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint('worker1')
+        router.advance_instance_endpoint('worker1')
         
-        assert router._instance_endpoint_position.get("worker1", 0) == 2
+        assert router._instance_endpoint_position.get('worker1', 0) == 2
         
-        router.reset_instance_endpoint("worker1")
+        router.reset_instance_endpoint('worker1')
         
-        assert "worker1" not in router._instance_endpoint_position
+        assert 'worker1' not in router._instance_endpoint_position
 
     def test_reset_restores_original_chain_order(self, router):
         """After reset, chain returns to original order."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _add_endpoint(router, "ep_b", "http://b-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _add_endpoint(router, 'ep_b', 'http://b-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a', 'ep_ep_b'])
         
         # Advance cursor
-        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint('worker1')
         
         # Reset (simulating successful completion)
-        router.reset_instance_endpoint("worker1")
+        router.reset_instance_endpoint('worker1')
         
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain[0]['api_base'] == 'http://a-api', \
-            "Chain should be back to original order after reset"
+            'Chain should be back to original order after reset'
 
     def test_reset_nonexistent_cursor_is_noop(self, router):
         """Resetting a cursor that doesn't exist is safe."""
         # Should not raise
-        router.reset_instance_endpoint("nonexistent_worker")
+        router.reset_instance_endpoint('nonexistent_worker')
 
 
 # ============================================================================
@@ -364,7 +364,7 @@ class TestCursorResetOnConfigChange:
     instance cursors so no stale rotation survives a config change.
     """
 
-    def _ep(self, name, api_base, model="test-model"):
+    def _ep(self, name, api_base, model='test-model'):
         return APIEndpoint(
             id=f"ep_{name}",
             name=name,
@@ -375,23 +375,23 @@ class TestCursorResetOnConfigChange:
 
     def test_from_dict_clears_all_instance_cursors(self, router):
         """Advancing a cursor then calling from_dict clears it (no stale positional rotation)."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _add_endpoint(router, "ep_b", "http://b-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _add_endpoint(router, 'ep_b', 'http://b-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a', 'ep_ep_b'])
 
         # Advance the cursor so a positional rotation would normally apply.
-        router.advance_instance_endpoint("worker1")
-        assert router._instance_endpoint_position.get("worker1", 0) == 1
+        router.advance_instance_endpoint('worker1')
+        assert router._instance_endpoint_position.get('worker1', 0) == 1
 
         # Config change via the UI entry point (from_dict).
         router.from_dict({
-            "endpoints": [self._ep("ep_a", "http://a-api").to_dict(),
-                          self._ep("ep_b", "http://b-api").to_dict()],
-            "agent_priorities": {"coder": ["ep_ep_a", "ep_ep_b"]},
+            'endpoints': [self._ep('ep_a', 'http://a-api').to_dict(),
+                          self._ep('ep_b', 'http://b-api').to_dict()],
+            'agent_priorities': {'coder': ['ep_ep_a', 'ep_ep_b']},
         })
 
         # All cursors must be cleared.
-        assert "worker1" not in router._instance_endpoint_position, \
+        assert 'worker1' not in router._instance_endpoint_position, \
             f"Cursor should be cleared after from_dict, got {router._instance_endpoint_position}"
 
     def test_from_dict_order_change_no_stale_rotation(self, router):
@@ -400,24 +400,24 @@ class TestCursorResetOnConfigChange:
         Before the fix: cursor=1 survived from_dict and rotated the NEW chain to start at ep_b.
         After the fix: cursor is cleared, so the chain starts at the new first endpoint (ep_c).
         """
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _add_endpoint(router, "ep_b", "http://b-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _add_endpoint(router, 'ep_b', 'http://b-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a', 'ep_ep_b'])
 
         # Advance cursor (position 1 → would rotate to ep_b under the old order).
-        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint('worker1')
 
         # Reorder endpoints via from_dict: new priority order is [c, a, b].
         router.from_dict({
-            "endpoints": [self._ep("ep_a", "http://a-api").to_dict(),
-                          self._ep("ep_b", "http://b-api").to_dict(),
-                          self._ep("ep_c", "http://c-api").to_dict()],
-            "agent_priorities": {"coder": ["ep_ep_c", "ep_ep_a", "ep_ep_b"]},
+            'endpoints': [self._ep('ep_a', 'http://a-api').to_dict(),
+                          self._ep('ep_b', 'http://b-api').to_dict(),
+                          self._ep('ep_c', 'http://c-api').to_dict()],
+            'agent_priorities': {'coder': ['ep_ep_c', 'ep_ep_a', 'ep_ep_b']},
         })
 
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         # Cursor cleared → unrotated order → first endpoint is the new Tier-1 head (ep_c).
-        assert chain[0]["api_base"] == "http://c-api", \
+        assert chain[0]['api_base'] == 'http://c-api', \
             f"Expected fresh order (ep_c) after config change, got {chain[0].get('api_base')}"
 
     def test_from_dict_resets_concurrent_live_cursor_of_other_instance(self, router):
@@ -428,21 +428,21 @@ class TestCursorResetOnConfigChange:
         edit via from_dict must invalidate every running agent's positional cursor, not just the one
         that triggered the edit.
         """
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _add_endpoint(router, "ep_b", "http://b-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a", "ep_ep_b"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _add_endpoint(router, 'ep_b', 'http://b-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a', 'ep_ep_b'])
 
         # Two concurrent live cursors for DIFFERENT instances.
-        router.advance_instance_endpoint("worker1")
-        router.advance_instance_endpoint("worker2")
-        assert router._instance_endpoint_position.get("worker1", 0) == 1
-        assert router._instance_endpoint_position.get("worker2", 0) == 1
+        router.advance_instance_endpoint('worker1')
+        router.advance_instance_endpoint('worker2')
+        assert router._instance_endpoint_position.get('worker1', 0) == 1
+        assert router._instance_endpoint_position.get('worker2', 0) == 1
 
         # Unrelated config change (same endpoints, same priorities) via the UI entry point.
         router.from_dict({
-            "endpoints": [self._ep("ep_a", "http://a-api").to_dict(),
-                          self._ep("ep_b", "http://b-api").to_dict()],
-            "agent_priorities": {"coder": ["ep_ep_a", "ep_ep_b"]},
+            'endpoints': [self._ep('ep_a', 'http://a-api').to_dict(),
+                          self._ep('ep_b', 'http://b-api').to_dict()],
+            'agent_priorities': {'coder': ['ep_ep_a', 'ep_ep_b']},
         })
 
         # The concurrent live cursor for the OTHER instance must also be reset.
@@ -458,15 +458,15 @@ class TestCursorResetOnConfigChange:
         is a safe no-op on cursors without corrupting the freshly-loaded state.
         """
         router.from_dict({
-            "endpoints": [self._ep("ep_a", "http://a-api").to_dict()],
-            "agent_priorities": {"coder": ["ep_ep_a"]},
+            'endpoints': [self._ep('ep_a', 'http://a-api').to_dict()],
+            'agent_priorities': {'coder': ['ep_ep_a']},
         })
         # No cursors were present, so the store stays empty.
         assert router._instance_endpoint_position == {}
         # The config was still applied (not a silent no-op on state).
-        assert "ep_ep_a" in router.endpoints
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
-        assert chain[0]["api_base"] == "http://a-api"
+        assert 'ep_ep_a' in router.endpoints
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
+        assert chain[0]['api_base'] == 'http://a-api'
 
 
 # ============================================================================
@@ -478,15 +478,15 @@ class TestCooldownFiltering:
 
     def test_cooldowned_endpoint_skipped(self, router):
         """Endpoint in cooldown period is excluded from the chain."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a'])
 
         # Mark endpoint as failed (within cooldown). Cooldown keys are per-(base, model)
         # since the router-cascade fix — use the same key format get_endpoint_chain reads.
         with router._lock:
             router._endpoint_failure_times[(normalize_api_base('http://a-api'), 'test-model')] = time.time()
 
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
         
         api_bases = [cfg.get('api_base') for cfg in chain]
         # ep_a should be skipped, only default remains
@@ -494,14 +494,14 @@ class TestCooldownFiltering:
 
     def test_cooldown_expires_endpoint_available(self, router):
         """Endpoint becomes available after cooldown expires."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a'])
 
         # Mark as failed long ago (beyond cooldown) — per-(base, model) key format.
         with router._lock:
             router._endpoint_failure_times[(normalize_api_base('http://a-api'), 'test-model')] = time.time() - 3600
 
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
         
         api_bases = [cfg.get('api_base') for cfg in chain]
         assert 'http://a-api' in api_bases
@@ -516,20 +516,20 @@ class TestCallWithFallbackGenerators:
 
     def test_generator_passed_through(self, router):
         """Generator results are passed through without double-wrapping."""
-        _add_endpoint(router, "ep_a", "http://a-api")
-        _set_agent_priorities(router, "coder", ["ep_ep_a"])
+        _add_endpoint(router, 'ep_a', 'http://a-api')
+        _set_agent_priorities(router, 'coder', ['ep_ep_a'])
         
         def gen_call(llm_cfg, *args, **kwargs):
-            yield "chunk1"
-            yield "chunk2"
+            yield 'chunk1'
+            yield 'chunk2'
         
-        result = router.call_with_fallback("coder", gen_call)
+        result = router.call_with_fallback('coder', gen_call)
         
         # Should be a generator
         assert hasattr(result, '__iter__') and hasattr(result, '__next__')
         
         chunks = list(result)
-        assert chunks == ["chunk1", "chunk2"]
+        assert chunks == ['chunk1', 'chunk2']
 
     def test_generator_error_triggers_fallback(self, router):
         """Errors on first chunk of generator trigger fallback to next endpoint.
@@ -539,8 +539,8 @@ class TestCallWithFallbackGenerators:
         calls go directly through without retry wrapping. This test uses concurrency_limit=1
         to ensure the fallback mechanism is exercised.
         """
-        _add_endpoint(router, "bad_ep", "http://bad-api", max_retries=0, concurrency_limit=1)
-        _set_agent_priorities(router, "Coder", ["ep_bad_ep"])
+        _add_endpoint(router, 'bad_ep', 'http://bad-api', max_retries=0, concurrency_limit=1)
+        _set_agent_priorities(router, 'Coder', ['ep_bad_ep'])
         
         call_bases = []  # Track which endpoints were called and in what order
         
@@ -548,11 +548,11 @@ class TestCallWithFallbackGenerators:
             api_base = llm_cfg.get('api_base')
             call_bases.append(api_base)
             if api_base == 'http://bad-api':
-                raise ConnectionError("First chunk failure")
-            yield "fallback success"
+                raise ConnectionError('First chunk failure')
+            yield 'fallback success'
         
         # call_with_fallback should catch the error and retry with fallback endpoints.
-        result = router.call_with_fallback("Coder", gen_call)
+        result = router.call_with_fallback('Coder', gen_call)
         
         try:
             chunks = list(result)

@@ -223,7 +223,7 @@ class AsyncShellTracker:
 
         # Opt-out override (e.g. test harnesses): force no console window regardless of caller state.
         # Does NOT change production defaults — only takes effect when this env var is set truthy.
-        if console_window and os.getenv("AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW", "").strip() not in ("", "0", "false", "False"):
+        if console_window and os.getenv('AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW', '').strip() not in ('', '0', 'false', 'False'):
             console_window = False
 
         tool_id = self._next_id(agent_name)
@@ -1092,13 +1092,13 @@ class AsyncShellTracker:
         if not new_lines:
             # Still running with no new output — send minimal heartbeat so sleeping
             # agents wake up and know the process hasn't died.
-            logger.debug("[async_shell] heartbeat(no output) agent=%s tool_id=%s beat=%s",
+            logger.debug('[async_shell] heartbeat(no output) agent=%s tool_id=%s beat=%s',
                          agent_name, tool_id, beat)
             msg = f"⟨shell_cmd heartbeat⟩ Beat {beat} ({elapsed:.0f}s), Tool ID: {tool_id} | No new output (still running)"
             self._enqueue(agent_name, msg)
             return
 
-        logger.debug("[async_shell] heartbeat with output agent=%s tool_id=%s lines=%d",
+        logger.debug('[async_shell] heartbeat with output agent=%s tool_id=%s lines=%d',
                      agent_name, tool_id, len(new_lines))
         output_text = self._format_output_text(new_lines)
         if not output_text:
@@ -1207,9 +1207,9 @@ class AsyncShellTracker:
         else:
             rc = task.return_code if task and task.return_code is not None else 0
             if rc == -1:
-                status = "killed externally (via __kill)"
+                status = 'killed externally (via __kill)'
             elif rc == 0:
-                status = "success"
+                status = 'success'
             else:
                 status = f"exit code {rc}"
             return (
@@ -1443,7 +1443,7 @@ class AsyncShellTracker:
 
         # Format status header
         if completed:
-            rc = return_code if return_code is not None else "?"
+            rc = return_code if return_code is not None else '?'
             status_label = f"completed (exit code {rc}, {elapsed:.0f}s)"
         else:
             status_label = f"running ({elapsed:.0f}s elapsed)"
@@ -1478,7 +1478,7 @@ class AsyncShellTracker:
 
             msg += f"\nOutput ({len(consumed_lines)} lines):\n{output_text}"
         else:
-            msg += "\nNo new output since last status check."
+            msg += '\nNo new output since last status check.'
 
         return msg
 

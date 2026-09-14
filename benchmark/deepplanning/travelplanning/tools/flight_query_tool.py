@@ -15,18 +15,18 @@ class FlightQueryTool(BaseTravelTool):
     LANG_FIELDS = {
         'zh': {
             'segment': lambda idx: f"第{idx}段",
-            'remaining_seats': "剩余票数量",
-            'sufficient': "充足",
-            'no_info': "未查询到信息，请检查输入参数",
+            'remaining_seats': '剩余票数量',
+            'sufficient': '充足',
+            'no_info': '未查询到信息，请检查输入参数',
             'not_found': lambda o, d, date, seat: f"未找到从 {o} 到 {d} 在 {date} 的航班信息",
             'db_loaded': lambda count, path: f"✓ 航班数据库加载成功: {count} 条记录 (路径: {path})",
             'db_not_found': lambda path: f"⚠ 警告: 航班数据库未找到于 {path}",
         },
         'en': {
             'segment': lambda idx: f"Segment {idx}",
-            'remaining_seats': "Remaining Seats",
-            'sufficient': "Available",
-            'no_info': "No information found, please check input parameters",
+            'remaining_seats': 'Remaining Seats',
+            'sufficient': 'Available',
+            'no_info': 'No information found, please check input parameters',
             'not_found': lambda o, d, date, seat: f"No flight information found from {o} to {d} on {date}",
             'db_loaded': lambda count, path: f"✓ Flight database loaded: {count} records (path: {path})",
             'db_not_found': lambda path: f"⚠ Warning: Flight database not found at {path}",
@@ -92,27 +92,27 @@ class FlightQueryTool(BaseTravelTool):
             
             for idx, row in enumerate(route_segments.itertuples(), 1):
                 seat_status = row.seat_status
-                if seat_status is None or str(seat_status).strip() == "" or str(seat_status).lower() == "nan":
+                if seat_status is None or str(seat_status).strip() == '' or str(seat_status).lower() == 'nan':
                     seat_status = self.fields['sufficient']
                 
                 segment = {
                     self.fields['segment'](idx): {
-                        "arrCityName": row.destination_city,
-                        "arrStationCode": row.arr_station_code,
-                        "arrStationName": row.arr_station_name,
-                        "depCityName": row.origin_city,
-                        "depStationCode": row.dep_station_code,
-                        "depStationName": row.dep_station_name,
-                        "duration": int(row.duration),
-                        "arrDateTime": row.arr_datetime,
-                        "depDateTime": row.dep_datetime,
-                        "marketingTransportName": row.airline,
-                        "marketingTransportNo": row.flight_no,
-                        "seatClassName": row.seat_class,
+                        'arrCityName': row.destination_city,
+                        'arrStationCode': row.arr_station_code,
+                        'arrStationName': row.arr_station_name,
+                        'depCityName': row.origin_city,
+                        'depStationCode': row.dep_station_code,
+                        'depStationName': row.dep_station_name,
+                        'duration': int(row.duration),
+                        'arrDateTime': row.arr_datetime,
+                        'depDateTime': row.dep_datetime,
+                        'marketingTransportName': row.airline,
+                        'marketingTransportNo': row.flight_no,
+                        'seatClassName': row.seat_class,
                         self.fields['remaining_seats']: seat_status,
-                        "equipSize": row.equip_size,
-                        "equipType": row.equip_type,
-                        "manufacturer": row.manufacturer
+                        'equipSize': row.equip_size,
+                        'equipType': row.equip_type,
+                        'manufacturer': row.manufacturer
                     }
                 }
                 route_data.update(segment)
@@ -122,7 +122,7 @@ class FlightQueryTool(BaseTravelTool):
                     except Exception:
                         route_price = None
             
-            route_data["price"] = route_price if route_price is not None else 0
+            route_data['price'] = route_price if route_price is not None else 0
             flights.append(route_data)
         
         return self.format_result_as_json(flights)

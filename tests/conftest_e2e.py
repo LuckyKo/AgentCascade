@@ -17,7 +17,7 @@ def generate_client_keypair():
     private_key = x25519.X25519PrivateKey.generate()
     public_key_b64 = base64.b64encode(
         private_key.public_key().public_bytes_raw()
-    ).decode("utf-8")
+    ).decode('utf-8')
     return private_key, public_key_b64
 
 
@@ -35,6 +35,6 @@ def encrypt_payload(shared_secret: bytes, payload: dict) -> tuple[str, str]:
     """
     aesgcm = AESGCM(shared_secret)
     nonce = os.urandom(12)  # 96-bit nonce for AES-GCM
-    plaintext = json.dumps(payload).encode("utf-8")
+    plaintext = json.dumps(payload).encode('utf-8')
     ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-    return base64.b64encode(ciphertext).decode("utf-8"), base64.b64encode(nonce).decode("utf-8")
+    return base64.b64encode(ciphertext).decode('utf-8'), base64.b64encode(nonce).decode('utf-8')

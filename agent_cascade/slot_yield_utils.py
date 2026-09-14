@@ -23,14 +23,14 @@ def describe_pool_holders(agent_pool: Any, caller_name: str) -> str:
     try:
         router = agent_pool.api_router
         if not router or not caller_name:
-            return "n/a (no router)"
+            return 'n/a (no router)'
         inst = agent_pool.get_instance(caller_name)
         agent_class = inst.agent_class if inst else None
         if not agent_class:
-            return "n/a (caller instance gone)"
+            return 'n/a (caller instance gone)'
         slot_info = router.get_agent_slot_info(agent_class)
         if not slot_info or not slot_info.get('needs_slot'):
-            return "none (unlimited endpoint — no slot needed)"
+            return 'none (unlimited endpoint — no slot needed)'
         sched_pool = router.scheduler._get_or_create_pool(
             slot_info['api_base'], slot_info['concurrency_limit']
         )
@@ -90,7 +90,7 @@ def yield_caller_slot(
         )
         # Structured drop-handoff event (sticky slot plan change #9/#10c): system agents
         # (Security/Compressor) use the same yield/reacquire path as sync children.
-        engine._release_slot(caller_inst, caller_name, release_reason, action="drop-handoff")
+        engine._release_slot(caller_inst, caller_name, release_reason, action='drop-handoff')
         return True
 
     # Callback is None. Check whether the pool STILL shows the caller as a

@@ -14,7 +14,7 @@ import time
 import json
 from pathlib import Path
 
-cascade_dir = Path(r"N:\work\WD\AgentCascade")
+cascade_dir = Path(r'N:\work\WD\AgentCascade')
 if str(cascade_dir) not in sys.path:
     sys.path.insert(0, str(cascade_dir))
 
@@ -89,14 +89,14 @@ def profile_streaming():
     print(f"[{time.strftime('%X')}] Avg per yield: {total_elapsed_ms/max(yield_count, 1):.1f}ms")
     
     # Save timing data
-    output_path = cascade_dir / "workspace" / "logs" / "streaming_profile.json"
+    output_path = cascade_dir / 'workspace' / 'logs' / 'streaming_profile.json'
     with open(output_path, 'w') as f:
         json.dump(timing_data, f, indent=2)
     print(f"[{time.strftime('%X')}] Timing data saved to: {output_path}")
     
     return True
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         success = profile_streaming()
         if not success:

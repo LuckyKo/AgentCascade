@@ -32,9 +32,9 @@ class TestReadLogsAutoResolution:
     def _write_test_log(self, tmp_path: Path, name: str, entries: list) -> Path:
         """Write a JSONL log file for testing."""
         p = tmp_path / name
-        with open(p, "w", encoding="utf-8") as f:
+        with open(p, 'w', encoding='utf-8') as f:
             for entry in entries:
-                f.write(json.dumps(entry) + "\n")
+                f.write(json.dumps(entry) + '\n')
         return p
 
     def test_bare_filename_resolved_in_log_dir(self):
@@ -43,8 +43,8 @@ class TestReadLogsAutoResolution:
             tmp_path = Path(tmp)
             log_file = self._write_test_log(
                 tmp_path,
-                "test_agent.jsonl",
-                [{"type": "user", "content": "hello"}, {"type": "assistant", "content": "hi"}],
+                'test_agent.jsonl',
+                [{'type': 'user', 'content': 'hello'}, {'type': 'assistant', 'content': 'hi'}],
             )
 
             pool = self._create_mock_agent_pool(str(tmp_path))
@@ -52,11 +52,11 @@ class TestReadLogsAutoResolution:
             from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=pool)
-            result = tool.call({"log_file": "test_agent.jsonl"})
+            result = tool.call({'log_file': 'test_agent.jsonl'})
 
-            assert "Error" not in result, f"Unexpected error: {result}"
-            assert "hello" in result
-            assert "hi" in result
+            assert 'Error' not in result, f"Unexpected error: {result}"
+            assert 'hello' in result
+            assert 'hi' in result
 
     def test_bare_filename_not_in_log_dir_falls_through(self):
         """If bare filename doesn't exist in log_dir, falls through to resolve_tool_path.
@@ -73,7 +73,7 @@ class TestReadLogsAutoResolution:
 
             tool = ReadLogs(agent_pool=pool)
             # Non-existent bare filename should fall through without crashing
-            result = tool.call({"log_file": "nonexistent.jsonl"})
+            result = tool.call({'log_file': 'nonexistent.jsonl'})
 
             # Should not crash — may return error about file not found or path restriction
             assert isinstance(result, str), f"Expected string result, got {type(result)}"
@@ -82,13 +82,13 @@ class TestReadLogsAutoResolution:
         """The '..' guard rejects path traversal attempts."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            log_dir = tmp_path / "logs"
+            log_dir = tmp_path / 'logs'
             log_dir.mkdir()
 
             # Write a file outside log_dir that we're trying to reach via ..
-            secret_file = tmp_path / "secret.jsonl"
-            with open(secret_file, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"secret": "data"}) + "\n")
+            secret_file = tmp_path / 'secret.jsonl'
+            with open(secret_file, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'secret': 'data'}) + '\n')
 
             pool = self._create_mock_agent_pool(str(log_dir))
 
@@ -96,11 +96,11 @@ class TestReadLogsAutoResolution:
 
             tool = ReadLogs(agent_pool=pool)
             # Attempt path traversal — should NOT resolve via auto-resolution
-            result = tool.call({"log_file": "../secret.jsonl"})
+            result = tool.call({'log_file': '../secret.jsonl'})
 
             # The ".." guard prevents auto-resolution, and resolve_tool_path should also reject it
             # Either way, we should NOT get the secret data
-            assert "secret" not in result.lower() or "Error" in result or "not found" in result.lower(), \
+            assert 'secret' not in result.lower() or 'Error' in result or 'not found' in result.lower(), \
                 "Path traversal via '..' was not properly blocked!"
 
     def test_full_path_still_works(self):
@@ -109,20 +109,20 @@ class TestReadLogsAutoResolution:
         This verifies the fallback doesn't crash — actual success depends on workspace config.
         """
         import os
-        workspace_root = Path(os.environ.get("AGENT_WORKSPACE", "N:\\work\\WD\\AgentWorkspace"))
-        test_file = workspace_root / "_test_regression_fullpath.jsonl"
+        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        test_file = workspace_root / '_test_regression_fullpath.jsonl'
 
         try:
-            with open(test_file, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"msg": "via full path"}) + "\n")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'msg': 'via full path'}) + '\n')
 
-            pool = self._create_mock_agent_pool("/nonexistent")
+            pool = self._create_mock_agent_pool('/nonexistent')
 
             from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=pool)
             # Should not crash — result depends on resolve_tool_path restrictions
-            result = tool.call({"log_file": str(test_file)})
+            result = tool.call({'log_file': str(test_file)})
             assert isinstance(result, str), f"Expected string result, got {type(result)}"
         finally:
             if test_file.exists():
@@ -134,8 +134,8 @@ class TestReadLogsAutoResolution:
             tmp_path = Path(tmp)
             self._write_test_log(
                 tmp_path,
-                "agent_one.jsonl",
-                [{"role": "user", "content": "single match"}],
+                'agent_one.jsonl',
+                [{'role': 'user', 'content': 'single match'}],
             )
 
             pool = self._create_mock_agent_pool(str(tmp_path))
@@ -143,26 +143,26 @@ class TestReadLogsAutoResolution:
             from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=pool)
-            result = tool.call({"log_file": "agent_*.jsonl"})
+            result = tool.call({'log_file': 'agent_*.jsonl'})
 
-            assert "Error" not in result, f"Unexpected error: {result}"
-            assert "single match" in result
+            assert 'Error' not in result, f"Unexpected error: {result}"
+            assert 'single match' in result
 
     def test_wildcard_multiple_matches_returns_error(self):
         """Wildcard patterns with multiple matches return a helpful error."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            self._write_test_log(tmp_path, "agent_a.jsonl", [{"msg": "a"}])
-            self._write_test_log(tmp_path, "agent_b.jsonl", [{"msg": "b"}])
+            self._write_test_log(tmp_path, 'agent_a.jsonl', [{'msg': 'a'}])
+            self._write_test_log(tmp_path, 'agent_b.jsonl', [{'msg': 'b'}])
 
             pool = self._create_mock_agent_pool(str(tmp_path))
 
             from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=pool)
-            result = tool.call({"log_file": "agent_*.jsonl"})
+            result = tool.call({'log_file': 'agent_*.jsonl'})
 
-            assert "Error" in result or "Multiple" in result, \
+            assert 'Error' in result or 'Multiple' in result, \
                 f"Expected error for multiple matches but got: {result}"
 
     def test_no_agent_pool_falls_through(self):
@@ -172,20 +172,20 @@ class TestReadLogsAutoResolution:
         a workspace path instead of a temp dir.
         """
         import os
-        workspace_root = Path(os.environ.get("AGENT_WORKSPACE", "N:\\work\\WD\\AgentWorkspace"))
-        test_file = workspace_root / "_test_regression_nopool.jsonl"
+        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        test_file = workspace_root / '_test_regression_nopool.jsonl'
 
         try:
-            with open(test_file, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"role": "user", "content": "via fallback"}) + "\n")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'role': 'user', 'content': 'via fallback'}) + '\n')
 
             from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=None)
-            result = tool.call({"log_file": str(test_file)})
+            result = tool.call({'log_file': str(test_file)})
 
-            assert "Error" not in result, f"Unexpected error: {result}"
-            assert "via fallback" in result
+            assert 'Error' not in result, f"Unexpected error: {result}"
+            assert 'via fallback' in result
         finally:
             if test_file.exists():
                 test_file.unlink()
@@ -197,14 +197,14 @@ class TestReadLogsAutoResolution:
         depends on workspace path restrictions.
         """
         import os
-        workspace_root = Path(os.environ.get("AGENT_WORKSPACE", "N:\\work\\WD\\AgentWorkspace"))
-        subdir = workspace_root / "_test_regression_sub"
+        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        subdir = workspace_root / '_test_regression_sub'
         subdir.mkdir(exist_ok=True)
-        test_file = subdir / "nested.jsonl"
+        test_file = subdir / 'nested.jsonl'
 
         try:
-            with open(test_file, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"msg": "nested"}) + "\n")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'msg': 'nested'}) + '\n')
 
             pool = self._create_mock_agent_pool(str(workspace_root))
 
@@ -212,7 +212,7 @@ class TestReadLogsAutoResolution:
 
             tool = ReadLogs(agent_pool=pool)
             # Path with / goes to resolve_tool_path, not auto-resolution — should not crash
-            result = tool.call({"log_file": str(test_file)})
+            result = tool.call({'log_file': str(test_file)})
             assert isinstance(result, str), f"Expected string result, got {type(result)}"
         finally:
             if test_file.exists():
@@ -272,21 +272,21 @@ class TestFileOpsRefactoring:
     def test_read_file_basic(self):
         """ReadFile can read a file within allowed directories."""
         import os
-        workspace_root = Path(os.environ.get("AGENT_WORKSPACE", "N:\\work\\WD\\AgentWorkspace"))
-        test_file = workspace_root / "_test_regression_readfile.txt"
+        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        test_file = workspace_root / '_test_regression_readfile.txt'
 
         try:
-            with open(test_file, "w", encoding="utf-8") as f:
-                f.write("test content\nline 2")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write('test content\nline 2')
 
             from agent_cascade.tools.custom.file_ops import ReadFile
 
             tool = ReadFile()
-            result = tool.call({"path": str(test_file)})
+            result = tool.call({'path': str(test_file)})
 
-            assert "Error" not in result, f"Unexpected error: {result}"
-            assert "test content" in result
-            assert "line 2" in result
+            assert 'Error' not in result, f"Unexpected error: {result}"
+            assert 'test content' in result
+            assert 'line 2' in result
         finally:
             if test_file.exists():
                 test_file.unlink()
@@ -304,8 +304,8 @@ class TestReadFileWildReadHighWaterMark:
 
     def _read(self, tmp_path: Path, content: str, **kwargs):
         from agent_cascade.tools.custom.file_ops import ReadFile
-        p = tmp_path / "f.txt"
-        p.write_text(content, encoding="utf-8")
+        p = tmp_path / 'f.txt'
+        p.write_text(content, encoding='utf-8')
         tool = ReadFile()
         return tool._read_text_file(
             path=str(p), resolved=p, start_line=1, limit=150, **kwargs,
@@ -314,44 +314,44 @@ class TestReadFileWildReadHighWaterMark:
     def test_wild_read_multi_line_truncates_at_hwm(self):
         """A wild read exceeding the HWM on a multi-line file warns and cuts at a line boundary."""
         with tempfile.TemporaryDirectory() as tmp:
-            lines = [f"line {i} " + "p" * 35 for i in range(1, 60)]  # ~2.6KB > 2000
-            out = self._read(Path(tmp), "\n".join(lines) + "\n",
+            lines = [f"line {i} " + 'p' * 35 for i in range(1, 60)]  # ~2.6KB > 2000
+            out = self._read(Path(tmp), '\n'.join(lines) + '\n',
                              is_wild_read=True, wild_truncation=2000)
-            assert "[TRUNCATION WARNING: Unbound read detected!]" in out
-            assert "[TRUNCATED]" not in out
+            assert '[TRUNCATION WARNING: Unbound read detected!]' in out
+            assert '[TRUNCATED]' not in out
             # Pagination hint present and consistent with the last displayed line.
-            body = out.split("```")[1]
-            last = [l for l in body.split("\n") if l.strip()][-1]
-            last_num = int(last.split(":")[0])
+            body = out.split('```')[1]
+            last = [l for l in body.split('\n') if l.strip()][-1]
+            last_num = int(last.split(':')[0])
             assert f"→ continue at start_line={last_num + 1}" in out
 
     def test_wild_read_single_long_line_hard_cut(self):
         """A single very long line (no newline before the threshold) is hard-cut."""
         with tempfile.TemporaryDirectory() as tmp:
-            out = self._read(Path(tmp), "x" * 5000,
+            out = self._read(Path(tmp), 'x' * 5000,
                              is_wild_read=True, wild_truncation=2000)
-            assert "[TRUNCATION WARNING: Unbound read detected!]" in out
+            assert '[TRUNCATION WARNING: Unbound read detected!]' in out
             # Content body should be bounded near the threshold (not 5000 chars).
-            body = out.split("```")[1]
+            body = out.split('```')[1]
             assert len(body) < 4000
 
     def test_wild_read_under_hwm_no_warning(self):
         """A wild read under the HWM is returned in full with no truncation marker."""
         with tempfile.TemporaryDirectory() as tmp:
-            out = self._read(Path(tmp), "short\nfile\nunder limit\n",
+            out = self._read(Path(tmp), 'short\nfile\nunder limit\n',
                              is_wild_read=True, wild_truncation=2000)
-            assert "TRUNCATION WARNING" not in out
-            assert "[TRUNCATED]" not in out
+            assert 'TRUNCATION WARNING' not in out
+            assert '[TRUNCATED]' not in out
 
     def test_explicit_limit_never_uses_wild_warning(self):
         """An explicit limit (even beyond the HWM) uses [TRUNCATED], never the wild warning."""
         with tempfile.TemporaryDirectory() as tmp:
-            lines = [f"line {i} " + "p" * 35 for i in range(1, 200)]
-            out = self._read(Path(tmp), "\n".join(lines) + "\n",
+            lines = [f"line {i} " + 'p' * 35 for i in range(1, 200)]
+            out = self._read(Path(tmp), '\n'.join(lines) + '\n',
                              is_wild_read=False, wild_truncation=2000)
-            assert "TRUNCATION WARNING" not in out
+            assert 'TRUNCATION WARNING' not in out
             # limit=150 on a 199-line file -> line-limit truncation marker.
-            assert "[TRUNCATED]" in out
+            assert '[TRUNCATED]' in out
 
     def test_calculate_char_limit_ignores_wild_read(self):
         """_calculate_char_limit is context-derived and takes only kwargs (no wild cap)."""
@@ -393,9 +393,9 @@ class TestReadLogsFormatParameter:
     def _write_test_log(self, tmp_path: Path, name: str, entries: list) -> Path:
         """Write a JSONL log file for testing."""
         p = tmp_path / name
-        with open(p, "w", encoding="utf-8") as f:
+        with open(p, 'w', encoding='utf-8') as f:
             for entry in entries:
-                f.write(json.dumps(entry) + "\n")
+                f.write(json.dumps(entry) + '\n')
         return p
 
     def test_raw_format_produces_json_lines_with_number_prefixes(self):
@@ -404,10 +404,10 @@ class TestReadLogsFormatParameter:
             tmp_path = Path(tmp)
             self._write_test_log(
                 tmp_path,
-                "test.jsonl",
+                'test.jsonl',
                 [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "hi there"},
+                    {'role': 'user', 'content': 'hello'},
+                    {'role': 'assistant', 'content': 'hi there'},
                 ],
             )
 
@@ -415,25 +415,25 @@ class TestReadLogsFormatParameter:
             from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=pool)
-            result = tool.call({"log_file": "test.jsonl", "format": "raw"})
+            result = tool.call({'log_file': 'test.jsonl', 'format': 'raw'})
 
-            assert "Error" not in result, f"Unexpected error: {result}"
-            lines = result.strip().split("\n")
+            assert 'Error' not in result, f"Unexpected error: {result}"
+            lines = result.strip().split('\n')
             # First line is the operation-status header; remaining lines are numbered JSON entries.
             assert len(lines) == 3
-            assert lines[0].startswith("OK: Read "), f"Missing header: {lines[0]}"
+            assert lines[0].startswith('OK: Read '), f"Missing header: {lines[0]}"
 
             # Each entry line (after the header) starts with a number prefix followed by ": " and valid JSON
             for line in lines[1:]:
-                assert ": " in line, f"Line missing ': ' separator: {line}"
-                num_prefix, json_part = line.split(": ", 1)
+                assert ': ' in line, f"Line missing ': ' separator: {line}"
+                num_prefix, json_part = line.split(': ', 1)
                 assert num_prefix.isdigit(), f"Prefix not numeric: {num_prefix}"
                 parsed = json.loads(json_part)
                 assert isinstance(parsed, dict), f"Not a JSON object: {parsed}"
 
             # Verify content is preserved in raw output
-            assert "hello" in result
-            assert "hi there" in result
+            assert 'hello' in result
+            assert 'hi there' in result
 
     def test_simple_format_produces_human_readable_output(self):
         """simple format produces human-readable output with role labels, timestamps."""
@@ -441,13 +441,13 @@ class TestReadLogsFormatParameter:
             tmp_path = Path(tmp)
             self._write_test_log(
                 tmp_path,
-                "test.jsonl",
+                'test.jsonl',
                 [
-                    {"role": "user", "content": "hello world"},
+                    {'role': 'user', 'content': 'hello world'},
                     {
-                        "role": "assistant",
-                        "timestamp": "2026-08-14T10:30:00Z",
-                        "content": "hi there",
+                        'role': 'assistant',
+                        'timestamp': '2026-08-14T10:30:00Z',
+                        'content': 'hi there',
                     },
                 ],
             )
@@ -456,28 +456,28 @@ class TestReadLogsFormatParameter:
             from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=pool)
-            result = tool.call({"log_file": "test.jsonl", "format": "simple"})
+            result = tool.call({'log_file': 'test.jsonl', 'format': 'simple'})
 
-            assert "Error" not in result, f"Unexpected error: {result}"
+            assert 'Error' not in result, f"Unexpected error: {result}"
 
             # Should contain role labels
-            assert "USER" in result
-            assert "ASSISTANT" in result
+            assert 'USER' in result
+            assert 'ASSISTANT' in result
 
             # Should contain content previews (indented)
-            assert "hello world" in result
-            assert "hi there" in result
+            assert 'hello world' in result
+            assert 'hi there' in result
 
             # Should NOT be raw JSON lines with ": {" pattern
-            for line in result.split("\n"):
+            for line in result.split('\n'):
                 stripped = line.strip()
-                if stripped.startswith("[") and "] USER" in stripped:
+                if stripped.startswith('[') and '] USER' in stripped:
                     continue  # header line, OK
-                if stripped.startswith("    "):
+                if stripped.startswith('    '):
                     continue  # content preview, OK
                 # Check it's not raw JSON format (number prefix followed by JSON object)
-                if ": {" in stripped or ":[" in stripped:
-                    parts = stripped.split(": ", 1)
+                if ': {' in stripped or ':[' in stripped:
+                    parts = stripped.split(': ', 1)
                     if len(parts) == 2 and parts[0].isdigit():
                         pytest.fail(f"Found raw-format line in simple output: {stripped}")
 
@@ -487,10 +487,10 @@ class TestReadLogsFormatParameter:
             tmp_path = Path(tmp)
             self._write_test_log(
                 tmp_path,
-                "test.jsonl",
+                'test.jsonl',
                 [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "hi"},
+                    {'role': 'user', 'content': 'hello'},
+                    {'role': 'assistant', 'content': 'hi'},
                 ],
             )
 
@@ -499,33 +499,33 @@ class TestReadLogsFormatParameter:
 
             tool = ReadLogs(agent_pool=pool)
             # Call WITHOUT specifying format parameter
-            result = tool.call({"log_file": "test.jsonl"})
+            result = tool.call({'log_file': 'test.jsonl'})
 
-            assert "Error" not in result, f"Unexpected error: {result}"
+            assert 'Error' not in result, f"Unexpected error: {result}"
 
             # Should produce simple format output (role labels, no raw JSON lines)
-            assert "USER" in result or "ASSISTANT" in result, \
+            assert 'USER' in result or 'ASSISTANT' in result, \
                 "Default format should be 'simple' with role labels"
 
     def test_truncation_modes_work_with_raw_format(self):
         """trim_tools truncates tool OUTPUTS but keeps tool CALLS intact; trim_all/none behave as expected."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            long_args = "x" * 2000
-            long_output = "y" * 2000
+            long_args = 'x' * 2000
+            long_output = 'y' * 2000
             self._write_test_log(
                 tmp_path,
-                "test.jsonl",
+                'test.jsonl',
                 [
                     {
-                        "role": "assistant",
-                        "content": "calling tool",
-                        "function_call": {"name": "big_tool", "arguments": long_args},
+                        'role': 'assistant',
+                        'content': 'calling tool',
+                        'function_call': {'name': 'big_tool', 'arguments': long_args},
                     },
                     {
-                        "role": "function",
-                        "name": "big_tool",
-                        "content": long_output,
+                        'role': 'function',
+                        'name': 'big_tool',
+                        'content': long_output,
                     },
                 ],
             )
@@ -537,42 +537,42 @@ class TestReadLogsFormatParameter:
 
             # trim_tools: assistant tool-call arguments must be INTACT; tool-output content truncated
             result_trim_tools = tool.call(
-                {"log_file": "test.jsonl", "format": "raw", "mode": "trim_tools", "max_chars_per_message": 100}
+                {'log_file': 'test.jsonl', 'format': 'raw', 'mode': 'trim_tools', 'max_chars_per_message': 100}
             )
-            assert "Error" not in result_trim_tools, f"Unexpected error: {result_trim_tools}"
+            assert 'Error' not in result_trim_tools, f"Unexpected error: {result_trim_tools}"
             # Tool call arguments are preserved (no TRUNCATED marker on them)
             assert long_args in result_trim_tools
             # Tool output content IS truncated (TRUNCATED marker present)
-            assert "TRUNCATED" in result_trim_tools
+            assert 'TRUNCATED' in result_trim_tools
 
             # trim_all: should truncate all long strings (both args and output)
             result_trim_all = tool.call(
-                {"log_file": "test.jsonl", "format": "raw", "mode": "trim_all", "max_chars_per_message": 100}
+                {'log_file': 'test.jsonl', 'format': 'raw', 'mode': 'trim_all', 'max_chars_per_message': 100}
             )
-            assert "Error" not in result_trim_all, f"Unexpected error: {result_trim_all}"
+            assert 'Error' not in result_trim_all, f"Unexpected error: {result_trim_all}"
             assert long_args not in result_trim_all
             assert long_output not in result_trim_all
-            assert "TRUNCATED" in result_trim_all
+            assert 'TRUNCATED' in result_trim_all
 
             # none: should NOT truncate anything
             result_none = tool.call(
-                {"log_file": "test.jsonl", "format": "raw", "mode": "none"}
+                {'log_file': 'test.jsonl', 'format': 'raw', 'mode': 'none'}
             )
-            assert "Error" not in result_none, f"Unexpected error: {result_none}"
+            assert 'Error' not in result_none, f"Unexpected error: {result_none}"
             assert long_args in result_none
             assert long_output in result_none
-            assert "TRUNCATED" not in result_none
+            assert 'TRUNCATED' not in result_none
 
     def test_truncation_modes_work_with_simple_format(self):
         """Existing truncation modes still work with simple format."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            long_content = "y" * 2000
+            long_content = 'y' * 2000
             self._write_test_log(
                 tmp_path,
-                "test.jsonl",
+                'test.jsonl',
                 [
-                    {"role": "user", "content": long_content},
+                    {'role': 'user', 'content': long_content},
                 ],
             )
 
@@ -583,19 +583,19 @@ class TestReadLogsFormatParameter:
 
             # trim_all: content preview in simple mode should be truncated
             result_trim_all = tool.call(
-                {"log_file": "test.jsonl", "format": "simple", "mode": "trim_all", "max_chars_per_message": 100}
+                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'trim_all', 'max_chars_per_message': 100}
             )
-            assert "Error" not in result_trim_all, f"Unexpected error: {result_trim_all}"
+            assert 'Error' not in result_trim_all, f"Unexpected error: {result_trim_all}"
             # Simple mode content preview is capped at ~200 chars regardless of max_chars,
             # but trim_all should still truncate the underlying data before formatting
-            assert "USER" in result_trim_all
+            assert 'USER' in result_trim_all
 
             # none: no truncation applied
             result_none = tool.call(
-                {"log_file": "test.jsonl", "format": "simple", "mode": "none"}
+                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'none'}
             )
-            assert "Error" not in result_none, f"Unexpected error: {result_none}"
-            assert "USER" in result_none
+            assert 'Error' not in result_none, f"Unexpected error: {result_none}"
+            assert 'USER' in result_none
 
     def test_no_role_raw_entry_respects_mode_none(self):
         """Regression: a dict entry without a recognizable 'role' field hits the RAW
@@ -606,12 +606,12 @@ class TestReadLogsFormatParameter:
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            long_value = "z" * 2000
+            long_value = 'z' * 2000
             self._write_test_log(
                 tmp_path,
-                "test.jsonl",
+                'test.jsonl',
                 [
-                    {"type": "custom_event", "payload": long_value},
+                    {'type': 'custom_event', 'payload': long_value},
                 ],
             )
 
@@ -622,21 +622,21 @@ class TestReadLogsFormatParameter:
 
             # none: role-less RAW entry must be emitted in full, no TRUNCATED marker
             result_none = tool.call(
-                {"log_file": "test.jsonl", "format": "simple", "mode": "none"}
+                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'none'}
             )
-            assert "Error" not in result_none, f"Unexpected error: {result_none}"
-            assert "[RAW]" in result_none
+            assert 'Error' not in result_none, f"Unexpected error: {result_none}"
+            assert '[RAW]' in result_none
             assert long_value in result_none
-            assert "TRUNCATED" not in result_none
+            assert 'TRUNCATED' not in result_none
 
             # trim_all: same entry must still be truncated (guard is mode-specific)
             result_trim_all = tool.call(
-                {"log_file": "test.jsonl", "format": "simple", "mode": "trim_all", "max_chars_per_message": 100}
+                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'trim_all', 'max_chars_per_message': 100}
             )
-            assert "Error" not in result_trim_all, f"Unexpected error: {result_trim_all}"
-            assert "[RAW]" in result_trim_all
+            assert 'Error' not in result_trim_all, f"Unexpected error: {result_trim_all}"
+            assert '[RAW]' in result_trim_all
             assert long_value not in result_trim_all
-            assert "TRUNCATED" in result_trim_all
+            assert 'TRUNCATED' in result_trim_all
 
     def test_invalid_format_returns_error(self):
         """Invalid format value returns a clear error message (via jsonschema validation)."""
@@ -644,8 +644,8 @@ class TestReadLogsFormatParameter:
             tmp_path = Path(tmp)
             self._write_test_log(
                 tmp_path,
-                "test.jsonl",
-                [{"role": "user", "content": "hello"}],
+                'test.jsonl',
+                [{'role': 'user', 'content': 'hello'}],
             )
 
             pool = self._create_mock_agent_pool(str(tmp_path))
@@ -654,9 +654,9 @@ class TestReadLogsFormatParameter:
 
             tool = ReadLogs(agent_pool=pool)
             # Invalid enum value is caught by jsonschema validation before custom error handling
-            with pytest.raises(jsonschema.ValidationError, match="invalid.*not one of"):
-                tool.call({"log_file": "test.jsonl", "format": "invalid"})
+            with pytest.raises(jsonschema.ValidationError, match='invalid.*not one of'):
+                tool.call({'log_file': 'test.jsonl', 'format': 'invalid'})
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+if __name__ == '__main__':
+    pytest.main([__file__, '-v'])

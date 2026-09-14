@@ -93,7 +93,7 @@ class TestKilledProcessCleanup:
                 break
             time.sleep(0.1)
         assert not tracker.has_active_tasks('test_agent'), \
-            "Task still reported as active after kill_task returned"
+            'Task still reported as active after kill_task returned'
 
     def test_killed_process_no_longer_sends_heartbeats(self):
         """A killed process stops sending heartbeats immediately."""
@@ -111,7 +111,7 @@ class TestKilledProcessCleanup:
         time.sleep(1.0)  # Allow some heartbeats
 
         hb_before = sum(1 for m in pool.messages if 'heartbeat' in m[1].lower())
-        assert hb_before > 0, "Should have received heartbeats before kill"
+        assert hb_before > 0, 'Should have received heartbeats before kill'
 
         tracker.kill_task('test_agent', tool_id)
 
@@ -125,7 +125,7 @@ class TestKilledProcessCleanup:
     def test_killed_process_actually_terminated_on_os(self):
         """Verify the killed process is actually gone from the OS process table."""
         if os.name != 'nt':
-            pytest.skip("OS-level verification is Windows-specific")
+            pytest.skip('OS-level verification is Windows-specific')
 
         pool = _make_pool()
         tracker = AsyncShellTracker(pool=pool)
@@ -188,7 +188,7 @@ class TestTimeoutBehavior:
         # Task should now be completed (by timeout kill).
         # Note: timeout sets completed=True but NOT killed=True — only kill_task sets killed.
         with task._lock:
-            assert task.completed is True, "Task should be completed after timeout"
+            assert task.completed is True, 'Task should be completed after timeout'
             # Return code should be non-zero since process was killed by timeout
             assert task.return_code is not None and task.return_code != 0, \
                 f"Expected non-zero exit code after timeout kill, got {task.return_code}"
@@ -304,7 +304,7 @@ class TestStderrCapture:
         if completed_early:
             assert return_code == 42, f"Expected exit code 42, got {return_code}"
             assert early_output is not None and len(early_output) > 0, \
-                "Early output should contain stderr for failed command"
+                'Early output should contain stderr for failed command'
             assert any('error message' in line.lower() for line in early_output), \
                 f"Stderr 'error message' not found in early output: {early_output}"
         else:
@@ -321,7 +321,7 @@ class TestStderrCapture:
                             list(task.stderr_lines) if hasattr(task, 'stderr_lines') else [])
                     if completed:
                         break
-                assert time.time() < deadline, "Task did not complete within 10s"
+                assert time.time() < deadline, 'Task did not complete within 10s'
                 time.sleep(0.1)
 
             assert rc == 42, f"Expected exit code 42, got {rc}"
@@ -355,7 +355,7 @@ class TestStderrCapture:
                         rc = task.return_code
                     if completed:
                         break
-                assert time.time() < deadline, "Task did not complete within 10s"
+                assert time.time() < deadline, 'Task did not complete within 10s'
                 time.sleep(0.1)
 
             assert rc == 42, f"Expected exit code 42, got {rc}"
@@ -397,7 +397,7 @@ class TestKillEdgeCases:
 
         # kill_task should not crash — either finds the finished task or reports not found
         result = tracker.kill_task('test_agent', tool_id)
-        assert result is not None, "kill_task should return a message"
+        assert result is not None, 'kill_task should return a message'
         # Acceptable outcomes: already finished, or task cleaned up (not found)
         assert ('finished' in result.lower() or 'no running shell' in result.lower()), \
             f"Unexpected kill_task result for finished command: {result}"

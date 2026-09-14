@@ -10,7 +10,7 @@ def watch_stream(
     stream: Iterator[T],
     max_silence_seconds: float,
     max_total_seconds: float,
-    error_message_prefix: str = "",
+    error_message_prefix: str = '',
 ) -> Iterator[T]:
     """Wrap a streaming iterator with silence and total-duration timeout guards.
 
@@ -27,7 +27,7 @@ def watch_stream(
         RuntimeError: On silence timeout or total timeout. Caller should wrap in
             ModelServiceError if needed.
     """
-    prefix = f"{error_message_prefix}: " if error_message_prefix else ""
+    prefix = f"{error_message_prefix}: " if error_message_prefix else ''
     stream_start = time.monotonic()
     first_item = True
     last_item_time: float | None = None

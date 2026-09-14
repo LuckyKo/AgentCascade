@@ -96,7 +96,7 @@ class SlotsMixin:
                     args=args,
                     caller_name=caller,
                     child_depth=nest_depth,
-                    prefix="Agent",
+                    prefix='Agent',
                 )
 
                 # Save child's state after async completion (state save/restore flow step 4).

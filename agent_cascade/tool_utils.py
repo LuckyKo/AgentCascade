@@ -310,11 +310,11 @@ def format_truncation_notice(
     elif total_chars is not None:
         msg = f"[TRUNCATED — {total_chars} chars total"
     else:
-        msg = "[TRUNCATED"
+        msg = '[TRUNCATED'
 
     if spill_path:
         msg += f". Full output saved to: {spill_path}"
-    msg += "]"
+    msg += ']'
     return msg
 
 

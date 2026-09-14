@@ -231,13 +231,13 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
                 self._async_registry.shutdown(wait=False)  # Quick stop — don't block waiting for tasks
             except Exception as e:
                 logger.debug(f"Async registry shutdown failed (non-critical): {e}")
-            logger.debug("Background services shut down (idle_checker + async_registry)")
+            logger.debug('Background services shut down (idle_checker + async_registry)')
         else:
             self._stopped_event.clear()
             # Restart background services on resume (they were shut down during stop)
             try:
                 self._idle.start()
-                logger.debug("Idle checker restarted")
+                logger.debug('Idle checker restarted')
             except Exception as e:
                 logger.debug(f"Idle manager restart (non-critical): {e}")
             # Restart async registry executor via the thread-safe resize path.
@@ -245,12 +245,12 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
             try:
                 if self._async_registry is not None and self._async_registry.resize_executor(
                         self.settings.max_workers):
-                    logger.debug("Async registry executor resized on resume")
+                    logger.debug('Async registry executor resized on resume')
                 else:
-                    logger.debug("Async registry resize skipped (missing or failed, non-critical)")
+                    logger.debug('Async registry resize skipped (missing or failed, non-critical)')
             except Exception as e:
                 logger.debug(f"Async registry restart (non-critical): {e}")
-            logger.debug("Stopped flag cleared — ready for new execution")
+            logger.debug('Stopped flag cleared — ready for new execution')
     def _update_child_relationship(self, parent_name: str, child_name: str, add: bool = True) -> None:
         """Update both pool.children and parent's _child_instances.
         
@@ -303,10 +303,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         try:
             template = load_agent_template(self, name, llm_cfg)
             self.templates[name] = template
-            logger.info("[OK] Loaded agent on demand: %s", name)
+            logger.info('[OK] Loaded agent on demand: %s', name)
             return template
         except Exception as e:
-            logger.error("[ERROR] Failed to load agent %s: %s", name, e)
+            logger.error('[ERROR] Failed to load agent %s: %s', name, e)
             raise
 
     def on_dismissed(self, callback):
@@ -368,9 +368,9 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
                            if self.api_router else {})
                 template = load_agent_template(self, agent_name, llm_cfg)
                 self.templates[agent_name] = template
-                logger.info("[OK] Loaded agent: %s", agent_name)
+                logger.info('[OK] Loaded agent: %s', agent_name)
             except Exception as e:
-                logger.error("[ERROR] Failed to load agent %s: %s", agent_name, e)
+                logger.error('[ERROR] Failed to load agent %s: %s', agent_name, e)
     def _clear_all_state_dicts(self):
         """Clear all per-instance state dictionaries."""
         self.instance_state.clear()

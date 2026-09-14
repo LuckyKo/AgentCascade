@@ -10,13 +10,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 from agent_cascade.inner_loop_detect import InnerLoopDetector
 
 # Try relative to project first, then fallback to sibling workspace dir
-SAMPLE_FILE = PROJECT_ROOT / "tests" / "loop_samples" / "samples_2026-07-07.jsonl"
+SAMPLE_FILE = PROJECT_ROOT / 'tests' / 'loop_samples' / 'samples_2026-07-07.jsonl'
 if not SAMPLE_FILE.exists():
     # Sibling directory: AgentWorkspace/logs/loop_samples (same parent as project)
-    SAMPLE_FILE = PROJECT_ROOT.parent / "AgentWorkspace" / "logs" / "loop_samples" / "samples_2026-07-07.jsonl"
+    SAMPLE_FILE = PROJECT_ROOT.parent / 'AgentWorkspace' / 'logs' / 'loop_samples' / 'samples_2026-07-07.jsonl'
 
 samples = []
-with open(SAMPLE_FILE, "r", encoding="utf-8") as f:
+with open(SAMPLE_FILE, 'r', encoding='utf-8') as f:
     for line in f:
         line = line.strip()
         if line:
@@ -24,16 +24,16 @@ with open(SAMPLE_FILE, "r", encoding="utf-8") as f:
 
 # Test with default settings (same as production)
 print(f"Testing {len(samples)} samples against current detector (threshold=200, min_chars=4000)")
-print("=" * 70)
+print('=' * 70)
 
 caught = 0
 missed = 0
 results = []
 
 for idx, sample in enumerate(samples):
-    text = sample["text"]
-    instance = sample["instance_name"]
-    orig_reason = sample["reason"][:55]
+    text = sample['text']
+    instance = sample['instance_name']
+    orig_reason = sample['reason'][:55]
     
     detector = InnerLoopDetector()
     # Feed the entire text at once (simulating one large chunk)
@@ -42,11 +42,11 @@ for idx, sample in enumerate(samples):
     if result is not None:
         caught += 1
         results.append({
-            "sample": idx + 1,
-            "instance": instance,
-            "orig_reason": orig_reason,
-            "detected_reason": result["reason"],
-            "score": result["score"],
+            'sample': idx + 1,
+            'instance': instance,
+            'orig_reason': orig_reason,
+            'detected_reason': result['reason'],
+            'score': result['score'],
         })
     else:
         missed += 1
@@ -64,16 +64,16 @@ if results:
 if missed:
     print(f"\n⚠️  {missed} samples were NOT caught — detector may be too loose!")
 else:
-    print("\n✅ All samples correctly triggered the detector.")
+    print('\n✅ All samples correctly triggered the detector.')
 
 # Also test with chunked feeding (more realistic streaming scenario)
-print("\n" + "=" * 70)
-print("Now testing with CHUNKED feeding (50-char chunks, more realistic):")
+print('\n' + '=' * 70)
+print('Now testing with CHUNKED feeding (50-char chunks, more realistic):')
 caught_chunked = 0
 missed_chunked = 0
 
 for idx, sample in enumerate(samples):
-    text = sample["text"]
+    text = sample['text']
     detector = InnerLoopDetector()
     
     pos = 0
@@ -96,4 +96,4 @@ print(f"  MISSED:   {missed_chunked}/{len(samples)}")
 if missed_chunked:
     print(f"\n⚠️  {missed_chunked} samples missed with chunked feeding!")
 else:
-    print("\n✅ All samples correctly triggered even with chunked feeding.")
+    print('\n✅ All samples correctly triggered even with chunked feeding.')

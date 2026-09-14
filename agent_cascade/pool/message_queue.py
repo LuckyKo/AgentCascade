@@ -67,7 +67,7 @@ class MessageQueueMixin:
             now_mono = time.monotonic()
             global _mq_depth_last_warn
             if now_mono - _mq_depth_last_warn >= 10.0:
-                suffix = f" (from '{sender}')" if sender else ""
+                suffix = f" (from '{sender}')" if sender else ''
                 logger.warning(f"[MESSAGE_QUEUE] Instance '{name}' message queue depth high: {depth} messages pending execution{suffix}")
                 _mq_depth_last_warn = now_mono
 

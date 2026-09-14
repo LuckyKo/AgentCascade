@@ -377,12 +377,12 @@ class ShellMixin:
     # ------------------------------------------------------------------
     def execute_shell_command(
         self, command: str, justification: str, agent_name: str,
-        cwd: str = ".", char_limit: int = 2000, timeout: Optional[int] = None,
+        cwd: str = '.', char_limit: int = 2000, timeout: Optional[int] = None,
     ) -> str:
         """Execute a shell command — auto-approved for safe read-only commands."""
         try:
             from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-            resolved_cwd = resolve_tool_path(cwd, mode="rw", agent_pool=self.agent_pool)
+            resolved_cwd = resolve_tool_path(cwd, mode='rw', agent_pool=self.agent_pool)
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
 
@@ -397,7 +397,7 @@ class ShellMixin:
 
         if is_safe:
             approved = True
-            reason = "Auto-approved: safe read-only filesystem operation"
+            reason = 'Auto-approved: safe read-only filesystem operation'
             justification_text = reason
         else:
             description = (
@@ -481,21 +481,21 @@ class ShellMixin:
             if drain_errors:
                 logger.warning(
                     f"Pipe drain errors on PID {proc.pid}: "
-                    + "; ".join(str(e) for e in drain_errors)
+                    + '; '.join(str(e) for e in drain_errors)
                 )
 
             stdout: str = ''.join(stdout_chunks)
             stderr: str = ''.join(stderr_chunks)
 
             if result_ok:
-                output = ""
+                output = ''
                 if stdout:
                     output += f"STDOUT:\n{stdout}\n"
                 if stderr:
                     output += f"STDERR:\n{stderr}\n"
 
                 if proc.returncode == 0:
-                    status = "Command completed successfully."
+                    status = 'Command completed successfully.'
                 else:
                     status = f"Command exited with return code {proc.returncode}."
 
@@ -504,7 +504,7 @@ class ShellMixin:
                     if ON_WINDOWS and self._detect_multiline_python(original_command):
                         output = f"No output produced.\n\n{self._multiline_python_hint()}"
                     else:
-                        output = "No output produced."
+                        output = 'No output produced.'
 
                 final_output = truncate_with_spillover(
                     output, char_limit,
@@ -514,7 +514,7 @@ class ShellMixin:
                     operation_mode='mid',
                 )
                 if final_output is not output:
-                    status += " [TRUNCATED]"
+                    status += ' [TRUNCATED]'
 
                 elapsed = time.time() - exec_start
                 status += f" (elapsed {elapsed:.1f}s)"
@@ -528,7 +528,7 @@ class ShellMixin:
                 return final_msg + f"\n{final_output}"
 
             # ── Timeout path ────────────────────────────────────────
-            output = ""
+            output = ''
             if stdout:
                 output += f"STDOUT (partial):\n{stdout}\n"
             if stderr:

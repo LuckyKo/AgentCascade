@@ -54,7 +54,7 @@ class TestResolveToolPathFallback:
 
     def test_valid_relative_path_resolves_to_workspace(self):
         """Relative path '.' should resolve to the workspace directory."""
-        result = resolve_tool_path('.', mode="rw")
+        result = resolve_tool_path('.', mode='rw')
         assert result.is_absolute()
         from agent_cascade.settings import DEFAULT_WORKSPACE
         base = Path(DEFAULT_WORKSPACE).resolve()
@@ -62,7 +62,7 @@ class TestResolveToolPathFallback:
 
     def test_workspace_prefix_stripped_and_resolved(self):
         """Path with /workspace/ prefix should be stripped and resolved correctly."""
-        result = resolve_tool_path('/workspace/src/main.py', mode="ro")
+        result = resolve_tool_path('/workspace/src/main.py', mode='ro')
         from agent_cascade.settings import DEFAULT_WORKSPACE
         base = Path(DEFAULT_WORKSPACE).resolve()
         expected = (base / 'src/main.py').resolve()
@@ -70,14 +70,14 @@ class TestResolveToolPathFallback:
 
     def test_workspace_root_resolves_to_base(self):
         """Path '/workspace' should resolve to the workspace directory."""
-        result = resolve_tool_path('/workspace', mode="rw")
+        result = resolve_tool_path('/workspace', mode='rw')
         from agent_cascade.settings import DEFAULT_WORKSPACE
         base = Path(DEFAULT_WORKSPACE).resolve()
         assert result == base
 
     def test_workspace_prefix_without_leading_slash(self):
         """Path 'workspace/src' should also be handled."""
-        result = resolve_tool_path('workspace/src', mode="ro")
+        result = resolve_tool_path('workspace/src', mode='ro')
         from agent_cascade.settings import DEFAULT_WORKSPACE
         base = Path(DEFAULT_WORKSPACE).resolve()
         expected = (base / 'src').resolve()
@@ -89,14 +89,14 @@ class TestResolveToolPathFallback:
         outside = Path('/tmp/../../../etc/passwd').resolve() if os.name != 'nt' else Path('C:\\Windows\\System32').resolve()
 
         with pytest.raises(ValueError) as exc_info:
-            resolve_tool_path(str(outside), mode="rw")
+            resolve_tool_path(str(outside), mode='rw')
 
         assert 'outside the allowed' in str(exc_info.value).lower()
 
     def test_traversal_escape_raises_value_error(self):
         """Path traversal attempts should raise ValueError."""
         with pytest.raises(ValueError) as exc_info:
-            resolve_tool_path('../../../../../../etc/passwd', mode="rw")
+            resolve_tool_path('../../../../../../etc/passwd', mode='rw')
 
         assert 'outside the allowed' in str(exc_info.value).lower()
 
@@ -106,7 +106,7 @@ class TestResolveToolPathFallback:
         base = Path(DEFAULT_WORKSPACE).resolve()
         abs_path = base / 'some_file.txt'
 
-        result = resolve_tool_path(str(abs_path), mode="ro")
+        result = resolve_tool_path(str(abs_path), mode='ro')
         assert result == abs_path.resolve()
 
 
@@ -222,7 +222,7 @@ class TestCwdResolutionConsistency:
         bad_path = '../../../../../../etc/passwd'
 
         with pytest.raises(ValueError):
-            resolve_tool_path(bad_path, mode="rw")
+            resolve_tool_path(bad_path, mode='rw')
 
         with pytest.raises(ValueError):
-            resolve_tool_path(bad_path, mode="ro")
+            resolve_tool_path(bad_path, mode='ro')

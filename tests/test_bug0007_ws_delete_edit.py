@@ -36,25 +36,25 @@ from agent_cascade.ws_handlers import WsMessageHandler
 # ──────────────────────────────────────────────
 
 def _user(content: str, ts: str = None) -> dict:
-    m = {"role": "user", "content": content}
+    m = {'role': 'user', 'content': content}
     if ts:
-        m["timestamp"] = ts
+        m['timestamp'] = ts
     return m
 
 
 def _assistant(content: str, ts: str = None) -> dict:
-    m = {"role": "assistant", "content": content}
+    m = {'role': 'assistant', 'content': content}
     if ts:
-        m["timestamp"] = ts
+        m['timestamp'] = ts
     return m
 
 
-def _marker(summary: str, ts: str, kind: str = "l1") -> dict:
-    header = f"L2, 7 summaries consolidated" if kind == "l2" else summary
+def _marker(summary: str, ts: str, kind: str = 'l1') -> dict:
+    header = f"L2, 7 summaries consolidated" if kind == 'l2' else summary
     return {
-        "role": "user",
-        "content": (f"{COMPRESSION_MARKER} ({header}) ---\n<context_summary>\n{summary}\n</context_summary>"),
-        "timestamp": ts,
+        'role': 'user',
+        'content': (f"{COMPRESSION_MARKER} ({header}) ---\n<context_summary>\n{summary}\n</context_summary>"),
+        'timestamp': ts,
     }
 
 
@@ -82,7 +82,7 @@ class _FakePool:
         self._inst = instance
         self._logger = logger_inst
         # Pre-populate so handlers can write instance_state[name]['messages'] (mirrors real pool).
-        self.instance_state = {"Maine": {"messages": []}}
+        self.instance_state = {'Maine': {'messages': []}}
 
     def get_instance(self, name):
         return self._inst
@@ -97,26 +97,26 @@ def _make_handler(tmp_path: Path) -> tuple:
     Returns (handler, logger_inst, fake_instance, log_file).
     The on-disk file holds FULL history; the instance.conversation is the TRIMMED pool.
     """
-    log_file = tmp_path / "bug0007_ws.jsonl"
+    log_file = tmp_path / 'bug0007_ws.jsonl'
 
     # ── Full on-disk history: [SYS][U0] + 100 pre-marker raw + L2 marker + 40 mid + tail ──
     full = []
-    full.append(_user("system", _ts(0)))
-    full.append(_user("initial user", _ts(1)))
+    full.append(_user('system', _ts(0)))
+    full.append(_user('initial user', _ts(1)))
     for i in range(100):
         full.append(_user(f"pre {i}", _ts(2 + i)) if i % 2 == 0 else _assistant(f"pa {i}", _ts(2 + i)))
-    l2 = _marker("L2 consolidated", _ts(102), kind="l2")
+    l2 = _marker('L2 consolidated', _ts(102), kind='l2')
     full.append(l2)
     for i in range(40):
         full.append(_user(f"mid {i}", _ts(103 + i)) if i % 2 == 0 else _assistant(f"m {i}", _ts(103 + i)))
 
-    lines = [json.dumps({"metadata": {"agent_class": "orchestrator"}})]
+    lines = [json.dumps({'metadata': {'agent_class': 'orchestrator'}})]
     for m in full:
         lines.append(json.dumps(m))
-    log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log_file.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
     logger_inst = AgentInstanceLogger(
-        agent_class="orchestrator", instance_name="Maine",
+        agent_class='orchestrator', instance_name='Maine',
         log_dir=str(tmp_path), log_path=str(log_file),
     )
     # Mirror what load_session_from_log leaves: data["history"] = full tracked set.
@@ -132,7 +132,7 @@ def _make_handler(tmp_path: Path) -> tuple:
         return None
 
     handler = WsMessageHandler(
-        session={"session_name": "Maine"},
+        session={'session_name': 'Maine'},
         agent_pool=fake_pool,
         agents=[],
         send_queue=None,
@@ -147,7 +147,7 @@ def _make_handler(tmp_path: Path) -> tuple:
 
 def _read_msgs(log_file: Path):
     out = []
-    for line in log_file.read_text(encoding="utf-8").splitlines():
+    for line in log_file.read_text(encoding='utf-8').splitlines():
         line = line.strip()
         if not line:
             continue
@@ -155,14 +155,14 @@ def _read_msgs(log_file: Path):
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+        if isinstance(item, dict) and 'metadata' not in item and 'event' not in item:
             out.append(item)
     return out
 
 
 def _raw_contents(msgs):
-    return [m["content"] for m in msgs
-            if isinstance(m.get("content"), str) and not m["content"].startswith(COMPRESSION_MARKER)]
+    return [m['content'] for m in msgs
+            if isinstance(m.get('content'), str) and not m['content'].startswith(COMPRESSION_MARKER)]
 
 
 def _run(coro):
@@ -180,14 +180,14 @@ def test_delete_one_preserves_pre_marker_raw(tmp_path):
     raw_before = set(_raw_contents(before))
     # Pre-marker raw = every non-marker message that sits BEFORE the L2 marker on disk.
     l2_idx = next(i for i, m in enumerate(before)
-                  if isinstance(m.get("content"), str) and m["content"].startswith(COMPRESSION_MARKER))
+                  if isinstance(m.get('content'), str) and m['content'].startswith(COMPRESSION_MARKER))
     pre_marker_raw = set(_raw_contents(before[:l2_idx]))
-    assert pre_marker_raw, "seed sanity: pre-marker raw present on disk"
+    assert pre_marker_raw, 'seed sanity: pre-marker raw present on disk'
 
     # The displayed (trimmed) pool has 6 messages. Delete the LAST one (index 5 = full[-1]).
     trimmed = fake_inst.conversation
-    target_content = trimmed[5]["content"]
-    data = {"indices": [5], "instance_name": "Maine"}
+    target_content = trimmed[5]['content']
+    data = {'indices': [5], 'instance_name': 'Maine'}
 
     _run(handler.handle_delete_messages(data))
 
@@ -200,11 +200,11 @@ def test_delete_one_preserves_pre_marker_raw(tmp_path):
 
     # 2. The targeted message was actually removed (exactly one fewer message overall).
     assert len(after) == len(before) - 1, f"expected {len(before)-1} msgs after deleting 1, got {len(after)}"
-    assert target_content not in raw_after, "targeted message should be removed"
+    assert target_content not in raw_after, 'targeted message should be removed'
 
     # 3. Pool working set stayed trimmed and dropped the same message by identity.
     assert len(fake_inst.rebuilt) == len(trimmed) - 1
-    assert all(m["content"] != target_content for m in fake_inst.rebuilt)
+    assert all(m['content'] != target_content for m in fake_inst.rebuilt)
 
 
 # ──────────────────────────────────────────────
@@ -219,11 +219,11 @@ def test_shrink_guard_aborts_massive_drop(tmp_path):
     # (as the old buggy code did: trimmed pool over full file) must be REFUSED.
     tiny = [lg._format_message(fake_inst.conversation[0])]  # 1 message
 
-    ok = lg.rewrite_log_with_history(tiny, caller="ws_delete_test")  # allow_shrink NOT set
-    assert ok is False, "shrink guard should refuse a massive shrink without allow_shrink=True"
+    ok = lg.rewrite_log_with_history(tiny, caller='ws_delete_test')  # allow_shrink NOT set
+    assert ok is False, 'shrink guard should refuse a massive shrink without allow_shrink=True'
 
     after_count = len(_read_msgs(log_file))
-    assert after_count == before_count, "file must be unchanged when the shrink guard aborts"
+    assert after_count == before_count, 'file must be unchanged when the shrink guard aborts'
 
 
 # ──────────────────────────────────────────────
@@ -236,13 +236,13 @@ def test_edit_preserves_pre_marker_raw(tmp_path):
     before = _read_msgs(log_file)
     raw_before = set(_raw_contents(before))
     l2_idx = next(i for i, m in enumerate(before)
-                  if isinstance(m.get("content"), str) and m["content"].startswith(COMPRESSION_MARKER))
+                  if isinstance(m.get('content'), str) and m['content'].startswith(COMPRESSION_MARKER))
     pre_marker_raw = set(_raw_contents(before[:l2_idx]))
 
     # Edit the LAST displayed message (index 5) to new content.
     trimmed = fake_inst.conversation
-    target_content = trimmed[5]["content"]
-    data = {"index": 5, "content": "EDITED CONTENT", "instance_name": "Maine"}
+    target_content = trimmed[5]['content']
+    data = {'index': 5, 'content': 'EDITED CONTENT', 'instance_name': 'Maine'}
 
     _run(handler.handle_edit_message(data))
 
@@ -257,8 +257,8 @@ def test_edit_preserves_pre_marker_raw(tmp_path):
     assert len(after) == len(before), f"edit should not change message count: {len(before)} -> {len(after)}"
 
     # 3. The edit was actually applied to the on-disk copy of that message.
-    assert "EDITED CONTENT" in raw_after, "edited content should be present on disk"
-    assert target_content not in raw_after or "EDITED CONTENT" in raw_after
+    assert 'EDITED CONTENT' in raw_after, 'edited content should be present on disk'
+    assert target_content not in raw_after or 'EDITED CONTENT' in raw_after
 
 
 # ──────────────────────────────────────────────
@@ -268,13 +268,13 @@ def test_edit_preserves_pre_marker_raw(tmp_path):
 def test_delete_on_fresh_session_no_file(tmp_path):
     """When the on-disk file is empty/missing (fresh session), delete falls back to the pool
     view and still removes the targeted message without error."""
-    log_file = tmp_path / "fresh.jsonl"
+    log_file = tmp_path / 'fresh.jsonl'
     logger_inst = AgentInstanceLogger(
-        agent_class="orchestrator", instance_name="Maine",
+        agent_class='orchestrator', instance_name='Maine',
         log_dir=str(tmp_path), log_path=str(log_file),
     )
     # No file written yet.
-    conv = [_user("system", _ts(0)), _user("hello", _ts(1)), _assistant("hi", _ts(2))]
+    conv = [_user('system', _ts(0)), _user('hello', _ts(1)), _assistant('hi', _ts(2))]
     fake_inst = _FakeInstance(conv)
     fake_pool = _FakePool(fake_inst, logger_inst)
 
@@ -282,16 +282,16 @@ def test_delete_on_fresh_session_no_file(tmp_path):
         return None
 
     handler = WsMessageHandler(
-        session={"session_name": "Maine"}, agent_pool=fake_pool, agents=[], send_queue=None,
+        session={'session_name': 'Maine'}, agent_pool=fake_pool, agents=[], send_queue=None,
         broadcast_fn=_noop, build_state_fn=lambda *a, **k: {}, start_gen_fn=None,
         session_lock=threading.Lock(), app=None,
     )
 
-    _run(handler.handle_delete_messages({"indices": [1], "instance_name": "Maine"}))
+    _run(handler.handle_delete_messages({'indices': [1], 'instance_name': 'Maine'}))
 
     rebuilt = fake_inst.rebuilt
     assert len(rebuilt) == 2
-    assert all(m["content"] != "hello" for m in rebuilt), "targeted message should be removed from pool"
+    assert all(m['content'] != 'hello' for m in rebuilt), 'targeted message should be removed from pool'
 
 
 # ──────────────────────────────────────────────
@@ -304,29 +304,29 @@ def test_edit_drifted_identity_not_silently_lost(tmp_path):
     """The displayed (pool) message's identity does not exist in the on-disk file. After edit,
     the new content must be persisted somewhere visible (pool fallback), and the file must NOT
     be left as a full-history copy that silently lacks the claimed edit."""
-    log_file = tmp_path / "drift.jsonl"
+    log_file = tmp_path / 'drift.jsonl'
 
     # Full on-disk history: [SYS][U0] + L2 marker + tail. NOTE: no message with content "DRIFT".
     full = []
-    full.append(_user("system", _ts(0)))
-    full.append(_user("initial user", _ts(1)))
-    full.append(_marker("L2 consolidated", _ts(2), kind="l2"))
+    full.append(_user('system', _ts(0)))
+    full.append(_user('initial user', _ts(1)))
+    full.append(_marker('L2 consolidated', _ts(2), kind='l2'))
     for i in range(5):
         full.append(_user(f"tail {i}", _ts(3 + i)))
 
-    lines = [json.dumps({"metadata": {"agent_class": "orchestrator"}})]
+    lines = [json.dumps({'metadata': {'agent_class': 'orchestrator'}})]
     for m in full:
         lines.append(json.dumps(m))
-    log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log_file.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
     logger_inst = AgentInstanceLogger(
-        agent_class="orchestrator", instance_name="Maine",
+        agent_class='orchestrator', instance_name='Maine',
         log_dir=str(tmp_path), log_path=str(log_file),
     )
     logger_inst.load_history_from_file()
 
     # Trimmed pool working set: [SYS][U0][L2] + a message "DRIFT" whose identity is NOT on disk.
-    drifted = {"role": "user", "content": "DRIFT", "timestamp": _ts(99)}  # ts 99 not in file
+    drifted = {'role': 'user', 'content': 'DRIFT', 'timestamp': _ts(99)}  # ts 99 not in file
     trimmed = [full[0], full[1], full[2], drifted]
 
     fake_inst = _FakeInstance(trimmed)
@@ -336,34 +336,34 @@ def test_edit_drifted_identity_not_silently_lost(tmp_path):
         return None
 
     handler = WsMessageHandler(
-        session={"session_name": "Maine"}, agent_pool=fake_pool, agents=[], send_queue=None,
+        session={'session_name': 'Maine'}, agent_pool=fake_pool, agents=[], send_queue=None,
         broadcast_fn=_noop, build_state_fn=lambda *a, **k: {}, start_gen_fn=None,
         session_lock=threading.Lock(), app=None,
     )
 
     # Edit the drifted message (index 3 in the displayed pool).
     _run(handler.handle_edit_message(
-        {"index": 3, "content": "DRIFT EDITED", "instance_name": "Maine"}
+        {'index': 3, 'content': 'DRIFT EDITED', 'instance_name': 'Maine'}
     ))
 
     # The edit must be persisted to the pool working set (fallback path).
     rebuilt = fake_inst.rebuilt
-    assert any(m["content"] == "DRIFT EDITED" for m in rebuilt), \
-        "edit must be persisted to the pool working set when identity drifted"
-    assert all(m["content"] != "DRIFT" for m in rebuilt), "old drifted content should be replaced"
+    assert any(m['content'] == 'DRIFT EDITED' for m in rebuilt), \
+        'edit must be persisted to the pool working set when identity drifted'
+    assert all(m['content'] != 'DRIFT' for m in rebuilt), 'old drifted content should be replaced'
 
     # The on-disk file must NOT be left as a full-history copy that silently LACKS the edit.
     # (The pre-fix bug wrote `edited_full` with applied=False → an un-edited 8-msg full history.)
     after = _read_msgs(log_file)
-    after_contents = [m["content"] for m in after]
+    after_contents = [m['content'] for m in after]
 
     # The chosen behavior is pool fallback: the file now reflects the edited pool (4 msgs),
     # NOT the un-edited 8-msg full history. Either way, the edit must be present on disk and
     # the old drifted content gone — we never wrote a full copy that drops the claimed edit.
-    assert "DRIFT EDITED" in after_contents, \
-        "BUG #1: file written WITHOUT the edit the UI claims was applied (silent no-op)"
-    assert "DRIFT" not in after_contents, "old drifted content should be replaced on disk"
+    assert 'DRIFT EDITED' in after_contents, \
+        'BUG #1: file written WITHOUT the edit the UI claims was applied (silent no-op)'
+    assert 'DRIFT' not in after_contents, 'old drifted content should be replaced on disk'
 
     # Confirm we did NOT fall into the pre-fix failure mode: an un-edited full-history write.
-    assert len(after) != len(full) or "DRIFT EDITED" in after_contents, \
-        "BUG #1: file kept full-history shape but lacks the claimed edit (un-edited clobber)"
+    assert len(after) != len(full) or 'DRIFT EDITED' in after_contents, \
+        'BUG #1: file kept full-history shape but lacks the claimed edit (un-edited clobber)'

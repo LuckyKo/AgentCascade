@@ -198,9 +198,9 @@ def setup_paths(args):
 
 def print_config(args):
     """Print configuration summary"""
-    print("=" * 80)
-    print("TravelBench Integrated Runner")
-    print("=" * 80)
+    print('=' * 80)
+    print('TravelBench Integrated Runner')
+    print('=' * 80)
     print(f"Model:              {args.model}")
     print(f"Language:           {args.language}")
     print(f"Workers:            {args.workers}")
@@ -213,23 +213,23 @@ def print_config(args):
     # Pipeline steps
     steps = []
     if args.start_from == 'inference':
-        steps = ["1. Inference", "2. Conversion", "3. Evaluation"]
+        steps = ['1. Inference', '2. Conversion', '3. Evaluation']
     elif args.start_from == 'conversion':
-        steps = ["2. Conversion", "3. Evaluation"]
+        steps = ['2. Conversion', '3. Evaluation']
     elif args.start_from == 'evaluation':
-        steps = ["3. Evaluation"]
+        steps = ['3. Evaluation']
     
     print(f"Pipeline steps:     {' → '.join(steps)}")
     print(f"Start from:         {args.start_from.capitalize()}")
-    print("=" * 80)
+    print('=' * 80)
     print()
 
 
 def run_step_inference(args):
     """Step 1: Run agent inference to generate trajectories"""
-    print("\n" + "=" * 80)
-    print("STEP 1: Agent Inference")
-    print("=" * 80)
+    print('\n' + '=' * 80)
+    print('STEP 1: Agent Inference')
+    print('=' * 80)
     
     # Auto-detect missing reports if not explicitly specifying rerun_ids
     rerun_ids = None
@@ -294,9 +294,9 @@ def run_step_inference(args):
 
 def run_step_conversion(args):
     """Step 2: Convert reports to standardized plan format"""
-    print("\n" + "=" * 80)
-    print("STEP 2: Plan Conversion")
-    print("=" * 80)
+    print('\n' + '=' * 80)
+    print('STEP 2: Plan Conversion')
+    print('=' * 80)
     
     # Auto-detect missing converted plans
     converted_plans_dir = args.output_dir / 'converted_plans'
@@ -343,9 +343,9 @@ def run_step_conversion(args):
 
 def run_step_evaluation(args):
     """Step 3: Evaluate converted plans"""
-    print("\n" + "=" * 80)
-    print("STEP 3: Plan Evaluation")
-    print("=" * 80)
+    print('\n' + '=' * 80)
+    print('STEP 3: Plan Evaluation')
+    print('=' * 80)
     print(f"  Language: {args.language}")
     print(f"  Database directory: {args.database_dir}")
     print(f"  Test data: {args.test_data}")
@@ -382,9 +382,9 @@ def run_step_evaluation(args):
 
 def print_final_summary(args, inference_results, conversion_results, eval_results):
     """Print final summary of all steps"""
-    print("\n" + "=" * 80)
-    print("FINAL SUMMARY")
-    print("=" * 80)
+    print('\n' + '=' * 80)
+    print('FINAL SUMMARY')
+    print('=' * 80)
     
     if inference_results:
         print(f"Inference:  {inference_results['success']}/{inference_results['total']} succeeded")
@@ -397,7 +397,7 @@ def print_final_summary(args, inference_results, conversion_results, eval_result
         print(f"            Pass rate = {eval_results['pass_rate']:.1f}%")
     
     print(f"\nResults saved to: {args.output_dir}")
-    print("=" * 80)
+    print('=' * 80)
 
 
 def run_single_language(args, language):
@@ -418,21 +418,21 @@ def run_single_language(args, language):
     if args.start_from == 'inference':
         success, inference_results = run_step_inference(args)
         if not success:
-            print("\n⚠️  Inference failed, skipping subsequent steps")
+            print('\n⚠️  Inference failed, skipping subsequent steps')
             return False, None, None, None
     
     # Step 2: Conversion
     if args.start_from in ['inference', 'conversion']:
         success, conversion_results = run_step_conversion(args)
         if not success:
-            print("\n⚠️  Conversion failed, skipping evaluation")
+            print('\n⚠️  Conversion failed, skipping evaluation')
             return False, inference_results, None, None
     
     # Step 3: Evaluation
     if args.start_from in ['inference', 'conversion', 'evaluation']:
         success, eval_results = run_step_evaluation(args)
         if not success:
-            print("\n⚠️  Evaluation failed")
+            print('\n⚠️  Evaluation failed')
             return False, inference_results, conversion_results, None
     
     # Print summary for this language
@@ -456,9 +456,9 @@ def main():
     # Determine which languages to run
     if args.language is None:
         languages = ['zh', 'en']
-        print("=" * 80)
-        print("Running for both languages: zh and en")
-        print("=" * 80)
+        print('=' * 80)
+        print('Running for both languages: zh and en')
+        print('=' * 80)
         print()
     else:
         languages = [args.language]
@@ -467,9 +467,9 @@ def main():
     all_success = True
     for idx, lang in enumerate(languages):
         if len(languages) > 1:
-            print("\n" + "=" * 80)
+            print('\n' + '=' * 80)
             print(f"LANGUAGE {idx + 1}/{len(languages)}: {lang.upper()}")
-            print("=" * 80)
+            print('=' * 80)
             print()
         
         success, inf_res, conv_res, eval_res = run_single_language(args, lang)
@@ -485,17 +485,17 @@ def main():
     
     # Print overall summary
     overall_elapsed = time.time() - overall_start_time
-    print("\n" + "=" * 80)
-    print("OVERALL SUMMARY")
-    print("=" * 80)
+    print('\n' + '=' * 80)
+    print('OVERALL SUMMARY')
+    print('=' * 80)
     print(f"Languages run: {', '.join(languages)}")
     print(f"Total time: {overall_elapsed:.2f}s ({overall_elapsed/60:.1f} minutes)")
-    print("=" * 80)
+    print('=' * 80)
     
     if all_success:
-        print("\n✅ All pipelines completed successfully!")
+        print('\n✅ All pipelines completed successfully!')
     else:
-        print("\n⚠️  Some pipelines failed. Check logs above.")
+        print('\n⚠️  Some pipelines failed. Check logs above.')
         sys.exit(1)
 
 

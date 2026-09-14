@@ -55,7 +55,7 @@ class StreamPublisher:
             RuntimeError: If _engine not set (initialize() not called).
         """
         if self._engine is None:
-            raise RuntimeError("StreamPublisher._engine not set")
+            raise RuntimeError('StreamPublisher._engine not set')
         return self._engine
     
     def set_engine(self, engine: 'ExecutionEngine') -> None:

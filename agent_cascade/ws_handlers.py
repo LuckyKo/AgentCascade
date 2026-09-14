@@ -367,7 +367,7 @@ class WsMessageHandler:
                         f"{stuck}"
                     )
                 else:
-                    logger.debug("All slots released cleanly after stop_session")
+                    logger.debug('All slots released cleanly after stop_session')
 
             logger.debug(f"Transitioned {transitioned} agent(s) to IDLE, generation now={self.agent_pool._run_generation}")
 
@@ -418,7 +418,7 @@ class WsMessageHandler:
             # pool.resume() itself invalidates the stream cache (SlotsMixin).
             self.agent_pool.resume()  # Clears _paused Event — backend unblocks Phase 4 tool execution
             from agent_cascade.log import logger
-            logger.info("Cleared global pause flag — all agents will resume naturally")
+            logger.info('Cleared global pause flag — all agents will resume naturally')
 
     async def handle_resume(self, data: dict) -> None:
         """Handle 'resume' — restore agent pools from logs and restart generation."""
@@ -491,7 +491,7 @@ class WsMessageHandler:
                                             continue
                                         try:
                                             item = json.loads(line)
-                                            if "metadata" not in item and "event" not in item:
+                                            if 'metadata' not in item and 'event' not in item:
                                                 recov.append(item)
                                         except json.JSONDecodeError as e:
                                             _logger.debug(f"Skipping malformed JSONL line in agent pool recovery: {e}")
@@ -584,7 +584,7 @@ class WsMessageHandler:
         # 1. Rollback all agents to start of last turn
         if self.agent_pool and self.session.get('last_turn_snapshots'):
             self.agent_pool.rollback_to_snapshots(
-                self.session['last_turn_snapshots'], reason="User retry"
+                self.session['last_turn_snapshots'], reason='User retry'
             )
             self._sync_sub_agent_states()
 
@@ -608,7 +608,7 @@ class WsMessageHandler:
                         pop_count=count,
                         sync_logger=True,
                         preserve_system_user=False,
-                        reason="User retry: trim trailing assistant/function messages",
+                        reason='User retry: trim trailing assistant/function messages',
                     )
 
         # Early exit if no usable state
@@ -664,7 +664,7 @@ class WsMessageHandler:
         agent_names = self.agent_pool.list_agents()
         if not agent_names:
             from agent_cascade.log import logger
-            logger.warning("No agents found after refresh")
+            logger.warning('No agents found after refresh')
             return []
         
         # Filter out None values in case get_agent fails for some template
@@ -729,7 +729,7 @@ class WsMessageHandler:
     async def handle_restart_server(self, data: dict) -> None:
         """Handle 'restart_server' — restart the server process."""
         from agent_cascade.log import logger
-        logger.warning("Server restart requested via UI")
+        logger.warning('Server restart requested via UI')
         import sys
         await self.broadcast_fn({'type': 'error', 'message': 'Server is restarting... Please wait.'})
         os.execl(sys.executable, sys.executable, *sys.argv)
@@ -895,7 +895,7 @@ class WsMessageHandler:
                     self.app.current_auto_security = bool(settings_json['auto_security'])
                     await self.broadcast_fn({'type': 'info', 'message': f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"})
                 else:
-                    logger.warning("App missing current_auto_security attribute during import")
+                    logger.warning('App missing current_auto_security attribute during import')
 
             await self.broadcast_fn({
                 'type': 'import_settings',
@@ -945,7 +945,7 @@ class WsMessageHandler:
 
         # If neither key was present, nothing to do.
         if not ro_updated and not rw_updated:
-            _logger.debug("[set_work_folders] No work folder keys provided, ignoring")
+            _logger.debug('[set_work_folders] No work folder keys provided, ignoring')
             return
 
         try:
@@ -956,9 +956,9 @@ class WsMessageHandler:
             # Delegate to operation_manager for consistent path resolution/validation.
             # This handles invalid paths gracefully (logs warning, skips bad entries).
             om.set_extra_work_folders(final_ro, final_rw)
-            _logger.info("[set_work_folders] Explicit save — RO=%s, RW=%s", ro_paths, rw_paths)
+            _logger.info('[set_work_folders] Explicit save — RO=%s, RW=%s', ro_paths, rw_paths)
         except Exception as e:
-            _logger.error("[set_work_folders] Failed to set work folders: %s", e)
+            _logger.error('[set_work_folders] Failed to set work folders: %s', e)
 
         await self._broadcast()
 
@@ -1063,13 +1063,13 @@ class WsMessageHandler:
             # Identity of the message being edited (timestamp + ORIGINAL content) — used to
             # locate its counterpart in the full on-disk history.
             edit_key = _msg_identity(msg)
-            old_content = msg_field(msg, CONTENT, "")
+            old_content = msg_field(msg, CONTENT, '')
             new_parsed_content = _parse_multimodal_content(content)
 
             # If this is a compression marker, ensure tags are preserved
             is_compression_msg = str(old_content).startswith(COMPRESSION_MARKER)
             if is_compression_msg:
-                if COMPRESSION_MARKER in content or "<context_summary>" in content:
+                if COMPRESSION_MARKER in content or '<context_summary>' in content:
                     new_parsed_content = content
                 else:
                     new_parsed_content = f"{COMPRESSION_MARKER}\n\n<context_summary>\n{content}\n</context_summary>"
@@ -1126,12 +1126,12 @@ class WsMessageHandler:
                             f"'{target_name}' (identity drift). Falling back to pool working set "
                             f"so the edit is persisted rather than silently lost."
                         )
-                        logger_inst.rewrite_log_with_history(history, caller="ws_edit")
+                        logger_inst.rewrite_log_with_history(history, caller='ws_edit')
                     else:
                         # File empty/unreadable → fall back to the (already-edited) pool;
                         # otherwise write the full history with the edit applied in place.
                         logger_inst.rewrite_log_with_history(
-                            edited_full if full_history else history, caller="ws_edit"
+                            edited_full if full_history else history, caller='ws_edit'
                         )
 
                 # Sync instance_state so build_state() sees the edit
@@ -1212,7 +1212,7 @@ class WsMessageHandler:
                 # able to collapse a full-history file. If the rewrite would drop far more than
                 # requested, rewrite_log_with_history logs CRITICAL and aborts, leaving the file
                 # unchanged — fail safe rather than silently destroy history.
-                logger_inst.rewrite_log_with_history(new_full, caller="ws_delete")
+                logger_inst.rewrite_log_with_history(new_full, caller='ws_delete')
 
                 if target_name != self.session['session_name'] and target_name in self.agent_pool.instance_state:
                     self.agent_pool.instance_state[target_name]['messages'] = list(new_pool)
@@ -1251,8 +1251,8 @@ class WsMessageHandler:
                 if first_line:
                     first_data = json.loads(first_line)
                     if isinstance(first_data, dict):
-                        meta = first_data.get("metadata", {})
-                        extracted = meta.get("instance_name") if isinstance(meta, dict) else None
+                        meta = first_data.get('metadata', {})
+                        extracted = meta.get('instance_name') if isinstance(meta, dict) else None
                         if extracted:
                             instance_name = str(extracted).strip()
         except (OSError, json.JSONDecodeError, KeyError) as e:
@@ -1276,7 +1276,7 @@ class WsMessageHandler:
                 clear_sub_agents_before_load=True,
                 caller_name=caller_name if exclude_caller else None
             )
-        if status.startswith("Error"):
+        if status.startswith('Error'):
             await self.broadcast_fn({'type': 'error', 'message': status})
             return
 

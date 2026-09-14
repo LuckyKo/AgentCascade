@@ -204,7 +204,7 @@ class BaseShoppingTool(ABC):
         if isinstance(self.parameters, dict) and self.parameters:
             if not self._is_valid_schema(self.parameters):
                 raise ValueError(
-                    "parameters must adhere to a valid JSON schema format.\n"
+                    'parameters must adhere to a valid JSON schema format.\n'
                     f"current parameters: {self.parameters}\n"
                     f"tool name: {self.name}"
                 )
@@ -354,15 +354,15 @@ class BaseShoppingTool(ABC):
                 PANDAS_AVAILABLE = False
                 raise ImportError(
                     f"Failed to import pandas: {e}\n"
-                    "Please run: pip install pandas\n"
-                    "Or use a JSON-format database."
+                    'Please run: pip install pandas\n'
+                    'Or use a JSON-format database.'
                 )
 
         if PANDAS_AVAILABLE is False:
             raise ImportError(
-                "pandas is not installed or failed to import. Cannot load CSV database.\n"
-                "Please run: pip install pandas\n"
-                "Or use a JSON-format database."
+                'pandas is not installed or failed to import. Cannot load CSV database.\n'
+                'Please run: pip install pandas\n'
+                'Or use a JSON-format database.'
             )
 
         pd = PANDAS_AVAILABLE
@@ -392,11 +392,11 @@ class BaseShoppingTool(ABC):
             Full schema as required by OpenAI Function Calling
         """
         return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters
+            'type': 'function',
+            'function': {
+                'name': self.name,
+                'description': self.description,
+                'parameters': self.parameters
             }
         }
 
@@ -409,12 +409,12 @@ class BaseShoppingTool(ABC):
             Function definition dict
         """
         return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters
+            'name': self.name,
+            'description': self.description,
+            'parameters': self.parameters
         }
 
-    def get_schema(self, format: str = "openai") -> Dict:
+    def get_schema(self, format: str = 'openai') -> Dict:
         """
         Get the tool schema in the specified format.
 
@@ -427,13 +427,13 @@ class BaseShoppingTool(ABC):
         Raises:
             ValueError: If the format is unrecognized
         """
-        if format in ("openai", "qwen"):
+        if format in ('openai', 'qwen'):
             return self.openai_schema
-        elif format == "anthropic":
+        elif format == 'anthropic':
             return {
-                "name": self.name,
-                "description": self.description,
-                "input_schema": self.parameters
+                'name': self.name,
+                'description': self.description,
+                'input_schema': self.parameters
             }
         else:
             raise ValueError(
@@ -449,10 +449,10 @@ class BaseShoppingTool(ABC):
             Schema in OpenAI Function Calling format
         """
         return {
-            "type": "function",
-            "function": {
-                "name": cls.name,
-                "description": cls.description,
-                "parameters": cls.parameters
+            'type': 'function',
+            'function': {
+                'name': cls.name,
+                'description': cls.description,
+                'parameters': cls.parameters
             }
         }

@@ -45,36 +45,36 @@ class TestAsyncToolRegistryIntegration:
     def test_completed_tool_result_enqueued(self, registry, mock_pool):
         """Completed tool results are enqueued via pool.enqueue_message."""
         def quick_tool():
-            return "tool_output"
+            return 'tool_output'
 
-        registry.register("worker1", quick_tool, function_id="call_123")
+        registry.register('worker1', quick_tool, function_id='call_123')
 
         # Poll until completion instead of blind sleep.
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("worker1") and time.monotonic() < deadline:
+        while registry.has_pending('worker1') and time.monotonic() < deadline:
             time.sleep(0.05)
 
         mock_pool.enqueue_message.assert_called_once()
         agent_name, msg = mock_pool.enqueue_message.call_args[0]
-        assert agent_name == "worker1"
-        assert "tool_output" in msg
+        assert agent_name == 'worker1'
+        assert 'tool_output' in msg
 
     def test_tool_error_enqueued(self, registry, mock_pool):
         """Tool errors are enqueued as formatted error messages."""
         def failing_tool():
-            raise RuntimeError("Something broke")
+            raise RuntimeError('Something broke')
 
-        registry.register("worker1", failing_tool)
+        registry.register('worker1', failing_tool)
 
         # Poll until completion instead of blind sleep.
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("worker1") and time.monotonic() < deadline:
+        while registry.has_pending('worker1') and time.monotonic() < deadline:
             time.sleep(0.05)
 
         mock_pool.enqueue_message.assert_called_once()
         agent_name, msg = mock_pool.enqueue_message.call_args[0]
-        assert agent_name == "worker1"
-        assert "Error" in msg or "broke" in msg
+        assert agent_name == 'worker1'
+        assert 'Error' in msg or 'broke' in msg
 
     def test_has_pending_true_while_running(self, registry):
         """has_pending returns True while tool is executing."""
@@ -83,29 +83,29 @@ class TestAsyncToolRegistryIntegration:
         def slow_tool():
             time.sleep(0.2)
             completed_event.set()
-            return "done"
+            return 'done'
 
-        registry.register("worker1", slow_tool)
+        registry.register('worker1', slow_tool)
 
-        assert registry.has_pending("worker1") is True
+        assert registry.has_pending('worker1') is True
 
         # Wait for tool to complete via event instead of blind sleep.
         completed_event.wait(timeout=5.0)
-        assert registry.has_pending("worker1") is False
+        assert registry.has_pending('worker1') is False
 
     def test_has_pending_false_after_completion(self, registry):
         """has_pending returns False after all tools complete."""
         def quick_tool():
-            return "done"
+            return 'done'
 
-        registry.register("worker1", quick_tool)
+        registry.register('worker1', quick_tool)
 
         # Poll until completion instead of blind sleep.
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("worker1") and time.monotonic() < deadline:
+        while registry.has_pending('worker1') and time.monotonic() < deadline:
             time.sleep(0.05)
 
-        assert registry.has_pending("worker1") is False
+        assert registry.has_pending('worker1') is False
 
     def test_clear_pending_removes_entries(self, registry):
         """clear_pending removes all pending entries for an instance."""
@@ -114,14 +114,14 @@ class TestAsyncToolRegistryIntegration:
         def slow_tool():
             # Wait indefinitely; will not complete if pending is cleared
             finish_event.wait(timeout=30)
-            return "done"
+            return 'done'
 
-        registry.register("worker1", slow_tool)
-        assert registry.has_pending("worker1") is True
+        registry.register('worker1', slow_tool)
+        assert registry.has_pending('worker1') is True
 
-        cancelled = registry.clear_pending("worker1")
+        cancelled = registry.clear_pending('worker1')
         assert cancelled >= 0
-        assert registry.has_pending("worker1") is False
+        assert registry.has_pending('worker1') is False
 
 
 # ============================================================================
@@ -136,22 +136,22 @@ class TestHasPendingRaceCondition:
         registry = AsyncToolRegistry(pool=mock_pool)
 
         def quick_tool():
-            return "result"
+            return 'result'
 
-        registry.register("worker1", quick_tool)
+        registry.register('worker1', quick_tool)
 
         # Poll until completion instead of blind sleep.
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("worker1") and time.monotonic() < deadline:
+        while registry.has_pending('worker1') and time.monotonic() < deadline:
             time.sleep(0.05)
 
         # Now: has_pending should be False AND result should have been enqueued
-        pending = registry.has_pending("worker1")
+        pending = registry.has_pending('worker1')
         enqueue_calls = mock_pool.enqueue_message.call_count
 
         if not pending:
             assert enqueue_calls >= 1, \
-                "Race condition: has_pending=False but no message enqueued"
+                'Race condition: has_pending=False but no message enqueued'
 
 
 # ============================================================================
@@ -166,19 +166,19 @@ class TestNestedAgentCallsViaAsyncToolRegistry:
         registry = AsyncToolRegistry(pool=mock_pool)
 
         def nested_agent_tool():
-            return "[Agent researcher1 Completed]: Nested result data"
+            return '[Agent researcher1 Completed]: Nested result data'
 
-        registry.register("parent_worker", nested_agent_tool, function_id="nested_1")
+        registry.register('parent_worker', nested_agent_tool, function_id='nested_1')
 
         # Poll until completion.
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("parent_worker") and time.monotonic() < deadline:
+        while registry.has_pending('parent_worker') and time.monotonic() < deadline:
             time.sleep(0.05)
 
         mock_pool.enqueue_message.assert_called_once()
         agent_name, msg = mock_pool.enqueue_message.call_args[0]
-        assert agent_name == "parent_worker"
-        assert "Nested result data" in msg
+        assert agent_name == 'parent_worker'
+        assert 'Nested result data' in msg
 
 
 # ============================================================================
@@ -193,23 +193,23 @@ class TestMultipleConcurrentAsyncTools:
         registry = AsyncToolRegistry(pool=mock_pool)
 
         def tool1():
-            return "result1"
+            return 'result1'
 
         def tool2():
-            return "result2"
+            return 'result2'
 
-        registry.register("worker", tool1)
-        registry.register("worker", tool2)
+        registry.register('worker', tool1)
+        registry.register('worker', tool2)
 
         # Poll until both complete.
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("worker") and time.monotonic() < deadline:
+        while registry.has_pending('worker') and time.monotonic() < deadline:
             time.sleep(0.05)
 
         assert mock_pool.enqueue_message.call_count == 2
         msgs = [call[0][1] for call in mock_pool.enqueue_message.call_args_list]
-        assert any("result1" in m for m in msgs)
-        assert any("result2" in m for m in msgs)
+        assert any('result1' in m for m in msgs)
+        assert any('result2' in m for m in msgs)
 
 
 # ============================================================================
@@ -224,18 +224,18 @@ class TestSingleQueueRegression:
         registry = AsyncToolRegistry(pool=mock_pool)
 
         def quick_tool():
-            return "test_output"
+            return 'test_output'
 
-        registry.register("worker1", quick_tool)
+        registry.register('worker1', quick_tool)
 
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("worker1") and time.monotonic() < deadline:
+        while registry.has_pending('worker1') and time.monotonic() < deadline:
             time.sleep(0.05)
 
         mock_pool.enqueue_message.assert_called_once()
         agent_name, msg = mock_pool.enqueue_message.call_args[0]
-        assert isinstance(msg, str), "Message must be a plain string for unified queue"
-        assert agent_name == "worker1"
+        assert isinstance(msg, str), 'Message must be a plain string for unified queue'
+        assert agent_name == 'worker1'
 
 
 # ============================================================================
@@ -253,7 +253,7 @@ class TestChildAgentFailedError:
         mock_engine = MagicMock()
         mock_inst = MagicMock()
         mock_inst.is_terminated = False
-        mock_conv = [{"role": "assistant", "content": "[SYSTEM ERROR: HTTP 400 - not supported]"}]
+        mock_conv = [{'role': 'assistant', 'content': '[SYSTEM ERROR: HTTP 400 - not supported]'}]
         mock_engine._create_and_run_agent.return_value = (mock_inst, mock_conv)
 
         # Mock pool: not stopped, not terminated
@@ -264,14 +264,14 @@ class TestChildAgentFailedError:
         mock_pool._compression_halted = set()
         mock_pool.get_instance.return_value = None
 
-        with pytest.raises(ChildAgentFailedError, match="SYSTEM ERROR"):
+        with pytest.raises(ChildAgentFailedError, match='SYSTEM ERROR'):
             run_child_core(
                 engine=mock_engine,
                 pool=mock_pool,
-                agent_class="coder",
-                instance_name="child1",
+                agent_class='coder',
+                instance_name='child1',
                 args={},
-                caller_name="parent1",
+                caller_name='parent1',
                 child_depth=1,
             )
 
@@ -282,25 +282,25 @@ class TestChildAgentFailedError:
         mock_engine = MagicMock()
         mock_inst = MagicMock()
         mock_inst.is_terminated = True
-        mock_conv = [{"role": "assistant", "content": "partial output before termination"}]
+        mock_conv = [{'role': 'assistant', 'content': 'partial output before termination'}]
         mock_engine._create_and_run_agent.return_value = (mock_inst, mock_conv)
 
         # Mock pool: instance IS in terminated_instances
         mock_pool = MagicMock()
         mock_pool.stopped = False
-        mock_pool.terminated_instances = {"child1"}
+        mock_pool.terminated_instances = {'child1'}
         mock_pool._halted_instances = set()
         mock_pool._compression_halted = set()
         mock_pool.get_instance.return_value = None
 
-        with pytest.raises(ChildAgentFailedError, match="terminated"):
+        with pytest.raises(ChildAgentFailedError, match='terminated'):
             run_child_core(
                 engine=mock_engine,
                 pool=mock_pool,
-                agent_class="coder",
-                instance_name="child1",
+                agent_class='coder',
+                instance_name='child1',
                 args={},
-                caller_name="parent1",
+                caller_name='parent1',
                 child_depth=1,
             )
 
@@ -313,14 +313,14 @@ class TestChildAgentFailedError:
         def failing_child():
             raise ChildAgentFailedError("Sub-agent 'child1' failed: [SYSTEM ERROR: HTTP 400]")
 
-        registry.register("parent1", failing_child, function_id="call_abc")
+        registry.register('parent1', failing_child, function_id='call_abc')
 
         deadline = time.monotonic() + 5.0
-        while registry.has_pending("parent1") and time.monotonic() < deadline:
+        while registry.has_pending('parent1') and time.monotonic() < deadline:
             time.sleep(0.05)
 
         mock_pool.enqueue_message.assert_called_once()
         agent_name, msg = mock_pool.enqueue_message.call_args[0]
-        assert agent_name == "parent1"
-        assert "[Background Tool Error]" in msg
-        assert "child1" in msg
+        assert agent_name == 'parent1'
+        assert '[Background Tool Error]' in msg
+        assert 'child1' in msg

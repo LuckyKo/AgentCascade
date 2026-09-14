@@ -53,7 +53,7 @@ class TestAgentKernelTracking:
         )
 
         # Set up mock state
-        session = "test_session_123"
+        session = 'test_session_123'
         kernel_id = f"ci_{session}_{os.getpid()}"
         
         with patch('agent_cascade.tools.code_interpreter._KERNEL_LOCK', MagicMock()):
@@ -63,15 +63,15 @@ class TestAgentKernelTracking:
         result = cleanup_kernels_for_session(session)
 
         # Verify tracking was removed
-        assert session not in _AGENT_KERNELS, "Session should be removed from _AGENT_KERNELS"
+        assert session not in _AGENT_KERNELS, 'Session should be removed from _AGENT_KERNELS'
         assert result == 1, f"Should report 1 kernel cleaned up, got {result}"
 
     def test_cleanup_kernels_for_session_noop_when_empty(self):
         """Verify cleanup returns 0 when session has no kernels."""
         from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session
 
-        result = cleanup_kernels_for_session("nonexistent_session")
-        assert result == 0, "Should return 0 for unknown session"
+        result = cleanup_kernels_for_session('nonexistent_session')
+        assert result == 0, 'Should return 0 for unknown session'
 
     def test_cleanup_kernels_for_session_handles_multiple_kernels(self):
         """Verify cleanup handles multiple kernels per session."""
@@ -79,7 +79,7 @@ class TestAgentKernelTracking:
             _AGENT_KERNELS, cleanup_kernels_for_session
         )
 
-        session = "multi_kernel_session"
+        session = 'multi_kernel_session'
         pid = os.getpid()
         kernel_ids = [f"ci_{session}_k1_{pid}", f"ci_{session}_k2_{pid}"]
         
@@ -120,8 +120,8 @@ class TestCodeInterpreterClose:
     def test_close_method_exists(self):
         """Verify close() method exists on CodeInterpreter."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
-        assert hasattr(CodeInterpreter, 'close'), "CodeInterpreter should have close() method"
-        assert callable(getattr(CodeInterpreter, 'close')), "close() should be callable"
+        assert hasattr(CodeInterpreter, 'close'), 'CodeInterpreter should have close() method'
+        assert callable(getattr(CodeInterpreter, 'close')), 'close() should be callable'
 
     def test_close_shuts_down_kernel_clients(self):
         """Verify close() calls shutdown on kernel clients."""
@@ -143,7 +143,7 @@ class TestCodeInterpreterClose:
 
         # Set up mock kernel state
         _KERNEL_CLIENTS[kernel_id] = mock_kc
-        _DOCKER_CONTAINERS[kernel_id] = "fake_container_id"
+        _DOCKER_CONTAINERS[kernel_id] = 'fake_container_id'
 
         with patch('subprocess.run') as mock_run:
             result = ci.close()
@@ -152,8 +152,8 @@ class TestCodeInterpreterClose:
         mock_kc.shutdown.assert_called_once()
         
         # Verify kernel was removed from tracking
-        assert kernel_id not in _KERNEL_CLIENTS, "Kernel should be removed from _KERNEL_CLIENTS"
-        assert kernel_id not in _DOCKER_CONTAINERS, "Container should be removed from _DOCKER_CONTAINERS"
+        assert kernel_id not in _KERNEL_CLIENTS, 'Kernel should be removed from _KERNEL_CLIENTS'
+        assert kernel_id not in _DOCKER_CONTAINERS, 'Container should be removed from _DOCKER_CONTAINERS'
         assert result == 1, f"close() should return 1, got {result}"
 
     def test_close_noop_when_no_kernels(self):
@@ -162,7 +162,7 @@ class TestCodeInterpreterClose:
 
         ci = CodeInterpreter(cfg={'work_dir': '/tmp/test_ci_close'})
         result = ci.close()
-        assert result == 0, "close() should return 0 when no kernels to clean up"
+        assert result == 0, 'close() should return 0 when no kernels to clean up'
 
 
 class TestDismissTriggersCleanup:
@@ -196,7 +196,7 @@ class TestDismissTriggersCleanup:
             _KERNEL_ACTIVITY, cleanup_kernels_for_session
         )
 
-        session = "test_clear_state"
+        session = 'test_clear_state'
         pid = os.getpid()
         kernel_id = f"ci_{session}_{pid}"
 
@@ -204,7 +204,7 @@ class TestDismissTriggersCleanup:
         with patch('agent_cascade.tools.code_interpreter._KERNEL_LOCK', MagicMock()):
             _AGENT_KERNELS[session] = [kernel_id]
             _KERNEL_CLIENTS[kernel_id] = MagicMock()
-            _DOCKER_CONTAINERS[kernel_id] = "test_container_123"
+            _DOCKER_CONTAINERS[kernel_id] = 'test_container_123'
             _KERNEL_ACTIVITY[kernel_id] = {'last_active': 0, 'work_dir': '/tmp'}
 
         # Run cleanup
@@ -212,9 +212,9 @@ class TestDismissTriggersCleanup:
 
         # Verify all tracking was cleared
         assert session not in _AGENT_KERNELS
-        assert kernel_id not in _KERNEL_CLIENTS, "Kernel client should be removed"
-        assert kernel_id not in _DOCKER_CONTAINERS, "Container should be removed"
-        assert kernel_id not in _KERNEL_ACTIVITY, "Activity tracking should be cleared"
+        assert kernel_id not in _KERNEL_CLIENTS, 'Kernel client should be removed'
+        assert kernel_id not in _DOCKER_CONTAINERS, 'Container should be removed'
+        assert kernel_id not in _KERNEL_ACTIVITY, 'Activity tracking should be cleared'
         assert result == 1
 
     def test_close_clears_all_kernel_state(self):
@@ -232,9 +232,9 @@ class TestDismissTriggersCleanup:
         mock_kc = MagicMock()
         with patch('agent_cascade.tools.code_interpreter._KERNEL_LOCK', MagicMock()):
             _KERNEL_CLIENTS[kernel_id] = mock_kc
-            _DOCKER_CONTAINERS[kernel_id] = "test_container_close"
+            _DOCKER_CONTAINERS[kernel_id] = 'test_container_close'
             _KERNEL_ACTIVITY[kernel_id] = {'last_active': 0, 'work_dir': '/tmp/test_close_clear'}
-            _AGENT_KERNELS["some_session"] = [kernel_id]
+            _AGENT_KERNELS['some_session'] = [kernel_id]
 
         with patch('subprocess.run') as mock_run:
             result = ci.close()
@@ -242,7 +242,7 @@ class TestDismissTriggersCleanup:
         assert kernel_id not in _KERNEL_CLIENTS
         assert kernel_id not in _DOCKER_CONTAINERS
         # Kernel should be removed from session tracking too
-        assert kernel_id not in _AGENT_KERNELS.get("some_session", [])
+        assert kernel_id not in _AGENT_KERNELS.get('some_session', [])
         assert result == 1
 
 
@@ -315,8 +315,8 @@ class TestModuleLevelAPI:
         sig = inspect.signature(cleanup_kernels_for_session)
         params = list(sig.parameters.keys())
         
-        assert 'session_name' in params, "Should have session_name parameter"
-        assert 'force_timeout' in params, "Should have force_timeout parameter"
+        assert 'session_name' in params, 'Should have session_name parameter'
+        assert 'force_timeout' in params, 'Should have force_timeout parameter'
         
         # Check default value for force_timeout
         assert sig.parameters['force_timeout'].default == 5.0
@@ -324,7 +324,7 @@ class TestModuleLevelAPI:
     def test_agent_kernels_dict_exists(self):
         """Verify _AGENT_KERNELS tracking dict exists."""
         from agent_cascade.tools.code_interpreter import _AGENT_KERNELS
-        assert isinstance(_AGENT_KERNELS, dict), "_AGENT_KERNELS should be a dict"
+        assert isinstance(_AGENT_KERNELS, dict), '_AGENT_KERNELS should be a dict'
 
 
 class TestTempFileCleanup:
@@ -360,7 +360,7 @@ class TestTempFileCleanup:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            session = "temp_file_test"
+            session = 'temp_file_test'
             pid = os.getpid()
             kernel_id = f"ci_{session}_{pid}"
 
@@ -382,9 +382,9 @@ class TestTempFileCleanup:
 
             assert result == 1
             # Verify temp files were removed
-            assert not os.path.exists(conn_host), "Host connection file should be removed"
-            assert not os.path.exists(conn_container), "Container connection file should be removed"
-            assert not os.path.exists(launch_script), "Launch script should be removed"
+            assert not os.path.exists(conn_host), 'Host connection file should be removed'
+            assert not os.path.exists(conn_container), 'Container connection file should be removed'
+            assert not os.path.exists(launch_script), 'Launch script should be removed'
 
     def test_close_removes_temp_files(self):
         """Verify CodeInterpreter.close() removes connection files and launch scripts."""
@@ -409,7 +409,7 @@ class TestTempFileCleanup:
             mock_kc = MagicMock()
             with patch('agent_cascade.tools.code_interpreter._KERNEL_LOCK', MagicMock()):
                 _KERNEL_CLIENTS[kernel_id] = mock_kc
-                _DOCKER_CONTAINERS[kernel_id] = "fake_container"
+                _DOCKER_CONTAINERS[kernel_id] = 'fake_container'
                 _KERNEL_ACTIVITY[kernel_id] = {'last_active': 0, 'work_dir': tmpdir}
 
             with patch('subprocess.run'):
@@ -417,9 +417,9 @@ class TestTempFileCleanup:
 
             assert result == 1
             # Verify temp files were removed
-            assert not os.path.exists(conn_host), "Host connection file should be removed by close()"
-            assert not os.path.exists(conn_container), "Container connection file should be removed by close()"
-            assert not os.path.exists(launch_script), "Launch script should be removed by close()"
+            assert not os.path.exists(conn_host), 'Host connection file should be removed by close()'
+            assert not os.path.exists(conn_container), 'Container connection file should be removed by close()'
+            assert not os.path.exists(launch_script), 'Launch script should be removed by close()'
 
 
 if __name__ == '__main__':

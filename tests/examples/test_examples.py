@@ -160,6 +160,6 @@ def test_qwen2vl_assistant_tooluse(local_vl_llm_cfg):
 @pytest.mark.extra_examples
 @pytest.mark.extra_vl
 @pytest.mark.skip_if_no_local
-@pytest.mark.skipif(True, reason="Requires DashScope setup with video model support; unrelated UnboundLocalError in qwenvl_dashscope.py line 58")
+@pytest.mark.skipif(True, reason='Requires DashScope setup with video model support; unrelated UnboundLocalError in qwenvl_dashscope.py line 58')
 def test_video_understanding(local_vl_llm_cfg):
     _qwen2vl_assistant_video_test(vl_llm_cfg=local_vl_llm_cfg)

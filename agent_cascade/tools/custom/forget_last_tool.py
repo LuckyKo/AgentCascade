@@ -27,13 +27,13 @@ class ForgetLast(BaseTool):
     
     name = 'forget_last'
     description = (
-        "Retroactively truncate the output of the last N tool call responses in the "
-        "active conversation history. Each truncated response is shortened to "
+        'Retroactively truncate the output of the last N tool call responses in the '
+        'active conversation history. Each truncated response is shortened to '
         f"{DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS} characters max, with a marker indicating "
         f"truncation. Responses already ≤ {DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT} chars are skipped as they're short enough. "
-        "An optional justification parameter appends a reason to the truncation marker for context awareness. "
-        "This frees up context space without losing the fact that the tool was called. "
-        "Affects both the in-memory pool and the log file."
+        'An optional justification parameter appends a reason to the truncation marker for context awareness. '
+        'This frees up context space without losing the fact that the tool was called. '
+        'Affects both the in-memory pool and the log file.'
     )
     
     parameters = {
@@ -107,12 +107,12 @@ class ForgetLast(BaseTool):
         )
         
         if not self.agent_pool or not agent_name:
-            return "Error: ForgetLast tool requires agent_pool and agent_name to be set."
+            return 'Error: ForgetLast tool requires agent_pool and agent_name to be set.'
         
         # Get the conversation history (returns a copy — we need to write back)
         history = self.agent_pool.get_conversation(agent_name)
         if not history:
-            return "Error: No conversation history found."
+            return 'Error: No conversation history found.'
         
         # Identify function result messages to truncate (counting backwards)
         indices_to_truncate = []

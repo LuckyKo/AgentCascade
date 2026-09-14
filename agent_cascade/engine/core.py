@@ -96,7 +96,7 @@ def _is_explicit_skill_list(load_skill_value) -> bool:
     """
     if isinstance(load_skill_value, list):
         return True
-    if isinstance(load_skill_value, str) and load_skill_value.strip().startswith("["):
+    if isinstance(load_skill_value, str) and load_skill_value.strip().startswith('['):
         try:
             import json as _json_list_check
             return isinstance(_json_list_check.loads(load_skill_value), list)
@@ -194,7 +194,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         """Consume one turn from *turns* (remaining budget). On the FIRST consumption of
         this run() (instance._turn_consumed not yet set), also record a user turn in
         telemetry. Returns the new remaining count."""
-        if not getattr(instance, "_turn_consumed", False):
+        if not getattr(instance, '_turn_consumed', False):
             instance._turn_consumed = True
             if (tel := self._telemetry()) is not None:
                 try:
@@ -205,7 +205,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
     # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────
 
-    def _acquire_slot_with_logging(self, instance: AgentInstance, context: str = "initial") -> None:
+    def _acquire_slot_with_logging(self, instance: AgentInstance, context: str = 'initial') -> None:
         """Acquire concurrency slot with debug logging.
 
         Args:
@@ -299,7 +299,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         drain_fn: Optional[Callable[[str], Any]] = None,   # Drain mode: callable that takes inst_name and returns data
         items: Optional[Any] = None,                        # Items mode: already-drained data to inject
         factory: Callable[[Any], Message],                  # Converts raw item → Message
-        log_level: str = "debug",                           # Most injection points are debug-level
+        log_level: str = 'debug',                           # Most injection points are debug-level
     ) -> bool:
         """Drain a queue/buffer and inject results as USER messages into all working lists.
 
@@ -373,13 +373,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 with instance._compression_lock:
                     conv = instance.conversation
                 log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                _check_tail(inst_name, conv, log_inst.log_path, context="drain_inject")
+                _check_tail(inst_name, conv, log_inst.log_path, context='drain_inject')
         except Exception as e:
             logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
 
         # Proactive compression check after async child results are injected
         if processed_messages:
-            self._proactive_compression_check(instance, messages, llm_messages, response, check_label="async-drain")
+            self._proactive_compression_check(instance, messages, llm_messages, response, check_label='async-drain')
 
         return True
 
@@ -413,7 +413,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # Don't double-wrap agent results that already have [Agent ...] prefix
         if stripped.startswith('[Agent '):
             return Message(role=USER, content=result_content)
-        prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
+        prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else '[BACKGROUND TOOL RESULT]'
         return Message(role=USER, content=f"{prefix}: {result_content}")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -436,7 +436,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 or a tuple of (messages_list, is_streaming_bool) during LLM streaming phases.
                 Consumers should unpack tuples before extending conversations to avoid bool leaks.
         """
-        logger.debug("engine.run() ENTRY - instance=%s", instance.instance_name)
+        logger.debug('engine.run() ENTRY - instance=%s', instance.instance_name)
         # Every run starts with a clean turn-consumed flag so the first budget
         # consumption of this run counts as exactly one user turn in telemetry.
         # Set BEFORE any early-exit path so a stale flag can never suppress it.
@@ -515,11 +515,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             if self._is_terminal_stop(instance.instance_name):
                 return  # Terminal stop — don't start work (exit finally → IDLE)
 
-            self._acquire_slot_with_logging(instance, "initial")
+            self._acquire_slot_with_logging(instance, 'initial')
 
             # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
             if self._is_terminal_stop(instance.instance_name):
-                self._release_slot(instance, instance.instance_name, action="drop-exit")
+                self._release_slot(instance, instance.instance_name, action='drop-exit')
                 return  # Terminal stop — release slot and exit (exit finally → IDLE)
 
             # ── Phase 1: Setup ─────────────────────────────────────────────
@@ -533,7 +533,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
                     llm_cfg = getattr(getattr(template, 'llm', None), 'cfg', None) or {}
                     api_base = llm_cfg.get('api_base', '') or llm_cfg.get('model_server', '') or ''
-                    sys_prompt = ""
+                    sys_prompt = ''
                     if template:
                         try:
                             m0_msgs = instance.conversation[:1]
@@ -592,10 +592,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         with instance._compression_lock:
                             conv = instance.conversation
                         log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                        _check_tail(inst_name, conv, log_inst.log_path, context="early_exit")
+                        _check_tail(inst_name, conv, log_inst.log_path, context='early_exit')
                     except Exception:
                         pass  # Non-critical check
-                logger.debug("early exit - %s (_setup_turn returned empty)", instance.instance_name)
+                logger.debug('early exit - %s (_setup_turn returned empty)', instance.instance_name)
                 # Telemetry: record turn end for early exit (non-blocking)
                 if (tel := self._telemetry()) is not None:
                     try:
@@ -745,7 +745,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             # transient UI notifications only — don't add to
                             # conversation history
                             content = msg_field(msg, 'content', '')
-                            is_retrying_msg = isinstance(content, str) and content.startswith("[RETRYING]")
+                            is_retrying_msg = isinstance(content, str) and content.startswith('[RETRYING]')
 
                             stream_tick += 1
                             if (result := self._check_stream_termination(
@@ -776,12 +776,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # alongside stop
                 if not terminated_during_stream:
                     if self._is_terminal_stop(instance.instance_name):
-                        logger.debug("terminal stop - %s", instance.instance_name)
+                        logger.debug('terminal stop - %s', instance.instance_name)
                         yield response
                         break
                     elif self._is_suspended_by_compression(instance.instance_name):
                         # Compression-halt is a suspension, not termination — wait cooperatively.
-                        logger.debug("suspended by compression, waiting - %s", instance.instance_name)
+                        logger.debug('suspended by compression, waiting - %s', instance.instance_name)
                         if not self._wait_for_compression_to_clear(instance.instance_name):
                             yield response
                             break  # Terminal stop during wait
@@ -819,7 +819,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # extract_instance_output()
                 # (which reads messages[-1]) returns the agent's actual output
                 # with the warning.
-                turn_notice = "\n\n[Turn limit reached — results may be incomplete. Continue if needed.]"
+                turn_notice = '\n\n[Turn limit reached — results may be incomplete. Continue if needed.]'
                 notice_appended = False
                 if instance.conversation:
                     # Find the last assistant message with text content and
@@ -876,7 +876,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             logger.debug(f"[DISMISSAL] Aborting run() for {instance.instance_name}: terminated")
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
-            logger.error("EXCEPTION - %s: %s: %s", instance.instance_name, type(e).__name__, e, exc_info=True)
+            logger.error('EXCEPTION - %s: %s: %s', instance.instance_name, type(e).__name__, e, exc_info=True)
             # Telemetry: record turn end on exception (non-blocking)
             if (tel := self._telemetry()) is not None:
                 try:
@@ -923,7 +923,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
             # Release concurrency slot on exit if still held (using helper
             # method FIX Mi3). Structured drop-exit event (change #10c).
-            self._release_slot(instance, instance.instance_name, action="drop-exit")
+            self._release_slot(instance, instance.instance_name, action='drop-exit')
 
             # FIX LogAppendFixer: Final sync to ensure all messages in
             # conversation are logged
@@ -934,7 +934,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 agent_class = instance.agent_class
                 log_inst = self.pool.get_logger(inst_name, agent_class)
 
-                already_logged_count = len(log_inst.data.get("history", []))
+                already_logged_count = len(log_inst.data.get('history', []))
                 with instance._compression_lock:
                     conv_len = len(instance.conversation)
 
@@ -957,7 +957,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         # — D1 fix) ──
                         if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
                             from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                            _check_tail(inst_name, conv, log_inst.log_path, context="final_sync")
+                            _check_tail(inst_name, conv, log_inst.log_path, context='final_sync')
             except Exception as e:
                 logger.debug(f"Final sync to JSONL failed for {getattr(instance, 'instance_name', 'unknown')} (non-critical): {e}")
 
@@ -975,13 +975,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     if preserve:
                         instance.sleeping_since = time.monotonic()
                     logger.debug(
-                        "EXIT - %s %s→%s%s", instance.instance_name, current_state.name,
-                        target.name, " [suspension-preserved]" if preserve else ""
+                        'EXIT - %s %s→%s%s', instance.instance_name, current_state.name,
+                        target.name, ' [suspension-preserved]' if preserve else ''
                     )
                 elif current_state == AgentState.TERMINATED:
-                    logger.debug("EXIT - %s already TERMINATED", instance.instance_name)
+                    logger.debug('EXIT - %s already TERMINATED', instance.instance_name)
                 else:
-                    logger.debug("EXIT - %s in %s state", instance.instance_name, current_state.name)
+                    logger.debug('EXIT - %s in %s state', instance.instance_name, current_state.name)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Phase Methods — each ~20-60 lines, independently testable
@@ -1010,7 +1010,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # slot can never evict another agent. A missed restore is far better than a
         # wrongful eviction — any resolution failure skips the restore.
         if instance._slot_release is None:
-            logger.debug("[STATE_RESTORE_SKIP] %s holds no slot — skipping state restore", inst_name)
+            logger.debug('[STATE_RESTORE_SKIP] %s holds no slot — skipping state restore', inst_name)
         else:
             self._restore_held_slot_state(instance, inst_name)
 
@@ -1018,7 +1018,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             conv = list(instance.conversation)
 
         if not conv:
-            logger.warning("empty conversation for %s - early exit", inst_name)
+            logger.warning('empty conversation for %s - early exit', inst_name)
             return None, None, None
 
         # Simple cache check: use cached working set if config hasn't changed
@@ -1116,12 +1116,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     if meta_block:
                         if '## Session Metadata' in m0_content:
                             # Replace the existing block with fresh data
-                            m0_content = _replace_section(m0_content, "## Session Metadata", meta_block)
+                            m0_content = _replace_section(m0_content, '## Session Metadata', meta_block)
                         else:
                             # First injection — insert after the identity line
                             # (same position as before)
                             content_lines = m0_content.split('\n')
-                            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
+                            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith('#') else 1
                             for i, ml in enumerate(meta_block.split('\n')):
                                 content_lines.insert(insert_pos + i, ml)
                             m0_content = '\n'.join(content_lines)
@@ -1140,9 +1140,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             # Legacy migration support only: strip the old "--- CURRENT AVAILABLE RESOURCES"
                             # block from restored sessions that predate the "## AVAILABLE AGENTS" format.
                             if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
-                                escaped_old = re.escape("--- CURRENT AVAILABLE RESOURCES")
+                                escaped_old = re.escape('--- CURRENT AVAILABLE RESOURCES')
                                 old_pattern = escaped_old + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
-                                m0_content = re.sub(old_pattern, "", m0_content, count=1, flags=re.DOTALL)
+                                m0_content = re.sub(old_pattern, '', m0_content, count=1, flags=re.DOTALL)
 
                             # First injection — insert before ## Active Skills if present,
                             # otherwise append at end. This ensures consistent order:
@@ -1182,11 +1182,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
                         try:
                             log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                            if log_inst.data["history"]:
+                            if log_inst.data['history']:
                                 # Update in-memory system message only — do NOT rewrite the JSONL file here.
                                 # data["history"] is the trimmed working set; rewriting the full-history file
                                 # from it would destroy retained history. New text persists on next append.
-                                log_inst.data["history"][0] = log_inst._format_message(m0)
+                                log_inst.data['history'][0] = log_inst._format_message(m0)
                         except Exception as e:
                             logger.warning(f"Failed to update in-memory system message for {inst_name}: {e}")
                     else:
@@ -1260,7 +1260,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             with instance._state_lock:
                 instance._compression_suspended_at = time.monotonic()  # BUG-4/8 marker
                 save_instance_state(instance)
-            self._release_slot(instance, inst_name, "compression_halt", action="drop-handoff")
+            self._release_slot(instance, inst_name, 'compression_halt', action='drop-handoff')
 
         try:
             # ── BUG-6 FIX: plain sleep tick ─────────────────────────────────
@@ -1289,7 +1289,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # one, so we swallow it and let compression resume WITHOUT re-acquiring
                 # its slot. Every other reacquire_for caller lets the exception propagate.
                 try:
-                    ok = self.reacquire_for(instance, inst_name, context="after_compression_resume")
+                    ok = self.reacquire_for(instance, inst_name, context='after_compression_resume')
                 except Exception as e:
                     logger.error(
                         f"[SLOT_REACQUIRE_DEGRADED] compression-resume for '{inst_name}' "
@@ -1341,13 +1341,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         try:
             held_cfg = self._resolve_held_endpoint(instance)
             if not held_cfg:
-                logger.debug("[STATE_RESTORE_SKIP] %s — could not resolve held endpoint", inst_name)
+                logger.debug('[STATE_RESTORE_SKIP] %s — could not resolve held endpoint', inst_name)
                 return False
             from agent_cascade.state_ops import restore_instance_state
             return restore_instance_state(instance, held_endpoint_cfg=held_cfg)
         except Exception as e:
             # Never evict on a resolution error — skip the restore.
-            logger.debug("[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s", inst_name, e)
+            logger.debug('[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s', inst_name, e)
             return False
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
@@ -1416,7 +1416,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             stopped = self._is_terminal_stop(inst_name)
             if stopped:
                 logger.debug(
-                    "[TERMINATE] Stopped mid-stream after %d ticks - %s",
+                    '[TERMINATE] Stopped mid-stream after %d ticks - %s',
                     stream_tick, inst_name
                 )
                 return (response + turn_output + partial_msgs, False)
@@ -1616,7 +1616,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         _det_reason = getattr(e, 'detection_reason', str(e)) or str(e)
         if (tel := self._telemetry()) is not None:
             try:
-                tel.record_loop_detected(inst_name, reason=_det_reason, auto_rolled_back=False, pop_count=0, loop_type="inner")
+                tel.record_loop_detected(inst_name, reason=_det_reason, auto_rolled_back=False, pop_count=0, loop_type='inner')
             except Exception:
                 pass
 
@@ -1730,7 +1730,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         """
         log_inst = self.pool.get_logger(inst_name, instance.agent_class)
 
-        already_logged_count = len(log_inst.data.get("history", []))
+        already_logged_count = len(log_inst.data.get('history', []))
         with instance._compression_lock:
             conv = list(instance.conversation)
 
@@ -1764,7 +1764,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # tail.
             if wrote_any and getattr(self.pool.settings, 'tail_sync_check_enabled', True):
                 from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                _check_tail(inst_name, conv, log_inst.log_path, context="log_messages")
+                _check_tail(inst_name, conv, log_inst.log_path, context='log_messages')
         except Exception as e:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 
@@ -1807,7 +1807,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # NEW: reasoning-only gets a SOFT continue first (up to N times). Guarded by the
             # BUDGET counter, which never resets mid-episode, so once we fall through to full
             # retry this path is permanently closed for the episode (N3).
-            if is_incomplete == "reasoning-only" and instance._reasoning_only_soft_attempts < REASONING_ONLY_CONTINUE_ATTEMPTS:
+            if is_incomplete == 'reasoning-only' and instance._reasoning_only_soft_attempts < REASONING_ONLY_CONTINUE_ATTEMPTS:
                 instance._reasoning_only_soft_attempts += 1  # budget: how many soft tries this episode
                 reason = f"incomplete state (reasoning-only, soft continue {instance._reasoning_only_soft_attempts}/{REASONING_ONLY_CONTINUE_ATTEMPTS})"
                 if (tel := self._telemetry()) is not None:
@@ -1826,7 +1826,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 return True
 
             # existing full-retry path (truncation / broken-json / empty-output / reasoning-only after N soft tries)
-            reason = "truncation" if is_truncated else f"incomplete state ({is_incomplete})"
+            reason = 'truncation' if is_truncated else f"incomplete state ({is_incomplete})"
             if (tel := self._telemetry()) is not None:
                 try:
                     tel.record_auto_continue(inst_name, reason=reason)
@@ -1840,7 +1840,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # this episode (they live in conversation/llm_messages/response, NOT in turn_output).
             # Guarded to reasoning-only so a broken-json/empty-output/truncation retry never pops
             # unrelated nudges (N2); with nudge OFF the counter is 0, so this is a no-op.
-            if is_incomplete == "reasoning-only":
+            if is_incomplete == 'reasoning-only':
                 pop_count += instance._reasoning_only_pending_nudges
             if pop_count > 0:
                 self.pool._rollback_instance(inst_name, pop_count=pop_count)
@@ -1871,11 +1871,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # attempt>=2  -> "You have produced reasoning-only output again with no visible result. STOP thinking ..."
         """
         if attempt >= 2:
-            return ("You have produced reasoning-only output again with no visible result. "
-                    "STOP thinking and MUST produce either a final answer or a concrete tool call "
-                    "on this turn — do not emit another reasoning-only message.")
-        return ("Your last turn contained only reasoning/thinking and no output or tool call. "
-                "Please continue — produce your response text or make the next tool call now.")
+            return ('You have produced reasoning-only output again with no visible result. '
+                    'STOP thinking and MUST produce either a final answer or a concrete tool call '
+                    'on this turn — do not emit another reasoning-only message.')
+        return ('Your last turn contained only reasoning/thinking and no output or tool call. '
+                'Please continue — produce your response text or make the next tool call now.')
 
     def _sync_conversation_log(self, instance: AgentInstance, inst_name: str, context: str) -> None:
         """Mark activity + run the tail-sync JSONL check after a conversation append (house pattern).
@@ -1916,7 +1916,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             response.append(msg)          # local accumulator (UI visibility)
             self._append_and_log(instance, msg, lock_held=True)  # conversation + JSONL log atomically
         # Keep the JSONL log in sync with the appended nudge (house pattern).
-        self._sync_conversation_log(instance, inst_name, "reasoning_soft_continue")
+        self._sync_conversation_log(instance, inst_name, 'reasoning_soft_continue')
 
 
     def _process_response(
@@ -2176,7 +2176,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             ):
                 return True  # Continue loop to process drained results
         except Exception as e:
-            logger.error("Safety drain failed for %s: %s", inst_name, e)
+            logger.error('Safety drain failed for %s: %s', inst_name, e)
 
         return False
 
@@ -2210,7 +2210,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             return False  # Terminal stop — break from main loop
         elif self._is_suspended_by_compression(inst_name):
             # Compression-halt is a suspension, not termination — wait, then re-process.
-            logger.debug("post-turn processing suspended by compression - %s", inst_name)
+            logger.debug('post-turn processing suspended by compression - %s', inst_name)
             if not self._wait_for_compression_to_clear(inst_name):
                 return False  # Terminal stop during wait
             # Resumed — fall through to process the response normally
@@ -2243,7 +2243,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
 
     @staticmethod
-    def _release_slot(slot_holder: Any, holder_name: str, context: str = "cleanup",
+    def _release_slot(slot_holder: Any, holder_name: str, context: str = 'cleanup',
                       action: Optional[str] = None) -> None:
         """Release a concurrency slot from a slot holder with error handling.
 
@@ -2267,7 +2267,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         release_slot_permit(slot_holder, holder_name, action=action, context=context)
 
 
-    def reacquire_for(self, instance: Any, holder_name: str, context: str = "reacquire") -> bool:
+    def reacquire_for(self, instance: Any, holder_name: str, context: str = 'reacquire') -> bool:
         """Re-acquire a concurrency slot for an agent after yielding it to a child.
 
         Public helper for the Security/Compressor yield/reacquire pattern (and any
@@ -2455,8 +2455,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             _sleep_pool = _sched._pools.get(_held_key) if _held_key else None
                     except Exception:
                         pass
-                    release_slot_permit(instance, instance.instance_name, action="drop-sleep",
-                                        context="sleep transition", pool=_sleep_pool)
+                    release_slot_permit(instance, instance.instance_name, action='drop-sleep',
+                                        context='sleep transition', pool=_sleep_pool)
 
                 # Mark activity before transitioning to SLEEPING so idle timer
                 # is updated
@@ -2522,7 +2522,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 instance._transition(AgentState.RUNNING)
                 instance.sleeping_since = None
                 instance._last_wakeup_log = time.monotonic()
-                logger.debug("RESUMED from SLEEPING - %s (%d messages)", inst_name, len(messages_list))
+                logger.debug('RESUMED from SLEEPING - %s (%d messages)', inst_name, len(messages_list))
 
             # Inject all drained messages as user-type messages (async results are already formatted strings)
             self._drain_and_inject(
@@ -2532,7 +2532,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             )
 
             # Re-acquire concurrency slot after waking from SLEEPING
-            self._acquire_slot_with_logging(instance, "after_message_wakeup")
+            self._acquire_slot_with_logging(instance, 'after_message_wakeup')
             if self._is_terminal_stop(inst_name):
                 return SleepAction.BREAK_LOOP, None
 
@@ -2587,13 +2587,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
             # Log wakeup message periodically
             if (current_time - instance._last_wakeup_log) >= wakeup_interval:
-                logger.info("SLEEPING - %s waiting %.1fs for background tools",
+                logger.info('SLEEPING - %s waiting %.1fs for background tools',
                             inst_name, sleeping_duration)
                 instance._last_wakeup_log = current_time
 
             try:
                 if (current_time - instance._last_waiting_debug_log) >= 5.0:
-                    logger.debug("WAITING for background tools - %s (%.1fs)", inst_name, sleeping_duration)
+                    logger.debug('WAITING for background tools - %s (%.1fs)', inst_name, sleeping_duration)
                     instance._last_waiting_debug_log = current_time
             except Exception:
                 # Debug log throttling must never crash the agent loop
@@ -2632,7 +2632,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     instance._last_wakeup_log = time.monotonic()
 
                 # Re-acquire concurrency slot after waking from SLEEPING
-                self._acquire_slot_with_logging(instance, "after_stable_drain")
+                self._acquire_slot_with_logging(instance, 'after_stable_drain')
 
                 # Restore KV cache after slot acquired, before resuming execution —
                 # gated on actual slot ownership and targeting the held endpoint only
@@ -2657,7 +2657,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     return SleepAction.BREAK_LOOP, None
                 instance._transition(AgentState.COMPLETING)
                 instance.sleeping_since = None
-            logger.debug("COMPLETING - %s (no pending tools)", inst_name)
+            logger.debug('COMPLETING - %s (no pending tools)', inst_name)
             return SleepAction.BREAK_LOOP, None
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -2713,14 +2713,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         for key, val in tool_args.items():
             if isinstance(val, str) and len(val) > threshold:
                 try:
-                    idx = cp.add("arg", f"{tool_name}.{key}", val, threshold=threshold)
+                    idx = cp.add('arg', f"{tool_name}.{key}", val, threshold=threshold)
                     cache_refs[key] = idx
                 except (TypeError, AttributeError):
                     pass
 
         # Build notification only if something was actually cached
         if cache_refs:
-            refs_str = ", ".join(
+            refs_str = ', '.join(
                 f'"{k}" → N={n}' for k, n in cache_refs.items()
             )
             with inst._compression_lock:
@@ -2754,7 +2754,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         char_count = len(output)
         try:
-            idx = cp.add("output", tool_name, output, threshold=threshold)
+            idx = cp.add('output', tool_name, output, threshold=threshold)
             with inst._compression_lock:
                 inst._cache_notifications.append(
                     f'[{tool_name}] Output cached: N={idx} ({char_count} chars)'
@@ -2787,13 +2787,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             try:
                 parsed = json.loads(tool_args)
             except json.JSONDecodeError:
-                logger.debug("JSON parse failure for %s/%s", instance_name, tool_name)
+                logger.debug('JSON parse failure for %s/%s', instance_name, tool_name)
                 return None  # JSON parse failure — signal error to caller
             if not isinstance(parsed, dict):
-                logger.debug("parsed to non-dict for %s/%s: %s", instance_name, tool_name, type(parsed).__name__)
+                logger.debug('parsed to non-dict for %s/%s: %s', instance_name, tool_name, type(parsed).__name__)
                 return None  # Parsed to non-dict — signal error
         else:
-            logger.debug("unexpected type for %s/%s: %s", instance_name, tool_name, type(tool_args).__name__)
+            logger.debug('unexpected type for %s/%s: %s', instance_name, tool_name, type(tool_args).__name__)
             return None  # Unexpected type — signal error
 
         # Scan for {USE_CACHED_ENTRY_N} patterns using shared function (avoids
@@ -2835,8 +2835,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         self._create_completed = False  # Reset for this execution cycle
 
         logger.debug(
-            "[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=%s, class=%s, caller=%s, "
-            "nest_depth=%d, force_fresh=%s",
+            '[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=%s, class=%s, caller=%s, '
+            'nest_depth=%d, force_fresh=%s',
             instance_name, agent_class, caller, nest_depth, force_fresh
         )
 
@@ -2847,7 +2847,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # ── Skill Advisor gate (AUTO Skill Helper — Advanced mode) ───────────
         # Runs BEFORE find_or_create_instance() so a DENY never allocates a child.
         _advisor_recommended_skills: Optional[List[str]] = None  # names, or None → use resolve_load_skill
-        _advisor_task_notes: str = ""
+        _advisor_task_notes: str = ''
 
         load_skill_value = args.get('load_skill')
         if load_skill_value is None:
@@ -2869,7 +2869,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # Multi-element lists (e.g. ["AUTO", "docker"]) default to AUTO — the
         # presence of explicit skill names alongside AUTO means "auto + extras".
         load_skill_mode_upper = (
-            load_skill_value.strip().upper() if isinstance(load_skill_value, str) else "AUTO"
+            load_skill_value.strip().upper() if isinstance(load_skill_value, str) else 'AUTO'
         )
         auto_skill_mode = getattr(self.pool.settings, 'auto_skill_mode', 'basic')
         _skill_mgr_gate = getattr(self.pool, 'skill_manager', None)
@@ -2879,22 +2879,22 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             if _skill_mgr_gate is not None:
                 _skill_mgr_gate._ensure_discovered()
         except Exception as e:  # noqa: BLE001 — never block delegation on a discovery hiccup
-            logger.debug("[SKILL-ADVISOR] gate _ensure_discovered failed: %s", e)
+            logger.debug('[SKILL-ADVISOR] gate _ensure_discovered failed: %s', e)
 
         # NOTE: auto_skill_mode == "none" never runs the advisor. The `== "advanced"`
         # check below already excludes it (only "advanced" passes), so no extra guard
         # is required — this comment documents that intent explicitly.
         should_run_advisor = (
             load_skill_mode_upper == LOAD_SKILL_AUTO
-            and auto_skill_mode == "advanced"
+            and auto_skill_mode == 'advanced'
             and not force_fresh
             and log_file is None          # external load → skip advisor (needs fresh skills)
             and _skill_mgr_gate is not None
             and len(_skill_mgr_gate.get_skill_names()) > 0  # nothing to recommend
         )
         logger.debug(
-            "[SKILL-ADVISOR] gate check: mode=%s, auto_skill_mode=%s, force_fresh=%s, "
-            "log_file=%s, skill_mgr=%s, skills_count=%d → should_run=%s",
+            '[SKILL-ADVISOR] gate check: mode=%s, auto_skill_mode=%s, force_fresh=%s, '
+            'log_file=%s, skill_mgr=%s, skills_count=%d → should_run=%s',
             load_skill_mode_upper, auto_skill_mode, force_fresh, log_file,
             _skill_mgr_gate is not None,
             len(_skill_mgr_gate.get_skill_names()) if _skill_mgr_gate else 0,
@@ -2919,7 +2919,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                 and getattr(_existing_inst.conversation[0], 'role', None) == SYSTEM:
                             _is_early_recall = True
             except Exception as e:  # noqa: BLE001 — never block delegation on a check failure
-                logger.debug("[SKILL-ADVISOR] Early recall check failed (treating as new): %s", e)
+                logger.debug('[SKILL-ADVISOR] Early recall check failed (treating as new): %s', e)
 
             if not _is_early_recall:
                 from agent_cascade.skills.advisor import run_skill_advisor, SkillAdvisorResult
@@ -2932,8 +2932,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         agent_class=agent_class, caller_name=caller,
                     )
                 except Exception as e:  # noqa: BLE001 — advisor must never break delegation
-                    logger.error("[SKILL-ADVISOR] Unexpected error; falling back to basic match: %s", e)
-                    _advisor_result = SkillAdvisorResult(verdict="ambiguous", reason=f"unexpected: {e}")
+                    logger.error('[SKILL-ADVISOR] Unexpected error; falling back to basic match: %s', e)
+                    _advisor_result = SkillAdvisorResult(verdict='ambiguous', reason=f"unexpected: {e}")
 
                 # Telemetry (best-effort, non-blocking)
                 try:
@@ -2949,9 +2949,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 except Exception:  # noqa: BLE001
                     pass
 
-                if _advisor_result.verdict == "deny":
+                if _advisor_result.verdict == 'deny':
                     logger.warning(
-                        "[SKILL-ADVISOR] DENIED delegation to %s: %s",
+                        '[SKILL-ADVISOR] DENIED delegation to %s: %s',
                         instance_name, _advisor_result.reason,
                     )
                     # No child instance is created — return an error the caller can surface.
@@ -2962,16 +2962,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         f"Consider handling this task yourself or rephrasing with more specific context."
                     ))]
 
-                if _advisor_result.verdict == "approve":
+                if _advisor_result.verdict == 'approve':
                     _advisor_recommended_skills = list(_advisor_result.recommended_skills)
-                    _advisor_task_notes = _advisor_result.task_notes or ""
+                    _advisor_task_notes = _advisor_result.task_notes or ''
                     logger.info(
-                        "[SKILL-ADVISOR] APPROVED delegation to %s (skills=%s, notes=%d chars)",
+                        '[SKILL-ADVISOR] APPROVED delegation to %s (skills=%s, notes=%d chars)',
                         instance_name, _advisor_recommended_skills, len(_advisor_task_notes),
                     )
                 else:  # "ambiguous" → fall back to basic keyword match below
                     logger.warning(
-                        "[SKILL-ADVISOR] Ambiguous result for %s (%s) — falling back to basic match",
+                        '[SKILL-ADVISOR] Ambiguous result for %s (%s) — falling back to basic match',
                         instance_name, _advisor_result.reason,
                     )
 
@@ -3012,7 +3012,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             sys_msg = inst.conversation[0]
             logger.debug(
                 "[SKILLS] Recall of %s: refreshed '## Active Skills' block "
-                "(load_skill ignored on recall)",
+                '(load_skill ignored on recall)',
                 instance_name,
             )
         else:
@@ -3046,7 +3046,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 if isinstance(load_skill_value, str):
                     load_skill_mode_upper = load_skill_value.strip().upper()
                 else:
-                    load_skill_mode_upper = "AUTO"
+                    load_skill_mode_upper = 'AUTO'
                 if load_skill_mode_upper != LOAD_SKILL_NONE and auto_skill_mode != AUTO_SKILL_MODE_NONE:
                     # Basic ("basic") / Advanced ("advanced") behavior — unchanged.
                     if _advisor_recommended_skills is not None:
@@ -3070,14 +3070,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         if _advisor_loaded_names:
                             _tel = getattr(self.pool, 'telemetry', None)
                             if _tel is not None:
-                                _tel.record_skills_loaded(inst.agent_class, _advisor_loaded_names, "advisor")
+                                _tel.record_skills_loaded(inst.agent_class, _advisor_loaded_names, 'advisor')
                     else:
                         try:
                             loaded_skills = skill_manager.resolve_load_skill(
                                 load_skill_value, task_text, context_text
                             )
                         except Exception as e:
-                            logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
+                            logger.warning('[SKILLS] Failed to resolve skills for %s: %s', instance_name, e)
                             loaded_skills = []
                         # Telemetry: capture resolved (explicit/auto) skills. Names come
                         # from the shared resolver so they match what was injected exactly.
@@ -3087,7 +3087,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         if _resolved_names:
                             _tel = getattr(self.pool, 'telemetry', None)
                             if _tel is not None:
-                                _mode = "explicit" if _is_explicit_skill_list(load_skill_value) else "auto"
+                                _mode = 'explicit' if _is_explicit_skill_list(load_skill_value) else 'auto'
                                 _tel.record_skills_loaded(inst.agent_class, _resolved_names, _mode)
                 elif auto_skill_mode == AUTO_SKILL_MODE_NONE and _is_explicit_skill_list(load_skill_value):
                     # "none" mode: skip system auto-matching entirely (no Basic keyword
@@ -3105,7 +3105,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             load_skill_value, task_text, context_text
                         )
                     except Exception as e:
-                        logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
+                        logger.warning('[SKILLS] Failed to resolve skills for %s: %s', instance_name, e)
                         loaded_skills = []
                     # Telemetry: capture explicit skills (this branch is explicit-only by
                     # construction — _is_explicit_skill_list gate above).
@@ -3115,7 +3115,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     if _resolved_names:
                         _tel = getattr(self.pool, 'telemetry', None)
                         if _tel is not None:
-                            _tel.record_skills_loaded(inst.agent_class, _resolved_names, "explicit")
+                            _tel.record_skills_loaded(inst.agent_class, _resolved_names, 'explicit')
                 # else: "none" mode + AUTO/default → no auto-matched skills (loaded_skills stays [])
 
                 # (2) Self-Augmentation — gated by the GLOBAL "Enable skills" toggle
@@ -3124,7 +3124,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 #     present whenever skills are globally ON, even if this call passed
                 #     load_skill="NONE". _inject_skills_to_system_message is idempotent
                 #     (skips when '## Active Skills' already exists).
-                self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
+                self_augmentation_instructions = skill_manager.load_full_instructions('self-augmentation')
                 if self_augmentation_instructions and self_augmentation_instructions not in loaded_skills:
                     loaded_skills.append(self_augmentation_instructions)
                     # Telemetry: capture Self-Augmentation (init path only). The restore/
@@ -3132,7 +3132,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # these are mutually exclusive, so each injection is counted once.
                     _tel = getattr(self.pool, 'telemetry', None)
                     if _tel is not None:
-                        _tel.record_skills_loaded(inst.agent_class, ["self-augmentation"], "self-augmentation")
+                        _tel.record_skills_loaded(inst.agent_class, ['self-augmentation'], 'self-augmentation')
 
             # Inject skills into system message using general-purpose helper.
             # When the global toggle is OFF (global_skills_enabled False),
@@ -3180,7 +3180,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # Without this, the main streaming loop is blocked during tool
             # execution
             # and no WebSocket events arrive until the sub-agent finishes.
-            logger.debug("starting engine.run() for %s", instance_name)
+            logger.debug('starting engine.run() for %s', instance_name)
 
             final_resp = []
             _update_counter = 0
@@ -3191,7 +3191,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
             # Bug
             if self.pool.is_instance_terminated(instance_name):
-                logger.info("instance %s terminated before execution - skipping", instance_name)
+                logger.info('instance %s terminated before execution - skipping', instance_name)
                 # Clear leftover queued messages to prevent accumulation
                 q = self.pool.message_queues.get(instance_name)
                 if q:
@@ -3380,8 +3380,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # Determine exit reason for debugging
             _completed = getattr(self, '_create_completed', False)
             logger.debug(
-                "[CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=%s, reason=%s, "
-                "inst_type=%s, conv_len=%d, final_resp_len=%d",
+                '[CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=%s, reason=%s, '
+                'inst_type=%s, conv_len=%d, final_resp_len=%d',
                 instance_name, 'completed' if _completed else 'aborted', type(inst).__name__,
                 len(conv), len(final_resp) if 'final_resp' in locals() else 0
             )
@@ -3400,7 +3400,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
     def _create_system_agent(
         self, agent_class: str, instance_name: str,
-        task: str, caller: str, context: str = ""
+        task: str, caller: str, context: str = ''
     ) -> 'AgentInstance':
         """Create a fresh AgentInstance for system-invoked agents (Security, Compressor).
 

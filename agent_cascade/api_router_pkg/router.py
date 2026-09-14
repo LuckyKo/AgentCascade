@@ -182,8 +182,8 @@ class APIRouter:
         self._last_active_endpoint: Optional[Tuple[str, str]] = None
 
         # Persistence path — env var takes precedence for test isolation
-        if os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR"):
-            self._config_dir = Path(os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"])
+        if os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR'):
+            self._config_dir = Path(os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'])
         elif config_dir:
             self._config_dir = Path(config_dir)
         else:
@@ -500,7 +500,7 @@ class APIRouter:
         self,
         instance: 'AgentInstance',
         desired_key: Optional[str] = None,
-        origin: str = "sticky",
+        origin: str = 'sticky',
     ) -> bool:
         """Keep an agent's lifecycle slot in sync with the endpoint it is about to call.
 
@@ -547,7 +547,7 @@ class APIRouter:
         needs_slot = resolved['needs_slot']
         desired_key = resolved['desired_key']
 
-        origin_suffix = f" origin={origin}" if origin and origin != "sticky" else ""
+        origin_suffix = f" origin={origin}" if origin and origin != 'sticky' else ''
 
         with instance._state_lock:
             held_key = getattr(instance, '_slot_key', None)
@@ -657,7 +657,7 @@ class APIRouter:
                             break
         except Exception:
             logger.debug(
-                "Failed to recover endpoint concurrency for explicit key "
+                'Failed to recover endpoint concurrency for explicit key '
                 f"(instance={inst_name}, desired_key={desired_key})",
                 exc_info=True,
             )
@@ -763,7 +763,7 @@ class APIRouter:
         logger.debug(
             f"[SLOTPOOL] instance={inst_name} pool={old_key} "
             f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}"
-            + (f" origin={origin}" if origin and origin != "sticky" else "")
+            + (f" origin={origin}" if origin and origin != 'sticky' else '')
         )
 
     def _pool_waiter_count(self, slot_key: Optional[str]) -> int:
@@ -1129,7 +1129,7 @@ class APIRouter:
             return (True, False)
 
         api_key = endpoint_cfg.get('api_key', 'EMPTY')
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key and api_key != 'EMPTY' else {}
+        headers = {'Authorization': f"Bearer {api_key}"} if api_key and api_key != 'EMPTY' else {}
         timeout = (1.5, SANITY_PROBE_TIMEOUT_SECONDS)
 
         try:
@@ -1316,7 +1316,7 @@ class APIRouter:
         # call_with_fallback with no per-endpoint detail). The message carries the full
         # endpoint list so the failure is explicit and loggable.
         if not validated:
-            details = "; ".join(
+            details = '; '.join(
                 f"{cfg.get('model', 'unknown')} @ {cfg.get('api_base') or cfg.get('model_server', '')}"
                 for cfg in chain
             )
@@ -2432,7 +2432,7 @@ class APIRouter:
 
         raise RuntimeError(
             f"All API endpoints exhausted for agent type '{agent_type}'.\n"
-            + "\n".join(all_errors)
+            + '\n'.join(all_errors)
         )
 
     # ── Image Captioning ─────────────────────────────────────────────────
@@ -2440,8 +2440,8 @@ class APIRouter:
     # a caption using any available vision-capable endpoint.
 
     CAPTION_PROMPT = (
-        "Describe this image in one concise sentence suitable for use as an alt-text description. "
-        "Focus on key visual elements: objects, people, colors, layout, and any text visible."
+        'Describe this image in one concise sentence suitable for use as an alt-text description. '
+        'Focus on key visual elements: objects, people, colors, layout, and any text visible.'
     )
 
     @staticmethod
@@ -2622,14 +2622,14 @@ class APIRouter:
         if not self._has_uncaptioned_images(messages):
             # Observability: make the "already captioned → skip" path visible so a
             # redundant re-caption (or its absence) is diagnosable from the console.
-            logger.debug("[APIRouter] Captioning skipped — no uncaptioned images present")
+            logger.debug('[APIRouter] Captioning skipped — no uncaptioned images present')
             return messages
 
         from agent_cascade.llm.schema import ContentItem, Message
         vision_cfg = self._get_vision_endpoint_for_agent(agent_type, instance_name=instance_name)
         if not vision_cfg:
             # Replace uncaptioned images with placeholder text to ensure safe fallback
-            logger.warning("[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders")
+            logger.warning('[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders')
             for msg in messages:
                 items = msg.content if isinstance(msg.content, list) else []
                 for item in items:
@@ -2886,15 +2886,15 @@ class APIRouter:
             try:
                 self._config_dir.mkdir(parents=True, exist_ok=True)
                 default_config = {
-                    "endpoints": [],
-                    "agent_priorities": {},
-                    "agent_types_with_priorities": [],
+                    'endpoints': [],
+                    'agent_priorities': {},
+                    'agent_types_with_priorities': [],
                 }
                 with open(self._config_path, 'w', encoding='utf-8') as f:
                     json.dump(default_config, f, indent=2)
                 logger.warning(
-                    "config/api_endpoints.json not found; created with empty default configuration. "
-                    "Please configure at least one LLM endpoint."
+                    'config/api_endpoints.json not found; created with empty default configuration. '
+                    'Please configure at least one LLM endpoint.'
                 )
             except OSError as e:
                 logger.error(f"[APIRouter] Failed to create config/api_endpoints.json: {e}")
@@ -2992,7 +2992,7 @@ class APIRouter:
             if n_blacklist > 0 or n_failures > 0 or had_last_success:
                 logger.info(f"[APIRouter] from_dict: cleared {n_blacklist} blacklist entries, "
                             f"{n_failures} failure counters"
-                            + (", last-successful endpoint" if had_last_success else ""))
+                            + (', last-successful endpoint' if had_last_success else ''))
 
             # Normalize agent_priorities to remove case-insensitive duplicates
             raw_priorities = data.get('agent_priorities', {})
@@ -3005,7 +3005,7 @@ class APIRouter:
             # tier chain, and from_dict() rebuilds self.endpoints / agent_priorities — so any
             # stale positional cursor now points at the WRONG endpoint. Reset ALL instance
             # cursors under the lock so a config change never leaves a dangling rotation behind.
-            self._reset_instance_cursors("[APIRouter.from_dict] Endpoint config changed")
+            self._reset_instance_cursors('[APIRouter.from_dict] Endpoint config changed')
 
             logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "
                        f"({ep_ids}) with "

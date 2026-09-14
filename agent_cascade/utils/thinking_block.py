@@ -22,13 +22,13 @@ _THINK_SEARCH_RE = _THINK_BLOCK_RE
 _BRACKET_SEARCH_RE = _THINK_BLOCK_BRACKET_RE
 
 # Matches Gemma-style thinking blocks at the start of a message
-_GEMMA_THOUGHT_RE = re.compile(r"^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<channel\|>|$)", re.IGNORECASE)
+_GEMMA_THOUGHT_RE = re.compile(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<channel\|>|$)', re.IGNORECASE)
 
 # Matches [TOOL RESPONSE TRUNCATED...] blocks
 _TOOL_TRUNCATED_RE = re.compile(r'\[TOOL RESPONSE TRUNCATED.*?\]', re.DOTALL)
 
 # Matches <context_summary>...</context_summary> blocks
-_CONTEXT_SUMMARY_RE = re.compile(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", re.DOTALL)
+_CONTEXT_SUMMARY_RE = re.compile(r'<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>', re.DOTALL)
 
 # Matches markdown bolding (** or __)
 _MARKDOWN_BOLD_RE = re.compile(r'(\*\*|__)')

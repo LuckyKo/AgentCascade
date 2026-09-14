@@ -28,7 +28,7 @@ import pytest
 # so PYTEST_XDIST_WORKER is already set by the time this module is imported in
 # each worker — giving every worker a distinct value from import time on.
 def _derive_test_instance_id() -> str:
-    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    worker = os.environ.get('PYTEST_XDIST_WORKER', '')
     if worker:
         suffix = f"test_{worker}"
     else:
@@ -36,12 +36,12 @@ def _derive_test_instance_id() -> str:
     return suffix[:64]
 
 
-os.environ["AGENT_CASCADE_INSTANCE_ID"] = _derive_test_instance_id()
+os.environ['AGENT_CASCADE_INSTANCE_ID'] = _derive_test_instance_id()
 
 # Never pop a visible cmd window for async shell_cmd in tests.  This env var is
 # an opt-out override read by agent_cascade/tools/custom/shell_cmd.py; it does
 # NOT change production defaults (which still honor the pool toggle).
-os.environ["AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW"] = "1"
+os.environ['AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW'] = '1'
 
 # Ensure the project root is on sys.path so top-level packages like `config`
 # are importable in xdist workers (which don't inherit CWD from the launcher).
@@ -60,33 +60,33 @@ from agent_cascade.llm.schema import SYSTEM, USER
 
 # LM Studio runs on the host machine; from inside Docker containers we reach it
 # via host.docker.internal.  On bare-metal / WSL hosts, localhost works too.
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "host.docker.internal")
+_LOCAL_HOSTS = ('127.0.0.1', 'localhost', 'host.docker.internal')
 
 # Endpoints to probe (ordered by preference)
 _LOCAL_ENDPOINTS = [
     {
-        "name": "LM Studio",
-        "port": 1234,
-        "path": "/v1/models",
-        "model_type": "qwenvl_oai",
+        'name': 'LM Studio',
+        'port': 1234,
+        'path': '/v1/models',
+        'model_type': 'qwenvl_oai',
     },
     {
-        "name": "Ollama",
-        "port": 11434,
-        "path": "/v1/models",
-        "model_type": "qwenvl_oai",
+        'name': 'Ollama',
+        'port': 11434,
+        'path': '/v1/models',
+        'model_type': 'qwenvl_oai',
     },
     {
-        "name": "vLLM / generic",
-        "port": 8000,
-        "path": "/v1/models",
-        "model_type": "qwenvl_oai",
+        'name': 'vLLM / generic',
+        'port': 8000,
+        'path': '/v1/models',
+        'model_type': 'qwenvl_oai',
     },
 ]
 
 # Default lightweight models for testing (must be loaded on the server)
-_DEFAULT_TEST_MODEL = "qwen/qwen3-4b-2507"   # fast general-purpose
-_DEFAULT_VL_TEST_MODEL = "qwen/qwen3-vl-4b"  # vision + text
+_DEFAULT_TEST_MODEL = 'qwen/qwen3-4b-2507'   # fast general-purpose
+_DEFAULT_VL_TEST_MODEL = 'qwen/qwen3-vl-4b'  # vision + text
 
 
 class _LocalLLMDetector:
@@ -119,13 +119,13 @@ class _LocalLLMDetector:
                     import urllib.request
                     resp = urllib.request.urlopen(url, timeout=timeout)
                     data = json.loads(resp.read())
-                    models = [m.get("id", m.get("name", ""))
-                              for m in data.get("data", [])]
+                    models = [m.get('id', m.get('name', ''))
+                              for m in data.get('data', [])]
                     if models:
                         self.available = True
                         self.api_base = f"http://{host}:{ep['port']}/v1"
                         self.models = models
-                        self.name = ep["name"]
+                        self.name = ep['name']
                         return True
                 except Exception:
                     continue
@@ -143,8 +143,8 @@ def _local_tests_opted_in() -> bool:
     llama.cpp box.  Running real LLM calls against it (model loads/unloads) must
     be a deliberate act, not a side-effect of mere reachability.
     """
-    val = os.environ.get("AGENT_CASCADE_RUN_LOCAL_TESTS", "").strip().lower()
-    return val in ("1", "true", "yes", "on")
+    val = os.environ.get('AGENT_CASCADE_RUN_LOCAL_TESTS', '').strip().lower()
+    return val in ('1', 'true', 'yes', 'on')
 
 
 def _find_text_model():
@@ -203,8 +203,8 @@ def _find_vl_model():
 def pytest_configure(config):
     """Auto-probe for local LLM servers when the test session starts."""
     config.addinivalue_line(
-        "markers",
-        "skip_if_no_local: skip when no local LLM server is available or not opted in",
+        'markers',
+        'skip_if_no_local: skip when no local LLM server is available or not opted in',
     )
     if _local_llm_detector.probe():
         if _local_tests_opted_in():
@@ -214,7 +214,7 @@ def pytest_configure(config):
             print(f"\n[conftest] Local LLM found ({_local_llm_detector.name}) — "
                   f"live tests SKIPPED (set AGENT_CASCADE_RUN_LOCAL_TESTS=1 to run them)")
     else:
-        print("\n[conftest] No local LLM server detected — integration tests will be skipped")
+        print('\n[conftest] No local LLM server detected — integration tests will be skipped')
 
 
 def pytest_collection_modifyitems(config, items):
@@ -225,13 +225,13 @@ def pytest_collection_modifyitems(config, items):
     """
     if (not _local_llm_detector.available) or (not _local_tests_opted_in()):
         if not _local_llm_detector.available:
-            reason = "No local LLM server available (LM Studio / Ollama on localhost)"
+            reason = 'No local LLM server available (LM Studio / Ollama on localhost)'
         else:
-            reason = ("Local LLM server present but live tests not opted in "
-                      "(set AGENT_CASCADE_RUN_LOCAL_TESTS=1)")
+            reason = ('Local LLM server present but live tests not opted in '
+                      '(set AGENT_CASCADE_RUN_LOCAL_TESTS=1)')
         skip_marker = pytest.mark.skip(reason=reason)
         for item in items:
-            if "skip_if_no_local" in item.keywords:
+            if 'skip_if_no_local' in item.keywords:
                 item.add_marker(skip_marker)
 
 
@@ -239,28 +239,28 @@ def pytest_collection_modifyitems(config, items):
 # Fixtures: local LLM configuration dicts
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope='session')
 def local_llm_available():
     """Return True if a local LLM server was detected at session start."""
     return _local_llm_detector.available
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope='session')
 def local_llm_api_base():
     """Base URL of the detected local LLM endpoint (e.g. http://host.docker.internal:1234/v1).
 
     Raises pytest.skip if no server was found.
     """
     if not _local_llm_detector.available:
-        pytest.skip("No local LLM server available")
+        pytest.skip('No local LLM server available')
     return _local_llm_detector.api_base
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope='session')
 def local_llm_models():
     """List of model IDs available on the detected local endpoint."""
     if not _local_llm_detector.available:
-        pytest.skip("No local LLM server available")
+        pytest.skip('No local LLM server available')
     return _local_llm_detector.models
 
 
@@ -276,10 +276,10 @@ def local_llm_cfg(local_llm_api_base):
             response = llm.chat(messages=[Message('user', 'hello')])
     """
     return {
-        "model": _find_text_model(),
-        "model_server": local_llm_api_base,
-        "api_key": "EMPTY",
-        "model_type": "qwenvl_oai",
+        'model': _find_text_model(),
+        'model_server': local_llm_api_base,
+        'api_key': 'EMPTY',
+        'model_type': 'qwenvl_oai',
     }
 
 
@@ -290,10 +290,10 @@ def local_vl_llm_cfg(local_llm_api_base):
     Use this for tests that need multimodal capabilities (image understanding).
     """
     return {
-        "model": _find_vl_model(),
-        "model_server": local_llm_api_base,
-        "api_key": "EMPTY",
-        "model_type": "qwenvl_oai",
+        'model': _find_vl_model(),
+        'model_server': local_llm_api_base,
+        'api_key': 'EMPTY',
+        'model_type': 'qwenvl_oai',
     }
 
 
@@ -301,7 +301,7 @@ def local_vl_llm_cfg(local_llm_api_base):
 def local_llm_cfg_with_retry(local_llm_cfg):
     """Like local_llm_cfg but with relaxed retry settings for CI environments."""
     cfg = dict(local_llm_cfg)
-    cfg.setdefault("generate_cfg", {})["max_retries"] = 2
+    cfg.setdefault('generate_cfg', {})['max_retries'] = 2
     return cfg
 
 
@@ -362,7 +362,7 @@ class _MockInstanceConversationMapping(Dict[str, List[Any]]):
     a view onto instance.conversation lists, not separate storage.
     """
 
-    def __init__(self, pool: "MockAgentPool"):
+    def __init__(self, pool: 'MockAgentPool'):
         super().__init__()
         self._pool = pool
 
@@ -399,16 +399,16 @@ class MockAgentPool:
     """
 
     def __init__(self, history: Optional[List[Any]] = None):
-        self.instance_name: str = "TestAgent"
+        self.instance_name: str = 'TestAgent'
         self.instances: Dict[str, MockInstance] = {}
         self.instance_conversations = _MockInstanceConversationMapping(self)
 
         # Create TestAgent instance with the provided history
         if history is not None:
-            self.instances["TestAgent"] = MockInstance(history)
+            self.instances['TestAgent'] = MockInstance(history)
 
     @staticmethod
-    def _msg_field(msg: Any, field: str, default: Any = "") -> Any:
+    def _msg_field(msg: Any, field: str, default: Any = '') -> Any:
         """Extract a field from a message (dict or Message object)."""
         return msg.get(field, default) if isinstance(msg, dict) else getattr(msg, field, default)
 
@@ -449,7 +449,7 @@ class MockAgentPool:
             active_start_idx = latest_marker + 1
         else:
             # Skip system message at index 0 AND first user message (U0)
-            first_role = self._msg_field(conv[0], "role")
+            first_role = self._msg_field(conv[0], 'role')
             active_start_idx = 2 if first_role == SYSTEM else 1
 
         active_set = conv[active_start_idx:]
@@ -465,8 +465,8 @@ class MockAgentPool:
         """
         for i in range(len(history) - 1, -1, -1):
             msg = history[i]
-            role = MockAgentPool._msg_field(msg, "role")
-            content = MockAgentPool._msg_field(msg, "content")
+            role = MockAgentPool._msg_field(msg, 'role')
+            content = MockAgentPool._msg_field(msg, 'content')
             # Only consider USER messages (compression markers are always user role)
             if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 return i
@@ -490,21 +490,21 @@ class MockAgentPool:
 # Fixtures: isolated config directory
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope='session', autouse=True)
 def isolated_config_dir(tmp_path_factory):
     """Set AGENT_CASCADE_TEST_CONFIG_DIR to a temp directory for the entire test session.
 
     This ensures all APIRouter instances created during tests use an isolated config
     directory instead of the production project-root/config directory.
     """
-    test_config = tmp_path_factory.mktemp("test_config")
-    os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = str(test_config)
+    test_config = tmp_path_factory.mktemp('test_config')
+    os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(test_config)
     yield test_config
     # Cleanup not strictly necessary (tmp_path handles it), but explicit is clear
-    os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+    os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope='session', autouse=True)
 def isolated_instance_id():
     """Set a UNIQUE AGENT_CASCADE_INSTANCE_ID per parallel worker for the test session.
 
@@ -517,8 +517,8 @@ def isolated_instance_id():
     The value is also set at module import time (see top of this file); this fixture re-derives
     it so it stays correct even if the env var was unset/cleared by the time fixtures run.
     """
-    os.environ["AGENT_CASCADE_INSTANCE_ID"] = _derive_test_instance_id()
-    yield os.environ["AGENT_CASCADE_INSTANCE_ID"]
+    os.environ['AGENT_CASCADE_INSTANCE_ID'] = _derive_test_instance_id()
+    yield os.environ['AGENT_CASCADE_INSTANCE_ID']
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +576,7 @@ FAST_RETRY_POLICY = _RetryPolicy(
     endpoint_max_retries=1,
 )
 
-BUSY_ERR_TEXT = "503 - Failed to load model: qwen2.5 failed to start"
+BUSY_ERR_TEXT = '503 - Failed to load model: qwen2.5 failed to start'
 
 
 def _busy_error():
@@ -586,8 +586,8 @@ def _busy_error():
 @pytest.fixture
 def router(tmp_path_factory):
     """Isolated APIRouter with its own config dir (no real endpoints)."""
-    test_config_dir = str(tmp_path_factory.mktemp("cascade_breaker_test"))
-    with _patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_config_dir}):
+    test_config_dir = str(tmp_path_factory.mktemp('cascade_breaker_test'))
+    with _patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_config_dir}):
         r = _APIRouter(default_llm_cfg={
             'api_base': 'http://default-api',
             'model': 'default-model',

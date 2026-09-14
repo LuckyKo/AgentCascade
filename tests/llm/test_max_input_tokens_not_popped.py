@@ -59,13 +59,13 @@ def test_max_input_tokens_not_popped(llm: _DummyLLM):
     # First call
     list(llm.chat([Message('user', 'hi')]))
     assert llm.generate_cfg.get('max_input_tokens') == 120000, (
-        "max_input_tokens was consumed by .pop() on first call"
+        'max_input_tokens was consumed by .pop() on first call'
     )
 
     # Second call — should still see the same value
     list(llm.chat([Message('user', 'hi again')]))
     assert llm.generate_cfg.get('max_input_tokens') == 120000, (
-        "max_input_tokens was consumed on second call"
+        'max_input_tokens was consumed on second call'
     )
 
 

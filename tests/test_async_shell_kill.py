@@ -86,9 +86,9 @@ class TestKillTaskWithMockedProcess:
             mock_kill.assert_called_once()
             assert mock_kill.call_args[0][0] is proc_mock
 
-    @pytest.mark.parametrize("poll_behavior,expected_in_result", [
-        ("waits_then_dead", "Shell killed"),
-        ("never_dies", "did not terminate"),
+    @pytest.mark.parametrize('poll_behavior,expected_in_result', [
+        ('waits_then_dead', 'Shell killed'),
+        ('never_dies', 'did not terminate'),
     ])
     def test_kill_returns_after_process_confirmed_dead(self, poll_behavior, expected_in_result):
         """kill_task waits until proc.poll() != None before returning success (or errors on timeout)."""
@@ -96,7 +96,7 @@ class TestKillTaskWithMockedProcess:
         proc_mock = MagicMock()
         proc_mock.pid = 99999
 
-        if poll_behavior == "waits_then_dead":
+        if poll_behavior == 'waits_then_dead':
             # First polls return None, then process dies
             call_count = [0]
             def poll_side_effect():
@@ -113,7 +113,7 @@ class TestKillTaskWithMockedProcess:
             # Verify we waited (poll called multiple times)
             assert call_count[0] > 2
 
-        elif poll_behavior == "never_dies":
+        elif poll_behavior == 'never_dies':
             proc_mock.poll.return_value = None  # Never dies
 
             task = _make_running_task(pid=99999, process=proc_mock)
@@ -173,7 +173,7 @@ class TestKillTaskWithRealProcess:
             timeout=3600,
         )
 
-        assert not completed_early, "Command should not complete instantly"
+        assert not completed_early, 'Command should not complete instantly'
 
         # Wait for process to start and possibly send a heartbeat
         time.sleep(1.0)
@@ -207,12 +207,12 @@ class TestKillTaskWithRealProcess:
                 assert str(real_pid) not in proc_info.stdout.strip(), \
                     f"Process {real_pid} still running after kill. Output: {proc_info.stdout[:200]}"
             except subprocess.TimeoutExpired:
-                pytest.skip("tasklist timed out")
+                pytest.skip('tasklist timed out')
 
     def test_kill_returns_only_after_process_dead(self):
         """kill_task blocks until the process is confirmed terminated (Windows)."""
         if os.name != 'nt':
-            pytest.skip("Windows-only test")
+            pytest.skip('Windows-only test')
 
         pool = MagicMock()
         pool.enqueue_message = lambda agent, msg: None
@@ -255,7 +255,7 @@ class TestKillTaskWithRealProcess:
             assert str(pid) not in proc_info.stdout.strip(), \
                 f"Process {pid} still running after kill returned. Output: {proc_info.stdout[:200]}"
         except subprocess.TimeoutExpired:
-            pytest.skip("tasklist timed out")
+            pytest.skip('tasklist timed out')
 
 
 # ============================================================================
@@ -293,7 +293,7 @@ class TestPowerShellNoProfile:
     def test_powershell_command_gets_noprofile(self):
         """PowerShell commands get -NoProfile injected on Windows."""
         if os.name != 'nt':
-            pytest.skip("Windows-only feature")
+            pytest.skip('Windows-only feature')
 
         pool = MagicMock()
         pool.enqueue_message = lambda agent, msg: None
@@ -324,7 +324,7 @@ class TestPowerShellNoProfile:
                 timeout=3600,
             )
 
-        assert captured_cmd, "No command was captured"
+        assert captured_cmd, 'No command was captured'
         cmd = captured_cmd[0]
         assert '-NoProfile' in cmd, f"-NoProfile not found in: {cmd}"
 
@@ -455,7 +455,7 @@ class TestKillSiblingProcesses:
         avoiding flaky behavior from real process timing.
         """
         if os.name != 'nt':
-            pytest.skip("Windows-only test")
+            pytest.skip('Windows-only test')
 
         tracker = AsyncShellTracker(pool=None)
 
@@ -515,7 +515,7 @@ class TestKillSiblingProcesses:
     def test_descendant_pid_collection(self):
         """Verify _get_windows_descendant_pids correctly finds child processes."""
         if os.name != 'nt':
-            pytest.skip("Windows-only test")
+            pytest.skip('Windows-only test')
 
         tracker = AsyncShellTracker(pool=None)
 
@@ -531,7 +531,7 @@ class TestKillSiblingProcesses:
             descendants = tracker._get_windows_descendant_pids(proc.pid)
 
             # Should find at least the ping process as a descendant
-            assert isinstance(descendants, list), "Should return a list of PIDs"
+            assert isinstance(descendants, list), 'Should return a list of PIDs'
             # Note: We don't assert len > 0 because start /B may spawn as sibling not child
             # The important thing is the method works without errors
 
@@ -580,9 +580,9 @@ class TestDescendantPIDCollectionMocked:
 
             descendants = tracker._get_windows_descendant_pids(1000)
 
-            assert 2000 in descendants, "Should find direct child"
-            assert 3000 in descendants, "Should find grandchild"
-            assert 1000 not in descendants, "Should not include parent itself"
+            assert 2000 in descendants, 'Should find direct child'
+            assert 3000 in descendants, 'Should find grandchild'
+            assert 1000 not in descendants, 'Should not include parent itself'
             assert len(descendants) == 2
 
     def test_handles_commas_in_output(self):
@@ -601,14 +601,14 @@ class TestDescendantPIDCollectionMocked:
 
             descendants = tracker._get_windows_descendant_pids(1000)
 
-            assert 2000 in descendants, "Should find child"
+            assert 2000 in descendants, 'Should find child'
 
     def test_handles_tasklist_failure(self):
         """_get_windows_descendant_pids returns [] on subprocess failure."""
         tracker = AsyncShellTracker(pool=None)
 
         with patch('subprocess.run') as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired("powershell", 10)
+            mock_run.side_effect = subprocess.TimeoutExpired('powershell', 10)
 
             descendants = tracker._get_windows_descendant_pids(1000)
 
@@ -638,9 +638,9 @@ class TestPIDAliveCheckMocked:
 
             alive = tracker._check_windows_pids_alive([4, 500, 999])
 
-            assert 4 in alive, "PID 4 should be alive"
-            assert 500 in alive, "PID 500 should be alive"
-            assert 999 not in alive, "Non-existent PID should not be reported alive"
+            assert 4 in alive, 'PID 4 should be alive'
+            assert 500 in alive, 'PID 500 should be alive'
+            assert 999 not in alive, 'Non-existent PID should not be reported alive'
 
     def test_empty_input_returns_empty(self):
         """_check_windows_pids_alive returns [] for empty input."""
@@ -673,7 +673,7 @@ class TestKillProcessTreeTaskkillFailure:
     def test_handles_taskkill_failure_gracefully(self):
         """_kill_process_tree logs warning and continues verification when taskkill fails."""
         if os.name != 'nt':
-            pytest.skip("Windows-only test")
+            pytest.skip('Windows-only test')
 
         tracker = AsyncShellTracker(pool=None)
 

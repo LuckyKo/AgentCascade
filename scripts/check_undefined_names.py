@@ -18,7 +18,7 @@ from pathlib import Path
 
 # Ensure tests/ is on sys.path so we can import the shared analyzer.
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_TESTS_DIR = _SCRIPT_DIR.parent / "tests"
+_TESTS_DIR = _SCRIPT_DIR.parent / 'tests'
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
@@ -29,11 +29,11 @@ def main(argv=None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Detect undefined names (ruff F821 equivalent) in agent_cascade."
+        description='Detect undefined names (ruff F821 equivalent) in agent_cascade.'
     )
     parser.add_argument(
-        "path", nargs="?", default=None,
-        help="Directory to scan (default: the agent_cascade package).",
+        'path', nargs='?', default=None,
+        help='Directory to scan (default: the agent_cascade package).',
     )
     args = parser.parse_args(argv)
 
@@ -60,5 +60,5 @@ def main(argv=None) -> int:
     return 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

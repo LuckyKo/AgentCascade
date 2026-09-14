@@ -69,13 +69,13 @@ class ProposeSkill(BaseTool):
         test_task = parsed.get('test_task', '')
 
         if not skill_content:
-            return "No skill content provided. Include YAML frontmatter with name, description, and triggers fields."
+            return 'No skill content provided. Include YAML frontmatter with name, description, and triggers fields.'
 
         try:
             justification = parsed.get('justification')
             update_existing = bool(parsed.get('update_existing', False))
         except (AttributeError, TypeError):
-            return "Invalid parameters for propose_skill"
+            return 'Invalid parameters for propose_skill'
 
         if not justification:
             return "'justification' is required for propose_skill"
@@ -83,7 +83,7 @@ class ProposeSkill(BaseTool):
         # Get SkillManager from pool
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
         if skill_manager is None:
-            return "No skills system available. Skills may not have been initialized."
+            return 'No skills system available. Skills may not have been initialized.'
 
         # Parse frontmatter for name and version
         fm, _ = parse_frontmatter(skill_content)
@@ -91,7 +91,7 @@ class ProposeSkill(BaseTool):
         proposed_version = fm.get('version', '1.0.0') if fm else '1.0.0'
 
         if not proposed_name:
-            return "Skill name is required in YAML frontmatter."
+            return 'Skill name is required in YAML frontmatter.'
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
         existing_meta = skill_manager.get_skill_metadata(proposed_name)
@@ -112,7 +112,7 @@ class ProposeSkill(BaseTool):
                     padded = parts + ['0'] * (3 - len(parts))
                     effective_version = f"{padded[0]}.{padded[1]}.{int(padded[2]) + 1}"
                 except (ValueError, IndexError):
-                    effective_version = "1.0.1"
+                    effective_version = '1.0.1'
 
                 # Patch frontmatter with computed version
                 skill_content = skill_content.replace(
@@ -165,12 +165,12 @@ class ProposeSkill(BaseTool):
             success, errors = skill_manager.update_skill_in_place(
                 name=proposed_name,
                 skill_content=skill_content,
-                source="auto-generated",
+                source='auto-generated',
             )
         else:
             success, errors = skill_manager.register_skill_from_content(
                 skill_content=skill_content,
-                source="auto-generated",
+                source='auto-generated',
                 task_text=test_task,
             )
 

@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
 from agent_cascade.compression.helpers import compute_discard_count
 
 
-def _make_msg(role, content="text", function_call=None, extra=None):
+def _make_msg(role, content='text', function_call=None, extra=None):
     """Create a test message with optional function_call and extra dict.
 
     When function_call is provided but no extra dict is given, an extra dict
@@ -36,9 +36,9 @@ class TestToolChainBoundaryProtection:
     def test_no_adjustment_when_cut_is_on_user_message(self):
         """If the boundary falls on a USER message, no adjustment needed."""
         msgs = [
-            _make_msg(USER, "hello"),
-            _make_msg(ASSISTANT, "hi there"),
-            _make_msg(USER, "what time is it?"),  # discard=2 lands here
+            _make_msg(USER, 'hello'),
+            _make_msg(ASSISTANT, 'hi there'),
+            _make_msg(USER, 'what time is it?'),  # discard=2 lands here
             _make_msg(ASSISTANT, "it's noon"),
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
@@ -48,10 +48,10 @@ class TestToolChainBoundaryProtection:
     def test_no_adjustment_when_cut_is_on_assistant_message(self):
         """If the boundary falls on a plain ASSISTANT message, no adjustment."""
         msgs = [
-            _make_msg(ASSISTANT, "first"),
-            _make_msg(FUNCTION, "tool result"),
-            _make_msg(ASSISTANT, "second"),  # discard=2 lands here
-            _make_msg(USER, "ok"),
+            _make_msg(ASSISTANT, 'first'),
+            _make_msg(FUNCTION, 'tool result'),
+            _make_msg(ASSISTANT, 'second'),  # discard=2 lands here
+            _make_msg(USER, 'ok'),
         ]
         discard = compute_discard_count(msgs, 0.5, False)
         assert discard == 2
@@ -59,10 +59,10 @@ class TestToolChainBoundaryProtection:
     def test_adjustment_when_cut_is_on_function_result(self):
         """If the boundary falls on a FUNCTION result, walk forward to include its pair."""
         msgs = [
-            _make_msg(USER, "prompt"),
-            _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),  # tool call at index 1, extra={'function_id': 'call_shell_cmd'}
-            _make_msg(FUNCTION, "tool output", extra={'function_id': 'call_shell_cmd'}),  # matches ASSISTANT above
-            _make_msg(ASSISTANT, "response"),
+            _make_msg(USER, 'prompt'),
+            _make_msg(ASSISTANT, 'thinking', function_call='shell_cmd'),  # tool call at index 1, extra={'function_id': 'call_shell_cmd'}
+            _make_msg(FUNCTION, 'tool output', extra={'function_id': 'call_shell_cmd'}),  # matches ASSISTANT above
+            _make_msg(ASSISTANT, 'response'),
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
         # msgs[2] is FUNCTION with matching function_id -> post-validation finds split
@@ -74,10 +74,10 @@ class TestToolChainBoundaryProtection:
     def test_adjustment_with_function_at_boundary(self):
         """Boundary falls on FUNCTION result — no clean split exists, returns -1."""
         msgs = [
-            _make_msg(USER, "hello"),
-            _make_msg(ASSISTANT, "thinking", function_call="read_file"),  # tool call at index 1
-            _make_msg(FUNCTION, "file content"),  # FUNCTION at index 2 — this is the boundary
-            _make_msg(ASSISTANT, "analysis"),
+            _make_msg(USER, 'hello'),
+            _make_msg(ASSISTANT, 'thinking', function_call='read_file'),  # tool call at index 1
+            _make_msg(FUNCTION, 'file content'),  # FUNCTION at index 2 — this is the boundary
+            _make_msg(ASSISTANT, 'analysis'),
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
         discard = compute_discard_count(msgs, 0.5, False)
@@ -86,12 +86,12 @@ class TestToolChainBoundaryProtection:
     def test_adjustment_extends_when_tail_guard_allows(self):
         """When tail guard allows, extend discard to include the FUNCTION result."""
         msgs = [
-            _make_msg(USER, "hello"),
-            _make_msg(ASSISTANT, "thinking", function_call="read_file"),  # tool call at index 1
-            _make_msg(FUNCTION, "file content"),  # boundary at index 2
-            _make_msg(ASSISTANT, "analysis"),     # index 3
-            _make_msg(USER, "next"),              # index 4
-            _make_msg(ASSISTANT, "response"),     # index 5
+            _make_msg(USER, 'hello'),
+            _make_msg(ASSISTANT, 'thinking', function_call='read_file'),  # tool call at index 1
+            _make_msg(FUNCTION, 'file content'),  # boundary at index 2
+            _make_msg(ASSISTANT, 'analysis'),     # index 3
+            _make_msg(USER, 'next'),              # index 4
+            _make_msg(ASSISTANT, 'response'),     # index 5
         ]
         discard = compute_discard_count(msgs, 0.375, False)
         assert discard == 3
@@ -99,10 +99,10 @@ class TestToolChainBoundaryProtection:
     def test_adjustment_skips_plain_assistant_messages(self):
         """Walking back stops at non-FUNCTION, non-tool-call messages."""
         msgs = [
-            _make_msg(ASSISTANT, "plain text"),  # no function_call — stop walking here
-            _make_msg(FUNCTION, "tool result"),  # boundary would be here
-            _make_msg(ASSISTANT, "response"),
-            _make_msg(USER, "ok"),
+            _make_msg(ASSISTANT, 'plain text'),  # no function_call — stop walking here
+            _make_msg(FUNCTION, 'tool result'),  # boundary would be here
+            _make_msg(ASSISTANT, 'response'),
+            _make_msg(USER, 'ok'),
         ]
         discard = compute_discard_count(msgs, 0.5, False)
         assert discard == 2
@@ -110,10 +110,10 @@ class TestToolChainBoundaryProtection:
     def test_adjustment_with_consecutive_function_results(self):
         """Multiple consecutive FUNCTION results — no clean split exists, returns -1."""
         msgs = [
-            _make_msg(ASSISTANT, "thinking", function_call="read_file"),  # tool call at index 0
-            _make_msg(FUNCTION, "result 1"),  # index 1
-            _make_msg(FUNCTION, "result 2"),  # index 2 — boundary lands here
-            _make_msg(ASSISTANT, "done"),
+            _make_msg(ASSISTANT, 'thinking', function_call='read_file'),  # tool call at index 0
+            _make_msg(FUNCTION, 'result 1'),  # index 1
+            _make_msg(FUNCTION, 'result 2'),  # index 2 — boundary lands here
+            _make_msg(ASSISTANT, 'done'),
         ]
         discard = compute_discard_count(msgs, 0.5, False)
         assert discard == -1
@@ -121,8 +121,8 @@ class TestToolChainBoundaryProtection:
     def test_no_adjustment_at_end_of_active_set(self):
         """With only an A→F pair and tail_keep=2, no valid compression exists."""
         msgs = [
-            _make_msg(ASSISTANT, "thinking", function_call="read_file"),
-            _make_msg(FUNCTION, "result"),
+            _make_msg(ASSISTANT, 'thinking', function_call='read_file'),
+            _make_msg(FUNCTION, 'result'),
         ]
         # fraction=1.0 -> int(2*1.0)=2, force -> max(1, 2)=2
         # refinement advances past F to pos 2 (end), returns unclamped value exceeding keep zone
@@ -132,10 +132,10 @@ class TestToolChainBoundaryProtection:
     def test_dict_messages_work(self):
         """Tool chain detection works with dict messages — returns -1 when no clean split."""
         msgs = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "thinking", "function_call": {"name": "read_file"}},  # tool call at index 1
-            {"role": "function", "content": "file content"},  # boundary at index 2
-            {"role": "user", "content": "next"},
+            {'role': 'user', 'content': 'hello'},
+            {'role': 'assistant', 'content': 'thinking', 'function_call': {'name': 'read_file'}},  # tool call at index 1
+            {'role': 'function', 'content': 'file content'},  # boundary at index 2
+            {'role': 'user', 'content': 'next'},
         ]
         discard = compute_discard_count(msgs, 0.5, False)
         assert discard == -1
@@ -143,9 +143,9 @@ class TestToolChainBoundaryProtection:
     def test_force_mode_adjustment(self):
         """Force mode also returns -1 when tool chain boundary has no clean split."""
         msgs = [
-            _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),
-            _make_msg(FUNCTION, "output", extra={'function_id': 'call_shell_cmd'}),  # boundary, matches ASSISTANT above
-            _make_msg(ASSISTANT, "done"),
+            _make_msg(ASSISTANT, 'thinking', function_call='shell_cmd'),
+            _make_msg(FUNCTION, 'output', extra={'function_id': 'call_shell_cmd'}),  # boundary, matches ASSISTANT above
+            _make_msg(ASSISTANT, 'done'),
         ]
         discard = compute_discard_count(msgs, 0.3, True)
         assert discard == -1
@@ -153,9 +153,9 @@ class TestToolChainBoundaryProtection:
     def test_adjustment_respects_tail_guard(self):
         """Returns -1 when tail guard prevents valid compression at tool boundary."""
         msgs = [
-            _make_msg(ASSISTANT, "thinking", function_call="read_file"),
-            _make_msg(FUNCTION, "result"),  # boundary would be here
-            _make_msg(ASSISTANT, "done"),  # only 1 message left if we include this
+            _make_msg(ASSISTANT, 'thinking', function_call='read_file'),
+            _make_msg(FUNCTION, 'result'),  # boundary would be here
+            _make_msg(ASSISTANT, 'done'),  # only 1 message left if we include this
         ]
         discard = compute_discard_count(msgs, 0.6, False)
         assert discard == -1

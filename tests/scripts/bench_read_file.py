@@ -37,7 +37,7 @@ WORK_DIR = Path(DEFAULT_WORKSPACE)
 
 def create_test_file(path: Path, num_lines: int) -> None:
     """Create a deterministic text file for benchmarking."""
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, 'w', encoding='utf-8') as f:
         for i in range(1, num_lines + 1):
             # ~60 chars per line → realistic content size
             f.write(f"Line {i:05d}: This is a test line with some meaningful content for benchmarking.\n")
@@ -68,26 +68,26 @@ def detect_sleep_calls() -> List[str]:
     found: List[str] = []
     
     # Check file_ops.py
-    src = Path(PROJECT_ROOT) / "agent_cascade" / "tools" / "custom" / "file_ops.py"
-    with open(src, "r") as f:
+    src = Path(PROJECT_ROOT) / 'agent_cascade' / 'tools' / 'custom' / 'file_ops.py'
+    with open(src, 'r') as f:
         lines = f.readlines()
     for i, line in enumerate(lines, 1):
-        if "sleep" in line and not line.strip().startswith("#"):
+        if 'sleep' in line and not line.strip().startswith('#'):
             found.append(f"  file_ops.py:{i} → {line.strip()}")
     
     # Check base tool class
-    src2 = Path(PROJECT_ROOT) / "agent_cascade" / "tools" / "base.py"
-    with open(src2, "r") as f:
+    src2 = Path(PROJECT_ROOT) / 'agent_cascade' / 'tools' / 'base.py'
+    with open(src2, 'r') as f:
         lines = f.readlines()
     for i, line in enumerate(lines, 1):
-        if "sleep" in line and not line.strip().startswith("#"):
+        if 'sleep' in line and not line.strip().startswith('#'):
             found.append(f"  base.py:{i} → {line.strip()}")
 
     # Check settings module (lazy imports can cause delays)
-    src3 = Path(PROJECT_ROOT) / "agent_cascade" / "settings.py"
-    with open(src3, "r") as f:
+    src3 = Path(PROJECT_ROOT) / 'agent_cascade' / 'settings.py'
+    with open(src3, 'r') as f:
         content = f.read()
-    if "sleep" in content and "# sleep" not in content.lower():
+    if 'sleep' in content and '# sleep' not in content.lower():
         found.append(f"  settings.py → contains sleep() calls")
 
     return found
@@ -118,7 +118,7 @@ def benchmark_full_call(tool: ReadFile, test_file: Path, label: str) -> List[flo
     
     for _ in range(NUM_ITERATIONS):
         t0 = time.perf_counter()
-        result = tool.call({"path": str(rel), "start_line": 1, "limit": TEST_FILE_LINES})
+        result = tool.call({'path': str(rel), 'start_line': 1, 'limit': TEST_FILE_LINES})
         elapsed = (time.perf_counter() - t0) * 1000
         times_ms.append(elapsed)
         
@@ -135,41 +135,41 @@ def benchmark_step_breakdown(tool: ReadFile, test_file: Path) -> None:
     rel = str(test_file.relative_to(WORK_DIR))
     
     print(f"\n{'=' * 60}")
-    print("  Per-Step Breakdown (single iteration)")
+    print('  Per-Step Breakdown (single iteration)')
     print(f"{'=' * 60}")
     
     steps: List[tuple] = []  # (step_name, elapsed_ms)
     
     # Step 1: _verify_json_format_args (inside call())
     t0 = time.perf_counter()
-    params = tool._verify_json_format_args({"path": rel, "start_line": 1, "limit": TEST_FILE_LINES})
-    steps.append(("JSON arg parsing", (time.perf_counter() - t0) * 1000))
+    params = tool._verify_json_format_args({'path': rel, 'start_line': 1, 'limit': TEST_FILE_LINES})
+    steps.append(('JSON arg parsing', (time.perf_counter() - t0) * 1000))
     
     # Step 2: _resolve_path
     t0 = time.perf_counter()
-    resolved = tool._resolve_path(params["path"])
-    steps.append(("_resolve_path", (time.perf_counter() - t0) * 1000))
+    resolved = tool._resolve_path(params['path'])
+    steps.append(('_resolve_path', (time.perf_counter() - t0) * 1000))
     
     # Step 3: file existence checks
     t0 = time.perf_counter()
     _ = resolved.exists() and resolved.is_file()
-    steps.append(("exists + is_file check", (time.perf_counter() - t0) * 1000))
+    steps.append(('exists + is_file check', (time.perf_counter() - t0) * 1000))
     
     # Step 4: _is_binary_file
     from agent_cascade.tools.custom.file_ops import _is_binary_file
     t0 = time.perf_counter()
     is_bin = _is_binary_file(resolved)
-    steps.append(("_is_binary_file", (time.perf_counter() - t0) * 1000))
+    steps.append(('_is_binary_file', (time.perf_counter() - t0) * 1000))
     
     # Step 5: _determine_limits
     t0 = time.perf_counter()
     limit, is_wild = tool._determine_limits(TEST_FILE_LINES)
-    steps.append(("_determine_limits", (time.perf_counter() - t0) * 1000))
+    steps.append(('_determine_limits', (time.perf_counter() - t0) * 1000))
     
     # Step 6: _read_text_file (the actual file I/O + formatting)
     t0 = time.perf_counter()
     result = tool._read_text_file(rel, resolved, 1, limit)
-    steps.append(("_read_text_file (I/O + format)", (time.perf_counter() - t0) * 1000))
+    steps.append(('_read_text_file (I/O + format)', (time.perf_counter() - t0) * 1000))
     
     # Print breakdown table
     total = sum(s[1] for s in steps)
@@ -191,7 +191,7 @@ def benchmark_large_file(tool: ReadFile, test_file: Path) -> List[float]:
     
     for _ in range(min(NUM_ITERATIONS, 20)):  # Fewer iterations for large files
         t0 = time.perf_counter()
-        result = tool.call({"path": str(rel), "start_line": 1, "limit": -1})
+        result = tool.call({'path': str(rel), 'start_line': 1, 'limit': -1})
         elapsed = (time.perf_counter() - t0) * 1000
         times_ms.append(elapsed)
     
@@ -201,8 +201,8 @@ def benchmark_large_file(tool: ReadFile, test_file: Path) -> List[float]:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    print("=" * 60)
-    print("  ReadFile Tool Performance Benchmark")
+    print('=' * 60)
+    print('  ReadFile Tool Performance Benchmark')
     print(f"{'=' * 60}")
     print(f"  Project root : {PROJECT_ROOT}")
     print(f"  Iterations   : {NUM_ITERATIONS}")
@@ -210,18 +210,18 @@ def main():
     # ── Sleep call detection ───────────────────────────────────────────────
     sleeps = detect_sleep_calls()
     if sleeps:
-        print("\n⚠  SLEEP CALLS FOUND in the read_file code path:")
+        print('\n⚠  SLEEP CALLS FOUND in the read_file code path:')
         for s in sleeps:
             print(s)
     else:
-        print("\n✓ No sleep() calls found in the read_file code path.")
+        print('\n✓ No sleep() calls found in the read_file code path.')
 
     # ── Create test files inside DEFAULT_WORKSPACE (so _resolve_path works) ──
-    tmp_dir = WORK_DIR / "_perf_test_tmp"
+    tmp_dir = WORK_DIR / '_perf_test_tmp'
     tmp_dir.mkdir(exist_ok=True)
     
-    small_file = tmp_dir / "small_test.txt"
-    large_file = tmp_dir / "large_test.txt"
+    small_file = tmp_dir / 'small_test.txt'
+    large_file = tmp_dir / 'large_test.txt'
     
     create_test_file(small_file, TEST_FILE_LINES)
     create_test_file(large_file, LARGE_FILE_LINES)
@@ -236,24 +236,24 @@ def main():
     try:
         # ── Test 1: _resolve_path latency ───────────────────────────────────
         resolve_times = benchmark_resolve_path(tool, small_file)
-        stats("Path Resolution (_resolve_path)", resolve_times)
+        stats('Path Resolution (_resolve_path)', resolve_times)
 
         # ── Test 2: Full call() latency (small file) ────────────────────────
         full_small_times = benchmark_full_call(
-            tool, small_file, "Full read_file.call() — Small File"
+            tool, small_file, 'Full read_file.call() — Small File'
         )
-        stats("Full call() — Small File", full_small_times)
+        stats('Full call() — Small File', full_small_times)
 
         # ── Test 3: Full call() latency (large file) ────────────────────────
         full_large_times = benchmark_large_file(tool, large_file)
-        stats("Full call() — Large File", full_large_times)
+        stats('Full call() — Large File', full_large_times)
 
         # ── Test 4: Per-step breakdown ──────────────────────────────────────
         benchmark_step_breakdown(tool, small_file)
 
         # ── Summary ─────────────────────────────────────────────────────────
         print(f"\n{'=' * 60}")
-        print("  SUMMARY")
+        print('  SUMMARY')
         print(f"{'=' * 60}")
         
         avg_small = statistics.mean(full_small_times)
@@ -292,5 +292,5 @@ def main():
         print(f"\n  Temp directory cleaned up.")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

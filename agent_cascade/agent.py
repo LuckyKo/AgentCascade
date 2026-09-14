@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -182,7 +182,9 @@ class Agent(ABC):
                              functions=functions,
                              stream=stream,
                              extra_generate_cfg=merge_generate_cfgs(
-                                 base_generate_cfg={**self.extra_generate_cfg, 'agent_name': self.name},
+                                 base_generate_cfg={
+                                     **self.extra_generate_cfg, 'agent_name': self.name
+                                 },
                                  new_generate_cfg=extra_generate_cfg,
                              ))
 
@@ -258,10 +260,10 @@ class Agent(ABC):
         """
         if tool_name not in self.function_map:
             return f'Tool {tool_name} does not exists.'
-        
+
         tool = self.function_map[tool_name]
         try:
-            # Pass the agent itself as agent_obj so tools (like compress_context) 
+            # Pass the agent itself as agent_obj so tools (like compress_context)
             # can sync back to its base system_message for persistence across turns.
             if 'agent_obj' not in kwargs:
                 kwargs['agent_obj'] = self

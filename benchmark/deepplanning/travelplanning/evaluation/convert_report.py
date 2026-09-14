@@ -68,7 +68,7 @@ def extract_json_from_response(text: str) -> Optional[str]:
         return None
     
     # Try to extract from <JSON> tags
-    match = re.search(r"<JSON>([\s\S]*?)</JSON>", text)
+    match = re.search(r'<JSON>([\s\S]*?)</JSON>', text)
     if match:
         return match.group(1).strip()
     
@@ -133,8 +133,8 @@ def process_single_report(
             
             # Construct messages
             messages = [
-                {"role": "system", "content": format_prompt},
-                {"role": "user", "content": raw_text},
+                {'role': 'system', 'content': format_prompt},
+                {'role': 'user', 'content': raw_text},
             ]
             
             # Call LLM for conversion
@@ -144,7 +144,7 @@ def process_single_report(
                 max_tokens=10240
             )
             
-            content = resp.choices[0].message.content or ""
+            content = resp.choices[0].message.content or ''
             
             # Extract JSON
             json_payload = extract_json_from_response(content)
@@ -360,7 +360,7 @@ def convert_reports(
     }
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(

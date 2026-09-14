@@ -19,26 +19,26 @@ from agent_cascade.compression.helpers import _refine_tool_call_boundary, comput
 
 # ── Helper factories for dict-based messages ────────────────────────────────
 
-def user(content="text"):
+def user(content='text'):
     """Create a USER message."""
-    return {"role": "user", "content": content}
+    return {'role': 'user', 'content': content}
 
 
-def assistant_tc(name="tool_0"):
+def assistant_tc(name='tool_0'):
     """Create an ASSISTANT message with tool_calls (standard OpenAI format)."""
     return {
-        "role": "assistant",
-        "content": f"calling {name}",
-        "tool_calls": [{"id": f"call_{name}", "function": {"name": name, "arguments": "{}"}}],
+        'role': 'assistant',
+        'content': f"calling {name}",
+        'tool_calls': [{'id': f"call_{name}", 'function': {'name': name, 'arguments': '{}'}}],
     }
 
 
-def function(content="result", function_id=None):
+def function(content='result', function_id=None):
     """Create a FUNCTION result message."""
     return {
-        "role": "function",
-        "content": content,
-        "extra": {"function_id": function_id},
+        'role': 'function',
+        'content': content,
+        'extra': {'function_id': function_id},
     }
 
 
@@ -62,13 +62,13 @@ class TestIndependentPairsRefine:
         Starting discard at position 1 (first A) should stay at 1.
         """
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1 - first A of pair 1
-            function("res_0"),        # 2 - F of pair 1
-            assistant_tc("tool_1"),   # 3 - first A of pair 2
-            function("res_1"),        # 4 - F of pair 2
-            assistant_tc("tool_2"),   # 5 - first A of pair 3
-            function("res_2"),        # 6 - F of pair 3
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1 - first A of pair 1
+            function('res_0'),        # 2 - F of pair 1
+            assistant_tc('tool_1'),   # 3 - first A of pair 2
+            function('res_1'),        # 4 - F of pair 2
+            assistant_tc('tool_2'),   # 5 - first A of pair 3
+            function('res_2'),        # 6 - F of pair 3
         ]
 
         result = _refine_tool_call_boundary(active, 1, 5)
@@ -80,11 +80,11 @@ class TestIndependentPairsRefine:
         The previous message is F (not an assistant with tool calls), so rule 3 applies.
         """
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1
-            function("res_0"),        # 2
-            assistant_tc("tool_1"),   # 3 - second A (prev is F, not A(tc))
-            function("res_1"),        # 4
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1
+            function('res_0'),        # 2
+            assistant_tc('tool_1'),   # 3 - second A (prev is F, not A(tc))
+            function('res_1'),        # 4
         ]
 
         result = _refine_tool_call_boundary(active, 3, 5)
@@ -93,10 +93,10 @@ class TestIndependentPairsRefine:
     def test_refine_advances_through_pair(self):
         """When discard lands at first A, it advances through the complete A->F pair."""
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1 - A(tc) at boundary
-            function("res_0"),        # 2 - F matching above
-            assistant_tc("tool_1"),   # 3
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1 - A(tc) at boundary
+            function('res_0'),        # 2 - F matching above
+            assistant_tc('tool_1'),   # 3
         ]
 
         result = _refine_tool_call_boundary(active, 1, 4)
@@ -117,11 +117,11 @@ class TestBatchedChainRefine:
     def test_intermediate_a_skips_to_end(self):
         """A->A->F->F: discard at second A should advance to end of chain (unclamped)."""
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1 - first A (safe)
-            assistant_tc("tool_1"),   # 2 - intermediate A (unsafe)
-            function("res_0"),        # 3
-            function("res_1"),        # 4
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1 - first A (safe)
+            assistant_tc('tool_1'),   # 2 - intermediate A (unsafe)
+            function('res_0'),        # 3
+            function('res_1'),        # 4
         ]
 
         result = _refine_tool_call_boundary(active, 2, 4)
@@ -130,11 +130,11 @@ class TestBatchedChainRefine:
     def test_first_a_of_chain_is_safe(self):
         """A->A->F->F: the first A of the chain is safe (no prev A(tc))."""
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1 - first A (prev is USER)
-            assistant_tc("tool_1"),   # 2
-            function("res_0"),        # 3
-            function("res_1"),        # 4
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1 - first A (prev is USER)
+            assistant_tc('tool_1'),   # 2
+            function('res_0'),        # 3
+            function('res_1'),        # 4
         ]
 
         result = _refine_tool_call_boundary(active, 1, 5)
@@ -143,13 +143,13 @@ class TestBatchedChainRefine:
     def test_three_consecutive_as(self):
         """A->A->A->F->F->F: three consecutive As should all advance (unclamped)."""
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1
-            assistant_tc("tool_1"),   # 2 - intermediate A
-            assistant_tc("tool_2"),   # 3 - also intermediate
-            function("res_0"),        # 4
-            function("res_1"),        # 5
-            function("res_2"),        # 6
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1
+            assistant_tc('tool_1'),   # 2 - intermediate A
+            assistant_tc('tool_2'),   # 3 - also intermediate
+            function('res_0'),        # 4
+            function('res_1'),        # 5
+            function('res_2'),        # 6
         ]
 
         result = _refine_tool_call_boundary(active, 2, 6)
@@ -168,11 +168,11 @@ class TestLandedOnFunctionRefine:
     def test_landed_on_single_function(self):
         """A->F->F->A: discard at first F should skip both Fs."""
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1
-            function("res_0"),        # 2 - landed here
-            function("res_1"),        # 3
-            assistant_tc("tool_1"),   # 4
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1
+            function('res_0'),        # 2 - landed here
+            function('res_1'),        # 3
+            assistant_tc('tool_1'),   # 4
         ]
 
         result = _refine_tool_call_boundary(active, 2, 5)
@@ -181,10 +181,10 @@ class TestLandedOnFunctionRefine:
     def test_landed_on_function_at_start(self):
         """F->F at the very start: skip both."""
         active = [
-            function("res_0"),        # 0 - landed here
-            function("res_1"),        # 1
-            assistant_tc("tool_0"),   # 2
-            user("prompt"),           # 3
+            function('res_0'),        # 0 - landed here
+            function('res_1'),        # 1
+            assistant_tc('tool_0'),   # 2
+            user('prompt'),           # 3
         ]
 
         result = _refine_tool_call_boundary(active, 0, 4)
@@ -193,11 +193,11 @@ class TestLandedOnFunctionRefine:
     def test_exact_scenario_from_spec(self):
         """Exact scenario: active=[U, A(tc), F, F, A], discard=2 -> landed on F -> skip to 4."""
         active = [
-            user("prompt"),          # 0 - U
-            assistant_tc("tool_0"),   # 1 - A(tc)
-            function("res_0"),        # 2 - F (discard lands here)
-            function("res_1"),        # 3 - F
-            assistant_tc("tool_1"),   # 4 - A
+            user('prompt'),          # 0 - U
+            assistant_tc('tool_0'),   # 1 - A(tc)
+            function('res_0'),        # 2 - F (discard lands here)
+            function('res_1'),        # 3 - F
+            assistant_tc('tool_1'),   # 4 - A
         ]
 
         result = _refine_tool_call_boundary(active, 2, 5)
@@ -218,13 +218,13 @@ class TestMixedPatternRefine:
     def test_split_after_first_pair(self):
         """Split right after the first A->F pair (at first A of batched part)."""
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1 - A of independent pair
-            function("res_0"),        # 2 - F of independent pair
-            assistant_tc("tool_1"),   # 3 - first A of batched chain (prev is F)
-            assistant_tc("tool_2"),   # 4 - second A of batched chain
-            function("res_1"),        # 5
-            function("res_2"),        # 6
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1 - A of independent pair
+            function('res_0'),        # 2 - F of independent pair
+            assistant_tc('tool_1'),   # 3 - first A of batched chain (prev is F)
+            assistant_tc('tool_2'),   # 4 - second A of batched chain
+            function('res_1'),        # 5
+            function('res_2'),        # 6
         ]
 
         result = _refine_tool_call_boundary(active, 3, 7)
@@ -233,13 +233,13 @@ class TestMixedPatternRefine:
     def test_at_intermediate_a_of_batched_part(self):
         """Discard at the second A of the batched chain part (unclamped)."""
         active = [
-            user("prompt"),          # 0
-            assistant_tc("tool_0"),   # 1
-            function("res_0"),        # 2
-            assistant_tc("tool_1"),   # 3 - first A of batched chain
-            assistant_tc("tool_2"),   # 4 - second A (intermediate, unsafe)
-            function("res_1"),        # 5
-            function("res_2"),        # 6
+            user('prompt'),          # 0
+            assistant_tc('tool_0'),   # 1
+            function('res_0'),        # 2
+            assistant_tc('tool_1'),   # 3 - first A of batched chain
+            assistant_tc('tool_2'),   # 4 - second A (intermediate, unsafe)
+            function('res_1'),        # 5
+            function('res_2'),        # 6
         ]
 
         result = _refine_tool_call_boundary(active, 4, 6)
@@ -257,7 +257,7 @@ class TestComputeDiscardCount:
     behaves more predictably with properly structured Message objects.
     """
 
-    def _make_msg(self, role, content="text", function_call=None, extra=None):
+    def _make_msg(self, role, content='text', function_call=None, extra=None):
         """Create a Message object like the existing test suite does."""
         from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
         if role == ASSISTANT and function_call:
@@ -271,13 +271,13 @@ class TestComputeDiscardCount:
         """Independent pairs with extra tail room should find a valid split."""
         from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
         active = [
-            self._make_msg(USER, "prompt"),
-            self._make_msg(ASSISTANT, "thinking", function_call="tool_0"),
-            self._make_msg(FUNCTION, "result_0", extra={'function_id': 'call_tool_0'}),
-            self._make_msg(ASSISTANT, "thinking", function_call="tool_1"),
-            self._make_msg(FUNCTION, "result_1", extra={'function_id': 'call_tool_1'}),
-            self._make_msg(USER, "next"),
-            self._make_msg(ASSISTANT, "done"),  # extra tail room
+            self._make_msg(USER, 'prompt'),
+            self._make_msg(ASSISTANT, 'thinking', function_call='tool_0'),
+            self._make_msg(FUNCTION, 'result_0', extra={'function_id': 'call_tool_0'}),
+            self._make_msg(ASSISTANT, 'thinking', function_call='tool_1'),
+            self._make_msg(FUNCTION, 'result_1', extra={'function_id': 'call_tool_1'}),
+            self._make_msg(USER, 'next'),
+            self._make_msg(ASSISTANT, 'done'),  # extra tail room
         ]
 
         count = compute_discard_count(active, 0.5, False)
@@ -287,13 +287,13 @@ class TestComputeDiscardCount:
         """Batched chain with extra tail room should find a valid split."""
         from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
         active = [
-            self._make_msg(USER, "prompt"),
-            self._make_msg(ASSISTANT, "thinking", function_call="tool_0"),
-            self._make_msg(ASSISTANT, "thinking", function_call="tool_1"),
-            self._make_msg(FUNCTION, "result_0", extra={'function_id': 'call_tool_0'}),
-            self._make_msg(FUNCTION, "result_1", extra={'function_id': 'call_tool_1'}),
-            self._make_msg(USER, "next"),
-            self._make_msg(ASSISTANT, "done"),  # extra tail room
+            self._make_msg(USER, 'prompt'),
+            self._make_msg(ASSISTANT, 'thinking', function_call='tool_0'),
+            self._make_msg(ASSISTANT, 'thinking', function_call='tool_1'),
+            self._make_msg(FUNCTION, 'result_0', extra={'function_id': 'call_tool_0'}),
+            self._make_msg(FUNCTION, 'result_1', extra={'function_id': 'call_tool_1'}),
+            self._make_msg(USER, 'next'),
+            self._make_msg(ASSISTANT, 'done'),  # extra tail room
         ]
 
         count = compute_discard_count(active, 0.5, False)
@@ -303,15 +303,15 @@ class TestComputeDiscardCount:
         """Mixed pattern with extra tail room should find a valid split."""
         from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
         active = [
-            self._make_msg(USER, "prompt"),
-            self._make_msg(ASSISTANT, "thinking", function_call="tool_0"),
-            self._make_msg(FUNCTION, "result_0", extra={'function_id': 'call_tool_0'}),
-            self._make_msg(ASSISTANT, "thinking", function_call="tool_1"),
-            self._make_msg(ASSISTANT, "thinking", function_call="tool_2"),
-            self._make_msg(FUNCTION, "result_1", extra={'function_id': 'call_tool_1'}),
-            self._make_msg(FUNCTION, "result_2", extra={'function_id': 'call_tool_2'}),
-            self._make_msg(USER, "next"),
-            self._make_msg(ASSISTANT, "done"),  # extra tail room
+            self._make_msg(USER, 'prompt'),
+            self._make_msg(ASSISTANT, 'thinking', function_call='tool_0'),
+            self._make_msg(FUNCTION, 'result_0', extra={'function_id': 'call_tool_0'}),
+            self._make_msg(ASSISTANT, 'thinking', function_call='tool_1'),
+            self._make_msg(ASSISTANT, 'thinking', function_call='tool_2'),
+            self._make_msg(FUNCTION, 'result_1', extra={'function_id': 'call_tool_1'}),
+            self._make_msg(FUNCTION, 'result_2', extra={'function_id': 'call_tool_2'}),
+            self._make_msg(USER, 'next'),
+            self._make_msg(ASSISTANT, 'done'),  # extra tail room
         ]
 
         count = compute_discard_count(active, 0.5, False)
@@ -324,26 +324,26 @@ class TestComputeDiscardCount:
     def test_no_false_negative_independent_pairs(self):
         """Independent pairs with tail room should not cause compression failure (-1)."""
         from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
-        active = [self._make_msg(USER, "prompt")]
+        active = [self._make_msg(USER, 'prompt')]
         for i in range(4):
             active.append(self._make_msg(ASSISTANT, f"call {i}", function_call=f"tool_{i}"))
             active.append(self._make_msg(FUNCTION, f"res_{i}", extra={'function_id': f'call_tool_{i}'}))
         # Add tail messages to give room for post-validation
-        active.append(self._make_msg(USER, "next"))
-        active.append(self._make_msg(ASSISTANT, "done"))
+        active.append(self._make_msg(USER, 'next'))
+        active.append(self._make_msg(ASSISTANT, 'done'))
 
         count = compute_discard_count(active, 0.3, False)
-        assert count != -1, "Independent pairs should not cause compression failure (-1)"
+        assert count != -1, 'Independent pairs should not cause compression failure (-1)'
 
     def test_plain_messages_only(self):
         """Pure plain messages should work trivially."""
-        active = [user("a"), user("b"), user("c"), user("d")]
+        active = [user('a'), user('b'), user('c'), user('d')]
         count = compute_discard_count(active, 0.5, False)
         assert count == 2
 
     def test_single_pair_kept_as_tail(self):
         """A single A->F pair at the end should be kept as tail."""
-        active = [user("prompt"), assistant_tc("tool_0"), function("res_0")]
+        active = [user('prompt'), assistant_tc('tool_0'), function('res_0')]
         count = compute_discard_count(active, 0.5, False)
         assert count >= 0 and count <= len(active) - 2
 
@@ -355,7 +355,7 @@ class TestBoundaryConditions:
 
     def test_refine_at_exact_max_discard(self):
         """Discard at FUNCTION position advances past it (unclamped return)."""
-        active = [user("prompt"), assistant_tc("tool_0"), function("res_0")]
+        active = [user('prompt'), assistant_tc('tool_0'), function('res_0')]
 
         result = _refine_tool_call_boundary(active, 2, 2)
         # Pos 2 is FUNCTION → rule 1: skip past consecutive Fs → discard becomes 3
@@ -363,23 +363,23 @@ class TestBoundaryConditions:
 
     def test_refine_plain_messages(self):
         """All plain messages should not advance at all."""
-        active = [user("a"), user("b"), assistant_tc("tool_0"), function("res")]
+        active = [user('a'), user('b'), assistant_tc('tool_0'), function('res')]
 
         result = _refine_tool_call_boundary(active, 1, 4)
-        assert result == 1, "Plain USER message is safe"
+        assert result == 1, 'Plain USER message is safe'
 
     def test_refine_stays_within_max_discard(self):
         """Result should never exceed max_discard."""
-        active = [user("prompt"), assistant_tc("tool_0"), function("res_0"),
-                  assistant_tc("tool_1"), function("res_1")]
+        active = [user('prompt'), assistant_tc('tool_0'), function('res_0'),
+                  assistant_tc('tool_1'), function('res_1')]
 
         result = _refine_tool_call_boundary(active, 1, 2)
         assert result <= 2, f"Result {result} exceeds max_discard=2"
 
     def test_refine_respects_max_bound(self):
         """Refinement should clamp to max_discard even when chain extends further."""
-        active = [user("prompt"), assistant_tc("tool_0"), function("res_0"),
-                  assistant_tc("tool_1"), function("res_1")]
+        active = [user('prompt'), assistant_tc('tool_0'), function('res_0'),
+                  assistant_tc('tool_1'), function('res_1')]
 
         result = _refine_tool_call_boundary(active, 1, 3)
         assert result <= 3
@@ -393,20 +393,20 @@ class TestGetMessageRole:
     def test_dict_and_object_messages(self):
         """Verify role extraction works for both dict and Message object formats."""
         # Dict-style messages
-        assert get_message_role({"role": "user", "content": "hello"}) == "user"
-        assert get_message_role({"role": "assistant", "content": "thinking...", "tool_calls": []}) == "assistant"
-        assert get_message_role({"role": "function", "content": "result"}) == "function"
-        assert get_message_role({"content": "no role key"}) == ""
+        assert get_message_role({'role': 'user', 'content': 'hello'}) == 'user'
+        assert get_message_role({'role': 'assistant', 'content': 'thinking...', 'tool_calls': []}) == 'assistant'
+        assert get_message_role({'role': 'function', 'content': 'result'}) == 'function'
+        assert get_message_role({'content': 'no role key'}) == ''
 
         # Message objects
         from agent_cascade.llm.schema import USER, FUNCTION, Message
-        assert get_message_role(Message(role=USER, content="hello")) == USER
-        assert get_message_role(Message(role=FUNCTION, content="result")) == FUNCTION
+        assert get_message_role(Message(role=USER, content='hello')) == USER
+        assert get_message_role(Message(role=FUNCTION, content='result')) == FUNCTION
 
         # Missing attribute
         class PlainMsg:
             pass
-        assert get_message_role(PlainMsg()) == ""
+        assert get_message_role(PlainMsg()) == ''
 
 
 if __name__ == '__main__':

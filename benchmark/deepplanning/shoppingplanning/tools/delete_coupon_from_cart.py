@@ -6,16 +6,16 @@ from base_shopping_tool import BaseShoppingTool, register_tool
 
 # List of valid coupons
 VALID_COUPONS = [
-    "Cross-store: ¥30 off every ¥300",
-    "Cross-store: ¥60 off every ¥500",
-    "Cross-store: ¥120 off every ¥900",
-    "Cross-store: ¥200 off every ¥1,200",
-    "Cross-store: ¥300 off every ¥1,500",
-    "Same-brand: ¥25 off every ¥200",
-    "Same-brand: ¥60 off every ¥400",
-    "Same-brand: ¥180 off every ¥1,000",
-    "Same-brand: ¥300 off every ¥1,200",
-    "VIP: ¥200 off every ¥1,000",
+    'Cross-store: ¥30 off every ¥300',
+    'Cross-store: ¥60 off every ¥500',
+    'Cross-store: ¥120 off every ¥900',
+    'Cross-store: ¥200 off every ¥1,200',
+    'Cross-store: ¥300 off every ¥1,500',
+    'Same-brand: ¥25 off every ¥200',
+    'Same-brand: ¥60 off every ¥400',
+    'Same-brand: ¥180 off every ¥1,000',
+    'Same-brand: ¥300 off every ¥1,200',
+    'VIP: ¥200 off every ¥1,000',
 ]
 
 
@@ -41,9 +41,9 @@ class DeleteCouponFromCartTool(BaseShoppingTool):
     def _load_cart(self, path: Path):
         """Load cart data from JSON file."""
         default_cart = {
-            "items": [],
-            "used_coupons": [],
-            "summary": {"total_items_count": 0, "total_price": 0.0},
+            'items': [],
+            'used_coupons': [],
+            'summary': {'total_items_count': 0, 'total_price': 0.0},
         }
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -61,8 +61,8 @@ class DeleteCouponFromCartTool(BaseShoppingTool):
                         self.cart_data['used_coupons'] = []
                     if 'summary' not in self.cart_data:
                         self.cart_data['summary'] = {
-                            "total_items_count": len(self.cart_data.get('items', [])),
-                            "total_price": 0.0
+                            'total_items_count': len(self.cart_data.get('items', [])),
+                            'total_price': 0.0
                         }
                 else:
                     self.cart_data = default_cart
@@ -171,24 +171,24 @@ class DeleteCouponFromCartTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         coupon_name = params_dict.get('coupon_name')
         quantity = params_dict.get('quantity', 1)
 
         if not coupon_name:
             return self.format_result_as_json({
-                "error": "coupon_name is required",
+                'error': 'coupon_name is required',
             })
 
         if not isinstance(quantity, (int, float)) or quantity <= 0:
             return self.format_result_as_json({
-                "error": "quantity must be a positive number",
+                'error': 'quantity must be a positive number',
             })
 
         if coupon_name not in VALID_COUPONS:
             return self.format_result_as_json({
-                "error": f"Invalid coupon name: '{coupon_name}'. Valid coupons are: {', '.join(VALID_COUPONS)}",
+                'error': f"Invalid coupon name: '{coupon_name}'. Valid coupons are: {', '.join(VALID_COUPONS)}",
             })
 
         quantity = int(quantity)
@@ -217,12 +217,12 @@ class DeleteCouponFromCartTool(BaseShoppingTool):
 
         if not coupon_found:
             return self.format_result_as_json({
-                "error": f"Coupon not in cart: '{coupon_name}'",
+                'error': f"Coupon not in cart: '{coupon_name}'",
             })
 
         if current_quantity < quantity:
             return self.format_result_as_json({
-                "error": f"Insufficient coupon quantity in cart: Cart has {current_quantity} of '{coupon_name}', cannot remove {quantity}",
+                'error': f"Insufficient coupon quantity in cart: Cart has {current_quantity} of '{coupon_name}', cannot remove {quantity}",
             })
 
         new_quantity = current_quantity - quantity
@@ -245,7 +245,7 @@ class DeleteCouponFromCartTool(BaseShoppingTool):
             self._save_cart()
         except Exception as e:
             return self.format_result_as_json({
-                "error": f"Failed to save cart: {str(e)}",
+                'error': f"Failed to save cart: {str(e)}",
             })
 
         return self.format_result_as_json(self.cart_data)

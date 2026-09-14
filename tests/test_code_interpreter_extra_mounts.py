@@ -191,7 +191,7 @@ class TestExtraMounts(unittest.TestCase):
         # Verify: all -v flags and their positions
         v_entries = [(i, docker_run_cmd[i + 1]) for i in range(len(docker_run_cmd))
                      if docker_run_cmd[i] == '-v']
-        self.assertEqual(len(v_entries), 3, "Should have exactly 3 volume mounts")
+        self.assertEqual(len(v_entries), 3, 'Should have exactly 3 volume mounts')
 
         # The last -v should be the work_dir mount (mounting to /workspace)
         last_v_idx, last_v_vol = v_entries[-1]
@@ -494,7 +494,7 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
         # path_mapping file should NOT exist because container failed to start
         mapping_file = os.path.join(self.tmpdir, f'path_mapping_{kernel_id}.json')
         self.assertFalse(os.path.exists(mapping_file),
-                         "path_mapping file must not be written when Docker fails")
+                         'path_mapping file must not be written when Docker fails')
 
     def test_path_mapping_written_on_docker_success(self):
         """If subprocess.run succeeds, path_mapping file SHOULD be created."""
@@ -539,7 +539,7 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
         # path_mapping file SHOULD exist because Docker succeeded
         mapping_file = os.path.join(self.tmpdir, f'path_mapping_{kernel_id}.json')
         self.assertTrue(os.path.exists(mapping_file),
-                        "path_mapping file must be written after Docker success")
+                        'path_mapping file must be written after Docker success')
         # Verify it's valid JSON
         with open(mapping_file) as f:
             mapping = json.load(f)
@@ -594,7 +594,7 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
         # path_mapping file SHOULD exist because docker run succeeded (even though ps check failed)
         mapping_file = os.path.join(self.tmpdir, f'path_mapping_{kernel_id}.json')
         self.assertTrue(os.path.exists(mapping_file),
-                        "path_mapping is written after docker run success, before docker ps loop")
+                        'path_mapping is written after docker run success, before docker ps loop')
 
 
 class TestWorkDirAttributeExists(unittest.TestCase):
@@ -628,7 +628,7 @@ class TestWorkDirAttributeExists(unittest.TestCase):
 
         # Verify base_dir does NOT exist (it was the old broken attribute name)
         self.assertFalse(hasattr(ci, 'base_dir'),
-                         "CodeInterpreter should not have base_dir — use work_dir instead")
+                         'CodeInterpreter should not have base_dir — use work_dir instead')
 
         # Build allowed_prefixes from ci.work_dir (as _start_kernel does at line 564)
         allowed_prefixes = [os.path.realpath(ci.work_dir)] if ci.work_dir else []

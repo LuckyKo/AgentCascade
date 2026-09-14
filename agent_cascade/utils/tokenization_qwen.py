@@ -224,7 +224,7 @@ class QWenTokenizer:
             return self.convert_tokens_to_string(token_list)
 
         if keep_both_sides:
-            ellipsis_tokens = self.tokenize("...")
+            ellipsis_tokens = self.tokenize('...')
             ellipsis_len = len(ellipsis_tokens)
             available = max_token - ellipsis_len
             if available <= 0: # Degenerate case: not enough space even for "..."

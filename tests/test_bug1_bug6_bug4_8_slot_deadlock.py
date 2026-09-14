@@ -31,12 +31,12 @@ from agent_cascade.llm.schema import Message
 # Helpers
 # ============================================================================
 
-def make_instance(name="A", parent="Main"):
+def make_instance(name='A', parent='Main'):
     """Real AgentInstance (dataclass-slots) — needed for _transition validation."""
     return AgentInstance(
         instance_name=name,
-        agent_class="coder",
-        conversation=[Message(role="system", content="sys")],
+        agent_class='coder',
+        conversation=[Message(role='system', content='sys')],
         created_at=time.monotonic(),
         last_activity=time.monotonic(),
         latest_marker_index=0,
@@ -72,11 +72,11 @@ class SlotTracker:
         self.acquired = False
 
 
-def suspend(pool, name="A"):
+def suspend(pool, name='A'):
     pool._compression_halted.add(name)
 
 
-def resume(pool, name="A"):
+def resume(pool, name='A'):
     pool._compression_halted.discard(name)
 
 
@@ -95,40 +95,40 @@ class TestBug1SlotReleaseOnHalt:
 
         # Simulate holding a slot at suspension entry.
         inst._slot_release = tracker.release
-        inst._slot_key = "_shared_sequential_slot_"
+        inst._slot_key = '_shared_sequential_slot_'
 
         save_calls = []
         restore_calls = []
         reacquire_results = [True]
 
-        def fake_reacquire(instance_arg, holder_name, context="reacquire"):
-            assert context == "after_compression_resume"
+        def fake_reacquire(instance_arg, holder_name, context='reacquire'):
+            assert context == 'after_compression_resume'
             # Halt must already be cleared for the re-acquire to proceed.
             assert not pool._compression_halted
             if reacquire_results.pop(0):
                 # Mirror real reacquire_for: set _slot_release/_slot_key on success.
                 instance_arg._slot_release = tracker.release
-                instance_arg._slot_key = "_shared_sequential_slot_"
+                instance_arg._slot_key = '_shared_sequential_slot_'
                 tracker.acquired = True
             return reacquire_results.insert(0, True) or True
 
         # restore is now invoked as restore_instance_state(instance, held_endpoint_cfg=...)
-        with patch.object(engine, "reacquire_for", side_effect=fake_reacquire), \
-             patch("agent_cascade.state_ops.save_instance_state",
+        with patch.object(engine, 'reacquire_for', side_effect=fake_reacquire), \
+             patch('agent_cascade.state_ops.save_instance_state',
                    side_effect=lambda i: save_calls.append(i.instance_name)), \
-             patch("agent_cascade.state_ops.restore_instance_state",
+             patch('agent_cascade.state_ops.restore_instance_state',
                    side_effect=lambda i, **kw: restore_calls.append(i.instance_name)):
             suspend(pool)
             # Resume from another thread after a tick, mirroring Compressor completion.
             threading.Timer(0.05, lambda: resume(pool)).start()
-            result = engine._wait_for_compression_to_clear("A")
+            result = engine._wait_for_compression_to_clear('A')
 
         assert result is True
-        assert tracker.released == 1, "slot must be released exactly once on suspension entry"
-        assert save_calls == ["A"], "KV state saved BEFORE releasing the slot"
-        assert restore_calls == ["A"], "KV state restored AFTER successful re-acquire"
+        assert tracker.released == 1, 'slot must be released exactly once on suspension entry'
+        assert save_calls == ['A'], 'KV state saved BEFORE releasing the slot'
+        assert restore_calls == ['A'], 'KV state restored AFTER successful re-acquire'
         assert inst._slot_release is not None and tracker.acquired
-        assert inst._slot_key == "_shared_sequential_slot_"
+        assert inst._slot_key == '_shared_sequential_slot_'
 
     def test_no_slot_agent_is_fast_noop(self):
         """Agent without a slot (unlimited endpoint): release is a no-op and the
@@ -137,11 +137,11 @@ class TestBug1SlotReleaseOnHalt:
         engine, pool = make_engine(inst)
 
         assert inst._slot_release is None
-        with patch.object(engine, "reacquire_for", return_value=True) as racq:
+        with patch.object(engine, 'reacquire_for', return_value=True) as racq:
             suspend(pool)
             threading.Timer(0.05, lambda: resume(pool)).start()
             t0 = time.monotonic()
-            result = engine._wait_for_compression_to_clear("A")
+            result = engine._wait_for_compression_to_clear('A')
             elapsed = time.monotonic() - t0
 
         assert result is True
@@ -155,52 +155,52 @@ class TestBug1SlotReleaseOnHalt:
         engine, pool = make_engine(inst)
         inst._slot_release = lambda: None
 
-        with patch.object(engine, "reacquire_for", return_value=False), \
-             patch("agent_cascade.state_ops.save_instance_state", return_value=True), \
-             patch("agent_cascade.state_ops.restore_instance_state") as restore_mock:
+        with patch.object(engine, 'reacquire_for', return_value=False), \
+             patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+             patch('agent_cascade.state_ops.restore_instance_state') as restore_mock:
             suspend(pool)
             threading.Timer(0.05, lambda: resume(pool)).start()
-            result = engine._wait_for_compression_to_clear("A")
+            result = engine._wait_for_compression_to_clear('A')
 
         assert result is True
-        assert inst._slot_release is None, "failed re-acquire leaves a clean slotless state"
-        restore_mock.assert_not_called(), "KV restore must NOT run after failed re-acquire"
+        assert inst._slot_release is None, 'failed re-acquire leaves a clean slotless state'
+        restore_mock.assert_not_called(), 'KV restore must NOT run after failed re-acquire'
 
     def test_terminal_stop_during_wait_returns_false(self):
         """Global stop during suspension → return False; slot stays released."""
         inst = make_instance()
         engine, pool = make_engine(inst)
         inst._slot_release = lambda: None
-        inst._slot_key = "k"
+        inst._slot_key = 'k'
 
         def stop_mid_wait():
             pool.stopped = True
 
-        with patch("agent_cascade.state_ops.save_instance_state", return_value=True), \
-             patch.object(engine, "reacquire_for") as racq:
+        with patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+             patch.object(engine, 'reacquire_for') as racq:
             suspend(pool)
             threading.Timer(0.05, stop_mid_wait).start()
-            result = engine._wait_for_compression_to_clear("A")
+            result = engine._wait_for_compression_to_clear('A')
 
         assert result is False
-        assert inst._slot_release is None, "no slot leak on terminal-stop exit"
-        racq.assert_not_called(), "terminal stop must not attempt re-acquisition"
+        assert inst._slot_release is None, 'no slot leak on terminal-stop exit'
+        racq.assert_not_called(), 'terminal stop must not attempt re-acquisition'
 
     def test_save_before_release_ordering(self):
         """KV save happens before slot release (sleep-transition ordering)."""
         inst = make_instance()
         engine, pool = make_engine(inst)
         events = []
-        inst._slot_release = lambda: events.append("release")
+        inst._slot_release = lambda: events.append('release')
 
-        with patch("agent_cascade.state_ops.save_instance_state",
-                   side_effect=lambda i: events.append("save")), \
-             patch.object(engine, "reacquire_for", return_value=True):
+        with patch('agent_cascade.state_ops.save_instance_state',
+                   side_effect=lambda i: events.append('save')), \
+             patch.object(engine, 'reacquire_for', return_value=True):
             suspend(pool)
             resume(pool)
-            engine._wait_for_compression_to_clear("A")
+            engine._wait_for_compression_to_clear('A')
 
-        assert events[:2] == ["save", "release"]
+        assert events[:2] == ['save', 'release']
 
 
 # ============================================================================
@@ -223,26 +223,26 @@ class TestBug6WaitLoopSleeps:
             if len(sleeps) >= 3:
                 resume(pool)  # clear flag after 3 ticks
 
-        with patch("agent_cascade.state_ops.save_instance_state", return_value=True), \
-             patch.object(engine, "reacquire_for", return_value=True), \
-             patch.object(core_mod.time, "sleep", side_effect=fake_sleep), \
-             patch.object(pool, "wait_if_paused") as wip:
+        with patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+             patch.object(engine, 'reacquire_for', return_value=True), \
+             patch.object(core_mod.time, 'sleep', side_effect=fake_sleep), \
+             patch.object(pool, 'wait_if_paused') as wip:
             suspend(pool)
-            result = engine._wait_for_compression_to_clear("A")
+            result = engine._wait_for_compression_to_clear('A')
 
         assert result is True
         assert len(sleeps) == 3, f"expected exactly 3 sleep ticks, got {len(sleeps)}"
         assert all(s == core_mod._COMPRESSION_WAIT_TIMEOUT for s in sleeps)
-        wip.assert_not_called(), "pool.wait_if_paused (global-event spin) must not be used"
+        wip.assert_not_called(), 'pool.wait_if_paused (global-event spin) must not be used'
 
     def test_loop_exits_promptly_when_flag_clears(self):
         """No suspension → zero iterations, immediate True."""
         inst = make_instance()
         engine, pool = make_engine(inst)
 
-        with patch("agent_cascade.state_ops.save_instance_state", return_value=True), \
-             patch.object(engine, "reacquire_for", return_value=True):
-            result = engine._wait_for_compression_to_clear("A")
+        with patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+             patch.object(engine, 'reacquire_for', return_value=True):
+            result = engine._wait_for_compression_to_clear('A')
 
         assert result is True
 
@@ -296,7 +296,7 @@ class TestBug48SuspensionAwareExit:
         engine, pool = make_engine(inst)
         pool.settings.tail_sync_check_enabled = False
 
-        with patch("agent_cascade.engine.core.logger") as log_mock:
+        with patch('agent_cascade.engine.core.logger') as log_mock:
             drive_run_to_exit(engine, inst, pool, suspended=True, outstanding=True)
 
         # Exactly ONE drain call: the pre-existing early-exit safety drain
@@ -306,8 +306,8 @@ class TestBug48SuspensionAwareExit:
         assert inst.state == AgentState.SLEEPING
         assert inst.sleeping_since is not None
         exit_logs = [str(c) for c in log_mock.debug.call_args_list
-                     if "EXIT -" in str(c)]
-        assert any("[suspension-preserved]" in s for s in exit_logs)
+                     if 'EXIT -' in str(c)]
+        assert any('[suspension-preserved]' in s for s in exit_logs)
 
     def test_normal_exit_still_clears_and_goes_idle(self):
         """Regression guard: no suspension → finally drains + clears, IDLE.
@@ -319,7 +319,7 @@ class TestBug48SuspensionAwareExit:
         drive_run_to_exit(engine, inst, pool, suspended=False, outstanding=True)
 
         assert pool.drain_queue.call_count == 2  # early-exit + finally
-        pool._async_registry.clear_pending.assert_called_once_with("A")
+        pool._async_registry.clear_pending.assert_called_once_with('A')
         assert inst.state == AgentState.IDLE
 
     def test_suspended_but_everything_completed_exits_idle(self):
@@ -331,7 +331,7 @@ class TestBug48SuspensionAwareExit:
         drive_run_to_exit(engine, inst, pool, suspended=True, outstanding=False)
 
         assert pool.drain_queue.call_count == 2  # early-exit + finally
-        pool._async_registry.clear_pending.assert_called_once_with("A")
+        pool._async_registry.clear_pending.assert_called_once_with('A')
         assert inst.state == AgentState.IDLE
         assert inst.sleeping_since is None
 
@@ -347,7 +347,7 @@ class TestBug48SuspensionAwareExit:
         # Terminal guard fires BEFORE _setup_turn → no early-exit safety drain;
         # the finally cleanup drain still runs (preserve=False).
         assert pool.drain_queue.call_count == 1
-        pool._async_registry.clear_pending.assert_called_once_with("A")
+        pool._async_registry.clear_pending.assert_called_once_with('A')
         assert inst.state != AgentState.SLEEPING
 
     def test_run_entry_resets_suspension_marker(self):
@@ -372,11 +372,11 @@ class TestBug48SuspensionAwareExit:
         inst.state = AgentState.SLEEPING
 
         pool = MagicMock()
-        pool.instances = {"A": inst}
+        pool.instances = {'A': inst}
         manager = IdleManager.__new__(IdleManager)
         manager.pool = pool
 
-        assert manager._is_idle("A") is False
+        assert manager._is_idle('A') is False
 
         inst.state = AgentState.IDLE
         # IDLE would proceed past the sleeping gate (hits execution-stack check).
@@ -387,6 +387,6 @@ class TestBug48SuspensionAwareExit:
         settings = MagicMock(idle_timeout_seconds=60.0,
                              system_agent_idle_timeout_seconds=60.0)
         pool.settings = settings
-        with patch("agent_cascade.pool.idle_manager.IdleManager._is_system_agent",
+        with patch('agent_cascade.pool.idle_manager.IdleManager._is_system_agent',
                    return_value=False):
-            assert manager._is_idle("A") is True
+            assert manager._is_idle('A') is True

@@ -168,7 +168,7 @@ def _http_call(llm_cfg, *a, **k):
 def _probe_on():
     """Ensure the sanity probe is ENABLED for these tests (the whole point of the fix)."""
     assert router_mod.SANITY_PROBE_ENABLED is True, \
-        "these tests require SANITY_PROBE_ENABLED to be True"
+        'these tests require SANITY_PROBE_ENABLED to be True'
 
 
 # ============================================================================
@@ -183,14 +183,14 @@ class TestNoReprobeOnLivePrimary:
         # Turn 1 — fresh acquisition: exactly ONE probe to head, then the POST.
         r1 = router.call_with_fallback('coder', _http_call, agent_instance_name='instA')
         assert r1 == 'head-model'
-        assert stubs['head_ref']['probes'] == 1, "fresh acquisition must probe head exactly once"
+        assert stubs['head_ref']['probes'] == 1, 'fresh acquisition must probe head exactly once'
         assert stubs['head_ref']['posts'] == 1
 
         # Turn 2 — same instance, connection still LIVE: NO probe, only the POST.
         r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='instA')
         assert r2 == 'head-model'
         assert stubs['head_ref']['probes'] == 1, \
-            "a live primary must NOT be re-probed on the next turn (flood fix)"
+            'a live primary must NOT be re-probed on the next turn (flood fix)'
         assert stubs['head_ref']['posts'] == 2
 
     def test_engine_retry_of_live_connection_does_not_reprobe(self, router, stubs):
@@ -220,13 +220,13 @@ class TestNoReprobeOnLivePrimary:
         # The transient failure + recovery happens inside ONE call_with_fallback; the probe gate
         # is only consulted at entry (once). No additional probe GETs may fire.
         assert stubs['head_ref']['probes'] == probes_after_first, \
-            "engine retry of a still-live connection must not re-probe"
+            'engine retry of a still-live connection must not re-probe'
 
         # A further turn on the recovered live connection: still no probe.
         r3 = router.call_with_fallback('coder', _http_call, agent_instance_name='instA')
         assert r3 == 'head-model'
         assert stubs['head_ref']['probes'] == probes_after_first, \
-            "after recovery the live connection is re-committed — no re-probe"
+            'after recovery the live connection is re-committed — no re-probe'
 
 
 # ============================================================================
@@ -252,7 +252,7 @@ class TestFreshAcquisitionProbesOnce:
         r = router.call_with_fallback('coder', _http_call, agent_instance_name='instB')
         assert r == 'head-model'
         assert stubs['head_ref']['probes'] == 2, \
-            "live-connection state must be per-instance, not global"
+            'live-connection state must be per-instance, not global'
 
 
 # ============================================================================
@@ -275,7 +275,7 @@ class TestWalkUntilLive:
         r = router.call_with_fallback('coder', _http_call, agent_instance_name='instW')
         assert r == 'second-model'
         # The dead head was probed exactly once (and failed); second was probed once and used.
-        assert stubs['second_ref']['probes'] == 1, "walk must probe the live endpoint exactly once"
+        assert stubs['second_ref']['probes'] == 1, 'walk must probe the live endpoint exactly once'
         assert stubs['second_ref']['posts'] == 1
 
         # The dead head entered cooldown → it is filtered out of the chain on the next
@@ -283,14 +283,14 @@ class TestWalkUntilLive:
         from agent_cascade.api_router_pkg.normalization import normalize_api_base
         with router._lock:
             in_cooldown = (normalize_api_base(dead_base), 'dead-model') in router._endpoint_failure_times
-        assert in_cooldown, "a probe-failed endpoint must enter cooldown"
+        assert in_cooldown, 'a probe-failed endpoint must enter cooldown'
 
         # Second acquisition: head is cooled down (no re-probe of it); second is now LIVE for
         # this instance → no re-probe of second either. Only the POST fires.
         r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='instW')
         assert r2 == 'second-model'
         assert stubs['second_ref']['probes'] == 1, \
-            "after committing to second it is live — no re-probe on the next acquisition"
+            'after committing to second it is live — no re-probe on the next acquisition'
 
 
 # ============================================================================
@@ -326,13 +326,13 @@ class TestLazyProbeSkipsUnreachedFallbacks:
             # probe would have fired a GET /models at each of them).
             r1 = router.call_with_fallback('coder', _http_call, agent_instance_name='lazyA')
             assert r1 == 'head-model'
-            assert head.ref['probes'] == 1, "fresh acquisition must probe the live primary once"
+            assert head.ref['probes'] == 1, 'fresh acquisition must probe the live primary once'
             assert head.ref['posts'] == 1
 
             # Turn 2 — same instance, primary still committed: NO probes at all (fast path).
             r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='lazyA')
             assert r2 == 'head-model'
-            assert head.ref['probes'] == 1, "committed live primary must not be re-probed"
+            assert head.ref['probes'] == 1, 'committed live primary must not be re-probed'
 
             # The invariant: the dead fallbacks were NEVER touched. A probe failure records a
             # cooldown entry — its absence proves each dead endpoint was never probed (a closed
@@ -408,7 +408,7 @@ class TestTimeoutReleasesLive:
             r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='instT')
         finally:
             stubs['head_ref']['timeout'] = False
-        assert r2 == 'second-model', "after head times out the call must fail over to second"
+        assert r2 == 'second-model', 'after head times out the call must fail over to second'
 
         # The live marker for head must have been released by the timeout (it is now second, or
         # absent — either way head is no longer marked live).
@@ -433,7 +433,7 @@ class TestTimeoutReleasesLive:
         assert r3 == 'head-model'
         # A new probe GET to head fired (re-acquisition from the top after release + cooldown expiry).
         assert stubs['head_ref']['probes'] >= 2, \
-            "after a timeout releases the slot, the next acquisition must re-probe from the top"
+            'after a timeout releases the slot, the next acquisition must re-probe from the top'
 
 
 # ============================================================================
@@ -463,7 +463,7 @@ class TestStickySlotReleaseClearsCommittedMarker:
         with router._lock:
             committed = router._instance_committed_endpoint.get('instR')
         assert committed == head_key, \
-            "a successful call must commit the endpoint (probe fast-path marker set)"
+            'a successful call must commit the endpoint (probe fast-path marker set)'
 
         # ── Step 2: release the sticky slot via the REAL path that calls _drop_held_permit. ──
         # A lightweight instance exposing exactly the state sync_sticky_slot touches. The held
@@ -484,15 +484,15 @@ class TestStickySlotReleaseClearsCommittedMarker:
 
         with inst._state_lock:
             assert inst._slot_release is None and inst._slot_key is None, \
-                "_drop_held_permit must nullify the held permit state"
+                '_drop_held_permit must nullify the held permit state'
         with router._lock:
             committed_after = router._instance_committed_endpoint.get('instR')
         assert committed_after is None, \
-            "releasing the sticky slot (_drop_held_permit) must clear the committed-endpoint marker"
+            'releasing the sticky slot (_drop_held_permit) must clear the committed-endpoint marker'
 
         # ── Step 3: a fresh acquisition must RE-PROBE head (no stale fast-path). ──
         probes_before = stubs['head_ref']['probes']
         r2 = router.call_with_fallback('coder', _http_call, agent_instance_name='instR')
         assert r2 == 'head-model'
         assert stubs['head_ref']['probes'] > probes_before, \
-            "after the sticky slot is released, the next acquisition must re-probe head (no fast-path)"
+            'after the sticky slot is released, the next acquisition must re-probe head (no fast-path)'

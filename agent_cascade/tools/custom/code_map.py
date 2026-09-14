@@ -47,7 +47,7 @@ class CodeMap(BaseTool):
         # Resolve absolute path with validation
         from agent_cascade.utils.tool_path_resolver import resolve_tool_path
         try:
-            abs_path = resolve_tool_path(rel_path, mode="ro", agent_pool=self.agent_pool)
+            abs_path = resolve_tool_path(rel_path, mode='ro', agent_pool=self.agent_pool)
         except ValueError as e:
             return f"Error: {str(e)}"
 
@@ -103,7 +103,7 @@ class CodeMap(BaseTool):
     def _map_python(self, content: str) -> str:
         try:
             tree = ast.parse(content)
-            result = ["# Python Code Map\n"]
+            result = ['# Python Code Map\n']
             
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
@@ -119,12 +119,12 @@ class CodeMap(BaseTool):
                     # Note: ast.walk doesn't maintain hierarchy easily, 
                     # so we just check if it's in the top-level body of the module.
                     if any(node == top for top in tree.body):
-                        prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                        prefix = 'async def' if isinstance(node, ast.AsyncFunctionDef) else 'def'
                         result.append(f"L{node.lineno}: {prefix} {node.name}")
 
             if len(result) == 1:
-                return "No classes or functions found in Python file."
-            return "\n".join(result)
+                return 'No classes or functions found in Python file.'
+            return '\n'.join(result)
         except SyntaxError as e:
             return f"Syntax Error parsing Python file: {e.msg} (Line {e.lineno})"
         except Exception as e:
@@ -132,7 +132,7 @@ class CodeMap(BaseTool):
 
     def _map_generic(self, content: str, lang: str) -> str:
         if lang == 'markdown':
-            result = ["# Markdown Code Map\n(ATX headings only; fenced code blocks ignored)\n"]
+            result = ['# Markdown Code Map\n(ATX headings only; fenced code blocks ignored)\n']
         else:
             result = [f"# {lang.capitalize()} Code Map (Heuristic)\n"]
         lines = content.splitlines()
@@ -255,6 +255,6 @@ class CodeMap(BaseTool):
 
         if len(result) == 1:
             if lang == 'markdown':
-                return "No headings found in Markdown file."
+                return 'No headings found in Markdown file.'
             return f"No recognizable structures found for {lang}."
-        return "\n".join(result)
+        return '\n'.join(result)

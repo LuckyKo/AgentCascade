@@ -50,11 +50,11 @@ def _parse(html: str, extract_image: bool = True, base_url: str = None):
 
 def test_parse_html_bs_images_in_reading_order():
     """Images land between the surrounding text blocks in reading order."""
-    html = ("<html><head><title>Order Page</title></head><body>"
-            "<p>PART-A before image.</p>"
+    html = ('<html><head><title>Order Page</title></head><body>'
+            '<p>PART-A before image.</p>'
             '<img src="https://example.com/abs.png" alt="Fig A">'
-            "<p>PART-B after image.</p>"
-            "</body></html>")
+            '<p>PART-B after image.</p>'
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/page.html')
     items = result[0]['content']
     # Flatten to a sequence of (kind, value) in output order.
@@ -82,11 +82,11 @@ def test_wrapped_p_single_entry_both_paths():
     Regression: source line-wraps were split into separate entries (one per source
     line) because the output was split on \n. Must hold for BOTH extract_image values.
     """
-    html = ("<html><head><title>T</title></head><body>"
-            "<p>WRAPPED-para starts here and continues "
-            "\nacross a second source line and then "
-            "\na third source line to finish.</p>"
-            "</body></html>")
+    html = ('<html><head><title>T</title></head><body>'
+            '<p>WRAPPED-para starts here and continues '
+            '\nacross a second source line and then '
+            '\na third source line to finish.</p>'
+            '</body></html>')
     for ei in (True, False):
         result = _parse(html, extract_image=ei, base_url='http://x/p.html')
         texts = _text_entries(result)
@@ -102,9 +102,9 @@ def test_div_two_p_separate_entries_both_paths():
     Regression: the table path (extract_image=False) previously merged nested blocks
     into one entry ('ab' with no separator).
     """
-    html = ("<html><head><title>T</title></head><body>"
-            "<div><p>ALPHA-para-one</p><p>BETA-para-two</p></div>"
-            "</body></html>")
+    html = ('<html><head><title>T</title></head><body>'
+            '<div><p>ALPHA-para-one</p><p>BETA-para-two</p></div>'
+            '</body></html>')
     for ei in (True, False):
         result = _parse(html, extract_image=ei, base_url='http://x/p.html')
         texts = _text_entries(result)
@@ -117,9 +117,9 @@ def test_div_two_p_separate_entries_both_paths():
 
 def test_pre_block_preserves_newlines_both_paths():
     """<pre> must be ONE entry with internal newlines PRESERVED (code block)."""
-    html = ("<html><head><title>T</title></head><body>"
-            "<pre>line-one\nline-two\nline-three</pre>"
-            "</body></html>")
+    html = ('<html><head><title>T</title></head><body>'
+            '<pre>line-one\nline-two\nline-three</pre>'
+            '</body></html>')
     for ei in (True, False):
         result = _parse(html, extract_image=ei, base_url='http://x/p.html')
         texts = _text_entries(result)
@@ -136,9 +136,9 @@ def test_br_inside_p_single_entry_both_paths():
     parts appear in one entry separated by whitespace — NOT two entries, and NOT run
     together with no separator.
     """
-    html = ("<html><head><title>T</title></head><body>"
-            "<p>FIRSTline<br>SECONDline</p>"
-            "</body></html>")
+    html = ('<html><head><title>T</title></head><body>'
+            '<p>FIRSTline<br>SECONDline</p>'
+            '</body></html>')
     for ei in (True, False):
         result = _parse(html, extract_image=ei, base_url='http://x/p.html')
         texts = _text_entries(result)
@@ -151,12 +151,12 @@ def test_br_inside_p_single_entry_both_paths():
 
 def test_wrapped_p_with_inline_single_entry_both_paths():
     """Wrapped <p> WITH inline tags stays ONE entry (combines newline + inline fixes)."""
-    html = ("<html><head><title>T</title></head><body>"
-            "<p>This module provides a portable way of using "
-            "\noperating system dependent functionality.  If you want to "
+    html = ('<html><head><title>T</title></head><body>'
+            '<p>This module provides a portable way of using '
+            '\noperating system dependent functionality.  If you want to '
             'read a file see <a href="#open"><code>open()</code></a>, if you want '
-            "\nto manipulate paths, see the os.path module.</p>"
-            "</body></html>")
+            '\nto manipulate paths, see the os.path module.</p>'
+            '</body></html>')
     for ei in (True, False):
         result = _parse(html, extract_image=ei, base_url='http://x/p.html')
         texts = _text_entries(result)
@@ -172,14 +172,14 @@ def test_parse_html_bs_inline_tags_do_not_fragment_paragraph():
     Regression: the old _walk flushed after EVERY element (incl. inline tags), so a
     paragraph dense with code refs fragmented into many tiny entries like ', if'.
     """
-    html = ("<html><head><title>Doc</title></head><body>"
-            "<p>This module provides a portable way of using operating system dependent "
+    html = ('<html><head><title>Doc</title></head><body>'
+            '<p>This module provides a portable way of using operating system dependent '
             'functionality.  If you just want to read or write a file see '
             '<a href="#open"><code>open()</code></a>, if you want to manipulate paths, '
             'see the <a href="#os.path"><code>os.path</code></a> module, and if you want '
             'to read all the lines see the <a href="#fileinput"><code>fileinput</code></a> '
-            "module.</p>"
-            "</body></html>")
+            'module.</p>'
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/page.html')
     texts = _text_entries(result)
     # The whole paragraph must be a single entry (not split at each inline tag).
@@ -191,9 +191,9 @@ def test_parse_html_bs_inline_tags_do_not_fragment_paragraph():
 
 def test_parse_html_bs_deeply_nested_inline_single_entry():
     """Deeply nested inline tags (<a><span><code>) still yield one entry."""
-    html = ("<html><head><title>Nested</title></head><body>"
+    html = ('<html><head><title>Nested</title></head><body>'
             "<p>before <a href='#'><span><code>x()</code></span></a> after</p>"
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     texts = _text_entries(result)
     assert len(texts) == 1
@@ -202,9 +202,9 @@ def test_parse_html_bs_deeply_nested_inline_single_entry():
 
 def test_parse_html_bs_nested_block_in_block_stays_separate():
     """<div><p>a</p><p>b</p></div> -> two entries, not one merged."""
-    html = ("<html><head><title>Blocks</title></head><body>"
-            "<div><p>ALPHA-para-one</p><p>BETA-para-two</p></div>"
-            "</body></html>")
+    html = ('<html><head><title>Blocks</title></head><body>'
+            '<div><p>ALPHA-para-one</p><p>BETA-para-two</p></div>'
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     texts = _text_entries(result)
     assert any('ALPHA-para-one' in t for t in texts)
@@ -219,9 +219,9 @@ def test_parse_html_bs_toplevel_inline_element_not_lost():
     Regression guard for the content-loss safeguard: _walk no longer flushes inline
     elements, so the top-level loop must flush any leftover buffer itself.
     """
-    html = ("<html><head><title>TopInline</title></head><body>"
-            "<span>TOPLEVEL-INLINE-VISIBLE</span>"
-            "</body></html>")
+    html = ('<html><head><title>TopInline</title></head><body>'
+            '<span>TOPLEVEL-INLINE-VISIBLE</span>'
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     texts = _text_entries(result)
     assert any('TOPLEVEL-INLINE-VISIBLE' in t for t in texts)
@@ -229,9 +229,9 @@ def test_parse_html_bs_toplevel_inline_element_not_lost():
 
 def test_parse_html_bs_image_inside_inline_element_ordering():
     """<p>before <a><img></a> after</p> -> text-before, image, text-after in order."""
-    html = ("<html><head><title>ImgInline</title></head><body>"
+    html = ('<html><head><title>ImgInline</title></head><body>'
             '<p>BEFORE-TEXT <a href="#"><img src="x.png" alt="inlink"></a> AFTER-TEXT</p>'
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     seq = [(k, v) for item in result[0]['content'] for k, v in item.items()]
     kinds = [k for k, _ in seq]
@@ -245,9 +245,9 @@ def test_parse_html_bs_image_inside_inline_element_ordering():
 
 def test_parse_html_bs_unknown_custom_tag_treated_inline():
     """An unknown/custom tag wrapping a paragraph is treated as inline (no flush)."""
-    html = ("<html><head><title>Custom</title></head><body>"
-            "<customwrap><p>CUSTOM-WRAP-para</p></customwrap>"
-            "</body></html>")
+    html = ('<html><head><title>Custom</title></head><body>'
+            '<customwrap><p>CUSTOM-WRAP-para</p></customwrap>'
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     texts = _text_entries(result)
     assert any('CUSTOM-WRAP-para' in t for t in texts)
@@ -255,9 +255,9 @@ def test_parse_html_bs_unknown_custom_tag_treated_inline():
 
 def test_parse_html_bs_relative_src_resolved_against_base_url():
     """src='img/x.png' on a page from http://example.com/a/b.html -> /a/img/x.png."""
-    html = ("<html><head><title>Rel Page</title></head><body>"
+    html = ('<html><head><title>Rel Page</title></head><body>'
             '<img src="img/x.png" alt="rel">'
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/a/b.html')
     images = [v for item in result[0]['content'] for v in item.values() if 'image' in item]
     assert images == ['![rel](http://example.com/a/img/x.png)']
@@ -265,11 +265,11 @@ def test_parse_html_bs_relative_src_resolved_against_base_url():
 
 def test_parse_html_bs_relative_src_resolved_against_base_href_tag():
     """With no base_url (e.g. a local file), a relative src resolves against <base href>."""
-    html = ("<html><head>"
+    html = ('<html><head>'
             '<base href="http://cdn.example.com/assets/">'
-            "<title>BaseHref Page</title></head><body>"
+            '<title>BaseHref Page</title></head><body>'
             '<img src="pic/y.png" alt="via-base">'
-            "</body></html>")
+            '</body></html>')
     # base_url=None -> _resolve_image_src falls back to the <base href> in the doc.
     result = _parse(html, base_url=None)
     images = [v for item in result[0]['content'] for v in item.values() if 'image' in item]
@@ -278,10 +278,10 @@ def test_parse_html_bs_relative_src_resolved_against_base_href_tag():
 
 def test_parse_html_bs_data_uri_skipped():
     """<img src='data:...'> is not included."""
-    html = ("<html><head><title>Data Page</title></head><body>"
+    html = ('<html><head><title>Data Page</title></head><body>'
             '<p>TEXT-ONLY-VISIBLE</p>'
             '<img src="data:image/png;base64,iVBORw0KGgoAAAANS" alt="inline">'
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     content = result[0]['content']
     assert all('image' not in item for item in content)
@@ -290,11 +290,11 @@ def test_parse_html_bs_data_uri_skipped():
 
 def test_parse_html_bs_missing_src_skipped():
     """<img> without src (and with empty src) is skipped without error."""
-    html = ("<html><head><title>NoSrc Page</title></head><body>"
-            "<p>REAL-TEXT</p>"
+    html = ('<html><head><title>NoSrc Page</title></head><body>'
+            '<p>REAL-TEXT</p>'
             '<img alt="no-src">'
             '<img src="" alt="empty-src">'
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     content = result[0]['content']
     assert all('image' not in item for item in content)
@@ -303,13 +303,13 @@ def test_parse_html_bs_missing_src_skipped():
 
 def test_parse_html_bs_boilerplate_images_stripped():
     """Images inside <nav> or a stripped banner header do NOT appear; content-root ones DO."""
-    html = ("<html><head><title>Banner Page</title></head><body>"
+    html = ('<html><head><title>Banner Page</title></head><body>'
             '<header role="banner"><img src="logo.png" alt="logo"></header>'
             '<nav><img src="nav-icon.png" alt="nav-icon"></nav>'
             '<main><p>MAIN-TEXT</p>'
             '<img src="content.png" alt="content-img">'
             '</main>'
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     content = result[0]['content']
     images = [v for item in content for v in item.values() if 'image' in item]
@@ -325,13 +325,13 @@ def test_parse_html_bs_duplicate_images_deduped():
     Regression for commit 427ca0b: responsive/lazy-load pages emit the same image
     multiple times; parse_html_bs must emit it once. Distinct URLs are unaffected.
     """
-    html = ("<html><head><title>Dup Page</title></head><body>"
+    html = ('<html><head><title>Dup Page</title></head><body>'
             '<p>FIRST-POS</p>'
             '<img src="x.png" alt="dup">'
             '<p>MIDDLE</p>'
             '<img src="x.png" alt="dup">'
             '<img src="y.png" alt="other">'
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, base_url='http://example.com/p.html')
     content = result[0]['content']
     images = [v for item in content for v in item.values() if 'image' in item]
@@ -342,10 +342,10 @@ def test_parse_html_bs_duplicate_images_deduped():
 
 def test_parse_html_bs_no_images_text_only_regression():
     """Text-only page with extract_image=True: no image entries, text unchanged."""
-    html = ("<html><head><title>Plain Page</title></head><body>"
-            "<p>PARA-ONE.</p>"
-            "<p>PARA-TWO.</p>"
-            "</body></html>")
+    html = ('<html><head><title>Plain Page</title></head><body>'
+            '<p>PARA-ONE.</p>'
+            '<p>PARA-TWO.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=True, base_url='http://example.com/p.html')
     content = result[0]['content']
     assert all('image' not in item for item in content)
@@ -357,10 +357,10 @@ def test_parse_html_bs_no_images_text_only_regression():
 
 def test_parse_html_bs_extract_image_false_omits_images():
     """extract_image=False: images omitted, text still present."""
-    html = ("<html><head><title>Off Page</title></head><body>"
+    html = ('<html><head><title>Off Page</title></head><body>'
             '<p>TEXT-ONLY-VISIBLE</p>'
             '<img src="https://example.com/hidden.png" alt="hidden">'
-            "</body></html>")
+            '</body></html>')
     result = _parse(html, extract_image=False, base_url='http://example.com/p.html')
     content = result[0]['content']
     assert all('image' not in item for item in content)
@@ -388,11 +388,11 @@ def test_simple_doc_parser_call_with_image_entry_no_crash():
     path that parse_html_bs-level unit tests do NOT cover (they bypass call()).
     """
     from agent_cascade.tools.simple_doc_parser import SimpleDocParser
-    html = ("<html><head><title>Full Path Page</title></head><body>"
-            "<p>Before figure.</p>"
+    html = ('<html><head><title>Full Path Page</title></head><body>'
+            '<p>Before figure.</p>'
             '<img src="https://example.com/fig.png" alt="Fig">'
-            "<p>After figure.</p>"
-            "</body></html>")
+            '<p>After figure.</p>'
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         parser = SimpleDocParser(cfg={'extract_image': True})
@@ -440,7 +440,7 @@ def test_mathml_fallback_to_annotation_when_no_alttext():
 
 def test_mathml_no_regression_without_math():
     """A page with no math is unaffected by the collapse."""
-    html = "<html><head><title>Plain</title></head><body><p>No math here, just text.</p></body></html>"
+    html = '<html><head><title>Plain</title></head><body><p>No math here, just text.</p></body></html>'
     result = _parse(html, extract_image=False)
     joined = ' '.join(item.get('text', '') for item in result[0]['content'])
     assert 'No math here, just text.' in joined
@@ -448,10 +448,10 @@ def test_mathml_no_regression_without_math():
 
 def test_mathml_and_image_together_in_order():
     """Math collapses AND an image stays inline, both in reading order."""
-    html = ("<html><head><title>Both</title></head><body>"
+    html = ('<html><head><title>Both</title></head><body>'
             "<p>cost is <math alttext='{\\displaystyle O(1)}'><mi>O</mi><mo>(</mo><mi>1</mi><mo>)</mo></math> here.</p>"
             '<img src="https://example.com/x.png" alt="X">'
-            "<p>done.</p></body></html>")
+            '<p>done.</p></body></html>')
     result = _parse(html, extract_image=True, base_url='http://example.com/p.html')
     seq = [(k, v) for item in result[0]['content'] for k, v in item.items()]
     kinds = [k for k, _ in seq]
@@ -512,14 +512,14 @@ def test_web_extractor_success_path_unaffected():
 
 def test_table_infobox_rows_compact():
     """A 2-column label/value table becomes one 'Label: Value' line per row, not splayed cells."""
-    html = ("<html><head><title>Infobox</title></head><body>"
+    html = ('<html><head><title>Infobox</title></head><body>'
             "<table class='infobox'>"
-            "<tr><th>Kingdom:</th><td>Animalia</td></tr>"
-            "<tr><th>Phylum:</th><td>Chordata</td></tr>"
-            "<tr><th>Class:</th><td>Mammalia</td></tr>"
-            "</table>"
-            "<p>Prose paragraph.</p>"
-            "</body></html>")
+            '<tr><th>Kingdom:</th><td>Animalia</td></tr>'
+            '<tr><th>Phylum:</th><td>Chordata</td></tr>'
+            '<tr><th>Class:</th><td>Mammalia</td></tr>'
+            '</table>'
+            '<p>Prose paragraph.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=False)  # table-aware path
     texts = [item.get('text', '') for item in result[0]['content']]
     joined = ' '.join(texts)
@@ -536,12 +536,12 @@ def test_table_infobox_rows_compact():
 
 def test_table_wider_data_rows_pipe_joined():
     """A 3+ column data table is pipe-joined, not mangled into label:value pairs."""
-    html = ("<html><head><title>Data</title></head><body>"
-            "<table>"
-            "<tr><th>Name</th><th>Age</th><th>City</th></tr>"
-            "<tr><td>Alice</td><td>30</td><td>Paris</td></tr>"
-            "</table>"
-            "</body></html>")
+    html = ('<html><head><title>Data</title></head><body>'
+            '<table>'
+            '<tr><th>Name</th><th>Age</th><th>City</th></tr>'
+            '<tr><td>Alice</td><td>30</td><td>Paris</td></tr>'
+            '</table>'
+            '</body></html>')
     result = _parse(html, extract_image=False)
     joined = ' '.join(item.get('text', '') for item in result[0]['content'])
     # Header row and data row are pipe-joined single lines.
@@ -551,12 +551,12 @@ def test_table_wider_data_rows_pipe_joined():
 
 def test_table_td_label_with_trailing_colon():
     """Wikipedia taxonomy rows use <td>Label:</td><td>Value</td> (no <th>) — must be label:value."""
-    html = ("<html><head><title>Taxonomy</title></head><body>"
+    html = ('<html><head><title>Taxonomy</title></head><body>'
             "<table class='infobox'>"
-            "<tr><td>Kingdom:</td><td>Animalia</td></tr>"
-            "<tr><td>Phylum:</td><td>Chordata</td></tr>"
-            "</table>"
-            "</body></html>")
+            '<tr><td>Kingdom:</td><td>Animalia</td></tr>'
+            '<tr><td>Phylum:</td><td>Chordata</td></tr>'
+            '</table>'
+            '</body></html>')
     result = _parse(html, extract_image=False)
     joined = ' '.join(item.get('text', '') for item in result[0]['content'])
     # Colon-ending <td> label -> 'Label: Value' (no doubled pipe separator).
@@ -567,10 +567,10 @@ def test_table_td_label_with_trailing_colon():
 
 def test_table_no_regression_prose_only():
     """A page with no tables is unaffected by the table-aware extraction."""
-    html = ("<html><head><title>Plain</title></head><body>"
-            "<p>First paragraph.</p>"
-            "<p>Second paragraph.</p>"
-            "</body></html>")
+    html = ('<html><head><title>Plain</title></head><body>'
+            '<p>First paragraph.</p>'
+            '<p>Second paragraph.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=False)
     joined = ' '.join(item.get('text', '') for item in result[0]['content'])
     assert 'First paragraph.' in joined
@@ -579,11 +579,11 @@ def test_table_no_regression_prose_only():
 
 def test_table_with_image_in_table_preserved_on_image_path():
     """The image path still extracts an image that lives inside a table (no DOM mutation)."""
-    html = ("<html><head><title>Table+Img</title></head><body>"
-            "<table><tr><td>Label</td><td>"
+    html = ('<html><head><title>Table+Img</title></head><body>'
+            '<table><tr><td>Label</td><td>'
             '<img src="https://example.com/in-table.png" alt="InTable">'
-            "</td></tr></table>"
-            "</body></html>")
+            '</td></tr></table>'
+            '</body></html>')
     result = _parse(html, extract_image=True, base_url='http://example.com/p.html')
     imgs = [item.get('image', '') for item in result[0]['content'] if 'image' in item]
     assert '![InTable](https://example.com/in-table.png)' in imgs
@@ -595,14 +595,14 @@ def test_table_with_image_in_table_preserved_on_image_path():
 
 def test_admonition_note_label_merged_with_body():
     """A Sphinx admonition label ('Note') merges into its body as 'Note: <body>'."""
-    html = ("<html><head><title>Adm</title></head><body>"
-            "<p>Intro paragraph.</p>"
+    html = ('<html><head><title>Adm</title></head><body>'
+            '<p>Intro paragraph.</p>'
             '<div class="admonition note">'
             '<p class="admonition-title">Note</p>'
-            "<p>All functions raise OSError on invalid input.</p>"
-            "</div>"
-            "<p>Trailing paragraph.</p>"
-            "</body></html>")
+            '<p>All functions raise OSError on invalid input.</p>'
+            '</div>'
+            '<p>Trailing paragraph.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=True)
     texts = [item.get('text', '') for item in result[0]['content']]
     # The label must NOT be a standalone entry.
@@ -614,16 +614,16 @@ def test_admonition_note_label_merged_with_body():
 
 def test_admonition_see_also_and_warning_merged():
     """'See also' and 'Warning' labels also merge into their following body."""
-    html = ("<html><head><title>Adm2</title></head><body>"
+    html = ('<html><head><title>Adm2</title></head><body>'
             '<div class="admonition seealso">'
             '<p class="admonition-title">See also</p>'
-            "<p>The os.reload_environ() function.</p>"
-            "</div>"
+            '<p>The os.reload_environ() function.</p>'
+            '</div>'
             '<div class="admonition warning">'
             '<p class="admonition-title">Warning</p>'
-            "<p>This function is not thread-safe.</p>"
-            "</div>"
-            "</body></html>")
+            '<p>This function is not thread-safe.</p>'
+            '</div>'
+            '</body></html>')
     result = _parse(html, extract_image=True)
     texts = [item.get('text', '') for item in result[0]['content']]
     assert any(t.strip().startswith('See also:') and 'reload_environ' in t for t in texts), \
@@ -634,13 +634,13 @@ def test_admonition_see_also_and_warning_merged():
 
 def test_admonition_label_does_not_leak_across_blocks():
     """A label only prefixes the NEXT text entry; it never leaks into a later block."""
-    html = ("<html><head><title>Adm3</title></head><body>"
+    html = ('<html><head><title>Adm3</title></head><body>'
             '<div class="admonition note">'
             '<p class="admonition-title">Note</p>'
-            "<p>First body.</p>"
-            "</div>"
-            "<p>Unrelated paragraph that must NOT be prefixed.</p>"
-            "</body></html>")
+            '<p>First body.</p>'
+            '</div>'
+            '<p>Unrelated paragraph that must NOT be prefixed.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=True)
     texts = [item.get('text', '') for item in result[0]['content']]
     # The unrelated paragraph must not carry the 'Note:' prefix.
@@ -653,13 +653,13 @@ def test_admonition_label_does_not_leak_across_blocks():
 
 def test_admonition_label_not_leaked_when_body_is_image():
     """If a non-text boundary (image) follows the label, the label is dropped, not leaked."""
-    html = ("<html><head><title>Adm4</title></head><body>"
+    html = ('<html><head><title>Adm4</title></head><body>'
             '<div class="admonition note">'
             '<p class="admonition-title">Note</p>'
             '<img src="https://example.com/x.png" alt="X">'
-            "</div>"
-            "<p>Later text must not be prefixed.</p>"
-            "</body></html>")
+            '</div>'
+            '<p>Later text must not be prefixed.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=True)
     texts = [item.get('text', '') for item in result[0]['content']]
     # No entry should carry a stray 'Note:' prefix (the image consumed the boundary).
@@ -669,12 +669,12 @@ def test_admonition_label_not_leaked_when_body_is_image():
 
 def test_admonition_label_not_leaked_when_body_empty():
     """An admonition with NO text body must not leak its label to a following paragraph."""
-    html = ("<html><head><title>Adm5</title></head><body>"
+    html = ('<html><head><title>Adm5</title></head><body>'
             '<div class="admonition note">'
             '<p class="admonition-title">Note</p>'
-            "</div>"
-            "<p>Next paragraph must not be prefixed.</p>"
-            "</body></html>")
+            '</div>'
+            '<p>Next paragraph must not be prefixed.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=True)
     texts = [item.get('text', '') for item in result[0]['content']]
     assert any(t.strip() == 'Next paragraph must not be prefixed.' for t in texts), \
@@ -685,12 +685,12 @@ def test_admonition_label_not_leaked_when_body_empty():
 
 def test_admonition_label_not_leaked_across_nested_siblings():
     """A label inside a nested empty admonition must not leak to a sibling block's text."""
-    html = ("<html><head><title>Adm6</title></head><body>"
-            "<div>"
+    html = ('<html><head><title>Adm6</title></head><body>'
+            '<div>'
               '<div class="admonition note"><p class="admonition-title">Note</p></div>'
-              "<p>Sibling text must not be prefixed.</p>"
-            "</div>"
-            "</body></html>")
+              '<p>Sibling text must not be prefixed.</p>'
+            '</div>'
+            '</body></html>')
     result = _parse(html, extract_image=True)
     texts = [item.get('text', '') for item in result[0]['content']]
     assert any(t.strip() == 'Sibling text must not be prefixed.' for t in texts), \
@@ -703,14 +703,14 @@ def test_admonition_sphinx_sibling_blocks_merge():
     The label must still merge into the body even though they're not inline — the body's
     own block-end flush consumes the stashed label before the enclosing div resets it.
     """
-    html = ("<html><head><title>Adm7</title></head><body>"
-            "<p>Intro.</p>"
+    html = ('<html><head><title>Adm7</title></head><body>'
+            '<p>Intro.</p>'
             '<div class="admonition note">'
             '<p class="admonition-title">Note</p>'
-            "<p>The body of the note lives in its own paragraph.</p>"
-            "</div>"
-            "<p>Trailing.</p>"
-            "</body></html>")
+            '<p>The body of the note lives in its own paragraph.</p>'
+            '</div>'
+            '<p>Trailing.</p>'
+            '</body></html>')
     result = _parse(html, extract_image=True)
     texts = [item.get('text', '') for item in result[0]['content']]
     assert any(t.strip().startswith('Note:') and 'body of the note' in t for t in texts), \

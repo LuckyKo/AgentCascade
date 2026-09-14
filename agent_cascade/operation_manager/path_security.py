@@ -147,7 +147,7 @@ class PathSecurityMixin:
 
         return folders[idx], remaining
 
-    def _resolve_path(self, path: str, mode: str = "ro", instance_name: Optional[str] = None) -> Path:
+    def _resolve_path(self, path: str, mode: str = 'ro', instance_name: Optional[str] = None) -> Path:
         """Resolve a path to be within the allowed directories (security).
 
         Args:
@@ -194,7 +194,7 @@ class PathSecurityMixin:
             extra_prefix_resolved = extra_folder
         elif clean_path.startswith('/extra_ro_'):
             # Map /extra_ro_N → extra_work_folders_ro[N]
-            if mode != "ro":
+            if mode != 'ro':
                 raise ValueError(
                     f"Path '{path}' refers to a read-only extra folder but was requested with mode='rw'. "
                     f"Use mode='ro' for paths under /extra_ro_*"
@@ -242,7 +242,7 @@ class PathSecurityMixin:
                 return resolved
 
         # 3. Check extra RO folders (allowed only if mode is "ro")
-        if mode == "ro":
+        if mode == 'ro':
             for extra in self.extra_work_folders_ro:
                 if self._path_is_contained(resolved, extra):
                     if not direct_absolute:

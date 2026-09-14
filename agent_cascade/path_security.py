@@ -7,7 +7,7 @@ from typing import List
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 # Sensitive filenames that should never be served
-_SENSITIVE_FILENAMES = {".env", ".gitconfig", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
+_SENSITIVE_FILENAMES = {'.env', '.gitconfig', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'}
 
 
 def _get_allowed_file_roots() -> List[Path]:
@@ -21,9 +21,9 @@ def _get_allowed_file_roots() -> List[Path]:
     from agent_cascade.settings import DEFAULT_WORKSPACE
 
     workspace_root = Path(DEFAULT_WORKSPACE)
-    base_logs = str(workspace_root / "logs")
+    base_logs = str(workspace_root / 'logs')
     instance_logs = make_instance_dir(base_logs)
-    media_dir = Path(instance_logs) / "media"
+    media_dir = Path(instance_logs) / 'media'
     return [media_dir, workspace_root]
 
 
@@ -55,7 +55,7 @@ def _is_path_allowed(path: str) -> bool:
     basename = resolved.name.lower()
 
     # Block hidden files/dirs (starting with dot)
-    if basename.startswith("."):
+    if basename.startswith('.'):
         return False
 
     # Block known sensitive filenames

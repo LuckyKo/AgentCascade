@@ -52,9 +52,9 @@ class ShoppingFnAgent:
         """
         self._load_env_from_dotenv()
 
-        self.model = model or os.getenv("TOOLS_AGENT_MODEL", "qwen-plus")
+        self.model = model or os.getenv('TOOLS_AGENT_MODEL', 'qwen-plus')
         default_schema = Path(__file__).resolve().parent / 'tools' / 'shopping_tool_schema.json'
-        self.tool_schema_path = tool_schema_path or os.getenv("SHOPPING_SCHEMA_PATH", str(default_schema))
+        self.tool_schema_path = tool_schema_path or os.getenv('SHOPPING_SCHEMA_PATH', str(default_schema))
 
         self.sample_id = sample_id
         if database_base_path:
@@ -121,7 +121,7 @@ class ShoppingFnAgent:
             tool_registry = getattr(base_shopping_tool, 'TOOL_REGISTRY', None)
             if tool_registry is None:
                 if os.getenv('DEBUG_TOOLS') == '1':
-                    print("[ShoppingFnAgent] WARN: TOOL_REGISTRY not found in base_shopping_tool")
+                    print('[ShoppingFnAgent] WARN: TOOL_REGISTRY not found in base_shopping_tool')
                 return instances
         except Exception as e:
             if os.getenv('DEBUG_TOOLS') == '1':
@@ -129,7 +129,7 @@ class ShoppingFnAgent:
             return instances
 
         if not tool_registry:
-            print("[ShoppingFnAgent] WARN: TOOL_REGISTRY is empty. No tools were registered.")
+            print('[ShoppingFnAgent] WARN: TOOL_REGISTRY is empty. No tools were registered.')
             return instances
 
         # Create tool instances from TOOL_REGISTRY
@@ -201,12 +201,12 @@ class ShoppingFnAgent:
         """Execute tool call"""
         inst = self.tool_instances.get(name)
         if not inst:
-            return json.dumps({"error": f"tool '{name}' not found"}, ensure_ascii=False)
+            return json.dumps({'error': f"tool '{name}' not found"}, ensure_ascii=False)
         try:
             res = inst.call(arguments_json)  # Pass raw JSON string
             return res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
         except Exception as e:
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return json.dumps({'error': str(e)}, ensure_ascii=False)
 
     def _call_llm(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None):
         """Call LLM with unified handling for all models"""
@@ -243,12 +243,12 @@ class ShoppingFnAgent:
     def _add_to_cart(self, history_messages: List[Any]) -> List[Any]:
         history_messages = list(history_messages)
         history_messages.append({
-            "role": "user",
-            "content": (
-                "Check whether the items in the shopping cart meet the requirements. "
-                "If not, add the required items to the cart. If there are multiple possible solutions, "
-                "choose the optimal one. The final result should be based on the items in the cart. "
-                "If the task is already complete, then stop."
+            'role': 'user',
+            'content': (
+                'Check whether the items in the shopping cart meet the requirements. '
+                'If not, add the required items to the cart. If there are multiple possible solutions, '
+                'choose the optimal one. The final result should be based on the items in the cart. '
+                'If the task is already complete, then stop.'
             )
         })
         return history_messages
@@ -279,12 +279,12 @@ class ShoppingFnAgent:
                 # Otherwise fallback to result/messages
                 msg_dir = Path(messages_output_dir or (Path(__file__).resolve().parent.parent / 'result' / 'messages'))
                 msg_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 messages_file = msg_dir / f'messages_{ts}.json'
 
-        messages: List[Any] = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + [{"role": "user", "content": user_query}]
+        messages: List[Any] = ([{'role': 'system', 'content': system_prompt}] if system_prompt else []) + [{'role': 'user', 'content': user_query}]
         if save_messages:
-            self._save_messages(messages, messages_file, 0, "Initial messages")
+            self._save_messages(messages, messages_file, 0, 'Initial messages')
 
         for step_count in range(1, max_llm_calls + 1):
             resp = self._call_llm(messages=messages, tools=self.openai_tools)
@@ -292,8 +292,8 @@ class ShoppingFnAgent:
             
             # Convert message object to serializable dict
             msg_dict = {
-                "role": "assistant",
-                "content": msg.content or '',
+                'role': 'assistant',
+                'content': msg.content or '',
             }
             
             # Preserve reasoning_content if present
@@ -302,7 +302,7 @@ class ShoppingFnAgent:
             
             calls = self._detect_tool_calls(msg)
             if calls:
-                msg_dict["tool_calls"] = [
+                msg_dict['tool_calls'] = [
                     {
                         'id': call['id'],
                         'type': 'function',
@@ -323,7 +323,7 @@ class ShoppingFnAgent:
 
             for call in calls:
                 tool_result = self._exec_tool(call['name'], call['arguments'])
-                messages.append({"role": "tool", "tool_call_id": call['id'], "content": tool_result})
+                messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': tool_result})
             if save_messages:
                 self._save_messages(messages, messages_file, step_count, f"Tool execution completed - {len(calls)} tools")
 
@@ -334,8 +334,8 @@ class ShoppingFnAgent:
             
             # Convert message object to serializable dict
             msg_dict = {
-                "role": "assistant",
-                "content": msg.content or '',
+                'role': 'assistant',
+                'content': msg.content or '',
             }
             
             # Preserve reasoning_content if present
@@ -344,7 +344,7 @@ class ShoppingFnAgent:
             
             calls = self._detect_tool_calls(msg)
             if calls:
-                msg_dict["tool_calls"] = [
+                msg_dict['tool_calls'] = [
                     {
                         'id': call['id'],
                         'type': 'function',
@@ -365,7 +365,7 @@ class ShoppingFnAgent:
             
             for call in calls:
                 tool_result = self._exec_tool(call['name'], call['arguments'])
-                messages.append({"role": "tool", "tool_call_id": call['id'], "content": tool_result})
+                messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': tool_result})
             if save_messages:
                 self._save_messages(messages, messages_file, step_count, f"Tool execution completed - {len(calls)} tools")
 
@@ -374,7 +374,7 @@ class ShoppingFnAgent:
     def _save_messages(self, messages: List[Any], filepath: Path, step: int, description: str):
         """Save messages to file"""
         serializable_messages = [m.model_dump() if hasattr(m, 'model_dump') else m for m in messages]
-        save_data = {"step": step, "description": description, "messages": serializable_messages}
+        save_data = {'step': step, 'description': description, 'messages': serializable_messages}
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(save_data, f, ensure_ascii=False, indent=2)

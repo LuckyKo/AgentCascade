@@ -21,12 +21,12 @@ def _help_file_path() -> Path:
 
     Exposed at module level so tests can monkeypatch it.
     """
-    return Path(__file__).resolve().parents[3] / "config" / "ac_system_help.yaml"
+    return Path(__file__).resolve().parents[3] / 'config' / 'ac_system_help.yaml'
 
 
 def _pct(v) -> str:
     """Format a 0..1 ratio as a percentage string; 'n/a' for non-numeric/None."""
-    return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else "n/a"
+    return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else 'n/a'
 
 
 @register_tool('system_info', allow_overwrite=True)
@@ -72,19 +72,19 @@ class SystemInfo(BaseTool):
         """
         telem = getattr(self.agent_pool, 'telemetry', None)
         if not telem:
-            return ("system_info telemetry dump unavailable: no telemetry collector "
-                    "attached to the agent pool.")
+            return ('system_info telemetry dump unavailable: no telemetry collector '
+                    'attached to the agent pool.')
         try:
             session = telem.get_session_summary() or {}
             configs = telem.get_config_comparison() or []
             agent_classes = telem.get_agent_class_summary() or []
             skills = telem.get_skill_usage_summary() or []
 
-            lines = ["--- AC Telemetry Dump (live) ---"]
+            lines = ['--- AC Telemetry Dump (live) ---']
 
             # ── Session totals ──
-            lines.append("")
-            lines.append("Session:")
+            lines.append('')
+            lines.append('Session:')
             for k in ('total_turns', 'total_llm_calls', 'total_tool_calls',
                       'total_input_tokens_est', 'total_output_tokens_est',
                       'avg_tps', 'total_retries', 'total_compressions'):
@@ -93,7 +93,7 @@ class SystemInfo(BaseTool):
 
             # Prompt cache (RFC 9211) hit/miss stats — only when LLM calls exist.
             if session.get('total_llm_calls', 0) > 0:
-                lines.append("  Prompt cache:")
+                lines.append('  Prompt cache:')
                 lines.append(
                     f"    hits={session.get('llm_cache_hits', 0)}  "
                     f"misses={session.get('llm_cache_misses', 0)}  "
@@ -107,14 +107,14 @@ class SystemInfo(BaseTool):
             # llm_calls_by_model — per-model call counts
             by_model = session.get('llm_calls_by_model') or {}
             if by_model:
-                lines.append("  LLM calls by model:")
+                lines.append('  LLM calls by model:')
                 for model, cnt in sorted(by_model.items(), key=lambda x: -x[1]):
                     lines.append(f"    {model}: {cnt}")
 
             # ── Config fingerprint (A/B) comparison ──
             if configs:
-                lines.append("")
-                lines.append("Config fingerprints (A/B):")
+                lines.append('')
+                lines.append('Config fingerprints (A/B):')
                 for c in configs:
                     fp = c.get('config_fingerprint', '?')
                     model = (c.get('config_description') or {}).get('model', '?')
@@ -128,12 +128,12 @@ class SystemInfo(BaseTool):
 
             # ── Agent class usage ──
             if agent_classes:
-                lines.append("")
-                lines.append("Agent class usage:")
+                lines.append('')
+                lines.append('Agent class usage:')
                 for a in agent_classes:
                     cls = a.get('agent_class', '?')
                     acc = a.get('tool_usage_accuracy')
-                    acc_str = f"{acc:.1f}%" if isinstance(acc, (int, float)) else "n/a"
+                    acc_str = f"{acc:.1f}%" if isinstance(acc, (int, float)) else 'n/a'
                     lines.append(
                         f"  {cls}: turns={a.get('turns', '')} "
                         f"time={a.get('total_time_sec', '')}s "
@@ -144,20 +144,20 @@ class SystemInfo(BaseTool):
             # ── Skill usage ── (get_skill_usage_summary returns a list of
             # {skill, loads, agent_classes, top_mode}, sorted by loads desc)
             if skills:
-                lines.append("")
-                lines.append("Skill usage:")
+                lines.append('')
+                lines.append('Skill usage:')
                 for s in skills:
                     name = s.get('skill', '?')
                     loads = s.get('loads', '')
                     top_mode = s.get('top_mode', '')
                     classes = s.get('agent_classes') or []
-                    cls_str = f" [{', '.join(classes)}]" if classes else ""
-                    mode_str = f" top_mode={top_mode}" if top_mode else ""
+                    cls_str = f" [{', '.join(classes)}]" if classes else ''
+                    mode_str = f" top_mode={top_mode}" if top_mode else ''
                     lines.append(f"  {name}: loads={loads}{cls_str}{mode_str}")
 
-            lines.append("")
-            lines.append("(Raw JSONL export: GET /api/telemetry/export)")
-            return "\n".join(lines)
+            lines.append('')
+            lines.append('(Raw JSONL export: GET /api/telemetry/export)')
+            return '\n'.join(lines)
 
         except Exception as e:
             logger.warning(f"system_info telemetry dump failed: {e}")
@@ -170,7 +170,7 @@ class SystemInfo(BaseTool):
             path = _help_file_path()
             if not path.is_file():
                 return f"system_info help file not found at {path}"
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data = yaml.safe_load(path.read_text(encoding='utf-8'))
             if not isinstance(data, dict):
                 return f"system_info help unavailable: YAML root is not a mapping\n(Help file: {path})"
 
@@ -185,18 +185,18 @@ class SystemInfo(BaseTool):
                     break
 
             if matched_key is None:
-                lines = [f"Unknown system_info help section: '{key}'.", ""]
+                lines = [f"Unknown system_info help section: '{key}'.", '']
                 lines.append('How to use: system_info(help="<section>") fetches one help section; omit `help` for normal system info.')
-                lines.append("")
-                lines.append("Available sections:")
+                lines.append('')
+                lines.append('Available sections:')
                 for s in sections:
                     lines.append(f"  - {s}")
                 usage = data.get('_usage')
                 if isinstance(usage, list):
-                    lines.append("")
+                    lines.append('')
                     for bullet in usage:
                         lines.append(f"  \u2022 {bullet}")
-                return "\n".join(lines)
+                return '\n'.join(lines)
 
             # Render the matched section
             sec = data[matched_key]
@@ -223,7 +223,7 @@ class SystemInfo(BaseTool):
                 m_width = max(7, min(max(len(str(e.get('method', ''))) for e in endpoints), 10))
                 p_width = max(20, min(max(len(str(e.get('path', ''))) for e in endpoints), 40))
                 header = f"{'METHOD'.ljust(m_width)}  {'PATH'.ljust(p_width)}  SUMMARY"
-                out_lines.append("")
+                out_lines.append('')
                 out_lines.append(header)
                 for ep in endpoints:
                     if not isinstance(ep, dict):
@@ -245,14 +245,14 @@ class SystemInfo(BaseTool):
                 if k not in known_keys:
                     out_lines.append(f"{k}: {v}")
 
-            return "\n".join(out_lines)
+            return '\n'.join(out_lines)
 
         except Exception as e:
             logger.warning(f"system_info help render failed: {e}")
             try:
                 path_str = str(_help_file_path())
             except Exception:
-                path_str = "<unknown>"
+                path_str = '<unknown>'
             return f"system_info help unavailable: {e}\n(Help file: {path_str})"
 
     def call(self, params: str, **kwargs) -> str:
@@ -280,7 +280,7 @@ class SystemInfo(BaseTool):
             # Limit the output if there are too many files
             if len(cwd_contents) > 20:
                 cwd_contents = cwd_contents[:20] + [f"... and {len(cwd_contents) - 20} more"]
-            cwd_str = ", ".join(cwd_contents)
+            cwd_str = ', '.join(cwd_contents)
         except Exception as e:
             cwd_str = f"Error reading directory: {str(e)}"
             
@@ -305,7 +305,7 @@ class SystemInfo(BaseTool):
         stats_str = f"Current Agent ({agent_name}) History Length: {len(history)} messages"
         
         # Max context detection
-        max_context = "Unknown"
+        max_context = 'Unknown'
         if agent_obj:
             # _get_max_tokens requires an instance argument - use defensive guards
             if hasattr(agent_obj, '_get_max_tokens') and inst is not None:
@@ -335,10 +335,10 @@ class SystemInfo(BaseTool):
                 effective_max = getattr(inst, 'max_turns', None) or DEFAULT_MAX_TURNS
                 stats_str += f"\nCurrent Turn: {inst._current_turn} / {effective_max}"
         else:
-            stats_str = "Agent Pool not connected.\n" + stats_str
+            stats_str = 'Agent Pool not connected.\n' + stats_str
 
         # Tools information — Fix #6: Use template from pool for ExecutionEngine compatibility
-        tools_str = ""
+        tools_str = ''
         template = None
         if agent_obj:
             # Reuse `inst` from early lookup to get template (works for both Agent and ExecutionEngine paths)
@@ -365,28 +365,28 @@ class SystemInfo(BaseTool):
                 tools_str += f"Disabled Tools: {', '.join(sorted(disabled))}\n"
         
         # Update max_context from template if still Unknown
-        if max_context == "Unknown" and template and hasattr(template, 'llm') and template.llm:
+        if max_context == 'Unknown' and template and hasattr(template, 'llm') and template.llm:
             from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
             cfg = template.llm.cfg
             max_context = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens') or DEFAULT_MAX_INPUT_TOKENS
 
         # Resolve Model and API base — primary source is template.llm (works for ExecutionEngine path too)
-        model = "Unknown"
-        api_base = "Unknown"
+        model = 'Unknown'
+        api_base = 'Unknown'
         
         # Primary: template.llm (works for both Agent and ExecutionEngine paths)
         if template and hasattr(template, 'llm') and template.llm:
-            model = getattr(template.llm, 'model', "Unknown") or "Unknown"
+            model = getattr(template.llm, 'model', 'Unknown') or 'Unknown'
             if hasattr(template.llm, 'cfg'):
                 cfg = template.llm.cfg
-                api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or "Unknown"
+                api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or 'Unknown'
         
         # Fallback: agent_obj.llm (works when agent_obj is an Agent instance)
-        if model == "Unknown" and agent_obj and hasattr(agent_obj, 'llm') and agent_obj.llm:
-            model = getattr(agent_obj.llm, 'model', "Unknown")
+        if model == 'Unknown' and agent_obj and hasattr(agent_obj, 'llm') and agent_obj.llm:
+            model = getattr(agent_obj.llm, 'model', 'Unknown')
             if hasattr(agent_obj.llm, 'cfg'):
                 cfg = agent_obj.llm.cfg
-                api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or "Unknown"
+                api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or 'Unknown'
 
         # Workspace and Folders information (with Docker container mount paths)
         default_ws = DEFAULT_WORKSPACE
@@ -412,7 +412,7 @@ class SystemInfo(BaseTool):
             
             rw_idx = 0
             if rw_folders:
-                folders_info += "Additional RW Folders:\n"
+                folders_info += 'Additional RW Folders:\n'
                 for folder in rw_folders:
                     abs_path = os.path.realpath(folder)
                     # Skip if path doesn't exist as a directory
@@ -428,7 +428,7 @@ class SystemInfo(BaseTool):
             # Filter and mount RO folders: same validation as RW but with read-only Docker flag
             ro_idx = 0
             if ro_folders:
-                folders_info += "Additional RO Folders:\n"
+                folders_info += 'Additional RO Folders:\n'
                 for folder in ro_folders:
                     abs_path = os.path.realpath(folder)
                     # Skip if path doesn't exist as a directory
@@ -448,12 +448,12 @@ class SystemInfo(BaseTool):
         if inst is not None and hasattr(inst, 'cache_pool') and inst.cache_pool is not None:
             cache_state = f"\n{inst.cache_pool.get_state_summary(max_display=10)}"
         else:
-            cache_state = "  (not initialized)"
+            cache_state = '  (not initialized)'
 
         # AC Server address — resolve the API server host:port this tool runs under.
         # Primary source is agent_pool.server_info set by the launcher; fall back to
         # AGENT_CASCADE_PORT env var, then the multi-agent default port (8765).
-        ac_server_str = "Unknown"
+        ac_server_str = 'Unknown'
         try:
             si = self.agent_pool.server_info if self.agent_pool else None
             if isinstance(si, (tuple, list)) and len(si) == 2 and si[0] and si[1]:
@@ -464,11 +464,11 @@ class SystemInfo(BaseTool):
                     port = int(env_port) if env_port is not None else 8765
                 except (ValueError, TypeError):
                     port = 8765
-                host = "0.0.0.0"
-            ac_server_str = f"http://{host}:{port}" + (" (all interfaces)" if str(host) == "0.0.0.0" else "")
+                host = '0.0.0.0'
+            ac_server_str = f"http://{host}:{port}" + (' (all interfaces)' if str(host) == '0.0.0.0' else '')
         except Exception as e:
             logger.warning(f"Failed to resolve AC server address: {e}")
-            ac_server_str = "Unknown"
+            ac_server_str = 'Unknown'
 
         info = (
             f"--- System Information ---\n"

@@ -41,8 +41,8 @@ _compressor_invocation_counter = 0
 
 # Conversational filler prefixes to strip from summaries
 _SUMMARY_PREFIXES = [
-    "here is a summary", "here is the summary", "summary:",
-    "in summary,", "here's a summary", "**summary**:",
+    'here is a summary', 'here is the summary', 'summary:',
+    'in summary,', "here's a summary", '**summary**:',
 ]
 
 # Regex for the optional caption that rides on the SAME line right after the end marker:
@@ -103,7 +103,7 @@ def _parse_compression_output(raw: str) -> Tuple[str, str]:
             summary_body = alt_body
 
     if not summary_body:
-        raise RuntimeError("Agent returned an empty summary")
+        raise RuntimeError('Agent returned an empty summary')
 
     tail = raw_stripped[marker_idx + len(COMPRESSION_END_MARKER):]
     m = _CAPTION_TAIL_RE.match(tail)
@@ -115,9 +115,9 @@ def _parse_compression_output(raw: str) -> Tuple[str, str]:
             f"Malformed caption after end marker (ignored, not leaked into summary): "
             f"'{tail.strip()[:80]}'"
         )
-        caption = ""
+        caption = ''
     else:
-        caption = ""
+        caption = ''
 
     return summary_body, caption
 
@@ -141,7 +141,7 @@ def _format_messages_for_summary(target_messages: List[Any]) -> str:
     Returns:
         A single string with role-prefixed message contents.
     """
-    history_text = ""
+    history_text = ''
     for msg in target_messages:
         if isinstance(msg, dict):
             role = msg.get('role', 'unknown').upper()
@@ -177,7 +177,7 @@ def _format_messages_for_summary(target_messages: List[Any]) -> str:
                             text_parts.append(f'[Image: {caption}]')
                         else:
                             text_parts.append('[Image]')
-            content = " ".join(text_parts)
+            content = ' '.join(text_parts)
 
         # Check for reasoning_content even if content is populated (handles str and list types)
         # Only process reasoning for assistant messages — matches extract_text_from_message behavior
@@ -257,8 +257,8 @@ def _configure_compressor_instance(
         comp_instance._generate_cfg_override = cfg
     else:
         logger.warning(
-            "[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — "
-            "template not available or missing llm attribute. Agent may have unrestricted tools."
+            '[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — '
+            'template not available or missing llm attribute. Agent may have unrestricted tools.'
         )
 
 
@@ -312,7 +312,7 @@ def _execute_compressor_and_extract_summary(
     comp_instance: Any,
     comp_state_key: str,
     caller_name: str,
-    timeout_label: str = "Compression",
+    timeout_label: str = 'Compression',
 ) -> Tuple[str, str]:
     """Execute compressor via engine.run() with slot bypass and extract summary.
 
@@ -360,9 +360,9 @@ def _execute_compressor_and_extract_summary(
         # If we released anything, _yielded_slot is set so the finally block re-acquires.
         _yielded_slot = yield_caller_slot(
             agent_pool, engine, caller_inst, caller_name,
-            log_prefix="COMPRESSION_SLOT_YIELD",
-            release_reason="before_compression",
-            before_action="compression",
+            log_prefix='COMPRESSION_SLOT_YIELD',
+            release_reason='before_compression',
+            before_action='compression',
         )
 
         _last_comp_send = 0.0
@@ -451,7 +451,7 @@ def _execute_compressor_and_extract_summary(
         if (tel := engine._telemetry()) is not None:
             try:
                 tel.record_agent_instance_call(
-                    comp_state_key, "Compressor", caller_name, latency_ms=_call_latency_ms,
+                    comp_state_key, 'Compressor', caller_name, latency_ms=_call_latency_ms,
                 )
             except Exception:
                 pass
@@ -467,10 +467,10 @@ def _execute_compressor_and_extract_summary(
             logger.debug(
                 f"[COMPRESSION_SLOT_REACQUIRE] Restoring slot for '{caller_name}' after compression"
             )
-            engine.reacquire_for(caller_inst, caller_name, context="after_compression")
+            engine.reacquire_for(caller_inst, caller_name, context='after_compression')
 
     # Extract the summary from the last assistant message
-    summary = ""
+    summary = ''
     if final_msgs:
         for msg_obj in reversed(final_msgs):
             role = (msg_obj.get('role', '') if isinstance(msg_obj, dict)
@@ -536,7 +536,7 @@ def _ensure_compressor_loaded(agent_pool) -> None:
 
     comp_agent = agent_pool.get_agent('Compressor')
     if not comp_agent:
-        raise RuntimeError("Compressor is None after loading")
+        raise RuntimeError('Compressor is None after loading')
 
 
 def invoke_compression_agent(
@@ -575,7 +575,7 @@ def invoke_compression_agent(
                       after exhausting all retry attempts.
     """
     if not agent_pool:
-        raise RuntimeError("agent_pool not connected")
+        raise RuntimeError('agent_pool not connected')
 
     _ensure_compressor_loaded(agent_pool)
 
@@ -593,7 +593,7 @@ def invoke_compression_agent(
 
     # Build the end instruction: marker always, caption only when requested.
     from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION, CAPTION_INSTRUCTION
-    end_instruction = " " + END_MARKER_INSTRUCTION + (CAPTION_INSTRUCTION if want_caption else "")
+    end_instruction = ' ' + END_MARKER_INSTRUCTION + (CAPTION_INSTRUCTION if want_caption else '')
 
     summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text, end_instruction=end_instruction)
 
@@ -638,7 +638,7 @@ def invoke_compression_agent(
         raise RuntimeError(f"COMPRESSION_MAX_RETRIES must be >= 1, got {max_retries}")
 
     try:
-        logger.info("Compression agent invoked via engine-based execution")
+        logger.info('Compression agent invoked via engine-based execution')
 
         for attempt in range(1, max_retries + 1):
             # Stop-check before each retry: after a user Stop, do not re-invoke
@@ -650,7 +650,7 @@ def invoke_compression_agent(
             try:
                 summary, caption = _execute_compressor_and_extract_summary(
                     agent_pool, engine, comp_instance, comp_state_key, caller_name,
-                    timeout_label="Compression",
+                    timeout_label='Compression',
                 )
                 return summary, caption
 
@@ -728,19 +728,19 @@ def invoke_consolidation_agent(
         RuntimeError: If the consolidation agent fails or returns an empty/invalid summary.
     """
     if not agent_pool:
-        raise RuntimeError("agent_pool not connected")
+        raise RuntimeError('agent_pool not connected')
 
     _ensure_compressor_loaded(agent_pool)
 
     comp_state_key = _generate_compressor_instance_name()
 
     # Format input as numbered summaries
-    summaries_text = ""
+    summaries_text = ''
     for i, s in enumerate(marker_summaries, 1):
         summaries_text += f"SUMMARY {i}:\n{s}\n\n"
 
     from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
-    end_instruction = " " + END_MARKER_INSTRUCTION  # marker only, no caption for compaction
+    end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for compaction
 
     consolidation_prompt = CONSOLIDATION_PROMPT.format(
         summaries_text=summaries_text.strip(), end_instruction=end_instruction
@@ -773,7 +773,7 @@ def invoke_consolidation_agent(
 
         summary, caption = _execute_compressor_and_extract_summary(
             agent_pool, engine, comp_instance, comp_state_key, caller_name,
-            timeout_label="Consolidation",
+            timeout_label='Consolidation',
         )
 
         return summary, caption

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Anchored on the arrow pattern only — no surrounding parens required, so it matches both L1
 # and L2 formats. Groups: (1) start datetime, (2) end datetime.
 _MARKER_TS_RE = re.compile(
-    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) → (\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
+    r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) → (\d{4}-\d{2}-\d{2} \d{2}:\d{2})'
 )
 
 
@@ -60,7 +60,7 @@ def select_markers_for_consolidation(marker_indices: List[int]) -> Tuple[List[in
         ValueError: If marker_indices is empty.
     """
     if not marker_indices:
-        raise ValueError("Cannot select markers from empty list")
+        raise ValueError('Cannot select markers from empty list')
     if len(marker_indices) < 2:
         # Not enough markers to consolidate — return all as "keep", none to consolidate
         return [], marker_indices[-1]
@@ -417,8 +417,8 @@ def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
         return f"{n_messages} messages summarized"
 
     try:
-        start_str = datetime.fromtimestamp(float(start_ts)).strftime("%Y-%m-%d %H:%M")
-        end_str = datetime.fromtimestamp(float(end_ts)).strftime("%Y-%m-%d %H:%M")
+        start_str = datetime.fromtimestamp(float(start_ts)).strftime('%Y-%m-%d %H:%M')
+        end_str = datetime.fromtimestamp(float(end_ts)).strftime('%Y-%m-%d %H:%M')
     except (ValueError, OverflowError, OSError):
         return f"{n_messages} messages summarized"
 
@@ -527,8 +527,8 @@ def _parse_marker_timestamps(msg: Any) -> Tuple[float | None, float | None]:
         # NOTE: strptime().timestamp() interprets the naive string as LOCAL time. This is
         # intentional and consistent with _format_timestamp_interval(), which renders via
         # datetime.fromtimestamp().strftime(...) (also local), so the round-trip is correct.
-        start_ts = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").timestamp()
-        end_ts = datetime.strptime(match.group(2), "%Y-%m-%d %H:%M").timestamp()
+        start_ts = datetime.strptime(match.group(1), '%Y-%m-%d %H:%M').timestamp()
+        end_ts = datetime.strptime(match.group(2), '%Y-%m-%d %H:%M').timestamp()
         return (float(start_ts), float(end_ts))
     except Exception as e:
         logger.debug(f"Marker timestamp parse failed (non-fatal): {e}")

@@ -37,7 +37,7 @@ class Calculate(BaseTool):
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
         self.allowed_names = {
-            k: v for k, v in math.__dict__.items() if not k.startswith("__")
+            k: v for k, v in math.__dict__.items() if not k.startswith('__')
         }
         self.allowed_names.update({
             'abs': abs,
@@ -76,7 +76,7 @@ class Calculate(BaseTool):
             # Restricted eval: only allowlisted math funcs + safe built-ins; __builtins__={} blocks
             # dangerous names like __import__. Attribute access (e.g. (1).__class__) can introspect
             # type objects but is NOT exploitable — no side-effect object is in scope (see tests).
-            result = eval(processed_expr, {"__builtins__": {}}, self.allowed_names)
+            result = eval(processed_expr, {'__builtins__': {}}, self.allowed_names)
             
             # Format the result to be clean
             if isinstance(result, (int, float)):

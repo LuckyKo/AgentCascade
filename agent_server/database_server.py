@@ -42,10 +42,10 @@ try:
         server_config = json.load(f)
         server_config = GlobalConfig(**server_config)
 except FileNotFoundError:
-    logger.error("[FATAL] Server config not found: %s", config_path)
+    logger.error('[FATAL] Server config not found: %s', config_path)
     raise SystemExit(1)
 except Exception as e:
-    logger.error("[FATAL] Failed to parse server config: %s", e)
+    logger.error('[FATAL] Failed to parse server config: %s', e)
     raise SystemExit(1)
 
 # This APP only requires storage capacity, so using the memory module alone
@@ -117,7 +117,7 @@ def cache_page(**kwargs):
         title = get_basename_from_url(url)
         save_browsing_meta_data(url, title, meta_file)
     except Exception as e:
-        logger.warning("Failed to process page content for %s: %s", url, e)
+        logger.warning('Failed to process page content for %s: %s', url, e)
         rm_browsing_meta_data(url, meta_file)
 
 
@@ -150,7 +150,7 @@ if __name__ == '__main__':
                     port=port)
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error("[FATAL] Port %d is already in use. Check other running services.", port)
+            logger.error('[FATAL] Port %d is already in use. Check other running services.', port)
         else:
-            logger.error("[FATAL] Database server failed to start: %s", e)
+            logger.error('[FATAL] Database server failed to start: %s', e)
         raise SystemExit(1)

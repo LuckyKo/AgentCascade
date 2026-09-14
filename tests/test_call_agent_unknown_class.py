@@ -32,14 +32,14 @@ from agent_cascade.tool_dispatcher import ToolDispatcher
 # Test Helpers — lightweight fakes
 # ──────────────────────────────────────────────
 
-def _make_mock_instance(instance_name: str, agent_class: str = "coder"):
+def _make_mock_instance(instance_name: str, agent_class: str = 'coder'):
     """Minimal mock AgentInstance with the attributes handle_call_agent touches."""
     inst = MagicMock()
     inst.instance_name = instance_name
     inst.agent_class = agent_class
     inst._state_lock = threading.RLock()
     inst.state = MagicMock(name=f"{instance_name}_state")
-    inst.state.name = "IDLE"  # Not in ACTIVE_STATES → Active Instance Guard passes
+    inst.state.name = 'IDLE'  # Not in ACTIVE_STATES → Active Instance Guard passes
     inst._slot_release = None
     inst._nest_depth = 0
     return inst
@@ -63,8 +63,8 @@ class FakePool:
         self.settings.max_nesting_depth = 10
         # Template registry: class name (as registered) -> Assistant template.
         self.templates = dict(templates if templates is not None else
-                              {"coder": MagicMock(), "orchestrator": MagicMock(),
-                               "reviewer": MagicMock()})
+                              {'coder': MagicMock(), 'orchestrator': MagicMock(),
+                               'reviewer': MagicMock()})
 
     def get_template(self, name: str):
         """Case-insensitive fallback mirroring pool/config_persist.py: exact → lowercase → titlecase."""
@@ -97,8 +97,8 @@ def _make_dispatcher(pool: FakePool):
     # Stub the routing endpoints: rejections must never reach these; legitimate
     # calls must. (pool.register_async_call is also stubbed as a backstop in case
     # _run_child_async runs for real.)
-    dispatcher._run_child_sync = MagicMock(return_value="SYNC_ROUTED")
-    dispatcher._run_child_async = MagicMock(return_value="ASYNC_ROUTED")
+    dispatcher._run_child_sync = MagicMock(return_value='SYNC_ROUTED')
+    dispatcher._run_child_async = MagicMock(return_value='ASYNC_ROUTED')
     pool.register_async_call = MagicMock()
     return dispatcher
 
@@ -106,7 +106,7 @@ def _make_dispatcher(pool: FakePool):
 def _run(dispatcher, caller, instance_name, agent_class):
     """Drive handle_call_agent and return the result string."""
     return dispatcher.handle_call_agent(
-        args={"instance_name": instance_name, "agent_class": agent_class, "task": "test"},
+        args={'instance_name': instance_name, 'agent_class': agent_class, 'task': 'test'},
         messages=[],
         instance=caller,
     )
@@ -120,15 +120,15 @@ class TestUnknownClassRejected:
     """An agent_class with no registered template is rejected early."""
 
     def test_unknown_class_fresh_name_rejected(self):
-        caller = _make_mock_instance("Maine", "orchestrator")
-        pool = FakePool(instances={"Maine": caller})
+        caller = _make_mock_instance('Maine', 'orchestrator')
+        pool = FakePool(instances={'Maine': caller})
         dispatcher = _make_dispatcher(pool)
 
-        result = _run(dispatcher, caller, "worker1", "nonexistent")
+        result = _run(dispatcher, caller, 'worker1', 'nonexistent')
 
-        assert result.startswith("Error:")
-        assert "nonexistent" in result  # names the requested class
-        assert "coder" in result  # lists at least one available class
+        assert result.startswith('Error:')
+        assert 'nonexistent' in result  # names the requested class
+        assert 'coder' in result  # lists at least one available class
         # Rejection happens before routing — no child is spawned.
         dispatcher._run_child_sync.assert_not_called()
         dispatcher._run_child_async.assert_not_called()
@@ -139,16 +139,16 @@ class TestUnknownClassRejected:
         Confirms we do NOT special-case the recall path: a genuinely unknown class
         is rejected regardless of whether an instance exists under that name.
         """
-        existing = _make_mock_instance("worker1", "coder")  # IDLE
-        caller = _make_mock_instance("Maine", "orchestrator")
-        pool = FakePool(instances={"worker1": existing, "Maine": caller})
+        existing = _make_mock_instance('worker1', 'coder')  # IDLE
+        caller = _make_mock_instance('Maine', 'orchestrator')
+        pool = FakePool(instances={'worker1': existing, 'Maine': caller})
         dispatcher = _make_dispatcher(pool)
 
-        result = _run(dispatcher, caller, "worker1", "bogus")
+        result = _run(dispatcher, caller, 'worker1', 'bogus')
 
-        assert result.startswith("Error:")
-        assert "bogus" in result
-        assert "coder" in result  # available-classes list present
+        assert result.startswith('Error:')
+        assert 'bogus' in result
+        assert 'coder' in result  # available-classes list present
         dispatcher._run_child_sync.assert_not_called()
         dispatcher._run_child_async.assert_not_called()
 
@@ -161,13 +161,13 @@ class TestValidClassRoutesThrough:
     """A registered class (exact or via case fallback) passes the guard and routes."""
 
     def test_valid_class_fresh_name_routes(self):
-        caller = _make_mock_instance("Maine", "orchestrator")
-        pool = FakePool(instances={"Maine": caller})
+        caller = _make_mock_instance('Maine', 'orchestrator')
+        pool = FakePool(instances={'Maine': caller})
         dispatcher = _make_dispatcher(pool)
 
-        result = _run(dispatcher, caller, "worker1", "coder")
+        result = _run(dispatcher, caller, 'worker1', 'coder')
 
-        assert not result.startswith("Error:")
+        assert not result.startswith('Error:')
         # Routing reached — async path taken (no slot info → needs no slot).
         dispatcher._run_child_async.assert_called_once()
         dispatcher._run_child_sync.assert_not_called()
@@ -175,16 +175,16 @@ class TestValidClassRoutesThrough:
     def test_case_insensitive_template_match_routes(self):
         """Template registered as 'Coder' (capital C); request 'coder' (lowercase).
         get_template fallback finds it → routes through, NOT rejected."""
-        caller = _make_mock_instance("Maine", "orchestrator")
+        caller = _make_mock_instance('Maine', 'orchestrator')
         pool = FakePool(
-            instances={"Maine": caller},
-            templates={"Coder": MagicMock(), "Orchestrator": MagicMock()},
+            instances={'Maine': caller},
+            templates={'Coder': MagicMock(), 'Orchestrator': MagicMock()},
         )
         dispatcher = _make_dispatcher(pool)
 
-        result = _run(dispatcher, caller, "worker1", "coder")
+        result = _run(dispatcher, caller, 'worker1', 'coder')
 
-        assert not result.startswith("Error:")
+        assert not result.startswith('Error:')
         dispatcher._run_child_async.assert_called_once()
         dispatcher._run_child_sync.assert_not_called()
 
@@ -197,22 +197,22 @@ class TestErrorMessageListsAllClasses:
     """The rejection error enumerates every registered class, sorted."""
 
     def test_error_lists_all_available_classes(self):
-        caller = _make_mock_instance("Maine", "orchestrator")
+        caller = _make_mock_instance('Maine', 'orchestrator')
         pool = FakePool(
-            instances={"Maine": caller},
+            instances={'Maine': caller},
             templates={
-                "coder": MagicMock(),
-                "researcher": MagicMock(),
-                "reviewer": MagicMock(),
-                "writer": MagicMock(),
+                'coder': MagicMock(),
+                'researcher': MagicMock(),
+                'reviewer': MagicMock(),
+                'writer': MagicMock(),
             },
         )
         dispatcher = _make_dispatcher(pool)
 
-        result = _run(dispatcher, caller, "worker1", "nonexistent")
+        result = _run(dispatcher, caller, 'worker1', 'nonexistent')
 
-        assert result.startswith("Error:")
-        for cls in ("coder", "researcher", "reviewer", "writer"):
+        assert result.startswith('Error:')
+        for cls in ('coder', 'researcher', 'reviewer', 'writer'):
             assert cls in result, f"expected '{cls}' in error: {result}"
 
 
@@ -224,14 +224,14 @@ class TestEmptyTemplatesEdgeCase:
     """No registered templates → generic fallback message (no class list)."""
 
     def test_empty_templates_fallback_message(self):
-        caller = _make_mock_instance("Maine", "orchestrator")
-        pool = FakePool(instances={"Maine": caller}, templates={})
+        caller = _make_mock_instance('Maine', 'orchestrator')
+        pool = FakePool(instances={'Maine': caller}, templates={})
         dispatcher = _make_dispatcher(pool)
 
-        result = _run(dispatcher, caller, "worker1", "anything")
+        result = _run(dispatcher, caller, 'worker1', 'anything')
 
-        assert result.startswith("Error:")
-        assert "anything" in result  # names the requested class
-        assert "No agent classes are registered" in result
+        assert result.startswith('Error:')
+        assert 'anything' in result  # names the requested class
+        assert 'No agent classes are registered' in result
         dispatcher._run_child_sync.assert_not_called()
         dispatcher._run_child_async.assert_not_called()

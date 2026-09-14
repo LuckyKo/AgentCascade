@@ -190,7 +190,7 @@ def _find_window_by_pid(pid: int):
 
     win32gui.EnumWindows(enum_callback, None)
     if len(results) > 1:
-        logger.warning("Multiple windows found for PID %d (%d total). Using first visible window.", pid, len(results))
+        logger.warning('Multiple windows found for PID %d (%d total). Using first visible window.', pid, len(results))
     return results[0] if results else None
 
 
@@ -206,8 +206,8 @@ def _capture_window_linux(pid: int) -> bytes:
     # Check for display server
     if not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
         raise RuntimeError(
-            "Screen capture requires a graphical display. No display server detected "
-            "(DISPLAY and WAYLAND_DISPLAY are unset)."
+            'Screen capture requires a graphical display. No display server detected '
+            '(DISPLAY and WAYLAND_DISPLAY are unset).'
         )
 
     # Get window ID from PID using xdotool
@@ -219,7 +219,7 @@ def _capture_window_linux(pid: int) -> bytes:
     except FileNotFoundError:
         raise RuntimeError(
             "Linux window capture requires 'xdotool'. Install via your package manager "
-            "(e.g., sudo apt install xdotool)."
+            '(e.g., sudo apt install xdotool).'
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Timeout while searching for window with PID {pid}.")

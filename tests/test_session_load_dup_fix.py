@@ -25,16 +25,16 @@ from agent_cascade.prompts.dna import COMPRESSION_MARKER
 # ──────────────────────────────────────────────
 
 DUMMY_LLM_CFG = {
-    "model": "qwen/qwen3-4b",
-    "model_server": "http://127.0.0.1:1234/v1",
-    "api_key": "EMPTY",
-    "model_type": "qwenvl_oai",
+    'model': 'qwen/qwen3-4b',
+    'model_server': 'http://127.0.0.1:1234/v1',
+    'api_key': 'EMPTY',
+    'model_type': 'qwenvl_oai',
 }
 
 
 def build_large_session(num_pairs=32):
     """Build a realistic session with ~64 messages."""
-    msgs = [Message(role=SYSTEM, content="You are a helpful coding assistant.")]
+    msgs = [Message(role=SYSTEM, content='You are a helpful coding assistant.')]
     for i in range(num_pairs):
         msgs.append(Message(role=USER, content=f"Question {i}: What is Python feature {i}?"))
         msgs.append(
@@ -46,7 +46,7 @@ def build_large_session(num_pairs=32):
 
 def build_compressed_session(num_rounds=4, tail_pairs=3):
     """Build a session that went through multiple compression rounds."""
-    msgs = [Message(role=SYSTEM, content="You are a helpful coding assistant.")]
+    msgs = [Message(role=SYSTEM, content='You are a helpful coding assistant.')]
 
     for i in range(10):
         msgs.append(Message(role=USER, content=f"Q{i}: Hello {i}"))
@@ -80,13 +80,13 @@ def write_jsonl(path, messages, metadata=None):
     """Write a JSONL file with metadata header + message lines."""
     if metadata is None:
         metadata = {
-            "agent_class": "coder",
-            "instance_name": "TestAgent",
-            "start_timestamp": datetime.now().isoformat(),
-            "current_log_path": path,
+            'agent_class': 'coder',
+            'instance_name': 'TestAgent',
+            'start_timestamp': datetime.now().isoformat(),
+            'current_log_path': path,
         }
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(json.dumps({"metadata": metadata}) + '\n')
+        f.write(json.dumps({'metadata': metadata}) + '\n')
         for m in messages:
             d = m.model_dump() if hasattr(m, 'model_dump') else dict(role=m.role, content=m.content)
             f.write(json.dumps(d, ensure_ascii=False) + '\n')
@@ -102,7 +102,7 @@ def read_jsonl_messages(path):
                 continue
             try:
                 item = json.loads(line)
-                if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                if isinstance(item, dict) and 'metadata' not in item and 'event' not in item:
                     msgs.append(item)
             except json.JSONDecodeError:
                 continue
@@ -113,8 +113,8 @@ def check_duplicates(msgs):
     """Return list of duplicate (role, content_prefix) tuples."""
     counts = {}
     for m in msgs:
-        c = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
-        r = m.get("role", "") if isinstance(m, dict) else getattr(m, "role", "")
+        c = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
+        r = m.get('role', '') if isinstance(m, dict) else getattr(m, 'role', '')
         key = (r, c[:80])
         counts[key] = counts.get(key, 0) + 1
     return {k: v for k, v in counts.items() if v > 1}
@@ -129,7 +129,7 @@ class TestLargeSessionLoad:
 
     def test_65_message_load(self, tmp_path):
         import uuid
-        log_path = str(tmp_path / "large_session.jsonl")
+        log_path = str(tmp_path / 'large_session.jsonl')
         full_msgs = build_large_session(num_pairs=32)  # 65 messages
         write_jsonl(log_path, full_msgs)
 
@@ -138,9 +138,9 @@ class TestLargeSessionLoad:
 
         inst_name = f"LargeTest_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         loaded_msgs = read_jsonl_messages(log_inst.log_path)
 
         dups = check_duplicates(loaded_msgs)
@@ -162,7 +162,7 @@ class TestCompressedSessionAppend:
 
     def test_load_then_append(self, tmp_path):
         import uuid
-        log_path = str(tmp_path / "compressed_session.jsonl")
+        log_path = str(tmp_path / 'compressed_session.jsonl')
         full_msgs = build_compressed_session(num_rounds=3, tail_pairs=5)
         write_jsonl(log_path, full_msgs)
 
@@ -171,9 +171,9 @@ class TestCompressedSessionAppend:
 
         inst_name = f"CompressTest_{uuid.uuid4().hex[:8]}"
         status = pool.load_session_from_log(log_path, target_instance=inst_name)
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger(inst_name, "coder")
+        log_inst = pool.get_logger(inst_name, 'coder')
         loaded_msgs = read_jsonl_messages(log_inst.log_path)
 
         # Check for duplicates immediately after load
@@ -181,7 +181,7 @@ class TestCompressedSessionAppend:
         assert not dups_after_load, f"Duplicates found right after load: {dups_after_load}"
 
         # Simulate reused instance path: direct log_message() for new messages
-        new_task = Message(role=USER, content="New task after session load")
+        new_task = Message(role=USER, content='New task after session load')
         new_response = Message(role=ASSISTANT, content="I'll handle that task.")
 
         log_inst.log_message(new_task)
@@ -198,7 +198,7 @@ class TestCompressedSessionAppend:
         assert not dups_after_append, f"Duplicates after append: {dups_after_append}"
 
         # Verify new messages are at the end
-        assert final_msgs[-1]["content"] == "I'll handle that task."
+        assert final_msgs[-1]['content'] == "I'll handle that task."
         assert len(final_msgs) == len(loaded_msgs) + 2
 
 
@@ -210,20 +210,20 @@ class TestReusedInstancePath:
     """Simulate lifecycle_manager.py reused instance flow."""
 
     def test_reuse_no_dups(self, tmp_path):
-        orig_log = str(tmp_path / "original.jsonl")
+        orig_log = str(tmp_path / 'original.jsonl')
         msgs = build_compressed_session(num_rounds=4, tail_pairs=3)
         write_jsonl(orig_log, msgs)
 
         from agent_cascade.agent_pool import AgentPool
         pool = AgentPool(DUMMY_LLM_CFG)
 
-        status = pool.load_session_from_log(orig_log, target_instance="Worker")
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        status = pool.load_session_from_log(orig_log, target_instance='Worker')
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger("Worker", "coder")
+        log_inst = pool.get_logger('Worker', 'coder')
 
         # FIX path (lifecycle_manager.py line 420-422): direct log_message()
-        task_msg = Message(role=USER, content="Please analyze this code.")
+        task_msg = Message(role=USER, content='Please analyze this code.')
         response_msg = Message(role=ASSISTANT, content="Here's my analysis...")
 
         log_inst.log_message(task_msg)
@@ -247,7 +247,7 @@ class TestReusedInstancePath:
         assert len(sys_msgs) == 1, f"System msg count: {len(sys_msgs)} (expected 1)"
 
         # Tail messages at the end
-        assert jsonl_msgs[-2]['content'] == "Please analyze this code."
+        assert jsonl_msgs[-2]['content'] == 'Please analyze this code.'
         assert jsonl_msgs[-1]['content'] == "Here's my analysis..."
 
 
@@ -259,7 +259,7 @@ class TestMultipleReloads:
     """Reload the same session multiple times to catch accumulation bugs."""
 
     def test_five_reloads(self, tmp_path):
-        log_path = str(tmp_path / "stress.jsonl")
+        log_path = str(tmp_path / 'stress.jsonl')
         msgs = build_large_session(num_pairs=25)  # 51 messages
         write_jsonl(log_path, msgs)
 
@@ -269,9 +269,9 @@ class TestMultipleReloads:
             pool = AgentPool(DUMMY_LLM_CFG)
             status = pool.load_session_from_log(log_path, target_instance=f"Agent_{round_num}")
 
-            assert not status.startswith("Error"), f"Round {round_num}: Load failed: {status}"
+            assert not status.startswith('Error'), f"Round {round_num}: Load failed: {status}"
 
-            log_inst = pool.get_logger(f"Agent_{round_num}", "coder")
+            log_inst = pool.get_logger(f"Agent_{round_num}", 'coder')
             loaded = read_jsonl_messages(log_inst.log_path)
 
             dups = check_duplicates(loaded)
@@ -290,16 +290,16 @@ class TestFileSyncFlag:
     """Verify rewrite_log_with_history sets _file_history_synced correctly."""
 
     def test_sync_flag_set(self, tmp_path):
-        log_path = str(tmp_path / "sync_test.jsonl")
+        log_path = str(tmp_path / 'sync_test.jsonl')
         msgs = build_compressed_session(num_rounds=3, tail_pairs=2)
         write_jsonl(log_path, msgs)
 
         from agent_cascade.agent_pool import AgentPool
         pool = AgentPool(DUMMY_LLM_CFG)
 
-        status = pool.load_session_from_log(log_path, target_instance="SyncTest")
-        assert not status.startswith("Error"), f"Load failed: {status}"
+        status = pool.load_session_from_log(log_path, target_instance='SyncTest')
+        assert not status.startswith('Error'), f"Load failed: {status}"
 
-        log_inst = pool.get_logger("SyncTest", "coder")
+        log_inst = pool.get_logger('SyncTest', 'coder')
         assert log_inst._file_history_synced, \
-            "_file_history_synced should be True after load_session_from_log"
+            '_file_history_synced should be True after load_session_from_log'

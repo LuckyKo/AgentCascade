@@ -32,19 +32,19 @@ from agent_cascade.llm.schema import USER, Message, ContentItem
 
 def _make_router(pool):
     """Build a lightweight APIRouter with its own isolated config dir + a mocked pool."""
-    d = tempfile.mkdtemp(prefix="imgcap_mode_")
-    orig = os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR")
-    os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = d
+    d = tempfile.mkdtemp(prefix='imgcap_mode_')
+    orig = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
+    os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = d
     try:
         router = APIRouter(
-            default_llm_cfg={"model": "default-model", "api_base": "http://localhost:1234/v1"},
+            default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
             config_dir=d,
         )
     finally:
         if orig is None:
-            os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+            os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
         else:
-            os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"] = orig
+            os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = orig
     router._pool = pool
     return router
 
@@ -69,12 +69,12 @@ def _instance_with_endpoint(api_base, model):
 
 def _msg_with_image(image='media/a.png'):
     """A user message with an uncaptioned image ContentItem plus a text item."""
-    return Message(role=USER, content=[ContentItem(image=image), ContentItem(text="look")])
+    return Message(role=USER, content=[ContentItem(image=image), ContentItem(text='look')])
 
 
-def _vision_endpoint(router, api_base="http://v:8080/v1", model="vision-model"):
+def _vision_endpoint(router, api_base='http://v:8080/v1', model='vision-model'):
     """Register a vision-capable endpoint on the router and return it."""
-    ep = APIEndpoint(name="vision", api_base=api_base, model=model, vision_enabled=True)
+    ep = APIEndpoint(name='vision', api_base=api_base, model=model, vision_enabled=True)
     router.add_endpoint(ep)
     return ep
 
@@ -86,7 +86,7 @@ class TestCaptionModeGating:
 
     def test_always_captions_even_when_active_endpoint_is_vision(self):
         """always: caption fires even though the active endpoint already has vision."""
-        pool = _make_pool(mode='always', instance=_instance_with_endpoint("http://v:8080/v1", "vision-model"))
+        pool = _make_pool(mode='always', instance=_instance_with_endpoint('http://v:8080/v1', 'vision-model'))
         router = _make_router(pool)
         _vision_endpoint(router)
 
@@ -98,14 +98,14 @@ class TestCaptionModeGating:
             mock_gcm.return_value = fake_model
             result = router.caption_images(messages, agent_type='generalist', instance_name='inst1')
 
-        assert mock_gcm.called, "always mode must fire a caption call"
+        assert mock_gcm.called, 'always mode must fire a caption call'
         # The image item should now carry the generated caption.
         img_item = messages[0].content[0]
         assert getattr(img_item, 'caption', None) == 'a cat'
 
     def test_auto_skips_when_active_endpoint_is_vision(self):
         """auto + vision-capable active endpoint: NO caption call, messages unchanged."""
-        pool = _make_pool(mode='auto', instance=_instance_with_endpoint("http://v:8080/v1", "vision-model"))
+        pool = _make_pool(mode='auto', instance=_instance_with_endpoint('http://v:8080/v1', 'vision-model'))
         router = _make_router(pool)
         _vision_endpoint(router)
 
@@ -113,7 +113,7 @@ class TestCaptionModeGating:
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
             result = router.caption_images(messages, agent_type='generalist', instance_name='inst1')
 
-        assert not mock_gcm.called, "auto mode must NOT caption when the active endpoint has vision"
+        assert not mock_gcm.called, 'auto mode must NOT caption when the active endpoint has vision'
         # Messages unchanged — no caption was added.
         img_item = messages[0].content[0]
         assert getattr(img_item, 'caption', None) is None
@@ -123,10 +123,10 @@ class TestCaptionModeGating:
         cleared and re-captioned, good existing captions are preserved."""
         # Active endpoint is text-only (vision_enabled=False) but a separate vision
         # endpoint exists in the registry for the caption call to use.
-        pool = _make_pool(mode='auto', instance=_instance_with_endpoint("http://t:8080/v1", "text-model"))
+        pool = _make_pool(mode='auto', instance=_instance_with_endpoint('http://t:8080/v1', 'text-model'))
         router = _make_router(pool)
-        router.add_endpoint(APIEndpoint(name="text", api_base="http://t:8080/v1", model="text-model", vision_enabled=False))
-        _vision_endpoint(router, api_base="http://v:8080/v1", model="vision-model")
+        router.add_endpoint(APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model', vision_enabled=False))
+        _vision_endpoint(router, api_base='http://v:8080/v1', model='vision-model')
 
         # msg A: image with a placeholder '[Image]' caption (should be re-captioned).
         msg_a = Message(role=USER, content=[ContentItem(image='media/a.png', caption='[Image]')])
@@ -143,7 +143,7 @@ class TestCaptionModeGating:
             mock_gcm.return_value.chat.side_effect = fake_chat
             router.caption_images([msg_a, msg_b], agent_type='generalist', instance_name='inst1')
 
-        assert calls, "auto mode must caption when the active endpoint is text-only"
+        assert calls, 'auto mode must caption when the active endpoint is text-only'
         # Placeholder was cleared and re-captioned with fresh content.
         assert getattr(msg_a.content[0], 'caption', None) == 'fresh caption'
         # Good existing caption preserved (not in the uncaptioned set → untouched).
@@ -151,21 +151,21 @@ class TestCaptionModeGating:
 
     def test_off_never_captions(self):
         """off: no caption call, messages unchanged."""
-        pool = _make_pool(mode='off', instance=_instance_with_endpoint("http://t:8080/v1", "text-model"))
+        pool = _make_pool(mode='off', instance=_instance_with_endpoint('http://t:8080/v1', 'text-model'))
         router = _make_router(pool)
         # No vision endpoint even — but the gate must short-circuit before that matters.
         messages = [_msg_with_image()]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
             result = router.caption_images(messages, agent_type='generalist', instance_name='inst1')
 
-        assert not mock_gcm.called, "off mode must never fire a caption call"
+        assert not mock_gcm.called, 'off mode must never fire a caption call'
         img_item = messages[0].content[0]
         assert getattr(img_item, 'caption', None) is None
 
     def test_invalid_mode_behaves_as_auto(self):
         """An invalid/unknown mode value normalizes to 'auto'."""
         # auto + vision active → skip (same as a valid 'auto').
-        pool = _make_pool(mode='bogus', instance=_instance_with_endpoint("http://v:8080/v1", "vision-model"))
+        pool = _make_pool(mode='bogus', instance=_instance_with_endpoint('http://v:8080/v1', 'vision-model'))
         router = _make_router(pool)
         _vision_endpoint(router)
 
@@ -195,7 +195,7 @@ class TestIsActiveEndpointVision:
 
     def test_returns_false_for_registry_mismatch(self):
         # Active endpoint points at a base/model not present in the registry.
-        inst = _instance_with_endpoint("http://unknown:9999/v1", "ghost-model")
+        inst = _instance_with_endpoint('http://unknown:9999/v1', 'ghost-model')
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
         _vision_endpoint(router)
@@ -204,27 +204,27 @@ class TestIsActiveEndpointVision:
     def test_returns_false_for_disabled_endpoint(self):
         # Inject directly (bypass add_endpoint/_save) so the disabled flag is preserved
         # deterministically for this unit test.
-        inst = _instance_with_endpoint("http://v:8080/v1", "vision-model")
+        inst = _instance_with_endpoint('http://v:8080/v1', 'vision-model')
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
-        ep = APIEndpoint(name="vision", api_base="http://v:8080/v1", model="vision-model",
+        ep = APIEndpoint(name='vision', api_base='http://v:8080/v1', model='vision-model',
                          vision_enabled=True, enabled=False)
         with router._lock:
             router.endpoints[ep.id] = ep
         assert router._is_active_endpoint_vision('inst1') is False
 
     def test_returns_true_for_matching_vision_endpoint(self):
-        inst = _instance_with_endpoint("http://v:8080/v1", "vision-model")
+        inst = _instance_with_endpoint('http://v:8080/v1', 'vision-model')
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
         _vision_endpoint(router)
         assert router._is_active_endpoint_vision('inst1') is True
 
     def test_returns_false_for_matching_text_only_endpoint(self):
-        inst = _instance_with_endpoint("http://t:8080/v1", "text-model")
+        inst = _instance_with_endpoint('http://t:8080/v1', 'text-model')
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
-        router.add_endpoint(APIEndpoint(name="text", api_base="http://t:8080/v1", model="text-model",
+        router.add_endpoint(APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model',
                                         vision_enabled=False))
         assert router._is_active_endpoint_vision('inst1') is False
 
@@ -269,8 +269,8 @@ class TestImageTokenEstimation:
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
 
         img = 'media/a.png'
-        text_only = Message(role=USER, content="hello world")
-        with_img = Message(role=USER, content=[ContentItem(text="hello world"), ContentItem(image=img)])
+        text_only = Message(role=USER, content='hello world')
+        with_img = Message(role=USER, content=[ContentItem(text='hello world'), ContentItem(image=img)])
 
         base = get_message_stats(text_only)['tokens']
         total = get_message_stats(with_img)['tokens']
@@ -286,8 +286,8 @@ class TestImageTokenEstimation:
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
 
         b64 = self.B64_IMAGE
-        text_only = Message(role=USER, content="hello world")
-        with_b64 = Message(role=USER, content=[ContentItem(text="hello world"), ContentItem(image=b64)])
+        text_only = Message(role=USER, content='hello world')
+        with_b64 = Message(role=USER, content=[ContentItem(text='hello world'), ContentItem(image=b64)])
 
         base = get_message_stats(text_only)['tokens']
         total = get_message_stats(with_b64)['tokens']
@@ -306,9 +306,9 @@ class TestImageTokenEstimation:
 
         img = 'media/a.png'
         b64 = self.B64_IMAGE
-        text_only = Message(role=USER, content="hello world")
+        text_only = Message(role=USER, content='hello world')
         mixed = Message(role=USER, content=[
-            ContentItem(text="hello world"),
+            ContentItem(text='hello world'),
             ContentItem(image=img),
             ContentItem(image=b64),
         ])
@@ -330,8 +330,8 @@ class TestImageTokenEstimation:
         from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
 
-        one_img = Message(role=USER, content=[ContentItem(text="same text"), ContentItem(image='media/a.png')])
-        two_img = Message(role=USER, content=[ContentItem(text="same text"),
+        one_img = Message(role=USER, content=[ContentItem(text='same text'), ContentItem(image='media/a.png')])
+        two_img = Message(role=USER, content=[ContentItem(text='same text'),
                                               ContentItem(image='media/a.png'),
                                               ContentItem(image='media/b.png')])
 
@@ -344,7 +344,7 @@ class TestImageTokenEstimation:
         # and this delta would be 0.
         expected_delta = IMAGE_TOKEN_ESTIMATE \
             + self._rendered_tokens(two_img) - self._rendered_tokens(one_img)
-        assert expected_delta > 0, "test setup: the two messages must render different placeholder text"
+        assert expected_delta > 0, 'test setup: the two messages must render different placeholder text'
         assert t_two - t_one == expected_delta, \
             f"same-text messages with different image counts must not collide " \
             f"(t_one={t_one}, t_two={t_two})"

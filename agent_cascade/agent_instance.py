@@ -8,28 +8,45 @@ created in the pool with agent_class="Orchestrator".
 See DESIGN_REWRITE.md §2.1 for design rationale.
 """
 
-import json                           # NEW: for serializing non-string values in cache preview
+import json  # NEW: for serializing non-string values in cache preview
 import time
 import threading
-from collections import deque         # NEW: rolling buffer for cache pool
+from collections import deque  # NEW: rolling buffer for cache pool
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Callable, List, Optional
 
 from agent_cascade.llm.schema import Message
 from agent_cascade.settings import (
-    DEFAULT_COMPRESSION_COOLDOWN_SECONDS, DEFAULT_COMPRESSION_MAX_ATTEMPTS,
-    COMPRESSION_FORCE_THRESHOLD, COMPRESSION_WARNING_THRESHOLD, COMPRESSION_TIMEOUT,
-    DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS,
+    DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
+    DEFAULT_COMPRESSION_MAX_ATTEMPTS,
+    COMPRESSION_FORCE_THRESHOLD,
+    COMPRESSION_WARNING_THRESHOLD,
+    COMPRESSION_TIMEOUT,
+    DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD,
+    DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS,
     COMPRESSION_SECURITY_CHECK_TIMEOUT,
-    AGENT_IDLE_TIMEOUT, SYSTEM_AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
-    AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
-    TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD,
-    AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
-    CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
-    CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
-    DEFAULT_LOAD_SKILL_MODE, DEFAULT_AUTO_SKILL_MODE, DEFAULT_MAX_TURNS,
-    STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
+    AGENT_IDLE_TIMEOUT,
+    SYSTEM_AGENT_IDLE_TIMEOUT,
+    AGENT_IDLE_CHECK_INTERVAL,
+    AGENT_MAX_AUTO_ROLLBACKS,
+    AGENT_MAX_NESTING_DEPTH,
+    AGENT_MAX_WORKERS,
+    TOOL_LOOP_DETECTION_ENABLED,
+    TOOL_LOOP_SIM_THRESHOLD,
+    AGENT_SLEEPING_TIMEOUT,
+    AGENT_SLEEPING_WAKEUP_INTERVAL,
+    CI_EXECUTION_TIMEOUT,
+    CI_WATCHDOG_TIMEOUT,
+    CI_STALE_CONTAINER_TTL,
+    CACHE_POOL_ENABLED,
+    CACHE_POOL_SIZE,
+    CACHE_THRESHOLD_CHARS,
+    DEFAULT_LOAD_SKILL_MODE,
+    DEFAULT_AUTO_SKILL_MODE,
+    DEFAULT_MAX_TURNS,
+    STREAM_MAX_SILENCE_SECONDS,
+    STREAM_MAX_TOTAL_SECONDS,
     DISMISS_THREAD_JOIN_TIMEOUT,
 )
 
@@ -73,6 +90,7 @@ class InvalidStateTransition(Exception):
 
 # ── Cache Pool Data Structures ────────────────────────────────────────────────
 
+
 @dataclass(slots=True)
 class CacheEntry:
     """Single entry in the argument/output cache pool.
@@ -80,12 +98,12 @@ class CacheEntry:
     Stores a tool argument dict or output string along with metadata
     for display and resolution via {USE_CACHED_ENTRY_N} syntax.
     """
-    index: int                    # Sequential N for {USE_CACHED_ENTRY_N} (monotonic, never wraps)
-    category: str                 # "arg" or "output"
-    source_tool: str              # Tool name that generated this entry
-    value: Any                    # Full cached value (for resolution via deep copy)
-    preview: str                  # Truncated display string (< 200 chars)
-    char_count: int               # Length of full string representation
+    index: int  # Sequential N for {USE_CACHED_ENTRY_N} (monotonic, never wraps)
+    category: str  # "arg" or "output"
+    source_tool: str  # Tool name that generated this entry
+    value: Any  # Full cached value (for resolution via deep copy)
+    preview: str  # Truncated display string (< 200 chars)
+    char_count: int  # Length of full string representation
 
 
 class ArgumentCachePool:
@@ -103,12 +121,11 @@ class ArgumentCachePool:
     def __init__(self, max_size: int = 50):
         self._entries: deque[CacheEntry] = deque(maxlen=max_size)
         self._lock = threading.Lock()
-        self._next_index = 1          # Monotonically increasing (never wraps/reset)
+        self._next_index = 1  # Monotonically increasing (never wraps/reset)
         self.max_size = max_size
-        self.enabled = True           # Toggle on/off
+        self.enabled = True  # Toggle on/off
 
-    def add(self, category: str, source_tool: str, value: Any,
-            threshold: int = 0) -> int:
+    def add(self, category: str, source_tool: str, value: Any, threshold: int = 0) -> int:
         """Add entry and return its index N. Returns -1 when disabled or below threshold.
 
         Args:
@@ -172,7 +189,7 @@ class ArgumentCachePool:
             head = self._next_index  # Next index to be assigned (exclusive upper bound)
 
         if not entries:
-            return "  Cache Pool: empty\n"
+            return '  Cache Pool: empty\n'
 
         lines = [f"  Cache Pool: {len(entries)}/{self.max_size} entries (enabled={self.enabled})\n"]
         # Show entries in [head - max_display : head) range, newest first
@@ -180,7 +197,7 @@ class ArgumentCachePool:
         display_entries = [e for e in entries if e.index > cutoff]
         display_entries.sort(key=lambda e: e.index, reverse=True)
         for e in display_entries:
-            marker = "ARG" if e.category == "arg" else "OUT"
+            marker = 'ARG' if e.category == 'arg' else 'OUT'
             # Escape whitespace as visible sequences (\n, \r, \t), then mid-truncate
             p = e.preview.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
             if len(p) > 120:
@@ -189,14 +206,14 @@ class ArgumentCachePool:
             # Pad source_tool to 24 chars for column alignment; wrap preview in quotes
             tool_label = f"{e.source_tool:<24}"
             lines.append(f"    [N={e.index:>3}] [{marker}] {tool_label}"
-                        f"({e.char_count} chars)  \"{p}\"")
+                         f"({e.char_count} chars)  \"{p}\"")
 
         older = [e for e in entries if e.index <= cutoff]
         if older:
-            indices = ", ".join(str(e.index) for e in older[:5])
+            indices = ', '.join(str(e.index) for e in older[:5])
             lines.append(f"    ... and {len(older)} older entries (oldest: N={indices}...)")
 
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
 
 @dataclass(slots=True)
@@ -220,18 +237,18 @@ class AgentInstance:
     """
 
     # ── Identity (no defaults) ─────────────────────────────────────────
-    instance_name: str                    # Unique identifier (e.g., "Main", "Coder1", "Researcher3")
-    agent_class: str                     # Template class name (e.g., "Orchestrator", "coder", "researcher")
+    instance_name: str  # Unique identifier (e.g., "Main", "Coder1", "Researcher3")
+    agent_class: str  # Template class name (e.g., "Orchestrator", "coder", "researcher")
 
     # ── Conversation State (no defaults) ────────────────────────────────
-    conversation: List[Message]          # Full cumulative history for this instance
+    conversation: List[Message]  # Full cumulative history for this instance
 
     # ── Metadata (no defaults) ──────────────────────────────────────────
-    created_at: float                    # time.monotonic() timestamp
-    last_activity: float                 # time.monotonic() timestamp of last message
+    created_at: float  # time.monotonic() timestamp
+    last_activity: float  # time.monotonic() timestamp of last message
 
     # ── Compression State (no defaults) ─────────────────────────────────
-    latest_marker_index: int             # Index in conversation where latest summary marker was inserted
+    latest_marker_index: int  # Index in conversation where latest summary marker was inserted
 
     # ── Execution State (with defaults) ─────────────────────────────────
     state: AgentState = field(default=AgentState.IDLE)  # Current lifecycle state (default: IDLE, not RUNNING)
@@ -243,67 +260,83 @@ class AgentInstance:
     _last_waiting_debug_log: float = field(default=0.0)  # Last time waiting debug message was logged (throttle)
 
     # ── Remaining Fields with defaults ──────────────────────────────────
-    is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)
-    max_turns: Optional[int] = None      # Per-instance turn limit (None = use default 50)
+    is_terminated: bool = False  # Set when terminate_instance() is called on this instance (Fix Bug41)
+    max_turns: Optional[int] = None  # Per-instance turn limit (None = use default 50)
     _current_turn: int = field(default=0)  # Current turn number during execution (for system_info display)
-    _turn_consumed: bool = field(default=False)  # True once a run() consumes its first turn; reset at each run() start so the first consumption counts as one user turn in telemetry
+    _turn_consumed: bool = field(
+        default=False
+    )  # True once a run() consumes its first turn; reset at each run() start so the first consumption counts as one user turn in telemetry
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
-    _child_instances: List[str] = field(default_factory=list)  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
+    _child_instances: List[str] = field(
+        default_factory=list
+    )  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)
-    _compression_lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
+    _compression_lock: threading.RLock = field(
+        default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
 
     # ── Auto-Skill Tracking ────────────────────────────────────────────────
-    _auto_skill_proposed: bool = field(default=False)          # Tracks if auto-skill prompt was injected for this instance
-    _auto_skill_proposed_count: int = field(default=0)         # Number of times auto-skill was proposed in this session
+    _auto_skill_proposed: bool = field(default=False)  # Tracks if auto-skill prompt was injected for this instance
+    _auto_skill_proposed_count: int = field(default=0)  # Number of times auto-skill was proposed in this session
 
     # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
-    _system_prompt_initialized: bool = field(default=False)  # Track if system prompt has been initialized once. Once set, session metadata and resources are frozen — they won't update even if the environment changes.
+    _system_prompt_initialized: bool = field(
+        default=False
+    )  # Track if system prompt has been initialized once. Once set, session metadata and resources are frozen — they won't update even if the environment changes.
 
     # ── Token Count Cache (Fix #2) ────────────────────────────────────────
-    _cached_token_count: int = field(default=0)                  # Cached cumulative token count for conversation
-    _last_token_count_conversation_length: int = field(default=0)  # Length of conversation when tokens were last counted
+    _cached_token_count: int = field(default=0)  # Cached cumulative token count for conversation
+    _last_token_count_conversation_length: int = field(
+        default=0)  # Length of conversation when tokens were last counted
 
     # ── Ground-Truth Token Counts from LLM API (Fix Force Compression Loop) ──
-    _last_actual_token_count: int = field(default=0)             # Actual token count from LLM API response (ground truth)
-    _allocated_max_input_tokens: int = field(default=0)          # Max input tokens allocated for the last LLM call
+    _last_actual_token_count: int = field(default=0)  # Actual token count from LLM API response (ground truth)
+    _allocated_max_input_tokens: int = field(default=0)  # Max input tokens allocated for the last LLM call
 
     # ── Compression Cooldown and Overfeeding Detection ───────────────────────
-    _last_force_compress_time: float = field(default=0.0)        # Monotonic timestamp of last forced compression attempt
-    _force_compress_count: int = field(default=0)                # Number of forced compressions in current session
-    _force_compress_fail_streak: int = field(default=0)          # Consecutive forced-compression failures (drives BUG-7 backoff gate)
-    _last_force_compress_fail_at: float = field(default=0.0)     # Monotonic timestamp of last forced-compression failure
+    _last_force_compress_time: float = field(default=0.0)  # Monotonic timestamp of last forced compression attempt
+    _force_compress_count: int = field(default=0)  # Number of forced compressions in current session
+    _force_compress_fail_streak: int = field(
+        default=0)  # Consecutive forced-compression failures (drives BUG-7 backoff gate)
+    _last_force_compress_fail_at: float = field(default=0.0)  # Monotonic timestamp of last forced-compression failure
 
     # ── Nesting Depth (Fix: prevent infinite nesting) ──────────────────────
-    _nest_depth: int = field(default=0)                           # Depth in the agent call chain (0 = root)
+    _nest_depth: int = field(default=0)  # Depth in the agent call chain (0 = root)
 
     # ── Per-instance LLM config override (Fix: avoid template mutation) ────
-    _generate_cfg_override: Optional[dict] = field(default=None)  # Merged into generate_cfg at call time without mutating template
+    _generate_cfg_override: Optional[dict] = field(
+        default=None)  # Merged into generate_cfg at call time without mutating template
 
     # ── Streaming State (Streaming UI Content Update Fix) ──────────────────
-    _streaming_responses: List[Message] = field(default_factory=list)  # Partial LLM content during streaming, updated every ~150ms
+    _streaming_responses: List[Message] = field(
+        default_factory=list)  # Partial LLM content during streaming, updated every ~150ms
 
     # ── Concurrency Slot Management (Parent Slot Acquisition Fix) ───────────
     _pool_ref: Optional['AgentPool'] = None  # Reference back to parent pool for queue cleanup on terminate()
-    _slot_release: Optional[Callable[[], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
-    _slot_key: Optional[str] = None  # Slot key of currently held SlotPool slot (e.g., '_shared_sequential_slot_' or api_base)
-    _compression_suspended_at: float = field(default=0.0)  # Monotonic timestamp of last compression-halt wait entry (0.0 = never suspended this run)
+    _slot_release: Optional[Callable[
+        [], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
+    _slot_key: Optional[
+        str] = None  # Slot key of currently held SlotPool slot (e.g., '_shared_sequential_slot_' or api_base)
+    _compression_suspended_at: float = field(
+        default=0.0)  # Monotonic timestamp of last compression-halt wait entry (0.0 = never suspended this run)
 
     # ── Persistent Working Set Caching (Fix LLM Reprocessing) ────────────────
     # These fields cache the working set to preserve LLM prefix caching across turns.
     # Simple model: if config unchanged, extend with new messages; otherwise rebuild.
-    _cached_messages: List[Message] = field(default_factory=list)      # Full conversation working set
+    _cached_messages: List[Message] = field(default_factory=list)  # Full conversation working set
 
     # ── Slot State Tracking (KV cache save/restore) ────────────────────────
-    _state_label: Optional[str] = None   # Last saved state label for this instance
-    _last_endpoint_config: Optional[dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
+    _state_label: Optional[str] = None  # Last saved state label for this instance
+    _last_endpoint_config: Optional[
+        dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
-    _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
+    _last_config_version: int = field(default=-1)  # Pool config version at last rebuild
 
     # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
     # After compression/rollback, the conversation state has concentrated patterns that can trigger
     # false-positive loop detection. This flag suppresses loop detection on the next turn only.
-    _suppress_loop_detection_next_turn: bool = field(default=False)     # Cooldown flag for loop detection after compression/rollback
-    _loop_rollback_count: int = field(default=0)                       # Track rollback count to prevent infinite recovery loops
+    _suppress_loop_detection_next_turn: bool = field(
+        default=False)  # Cooldown flag for loop detection after compression/rollback
+    _loop_rollback_count: int = field(default=0)  # Track rollback count to prevent infinite recovery loops
 
     # ── Fuzzy (Tier 2) loop-detection state machine (two-tier redesign) ───────
     # Warning-first throttling + optional escalation countdown, driven per
@@ -311,9 +344,12 @@ class AgentInstance:
     # cooldown flag above); turn source = _current_turn (set every iteration in
     # engine/core.py before _pre_llm_checks). All three are reset on the
     # post-compression cooldown path.
-    _fuzzy_warn_armed: bool = field(default=True)                      # Warning may be injected right now (throttle gate; True after re-arm, False after issuing one)
-    _fuzzy_warn_last_turn: int = field(default=-10**9)                 # _current_turn at which the last warning was issued (-10**9 = never)
-    _fuzzy_escalation_armed: bool = field(default=False)               # Escalation countdown active (True between a warning and re-arm / escalated rollback)
+    _fuzzy_warn_armed: bool = field(
+        default=True)  # Warning may be injected right now (throttle gate; True after re-arm, False after issuing one)
+    _fuzzy_warn_last_turn: int = field(
+        default=-10**9)  # _current_turn at which the last warning was issued (-10**9 = never)
+    _fuzzy_escalation_armed: bool = field(
+        default=False)  # Escalation countdown active (True between a warning and re-arm / escalated rollback)
 
     # ── Continue Button Message Merge (Fix Duplication Bug Option B) ───────────
     # When Continue is clicked, the last assistant message is popped from conversation
@@ -322,9 +358,12 @@ class AgentInstance:
     _continue_saved_msg: Optional[Message] = field(default=None)  # Temporary storage for Continue button merge
 
     # ── Auto-Continue State Tracking ──────────────────────────────────────────
-    _auto_continue_count: int = field(default=0)  # Consecutive auto-continue attempt counter (capped to prevent infinite loops)
-    _continue_extra_appended: bool = field(default=False)  # Set when continue-saved fallback append happens, for rollback accounting
-    _continue_fallback_append: bool = field(default=False)  # Set when continue fallback append occurs, for rollback accounting
+    _auto_continue_count: int = field(
+        default=0)  # Consecutive auto-continue attempt counter (capped to prevent infinite loops)
+    _continue_extra_appended: bool = field(
+        default=False)  # Set when continue-saved fallback append happens, for rollback accounting
+    _continue_fallback_append: bool = field(
+        default=False)  # Set when continue fallback append occurs, for rollback accounting
 
     # ── Reasoning-only soft-continue state (pure-resend before full retry) ────────
     # Episode budget for the soft path: total soft continues attempted since the last
@@ -699,7 +738,7 @@ class AgentInstance:
         with self._state_lock:
             self._state_label = None
             self._last_endpoint_config = None
-        
+
         # Phase 3: Cancel any pending tickets for this agent.
         # This is best-effort — the pool reference may not be available here,
         # but if it is, clean up to prevent stale queue entries.
@@ -711,8 +750,7 @@ class AgentInstance:
             # Non-critical — termination itself succeeded.
             import logging
             logging.getLogger(__name__).debug(
-                f"[TERMINATION] Failed to clean up queue entries for {self.instance_name}: {e}"
-            )
+                f"[TERMINATION] Failed to clean up queue entries for {self.instance_name}: {e}")
 
 
 @dataclass
@@ -741,75 +779,75 @@ class PoolSettings:
     sleeping_wakeup_interval: float = AGENT_SLEEPING_WAKEUP_INTERVAL  # Wakeup log interval while SLEEPING
 
     # Agent execution settings
-    max_turns: int = DEFAULT_MAX_TURNS              # Default turn limit per agent execution
-    auto_rollback_on_loop: bool = True              # Auto-rollback on detected loops (loop recovery toggle)
+    max_turns: int = DEFAULT_MAX_TURNS  # Default turn limit per agent execution
+    auto_rollback_on_loop: bool = True  # Auto-rollback on detected loops (loop recovery toggle)
 
     # Two-tier loop detection (2026-08 redesign).
     # DEPRECATED (kill switch only): legacy flag that can still DISABLE the fuzzy
     # (Tier 2) tier but cannot enable it on its own. Tier-2 enablement is
     # settings.loop_fuzzy_warning_enabled AND tool_loop_detection_enabled,
     # evaluated in _pre_llm_checks. Removed in a later cleanup release.
-    tool_loop_detection_enabled: bool = TOOL_LOOP_DETECTION_ENABLED   # Legacy kill switch for the fuzzy tier
-    tool_loop_sim_threshold: float = TOOL_LOOP_SIM_THRESHOLD          # Tier 2 (fuzzy) similarity floor for near-duplicate cores (default 0.85)
+    tool_loop_detection_enabled: bool = TOOL_LOOP_DETECTION_ENABLED  # Legacy kill switch for the fuzzy tier
+    tool_loop_sim_threshold: float = TOOL_LOOP_SIM_THRESHOLD  # Tier 2 (fuzzy) similarity floor for near-duplicate cores (default 0.85)
 
     # Inner-loop detection toggle (enabled by default for loop prevention)
-    inner_loop_detect_enabled: bool = True    # Enable in-message loop detection during streaming
-    loop_min_chars: int = 4000                # Min chars before activating heavy checks
-    loop_max_chars: int = 60960               # Hard char limit — force-trigger detection if exceeded (~12K tokens)
-    loop_score_threshold: int = 350           # DEPRECATED — scoring-based detection removed in Phase 3
+    inner_loop_detect_enabled: bool = True  # Enable in-message loop detection during streaming
+    loop_min_chars: int = 4000  # Min chars before activating heavy checks
+    loop_max_chars: int = 60960  # Hard char limit — force-trigger detection if exceeded (~12K tokens)
+    loop_score_threshold: int = 350  # DEPRECATED — scoring-based detection removed in Phase 3
 
     # Per-mode toggles for inner-loop detector (individual detection modes)
-    loop_char_run_enabled: bool = True        # Character run detection
-    loop_char_run_limit: int = 129            # Character run limit (consecutive identical chars)
-    loop_sentence_rep_enabled: bool = True    # DEPRECATED — sentence repetition detection removed in Phase 3
-    loop_ngram_rep_enabled: bool = True       # DEPRECATED — n-gram repetition detection removed in Phase 3
-    loop_block_rep_enabled: bool = True       # DEPRECATED — block repetition detection removed in Phase 3
-    loop_entropy_enabled: bool = True         # DEPRECATED: entropy detection removed in Phase 3, kept for backward compat
+    loop_char_run_enabled: bool = True  # Character run detection
+    loop_char_run_limit: int = 129  # Character run limit (consecutive identical chars)
+    loop_sentence_rep_enabled: bool = True  # DEPRECATED — sentence repetition detection removed in Phase 3
+    loop_ngram_rep_enabled: bool = True  # DEPRECATED — n-gram repetition detection removed in Phase 3
+    loop_block_rep_enabled: bool = True  # DEPRECATED — block repetition detection removed in Phase 3
+    loop_entropy_enabled: bool = True  # DEPRECATED: entropy detection removed in Phase 3, kept for backward compat
 
     # Max chars guard toggle — controls the hard character limit detection guard.
-    loop_max_chars_enabled: bool = True               # Enable max chars hard limit guard
+    loop_max_chars_enabled: bool = True  # Enable max chars hard limit guard
 
     # Two-phase semantic loop detection toggles (replaces scoring-based modes)
-    loop_two_phase_enabled: bool = True               # Enable two-phase semantic loop detection
-    loop_suspicion_threshold: int = 7                 # N-gram occurrence count to trigger suspicion [5-15]
-    loop_confirm_required: int = 5                    # Exact matches required for confirmation [2-6]
-    loop_cooldown_feeds: int = 50                     # Feeds to suppress after failed confirmation [10-200]
+    loop_two_phase_enabled: bool = True  # Enable two-phase semantic loop detection
+    loop_suspicion_threshold: int = 7  # N-gram occurrence count to trigger suspicion [5-15]
+    loop_confirm_required: int = 5  # Exact matches required for confirmation [2-6]
+    loop_cooldown_feeds: int = 50  # Feeds to suppress after failed confirmation [10-200]
 
     # Retry policy settings (Phase 6 — exposed via UI/Config with validation)
-    retry_max_attempts: int = 3              # Total outer retry attempts [1, 6]
-    endpoint_max_retries: int = 1            # Per-endpoint retries before failover [0, 2]
-    retry_base_delay: float = 1.0            # Initial backoff delay in seconds [≥0.1]
-    retry_max_delay: float = 8.0             # Maximum backoff cap in seconds [≥1.0]
+    retry_max_attempts: int = 3  # Total outer retry attempts [1, 6]
+    endpoint_max_retries: int = 1  # Per-endpoint retries before failover [0, 2]
+    retry_base_delay: float = 1.0  # Initial backoff delay in seconds [≥0.1]
+    retry_max_delay: float = 8.0  # Maximum backoff cap in seconds [≥1.0]
 
     # Code interpreter settings (Feature: CI session sharing)
-    ci_execution_timeout: int = CI_EXECUTION_TIMEOUT      # Per-call code execution timeout (seconds)
-    ci_watchdog_timeout: int = CI_WATCHDOG_TIMEOUT         # Kernel inactivity watchdog timeout (seconds)
-    ci_stale_container_ttl: int = CI_STALE_CONTAINER_TTL   # Stale container cleanup TTL (seconds)
+    ci_execution_timeout: int = CI_EXECUTION_TIMEOUT  # Per-call code execution timeout (seconds)
+    ci_watchdog_timeout: int = CI_WATCHDOG_TIMEOUT  # Kernel inactivity watchdog timeout (seconds)
+    ci_stale_container_ttl: int = CI_STALE_CONTAINER_TTL  # Stale container cleanup TTL (seconds)
 
     # Tail sync check (design doc §5.2 compliance — D1 fix)
-    tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes
+    tail_sync_check_enabled: bool = True  # Enable lightweight tail-length checks after writes
 
     # Cache pool settings (Feature: USE_CACHED_ENTRY_N)
-    cache_pool_enabled: bool = CACHE_POOL_ENABLED      # Toggle on/off (default: disabled)
-    cache_pool_size: int = CACHE_POOL_SIZE             # Rolling buffer entries per instance
+    cache_pool_enabled: bool = CACHE_POOL_ENABLED  # Toggle on/off (default: disabled)
+    cache_pool_size: int = CACHE_POOL_SIZE  # Rolling buffer entries per instance
     cache_threshold_chars: int = CACHE_THRESHOLD_CHARS  # Min chars for output & granular arg caching
 
     # Skills system settings
     default_load_skill_mode: str = DEFAULT_LOAD_SKILL_MODE  # "AUTO" (default) or "NONE" — controls whether skills auto-load on call_agent
-    auto_skill_enabled: bool = False                        # Controls whether auto-skill generation/proposal is allowed
+    auto_skill_enabled: bool = False  # Controls whether auto-skill generation/proposal is allowed
     # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == "AUTO"):
     #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior)
     #   "advanced" — invokes the Skill Advisor (Security agent) for semantic matching + validation
     #   "none"     — disables system-injected auto-matched skills (no Basic match, no Advanced
     #                advisor); Self-Augmentation and caller-explicit load_skill lists still apply
-    auto_skill_mode: str = DEFAULT_AUTO_SKILL_MODE          # "basic" (default), "advanced", or "none"
+    auto_skill_mode: str = DEFAULT_AUTO_SKILL_MODE  # "basic" (default), "advanced", or "none"
 
     # Agent budgeting settings
-    enable_agent_budgeting: bool = False                    # Enable max_turns propagation/budgeting for agent calls
+    enable_agent_budgeting: bool = False  # Enable max_turns propagation/budgeting for agent calls
 
     # Streaming timeout settings (layered defense against stuck streams)
     stream_max_silence_seconds: float = STREAM_MAX_SILENCE_SECONDS  # Max seconds between chunks before considering stream stalled
-    stream_max_total_seconds: float = STREAM_MAX_TOTAL_SECONDS      # Max total duration of a streaming response
+    stream_max_total_seconds: float = STREAM_MAX_TOTAL_SECONDS  # Max total duration of a streaming response
 
     # Dismiss thread join timeout (seconds to wait for agent thread to stop cooperatively)
     dismiss_thread_join_timeout: float = DISMISS_THREAD_JOIN_TIMEOUT
@@ -832,9 +870,8 @@ class PoolSettings:
         from dataclasses import asdict
         result = asdict(self)
         # Remove deprecated fields no longer used by InnerLoopDetector (Phase 3 cleanup)
-        for field in ('loop_score_threshold', 'loop_sentence_rep_enabled', 
-                      'loop_ngram_rep_enabled', 'loop_block_rep_enabled', 
-                      'loop_entropy_enabled', 'sleeping_timeout'):
+        for field in ('loop_score_threshold', 'loop_sentence_rep_enabled', 'loop_ngram_rep_enabled',
+                      'loop_block_rep_enabled', 'loop_entropy_enabled', 'sleeping_timeout'):
             result.pop(field, None)
         return result
 
@@ -852,5 +889,3 @@ class PoolSettings:
             return cls(**kwargs)
         except (TypeError, ValueError) as e:
             raise ValueError(f"Invalid pool_settings.json: {e}") from e
-
-

@@ -129,7 +129,7 @@ class SessionIOMixin:
                         for approval in self.operation_manager.pending.values():
                             if not approval.event.is_set():
                                 approval.approved = False
-                                approval.outcome_reason = "All instances dismissed"
+                                approval.outcome_reason = 'All instances dismissed'
                                 approval.event.set()
                         self.operation_manager.pending.clear()
                 except Exception as e:
@@ -217,8 +217,8 @@ class SessionIOMixin:
                             _stop_pool = _sched._pools.get(_held_key) if _held_key else None
                     except Exception:
                         pass
-                    if release_slot_permit(instance, inst_name, action="drop-stop",
-                                           context="on stop_session", pool=_stop_pool):
+                    if release_slot_permit(instance, inst_name, action='drop-stop',
+                                           context='on stop_session', pool=_stop_pool):
                         released_count += 1
                     elif instance.state.name not in ('IDLE', 'TERMINATED'):
                         held_count += 1
@@ -261,7 +261,7 @@ class SessionIOMixin:
                     for approval in self.operation_manager.pending.values():
                         if not approval.event.is_set():
                             approval.approved = False
-                            approval.outcome_reason = "Session stopped"
+                            approval.outcome_reason = 'Session stopped'
                             approval.event.set()
                             approval_count += 1
                     self.operation_manager.pending.clear()
@@ -271,7 +271,7 @@ class SessionIOMixin:
         # ── Instrumentation: Report stop state ──────────────────────────────────────
         with self._execution._state_lock:
             stack_len = len(self._execution.active_stack)
-        slot_info = ""
+        slot_info = ''
         if hasattr(self, 'api_router') and self.api_router:
             sched = self.api_router.scheduler
             status = sched.get_status()
@@ -349,8 +349,8 @@ class SessionIOMixin:
                 with open(potential_path, 'r', encoding='utf-8') as f:
                     for line in f:
                         item = self._parse_json_line(line.strip())
-                        messages.extend(item["messages"])
-                        metadata.update(item["metadata"])
+                        messages.extend(item['messages'])
+                        metadata.update(item['metadata'])
                 # Session boundary detection: keep only last session's messages
                 messages = self._extract_last_session(messages)
                 return messages, metadata
@@ -363,8 +363,8 @@ class SessionIOMixin:
         single_line = len(lines) == 1
         for line in lines:
             item = self._parse_json_line(line)
-            parse_messages.extend(item["messages"])
-            parse_metadata.update(item["metadata"])
+            parse_messages.extend(item['messages'])
+            parse_metadata.update(item['metadata'])
         # Session boundary detection: keep only last session's messages
         parse_messages = self._extract_last_session(parse_messages)
         if parse_messages or parse_metadata:
@@ -382,21 +382,21 @@ class SessionIOMixin:
                 # Session boundary detection: keep only last session's messages
                 return self._extract_last_session(filtered), {}
             elif isinstance(item, dict):
-                if "history" in item:
-                    history = item["history"]
+                if 'history' in item:
+                    history = item['history']
                     if isinstance(history, list):
                         filtered = [msg for msg in history if isinstance(msg, dict)]
                         meta = {}
-                        if "metadata" in item:
-                            meta.update(item["metadata"])
+                        if 'metadata' in item:
+                            meta.update(item['metadata'])
                         # Session boundary detection: keep only last session's messages
                         return self._extract_last_session(filtered), meta
                     elif isinstance(history, dict):
                         return [history], {}
                 else:
                     meta = {}
-                    if "metadata" in item:
-                        meta.update(item["metadata"])
+                    if 'metadata' in item:
+                        meta.update(item['metadata'])
                     return [item], meta
         except json.JSONDecodeError:
             pass
@@ -410,7 +410,7 @@ class SessionIOMixin:
         Handles plain dicts, metadata wrappers, and inline lists.
         Filters to only dict items (BOOL_LEAK guard).
         """
-        result = {"messages": [], "metadata": {}}
+        result = {'messages': [], 'metadata': {}}
         if not line:
             return result
         try:
@@ -419,21 +419,21 @@ class SessionIOMixin:
             return result
 
         if isinstance(item, dict):
-            if "metadata" in item:
+            if 'metadata' in item:
                 # Metadata wrapper: extract the metadata payload and any messages
-                if isinstance(item["metadata"], dict):
-                    result["metadata"].update(item["metadata"])
-                elif not item.get("event"):  # Skip event markers
-                    result["messages"].append(item)
-            elif "event" in item:
+                if isinstance(item['metadata'], dict):
+                    result['metadata'].update(item['metadata'])
+                elif not item.get('event'):  # Skip event markers
+                    result['messages'].append(item)
+            elif 'event' in item:
                 pass  # Skip COMPRESSION/ROLLBACK event markers
             else:
-                result["messages"].append(item)
+                result['messages'].append(item)
         elif isinstance(item, list):
             filtered = [msg for msg in item if isinstance(msg, dict)]
             if len(filtered) != len(item):
                 logger.debug(f"_parse_json_line: filtered {len(item)-len(filtered)} non-dict items from inline list")
-            result["messages"].extend(filtered)
+            result['messages'].extend(filtered)
 
         return result
 
@@ -461,15 +461,15 @@ class SessionIOMixin:
         # --- 1. Parse log early to determine target_instance name -------------
         log_input = log_input.strip()
         if not log_input:
-            return "Error: Empty log input."
+            return 'Error: Empty log input.'
 
         messages, metadata = self._parse_json_input(log_input)
         if not messages:
-            return "Error: No valid messages found in log input."
+            return 'Error: No valid messages found in log input.'
 
         # --- 2b. Determine instance name early for exclusion check ----------
         instance_name = self._resolve_instance_name(
-            target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession"
+            target_instance if target_instance is not None else metadata.get('instance_name') or 'RecoveredSession'
         )
 
         # --- 3. Dismiss ALL instances (sub-agents + roots) -------------------
@@ -484,14 +484,14 @@ class SessionIOMixin:
         from agent_cascade.llm.schema import CONTENT as MSG_CONTENT
         cleaned = [
             msg for msg in messages
-            if isinstance(msg, dict) and "event" not in msg
+            if isinstance(msg, dict) and 'event' not in msg
                and ROLE in msg and MSG_CONTENT in msg
         ]
         if not cleaned:
-            return "Error: No valid conversation messages found."
+            return 'Error: No valid conversation messages found.'
 
         # --- 4b. Determine agent class (instance_name already determined above) -
-        agent_class = (metadata.get("agent_class") or "Orchestrator").strip().lower()
+        agent_class = (metadata.get('agent_class') or 'Orchestrator').strip().lower()
 
         # --- 5. Build working set per design spec §5.2: [SYS][U0][COMP...][tail] -
         # Forward pass — find compression markers and extract summaries
@@ -584,7 +584,7 @@ class SessionIOMixin:
         try:
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
 
-            original_log_path = metadata.get("current_log_path")
+            original_log_path = metadata.get('current_log_path')
             if original_log_path and Path(original_log_path).exists():
                 new_log_path = AgentInstanceLogger.copy_session_file(
                     source_path=original_log_path,
@@ -597,9 +597,9 @@ class SessionIOMixin:
 
             # Update metadata for the new session context
             updated_metadata = dict(metadata) if metadata else {}
-            updated_metadata["current_log_path"] = new_log_path or original_log_path
+            updated_metadata['current_log_path'] = new_log_path or original_log_path
             if new_log_path:
-                updated_metadata["original_log_path"] = str(Path(original_log_path or "").name)
+                updated_metadata['original_log_path'] = str(Path(original_log_path or '').name)
 
             log_inst = AgentInstanceLogger(
                 agent_class=agent_class,
@@ -611,7 +611,7 @@ class SessionIOMixin:
             # Rewrite log with cleaned (full history), not working_set.
             # Design §5.2: "Agent memory and JSONL are NOT in full sync — the logs retain
             # the full conversation history at all times." Only in-memory gets [SYS][U0][COMP][tail].
-            log_inst.rewrite_log_with_history(cleaned, caller="load_session_from_log")
+            log_inst.rewrite_log_with_history(cleaned, caller='load_session_from_log')
 
             with self._logger._lock:
                 self._logger._loggers[key] = log_inst
@@ -629,7 +629,7 @@ class SessionIOMixin:
         except Exception as e:
             logger.warning(f"[SKILLS] Skill injection on load failed for {instance_name}: {e}")
 
-        log_source = "file" if Path(log_input).exists() else "JSON input"
+        log_source = 'file' if Path(log_input).exists() else 'JSON input'
         return f"Loaded {len(msg_objects)} messages for '{instance_name}' ({agent_class}) from {log_source}."
 
     @staticmethod

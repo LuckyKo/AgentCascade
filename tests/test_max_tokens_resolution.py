@@ -23,7 +23,7 @@ import pytest
 class _InstanceStub:
     """Minimal agent instance stub with explicit attributes only."""
 
-    def __init__(self, agent_class="coder", override=None, allocated=0):
+    def __init__(self, agent_class='coder', override=None, allocated=0):
         self.agent_class = agent_class
         if override is not None:
             self._generate_cfg_override = override
@@ -179,7 +179,7 @@ class TestResolveMaxTokensRouterException:
         pool = _PoolStub(static_limit=48000)
         pool.api_router = _RouterStub(80000)
         # Replace with a stub that raises
-        pool.api_router.get_effective_max_tokens = lambda cls: (_ for _ in ()).throw(RuntimeError("endpoint down"))  # noqa
+        pool.api_router.get_effective_max_tokens = lambda cls: (_ for _ in ()).throw(RuntimeError('endpoint down'))  # noqa
 
         inst = _InstanceStub()
 

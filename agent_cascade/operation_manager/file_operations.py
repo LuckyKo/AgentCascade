@@ -155,21 +155,21 @@ class FileOpsMixin:
 
         backup_base = self.base_dir / 'logs' / 'backups'
         if not backup_base.exists():
-            _safe_log(logging.DEBUG, "Backup directory does not exist: %s", backup_base)
+            _safe_log(logging.DEBUG, 'Backup directory does not exist: %s', backup_base)
             return
 
         if agent_name:
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
             agent_backup_dir = backup_base / safe_agent
             if not agent_backup_dir.exists():
-                _safe_log(logging.DEBUG, "Agent backup directory does not exist: %s", agent_backup_dir)
+                _safe_log(logging.DEBUG, 'Agent backup directory does not exist: %s', agent_backup_dir)
                 return
 
             archive_path = agent_backup_dir / 'backup_archive.zip'
             bak_files = list(agent_backup_dir.glob('*.bak'))
 
             if not bak_files:
-                _safe_log(logging.DEBUG, "No .bak files to archive for agent %s", agent_name)
+                _safe_log(logging.DEBUG, 'No .bak files to archive for agent %s', agent_name)
             else:
                 if archive_path.exists():
                     timestamp = int(time.time())
@@ -183,27 +183,27 @@ class FileOpsMixin:
                     for old_zip in old_zips:
                         zf.write(old_zip, arcname=old_zip.name)
 
-                _safe_log(logging.DEBUG, "Archived %d .bak files to %s", len(bak_files), archive_path)
+                _safe_log(logging.DEBUG, 'Archived %d .bak files to %s', len(bak_files), archive_path)
 
             for old_zip in agent_backup_dir.glob('backup_archive.*.zip'):
                 try:
                     old_zip.unlink()
                 except Exception as e:
-                    _safe_log(logging.WARNING, "Failed to delete old archive %s: %s", old_zip, e)
+                    _safe_log(logging.WARNING, 'Failed to delete old archive %s: %s', old_zip, e)
 
             if bak_files:
                 for bak_file in bak_files:
                     try:
                         bak_file.unlink()
                     except Exception as e:
-                        _safe_log(logging.WARNING, "Failed to delete backup file %s: %s", bak_file, e)
+                        _safe_log(logging.WARNING, 'Failed to delete backup file %s: %s', bak_file, e)
 
         else:
             archive_path = backup_base / 'backup_archive.zip'
             bak_files = list(backup_base.rglob('*.bak'))
 
             if not bak_files:
-                _safe_log(logging.DEBUG, "No .bak files to archive globally")
+                _safe_log(logging.DEBUG, 'No .bak files to archive globally')
             else:
                 if archive_path.exists():
                     timestamp = int(time.time())
@@ -218,20 +218,20 @@ class FileOpsMixin:
                     for old_zip in old_zips:
                         zf.write(old_zip, arcname=old_zip.name)
 
-                _safe_log(logging.DEBUG, "Archived %d .bak files globally to %s", len(bak_files), archive_path)
+                _safe_log(logging.DEBUG, 'Archived %d .bak files globally to %s', len(bak_files), archive_path)
 
             for old_zip in backup_base.glob('backup_archive.*.zip'):
                 try:
                     old_zip.unlink()
                 except Exception as e:
-                    _safe_log(logging.WARNING, "Failed to delete old archive %s: %s", old_zip, e)
+                    _safe_log(logging.WARNING, 'Failed to delete old archive %s: %s', old_zip, e)
 
             if bak_files:
                 for bak_file in bak_files:
                     try:
                         bak_file.unlink()
                     except Exception as e:
-                        _safe_log(logging.WARNING, "Failed to delete backup file %s: %s", bak_file, e)
+                        _safe_log(logging.WARNING, 'Failed to delete backup file %s: %s', bak_file, e)
 
     # ─── Static helpers for formatting and filtering ─────────────────────
 
@@ -239,7 +239,7 @@ class FileOpsMixin:
     def _format_size(size_bytes: Optional[int]) -> str:
         """Convert bytes to human-readable string (B, KB, MB, GB)."""
         if size_bytes is None:
-            return "?"
+            return '?'
         if size_bytes < 1024:
             return f"{size_bytes} B"
         units = ['KB', 'MB', 'GB', 'TB']
@@ -254,12 +254,12 @@ class FileOpsMixin:
     def _format_mtime(mtime_value) -> str:
         """Format modification time from a float timestamp like '2026-06-27 14:32'."""
         if mtime_value is None:
-            return "?"
+            return '?'
         try:
             dt = datetime.fromtimestamp(mtime_value)
             return dt.strftime('%Y-%m-%d %H:%M')
         except (OSError, ValueError):
-            return "?"
+            return '?'
 
     @staticmethod
     def _backup_path_str(backup_path) -> str:
@@ -429,14 +429,14 @@ class FileOpsMixin:
         total_files = len(sorted_files)
         total_size = sum(f['size'] for f in sorted_files if f.get('size'))
 
-        output = ""
+        output = ''
         if sorted_dirs:
-            output += "Directories:\n"
+            output += 'Directories:\n'
             for e in sorted_dirs:
-                marker = " (empty)" if e.get('is_empty') else f" (modified: {self._format_mtime(e['mtime'])})"
+                marker = ' (empty)' if e.get('is_empty') else f" (modified: {self._format_mtime(e['mtime'])})"
                 output += f"  {e['name']}/{marker}\n"
         if sorted_files:
-            output += "\nFiles:\n"
+            output += '\nFiles:\n'
             for e in sorted_files:
                 output += f"  {e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
         if overflow_count > 0:
@@ -571,7 +571,7 @@ class FileOpsMixin:
         def rel_of(dirpath: str) -> str:
             """Relative path of *dirpath* with respect to the listed root ('' for root)."""
             if dirpath == root_str:
-                return ""
+                return ''
             try:
                 return os.path.relpath(dirpath, root_str)
             except ValueError:  # cross-drive on Windows (shouldn't happen under walk)
@@ -580,7 +580,7 @@ class FileOpsMixin:
         def render_dir(dirpath: str, depth: int):
             nonlocal output, rendered_files, rendered_size
             group = entries_by_dir.get(dirpath, [])
-            prefix = "  " * depth
+            prefix = '  ' * depth
             base_rel = rel_of(dirpath)
             for e in group:
                 if e['is_dir']:
@@ -590,7 +590,7 @@ class FileOpsMixin:
                     # descend below so matching files are not lost.
                     if child in displayed_dirs:
                         is_empty = not entries_by_dir.get(child)
-                        marker = " (empty)" if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
+                        marker = ' (empty)' if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
                         rel_name = e['name'] if not base_rel else f"{base_rel}/{e['name']}"
                         output += f"{prefix}[DIR] {rel_name}/{marker}\n"
                     render_dir(child, depth + 1)
@@ -600,7 +600,7 @@ class FileOpsMixin:
                     rendered_files += 1
                     rendered_size += e['size'] or 0
 
-        output = ""
+        output = ''
         render_dir(dirpath=str(resolved), depth=0)
 
         # total_files/total_size are accumulated in render_dir (rendered_files /
@@ -618,16 +618,16 @@ class FileOpsMixin:
 
     def list_directory(
         self,
-        path: str = ".",
+        path: str = '.',
         recursive: bool = False,
         max_depth: int = -1,
         include: Optional[str] = None,
         exclude: Optional[str] = None,
-        sort_by: str = "name",
+        sort_by: str = 'name',
         show_summary: bool = False,
         max_entries: int = 500,
         char_limit: int = 3000,
-        agent_name: str = "unknown",
+        agent_name: str = 'unknown',
         min_size: Optional[str] = None,
         max_size: Optional[str] = None,
         modified_after: Optional[str] = None,
@@ -649,9 +649,9 @@ class FileOpsMixin:
             if recursive and max_depth == 0:
                 recursive = False
 
-            valid_sort_keys = {"name", "size", "date", "type"}
+            valid_sort_keys = {'name', 'size', 'date', 'type'}
             if sort_by not in valid_sort_keys:
-                sort_by = "name"
+                sort_by = 'name'
 
             # Build the filter context (single object threaded through the call chain).
             warnings = []
@@ -693,7 +693,7 @@ class FileOpsMixin:
                 is_empty = not (total_dirs or total_files)
 
             if is_empty:
-                output += "  (empty directory or all entries filtered out)"
+                output += '  (empty directory or all entries filtered out)'
 
             if show_summary:
                 output += f"\nSummary:\n"
@@ -704,7 +704,7 @@ class FileOpsMixin:
             # Surface unrecognized size/date filter values so the agent knows a
             # filter was silently ignored (prevents silent no-op confusion).
             if warnings:
-                output += "\n" + "".join(f"  {w}\n" for w in warnings)
+                output += '\n' + ''.join(f"  {w}\n" for w in warnings)
 
             result = header + output
             return truncate_with_spillover(
@@ -730,7 +730,7 @@ class FileOpsMixin:
             from agent_cascade.settings import DEFAULT_READ_FILE_MAX_LINES
             limit = DEFAULT_READ_FILE_MAX_LINES
         try:
-            resolved = self._resolve_path(path, mode="ro")
+            resolved = self._resolve_path(path, mode='ro')
             if not resolved.exists():
                 return f"File not found: {path}"
             if not resolved.is_file():
@@ -765,15 +765,15 @@ class FileOpsMixin:
             file_size_str = self._format_size(resolved.stat().st_size)
 
             # Encoding warning via replacement character count
-            content_text = "".join(lines)
+            content_text = ''.join(lines)
             repl_count = content_text.count('\ufffd')
-            encoding_note = f" [encoding: utf-8 with {repl_count} replacement(s)]" if repl_count > 0 else ""
+            encoding_note = f" [encoding: utf-8 with {repl_count} replacement(s)]" if repl_count > 0 else ''
 
             header = f"OK: Read {path} lines {start_line}-{actual_end}/{total_lines} (text, {file_size_str}){encoding_note}"
             if hit_end:
-                header += " [TRUNCATED]"
+                header += ' [TRUNCATED]'
 
-            content = "".join([f"{start_line + i}: {lines[i]}" for i in range(len(lines))])
+            content = ''.join([f"{start_line + i}: {lines[i]}" for i in range(len(lines))])
             result = f"{header}\n```\n{content}\n```"
 
             # Compact pagination footer when truncated
@@ -786,10 +786,10 @@ class FileOpsMixin:
 
     # ─── Write file ──────────────────────────────────────────────────────
 
-    def write_file(self, path: str, content: str, agent_name: str, justification: str = "") -> str:
+    def write_file(self, path: str, content: str, agent_name: str, justification: str = '') -> str:
         """Write a file — auto-approved for new files and owned files."""
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = self._resolve_path(path, mode='rw')
         except Exception as e:
             return f"ERROR: {str(e)}"
         is_new = not resolved.exists()
@@ -806,17 +806,17 @@ class FileOpsMixin:
                 return f"REJECTED: {reason}"
             justification = reason
         else:
-            justification = ""
+            justification = ''
 
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = self._resolve_path(path, mode='rw')
 
             # Backup if overwriting
-            backup_path_str = ""
+            backup_path_str = ''
             is_new = not resolved.exists()
             if not is_new:
                 safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-                backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+                backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
                 shutil.copy2(resolved, backup_path)
@@ -828,7 +828,7 @@ class FileOpsMixin:
 
             line_count = len(content.splitlines())
             file_size_str = self._format_size(len(content.encode('utf-8')))
-            verb = "Created" if is_new else "Overwrote"
+            verb = 'Created' if is_new else 'Overwrote'
             msg = f"OK: {verb} {path} ({line_count} lines, {file_size_str})"
 
             if justification:
@@ -851,7 +851,7 @@ class FileOpsMixin:
                   justification: str = '') -> str:
         """Edit a file surgically — auto-approved for agent-owned files."""
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = self._resolve_path(path, mode='rw')
         except Exception as e:
             return f"ERROR: {str(e)}"
 
@@ -972,13 +972,13 @@ class FileOpsMixin:
             # Map normalized (whitespace-stripped, non-blank) lines of the raw file
             file_line_info = []
             for idx, line in enumerate(file_lines):
-                norm = "".join(line.split())
+                norm = ''.join(line.split())
                 if norm:
                     file_line_info.append((idx, norm))
 
             old_line_info = []
             for line in old_content.splitlines(keepends=True):
-                norm = "".join(line.split())
+                norm = ''.join(line.split())
                 if norm:
                     old_line_info.append(norm)
 
@@ -1006,7 +1006,7 @@ class FileOpsMixin:
             if len(candidates) > 100:
                 return f"ERROR: Heuristic match found {len(candidates)} candidates in {path} — add more unique context to narrow down"
 
-            norm_old_joined = "".join(old_line_info)
+            norm_old_joined = ''.join(old_line_info)
             threshold = DEFAULT_HEURISTIC_MATCH_THRESHOLD
             matches = []
 
@@ -1017,7 +1017,7 @@ class FileOpsMixin:
                 for size in range(max(1, n_old_non_empty - 2), min(n_file_non_empty - start_list_idx + 1, n_old_non_empty + 3)):
                     candidate_slice = file_line_info[start_list_idx : start_list_idx + size]
                     candidate_norms = [item[1] for item in candidate_slice]
-                    norm_candidate_joined = "".join(candidate_norms)
+                    norm_candidate_joined = ''.join(candidate_norms)
 
                     ratio = difflib.SequenceMatcher(None, norm_old_joined, norm_candidate_joined).ratio()
                     if ratio > best_ratio:
@@ -1044,7 +1044,7 @@ class FileOpsMixin:
             exact_start_line = orig_start_idx + 1
             exact_end_line = orig_end_idx + 1
 
-            actual_old_content = "".join(file_lines[orig_start_idx : orig_end_idx + 1])
+            actual_old_content = ''.join(file_lines[orig_start_idx : orig_end_idx + 1])
             match_ratio = unique_match['ratio']
 
             last_matched_line = file_lines[orig_end_idx]
@@ -1055,7 +1055,7 @@ class FileOpsMixin:
                 for line in s.splitlines():
                     if line.strip():
                         return line[:len(line) - len(line.lstrip())]
-                return ""
+                return ''
 
             def get_indent_width(indent_str: str) -> int:
                 """Calculate indent width in spaces (tab=4)."""
@@ -1097,7 +1097,7 @@ class FileOpsMixin:
                 while prev != result:
                     prev = result
                     result = re.sub(r'assign\s*[a-zA-Z_]\w*', 'assign', result)
-                return "".join(result.split())
+                return ''.join(result.split())
 
             def normalize_line_for_alignment(line: str) -> str:
                 if _is_python_file and match_mode == 'heuristic':
@@ -1145,9 +1145,9 @@ class FileOpsMixin:
             file_block_lines = actual_old_content.splitlines(keepends=True)
             file_indent_by_line = {}
             for idx, fl in enumerate(file_block_lines):
-                norm = "".join(fl.split())
+                norm = ''.join(fl.split())
                 if norm:
-                    leading_ws = fl[:len(fl) - len(fl.lstrip())] if fl.strip() else ""
+                    leading_ws = fl[:len(fl) - len(fl.lstrip())] if fl.strip() else ''
                     file_indent_by_line[idx] = leading_ws
 
             def find_best_indent_for_unmapped_line(
@@ -1165,7 +1165,7 @@ class FileOpsMixin:
                         f_idx = new_to_file_map[check_idx]
                         if f_idx in file_indent_by_line:
                             return file_indent_by_line[f_idx]
-                return file_indent if file_indent else ""
+                return file_indent if file_indent else ''
 
             # Phase 2 — Preservation: apply file indents to new_content lines
             new_content_lines = new_content.splitlines(keepends=True)
@@ -1212,7 +1212,7 @@ class FileOpsMixin:
                 else:
                     adjusted_lines.append(line)
 
-            new_content = "".join(adjusted_lines)
+            new_content = ''.join(adjusted_lines)
 
             # Phase 3 — Validation: increment-based indentation anomaly detection
             from collections import Counter
@@ -1244,7 +1244,7 @@ class FileOpsMixin:
                         curr_line_num, curr_w = indent_widths[j]
                         diff = abs(curr_w - prev_w)
                         if diff > threshold_val:
-                            direction = "increased" if curr_w > prev_w else "decreased"
+                            direction = 'increased' if curr_w > prev_w else 'decreased'
                             warnings.append(
                                 f"Indentation anomaly at line {curr_line_num} in {file_path}: "
                                 f"indent {direction} from {prev_w} to {curr_w} "
@@ -1329,12 +1329,12 @@ class FileOpsMixin:
                 return f"REJECTED: {reason}"
             justification = reason
         else:
-            justification = ""
+            justification = ''
 
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = self._resolve_path(path, mode='rw')
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-            backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+            backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
             shutil.copy2(resolved, backup_path)
@@ -1387,7 +1387,7 @@ class FileOpsMixin:
 
             elif match_mode in ('heuristic', 'heuristic_agnostic'):
                 # Discriminated labels for heuristic vs heuristic_agnostic
-                mode_label = "heuristic" if match_mode == 'heuristic' else "heur_ag"
+                mode_label = 'heuristic' if match_mode == 'heuristic' else 'heur_ag'
                 resolved_path_str = resolved.as_posix()
 
                 res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_label} {match_ratio:.0%}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
@@ -1433,10 +1433,10 @@ class FileOpsMixin:
 
     # ─── Re-indent ────────────────────────────────────────────────────────
 
-    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "min", justification: str = "") -> str:
+    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = 'min', justification: str = '') -> str:
         """Re-indents a block of code in a file."""
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = self._resolve_path(path, mode='rw')
         except Exception as e:
             return f"ERROR: {str(e)}"
 
@@ -1574,7 +1574,7 @@ class FileOpsMixin:
                 for i, info in enumerate(ws_info_list):
                     if info is None:
                         original_line = block_lines[i]
-                        suffix = ""
+                        suffix = ''
                         if original_line.endswith('\r\n'):
                             suffix = '\r\n'
                         elif original_line.endswith('\n'):
@@ -1644,10 +1644,10 @@ class FileOpsMixin:
                 return f"REJECTED: {reason}"
             justification = reason
         else:
-            justification = ""
+            justification = ''
 
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = self._resolve_path(path, mode='rw')
 
             # Re-read file after approval to avoid stale-content race condition
             # (enhances safety vs pre-approval read — another agent/tool may have modified the file while waiting for approval)
@@ -1658,7 +1658,7 @@ class FileOpsMixin:
             file_lines = file_content.splitlines(keepends=True)
 
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-            backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+            backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
             shutil.copy2(resolved, backup_path)
@@ -1666,7 +1666,7 @@ class FileOpsMixin:
 
             new_file_lines = list(file_lines)
             new_file_lines[start:end] = new_block_lines
-            new_content_val = "".join(new_file_lines)
+            new_content_val = ''.join(new_file_lines)
 
             # Generate unified diff before writing (both old and new content available)
             import difflib
@@ -1807,7 +1807,7 @@ class FileOpsMixin:
         max_size: Optional[str] = None,
         modified_after: Optional[str] = None,
         modified_before: Optional[str] = None,
-        justification: str = "",
+        justification: str = '',
     ) -> str:
         """Delete one or more files/directories.
 
@@ -1852,7 +1852,7 @@ class FileOpsMixin:
 
         for p in explicit:
             try:
-                resolved = self._resolve_path(p, mode="rw")
+                resolved = self._resolve_path(p, mode='rw')
             except Exception as e:
                 errors.append(f"{p}: {e}")
                 continue
@@ -1870,7 +1870,7 @@ class FileOpsMixin:
 
         # ── B6: empty resolved set → return BEFORE any approval prompt. ──────────
         if not targets:
-            detail = "; ".join(errors) if errors else "no entries matched the given path/filter"
+            detail = '; '.join(errors) if errors else 'no entries matched the given path/filter'
             return f"No files matched (0 of {len(explicit)} requested). {detail}"
 
         # ── B3: approval model for bulk deletes. ────────────────────────────────
@@ -1931,13 +1931,13 @@ class FileOpsMixin:
         if ok_count == total and not errors and justification:
             lines.append(f"Security Justification: {justification}")
         if failures:
-            lines.append("Failures:")
+            lines.append('Failures:')
             lines.extend(f"  ✗ {f}" for f in failures)
         # B6a errors (unresolvable / not-found explicit entries) are surfaced here.
         if errors:
-            lines.append("Skipped (unresolved):")
+            lines.append('Skipped (unresolved):')
             lines.extend(f"  - {e}" for e in errors)
-        return "\n".join(lines)
+        return '\n'.join(lines)
 
     # ─── delete_file helpers (B2/B3 + A2/A3 core) ──────────────────────────────
 
@@ -2059,18 +2059,18 @@ class FileOpsMixin:
                 pass
 
         sample = targets[:5]
-        sample_str = "\n".join(f"  - {t}" for t in sample)
-        more = f"\n  … and {n - len(sample)} more" if n > len(sample) else ""
+        sample_str = '\n'.join(f"  - {t}" for t in sample)
+        more = f"\n  … and {n - len(sample)} more" if n > len(sample) else ''
 
-        size_str = self._format_size(total_size) + ("+" if capped else "")
+        size_str = self._format_size(total_size) + ('+' if capped else '')
         desc = (f"Delete {n} entr{'y' if n == 1 else 'ies'} "
                 f"({n_files} file(s), {n_dirs} dir(s), total {size_str}):")
-        desc += "\n" + sample_str + more
+        desc += '\n' + sample_str + more
         if non_owned:
             desc += f"\n\n{len(non_owned)} of these are not owned by you and require approval."
         return desc
 
-    def _delete_one(self, resolved: Path, agent_name: str, justification: str = "") -> str:
+    def _delete_one(self, resolved: Path, agent_name: str, justification: str = '') -> str:
         """Hardened single-target delete (A2 backup+verify, A3 ownership cleanup).
 
         Returns the backup path string on success. Raises on failure so the bulk
@@ -2079,7 +2079,7 @@ class FileOpsMixin:
         is_directory = resolved.is_dir()
 
         safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-        backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+        backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = int(time.time())
@@ -2114,11 +2114,11 @@ class FileOpsMixin:
             try:
                 if is_directory:
                     if not self._verify_dir_backup(resolved, backup_path):
-                        raise RuntimeError("backup integrity check failed (file count/size mismatch)")
+                        raise RuntimeError('backup integrity check failed (file count/size mismatch)')
                     shutil.rmtree(resolved)
                 else:
                     if not self._verify_file_backup(resolved, backup_path):
-                        raise RuntimeError("backup integrity check failed (missing or size mismatch)")
+                        raise RuntimeError('backup integrity check failed (missing or size mismatch)')
                     resolved.unlink()
             except Exception as del_err:
                 # Delete/integrity step failed — clean up partial backup.
@@ -2184,11 +2184,11 @@ class FileOpsMixin:
 
     # ─── Copy file ────────────────────────────────────────────────────────
 
-    def copy_file(self, source: str, destination: str, agent_name: str, justification: str = "") -> str:
+    def copy_file(self, source: str, destination: str, agent_name: str, justification: str = '') -> str:
         """Copy a file — auto-approved if destination is new or agent-owned."""
         try:
-            src_path = self._resolve_path(source, mode="ro")
-            dest_path_check = self._resolve_path(destination, mode="rw")
+            src_path = self._resolve_path(source, mode='ro')
+            dest_path_check = self._resolve_path(destination, mode='rw')
         except Exception as e:
             return f"ERROR: {str(e)}"
         if not src_path.exists():
@@ -2206,18 +2206,18 @@ class FileOpsMixin:
                 return f"REJECTED: {reason}"
             justification = reason
         else:
-            justification = ""
+            justification = ''
 
         try:
-            dest_path = self._resolve_path(destination, mode="rw")
+            dest_path = self._resolve_path(destination, mode='rw')
 
             scope_info = self._compute_scope_info(src_path)
 
-            backup_path_str = ""
+            backup_path_str = ''
             was_overwrite = False
             if dest_path.exists():
                 safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-                backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+                backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
                 backup_dir.mkdir(parents=True, exist_ok=True)
 
                 timestamp = int(time.time())
@@ -2264,11 +2264,11 @@ class FileOpsMixin:
 
     # ─── Move file ────────────────────────────────────────────────────────
 
-    def move_file(self, source: str, destination: str, agent_name: str, justification: str = "") -> str:
+    def move_file(self, source: str, destination: str, agent_name: str, justification: str = '') -> str:
         """Move a file — auto-approved if source is agent-owned."""
         try:
-            src_path = self._resolve_path(source, mode="rw")
-            dest_path_check = self._resolve_path(destination, mode="rw")
+            src_path = self._resolve_path(source, mode='rw')
+            dest_path_check = self._resolve_path(destination, mode='rw')
         except Exception as e:
             return f"ERROR: {str(e)}"
         if not src_path.exists():
@@ -2286,15 +2286,15 @@ class FileOpsMixin:
                 return f"REJECTED: {reason}"
             justification = reason
         else:
-            justification = ""
+            justification = ''
 
         try:
-            dest_path = self._resolve_path(destination, mode="rw")
+            dest_path = self._resolve_path(destination, mode='rw')
 
-            backup_path_str = ""
+            backup_path_str = ''
             if dest_path.exists():
                 safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-                backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+                backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
                 backup_dir.mkdir(parents=True, exist_ok=True)
 
                 timestamp = int(time.time())

@@ -282,7 +282,7 @@ def compress_context(
     agent_pool,
     target_agent_name: str,        # Which agent's context to compress
     fraction: float = COMPRESSION_DEFAULT_FRACTION,  # Fraction of active history to discard
-    mode: str = "auto",            # "auto" (LLM generates) or "manual" (summary provided)
+    mode: str = 'auto',            # "auto" (LLM generates) or "manual" (summary provided)
     summary_text: str | None = None,  # Required when mode == "manual"
     force: bool = False,           # Bypass validation guards (forced compression at >95%)
     dry_run: bool = False,         # If True, generate summary but don't mutate pool
@@ -320,19 +320,19 @@ def compress_context(
             marker_message=None,
             messages_discarded=0,
             tail_count=0,
-            error="fraction must be between 0.0 and 1.0",
+            error='fraction must be between 0.0 and 1.0',
             mode=mode,
         )
 
     # ── 0. Validate manual mode has summary_text or precomputed_summary (before any other checks) ──
-    if mode == "manual" and not summary_text and not precomputed_summary:
+    if mode == 'manual' and not summary_text and not precomputed_summary:
         return CompressResult(
             success=False,
             summary_text=None,
             marker_message=None,
             messages_discarded=0,
             tail_count=0,
-            error="Manual mode requires summary_text or precomputed_summary",
+            error='Manual mode requires summary_text or precomputed_summary',
             mode=mode,
         )
 
@@ -352,7 +352,7 @@ def compress_context(
             marker_message=None,
             messages_discarded=0,
             tail_count=0,
-            error="No active messages to compress",
+            error='No active messages to compress',
             mode=mode,
         )
 
@@ -382,7 +382,7 @@ def compress_context(
             marker_message=None,
             messages_discarded=0,
             tail_count=len(active_set),
-            error="Compression not possible at this ratio — tool-call chains extend past the keep zone",
+            error='Compression not possible at this ratio — tool-call chains extend past the keep zone',
             mode=mode,
         )
 
@@ -432,7 +432,7 @@ def compress_context(
                 marker_message=None,
                 messages_discarded=0,
                 tail_count=len(active_set),
-                error="Compression not possible at this ratio — tool-call chains extend past the keep zone",
+                error='Compression not possible at this ratio — tool-call chains extend past the keep zone',
                 mode=mode,
             )
         target_discard_count = refined
@@ -462,7 +462,7 @@ def compress_context(
                 marker_message=None,
                 messages_discarded=0,
                 tail_count=len(active_set),
-                error="Not enough messages to compress; deferring until more accumulate",
+                error='Not enough messages to compress; deferring until more accumulate',
                 mode=mode,
             )
 
@@ -474,7 +474,7 @@ def compress_context(
             marker_message=None,
             messages_discarded=0,
             tail_count=len(active_set),
-            error="Force mode but compute_discard_count returned 0 — unexpected pool state",
+            error='Force mode but compute_discard_count returned 0 — unexpected pool state',
             mode=mode,
         )
 
@@ -522,7 +522,7 @@ def compress_context(
 
             # Actual COMPRESSION_PROMPT template size (with {history_text} replaced by empty string)
             # since the history_text portion maps to target_messages which we already counted.
-            prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text="", end_instruction=""))
+            prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text='', end_instruction=''))
             prompt_template_tokens = prompt_template_chars // CHARS_PER_TOKEN_ESTIMATE
 
             prompt_overhead_tokens = sys_prompt_tokens + prompt_template_tokens
@@ -572,11 +572,11 @@ def compress_context(
     # The caption is parsed out of the compressor output (never placed in the marker
     # body) and stored in log metadata for UI display. Manual/precomputed paths have
     # no caption — they produce a plain summary with an empty caption.
-    generated_caption = ""
+    generated_caption = ''
     if precomputed_summary:
         # Use a pre-generated summary (e.g., from /compress command after user approval)
         generated_summary = precomputed_summary.strip()
-    elif mode == "manual":
+    elif mode == 'manual':
         generated_summary = summary_text.strip()
     else:
         try:
@@ -587,7 +587,7 @@ def compress_context(
                     _cap_inst = agent_pool.get_instance(target_agent_name)
                     _cap_class = getattr(_cap_inst, 'agent_class', None) or target_agent_name
                     _cap_logger = agent_pool.get_logger(target_agent_name, _cap_class)
-                    _want_caption = not _cap_logger.data["metadata"].get("caption")
+                    _want_caption = not _cap_logger.data['metadata'].get('caption')
                 except Exception:
                     pass  # Non-fatal: default to no caption if logger unavailable
 
@@ -611,7 +611,7 @@ def compress_context(
             marker_message=None,
             messages_discarded=0,
             tail_count=0,
-            error="Failed to obtain a valid summary",
+            error='Failed to obtain a valid summary',
             mode=mode,
         )
 
@@ -771,7 +771,7 @@ def compress_context(
             marker_message=None,
             messages_discarded=0,
             tail_count=0,
-            error="Concurrent modification detected",
+            error='Concurrent modification detected',
             mode=mode,
         )
 
@@ -795,7 +795,7 @@ def compress_context(
             content = extract_text_from_message(wrapped, add_upload_info=True)
             discarded_tokens += qwen_count(content)
         # Count tokens in the marker/summary message that replaces them
-        summary_content = extract_text_from_message(marker_message, add_upload_info=True) if marker_message else ""
+        summary_content = extract_text_from_message(marker_message, add_upload_info=True) if marker_message else ''
         summary_tokens = qwen_count(summary_content) if summary_content else 0
         tokens_after = max(total_tokens - discarded_tokens + summary_tokens, 0)
     except Exception:

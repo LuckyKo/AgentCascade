@@ -37,16 +37,16 @@ def test_no_undefined_names():
 
         lines = [
             f"FAIL: {len(violations)} undefined name(s) across {len(by_file)} file(s):",
-            "",
+            '',
         ]
         for fname in sorted(by_file):
             lines.append(f"  {fname}")
             for v in by_file[fname]:
                 lines.append(f"    line {v.line}:{v.col}  undefined name {v.name!r}")
-            lines.append("")
+            lines.append('')
         lines.append(
-            "Fix: ensure every name used in executable code or non-string annotations is "
-            "defined, imported, or builtin in the current scope chain. "
-            "String annotations (forward refs) are exempt."
+            'Fix: ensure every name used in executable code or non-string annotations is '
+            'defined, imported, or builtin in the current scope chain. '
+            'String annotations (forward refs) are exempt.'
         )
-        assert False, "\n".join(lines)
+        assert False, '\n'.join(lines)

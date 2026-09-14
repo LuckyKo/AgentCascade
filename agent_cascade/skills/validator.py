@@ -25,15 +25,15 @@ _SNAKE_CASE_RE = re.compile(r'^[a-z][a-z0-9_-]*$')
 
 # Prompt injection patterns (borrowed from Hermes)
 _INJECTION_PATTERNS: list = [
-    "ignore previous instructions",
-    "ignore all previous",
-    "you are now",
-    "disregard your",
-    "forget your instructions",
-    "new instructions:",
-    "system prompt:",
-    "<system>",
-    "]]>",
+    'ignore previous instructions',
+    'ignore all previous',
+    'you are now',
+    'disregard your',
+    'forget your instructions',
+    'new instructions:',
+    'system prompt:',
+    '<system>',
+    ']]>',
 ]
 
 
@@ -41,7 +41,7 @@ def validate_skill(
     skill_content: str,
     skill_name: str,
     existing_names: set,
-    task_text: str = "",
+    task_text: str = '',
     check_injection: bool = True,
 ) -> Tuple[bool, List[str]]:
     """Validate a proposed skill. Returns (passed, error_messages).
@@ -68,7 +68,7 @@ def validate_skill(
     # Parse frontmatter
     frontmatter, body = parse_frontmatter(skill_content)
     if not frontmatter:
-        errors.append("No valid YAML frontmatter found in skill content")
+        errors.append('No valid YAML frontmatter found in skill content')
         return False, errors
 
     # Name check
@@ -101,7 +101,7 @@ def validate_skill(
 
     # Body check
     if not body:
-        errors.append("Skill body is empty")
+        errors.append('Skill body is empty')
     elif len(body) < MIN_SKILL_BODY_LENGTH:
         errors.append(f"Skill body too short ({len(body)} chars, minimum {MIN_SKILL_BODY_LENGTH})")
 
@@ -139,5 +139,5 @@ def validate_skill(
         return False, errors + warnings
 
     logger.info("[SKILLS] Validation passed for skill '%s'%s",
-                skill_name, f" (warnings: {', '.join(warnings)})" if warnings else "")
+                skill_name, f" (warnings: {', '.join(warnings)})" if warnings else '')
     return True, warnings

@@ -28,20 +28,20 @@ async def test_ws_send_queue_high_watermark_warning(caplog):
     with caplog.at_level(logging.WARNING):
         # 8th item reaches 8/10 (80% >= 75%)
         await _put_stream_update(queue, {'tick': 8})
-        assert any("WS send queue high-watermark reached" in rec.message for rec in caplog.records)
+        assert any('WS send queue high-watermark reached' in rec.message for rec in caplog.records)
 
 
 def test_slot_pool_contention_warning(caplog):
-    pool = SlotPool("test_provider", capacity=1)
+    pool = SlotPool('test_provider', capacity=1)
     # First acquire succeeds immediately without warning
-    release1 = pool.acquire("Agent1", "Worker")
+    release1 = pool.acquire('Agent1', 'Worker')
 
     with caplog.at_level(logging.WARNING):
         # Second acquire cannot succeed immediately (capacity=1) -> enqueued as waiter
         # Spawn thread for second acquire so it blocks
         release_holder = []
         def acquire_second():
-            release_holder.append(pool.acquire("Agent2", "Worker", timeout=2.0))
+            release_holder.append(pool.acquire('Agent2', 'Worker', timeout=2.0))
 
         t = threading.Thread(target=acquire_second)
         t.start()
@@ -61,11 +61,11 @@ def test_message_queue_depth_warning(caplog):
 
     with caplog.at_level(logging.WARNING):
         for i in range(4):
-            mock_pool.enqueue_message("Maine", f"msg_{i}")
-        assert not any("message queue depth high" in rec.message for rec in caplog.records)
+            mock_pool.enqueue_message('Maine', f"msg_{i}")
+        assert not any('message queue depth high' in rec.message for rec in caplog.records)
 
         # 5th message triggers warning
-        mock_pool.enqueue_message("Maine", "msg_4")
+        mock_pool.enqueue_message('Maine', 'msg_4')
         assert any("Instance 'Maine' message queue depth high: 5 messages pending execution" in rec.message for rec in caplog.records)
 
 
@@ -90,7 +90,7 @@ async def test_ws_send_queue_full_purge_and_resync(caplog):
         await _put_stream_update(queue, {'type': 'stream_update', 'instance': 'Maine', 'tick': 5})
 
         # Check that log warned about purge and resync
-        assert any("purged 4 stale stream_update delta(s)" in rec.message for rec in caplog.records)
+        assert any('purged 4 stale stream_update delta(s)' in rec.message for rec in caplog.records)
 
         # Done event was preserved
         items = []

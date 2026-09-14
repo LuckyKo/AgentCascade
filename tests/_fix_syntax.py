@@ -44,4 +44,4 @@ lines[2948] = '        assert sys_count == 1, f"Expected exactly 1 system messag
 with open(path, 'w') as f:
     f.writelines(lines)
 
-print("Fixes applied")
+print('Fixes applied')

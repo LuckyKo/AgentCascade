@@ -13,14 +13,14 @@ from typing import Dict, List, Any, Tuple
 
 class OperationType(Enum):
     """Types of operations that can require user approval."""
-    FILE_WRITE = "file_write"
-    FILE_EDIT = "file_edit"
-    FILE_DELETE = "file_delete"
-    FILE_COPY = "file_copy"
-    FILE_REPLACE = "file_replace"
-    CODE_EXECUTE = "code_execute"
-    EXTERNAL_TOOL = "external_tool"
-    CUSTOM = "custom"
+    FILE_WRITE = 'file_write'
+    FILE_EDIT = 'file_edit'
+    FILE_DELETE = 'file_delete'
+    FILE_COPY = 'file_copy'
+    FILE_REPLACE = 'file_replace'
+    CODE_EXECUTE = 'code_execute'
+    EXTERNAL_TOOL = 'external_tool'
+    CUSTOM = 'custom'
 
 
 @dataclass
@@ -32,12 +32,12 @@ class PendingApproval:
     tool_args: Dict[str, Any]
     description: str
     # Extracted justification from tool_args (e.g., shell_cmd passes 'justification')
-    justification: str = ""
+    justification: str = ''
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     # Threading primitives for blocking
     event: threading.Event = field(default_factory=threading.Event)
     approved: bool = False
-    outcome_reason: str = ""
+    outcome_reason: str = ''
 
 
 # ─── Constants (imported by api_server.py — must remain importable from package level) ──
@@ -71,11 +71,11 @@ class ApprovalMixin:
           - The agent is creating a brand new file (doesn't exist yet).
         """
         if creating_new:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = self._resolve_path(path, mode='rw')
             if not resolved.exists():
                 return True  # New file — no existing work affected
 
-        resolved = self._resolve_path(path, mode="rw")
+        resolved = self._resolve_path(path, mode='rw')
         owner = self._get_owner(resolved)
         return owner == agent_name
 
@@ -86,7 +86,7 @@ class ApprovalMixin:
         agent_name: str,
         tool_name: str,
         tool_args: Dict[str, Any],
-        description: str = "",
+        description: str = '',
     ) -> Tuple[bool, str]:
         """
         Block the calling thread until the user approves or rejects.
@@ -98,9 +98,9 @@ class ApprovalMixin:
         request_id = f"op_{uuid.uuid4().hex[:8]}"
 
         # Extract justification from tool_args if present (e.g., shell_cmd passes 'justification')
-        just = ""
+        just = ''
         if isinstance(tool_args, dict):
-            just = tool_args.get("justification", "") or ""
+            just = tool_args.get('justification', '') or ''
 
         # str() guards against non-string values (e.g., integers from malformed tool_args)
         approval = PendingApproval(
@@ -141,17 +141,17 @@ class ApprovalMixin:
             # Check if we exited due to stop (FIX 5) or timeout
             # REVIEWER FIX: Use .stopped directly instead of getattr
             if self.agent_pool and self.agent_pool.stopped:
-                return False, "Session stopped by user"
+                return False, 'Session stopped by user'
             else:
                 # Timed out - user is AFK
-                return False, "User is AFK, try another method if possible"
+                return False, 'User is AFK, try another method if possible'
 
         if approval.approved:
             return True, approval.outcome_reason
         else:
-            return False, approval.outcome_reason or "Rejected by user."
+            return False, approval.outcome_reason or 'Rejected by user.'
 
-    def user_approve(self, request_id: str, reason: str = "") -> str:
+    def user_approve(self, request_id: str, reason: str = '') -> str:
         """Called by WebUI when user clicks Approve."""
         with self._lock:
             approval = self.pending.pop(request_id, None)
@@ -164,7 +164,7 @@ class ApprovalMixin:
         approval.event.set()
         return f"Approved: {request_id}"
 
-    def user_reject(self, request_id: str, reason: str = "") -> str:
+    def user_reject(self, request_id: str, reason: str = '') -> str:
         """Called by WebUI when user clicks Reject."""
         with self._lock:
             approval = self.pending.pop(request_id, None)
@@ -173,7 +173,7 @@ class ApprovalMixin:
             return f"ERROR: Request '{request_id}' not found or already resolved."
 
         approval.approved = False
-        approval.outcome_reason = reason or "Rejected by user."
+        approval.outcome_reason = reason or 'Rejected by user.'
         approval.event.set()
         return f"Rejected: {request_id}"
 

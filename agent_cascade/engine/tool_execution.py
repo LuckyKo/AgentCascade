@@ -100,7 +100,7 @@ class ToolExecMixin:
                 break
             elif self._is_suspended_by_compression(inst_name):
                 # Compression-halt is a suspension, not termination — wait, then retry this tool.
-                logger.debug("tool exec suspended by compression - %s", inst_name)
+                logger.debug('tool exec suspended by compression - %s', inst_name)
                 if not self._wait_for_compression_to_clear(inst_name):
                     break  # Terminal stop during wait
                 continue  # Resumed, re-enter tool dispatch loop with current tool
@@ -123,11 +123,11 @@ class ToolExecMixin:
                 # Determine deny reason with same logic as legacy
                 # implementation
                 if tool_name in _primary_disabled_tools and tool_name not in _primary_function_map:
-                    deny_reason = "disabled and does not exist"
+                    deny_reason = 'disabled and does not exist'
                 elif tool_name in _primary_disabled_tools:
-                    deny_reason = "disabled"
+                    deny_reason = 'disabled'
                 else:
-                    deny_reason = "does not exist"
+                    deny_reason = 'does not exist'
 
                 logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
                 tool_result = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
@@ -179,7 +179,7 @@ class ToolExecMixin:
             # Track tool success/failure — needed for function_id matching and
             # frontend isToolFailure()
             _tool_success = True
-            _tool_error = ""
+            _tool_error = ''
 
             # Telemetry: record tool call start (non-blocking)
             if (tel := self._telemetry()) is not None:
@@ -314,7 +314,7 @@ class ToolExecMixin:
                             )
                             # Ensure we have something non-None to return
                             if not isinstance(tool_result, str):
-                                tool_result = str(tool_result) if tool_result is not None else ""
+                                tool_result = str(tool_result) if tool_result is not None else ''
 
                 # Clear thread-local instance name after draining to prevent
                 # stale references across concurrent calls
@@ -411,11 +411,11 @@ class ToolExecMixin:
                         # Determine deny reason with same logic as legacy
                         # implementation
                         if tool_name in _orphan_disabled_tools and tool_name not in _orphan_function_map:
-                            deny_reason = "disabled and does not exist"
+                            deny_reason = 'disabled and does not exist'
                         elif tool_name in _orphan_disabled_tools:
-                            deny_reason = "disabled"
+                            deny_reason = 'disabled'
                         else:
-                            deny_reason = "does not exist"
+                            deny_reason = 'does not exist'
 
                         # Log the denial (matching primary loop pattern)
                         logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
@@ -443,7 +443,7 @@ class ToolExecMixin:
                                 success=False,
                                 result_chars=len(fn_content),
                                 truncated=False,
-                                error=f"Tool {deny_reason}" if deny_reason else "Skipped (halt/stop)",
+                                error=f"Tool {deny_reason}" if deny_reason else 'Skipped (halt/stop)',
                                 is_call_agent=(tool_name == 'call_agent'),
                             )
                         except Exception:
@@ -471,7 +471,7 @@ class ToolExecMixin:
                     logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
 
         if used_any_tool:
-            self._proactive_compression_check(instance, messages, llm_messages, response, check_label="post-tool")
+            self._proactive_compression_check(instance, messages, llm_messages, response, check_label='post-tool')
 
         return used_any_tool
 

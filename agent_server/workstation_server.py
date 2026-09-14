@@ -124,7 +124,7 @@ def add_file(file, chosen_plug):
     f_type = get_file_type(file)
     if f_type not in PARSER_SUPPORTED_FILE_TYPES:
         display_path = (
-            f'Upload failed: only adding {", ".join(PARSER_SUPPORTED_FILE_TYPES)} as references is supported!')
+            f'Upload failed: only adding {', '.join(PARSER_SUPPORTED_FILE_TYPES)} as references is supported!')
     else:
         # cache file
         try:

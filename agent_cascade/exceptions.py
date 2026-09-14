@@ -13,7 +13,7 @@ class CharacterRunDetected(Exception):
         detection_reason: The raw reason string from the inner loop detector
             (e.g. "character run ' ' (142)", "repeated sentence", etc.).
     """
-    def __init__(self, message: str, detection_reason: str = "unknown"):
+    def __init__(self, message: str, detection_reason: str = 'unknown'):
         super().__init__(message)
         self.detection_reason = detection_reason
 

@@ -187,7 +187,7 @@ class TestPreValidateEndpointChain:
             with patch.object(router_mod._get_probe_session(), 'get') as mock_get:
                 assert router.pre_validate_endpoint_chain([cfg], instance_name='inst1') == [cfg]
             assert mock_get.call_count == 0, \
-                "a live connection must NOT be re-probed (the core flood fix)"
+                'a live connection must NOT be re-probed (the core flood fix)'
         finally:
             with router._lock:
                 del router._instance_committed_endpoint['inst1']
@@ -197,7 +197,7 @@ class TestPreValidateEndpointChain:
         cfg = _cfg()
         with patch.object(router_mod._get_probe_session(), 'get', return_value=_ok_response()) as mock_get:
             assert router.pre_validate_endpoint_chain([cfg], instance_name='inst1') == [cfg]
-        assert mock_get.call_count == 1, "no live marker → probe once"
+        assert mock_get.call_count == 1, 'no live marker → probe once'
 
     def test_disabled_via_settings(self, router):
         """SANITY_PROBE_ENABLED=False → chain returned as-is, zero probes."""
@@ -223,7 +223,7 @@ class TestPreValidateEndpointChain:
                 result = router.pre_validate_endpoint_chain([bad, good])
             # Blacklisted endpoint skipped (no probe), healthy one probed and kept.
             assert result == [good]
-            assert mock_get.call_count == 1, "blacklisted endpoint must not be probed"
+            assert mock_get.call_count == 1, 'blacklisted endpoint must not be probed'
         finally:
             with router._lock:
                 del router._endpoint_blacklist

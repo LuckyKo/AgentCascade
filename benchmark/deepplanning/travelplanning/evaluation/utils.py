@@ -20,7 +20,7 @@ def extract_from_to(text: str) -> Tuple[Optional[str], Optional[str]]:
     """Extract 'from' and 'to' cities from text like 'from CityA to CityB'."""
     if not isinstance(text, str):
         return None, None
-    m = re.search(r"from\s+(.+?)\s+to\s+([^,]+)(?=[,\s]|$)", text)
+    m = re.search(r'from\s+(.+?)\s+to\s+([^,]+)(?=[,\s]|$)', text)
     return (m.group(1).strip(), m.group(2).strip()) if m else (None, None)
 
 
@@ -28,14 +28,14 @@ def normalize_city(text: Optional[str]) -> Optional[str]:
     """Normalize city name by removing parentheses and content inside."""
     if text is None:
         return None
-    return re.sub(r"[（(].*?[)）]", "", text).strip()
+    return re.sub(r'[（(].*?[)）]', '', text).strip()
 
 
 def parse_lonlat_string(text: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
     """Parse coordinate string in format 'latitude,longitude', returns (lat, lon)."""
     if not text or not isinstance(text, str):
         return None, None
-    m = re.match(r"\s*([\-0-9\.]+)\s*,\s*([\-0-9\.]+)\s*$", text)
+    m = re.match(r'\s*([\-0-9\.]+)\s*,\s*([\-0-9\.]+)\s*$', text)
     if not m:
         return None, None
     try:
@@ -59,11 +59,11 @@ def parse_time_hhmm(t: Optional[str]) -> Optional[time]:
     if not t or not isinstance(t, str):
         return None
     t = t.strip()
-    if t == "24:00":
+    if t == '24:00':
         # Map 24:00 to 23:59 (end of day)
         return time(23, 59)
     try:
-        dt = datetime.strptime(t, "%H:%M")
+        dt = datetime.strptime(t, '%H:%M')
         return time(dt.hour, dt.minute)
     except Exception:
         return None
@@ -73,7 +73,7 @@ def parse_time_slot(slot: Optional[str]) -> Tuple[Optional[time], Optional[time]
     """Parse time slot string (e.g., '09:00-17:00') to time objects."""
     if not slot or not isinstance(slot, str):
         return None, None
-    m = re.match(r"\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*", slot)
+    m = re.match(r'\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*', slot)
     if not m:
         return None, None
     start = parse_time_hhmm(m.group(1))
@@ -151,7 +151,7 @@ def get_base_dir() -> Path:
     try:
         current_file = Path(__file__).resolve()
         base_dir = current_file.parent.parent  # evaluation -> TravelBench
-        if (base_dir / "database").exists():
+        if (base_dir / 'database').exists():
             return base_dir
     except (NameError, AttributeError):
         pass
@@ -159,13 +159,13 @@ def get_base_dir() -> Path:
     # Method 2: Search from current working directory
     cwd = Path.cwd()
     # Check current directory
-    if (cwd / "database").exists():
+    if (cwd / 'database').exists():
         return cwd
     # Check parent directory
-    if (cwd.parent / "database").exists():
+    if (cwd.parent / 'database').exists():
         return cwd.parent
     # Check parent's parent directory (if running from evaluation directory)
-    if (cwd.parent.parent / "database").exists():
+    if (cwd.parent.parent / 'database').exists():
         return cwd.parent.parent
     
     # Method 3: If not found, try from common locations
@@ -201,7 +201,7 @@ def get_database_dir(database_dir: Optional[Path] = None) -> Path:
             return db_path
     
     # 3. Default to _BASE_DIR / "database" / "id_0"
-    return get_base_dir() / "database" / "id_0"
+    return get_base_dir() / 'database' / 'id_0'
 
 
 # ----------------------
@@ -216,16 +216,16 @@ def load_restaurant_index(csv_path: str) -> Dict[str, Dict[str, Any]]:
         # If file doesn't exist, return empty index; upper layer checks will provide failure reason
         return {}
     try:
-        with open(csv_path, "r", encoding="utf-8-sig") as f:  # Use utf-8-sig to handle BOM
+        with open(csv_path, 'r', encoding='utf-8-sig') as f:  # Use utf-8-sig to handle BOM
             reader = csv.DictReader(f)
             for row in reader:
-                name = (row.get("restaurant_name") or "").strip()
+                name = (row.get('restaurant_name') or '').strip()
                 if not name:
                     continue
                 index[name] = {
-                    "price_per_person": row.get("price_per_person"),
-                    "opening_time": row.get("opening_time"),
-                    "closing_time": row.get("closing_time"),
+                    'price_per_person': row.get('price_per_person'),
+                    'opening_time': row.get('opening_time'),
+                    'closing_time': row.get('closing_time'),
                 }
     except Exception as e:
         # If loading fails, return empty index; upper layer checks will provide failure reason
@@ -240,15 +240,15 @@ def load_hotel_index(csv_path: str) -> Dict[str, Dict[str, Any]]:
     if not path_obj.exists():
         return {}
     try:
-        with open(csv_path, "r", encoding="utf-8-sig") as f:  # Use utf-8-sig to handle BOM
+        with open(csv_path, 'r', encoding='utf-8-sig') as f:  # Use utf-8-sig to handle BOM
             reader = csv.DictReader(f)
             for row in reader:
-                name = (row.get("name") or "").strip()
+                name = (row.get('name') or '').strip()
                 if not name:
                     continue
                 index[name] = {
-                    "price_per_night": row.get("price"),
-                    "city": row.get("city"),
+                    'price_per_night': row.get('price'),
+                    'city': row.get('city'),
                 }
     except Exception:
         return {}
@@ -262,21 +262,21 @@ def load_attraction_index(csv_path: str) -> Dict[str, Dict[str, Any]]:
     if not path_obj.exists():
         return {}
     try:
-        with open(csv_path, "r", encoding="utf-8-sig") as f:  # Use utf-8-sig to handle BOM
+        with open(csv_path, 'r', encoding='utf-8-sig') as f:  # Use utf-8-sig to handle BOM
             reader = csv.DictReader(f)
             for row in reader:
-                name = (row.get("attraction_name") or "").strip()
+                name = (row.get('attraction_name') or '').strip()
                 if not name:
                     continue
                 index[name] = {
-                    "opening_time": row.get("opening_time"),
-                    "closing_time": row.get("closing_time"),
-                    "min_visit_hours": row.get("min_visit_hours"),
-                    "max_visit_hours": row.get("max_visit_hours"),
-                    "ticket_price": row.get("ticket_price"),
-                    "latitude": row.get("latitude"),
-                    "longitude": row.get("longitude"),
-                    "closing_dates": row.get("closing_dates"),  # Add closing_dates field
+                    'opening_time': row.get('opening_time'),
+                    'closing_time': row.get('closing_time'),
+                    'min_visit_hours': row.get('min_visit_hours'),
+                    'max_visit_hours': row.get('max_visit_hours'),
+                    'ticket_price': row.get('ticket_price'),
+                    'latitude': row.get('latitude'),
+                    'longitude': row.get('longitude'),
+                    'closing_dates': row.get('closing_dates'),  # Add closing_dates field
                 }
     except Exception:
         return {}
@@ -294,17 +294,17 @@ def load_locations_index(csv_path: str) -> Dict[str, Dict[str, Any]]:
     if not path_obj.exists():
         return {}
     try:
-        with open(csv_path, "r", encoding="utf-8-sig") as f:  # Use utf-8-sig to handle BOM
+        with open(csv_path, 'r', encoding='utf-8-sig') as f:  # Use utf-8-sig to handle BOM
             reader = csv.DictReader(f)
             for row in reader:
-                name = (row.get("poi_name") or "").strip()
+                name = (row.get('poi_name') or '').strip()
                 if not name:
                     continue
                 # Keep original string format, don't convert to float
                 index[name] = {
-                    "latitude": (row.get("latitude") or "").strip(),
-                    "longitude": (row.get("longitude") or "").strip(),
-                    "poi_type": (row.get("poi_type") or "").strip(),
+                    'latitude': (row.get('latitude') or '').strip(),
+                    'longitude': (row.get('longitude') or '').strip(),
+                    'poi_type': (row.get('poi_type') or '').strip(),
                 }
     except Exception:
         return {}
@@ -324,23 +324,23 @@ def load_flights_index(csv_path: str) -> Dict[str, List[Dict[str, Any]]]:
     if not path_obj.exists():
         return {}
     try:
-        with open(csv_path, "r", encoding="utf-8-sig") as f:
+        with open(csv_path, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                flight_no = (row.get("flight_no") or "").strip()
+                flight_no = (row.get('flight_no') or '').strip()
                 if not flight_no:
                     continue
                 record = {
-                    "origin_city": (row.get("origin_city") or "").strip(),
-                    "destination_city": (row.get("destination_city") or "").strip(),
-                    "dep_station_name": (row.get("dep_station_name") or "").strip(),
-                    "arr_station_name": (row.get("arr_station_name") or "").strip(),
-                    "dep_datetime": (row.get("dep_datetime") or "").strip(),
-                    "arr_datetime": (row.get("arr_datetime") or "").strip(),
-                    "price": row.get("price"),
-                    "airline": (row.get("airline") or "").strip(),
-                    "segment_index": row.get("segment_index"),
-                    "route_index": row.get("route_index"),
+                    'origin_city': (row.get('origin_city') or '').strip(),
+                    'destination_city': (row.get('destination_city') or '').strip(),
+                    'dep_station_name': (row.get('dep_station_name') or '').strip(),
+                    'arr_station_name': (row.get('arr_station_name') or '').strip(),
+                    'dep_datetime': (row.get('dep_datetime') or '').strip(),
+                    'arr_datetime': (row.get('arr_datetime') or '').strip(),
+                    'price': row.get('price'),
+                    'airline': (row.get('airline') or '').strip(),
+                    'segment_index': row.get('segment_index'),
+                    'route_index': row.get('route_index'),
                 }
                 if flight_no not in index:
                     index[flight_no] = []
@@ -363,23 +363,23 @@ def load_trains_index(csv_path: str) -> Dict[str, List[Dict[str, Any]]]:
     if not path_obj.exists():
         return {}
     try:
-        with open(csv_path, "r", encoding="utf-8-sig") as f:
+        with open(csv_path, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                train_no = (row.get("train_no") or "").strip()
+                train_no = (row.get('train_no') or '').strip()
                 if not train_no:
                     continue
                 record = {
-                    "origin_city": (row.get("origin_city") or "").strip(),
-                    "destination_city": (row.get("destination_city") or "").strip(),
-                    "dep_station_name": (row.get("dep_station_name") or "").strip(),
-                    "arr_station_name": (row.get("arr_station_name") or "").strip(),
-                    "dep_datetime": (row.get("dep_datetime") or "").strip(),
-                    "arr_datetime": (row.get("arr_datetime") or "").strip(),
-                    "price": row.get("price"),
-                    "train_type": (row.get("train_type") or "").strip(),
-                    "segment_index": row.get("segment_index"),
-                    "route_index": row.get("route_index"),
+                    'origin_city': (row.get('origin_city') or '').strip(),
+                    'destination_city': (row.get('destination_city') or '').strip(),
+                    'dep_station_name': (row.get('dep_station_name') or '').strip(),
+                    'arr_station_name': (row.get('arr_station_name') or '').strip(),
+                    'dep_datetime': (row.get('dep_datetime') or '').strip(),
+                    'arr_datetime': (row.get('arr_datetime') or '').strip(),
+                    'price': row.get('price'),
+                    'train_type': (row.get('train_type') or '').strip(),
+                    'segment_index': row.get('segment_index'),
+                    'route_index': row.get('route_index'),
                 }
                 if train_no not in index:
                     index[train_no] = []
@@ -416,42 +416,42 @@ def load_station_to_city_mapping(database_dir: Optional[Path] = None) -> Dict[st
         db_dir = get_database_dir()
     
     # Load airport mapping from flights.csv
-    flights_path = db_dir / "flights" / "flights.csv"
+    flights_path = db_dir / 'flights' / 'flights.csv'
     if flights_path.exists():
         try:
-            with open(str(flights_path), "r", encoding="utf-8-sig") as f:
+            with open(str(flights_path), 'r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     # Departure airport
-                    dep_station = (row.get("dep_station_name") or "").strip()
-                    origin_city = (row.get("origin_city") or "").strip()
+                    dep_station = (row.get('dep_station_name') or '').strip()
+                    origin_city = (row.get('origin_city') or '').strip()
                     if dep_station and origin_city:
                         mapping[dep_station] = normalize_city(origin_city)
                     
                     # Arrival airport
-                    arr_station = (row.get("arr_station_name") or "").strip()
-                    dest_city = (row.get("destination_city") or "").strip()
+                    arr_station = (row.get('arr_station_name') or '').strip()
+                    dest_city = (row.get('destination_city') or '').strip()
                     if arr_station and dest_city:
                         mapping[arr_station] = normalize_city(dest_city)
         except Exception:
             pass
     
     # Load station mapping from trains.csv
-    trains_path = db_dir / "trains" / "trains.csv"
+    trains_path = db_dir / 'trains' / 'trains.csv'
     if trains_path.exists():
         try:
-            with open(str(trains_path), "r", encoding="utf-8-sig") as f:
+            with open(str(trains_path), 'r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     # Departure station
-                    dep_station = (row.get("dep_station_name") or "").strip()
-                    origin_city = (row.get("origin_city") or "").strip()
+                    dep_station = (row.get('dep_station_name') or '').strip()
+                    origin_city = (row.get('origin_city') or '').strip()
                     if dep_station and origin_city:
                         mapping[dep_station] = normalize_city(origin_city)
                     
                     # Arrival station
-                    arr_station = (row.get("arr_station_name") or "").strip()
-                    dest_city = (row.get("destination_city") or "").strip()
+                    arr_station = (row.get('arr_station_name') or '').strip()
+                    dest_city = (row.get('destination_city') or '').strip()
                     if arr_station and dest_city:
                         mapping[arr_station] = normalize_city(dest_city)
         except Exception:
@@ -522,8 +522,8 @@ def get_location_coords(name: str, locations_index: Dict[str, Dict[str, Any]]) -
     """Get coordinates from locations_index (string format, preserving original precision)."""
     if not name or name not in locations_index:
         return None, None
-    lat_str = locations_index[name].get("latitude")
-    lon_str = locations_index[name].get("longitude")
+    lat_str = locations_index[name].get('latitude')
+    lon_str = locations_index[name].get('longitude')
     # Verify if valid numbers (but return string)
     if not lat_str or not lon_str:
         return None, None
@@ -574,10 +574,10 @@ def parse_duration_hours(val: Any) -> Optional[float]:
 
 def is_all_day(opening: Optional[str], closing: Optional[str]) -> bool:
     """Check if opening hours are all day."""
-    opening = (opening or "").strip()
-    closing = (closing or "").strip()
+    opening = (opening or '').strip()
+    closing = (closing or '').strip()
     # Support both Chinese and English formats for 24-hour opening
-    all_day_patterns = ["全天开放", "Open 24 Hours"]
+    all_day_patterns = ['全天开放', 'Open 24 Hours']
     return opening in all_day_patterns and closing in all_day_patterns
 
 
@@ -631,21 +631,21 @@ def parse_closing_dates(closing_dates_str: Optional[str]) -> List[int]:
     # Based on actual data: only full names, no abbreviations
     day_map = {
         # English (full names only)
-        "monday": 1,
-        "tuesday": 2,
-        "wednesday": 3,
-        "thursday": 4,
-        "friday": 5,
-        "saturday": 6,
-        "sunday": 7,
+        'monday': 1,
+        'tuesday': 2,
+        'wednesday': 3,
+        'thursday': 4,
+        'friday': 5,
+        'saturday': 6,
+        'sunday': 7,
         # Chinese (周X format only, most common)
-        "周一": 1,
-        "周二": 2,
-        "周三": 3,
-        "周四": 4,
-        "周五": 5,
-        "周六": 6,
-        "周日": 7,
+        '周一': 1,
+        '周二': 2,
+        '周三': 3,
+        '周四': 4,
+        '周五': 5,
+        '周六': 6,
+        '周日': 7,
     }
     
     closing_days = []
@@ -696,11 +696,11 @@ def iter_meal_acts(daily_plans: List[Dict[str, Any]]):
     """Iterate through all meal activities in daily plans."""
     results = []
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") != "meal":
+        for act in day.get('activities', []) or []:
+            if act.get('type') != 'meal':
                 continue
-            details = act.get("details") or {}
-            name = (details.get("name") or "").strip()
+            details = act.get('details') or {}
+            name = (details.get('name') or '').strip()
             results.append((act, details, name))
     return results
 
@@ -709,11 +709,11 @@ def iter_hotel_acts(daily_plans: List[Dict[str, Any]]):
     """Iterate through all hotel activities in daily plans."""
     results = []
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") != "hotel":
+        for act in day.get('activities', []) or []:
+            if act.get('type') != 'hotel':
                 continue
-            details = act.get("details") or {}
-            name = (details.get("name") or "").strip()
+            details = act.get('details') or {}
+            name = (details.get('name') or '').strip()
             results.append((act, details, name))
     return results
 
@@ -722,11 +722,11 @@ def iter_attraction_acts(daily_plans: List[Dict[str, Any]]):
     """Iterate through all attraction activities in daily plans."""
     results = []
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") != "attraction":
+        for act in day.get('activities', []) or []:
+            if act.get('type') != 'attraction':
                 continue
-            details = act.get("details") or {}
-            name = (details.get("name") or "").strip()
+            details = act.get('details') or {}
+            name = (details.get('name') or '').strip()
             results.append((act, details, name))
     return results
 
@@ -735,10 +735,10 @@ def iter_intercity_public_acts(daily_plans: List[Dict[str, Any]]):
     """Iterate through all intercity public transport activities in daily plans."""
     results = []
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") != "travel_intercity_public":
+        for act in day.get('activities', []) or []:
+            if act.get('type') != 'travel_intercity_public':
                 continue
-            details = act.get("details") or {}
+            details = act.get('details') or {}
             results.append((act, details))
     return results
 
@@ -755,15 +755,15 @@ def get_day_accommodation_city(day: Dict[str, Any], hotels_index: Optional[Dict[
     """Get the accommodation city for a given day."""
     # Priority 1: Read city from hotel activity
     for act, details, _name in iter_hotel_acts([day]):
-        city = (details.get("city") or "").strip()
+        city = (details.get('city') or '').strip()
         if city:
             return normalize_city(city)
     # Priority 2: Read from day.accommodation field, look up city by hotel name in hotels.csv
-    accom = day.get("accommodation")
+    accom = day.get('accommodation')
     if isinstance(accom, dict):
-        hotel_name = (accom.get("name") or "").strip()
+        hotel_name = (accom.get('name') or '').strip()
         if hotel_name and hotels_index and hotel_name in hotels_index:
-            city_str = hotels_index[hotel_name].get("city")
+            city_str = hotels_index[hotel_name].get('city')
             if city_str:
                 return normalize_city(str(city_str).strip())
     return None
@@ -776,36 +776,36 @@ def iter_accommodation_entries(daily_plans: List[Dict[str, Any]]):
         if idx < len(daily_plans) - 1:
             for act, details, name in iter_hotel_acts([day]):
                 yield idx, {
-                    "name": name,
-                    "price": details.get("price") or details.get("cost"),
-                    "city": (details.get("city") or "").strip(),
-                    "source": "activity",
+                    'name': name,
+                    'price': details.get('price') or details.get('cost'),
+                    'city': (details.get('city') or '').strip(),
+                    'source': 'activity',
                 }
         # day.accommodation field
-        accom = day.get("accommodation")
+        accom = day.get('accommodation')
         if isinstance(accom, dict):
             yield idx, {
-                "name": (accom.get("name") or "").strip(),
-                "price": accom.get("price") or accom.get("cost") or accom.get("price_per_night"),
-                "city": (accom.get("city") or "").strip(),
-                "source": "field",
+                'name': (accom.get('name') or '').strip(),
+                'price': accom.get('price') or accom.get('cost') or accom.get('price_per_night'),
+                'city': (accom.get('city') or '').strip(),
+                'source': 'field',
             }
 
 
 def get_intercity_arrival_time(day: Dict[str, Any]) -> Optional[float]:
     """Get the arrival time of intercity transportation for a given day (in hours)."""
-    for act in day.get("activities", []) or []:
-        if act.get("type") == "travel_intercity_public":
+    for act in day.get('activities', []) or []:
+        if act.get('type') == 'travel_intercity_public':
             # Priority: use end_time, if not available extract from time_slot
-            end_time = act.get("end_time", "")
+            end_time = act.get('end_time', '')
             if not end_time:
-                time_slot = act.get("time_slot", "")
-                if time_slot and "-" in time_slot:
-                    end_time = time_slot.split("-")[1]
+                time_slot = act.get('time_slot', '')
+                if time_slot and '-' in time_slot:
+                    end_time = time_slot.split('-')[1]
             
             if end_time:
                 try:
-                    hour, minute = map(int, end_time.split(":"))
+                    hour, minute = map(int, end_time.split(':'))
                     return hour + minute / 60.0
                 except:
                     pass
@@ -814,18 +814,18 @@ def get_intercity_arrival_time(day: Dict[str, Any]) -> Optional[float]:
 
 def get_intercity_departure_time(day: Dict[str, Any]) -> Optional[float]:
     """Get the departure time of intercity transportation for a given day (in hours)."""
-    for act in day.get("activities", []) or []:
-        if act.get("type") == "travel_intercity_public":
+    for act in day.get('activities', []) or []:
+        if act.get('type') == 'travel_intercity_public':
             # Priority: use start_time, if not available extract from time_slot
-            start_time = act.get("start_time", "")
+            start_time = act.get('start_time', '')
             if not start_time:
-                time_slot = act.get("time_slot", "")
-                if time_slot and "-" in time_slot:
-                    start_time = time_slot.split("-")[0]
+                time_slot = act.get('time_slot', '')
+                if time_slot and '-' in time_slot:
+                    start_time = time_slot.split('-')[0]
             
             if start_time:
                 try:
-                    hour, minute = map(int, start_time.split(":"))
+                    hour, minute = map(int, start_time.split(':'))
                     return hour + minute / 60.0
                 except:
                     pass

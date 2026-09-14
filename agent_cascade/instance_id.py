@@ -26,13 +26,13 @@ def validate_instance_id(instance_id: str) -> str:
         ValueError: If instance ID contains invalid characters or exceeds max length
     """
     if instance_id is None or not str(instance_id).strip():  # Covers None, empty, whitespace-only
-        return ""
+        return ''
 
     normalized = str(instance_id).strip()
 
     if not _INSTANCE_ID_PATTERN.match(normalized):
         raise ValueError(
-            "Invalid instance ID: must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _)"
+            'Invalid instance ID: must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _)'
         )
 
     if len(normalized) > _MAX_INSTANCE_ID_LENGTH:
@@ -49,13 +49,13 @@ def get_instance_id() -> str:
     Reads from AGENT_CASCADE_INSTANCE_ID environment variable.
     The value is validated at startup; this function assumes it's already valid.
     """
-    return os.getenv("AGENT_CASCADE_INSTANCE_ID", "")
+    return os.getenv('AGENT_CASCADE_INSTANCE_ID', '')
 
 
 def get_instance_suffix() -> str:
     """Return '_<instance_id>' suffix for file paths, or empty string if no instance ID."""
     iid = get_instance_id()
-    return f"_{iid}" if iid else ""
+    return f"_{iid}" if iid else ''
 
 
 def make_instance_dir(base_path: str) -> str:
@@ -76,4 +76,4 @@ def make_instance_dir(base_path: str) -> str:
 
     p = Path(base_path)
     result = str(p.parent / f"{p.name}{suffix}")
-    return result.replace("\\", "/")
+    return result.replace('\\', '/')

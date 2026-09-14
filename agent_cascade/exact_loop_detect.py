@@ -126,7 +126,7 @@ def _combined_text(d: dict, content: str) -> str:
     """
     reasoning = d.get('reasoning_content') or d.get('thought') or ''
     if isinstance(reasoning, list):
-        reasoning = " ".join(_text_of(item) for item in reasoning)
+        reasoning = ' '.join(_text_of(item) for item in reasoning)
     else:
         reasoning = str(reasoning or '')
     if reasoning and not content.startswith('<think'):

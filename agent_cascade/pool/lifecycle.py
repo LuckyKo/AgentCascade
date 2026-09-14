@@ -35,11 +35,11 @@ class LifecycleMixin:
                 so it can be replaced by the loaded data.
         """
         if not instance_name:
-            raise ValueError("Instance name cannot be empty")
+            raise ValueError('Instance name cannot be empty')
 
         instance_name = instance_name.strip()
         if not instance_name:
-            raise ValueError("Instance name cannot be whitespace only")
+            raise ValueError('Instance name cannot be whitespace only')
 
         # Check for case-insensitive match
         for name in self.instances:
@@ -400,8 +400,8 @@ class LifecycleMixin:
                         _dismiss_pool = _sched._pools.get(_held_key) if _held_key else None
                 except Exception:
                     pass
-                release_slot_permit(inst, instance_name, action="drop-dismiss",
-                                    context="on dismiss", pool=_dismiss_pool)
+                release_slot_permit(inst, instance_name, action='drop-dismiss',
+                                    context='on dismiss', pool=_dismiss_pool)
             except Exception as e:
                 # Non-critical: the old thread's own run()-finally release still covers it.
                 logger.warning(f"Slot release on dismiss failed for '{instance_name}' (non-critical): {e}")
@@ -489,7 +489,7 @@ class LifecycleMixin:
                     for approval in self.operation_manager.pending.values():
                         if not approval.event.is_set():
                             approval.approved = False
-                            approval.outcome_reason = "Session reset"
+                            approval.outcome_reason = 'Session reset'
                             approval.event.set()
                     self.operation_manager.pending.clear()
             except Exception as e:

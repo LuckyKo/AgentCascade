@@ -221,7 +221,7 @@ class CompressionExecMixin:
         messages: List[Message],
         llm_messages: List[Message],
         response: Optional[List[Message]] = None,
-        check_label: str = "proactive"
+        check_label: str = 'proactive'
     ) -> None:
         """Check context usage after post-tool / async-drain appends and trigger compression if needed.
 
@@ -287,7 +287,7 @@ class CompressionExecMixin:
             f"({current_tokens}/{max_tokens} tokens). "
             f"Consider using compress_context to free space.]"
         )
-        self._append_system_notification(llm_messages, "[SYSTEM WARNING: Context", warning)
+        self._append_system_notification(llm_messages, '[SYSTEM WARNING: Context', warning)
 
 
     def _inline_rollback_and_hint(
@@ -435,7 +435,7 @@ class CompressionExecMixin:
         if comp_agent and hasattr(comp_agent, 'system_message'):
             sys_prompt_tokens = len(str(comp_agent.system_message)) // CHARS_PER_TOKEN_ESTIMATE
 
-        prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text="", end_instruction=""))
+        prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text='', end_instruction=''))
         prompt_overhead_tokens = sys_prompt_tokens + (prompt_template_chars // CHARS_PER_TOKEN_ESTIMATE)
 
         # Halve fraction iteratively until slice fits or we hit the minimum.
@@ -489,6 +489,6 @@ class CompressionExecMixin:
             return (target_fraction, discard_count, target_messages)
 
         # Should not reach here under normal conditions.
-        logger.warning("[FALLBACK_COMPRESSION] Exhausted slice attempts without finding a fit.")
+        logger.warning('[FALLBACK_COMPRESSION] Exhausted slice attempts without finding a fit.')
         return None
 

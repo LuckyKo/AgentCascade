@@ -62,7 +62,7 @@ def agent_pool(tmp_path):
         return pool
 
 
-def make_instance(name: str, agent_class: str = "coder", state: AgentState = AgentState.IDLE):
+def make_instance(name: str, agent_class: str = 'coder', state: AgentState = AgentState.IDLE):
     """Create a minimal AgentInstance for testing."""
     return AgentInstance(
         instance_name=name,
@@ -85,11 +85,11 @@ def _force_open_handle(pool, name: str, agent_class: str):
     """
     log_inst = pool.get_logger(name, agent_class)
     # A real write forces _ensure_file() to open the cached handle.
-    log_inst.log_message({"role": "user", "content": "hello"})
+    log_inst.log_message({'role': 'user', 'content': 'hello'})
     assert log_inst._file_handle is not None, \
-        "precondition: logger file handle should be open after a write"
+        'precondition: logger file handle should be open after a write'
     assert not log_inst._file_handle.closed, \
-        "precondition: logger file handle should be open (not closed) before dismissal"
+        'precondition: logger file handle should be open (not closed) before dismissal'
     return log_inst
 
 
@@ -106,43 +106,43 @@ class TestRemoveInstanceClosesLogger:
     """remove_instance() must close the cached file handle and drop the logger entry."""
 
     def test_remove_instance_closes_file_handle(self, agent_pool):
-        inst = make_instance("w1", agent_class="coder")
-        agent_pool.instances["w1"] = inst
-        log_inst = _force_open_handle(agent_pool, "w1", "coder")
+        inst = make_instance('w1', agent_class='coder')
+        agent_pool.instances['w1'] = inst
+        log_inst = _force_open_handle(agent_pool, 'w1', 'coder')
 
-        agent_pool.remove_instance("w1")
+        agent_pool.remove_instance('w1')
 
         # The previously-open handle must now be closed (or nulled).
         assert _handle_is_closed(log_inst), \
-            "remove_instance() leaked the logger file handle — it is still open"
+            'remove_instance() leaked the logger file handle — it is still open'
 
     def test_remove_instance_removes_logger_entry(self, agent_pool):
-        inst = make_instance("w2", agent_class="coder")
-        agent_pool.instances["w2"] = inst
-        _force_open_handle(agent_pool, "w2", "coder")
+        inst = make_instance('w2', agent_class='coder')
+        agent_pool.instances['w2'] = inst
+        _force_open_handle(agent_pool, 'w2', 'coder')
 
         # Sanity: the entry exists before removal.
-        assert ("w2", "coder") in agent_pool._logger._loggers
+        assert ('w2', 'coder') in agent_pool._logger._loggers
 
-        agent_pool.remove_instance("w2")
+        agent_pool.remove_instance('w2')
 
         # The (name, agent_class) key must be gone from the cache.
-        assert ("w2", "coder") not in agent_pool._logger._loggers, \
-            "remove_instance() did not remove the logger entry for the instance"
+        assert ('w2', 'coder') not in agent_pool._logger._loggers, \
+            'remove_instance() did not remove the logger entry for the instance'
 
     def test_remove_instance_with_mixed_case_agent_class(self, agent_pool):
         """agent_class normalization must match get_logger's (strip + lower)."""
-        inst = make_instance("w3", agent_class="Coder")
-        agent_pool.instances["w3"] = inst
-        log_inst = _force_open_handle(agent_pool, "w3", "Coder")
+        inst = make_instance('w3', agent_class='Coder')
+        agent_pool.instances['w3'] = inst
+        log_inst = _force_open_handle(agent_pool, 'w3', 'Coder')
 
         # get_logger normalizes to 'coder', so the cached key uses the lowercase form.
-        assert ("w3", "coder") in agent_pool._logger._loggers
+        assert ('w3', 'coder') in agent_pool._logger._loggers
 
-        agent_pool.remove_instance("w3")
+        agent_pool.remove_instance('w3')
 
         assert _handle_is_closed(log_inst)
-        assert ("w3", "coder") not in agent_pool._logger._loggers
+        assert ('w3', 'coder') not in agent_pool._logger._loggers
 
 
 # ===========================================================================
@@ -153,15 +153,15 @@ class TestDismissInstanceClosesLogger:
     """dismiss_instance() must also close the logger handle via remove_instance()."""
 
     def test_dismiss_idle_instance_closes_file_handle(self, agent_pool):
-        inst = make_instance("busy", agent_class="coder", state=AgentState.IDLE)
-        agent_pool.instances["busy"] = inst
-        log_inst = _force_open_handle(agent_pool, "busy", "coder")
+        inst = make_instance('busy', agent_class='coder', state=AgentState.IDLE)
+        agent_pool.instances['busy'] = inst
+        log_inst = _force_open_handle(agent_pool, 'busy', 'coder')
 
-        agent_pool.dismiss_instance("busy")
+        agent_pool.dismiss_instance('busy')
 
         assert _handle_is_closed(log_inst), \
-            "dismiss_instance() leaked the logger file handle — it is still open"
-        assert ("busy", "coder") not in agent_pool._logger._loggers
+            'dismiss_instance() leaked the logger file handle — it is still open'
+        assert ('busy', 'coder') not in agent_pool._logger._loggers
 
 
 # ===========================================================================
@@ -172,16 +172,16 @@ class TestRecreateAfterDismiss:
     """After dismissal, re-creating the same instance name must get a FRESH logger."""
 
     def test_recreate_same_name_gets_fresh_logger(self, agent_pool):
-        inst = make_instance("w1", agent_class="coder")
-        agent_pool.instances["w1"] = inst
-        old_log = _force_open_handle(agent_pool, "w1", "coder")
+        inst = make_instance('w1', agent_class='coder')
+        agent_pool.instances['w1'] = inst
+        old_log = _force_open_handle(agent_pool, 'w1', 'coder')
 
-        agent_pool.remove_instance("w1")
+        agent_pool.remove_instance('w1')
 
         # Re-create the same instance name and obtain its logger again.
-        inst2 = make_instance("w1", agent_class="coder")
-        agent_pool.instances["w1"] = inst2
-        new_log = agent_pool.get_logger("w1", "coder")
+        inst2 = make_instance('w1', agent_class='coder')
+        agent_pool.instances['w1'] = inst2
+        new_log = agent_pool.get_logger('w1', 'coder')
 
         # The stale (leaked) handle must have been closed so the two loggers can't
         # both be writing to the same JSONL file.

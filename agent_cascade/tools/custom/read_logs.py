@@ -130,12 +130,12 @@ class ReadLogs(BaseTool):
             size_bytes = file_path.stat().st_size
             return FileOpsMixin._format_size(size_bytes)
         except Exception:
-            return "?"
+            return '?'
 
     @staticmethod
     def _is_metadata(entry):
         """Check if an entry is a metadata line."""
-        return isinstance(entry, dict) and "metadata" in entry
+        return isinstance(entry, dict) and 'metadata' in entry
 
     @staticmethod
     def _truncate_middle(s, limit):
@@ -191,14 +191,14 @@ class ReadLogs(BaseTool):
         # request and must be preserved so the agent can see exactly what was called.
         # Only the results (content on role="function"/"tool" entries) are trimmed.
         if isinstance(item, dict):
-            role = str(item.get("role", "")).lower()
-            if role in ("function", "tool"):
+            role = str(item.get('role', '')).lower()
+            if role in ('function', 'tool'):
                 # Tool output: truncate the result content
-                if "content" in item and isinstance(item["content"], str):
-                    item["content"] = ReadLogs._truncate_middle(item["content"], max_chars)
+                if 'content' in item and isinstance(item['content'], str):
+                    item['content'] = ReadLogs._truncate_middle(item['content'], max_chars)
                 # Deep-truncate extra on tool-output entries (may carry nested results)
-                if "extra" in item:
-                    item["extra"] = ReadLogs._truncate_strings(item["extra"], max_chars)
+                if 'extra' in item:
+                    item['extra'] = ReadLogs._truncate_strings(item['extra'], max_chars)
             # NOTE: function_call.arguments / tool_calls[].function.arguments are intentionally
             # left intact here — they are assistant tool *calls*, not outputs.
         return item
@@ -224,84 +224,84 @@ class ReadLogs(BaseTool):
             return f"⟨L {entry_num}⟩ [{type(entry).__name__}] {c}", None
 
         # If it doesn't have a recognizable role, treat as raw JSON
-        role = entry.get("role", "").lower()
+        role = entry.get('role', '').lower()
         if not role:
             json_str = json.dumps(entry, ensure_ascii=False)
             if mode != 'none' and len(json_str) > max_chars:
                 json_str = ReadLogs._truncate_middle(json_str, max_chars)
             return f"⟨L {entry_num}⟩ [RAW] {json_str}", None
 
-        timestamp = entry.get("timestamp", "")
-        time_str = ""
+        timestamp = entry.get('timestamp', '')
+        time_str = ''
         if timestamp:
             # Extract HH:MM:SS portion if present
             t = str(timestamp)
-            for sep in ("T", " "):
+            for sep in ('T', ' '):
                 if sep in t:
                     time_part = t.split(sep)[1][:8]
                     if len(time_part) == 8:
                         time_str = time_part
                         break
-            if not time_str and ":" in t[:9]:
+            if not time_str and ':' in t[:9]:
                 time_str = t[:8]
 
         # Build role label
-        if role == "user":
-            role_label = "USER"
-        elif role == "assistant":
-            role_label = "ASSISTANT"
-        elif role == "function" or role == "tool":
-            name = entry.get("name") or entry.get("function_id", "?")
+        if role == 'user':
+            role_label = 'USER'
+        elif role == 'assistant':
+            role_label = 'ASSISTANT'
+        elif role == 'function' or role == 'tool':
+            name = entry.get('name') or entry.get('function_id', '?')
             role_label = f"TOOL({name})"
-        elif role == "system":
-            role_label = "SYSTEM"
+        elif role == 'system':
+            role_label = 'SYSTEM'
         else:
             role_label = f"{role.upper()}"
 
         # Build tool info for assistant entries with calls
-        tool_info = ""
-        if role == "assistant":
-            fc = entry.get("function_call")
-            tc = entry.get("tool_calls")
+        tool_info = ''
+        if role == 'assistant':
+            fc = entry.get('function_call')
+            tc = entry.get('tool_calls')
             calls = []
             if isinstance(fc, dict):
-                fn_name = fc.get("name", "?")
-                args = fc.get("arguments", "")
+                fn_name = fc.get('name', '?')
+                args = fc.get('arguments', '')
                 if len(args) > 60:
-                    args = args[:57] + "..."
+                    args = args[:57] + '...'
                 calls.append(f"{fn_name}({args})")
             if isinstance(tc, list):
                 for call in tc:
                     if isinstance(call, dict):
-                        fn = call.get("function", {})
-                        fn_name = fn.get("name", "?") if isinstance(fn, dict) else "?"
-                        args = fn.get("arguments", "") if isinstance(fn, dict) else ""
+                        fn = call.get('function', {})
+                        fn_name = fn.get('name', '?') if isinstance(fn, dict) else '?'
+                        args = fn.get('arguments', '') if isinstance(fn, dict) else ''
                         if len(args) > 60:
-                            args = args[:57] + "..."
+                            args = args[:57] + '...'
                         calls.append(f"{fn_name}({args})")
             if calls:
-                tool_info = " → " + ", ".join(calls)
+                tool_info = ' → ' + ', '.join(calls)
 
         # Build header
         header_parts = [f"⟨L {entry_num}⟩"]
         if time_str:
             header_parts.append(time_str)
         header_parts.append(role_label + tool_info)
-        header_line = " ".join(header_parts)
+        header_line = ' '.join(header_parts)
 
         # Content preview — handle both content and reasoning_content for assistant entries
         content = None
         reasoning = None
-        if role in ("user", "system"):
-            content = entry.get("content")
-        elif role == "assistant":
-            content = entry.get("content")
-            reasoning = entry.get("reasoning_content")
-        elif role in ("function", "tool"):
-            content = entry.get("content")
+        if role in ('user', 'system'):
+            content = entry.get('content')
+        elif role == 'assistant':
+            content = entry.get('content')
+            reasoning = entry.get('reasoning_content')
+        elif role in ('function', 'tool'):
+            content = entry.get('content')
         else:
             # Fallback: try content field for unknown roles
-            content = entry.get("content")
+            content = entry.get('content')
 
         result_lines = [header_line]
 
@@ -320,14 +320,14 @@ class ReadLogs(BaseTool):
                 c = ReadLogs._truncate_middle(c, max_chars)
             result_lines.append(f"    {c}")
 
-        return header_line, "\n".join(result_lines[1:]) if len(result_lines) > 1 else None
+        return header_line, '\n'.join(result_lines[1:]) if len(result_lines) > 1 else None
 
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
         log_file = params['log_file']
         max_chars = params.get('max_chars_per_message', 1000)
         if max_chars <= 0:
-            return "Error: max_chars_per_message must be a positive integer."
+            return 'Error: max_chars_per_message must be a positive integer.'
         range_str = params.get('range', None)
 
         # Parse and validate display mode
@@ -344,20 +344,20 @@ class ReadLogs(BaseTool):
 
         # Validate log_file input
         if not log_file or not isinstance(log_file, str) or not log_file.strip():
-            return "Error: log_file must be a non-empty string."
+            return 'Error: log_file must be a non-empty string.'
 
         log_file = log_file.strip()
 
         # Auto-resolve bare filenames in the instance-specific log directory
         file_path = None
         if (
-            "/" not in log_file
-            and "\\" not in log_file
-            and not log_file.startswith("./")
-            and ".." not in log_file  # prevent path traversal within log dir
+            '/' not in log_file
+            and '\\' not in log_file
+            and not log_file.startswith('./')
+            and '..' not in log_file  # prevent path traversal within log dir
             and self.agent_pool
-            and hasattr(self.agent_pool, "_logger")
-            and hasattr(self.agent_pool._logger, "log_dir")
+            and hasattr(self.agent_pool, '_logger')
+            and hasattr(self.agent_pool._logger, 'log_dir')
         ):
             try:
                 log_dir = Path(self.agent_pool._logger.log_dir)
@@ -366,14 +366,14 @@ class ReadLogs(BaseTool):
                 else:
                     # Only * and ? are treated as wildcards. [ ] are kept literal — this is a deliberate
                     # usability choice to avoid confusing filenames like file[1].log being misinterpreted.
-                    has_wildcards = "*" in log_file or "?" in log_file
+                    has_wildcards = '*' in log_file or '?' in log_file
                     if has_wildcards:
                         pattern = str(log_dir / log_file)
                         matches = _glob.glob(pattern)
                         if len(matches) == 1:
                             file_path = Path(matches[0])
                         elif len(matches) > 1:
-                            candidates = "\n".join(f"  - {m}" for m in sorted(matches))
+                            candidates = '\n'.join(f"  - {m}" for m in sorted(matches))
                             return (
                                 f"Error: Multiple log files match '{log_file}' "
                                 f"in {log_dir}. Please specify a more specific name or full path.\n\n"
@@ -393,7 +393,7 @@ class ReadLogs(BaseTool):
         if file_path is None:
             from agent_cascade.utils.tool_path_resolver import resolve_tool_path
             try:
-                file_path = resolve_tool_path(log_file, mode="ro", agent_pool=self.agent_pool)
+                file_path = resolve_tool_path(log_file, mode='ro', agent_pool=self.agent_pool)
             except ValueError as e:
                 return f"Error: {str(e)}"
 
@@ -419,7 +419,7 @@ class ReadLogs(BaseTool):
                 if isinstance(arr, list):
                     parsed_lines = [item for item in arr if item is not None]
                 else:
-                    parsed_lines = [{"raw": str(arr)}]
+                    parsed_lines = [{'raw': str(arr)}]
             except json.JSONDecodeError:
                 pass  # Fall through to JSONL parsing below
 
@@ -489,9 +489,9 @@ class ReadLogs(BaseTool):
                     line_text = item
                 else:
                     line_text = json.dumps(item, ensure_ascii=False)
-                num_label = "meta" if pos == 0 else pos
+                num_label = 'meta' if pos == 0 else pos
                 result.append(f"{num_label}: {line_text}")
-            return f"{header}\n```\n" + "\n".join(result) + "\n```"
+            return f"{header}\n```\n" + '\n'.join(result) + '\n```'
 
         # simple mode: human-readable summary (using original entry positions)
         result = []
@@ -500,4 +500,4 @@ class ReadLogs(BaseTool):
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)
-        return f"{header}\n```\n" + "\n".join(result) + "\n```"
+        return f"{header}\n```\n" + '\n'.join(result) + '\n```'

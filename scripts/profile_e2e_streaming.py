@@ -8,22 +8,22 @@ import subprocess
 import sys
 import time
 
-os.environ["AGENT_CASCADE_STREAM_TIMING"] = "1"
+os.environ['AGENT_CASCADE_STREAM_TIMING'] = '1'
 
 TEST_CMD = [
-    sys.executable, "-m", "pytest",
-    "tests/test_streaming_fullstack_e2e.py",
-    "-s", "-o", "addopts=", "--timeout=540", "-p", "no:xdist",
+    sys.executable, '-m', 'pytest',
+    'tests/test_streaming_fullstack_e2e.py',
+    '-s', '-o', 'addopts=', '--timeout=540', '-p', 'no:xdist',
 ]
 
-LOG_PATH = "logs/e2e_latency_profile.log"
-PROFILE_SVG = "profile_streaming_e2e.svg"
+LOG_PATH = 'logs/e2e_latency_profile.log'
+PROFILE_SVG = 'profile_streaming_e2e.svg'
 WARMUP_SEC = 15   # wait for server to start + first turns to stream
 PROFILE_SEC = 45  # profile duration (covers ~8-10 turns of streaming)
 
 print(f"[profile] Starting e2e test...")
-log_file = open(LOG_PATH, "w")
-proc = subprocess.Popen(TEST_CMD, stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.abspath(__file__)) + "/..")
+log_file = open(LOG_PATH, 'w')
+proc = subprocess.Popen(TEST_CMD, stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.abspath(__file__)) + '/..')
 
 print(f"[profile] Test PID: {proc.pid}")
 print(f"[profile] Waiting {WARMUP_SEC}s for streaming to start...")
@@ -36,7 +36,7 @@ if proc.poll() is not None:
 
 print(f"[profile] Profiling PID {proc.pid} for {PROFILE_SEC}s...")
 py_result = subprocess.run(
-    ["py-spy", "record", "-d", str(PROFILE_SEC), "-o", PROFILE_SVG, "--pid", str(proc.pid)],
+    ['py-spy', 'record', '-d', str(PROFILE_SEC), '-o', PROFILE_SVG, '--pid', str(proc.pid)],
     capture_output=True, text=True,
 )
 if py_result.returncode != 0:

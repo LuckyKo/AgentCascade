@@ -147,7 +147,7 @@ def _make_usage_callback(instance, telemetry_collector):
                 telemetry_collector.record_token_usage(tel_name, prompt_tokens, completion_tokens, details)
             except Exception as e:
                 from agent_cascade.log import logger
-                logger.debug("Telemetry usage callback error for %s: %s", instance.instance_name, e)
+                logger.debug('Telemetry usage callback error for %s: %s', instance.instance_name, e)
     return _on_usage
 
 
@@ -331,7 +331,7 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
         # Malformed message detection — any of these means incomplete output:
         # 1. Reasoning-only block: has reasoning but no content and no tool calls
         if has_reasoning and not content.strip() and not has_tool_call:
-            return "reasoning-only"
+            return 'reasoning-only'
 
         # 2. Incomplete tool call: has tool call with broken JSON arguments
         if has_tool_call:
@@ -346,11 +346,11 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
                 has_mismatch = (open_braces > close_braces) or (open_brackets > close_brackets)
                 # Only flag if mismatch exists, or ends with comma/quote AND has some content
                 if has_mismatch or (stripped and (stripped[-1] in ',\'"') and len(stripped) < MIN_OUTPUT_LENGTH):
-                    return "broken-json"
+                    return 'broken-json'
 
         # 3. Empty output: no reasoning, no content, no tool calls
         if not has_reasoning and not content.strip() and not has_tool_call:
-            return "empty-output"
+            return 'empty-output'
 
         break  # Only check the last assistant message
 
@@ -373,7 +373,7 @@ def _build_resources_block(pool, template, instance=None) -> str:
         A string containing the full resources block, or empty string if no template.
     """
     if not template or not hasattr(template, 'function_map'):
-        return ""
+        return ''
 
     content_parts = []
 
@@ -389,7 +389,7 @@ def _build_resources_block(pool, template, instance=None) -> str:
 
     # List available agent types only if this agent can call other agents
     if can_call_agents:
-        content_parts.append("\nAvailable Agent Types (call via call_agent):\n")
+        content_parts.append('\nAvailable Agent Types (call via call_agent):\n')
         has_agents = False
         templates_dict = getattr(pool, 'templates', {})
         for name in sorted(templates_dict.keys()):
@@ -399,26 +399,26 @@ def _build_resources_block(pool, template, instance=None) -> str:
                 content_parts.append(f"- **{name}**: {tagline}\n")
                 has_agents = True
         if not has_agents:
-            content_parts.append("- None currently available.\n")
+            content_parts.append('- None currently available.\n')
 
     # Append Argument Caching Pool instructions only if the feature is enabled
     cache_enabled = getattr(getattr(pool, 'settings', None), 'cache_pool_enabled', True)
     if cache_enabled:
         content_parts.append(
-            "\n### Advanced Feature: Argument Caching Pool\n"
-            "The system maintains a rolling cache of tool arguments and large outputs (>1000 chars).\n"
-            "Each cached entry is assigned a sequential index N. You can insert any cached entry by using\n"
+            '\n### Advanced Feature: Argument Caching Pool\n'
+            'The system maintains a rolling cache of tool arguments and large outputs (>1000 chars).\n'
+            'Each cached entry is assigned a sequential index N. You can insert any cached entry by using\n'
             'the placeholder "{USE_CACHED_ENTRY_N}" inside any tool argument value, where N is the cache index.\n'
-            "A single argument value can contain multiple placeholders, e.g.\n"
+            'A single argument value can contain multiple placeholders, e.g.\n'
             '  content: "I found {USE_CACHED_ENTRY_12} from X and {USE_CACHED_ENTRY_23} from Y."\n'
-            "Each placeholder is independently resolved and replaced with its cached value.\n"
-            "Use system_info to view the current cache pool state. When entries are cached, you will see a [CACHE INFO] notification."
+            'Each placeholder is independently resolved and replaced with its cached value.\n'
+            'Use system_info to view the current cache pool state. When entries are cached, you will see a [CACHE INFO] notification.'
         )
 
     if not content_parts:
-        return ""
+        return ''
 
-    return "\n\n## AVAILABLE AGENTS\n" + "".join(content_parts)
+    return '\n\n## AVAILABLE AGENTS\n' + ''.join(content_parts)
 
 
 def _build_skills_block(loaded_skills: list) -> str:
@@ -435,13 +435,13 @@ def _build_skills_block(loaded_skills: list) -> str:
         Formatted markdown block, or empty string if no skills loaded.
     """
     if not loaded_skills:
-        return ""
+        return ''
 
-    parts = ["\n\n## Active Skills"]
+    parts = ['\n\n## Active Skills']
     for idx, instructions in enumerate(loaded_skills, 1):
         parts.append(f"\n### Skill {idx}\n{instructions}")
 
-    logger.debug("[SKILLS] Built skills block with %d skill(s), total ~%d chars",
+    logger.debug('[SKILLS] Built skills block with %d skill(s), total ~%d chars',
                  len(loaded_skills), sum(len(s) for s in loaded_skills))
     return '\n'.join(parts)
 
@@ -493,7 +493,7 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
 
     # Ensure consistent order: AVAILABLE AGENTS → Active Skills.
     # If AVAILABLE AGENTS block exists, insert skills after it; otherwise append at end.
-    if "## AVAILABLE AGENTS" in sys_msg.content:
+    if '## AVAILABLE AGENTS' in sys_msg.content:
         # Find the end of the AVAILABLE AGENTS block (next ## heading or end).
         # Pattern captures from the heading through content to next section boundary.
         pattern = r'## AVAILABLE AGENTS\s*(.*?)(?=\n\n##|\Z)'
@@ -540,22 +540,22 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
     if isinstance(load_skill_value, str):
         load_skill_value_upper = load_skill_value.strip().upper()
     else:
-        load_skill_value_upper = "AUTO"
+        load_skill_value_upper = 'AUTO'
 
     skill_manager = getattr(pool, 'skill_manager', None)
     skills_to_inject = []
     if not skill_manager:
-        logger.debug("[SKILLS] _inject_self_augmentation_skill: no skill_manager on pool, skipping")
+        logger.debug('[SKILLS] _inject_self_augmentation_skill: no skill_manager on pool, skipping')
         return False
     if load_skill_value_upper == LOAD_SKILL_NONE:
-        logger.debug("[SKILLS] _inject_self_augmentation_skill: default_load_skill_mode is NONE (skills disabled), skipping")
+        logger.debug('[SKILLS] _inject_self_augmentation_skill: default_load_skill_mode is NONE (skills disabled), skipping')
         return False
 
     # Self-augmentation is injected for any enabled mode (AUTO or explicit list).
     # It's the meta-skill that enables runtime discovery, so it must always be present.
 
     skill_manager._ensure_discovered()
-    self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
+    self_augmentation_instructions = skill_manager.load_full_instructions('self-augmentation')
     if not self_augmentation_instructions:
         logger.warning("[SKILLS] _inject_self_augmentation_skill: 'self-augmentation' skill not found in registry")
         return False
@@ -570,7 +570,7 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
     if injected:
         _tel = getattr(pool, 'telemetry', None)
         if _tel is not None:
-            _tel.record_skills_loaded(instance.agent_class, ["self-augmentation"], "self-augmentation")
+            _tel.record_skills_loaded(instance.agent_class, ['self-augmentation'], 'self-augmentation')
     return injected
 
 
@@ -610,12 +610,12 @@ def _build_session_metadata(pool, instance) -> str:
     """
     inst_name = instance.instance_name
 
-    meta_lines = ["## Session Metadata"]
+    meta_lines = ['## Session Metadata']
 
     # Root agent only knows its supervisor is the user; sub-agents get their
     # caller as supervisor
     if instance.parent_instance is None:
-        meta_lines.append("- Supervisor: User")
+        meta_lines.append('- Supervisor: User')
     else:
         supervisor = instance.parent_instance
         log_filename = _get_supervisor_log_filename(pool, supervisor)
@@ -626,10 +626,10 @@ def _build_session_metadata(pool, instance) -> str:
 
     # Get workspace config from operation_manager (live source of truth),
     # falling back to logger metadata
-    working_dir = "Unknown"
+    working_dir = 'Unknown'
     extra_ro: list[str] = []
     extra_rw: list[str] = []
-    log_path = "N/A"
+    log_path = 'N/A'
 
     try:
         # Prefer operation_manager — it reflects UI config changes in real-time
@@ -654,11 +654,11 @@ def _build_session_metadata(pool, instance) -> str:
                 extra_rw = sorted(log_inst.data['metadata'].get('extra_paths_rw', []))
 
         except (AttributeError, KeyError) as e:
-            logger.debug("Logger metadata access failed for %s: %s", inst_name, e)
+            logger.debug('Logger metadata access failed for %s: %s', inst_name, e)
 
     except Exception as e:
-        logger.debug("Session metadata build failed: %s", e)
-        working_dir = os.getcwd() if hasattr(os, 'getcwd') else "Unknown"
+        logger.debug('Session metadata build failed: %s', e)
+        working_dir = os.getcwd() if hasattr(os, 'getcwd') else 'Unknown'
 
     meta_lines.append(f"- Working Dir: {working_dir}")
     if extra_ro:
@@ -666,7 +666,7 @@ def _build_session_metadata(pool, instance) -> str:
     if extra_rw:
         meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
     meta_lines.append(f"- Log Path: {log_path}")
-    meta_lines.append("Use your logs to recall details from turns that were compressed.")
+    meta_lines.append('Use your logs to recall details from turns that were compressed.')
 
     return '\n'.join(meta_lines)
 
@@ -723,7 +723,7 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
     Returns:
         The updated m0_content with the resources block replaced.
     """
-    return _replace_section(m0_content, "## AVAILABLE AGENTS", new_block)
+    return _replace_section(m0_content, '## AVAILABLE AGENTS', new_block)
 
 
 # The skills block contains arbitrary ## and ### sub-headings (skill content is
@@ -734,7 +734,7 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
 # injected after AVAILABLE AGENTS or appended at end, and nothing is ever added
 # after it), we match from "## Active Skills" greedily to EOF.
 _SKILLS_SECTION_RE = re.compile(
-    re.escape("## Active Skills") + r'.*',
+    re.escape('## Active Skills') + r'.*',
     flags=re.DOTALL,
 )
 
@@ -768,10 +768,10 @@ def _refresh_active_skills_block(pool, instance, skills_to_inject=None) -> bool:
         return False
 
     # Build the fresh block (empty string when no skills).
-    new_block = _build_skills_block(skills_to_inject) if skills_to_inject else ""
+    new_block = _build_skills_block(skills_to_inject) if skills_to_inject else ''
 
     old_content = sys_msg.content
-    if "## Active Skills" not in old_content:
+    if '## Active Skills' not in old_content:
         return False  # block absent (shouldn't happen on recall); nothing to refresh
 
     if new_block:
@@ -780,7 +780,7 @@ def _refresh_active_skills_block(pool, instance, skills_to_inject=None) -> bool:
         replacement = new_block.lstrip('\n')
         new_content = _SKILLS_SECTION_RE.sub(lambda _: replacement, old_content, count=1)
     else:
-        new_content = _SKILLS_SECTION_RE.sub("", old_content, count=1).strip()
+        new_content = _SKILLS_SECTION_RE.sub('', old_content, count=1).strip()
 
     if new_content == old_content:
         return False  # logically unchanged — preserve byte-identity for KV/prefix cache
@@ -810,7 +810,7 @@ def _resolve_recall_skills(pool) -> list:
 
     # Self-Augmentation is the one skill that must always be present when skills are ON.
     skills = []
-    self_aug = sm.load_full_instructions("self-augmentation")
+    self_aug = sm.load_full_instructions('self-augmentation')
     if self_aug:
         skills.append(self_aug)
     return skills

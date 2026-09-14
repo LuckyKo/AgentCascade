@@ -59,25 +59,25 @@ class ScanSkills(BaseTool):
         # Get SkillManager from pool
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
         if skill_manager is None:
-            return "No skills system available. Skills may not have been initialized."
+            return 'No skills system available. Skills may not have been initialized.'
 
         # Trigger a fresh discovery (cache-respecting) so new skills appear
         skill_manager._ensure_discovered()
 
         all_skills = skill_manager.get_all_metadata()
         if not all_skills:
-            return "No skills are currently registered in the system."
+            return 'No skills are currently registered in the system.'
 
         # Filter disabled skills when all=False
         if not show_all:
             disabled = getattr(skill_manager, '_disabled_names', set())
             all_skills = [s for s in all_skills if s['name'] not in disabled]
             if not all_skills:
-                return "No skills are currently registered in the system."
+                return 'No skills are currently registered in the system.'
 
         # If no query, just list everything
         if not query.strip():
-            lines = ["## Available Skills"]
+            lines = ['## Available Skills']
             for skill in all_skills:
                 source = skill.get('source', 'system')
                 version = skill.get('version', '1.0.0')
@@ -89,8 +89,8 @@ class ScanSkills(BaseTool):
         if not matches:
             return (
                 f"No skills matched the query '{query}'.\n\n"
-                "Available skills:\n" +
-                "\n".join(f"- **{s['name']}** [{s.get('source', 'system')}]: {s.get('description', '')}" for s in all_skills)
+                'Available skills:\n' +
+                '\n'.join(f"- **{s['name']}** [{s.get('source', 'system')}]: {s.get('description', '')}" for s in all_skills)
             )
 
         # Build response with scores

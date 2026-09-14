@@ -144,8 +144,8 @@ def _format_value(v, indent=0):
     Nested dicts use ### sub-headings.
     Empty dicts are skipped.
     """
-    res = ""
-    spacing = "  " * indent
+    res = ''
+    spacing = '  ' * indent
     if isinstance(v, list):
         for item in v:
             if isinstance(item, dict):
@@ -213,7 +213,7 @@ def build_system_prompt(config: dict) -> str:
     # 1. Identity section
     identity = config.get('identity', {})
     if isinstance(identity, dict) and identity:
-        system_prompt += "\n## Who You Are\n"
+        system_prompt += '\n## Who You Are\n'
         role = identity.get('role')
         if isinstance(role, str) and role.strip():
             system_prompt += f"Role: {role.strip()}\n"
@@ -226,26 +226,26 @@ def build_system_prompt(config: dict) -> str:
         
         traits = identity.get('personality_traits', [])
         if isinstance(traits, list) and traits:
-            system_prompt += "\nPersonality traits:\n"
+            system_prompt += '\nPersonality traits:\n'
             for trait in traits:
                 system_prompt += f"- {trait}\n"
     
     # 2. Communication style
     comm_cfg = config.get('communication', {})
     if isinstance(comm_cfg, dict) and comm_cfg:
-        system_prompt += "\n## How You Communicate\n"
+        system_prompt += '\n## How You Communicate\n'
         if comm_cfg.get('tone'):
             system_prompt += f"Tone: {comm_cfg.get('tone')}\n"
         
         notes = comm_cfg.get('style_notes', [])
         if isinstance(notes, list) and notes:
-            system_prompt += "\nStyle guidelines:\n"
+            system_prompt += '\nStyle guidelines:\n'
             for note in notes:
                 system_prompt += f"- {note}\n"
         
         principles = comm_cfg.get('principles', [])
         if isinstance(principles, list) and principles:
-            system_prompt += "\nPrinciples:\n"
+            system_prompt += '\nPrinciples:\n'
             for principle in principles:
                 system_prompt += f"- {principle}\n"
 
@@ -254,14 +254,14 @@ def build_system_prompt(config: dict) -> str:
     if isinstance(cap, dict):
         tools = cap.get('tools', [])
         if isinstance(tools, list) and tools:
-            system_prompt += "\n## Your Tools\nYou have access to these tools:\n"
+            system_prompt += '\n## Your Tools\nYou have access to these tools:\n'
             for tool in tools:
                 system_prompt += f"- **{tool}**: Use when you need to {get_tool_description(tool)}\n"
 
     # 4. Rules
     rules = config.get('rules', [])
     if isinstance(rules, list) and rules:
-        system_prompt += "\n## Your Rules\n"
+        system_prompt += '\n## Your Rules\n'
         for i, rule in enumerate(rules, 1):
             if isinstance(rule, dict):
                 # YAML may parse multi-line strings as dicts — normalize to key: value format
@@ -285,7 +285,7 @@ def build_system_prompt(config: dict) -> str:
     # 6. Final Notes / Remember
     final_notes = config.get('notes') or config.get('remember')
     if isinstance(final_notes, str) and final_notes.strip():
-        system_prompt += "\n## Remember\n"
+        system_prompt += '\n## Remember\n'
         system_prompt += f"{final_notes.strip()}\n"
     
     return system_prompt
@@ -323,7 +323,7 @@ def create_agent_from_soul(llm_cfg: dict, soul_path: str = 'soul.md', agent_clas
     raw_name = config.get('name', 'Assistant')
     
     # Normalize for comparison (replace underscores with spaces)
-    role_norm = (role_name or "").lower().replace('_', ' ')
+    role_norm = (role_name or '').lower().replace('_', ' ')
     name_norm = raw_name.lower().replace('_', ' ')
     
     if role_name and not name_norm.startswith(role_norm):
@@ -360,4 +360,4 @@ if __name__ == '__main__':
     print(f"Loaded agent: {config['name']}")
     print(f"Tagline: {config['tagline']}")
     print(f"\nSystem prompt preview:")
-    print(build_system_prompt(config)[:500] + "...")
+    print(build_system_prompt(config)[:500] + '...')

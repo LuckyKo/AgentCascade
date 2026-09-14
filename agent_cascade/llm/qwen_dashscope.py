@@ -118,7 +118,7 @@ class QwenChatAtDS(BaseFnCallModel):
             response,
             STREAM_MAX_SILENCE_SECONDS,
             STREAM_MAX_TOTAL_SECONDS,
-            error_message_prefix="DashScope",
+            error_message_prefix='DashScope',
         ):
             if chunk.status_code == HTTPStatus.OK:
                 # Extract usage from each chunk (last chunk has the complete count)
@@ -154,7 +154,7 @@ class QwenChatAtDS(BaseFnCallModel):
             response,
             STREAM_MAX_SILENCE_SECONDS,
             STREAM_MAX_TOTAL_SECONDS,
-            error_message_prefix="DashScope",
+            error_message_prefix='DashScope',
         ):
             if chunk.status_code == HTTPStatus.OK:
                 # Capture usage from each chunk; last chunk typically has the final count

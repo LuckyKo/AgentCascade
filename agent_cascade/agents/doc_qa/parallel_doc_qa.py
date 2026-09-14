@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -33,7 +33,7 @@ from agent_cascade.tools.simple_doc_parser import PARSER_SUPPORTED_FILE_TYPES
 from agent_cascade.utils.parallel_executor import parallel_exec
 from agent_cascade.utils.tokenization_qwen import count_tokens
 from agent_cascade.utils.utils import (extract_files_from_messages, extract_text_from_message, get_file_type,
-                                    print_traceback)
+                                       print_traceback)
 
 MAX_NO_RESPONSE_RETRY = 4
 DEFAULT_NAME = 'Simple Parallel DocQA With RAG Sum Agents'

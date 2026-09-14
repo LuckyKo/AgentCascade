@@ -171,12 +171,12 @@ def _truncate_caption(text: str) -> str:
     Appends an ellipsis (``…``) when the text was cut. Returns "" for falsy input.
     """
     if not text:
-        return ""
+        return ''
     # Collapse internal whitespace/newlines so a multi-line prompt becomes one line.
-    collapsed = " ".join(text.split())
+    collapsed = ' '.join(text.split())
     if len(collapsed) <= _SESSION_CAPTION_MAX_LEN:
         return collapsed
-    return collapsed[:_SESSION_CAPTION_MAX_LEN].rstrip() + "…"
+    return collapsed[:_SESSION_CAPTION_MAX_LEN].rstrip() + '…'
 
 
 def _read_session_caption(path, max_scan_lines: int = 200) -> str:
@@ -224,7 +224,7 @@ def _read_session_caption(path, max_scan_lines: int = 200) -> str:
                         return _truncate_caption(text)
     except Exception as e:
         logger.debug(f"Failed to read session caption for {path}: {e}")
-    return ""
+    return ''
 
 
 def create_app(agents, agent_pool, config=None, auto_security=True):
@@ -245,7 +245,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     from fastapi.middleware.cors import CORSMiddleware
 
     config = config or {}
-    app = FastAPI(title="AgentCascade API")
+    app = FastAPI(title='AgentCascade API')
 
     # Ensure media directory exists at startup (non-critical fallback)
     from agent_cascade.utils.media_utils import get_images_dir, MediaStorageError
@@ -265,10 +265,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=['*'],
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=['*'],
+        allow_headers=['*'],
     )
 
     # ── Unified architecture imports (Phase 5) ───────────────────────────
@@ -296,7 +296,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         after load_session_from_log(), so returning the tuples is redundant.
         """
         # Skip loading if fresh session requested (e.g., via --fresh CLI flag)
-        if config.get("fresh_session"):
+        if config.get('fresh_session'):
             return False
 
         try:
@@ -325,7 +325,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # Use the AgentPool's standardized loading logic to handle slicing
             # and system message preservation
             status = agent_pool.load_session_from_log(str(path), target_instance=name)
-            if status.startswith("Error"):
+            if status.startswith('Error'):
                 logger.error(f"Failed to load session {name} via pool: {status}")
                 return False
 
@@ -372,7 +372,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     )
             except Exception as e:
                 logger.error(f"Failed to create fallback main agent instance: {e}")
-                logger.warning("Server starting without main agent instance — first user message may fail")
+                logger.warning('Server starting without main agent instance — first user message may fail')
 
     # ── Unified token cache (coexists with old _cached_hist_stats during transition) ──
     from agent_cascade.utils.token_cache import AgentTokenCache
@@ -422,7 +422,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except RuntimeError:
                 # No running loop (worker thread): reuse the most recently created queue.
                 return _send_queue
-        if _send_queue is None or getattr(_send_queue, "_loop", None) is not loop:
+        if _send_queue is None or getattr(_send_queue, '_loop', None) is not loop:
             _send_queue = asyncio.Queue(maxsize=128)
         return _send_queue
 
@@ -730,7 +730,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     # ── Background tasks ──────────────────────────────────────────────────
 
-    @app.on_event("startup")
+    @app.on_event('startup')
     async def startup():
         # Create the send queue against THIS loop before spawning the sender task so it is
         # bound to the correct (current) event loop, not a stale one from create_app() time.
@@ -805,23 +805,23 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     # ── E2E Encrypted REST API ────────────────────────────────────────────
 
-    @app.get("/api/keys")
+    @app.get('/api/keys')
     async def api_get_keys():
         """Returns the server's X25519 public key (Base64)."""
         return {
-            "public_key": base64.b64encode(server_public_bytes).decode('utf-8'),
-            "algorithm": "X25519"
+            'public_key': base64.b64encode(server_public_bytes).decode('utf-8'),
+            'algorithm': 'X25519'
         }
 
-    @app.post("/api/handshake")
+    @app.post('/api/handshake')
     async def api_handshake(data: dict):
         """
         Performs X25519 handshake.
         Client sends its public_key, server returns a session_token.
         """
-        client_pub_b64 = data.get("public_key")
+        client_pub_b64 = data.get('public_key')
         if not client_pub_b64:
-            return JSONResponse(status_code=400, content={"message": "Missing public_key"})
+            return JSONResponse(status_code=400, content={'message': 'Missing public_key'})
             
         try:
             client_pub_bytes = base64.b64decode(client_pub_b64)
@@ -835,26 +835,26 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             token = secrets.token_hex(16)
             api_sessions[token] = shared_secret
             
-            return {"session_token": token}
+            return {'session_token': token}
         except Exception as e:
-            return JSONResponse(status_code=400, content={"message": f"Handshake failed: {str(e)}"})
+            return JSONResponse(status_code=400, content={'message': f"Handshake failed: {str(e)}"})
 
-    @app.post("/api/message")
+    @app.post('/api/message')
     async def api_inject_message(data: dict):
         """
         Inject an E2E encrypted message into an agent's queue.
         Payload must be AES-GCM encrypted using the shared secret.
         """
-        token = data.get("session_token")
-        encrypted_b64 = data.get("payload")
-        nonce_b64 = data.get("nonce")
+        token = data.get('session_token')
+        encrypted_b64 = data.get('payload')
+        nonce_b64 = data.get('nonce')
         
         if not all([token, encrypted_b64, nonce_b64]):
-            return JSONResponse(status_code=400, content={"message": "Missing token, payload, or nonce"})
+            return JSONResponse(status_code=400, content={'message': 'Missing token, payload, or nonce'})
             
         shared_secret = api_sessions.get(token)
         if not shared_secret:
-            return JSONResponse(status_code=401, content={"message": "Invalid or expired session token"})
+            return JSONResponse(status_code=401, content={'message': 'Invalid or expired session token'})
             
         try:
             # Decrypt payload
@@ -865,11 +865,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
             payload = json.loads(decrypted_bytes.decode('utf-8'))
             
-            target = payload.get("target") or session.get('session_name', 'Maine')
-            text = payload.get("text", "").strip()
+            target = payload.get('target') or session.get('session_name', 'Maine')
+            text = payload.get('text', '').strip()
             
             if not text:
-                return JSONResponse(status_code=400, content={"message": "Empty message text"})
+                return JSONResponse(status_code=400, content={'message': 'Empty message text'})
                 
             if agent_pool:
                 parsed_content = _parse_multimodal_content(text)
@@ -898,18 +898,18 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     except Exception as e:
                         logger.error(f"Failed to start generation thread for {target}: {e}")
 
-                return {"status": "success", "queued": True, "target": target}
+                return {'status': 'success', 'queued': True, 'target': target}
             else:
-                return JSONResponse(status_code=503, content={"message": "Agent pool not initialized"})
+                return JSONResponse(status_code=503, content={'message': 'Agent pool not initialized'})
                 
         except Exception as e:
-            return JSONResponse(status_code=400, content={"message": f"Decryption failed: {str(e)}"})
+            return JSONResponse(status_code=400, content={'message': f"Decryption failed: {str(e)}"})
 
-    @app.get("/api/status")
+    @app.get('/api/status')
     async def api_get_status(token: str = None):
         """Returns the current state of the agents."""
         if not token or token not in api_sessions:
-             return JSONResponse(status_code=401, content={"message": "Invalid session token"})
+             return JSONResponse(status_code=401, content={'message': 'Invalid session token'})
         
         # Protect session reads with session_lock to prevent race condition
         with session_lock:
@@ -917,16 +917,16 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             sess_name = session['session_name']
             
         return {
-            "generating": gen,
-            "active_agent": sess_name,
-            "agents": agent_pool.list_agents() if agent_pool else [],
-            "active_stack": get_active_stack(),
-            "instance_halted": agent_pool.is_instance_halted(sess_name) if (agent_pool and hasattr(agent_pool, 'is_instance_halted')) else False,
+            'generating': gen,
+            'active_agent': sess_name,
+            'agents': agent_pool.list_agents() if agent_pool else [],
+            'active_stack': get_active_stack(),
+            'instance_halted': agent_pool.is_instance_halted(sess_name) if (agent_pool and hasattr(agent_pool, 'is_instance_halted')) else False,
         }
 
     # ── REST endpoints ────────────────────────────────────────────────────
 
-    @app.get("/api/agents")
+    @app.get('/api/agents')
     async def api_list_agents():
         return [
             {
@@ -939,15 +939,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             for i, a in enumerate(agents)
         ]
 
-    @app.get("/api/state")
+    @app.get('/api/state')
     async def api_get_state():
         try:
             return build_state()
         except Exception as e:
-            logger.warning("State build failed: %s", e, exc_info=True)
-            return {"agents": [], "messages": [], "agent_instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 8192, "summary": "", "has_queued_messages": False, "queued_messages": [], "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
+            logger.warning('State build failed: %s', e, exc_info=True)
+            return {'agents': [], 'messages': [], 'agent_instances': {}, 'active_stack': [], 'generating': False, 'session_name': 'Maine', 'instance_name': 'Maine', 'total_tokens': 0, 'total_words': 0, 'max_tokens': 8192, 'summary': '', 'has_queued_messages': False, 'queued_messages': [], 'stopped': False, 'current_model': 'Unknown', 'telemetry': None, 'default_workspace': str(DEFAULT_WORKSPACE), 'is_waiting': False, 'api_router': {'endpoints': [], 'agent_priorities': {}}}
 
-    @app.post("/api/reset")
+    @app.post('/api/reset')
     async def api_reset():
         # Clear pool instance conversation (unified path)
         if agent_pool:
@@ -973,31 +973,31 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if agent_pool:
             agent_pool.reset()
         await _broadcast_state('done')
-        return {"status": "ok"}
+        return {'status': 'ok'}
 
-    @app.post("/api/approve/{request_id}")
+    @app.post('/api/approve/{request_id}')
     async def api_approve(request_id: str):
         if agent_pool and hasattr(agent_pool, 'operation_manager'):
             result = agent_pool.operation_manager.user_approve(request_id)
-            return {"status": "ok", "result": result}
-        return {"status": "error", "message": "No operation manager"}
+            return {'status': 'ok', 'result': result}
+        return {'status': 'error', 'message': 'No operation manager'}
 
-    @app.post("/api/reject/{request_id}")
-    async def api_reject(request_id: str, reason: str = "Rejected by user"):
+    @app.post('/api/reject/{request_id}')
+    async def api_reject(request_id: str, reason: str = 'Rejected by user'):
         if agent_pool and hasattr(agent_pool, 'operation_manager'):
             result = agent_pool.operation_manager.user_reject(request_id, reason)
-            return {"status": "ok", "result": result}
-        return {"status": "error", "message": "No operation manager"}
+            return {'status': 'ok', 'result': result}
+        return {'status': 'error', 'message': 'No operation manager'}
 
-    @app.post("/api/resume_all")
+    @app.post('/api/resume_all')
     async def api_resume_all():
         """Resume all paused agent instances (global resume)."""
         if agent_pool:
             agent_pool.resume()  # clear global pause flag — agents wake naturally from sleep loop
-            return {"status": "ok", "message": "All instances resumed"}
-        return {"status": "error", "message": "Agent pool not available"}
+            return {'status': 'ok', 'message': 'All instances resumed'}
+        return {'status': 'error', 'message': 'Agent pool not available'}
 
-    @app.get("/api/sessions")
+    @app.get('/api/sessions')
     async def api_list_sessions():
         if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             log_dir = agent_pool.operation_manager.base_dir / 'logs'
@@ -1005,7 +1005,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
 
         if not log_dir.exists():
-            return {"sessions": []}
+            return {'sessions': []}
 
         sessions = []
         for p in log_dir.glob('*.jsonl'):
@@ -1014,24 +1014,24 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 parts = p.stem.split('_')
                 if len(parts) >= 3:
                     agent_class = parts[0]
-                    timestamp = parts[-2] + "_" + parts[-1]
-                    instance_name = "_".join(parts[1:-2])
+                    timestamp = parts[-2] + '_' + parts[-1]
+                    instance_name = '_'.join(parts[1:-2])
                 else:
-                    agent_class = "Unknown"
+                    agent_class = 'Unknown'
                     instance_name = p.stem
-                    timestamp = "Unknown"
+                    timestamp = 'Unknown'
 
                 sessions.append({
-                    "path": str(p),
-                    "name": instance_name,
-                    "agent": agent_class,
-                    "timestamp": timestamp,
-                    "size": p.stat().st_size,
-                    "mtime": p.stat().st_mtime,
+                    'path': str(p),
+                    'name': instance_name,
+                    'agent': agent_class,
+                    'timestamp': timestamp,
+                    'size': p.stat().st_size,
+                    'mtime': p.stat().st_mtime,
                     # Session caption: metadata.caption if set, else truncated first USER
                     # message (fallback), else "". Read cheaply — line 1 for the caption,
                     # and only enough leading lines to find the first user message.
-                    "caption": _read_session_caption(p),
+                    'caption': _read_session_caption(p),
                 })
             except Exception as e:
                 logger.debug(f"Failed to parse session log file info: {e}")
@@ -1039,14 +1039,14 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         # Sort by mtime descending
         sessions.sort(key=lambda x: x['mtime'], reverse=True)
-        return {"sessions": sessions}
+        return {'sessions': sessions}
 
-    @app.get("/api/file")
+    @app.get('/api/file')
     async def api_serve_file(path: str):
         # Clean file:/// if present
-        if path.startswith("file:///"):
+        if path.startswith('file:///'):
             path = path[8:]
-        elif path.startswith("file://"):
+        elif path.startswith('file://'):
             path = path[7:]
 
         # Support for windows paths like n:/...
@@ -1055,53 +1055,53 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # Security check: ensure path is within allowed roots
         if not _is_path_allowed(path):
             logger.warning(f"Blocked access to disallowed path via /api/file: {path}")
-            return JSONResponse(status_code=403, content={"message": "Access denied"})
+            return JSONResponse(status_code=403, content={'message': 'Access denied'})
 
         try:
             if os.path.isfile(path):
                 return FileResponse(path)
         except OSError as e:
             logger.error(f"Error serving file {path}: {e}")
-            return JSONResponse(status_code=500, content={"message": "Internal server error"})
+            return JSONResponse(status_code=500, content={'message': 'Internal server error'})
 
-        return JSONResponse(status_code=404, content={"message": "File not found"})
+        return JSONResponse(status_code=404, content={'message': 'File not found'})
 
-    @app.get("/api/telemetry")
+    @app.get('/api/telemetry')
     async def api_telemetry():
         """Return session telemetry summary and per-config comparison data."""
         if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
             return {
-                "session": agent_pool.telemetry.get_session_summary(),
-                "configs": agent_pool.telemetry.get_config_comparison(),
-                "agent_classes": agent_pool.telemetry.get_agent_class_summary(),
-                "skills": agent_pool.telemetry.get_skill_usage_summary(),
-                "recent_events": agent_pool.telemetry.get_recent_events(50),
+                'session': agent_pool.telemetry.get_session_summary(),
+                'configs': agent_pool.telemetry.get_config_comparison(),
+                'agent_classes': agent_pool.telemetry.get_agent_class_summary(),
+                'skills': agent_pool.telemetry.get_skill_usage_summary(),
+                'recent_events': agent_pool.telemetry.get_recent_events(50),
             }
-        return {"session": {}, "configs": [], "agent_classes": [], "skills": [], "recent_events": []}
+        return {'session': {}, 'configs': [], 'agent_classes': [], 'skills': [], 'recent_events': []}
 
-    @app.get("/api/telemetry/export")
+    @app.get('/api/telemetry/export')
     async def api_telemetry_export():
         """Download the raw telemetry JSONL log file."""
         if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
             path = agent_pool.telemetry.export_jsonl()
             if os.path.exists(path):
                 return FileResponse(path, media_type='application/jsonlines', filename=os.path.basename(path))
-        return JSONResponse(status_code=404, content={"message": "No telemetry data available"})
+        return JSONResponse(status_code=404, content={'message': 'No telemetry data available'})
 
     # ── API Router Endpoints ──────────────────────────────────────────────
 
-    @app.get("/api/endpoints")
+    @app.get('/api/endpoints')
     async def api_list_endpoints():
         """List all configured API endpoints and agent priorities."""
         if agent_pool and hasattr(agent_pool, 'api_router'):
             return agent_pool.api_router.to_dict()
-        return {"endpoints": [], "agent_priorities": {}}
+        return {'endpoints': [], 'agent_priorities': {}}
 
-    @app.post("/api/endpoints")
+    @app.post('/api/endpoints')
     async def api_add_endpoint(data: dict):
         """Add a new API endpoint."""
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
-            return JSONResponse(status_code=500, content={"message": "No API router"})
+            return JSONResponse(status_code=500, content={'message': 'No API router'})
         
         from agent_cascade.api_router import APIEndpoint
         try:
@@ -1116,100 +1116,100 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             )
             ep_id = agent_pool.api_router.add_endpoint(ep)
             await _broadcast_state()
-            return {"status": "ok", "endpoint_id": ep_id}
+            return {'status': 'ok', 'endpoint_id': ep_id}
         except Exception as e:
-            return JSONResponse(status_code=400, content={"message": str(e)})
+            return JSONResponse(status_code=400, content={'message': str(e)})
 
-    @app.put("/api/endpoints/{endpoint_id}")
+    @app.put('/api/endpoints/{endpoint_id}')
     async def api_update_endpoint(endpoint_id: str, data: dict):
         """Update an existing API endpoint."""
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
-            return JSONResponse(status_code=500, content={"message": "No API router"})
+            return JSONResponse(status_code=500, content={'message': 'No API router'})
         
         ok = agent_pool.api_router.update_endpoint(endpoint_id, data)
         if ok:
             await _broadcast_state()
-            return {"status": "ok"}
-        return JSONResponse(status_code=404, content={"message": "Endpoint not found"})
+            return {'status': 'ok'}
+        return JSONResponse(status_code=404, content={'message': 'Endpoint not found'})
 
-    @app.delete("/api/endpoints/{endpoint_id}")
+    @app.delete('/api/endpoints/{endpoint_id}')
     async def api_delete_endpoint(endpoint_id: str):
         """Delete an API endpoint."""
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
-            return JSONResponse(status_code=500, content={"message": "No API router"})
+            return JSONResponse(status_code=500, content={'message': 'No API router'})
         
         ok = agent_pool.api_router.remove_endpoint(endpoint_id)
         if ok:
             await _broadcast_state()
-            return {"status": "ok"}
-        return JSONResponse(status_code=404, content={"message": "Endpoint not found"})
+            return {'status': 'ok'}
+        return JSONResponse(status_code=404, content={'message': 'Endpoint not found'})
 
-    @app.post("/api/endpoints/priorities")
+    @app.post('/api/endpoints/priorities')
     async def api_set_priorities(data: dict):
         """Set agent-type API endpoint priorities.
         
         Body: { "agent_priorities": { "orchestrator": ["id1", "id2"], ... } }
         """
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
-            return JSONResponse(status_code=500, content={"message": "No API router"})
+            return JSONResponse(status_code=500, content={'message': 'No API router'})
         
         priorities = data.get('agent_priorities', {})
         for agent_type, endpoint_ids in priorities.items():
             agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
         await _broadcast_state()
-        return {"status": "ok"}
+        return {'status': 'ok'}
 
-    @app.post("/api/endpoints/bulk")
+    @app.post('/api/endpoints/bulk')
     async def api_bulk_update_endpoints(data: dict):
         """Bulk update all endpoints and priorities (from UI save).
         
         Body: { "endpoints": [...], "agent_priorities": {...} }
         """
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
-            return JSONResponse(status_code=500, content={"message": "No API router"})
+            return JSONResponse(status_code=500, content={'message': 'No API router'})
         
         agent_pool.api_router.from_dict(data)
         await _broadcast_state()
-        return {"status": "ok"}
+        return {'status': 'ok'}
 
     # ── Image Gen Config Endpoints ─────────────────────────────────────────
     # Config lives at <AgentCascade_root>/config/image_gen.json. api_server.py is
     # inside agent_cascade/, so the project root is one level up (parent.parent).
-    _image_gen_config_path = Path(__file__).resolve().parent.parent / "config" / "image_gen.json"
+    _image_gen_config_path = Path(__file__).resolve().parent.parent / 'config' / 'image_gen.json'
 
-    @app.get("/api/image_gen")
+    @app.get('/api/image_gen')
     async def get_image_gen_config():
         """Return current image gen config."""
         from agent_cascade.tools.image_gen import _get_image_gen_config
         return _get_image_gen_config()
 
-    @app.post("/api/image_gen")
+    @app.post('/api/image_gen')
     async def save_image_gen_config(request: Request):
         """Save image gen config. Validates URL format and timeout range."""
         try:
             data = await request.json()
         except Exception:
-            return JSONResponse(status_code=400, content={"message": "Invalid JSON body"})
+            return JSONResponse(status_code=400, content={'message': 'Invalid JSON body'})
 
         if not isinstance(data, dict):
-            return JSONResponse(status_code=400, content={"message": "Body must be a JSON object"})
+            return JSONResponse(status_code=400, content={'message': 'Body must be a JSON object'})
 
         # Validate URL (must start with http:// or https://)
         url = data.get('url', '')
         if not isinstance(url, str) or not (url.startswith('http://') or url.startswith('https://')):
-            return JSONResponse(status_code=400, content={"message": "url must start with http:// or https://"})
+            return JSONResponse(status_code=400, content={'message': 'url must start with http:// or https://'})
 
         # Validate timeout (30-600 seconds). Accept int or numeric string; reject
         # floats (int() would silently truncate e.g. 180.5 → 180) and bools.
         timeout = data.get('timeout', 180)
         if isinstance(timeout, float):
-            return JSONResponse(status_code=400, content={"message": "timeout must be an integer"})
+            return JSONResponse(status_code=400, content={'message': 'timeout must be an integer'})
         try:
             timeout = int(timeout)
         except (TypeError, ValueError):
-            return JSONResponse(status_code=400, content={"message": "timeout must be an integer"})
+            return JSONResponse(status_code=400, content={'message': 'timeout must be an integer'})
         if not (30 <= timeout <= 600):
-            return JSONResponse(status_code=400, content={"message": "timeout must be between 30 and 600 seconds"})
+            return JSONResponse(status_code=400, content={'message': 'timeout must be between 30 and 600 seconds'})
 
         config = {
             'type': data.get('type', 'comfyui'),
@@ -1224,13 +1224,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             with open(_image_gen_config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
         except OSError as e:
-            return JSONResponse(status_code=500, content={"message": f"Failed to write config: {e}"})
+            return JSONResponse(status_code=500, content={'message': f"Failed to write config: {e}"})
 
         from agent_cascade.tools.image_gen import _invalidate_image_gen_config
         _invalidate_image_gen_config()
-        return {"status": "ok"}
+        return {'status': 'ok'}
 
-    @app.get("/api/image_gen/workflows")
+    @app.get('/api/image_gen/workflows')
     async def list_image_gen_workflows():
         """List available workflow files from the configured workflow_dir."""
         from agent_cascade.tools.image_gen import _get_image_gen_config, _list_workflows
@@ -1239,7 +1239,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if not wf_dir:
             # Fall back to the default workflows directory so the UI pulldown
             # is populated even before the user has saved any settings.
-            wf_dir = str(Path(__file__).resolve().parent.parent / "config" / "workflows")
+            wf_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'workflows')
         return _list_workflows(wf_dir)
 
     # ── start_gen wrapper: spawns run_agent_thread in a daemon thread ─────
@@ -1248,7 +1248,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     # ── WebSocket ─────────────────────────────────────────────────────────
 
-    @app.websocket("/ws/chat")
+    @app.websocket('/ws/chat')
     async def ws_chat(websocket: WebSocket):
         await websocket.accept()
         ws_connections.add(websocket)
@@ -1262,7 +1262,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             ws_connections.discard(websocket)
             # Close with error code so client knows something went wrong
             try:
-                await websocket.close(code=1011, reason="Server error building initial state")
+                await websocket.close(code=1011, reason='Server error building initial state')
             except Exception:
                 pass
             return
@@ -1298,15 +1298,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     # Validate that the web UI directory actually exists before serving static files
     if not os.path.isdir(web_ui_dir):
-        logger.warning("Web UI directory does not exist: %s — static file serving will fail", web_ui_dir)
+        logger.warning('Web UI directory does not exist: %s — static file serving will fail', web_ui_dir)
 
-    @app.post("/api/find_file")
+    @app.post('/api/find_file')
     async def find_file(request: Request):
         try:
             data = await request.json()
             filename = data.get('filename')
             if not filename:
-                return JSONResponse(status_code=400, content={"message": "Filename required"})
+                return JSONResponse(status_code=400, content={'message': 'Filename required'})
                 
             base_dir = Path(DEFAULT_WORKSPACE)
             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
@@ -1329,31 +1329,31 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     
             search_dir(base_dir)
             
-            return {"matches": matches}
+            return {'matches': matches}
         except Exception as e:
             logger.error(f"Failed to find file: {e}")
-            return JSONResponse(status_code=500, content={"message": str(e)})
+            return JSONResponse(status_code=500, content={'message': str(e)})
 
     # Dev tool: serve the frontend with no-cache so JS/CSS edits take effect on a
     # normal page refresh instead of being served from the browser's memory/disk cache.
-    _NO_CACHE_HEADERS = {"Cache-Control": "no-store, max-age=0, must-revalidate"}
+    _NO_CACHE_HEADERS = {'Cache-Control': 'no-store, max-age=0, must-revalidate'}
 
-    @app.get("/")
+    @app.get('/')
     async def serve_index():
         return FileResponse(os.path.join(web_ui_dir, 'index.html'), headers=_NO_CACHE_HEADERS)
 
-    @app.get("/{path:path}")
+    @app.get('/{path:path}')
     async def serve_static(path: str):
         file_path = os.path.normpath(os.path.join(web_ui_dir, path))
         # Path traversal protection: ensure resolved path is still within web_ui_dir
         if not (file_path.startswith(web_ui_dir + os.sep) or file_path == web_ui_dir):
-            return JSONResponse(status_code=403, content={"message": "Forbidden"})
+            return JSONResponse(status_code=403, content={'message': 'Forbidden'})
         if os.path.isfile(file_path):
             return FileResponse(file_path, headers=_NO_CACHE_HEADERS)
         # SPA fallback
         return FileResponse(os.path.join(web_ui_dir, 'index.html'), headers=_NO_CACHE_HEADERS)
 
-    @app.post("/api/parse")
+    @app.post('/api/parse')
     async def parse_document(file: UploadFile = File(...)):
         try:
             from agent_cascade.tools.simple_doc_parser import SimpleDocParser
@@ -1365,7 +1365,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             temp_dir.mkdir(exist_ok=True)
             
             file_path = temp_dir / file.filename
-            with file_path.open("wb") as buffer:
+            with file_path.open('wb') as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
             doc_extractor = SimpleDocParser({'structured_doc': False, 'work_dir': str(DEFAULT_WORKSPACE)})
@@ -1377,10 +1377,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except Exception as cleanup_err:
                 logger.warning(f"Failed to clean up temp file {file_path}: {cleanup_err}")
 
-            return {"text": text, "filename": file.filename}
+            return {'text': text, 'filename': file.filename}
         except Exception as e:
             logger.error(f"Failed to parse document: {e}")
-            return JSONResponse(status_code=500, content={"message": str(e)})
+            return JSONResponse(status_code=500, content={'message': str(e)})
 
     # Start media cleanup scheduler (non-critical)
     from agent_cascade.utils.media_utils import start_media_cleanup_scheduler
@@ -1392,7 +1392,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     return app
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     from agent_cascade.log import init_logging, logger
     init_logging()
 
@@ -1402,21 +1402,21 @@ if __name__ == "__main__":
     # Resolve project root: api_server.py lives inside agent_cascade/, so go up one level
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    parser = argparse.ArgumentParser(description="AgentCascade API Server")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
-    parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
-    parser.add_argument("--idle-timeout", type=float, default=None,
-                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 1600). "
-                             "Also settable via AGENT_CASCADE_IDLE_TIMEOUT env var.")
-    parser.add_argument("--system-agent-idle-timeout", type=float, default=None,
-                        help="Idle timeout for system agents (Compressor/Security) (default: 60). 0=off. "
-                             "Also settable via AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT env var.")
-    parser.add_argument("--idle-check-interval", type=float, default=None,
-                        help="Seconds between idle-check sweeps (default: 60). "
-                             "Also settable via AGENT_CASCADE_IDLE_CHECK_INTERVAL env var.")
-    parser.add_argument("--fresh", action="store_true",
-                        help="Start with a fresh session — do not load conversation history from log files.")
+    parser = argparse.ArgumentParser(description='AgentCascade API Server')
+    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--port', type=int, default=12345, help='Port to bind to')
+    parser.add_argument('--workspace', type=str, default=str(DEFAULT_WORKSPACE), help='Workspace directory')
+    parser.add_argument('--idle-timeout', type=float, default=None,
+                        help='Seconds of inactivity before auto-dismissing an idle agent (default: 1600). '
+                             'Also settable via AGENT_CASCADE_IDLE_TIMEOUT env var.')
+    parser.add_argument('--system-agent-idle-timeout', type=float, default=None,
+                        help='Idle timeout for system agents (Compressor/Security) (default: 60). 0=off. '
+                             'Also settable via AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT env var.')
+    parser.add_argument('--idle-check-interval', type=float, default=None,
+                        help='Seconds between idle-check sweeps (default: 60). '
+                             'Also settable via AGENT_CASCADE_IDLE_CHECK_INTERVAL env var.')
+    parser.add_argument('--fresh', action='store_true',
+                        help='Start with a fresh session — do not load conversation history from log files.')
     args = parser.parse_args()
 
     # Initialize the global agent_pool
@@ -1443,9 +1443,9 @@ if __name__ == "__main__":
     from agent_cascade.operation_manager import OperationManager
     try:
         operation_mgr = OperationManager(base_dir=args.workspace)
-        logger.debug("OperationManager initialized with base_dir: %s", args.workspace)
+        logger.debug('OperationManager initialized with base_dir: %s', args.workspace)
     except Exception as e:
-        logger.error("[FATAL] OperationManager initialization failed: %s", e)
+        logger.error('[FATAL] OperationManager initialization failed: %s', e)
         raise SystemExit(1)
 
     try:
@@ -1455,9 +1455,9 @@ if __name__ == "__main__":
             workspace_dir=args.workspace,
             operation_manager=operation_mgr,
         )
-        logger.debug("AgentPool created successfully")
+        logger.debug('AgentPool created successfully')
     except Exception as e:
-        logger.error("[FATAL] AgentPool creation failed: %s", e)
+        logger.error('[FATAL] AgentPool creation failed: %s', e)
         raise SystemExit(1)
 
     operation_mgr.agent_pool = agent_pool
@@ -1497,15 +1497,15 @@ if __name__ == "__main__":
         agent_pool.create_instance('Maine', 'orchestrator')
         logger.debug("Orchestrator instance 'Maine' created")
     except Exception as e:
-        logger.error("[FATAL] Failed to create orchestrator instance: %s", e)
+        logger.error('[FATAL] Failed to create orchestrator instance: %s', e)
         raise SystemExit(1)
 
     # Start background services (idle checker thread, etc.)
     try:
         agent_pool.start()
-        logger.debug("AgentPool background services started")
+        logger.debug('AgentPool background services started')
     except Exception as e:
-        logger.error("[FATAL] Failed to start AgentPool background services: %s", e)
+        logger.error('[FATAL] Failed to start AgentPool background services: %s', e)
         raise SystemExit(1)
 
     # Get the orchestrator agent template for create_app (new pool separates instances from templates)
@@ -1532,29 +1532,29 @@ if __name__ == "__main__":
         all_agents = [orch] + [a for a in all_agents if a != orch]
 
     try:
-        app = create_app(agents=all_agents, agent_pool=agent_pool, config={"fresh_session": args.fresh})
-        logger.debug("FastAPI app created successfully")
+        app = create_app(agents=all_agents, agent_pool=agent_pool, config={'fresh_session': args.fresh})
+        logger.debug('FastAPI app created successfully')
     except Exception as e:
-        logger.error("[FATAL] Failed to create API server app: %s", e)
+        logger.error('[FATAL] Failed to create API server app: %s', e)
         raise SystemExit(1)
 
     port = args.port
-    logger.info("\n[OK] API Server ready!")
-    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
-    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
-    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
-    logger.info("=" * 50)
+    logger.info('\n[OK] API Server ready!')
+    logger.info('    -> Open http://127.0.0.1:%d in your browser', port)
+    logger.info('    -> WebSocket at ws://127.0.0.1:%d/ws/chat', port)
+    logger.info('    -> REST API at http://127.0.0.1:%d/api/', port)
+    logger.info('=' * 50)
 
     # Set up graceful shutdown handler
     def handle_shutdown(signum, frame):
-        logger.info("\n[INFO] Initiating graceful shutdown...")
+        logger.info('\n[INFO] Initiating graceful shutdown...')
         agent_pool.stopped = True
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()
             except Exception as e:
                 logger.debug(f"Backup cleanup failed during shutdown (non-critical): {e}")
-        logger.info("[INFO] Terminated.")
+        logger.info('[INFO] Terminated.')
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)
@@ -1565,10 +1565,10 @@ if __name__ == "__main__":
         uvicorn.run(app, host=args.host, port=port)
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error("[FATAL] Port %d is already in use. Use --port to specify a different port.", port)
+            logger.error('[FATAL] Port %d is already in use. Use --port to specify a different port.', port)
         else:
-            logger.error("[FATAL] Server failed to start: %s", e)
+            logger.error('[FATAL] Server failed to start: %s', e)
         raise SystemExit(1)
     except Exception as e:
-        logger.error("[FATAL] Server crashed: %s", e)
+        logger.error('[FATAL] Server crashed: %s', e)
         raise SystemExit(1)

@@ -31,7 +31,7 @@ def normalize_version(raw) -> str:
     """
     if isinstance(raw, str) and _SEMVER_RE.match(raw):
         return raw
-    return "1.0.0"
+    return '1.0.0'
 
 
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
@@ -53,7 +53,7 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     """
     stripped = content.strip()
     if not stripped.startswith('---'):
-        logger.debug("[SKILLS] No YAML frontmatter delimiter found in content")
+        logger.debug('[SKILLS] No YAML frontmatter delimiter found in content')
         return {}, content
 
     # Split content into lines for processing
@@ -73,7 +73,7 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
 
     if not yaml_lines and body_start == 0:
         # No closing delimiter found; treat entire content as body
-        logger.debug("[SKILLS] No closing frontmatter delimiter found")
+        logger.debug('[SKILLS] No closing frontmatter delimiter found')
         return {}, content
 
     # Reconstruct YAML text from collected lines
@@ -83,11 +83,11 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     try:
         frontmatter = yaml.safe_load(yaml_text) or {}
     except yaml.YAMLError as e:
-        logger.warning("[SKILLS] Failed to parse YAML frontmatter: %s", e)
+        logger.warning('[SKILLS] Failed to parse YAML frontmatter: %s', e)
         return {}, content
 
     if not isinstance(frontmatter, dict):
-        logger.debug("[SKILLS] Frontmatter parsed as non-dict type: %s", type(frontmatter).__name__)
+        logger.debug('[SKILLS] Frontmatter parsed as non-dict type: %s', type(frontmatter).__name__)
         return {}, content
 
     # Body is everything after the closing delimiter
@@ -118,11 +118,11 @@ def parse_skill_file(skill_path: Path) -> Dict[str, Any]:
     frontmatter, body = parse_frontmatter(content)
 
     result = {
-        "frontmatter": frontmatter,
-        "body": body,
-        "path": str(skill_path),
-        "version": normalize_version(frontmatter.get("version")),
+        'frontmatter': frontmatter,
+        'body': body,
+        'path': str(skill_path),
+        'version': normalize_version(frontmatter.get('version')),
     }
 
-    logger.debug("[SKILLS] Parsed skill file: %s (name=%s)", skill_path, frontmatter.get('name', 'unknown'))
+    logger.debug('[SKILLS] Parsed skill file: %s (name=%s)', skill_path, frontmatter.get('name', 'unknown'))
     return result

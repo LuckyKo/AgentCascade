@@ -27,7 +27,7 @@ def get_leading_whitespace(s):
     for line in s.splitlines():
         if line.strip():
             return line[:len(line) - len(line.lstrip())]
-    return ""
+    return ''
 
 def get_indent_width(indent_str):
     """Calculate indent width in spaces (tab=4)."""
@@ -48,19 +48,19 @@ def heuristic_match(file_content, old_content):
     # Map normalized lines of the raw file
     file_line_info = []
     for idx, line in enumerate(file_lines):
-        norm = "".join(line.split())
+        norm = ''.join(line.split())
         if norm:
             file_line_info.append((idx, norm))
     
     # Map normalized lines of old_content
     old_line_info = []
     for line in old_content.splitlines(keepends=True):
-        norm = "".join(line.split())
+        norm = ''.join(line.split())
         if norm:
             old_line_info.append(norm)
     
     if not old_line_info:
-        raise ValueError("old_content contains only whitespace")
+        raise ValueError('old_content contains only whitespace')
     
     # Build file line map
     file_line_map = {}
@@ -87,7 +87,7 @@ def heuristic_match(file_content, old_content):
             candidate_slice = file_line_info[start_idx : start_idx + size]
             candidate_norms = [item[1] for item in candidate_slice]
             ratio = difflib.SequenceMatcher(
-                None, "".join(old_line_info), "".join(candidate_norms)
+                None, ''.join(old_line_info), ''.join(candidate_norms)
             ).ratio()
             if ratio > best_ratio:
                 best_ratio = ratio
@@ -108,15 +108,15 @@ def heuristic_match(file_content, old_content):
     orig_start = file_line_info[match['start_list_idx']][0]
     orig_end = file_line_info[match['end_list_idx'] - 1][0]
     
-    actual_old_content = "".join(file_lines[orig_start : orig_end + 1])
+    actual_old_content = ''.join(file_lines[orig_start : orig_end + 1])
     return actual_old_content, match['ratio']
 
 
 def apply_indent_preservation(old_content, new_content, actual_old_content):
     """Simulate the indentation preservation logic from operation_manager.py."""
-    old_norm_lines = ["".join(l.split()) for l in old_content.splitlines()]
-    file_norm_lines = ["".join(l.split()) for l in actual_old_content.splitlines()]
-    new_norm_lines = ["".join(l.split()) for l in new_content.splitlines()]
+    old_norm_lines = [''.join(l.split()) for l in old_content.splitlines()]
+    file_norm_lines = [''.join(l.split()) for l in actual_old_content.splitlines()]
+    new_norm_lines = [''.join(l.split()) for l in new_content.splitlines()]
     
     # Phase 1 - Alignment: old_content -> file block
     matcher = difflib.SequenceMatcher(None, old_norm_lines, file_norm_lines)
@@ -150,8 +150,8 @@ def apply_indent_preservation(old_content, new_content, actual_old_content):
     file_block_lines = actual_old_content.splitlines(keepends=True)
     file_indent_by_line = {}
     for idx, fl in enumerate(file_block_lines):
-        if "".join(fl.split()):
-            leading_ws = fl[:len(fl) - len(fl.lstrip())] if fl.strip() else ""
+        if ''.join(fl.split()):
+            leading_ws = fl[:len(fl) - len(fl.lstrip())] if fl.strip() else ''
             file_indent_by_line[idx] = leading_ws
     
     # Phase 2 - Apply indents
@@ -185,7 +185,7 @@ def apply_indent_preservation(old_content, new_content, actual_old_content):
         else:
             adjusted_lines.append(line)
     
-    return "".join(adjusted_lines)
+    return ''.join(adjusted_lines)
 
 
 # ============================================================================
@@ -195,20 +195,20 @@ def apply_indent_preservation(old_content, new_content, actual_old_content):
 def test_comment_preservation_basic():
     """Comments in old_content match and don't get duplicated/lost."""
     file_content = (
-        "def foo():\n"
-        "    # This is a comment\n"
-        "    x = 1\n"
-        "    y = 2\n"
-        "    return x + y\n"
+        'def foo():\n'
+        '    # This is a comment\n'
+        '    x = 1\n'
+        '    y = 2\n'
+        '    return x + y\n'
     )
     old_content = file_content  # exact match
     new_content = (
-        "def foo():\n"
-        "    # Modified comment\n"
-        "    x = 10\n"
-        "    y = 20\n"
-        "    z = 30\n"
-        "    return x + y + z\n"
+        'def foo():\n'
+        '    # Modified comment\n'
+        '    x = 10\n'
+        '    y = 20\n'
+        '    z = 30\n'
+        '    return x + y + z\n'
     )
     
     actual_old, ratio = heuristic_match(file_content, old_content)
@@ -219,8 +219,8 @@ def test_comment_preservation_basic():
     comment_count = sum(1 for line in result.splitlines() if line.strip().startswith('#'))
     assert comment_count == 1, f"Expected 1 comment, got {comment_count}"
     
-    assert "# Modified comment" in result
-    assert "z = 30" in result
+    assert '# Modified comment' in result
+    assert 'z = 30' in result
     
     # Indentation check
     for line in result.splitlines():
@@ -229,23 +229,23 @@ def test_comment_preservation_basic():
         leading = len(line) - len(line.lstrip())
         assert leading in (0, 4), f"Bad indent on: {line!r}"
     
-    print("PASS test_comment_preservation_basic")
+    print('PASS test_comment_preservation_basic')
 
 
 def test_comment_count_difference():
     """Differing comment counts should cause match failure, NOT silent duplication."""
     file_content = (
-        "def bar():\n"
-        "    # Comment A\n"
-        "    # Comment B\n"
-        "    val = 42\n"
-        "    return val\n"
+        'def bar():\n'
+        '    # Comment A\n'
+        '    # Comment B\n'
+        '    val = 42\n'
+        '    return val\n'
     )
     old_content = (
-        "def bar():\n"
-        "    # Comment A\n"
-        "    val = 42\n"
-        "    return val\n"
+        'def bar():\n'
+        '    # Comment A\n'
+        '    val = 42\n'
+        '    return val\n'
     )
     
     try:
@@ -255,33 +255,33 @@ def test_comment_count_difference():
         assert cc == 2, f"Matched {cc} comments but file has 2 - mismatch!"
     except ValueError:
         # Expected: match fails because content differs
-        print("PASS test_comment_count_difference (rejected)")
+        print('PASS test_comment_count_difference (rejected)')
         return
     
-    print("PASS test_comment_count_difference (matched correctly)")
+    print('PASS test_comment_count_difference (matched correctly)')
 
 
 def test_indentation_preservation():
     """Indentation preserved without comment-stripping gaps."""
     file_content = (
-        "class MyClass:\n"
-        "    # Class doc comment\n"
-        "    def method(self):\n"
-        "        # Method comment\n"
-        "        x = 1\n"
-        "        y = 2\n"
-        "        return x + y\n"
+        'class MyClass:\n'
+        '    # Class doc comment\n'
+        '    def method(self):\n'
+        '        # Method comment\n'
+        '        x = 1\n'
+        '        y = 2\n'
+        '        return x + y\n'
     )
     old_content = file_content
     new_content = (
-        "class MyClass:\n"
-        "    # Updated class comment\n"
-        "    def method(self):\n"
-        "        # Updated method comment\n"
-        "        x = 10\n"
-        "        y = 20\n"
-        "        z = 30\n"
-        "        return x + y + z\n"
+        'class MyClass:\n'
+        '    # Updated class comment\n'
+        '    def method(self):\n'
+        '        # Updated method comment\n'
+        '        x = 10\n'
+        '        y = 20\n'
+        '        z = 30\n'
+        '        return x + y + z\n'
     )
     
     actual_old, ratio = heuristic_match(file_content, old_content)
@@ -311,100 +311,100 @@ def test_indentation_preservation():
             # Inside method -> 8 spaces
             assert leading == 8, f"Line {line!r}: expected 8, got {leading}"
     
-    print("PASS test_indentation_preservation")
+    print('PASS test_indentation_preservation')
 
 
 def test_whitespace_tolerance():
     """Heuristic mode tolerates whitespace differences (no regression)."""
     file_content = (
-        "def hello():\n"
-        "    x=1\n"
-        "    y=2\n"
-        "    return x+y\n"
+        'def hello():\n'
+        '    x=1\n'
+        '    y=2\n'
+        '    return x+y\n'
     )
     old_content = (
-        "def hello():\n"
-        "    x = 1\n"
-        "    y = 2\n"
-        "    return x + y\n"
+        'def hello():\n'
+        '    x = 1\n'
+        '    y = 2\n'
+        '    return x + y\n'
     )
     
     actual_old, ratio = heuristic_match(file_content, old_content)
-    assert "x=1" in actual_old, "Should match file content exactly"
+    assert 'x=1' in actual_old, 'Should match file content exactly'
     
     new_content = (
-        "def hello():\n"
-        "    x = 10\n"
-        "    y = 20\n"
-        "    return x + y\n"
+        'def hello():\n'
+        '    x = 10\n'
+        '    y = 20\n'
+        '    return x + y\n'
     )
     
     adjusted_new = apply_indent_preservation(old_content, new_content, actual_old)
     result = file_content.replace(actual_old, adjusted_new, 1)
-    assert "x = 10" in result or "x=10" in result
+    assert 'x = 10' in result or 'x=10' in result
     
-    print("PASS test_whitespace_tolerance")
+    print('PASS test_whitespace_tolerance')
 
 
 def test_no_comment_stripping():
     """Core fix test: comment text IS part of normalized line comparison."""
     file_content = (
-        "def func():\n"
-        "    # Important comment\n"
-        "    x = 1\n"
+        'def func():\n'
+        '    # Important comment\n'
+        '    x = 1\n'
     )
     
     old_with_comment = (
-        "def func():\n"
-        "    # Important comment\n"
-        "    x = 1\n"
+        'def func():\n'
+        '    # Important comment\n'
+        '    x = 1\n'
     )
     old_without_comment = (
-        "def func():\n"
-        "    x = 1\n"
+        'def func():\n'
+        '    x = 1\n'
     )
     
     # WITH comment: should match
     actual_old, ratio = heuristic_match(file_content, old_with_comment)
-    assert "# Important comment" in actual_old
+    assert '# Important comment' in actual_old
     
     # WITHOUT comment: should fail (comments are structural now)
     try:
         heuristic_match(file_content, old_without_comment)
     except ValueError:
-        print("PASS test_no_comment_stripping (rejected)")
+        print('PASS test_no_comment_stripping (rejected)')
         return
     
-    print("PASS test_no_comment_stripping")
+    print('PASS test_no_comment_stripping')
 
 
 def test_multiline_c_comments():
     """C-style multiline comments are treated as structural content."""
     file_content = (
-        "/* This is a\n"
-        "   multiline comment */\n"
-        "void foo() {\n"
-        "    // inline comment\n"
-        "    int x = 1;\n"
-        "}\n"
+        '/* This is a\n'
+        '   multiline comment */\n'
+        'void foo() {\n'
+        '    // inline comment\n'
+        '    int x = 1;\n'
+        '}\n'
     )
     old_content = file_content
     new_content = (
-        "/* Updated comment */\n"
-        "void foo() {\n"
-        "    // updated inline comment\n"
-        "    int x = 42;\n"
-        "}\n"
+        '/* Updated comment */\n'
+        'void foo() {\n'
+        '    // updated inline comment\n'
+        '    int x = 42;\n'
+        '}\n'
     )
     
     actual_old, ratio = heuristic_match(file_content, old_content)
     adjusted_new = apply_indent_preservation(old_content, new_content, actual_old)
     result = file_content.replace(actual_old, adjusted_new, 1)
     
-    assert "int x = 42;" in result
-    assert "/* Updated comment */" in result
+    assert 'int x = 42;' in result
+    assert '/* Updated comment */' in result
     
-    print("PASS test_multiline_c_comments")
+    print('PASS test_multiline_c_comments')
 
 
 # ============================================================================
@@ -412,9 +412,9 @@ def test_multiline_c_comments():
 # ============================================================================
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("Testing heuristic edit_file fix: no comment stripping")
-    print("=" * 60)
+    print('=' * 60)
+    print('Testing heuristic edit_file fix: no comment stripping')
+    print('=' * 60)
     
     tests = [
         test_comment_preservation_basic,
@@ -435,9 +435,9 @@ if __name__ == '__main__':
             import traceback; traceback.print_exc()
             failed += 1
     
-    print("=" * 60)
+    print('=' * 60)
     print(f"Results: {passed} passed, {failed} failed out of {len(tests)}")
     
     if failed:
         sys.exit(1)
-    print("All tests PASSED")
+    print('All tests PASSED')

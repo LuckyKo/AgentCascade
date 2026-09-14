@@ -40,9 +40,9 @@ FAST_RETRY_POLICY = RetryPolicy(
 @pytest.fixture
 def router(tmp_path_factory):
     """Create an isolated APIRouter instance with its own config dir."""
-    test_config_dir = str(tmp_path_factory.mktemp("priority_swap_cursor_test"))
+    test_config_dir = str(tmp_path_factory.mktemp('priority_swap_cursor_test'))
 
-    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_config_dir}):
+    with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_config_dir}):
         r = APIRouter(default_llm_cfg={
             'api_base': 'http://default-api',
             'model': 'default-model',
@@ -66,10 +66,10 @@ def _add_endpoint(router, name, api_base, model='test-model', enabled=True):
 
 def _setup_three_endpoints(router):
     """Three real endpoints + 'coder' priorities [a, b, c]."""
-    _add_endpoint(router, "ep_a", "http://a-api")
-    _add_endpoint(router, "ep_b", "http://b-api")
-    _add_endpoint(router, "ep_c", "http://c-api")
-    router.set_agent_priorities("coder", ["ep_ep_a", "ep_ep_b", "ep_ep_c"])
+    _add_endpoint(router, 'ep_a', 'http://a-api')
+    _add_endpoint(router, 'ep_b', 'http://b-api')
+    _add_endpoint(router, 'ep_c', 'http://c-api')
+    router.set_agent_priorities('coder', ['ep_ep_a', 'ep_ep_b', 'ep_ep_c'])
 
 
 # ============================================================================
@@ -85,24 +85,24 @@ class TestSetAgentPrioritiesClearsCursor:
 
         # Advance cursor to position 2 — under the OLD order [a, b, c] the next
         # chain would rotate to start at ep_c.
-        router.advance_instance_endpoint("worker1")
-        router.advance_instance_endpoint("worker1")
-        assert router._instance_endpoint_position.get("worker1", 0) == 2
+        router.advance_instance_endpoint('worker1')
+        router.advance_instance_endpoint('worker1')
+        assert router._instance_endpoint_position.get('worker1', 0) == 2
 
         # Sanity: with the old order and cursor=2, the chain head is ep_c.
-        chain_old = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain_old = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain_old[0]['api_base'] == 'http://c-api'
 
         # Live reorder via the REAL entry point: new priority [c, a, b].
-        router.set_agent_priorities("coder", ["ep_ep_c", "ep_ep_a", "ep_ep_b"])
+        router.set_agent_priorities('coder', ['ep_ep_c', 'ep_ep_a', 'ep_ep_b'])
 
         # Cursor must be cleared for that instance.
-        assert "worker1" not in router._instance_endpoint_position, \
+        assert 'worker1' not in router._instance_endpoint_position, \
             f"Cursor should be cleared after set_agent_priorities, got {router._instance_endpoint_position}"
 
         # Chain must reflect the NEW priority order with head = new top priority (ep_c),
         # NOT a stale positional rotation of the new chain.
-        chain_new = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain_new = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain_new[0]['api_base'] == 'http://c-api', \
             f"Expected new head ep_c, got {chain_new[0].get('api_base')}"
         tier_bases = [cfg['api_base'] for cfg in chain_new[:-1]]  # exclude Tier-4 default
@@ -113,11 +113,11 @@ class TestSetAgentPrioritiesClearsCursor:
         """set_agent_priorities clears ALL cursors (clear-all semantics, like from_dict)."""
         _setup_three_endpoints(router)
 
-        router.advance_instance_endpoint("worker1")
-        router.advance_instance_endpoint("worker2")
-        assert router._instance_endpoint_position == {"worker1": 1, "worker2": 1}
+        router.advance_instance_endpoint('worker1')
+        router.advance_instance_endpoint('worker2')
+        assert router._instance_endpoint_position == {'worker1': 1, 'worker2': 1}
 
-        router.set_agent_priorities("coder", ["ep_ep_b", "ep_ep_a", "ep_ep_c"])
+        router.set_agent_priorities('coder', ['ep_ep_b', 'ep_ep_a', 'ep_ep_c'])
 
         assert router._instance_endpoint_position == {}, \
             f"All cursors must be cleared, got {router._instance_endpoint_position}"
@@ -128,15 +128,15 @@ class TestSetAgentPrioritiesClearsCursor:
         _setup_three_endpoints(router)
 
         # Cursor at position 2 (valid for the 3-endpoint tier list).
-        router.advance_instance_endpoint("worker1")
-        router.advance_instance_endpoint("worker1")
-        assert router._instance_endpoint_position.get("worker1", 0) == 2
+        router.advance_instance_endpoint('worker1')
+        router.advance_instance_endpoint('worker1')
+        assert router._instance_endpoint_position.get('worker1', 0) == 2
 
         # New chain has only ONE tier endpoint — stale index 2 is meaningless.
-        router.set_agent_priorities("coder", ["ep_ep_b"])
+        router.set_agent_priorities('coder', ['ep_ep_b'])
 
-        assert "worker1" not in router._instance_endpoint_position
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        assert 'worker1' not in router._instance_endpoint_position
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain[0]['api_base'] == 'http://b-api', \
             f"Expected new head ep_b, got {chain[0].get('api_base')}"
 
@@ -145,10 +145,10 @@ class TestSetAgentPrioritiesClearsCursor:
         leaves the cursor store empty (idempotent)."""
         _setup_three_endpoints(router)
 
-        router.set_agent_priorities("coder", ["ep_ep_b", "ep_ep_a"])
+        router.set_agent_priorities('coder', ['ep_ep_b', 'ep_ep_a'])
 
         assert router._instance_endpoint_position == {}
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain[0]['api_base'] == 'http://b-api'
 
 
@@ -163,34 +163,34 @@ class TestUpdateEndpointClearsCursor:
     def test_disable_endpoint_clears_cursor(self, router):
         _setup_three_endpoints(router)
 
-        router.advance_instance_endpoint("worker1")
-        assert router._instance_endpoint_position.get("worker1", 0) == 1
+        router.advance_instance_endpoint('worker1')
+        assert router._instance_endpoint_position.get('worker1', 0) == 1
 
         # Disable the head endpoint — it drops out of the tier chain entirely.
-        ok = router.update_endpoint("ep_ep_a", {"enabled": False})
+        ok = router.update_endpoint('ep_ep_a', {'enabled': False})
         assert ok is True
 
-        assert "worker1" not in router._instance_endpoint_position, \
+        assert 'worker1' not in router._instance_endpoint_position, \
             f"Cursor should be cleared after update_endpoint, got {router._instance_endpoint_position}"
 
         # Head must now be the new top priority (ep_b), not a stale rotation.
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain[0]['api_base'] == 'http://b-api', \
             f"Expected head ep_b after disabling ep_a, got {chain[0].get('api_base')}"
 
     def test_api_base_change_clears_cursor(self, router):
         _setup_three_endpoints(router)
 
-        router.advance_instance_endpoint("worker1")
-        router.advance_instance_endpoint("worker1")
-        assert router._instance_endpoint_position.get("worker1", 0) == 2
+        router.advance_instance_endpoint('worker1')
+        router.advance_instance_endpoint('worker1')
+        assert router._instance_endpoint_position.get('worker1', 0) == 2
 
         # Change the head endpoint's api_base — same positional slot, different target.
-        ok = router.update_endpoint("ep_ep_a", {"api_base": "http://a-api-v2"})
+        ok = router.update_endpoint('ep_ep_a', {'api_base': 'http://a-api-v2'})
         assert ok is True
 
-        assert "worker1" not in router._instance_endpoint_position
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        assert 'worker1' not in router._instance_endpoint_position
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         # Cursor reset → unrotated order → head is the (updated) ep_a.
         assert chain[0]['api_base'] == 'http://a-api-v2', \
             f"Expected updated head, got {chain[0].get('api_base')}"
@@ -199,13 +199,13 @@ class TestUpdateEndpointClearsCursor:
         """update_endpoint returns False for unknown IDs and must NOT touch cursors."""
         _setup_three_endpoints(router)
 
-        router.advance_instance_endpoint("worker1")
-        assert router._instance_endpoint_position.get("worker1", 0) == 1
+        router.advance_instance_endpoint('worker1')
+        assert router._instance_endpoint_position.get('worker1', 0) == 1
 
-        ok = router.update_endpoint("ep_nonexistent", {"enabled": False})
+        ok = router.update_endpoint('ep_nonexistent', {'enabled': False})
         assert ok is False
         # Early-return path — cursor untouched.
-        assert router._instance_endpoint_position.get("worker1", 0) == 1
+        assert router._instance_endpoint_position.get('worker1', 0) == 1
 
 
 # ============================================================================
@@ -220,16 +220,16 @@ class TestNormalRotationUnchanged:
         _setup_three_endpoints(router)
 
         # Cursor 0 → head a
-        chain1 = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain1 = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain1[0]['api_base'] == 'http://a-api'
 
-        router.advance_instance_endpoint("worker1")
-        chain2 = router.get_endpoint_chain("coder", instance_name="worker1")
+        router.advance_instance_endpoint('worker1')
+        chain2 = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain2[0]['api_base'] == 'http://b-api', \
             f"Expected rotation to ep_b, got {chain2[0].get('api_base')}"
 
-        router.advance_instance_endpoint("worker1")
-        chain3 = router.get_endpoint_chain("coder", instance_name="worker1")
+        router.advance_instance_endpoint('worker1')
+        chain3 = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain3[0]['api_base'] == 'http://c-api', \
             f"Expected rotation to ep_c, got {chain3[0].get('api_base')}"
 
@@ -238,17 +238,17 @@ class TestNormalRotationUnchanged:
 
         # Advance past the tier count — wraps (4 % 3 = 1 → head b).
         for _ in range(4):
-            router.advance_instance_endpoint("worker1")
+            router.advance_instance_endpoint('worker1')
 
-        chain = router.get_endpoint_chain("coder", instance_name="worker1")
+        chain = router.get_endpoint_chain('coder', instance_name='worker1')
         assert chain[0]['api_base'] == 'http://b-api', \
             f"Expected wrapped head ep_b, got {chain[0].get('api_base')}"
 
     def test_other_instances_unaffected_by_rotation(self, router):
         _setup_three_endpoints(router)
 
-        router.advance_instance_endpoint("worker1")
+        router.advance_instance_endpoint('worker1')
 
-        chain = router.get_endpoint_chain("coder", instance_name="worker2")
+        chain = router.get_endpoint_chain('coder', instance_name='worker2')
         assert chain[0]['api_base'] == 'http://a-api', \
             "Advancing one instance must not rotate another's chain"

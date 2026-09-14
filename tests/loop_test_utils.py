@@ -21,16 +21,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import importlib.util as _util
 
 _settings_spec = _util.spec_from_file_location(
-    "settings",
-    PROJECT_ROOT / "agent_cascade" / "settings.py",
+    'settings',
+    PROJECT_ROOT / 'agent_cascade' / 'settings.py',
 )
 _settings_mod = _util.module_from_spec(_settings_spec)
-sys.modules["agent_cascade.settings"] = _settings_mod
+sys.modules['agent_cascade.settings'] = _settings_mod
 _settings_spec.loader.exec_module(_settings_mod)
 
 _spec = _util.spec_from_file_location(
-    "inner_loop_detect",
-    PROJECT_ROOT / "agent_cascade" / "inner_loop_detect.py",
+    'inner_loop_detect',
+    PROJECT_ROOT / 'agent_cascade' / 'inner_loop_detect.py',
 )
 _mod = _util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
@@ -50,9 +50,9 @@ def find_log_dir() -> Optional[Path]:
     (N:/work/...) and inside Docker containers (/workspace/logs).
     """
     candidates = [
-        Path("/workspace/logs"),
-        PROJECT_ROOT.parent / "logs",
-        Path(r"N:\work\WD\AgentWorkspace\logs"),
+        Path('/workspace/logs'),
+        PROJECT_ROOT.parent / 'logs',
+        Path(r'N:\work\WD\AgentWorkspace\logs'),
     ]
     for p in candidates:
         if p.is_dir():
@@ -75,9 +75,9 @@ def extract_assistant_texts(log_dir: Path, min_length: int = 200) -> list[str]:
     """
     texts: list[str] = []
     for fname in sorted(log_dir.iterdir()):
-        if fname.suffix != ".jsonl":
+        if fname.suffix != '.jsonl':
             continue
-        with open(fname, encoding="utf-8", errors="replace") as fh:
+        with open(fname, encoding='utf-8', errors='replace') as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -88,19 +88,19 @@ def extract_assistant_texts(log_dir: Path, min_length: int = 200) -> list[str]:
                     continue
 
                 # Nested message format: {"message": {...}}
-                msg = entry.get("message", entry.get("msg"))
-                if isinstance(msg, dict) and msg.get("role") == "assistant":
-                    content = msg.get("content") or ""
-                    reasoning = msg.get("reasoning_content", msg.get("reasoning")) or ""
+                msg = entry.get('message', entry.get('msg'))
+                if isinstance(msg, dict) and msg.get('role') == 'assistant':
+                    content = msg.get('content') or ''
+                    reasoning = msg.get('reasoning_content', msg.get('reasoning')) or ''
                     full_text = reasoning + content
                     if len(full_text) >= min_length:
                         texts.append(full_text.strip())
                     continue
 
                 # Top-level format: {"role": "assistant", ...}
-                if entry.get("role") == "assistant":
-                    content = entry.get("content") or ""
-                    reasoning = entry.get("reasoning_content", entry.get("reasoning")) or ""
+                if entry.get('role') == 'assistant':
+                    content = entry.get('content') or ''
+                    reasoning = entry.get('reasoning_content', entry.get('reasoning')) or ''
                     full_text = reasoning + content
                     if len(full_text) >= min_length:
                         texts.append(full_text.strip())
@@ -114,7 +114,7 @@ def extract_assistant_texts(log_dir: Path, min_length: int = 200) -> list[str]:
 
 def get_assistant_texts(min_length: int = 200) -> list[str]:
     """Return assistant texts, cached across test calls for speed."""
-    if not hasattr(get_assistant_texts, "_cache"):
+    if not hasattr(get_assistant_texts, '_cache'):
         get_assistant_texts._cache = extract_assistant_texts(LOG_DIR, min_length) if LOG_DIR else []
     return get_assistant_texts._cache
 
@@ -132,17 +132,17 @@ def make_unique_filler(min_chars: int = 4500) -> str:
     """
     parts = []
     i = 0
-    while len(" ".join(parts)) < min_chars:
+    while len(' '.join(parts)) < min_chars:
         parts.append(f"Step {i} involves examining component alpha-{i} for correctness and completeness.")
         parts.append(f"Then I verify that module beta-{i + 100} handles edge cases properly too.")
         parts.append(f"Finally checking subsystem gamma-{i + 200} against the reference implementation spec.")
         i += 1
-    return " ".join(parts)
+    return ' '.join(parts)
 
 
 def feed_streaming(
     text: str,
-    chunk_size_strategy: str = "fixed",
+    chunk_size_strategy: str = 'fixed',
     base_chunk_size: int = 20,
 ) -> Optional[dict]:
     """Feed text through the detector using realistic streaming chunks.
@@ -169,7 +169,7 @@ def feed_streaming(
     pos = 0
 
     while pos < len(text):
-        if chunk_size_strategy == "random":
+        if chunk_size_strategy == 'random':
             actual_chunk = rng.randint(10, 40)
         else:
             actual_chunk = base_chunk_size
@@ -185,7 +185,7 @@ def feed_streaming(
 
 def feed_streaming_loop_test(
     text: str,
-    chunk_size_strategy: str = "fixed",
+    chunk_size_strategy: str = 'fixed',
     base_chunk_size: int = 500,
 ) -> Optional[dict]:
     """Feed text through the detector with chunks large enough to preserve tokenization.
@@ -215,7 +215,7 @@ def feed_streaming_loop_test(
     pos = 0
 
     while pos < len(text):
-        if chunk_size_strategy == "random":
+        if chunk_size_strategy == 'random':
             actual_chunk = rng.randint(200, 800)
         else:
             actual_chunk = base_chunk_size

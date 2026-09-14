@@ -47,9 +47,9 @@ class MockLLM(BaseChatModel):
     def __init__(self, cfg=None, fail_count=0, fail_type=None, succeed_after=None):
         # Default: disable L1 retries so we can test pure L2/L3 behavior
         if cfg is None:
-            cfg = {"max_retries": 0}
-        elif "max_retries" not in cfg:
-            cfg["max_retries"] = 0
+            cfg = {'max_retries': 0}
+        elif 'max_retries' not in cfg:
+            cfg['max_retries'] = 0
         super().__init__(cfg)
         self.call_count = 0
         self.fail_count = fail_count          # Number of initial calls that should fail
@@ -68,7 +68,7 @@ class MockLLM(BaseChatModel):
 
         # Success path: yield a single accumulated message batch
         from agent_cascade.llm.schema import Message, ASSISTANT
-        yield [Message(role=ASSISTANT, content="mock response")]
+        yield [Message(role=ASSISTANT, content='mock response')]
 
     def _chat_no_stream(self, messages, generate_cfg=None):
         """Mock non-streaming (required by abstract base)."""
@@ -78,7 +78,7 @@ class MockLLM(BaseChatModel):
             msg = f"Simulated failure #{self.call_count}"
             raise exc_class(msg) if exc_class is not ModelServiceError else exc_class(message=msg)
         from agent_cascade.llm.schema import Message, ASSISTANT
-        return [Message(role=ASSISTANT, content="mock response")]
+        return [Message(role=ASSISTANT, content='mock response')]
 
     def _chat_with_functions(self, messages, functions, stream, delta_stream, generate_cfg, lang):
         """Mock function-calling chat (required by abstract base)."""
@@ -107,7 +107,7 @@ class FailingStreamLLM(BaseChatModel):
 
     def _chat_no_stream(self, messages, generate_cfg=None):
         from agent_cascade.llm.schema import Message, ASSISTANT
-        return [Message(role=ASSISTANT, content="ok")]
+        return [Message(role=ASSISTANT, content='ok')]
 
     def _chat_with_functions(self, messages, functions, stream, delta_stream, generate_cfg, lang):
         if stream:
@@ -120,9 +120,9 @@ class FailingStreamLLM(BaseChatModel):
 def make_router(default_llm_cfg=None):
     """Create an APIRouter instance with minimal default config."""
     cfg = default_llm_cfg or {
-        "model": "default-model",
-        "api_base": "http://localhost:1111/v1",
-        "model_type": "qwenvl_oai",
+        'model': 'default-model',
+        'api_base': 'http://localhost:1111/v1',
+        'model_type': 'qwenvl_oai',
     }
     return APIRouter(default_llm_cfg=cfg)
 
@@ -138,25 +138,25 @@ class TestSingleEndpointRetryCount:
         """max_retries=2 → exactly 3 calls (initial + 2 retries) before failover."""
         router = make_router()
         ep = APIEndpoint(
-            name="test-ep",
-            api_base="http://localhost:9998/v1",
-            model="mock-model",
+            name='test-ep',
+            api_base='http://localhost:9998/v1',
+            model='mock-model',
             max_retries=2,
         )
         router.add_endpoint(ep)
         # Register endpoint in agent_priorities so it's included in the chain
-        router.set_agent_priorities("coder", [ep.id])
+        router.set_agent_priorities('coder', [ep.id])
 
         llm = MockLLM(fail_count=5, fail_type=ConnectionError)
 
         def do_call(llm_cfg):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         # Will exhaust custom endpoint (3 calls) then fall back to default_llm_cfg
-        with pytest.raises(RuntimeError, match="All API endpoints exhausted"):
-            router.call_with_fallback("coder", do_call, agent_instance_name="test-inst")
+        with pytest.raises(RuntimeError, match='All API endpoints exhausted'):
+            router.call_with_fallback('coder', do_call, agent_instance_name='test-inst')
 
         # Custom endpoint: 3 attempts (max_retries=2). Default fallback also tried.
         # Total >= 3 because default fallback adds more attempts.
@@ -166,9 +166,9 @@ class TestSingleEndpointRetryCount:
         """Fail once, succeed on retry → total 2 calls."""
         router = make_router()
         ep = APIEndpoint(
-            name="test-ep",
-            api_base="http://localhost:9997/v1",
-            model="mock-model",
+            name='test-ep',
+            api_base='http://localhost:9997/v1',
+            model='mock-model',
             max_retries=2,
         )
         router.add_endpoint(ep)
@@ -176,12 +176,12 @@ class TestSingleEndpointRetryCount:
         llm = MockLLM(fail_count=1, fail_type=ConnectionError)
 
         def do_call(llm_cfg):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         # First call fails, second succeeds. Should complete without raising.
-        router.call_with_fallback("coder", do_call, agent_instance_name="test-inst")
+        router.call_with_fallback('coder', do_call, agent_instance_name='test-inst')
 
         assert llm.call_count == 2, f"Expected exactly 2 calls (1 fail + 1 success), got {llm.call_count}"
 
@@ -199,12 +199,12 @@ class TestMultiEndpointFailover:
 
         # First endpoint: fails always, max_retries=1 (2 calls total)
         ep_a = APIEndpoint(
-            id="ep-a", name="A", api_base="http://localhost:9996/v1", model="a",
+            id='ep-a', name='A', api_base='http://localhost:9996/v1', model='a',
             max_retries=1,
         )
         # Second endpoint: succeeds immediately
         ep_b = APIEndpoint(
-            id="ep-b", name="B", api_base="http://localhost:9995/v1", model="b",
+            id='ep-b', name='B', api_base='http://localhost:9995/v1', model='b',
             max_retries=2,
         )
 
@@ -213,23 +213,23 @@ class TestMultiEndpointFailover:
 
         # Assign endpoints to coder agent priority list so they're used
         with router._lock:
-            router.agent_priorities["coder"] = ["ep-a", "ep-b"]
+            router.agent_priorities['coder'] = ['ep-a', 'ep-b']
 
         llm_a = MockLLM(fail_count=10, fail_type=ConnectionError)
         llm_b = MockLLM(fail_count=0)  # Always succeeds
 
         def do_call(llm_cfg):
-            api_base = llm_cfg.get("api_base", "")
-            if "9996" in api_base:
+            api_base = llm_cfg.get('api_base', '')
+            if '9996' in api_base:
                 llm = llm_a
             else:
                 llm = llm_b
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         # Should fail on ep_a (2 attempts), succeed on ep_b (1 attempt)
-        router.call_with_fallback("coder", do_call, agent_instance_name="test-inst")
+        router.call_with_fallback('coder', do_call, agent_instance_name='test-inst')
 
         assert llm_a.call_count == 2, f"EP-A: expected 2 calls, got {llm_a.call_count}"
         assert llm_b.call_count == 1, f"EP-B: expected 1 call, got {llm_b.call_count}"
@@ -251,8 +251,8 @@ class TestInnerLoopDetection:
         """
         router = make_router()
 
-        ep_a = APIEndpoint(id="ep-a", name="A", api_base="http://localhost:9992/v1", model="a", max_retries=5)
-        ep_b = APIEndpoint(id="ep-b", name="B", api_base="http://localhost:9991/v1", model="b", max_retries=2)
+        ep_a = APIEndpoint(id='ep-a', name='A', api_base='http://localhost:9992/v1', model='a', max_retries=5)
+        ep_b = APIEndpoint(id='ep-b', name='B', api_base='http://localhost:9991/v1', model='b', max_retries=2)
 
         router.add_endpoint(ep_a)
         router.add_endpoint(ep_b)
@@ -261,8 +261,8 @@ class TestInnerLoopDetection:
         llm_b = MockLLM(fail_count=0)
 
         def do_call(llm_cfg):
-            llm = llm_a if "ep-a" in llm_cfg.get("api_base", "") else llm_b
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            llm = llm_a if 'ep-a' in llm_cfg.get('api_base', '') else llm_b
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
@@ -270,7 +270,7 @@ class TestInnerLoopDetection:
         # L2 then sees ModelServiceError and retries normally (not inner-loop skip).
         # This documents the CURRENT behavior which will be fixed in Phase 2.
         try:
-            router.call_with_fallback("coder", do_call, agent_instance_name="test-inst")
+            router.call_with_fallback('coder', do_call, agent_instance_name='test-inst')
             succeeded = True
         except RuntimeError as e:
             succeeded = False
@@ -287,8 +287,8 @@ class TestInnerLoopDetection:
         """
         router = make_router()
 
-        ep_a = APIEndpoint(id="ep-a", name="A", api_base="http://localhost:9990/v1", model="a", max_retries=5)
-        ep_b = APIEndpoint(id="ep-b", name="B", api_base="http://localhost:9989/v1", model="b", max_retries=2)
+        ep_a = APIEndpoint(id='ep-a', name='A', api_base='http://localhost:9990/v1', model='a', max_retries=5)
+        ep_b = APIEndpoint(id='ep-b', name='B', api_base='http://localhost:9989/v1', model='b', max_retries=2)
 
         router.add_endpoint(ep_a)
         router.add_endpoint(ep_b)
@@ -297,13 +297,13 @@ class TestInnerLoopDetection:
         llm_b = MockLLM(fail_count=0)
 
         def do_call(llm_cfg):
-            llm = llm_a if "ep-a" in llm_cfg.get("api_base", "") else llm_b
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            llm = llm_a if 'ep-a' in llm_cfg.get('api_base', '') else llm_b
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         try:
-            router.call_with_fallback("coder", do_call, agent_instance_name="test-inst")
+            router.call_with_fallback('coder', do_call, agent_instance_name='test-inst')
             succeeded = True
         except RuntimeError as e:
             succeeded = False
@@ -332,13 +332,13 @@ class TestRawChatErrorPreservation:
         """
         class CustomAPIError(Exception):
             def __init__(self, message=None):
-                super().__init__(message or "custom api error")
+                super().__init__(message or 'custom api error')
 
-        llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=CustomAPIError)
+        llm = MockLLM(cfg={'max_retries': 0}, fail_count=1, fail_type=CustomAPIError)
 
         # Error should propagate as-is, NOT wrapped as ModelServiceError
         with pytest.raises(CustomAPIError):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
 
     def test_error_type_preserved_connection_error(self):
@@ -346,12 +346,12 @@ class TestRawChatErrorPreservation:
         # Use a ConnectionError subclass that accepts keyword args (MockLLM uses message=)
         class MockConnectionError(ConnectionError):
             def __init__(self, message=None):
-                super().__init__(message or "connection failed")
+                super().__init__(message or 'connection failed')
 
-        llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=MockConnectionError)
+        llm = MockLLM(cfg={'max_retries': 0}, fail_count=1, fail_type=MockConnectionError)
 
         with pytest.raises(MockConnectionError):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
 
 
@@ -366,8 +366,8 @@ class TestSubAgentRetryBehavior:
         """Each agent instance has its own endpoint cursor and retry state."""
         router = make_router()
 
-        ep_a = APIEndpoint(id="ep-a", name="A", api_base="http://localhost:9986/v1", model="a", max_retries=1)
-        ep_b = APIEndpoint(id="ep-b", name="B", api_base="http://localhost:9985/v1", model="b", max_retries=1)
+        ep_a = APIEndpoint(id='ep-a', name='A', api_base='http://localhost:9986/v1', model='a', max_retries=1)
+        ep_b = APIEndpoint(id='ep-b', name='B', api_base='http://localhost:9985/v1', model='b', max_retries=1)
 
         router.add_endpoint(ep_a)
         router.add_endpoint(ep_b)
@@ -376,24 +376,24 @@ class TestSubAgentRetryBehavior:
         llm_b = MockLLM(fail_count=0)
 
         def do_call(llm_cfg):
-            llm = llm_a if "ep-a" in llm_cfg.get("api_base", "") else llm_b
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            llm = llm_a if 'ep-a' in llm_cfg.get('api_base', '') else llm_b
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         # Agent 1: fails on ep_a, succeeds on ep_b
-        router.call_with_fallback("coder", do_call, agent_instance_name="agent-1")
+        router.call_with_fallback('coder', do_call, agent_instance_name='agent-1')
 
         calls_after_agent1 = llm_a.call_count + llm_b.call_count
 
         # Agent 2: fresh cursor — should also try ep_a first (may fail), then ep_b
-        router.call_with_fallback("coder", do_call, agent_instance_name="agent-2")
+        router.call_with_fallback('coder', do_call, agent_instance_name='agent-2')
 
         total_calls = llm_a.call_count + llm_b.call_count
 
         # Both agents went through their own retry/failover chain
         assert total_calls > calls_after_agent1, \
-            "Agent 2 should have made its own LLM calls"
+            'Agent 2 should have made its own LLM calls'
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -407,20 +407,20 @@ class TestPerformanceBaseline:
         """Baseline: successful call on first attempt."""
         router = make_router()
         ep = APIEndpoint(
-            id="ep-perf", name="Perf-EP", api_base="http://localhost:9984/v1",
-            model="perf-model", max_retries=2,
+            id='ep-perf', name='Perf-EP', api_base='http://localhost:9984/v1',
+            model='perf-model', max_retries=2,
         )
         router.add_endpoint(ep)
 
         llm = MockLLM(fail_count=0)
 
         def do_call(llm_cfg):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         start = time.time()
-        router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
+        router.call_with_fallback('coder', do_call, agent_instance_name='perf-test')
         elapsed = time.time() - start
 
         assert llm.call_count == 1
@@ -433,20 +433,20 @@ class TestPerformanceBaseline:
         """One failure then success → measure total time including backoff."""
         router = make_router()
         ep = APIEndpoint(
-            id="ep-perf2", name="Perf-EP", api_base="http://localhost:9983/v1",
-            model="perf-model", max_retries=2,
+            id='ep-perf2', name='Perf-EP', api_base='http://localhost:9983/v1',
+            model='perf-model', max_retries=2,
         )
         router.add_endpoint(ep)
 
         llm = MockLLM(fail_count=1, fail_type=ConnectionError)
 
         def do_call(llm_cfg):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         start = time.time()
-        router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
+        router.call_with_fallback('coder', do_call, agent_instance_name='perf-test')
         elapsed = time.time() - start
 
         assert llm.call_count == 2
@@ -457,23 +457,23 @@ class TestPerformanceBaseline:
         """All retries exhausted → measure total time until failure."""
         router = make_router()
         ep = APIEndpoint(
-            id="ep-perf3", name="Perf-EP", api_base="http://localhost:9982/v1",
-            model="perf-model", max_retries=2,
+            id='ep-perf3', name='Perf-EP', api_base='http://localhost:9982/v1',
+            model='perf-model', max_retries=2,
         )
         router.add_endpoint(ep)
         # Register endpoint in agent_priorities so it's included in the chain
-        router.set_agent_priorities("coder", [ep.id])
+        router.set_agent_priorities('coder', [ep.id])
 
         llm = MockLLM(fail_count=10, fail_type=ConnectionError)
 
         def do_call(llm_cfg):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         start = time.time()
         with pytest.raises(RuntimeError):
-            router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
+            router.call_with_fallback('coder', do_call, agent_instance_name='perf-test')
         elapsed = time.time() - start
 
         # Custom endpoint: 3 attempts. Default fallback: also tried (with its own retries).
@@ -498,13 +498,13 @@ class TestLLayerRetryBehavior:
         L1 retries are disabled to avoid error type corruption. Retries handled by L2/L3.
         """
         # Even if cfg specifies max_retries, it's ignored at L1
-        llm_with_cfg = MockLLM({"max_retries": 2})
+        llm_with_cfg = MockLLM({'max_retries': 2})
         assert llm_with_cfg.max_retries == 0
 
-        llm_custom = MockLLM({"max_retries": 5})
+        llm_custom = MockLLM({'max_retries': 5})
         assert llm_custom.max_retries == 0
 
-        llm_zero = MockLLM({"max_retries": 0})
+        llm_zero = MockLLM({'max_retries': 0})
         assert llm_zero.max_retries == 0
 
     def test_l1_endpoint_max_retries_decoupled(self):
@@ -514,13 +514,13 @@ class TestLLayerRetryBehavior:
         controls only L2 (API router) behavior — L1 retries are disabled.
         """
         ep = APIEndpoint(
-            name="test", api_base="http://localhost:9981/v1", model="m",
+            name='test', api_base='http://localhost:9981/v1', model='m',
             max_retries=3,
         )
         llm_cfg = ep.to_llm_cfg()
 
         # Endpoint's max_retries should NOT be in LLM config anymore (coupling broken)
-        assert "max_retries" not in llm_cfg, \
+        assert 'max_retries' not in llm_cfg, \
             f"Endpoint max_retries leaked to LLM cfg — coupling not broken: {llm_cfg}"
 
 
@@ -535,21 +535,21 @@ class TestBackoffTiming:
         """Router uses exponential backoff: base_delay * 2^attempt, capped at max_delay."""
         router = make_router()
         ep = APIEndpoint(
-            id="ep-backoff", name="Backoff-EP", api_base="http://localhost:9980/v1",
-            model="backoff-model", max_retries=3,
+            id='ep-backoff', name='Backoff-EP', api_base='http://localhost:9980/v1',
+            model='backoff-model', max_retries=3,
         )
         router.add_endpoint(ep)
 
         llm = MockLLM(fail_count=10, fail_type=ConnectionError)
 
         def do_call(llm_cfg):
-            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
             list(result)
             return True
 
         start = time.time()
         with pytest.raises(RuntimeError):
-            router.call_with_fallback("coder", do_call, agent_instance_name="backoff-test")
+            router.call_with_fallback('coder', do_call, agent_instance_name='backoff-test')
         elapsed = time.time() - start
 
         # 4 attempts (initial + 3 retries), backoff: 0.1 + 0.2 + 0.4 = 0.7s theoretical

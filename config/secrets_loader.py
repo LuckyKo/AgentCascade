@@ -20,8 +20,8 @@ _SECRETS_CACHE: dict = {}
 _SECRETS_LOADED: bool = False
 
 _DEFAULT_SECRETS = {
-    "serper_api_key": "",
-    "search_backend_priority": ["serper", "duckduckgo"],
+    'serper_api_key': '',
+    'search_backend_priority': ['serper', 'duckduckgo'],
 }
 
 
@@ -37,11 +37,11 @@ def _load_secrets() -> dict:
 
     # config/ is a package root; resolve relative to this file's directory.
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(base_dir, "secrets.json")
+    path = os.path.join(base_dir, 'secrets.json')
 
     _SECRETS_CACHE = {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if isinstance(data, dict):
                 _SECRETS_CACHE = data
@@ -49,11 +49,11 @@ def _load_secrets() -> dict:
         # Auto-create with safe defaults on first startup.
         try:
             os.makedirs(base_dir, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            with open(path, 'w', encoding='utf-8') as f:
                 json.dump(_DEFAULT_SECRETS, f, indent=2)
             logger.warning(
-                "config/secrets.json not found; created with default values. "
-                "Please set your API keys."
+                'config/secrets.json not found; created with default values. '
+                'Please set your API keys.'
             )
         except OSError as e:
             logger.error(f"Failed to create config/secrets.json: {e}")

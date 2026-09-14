@@ -96,7 +96,7 @@ def calculate_model_statistics(model_name: str, result_report_dir: Path) -> Opti
             continue
         
         # Read summary_report.json
-        report_path = folder / "summary_report.json"
+        report_path = folder / 'summary_report.json'
         if not report_path.exists():
             print(f"⚠️  Warning: {report_path} does not exist, skipping")
             continue
@@ -203,18 +203,18 @@ def calculate_model_statistics(model_name: str, result_report_dir: Path) -> Opti
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description="Calculate statistics for a model across all levels")
+    parser = argparse.ArgumentParser(description='Calculate statistics for a model across all levels')
     parser.add_argument(
-        "--model_name",
+        '--model_name',
         type=str,
         required=True,
-        help="Model name to calculate statistics for"
+        help='Model name to calculate statistics for'
     )
     parser.add_argument(
-        "--result_report_dir",
+        '--result_report_dir',
         type=str,
         default=None,
-        help="Path to result_report directory (default: script_dir/result_report)"
+        help='Path to result_report directory (default: script_dir/result_report)'
     )
     
     args = parser.parse_args()
@@ -230,7 +230,7 @@ def main():
         else:
             result_report_dir = script_dir / args.result_report_dir
     else:
-        result_report_dir = script_dir / "result_report"
+        result_report_dir = script_dir / 'result_report'
     
     print(f"\n{'='*80}")
     print(f"📊 Calculating Statistics for Model: {args.model_name}")
@@ -276,6 +276,6 @@ def main():
         sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
 

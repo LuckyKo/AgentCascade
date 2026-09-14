@@ -112,7 +112,7 @@ class TestAgentPoolInitialization:
         # Pool should store llm_cfg for fallback when no api_router
         assert pool.llm_cfg == llm_cfg
         # Pool should have loaded agent templates from soul files
-        assert len(pool.templates) > 0, "Should have loaded at least one agent template"
+        assert len(pool.templates) > 0, 'Should have loaded at least one agent template'
 
     def test_list_agents(self):
         """Pool should list known agent types."""
@@ -195,7 +195,7 @@ class TestOrchestratorLoading:
                 assert agent is not None, f"Failed to load {name}"
                 agents_loaded.append(name)
 
-        assert len(agents_loaded) >= 2, "Should be able to load at least 2 agent types"
+        assert len(agents_loaded) >= 2, 'Should be able to load at least 2 agent types'
 
 
 class TestExecutionEngine:
@@ -461,7 +461,7 @@ class TestStartApiServerIntegration:
 
         # Step 2: Verify agents were discovered
         agent_names = agent_pool.list_agents()
-        assert len(agent_names) > 0, "No agents discovered"
+        assert len(agent_names) > 0, 'No agents discovered'
         assert 'orchestrator' in agent_names
 
         # Step 3: Load orchestrator (same as start_api_server.py line 189)
@@ -480,7 +480,7 @@ class TestStartApiServerIntegration:
                 if sub_agent:
                     all_agents.append(sub_agent)
 
-        assert len(all_agents) >= 2, "Should have orchestrator + at least one sub-agent"
+        assert len(all_agents) >= 2, 'Should have orchestrator + at least one sub-agent'
 
 
 class TestCLIMode:
@@ -520,7 +520,7 @@ class TestCLIMode:
         # Loading a NEW agent (not pre-loaded by _discover_agents) should raise ValueError
         try:
             load_agent_template(pool, 'nonexistent_agent', llm_cfg=None)
-            assert False, "Should have raised ValueError"
+            assert False, 'Should have raised ValueError'
         except ValueError as e:
             msg = str(e).lower()
             # Accept either error message variant (endpoint config or general LLM config)

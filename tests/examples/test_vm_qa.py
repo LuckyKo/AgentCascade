@@ -26,7 +26,7 @@ _HAS_DASHSCOPE_KEY = bool(os.getenv('DASHSCOPE_API_KEY', '').strip())
 
 
 @pytest.mark.extra_examples
-@pytest.mark.skipif(not _HAS_DASHSCOPE_KEY, reason="Requires DASHSCOPE_API_KEY (live external API)")
+@pytest.mark.skipif(not _HAS_DASHSCOPE_KEY, reason='Requires DASHSCOPE_API_KEY (live external API)')
 def test_vm():
     """Test virtual memory QA with DashScope qwen-max — requires external API."""
     vm()

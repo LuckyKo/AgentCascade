@@ -80,7 +80,7 @@ class FnCallAgent(Agent):
             extra_generate_cfg = {'lang': lang}
             if kwargs.get('seed') is not None:
                 extra_generate_cfg['seed'] = kwargs['seed']
-                
+
             active_functions = self._get_active_functions()
 
             output_stream = self._call_llm(messages=messages,

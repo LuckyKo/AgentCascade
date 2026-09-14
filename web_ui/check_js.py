@@ -80,4 +80,4 @@ def check_structure(filename):
 
 if __name__ == '__main__':
     result = check_structure('N:\\work\\WD\\AgentCascade\\web_ui\\app.js')
-    print("Result:", "OK" if result else "ERROR")
+    print('Result:', 'OK' if result else 'ERROR')

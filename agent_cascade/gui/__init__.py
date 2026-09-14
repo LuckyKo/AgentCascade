@@ -15,13 +15,13 @@ class _WebUIRemovedError(ImportError):
 
     def __init__(self):
         msg = (
-            "The Gradio-based WebUI has been removed in the AgentCascade unified branch.\n"
-            "The custom HTML/JS frontend (served via FastAPI) replaced it.\n\n"
-            "To launch the web interface:\n"
-            "  python start_api_server.py          # standalone API server\n"
-            "  python start_multi_agent.py         # multi-agent entry point\n"
-            "Then open http://127.0.0.1:8765 in your browser.\n\n"
-            "The legacy demo/example scripts that use WebUI() are no longer supported."
+            'The Gradio-based WebUI has been removed in the AgentCascade unified branch.\n'
+            'The custom HTML/JS frontend (served via FastAPI) replaced it.\n\n'
+            'To launch the web interface:\n'
+            '  python start_api_server.py          # standalone API server\n'
+            '  python start_multi_agent.py         # multi-agent entry point\n'
+            'Then open http://127.0.0.1:8765 in your browser.\n\n'
+            'The legacy demo/example scripts that use WebUI() are no longer supported.'
         )
         super().__init__(msg)
 

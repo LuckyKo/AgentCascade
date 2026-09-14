@@ -36,7 +36,7 @@ def make_instance(state=AgentState.IDLE):
     """Minimal duck-typed AgentInstance (state + _state_lock only)."""
     return SimpleNamespace(
         state=state,
-        instance_name="Maine",
+        instance_name='Maine',
         _state_lock=threading.RLock(),
     )
 
@@ -44,7 +44,7 @@ def make_instance(state=AgentState.IDLE):
 def make_child_instance(state=AgentState.IDLE, parent=None):
     """Duck-typed child instance carrying the surface dismiss_instance touches."""
     inst = make_instance(state)
-    inst.instance_name = "child1"
+    inst.instance_name = 'child1'
     inst.parent_instance = parent
     # Surface used by the non-active dismissal branch (inst.terminate()).
     inst.is_terminated = False
@@ -97,7 +97,7 @@ class _FakeThreadFactory(MagicMock):
 class _FakeThread:
     """Captures the target callable; run() invokes it synchronously (or not)."""
 
-    def __init__(self, target=None, args=(), name="", daemon=False):
+    def __init__(self, target=None, args=(), name='', daemon=False):
         self.target = target
         self.args = args
         self.name = name
@@ -133,53 +133,53 @@ class TestRelaunchGates:
     def test_idle_parent_spawns_relaunch(self):
         pool = make_pool(make_instance(AgentState.IDLE))
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is True
+            assert relaunch_idle_agent(pool, 'Maine') is True
         ft = fake_thread.instances[0]
         assert ft.started
         assert ft.daemon is True
         # Target drives the instance through run_agent_in_pool.
         assert ft.target is _drive_instance_run
-        assert ft.args == (pool, "Maine")
+        assert ft.args == (pool, 'Maine')
 
     def test_sleeping_parent_no_relaunch(self):
         pool = make_pool(make_instance(AgentState.SLEEPING))
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is False
+            assert relaunch_idle_agent(pool, 'Maine') is False
         fake_thread.assert_not_called()
 
     def test_running_parent_no_relaunch(self):
         pool = make_pool(make_instance(AgentState.RUNNING))
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is False
+            assert relaunch_idle_agent(pool, 'Maine') is False
         fake_thread.assert_not_called()
 
     def test_terminated_state_no_relaunch(self):
         pool = make_pool(make_instance(AgentState.TERMINATED))
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is False
+            assert relaunch_idle_agent(pool, 'Maine') is False
         fake_thread.assert_not_called()
 
     def test_stopped_pool_no_relaunch(self):
         pool = make_pool(make_instance(AgentState.IDLE), stopped=True)
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is False
+            assert relaunch_idle_agent(pool, 'Maine') is False
         fake_thread.assert_not_called()
 
     def test_terminated_instance_no_relaunch(self):
         pool = make_pool(make_instance(AgentState.IDLE), terminated=True)
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is False
+            assert relaunch_idle_agent(pool, 'Maine') is False
         fake_thread.assert_not_called()
 
     def test_missing_instance_no_relaunch(self):
         pool = make_pool(None)  # get_instance -> None
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "ghost") is False
+            assert relaunch_idle_agent(pool, 'ghost') is False
         fake_thread.assert_not_called()
 
     def test_none_pool_no_relaunch(self):
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(None, "Maine") is False
+            assert relaunch_idle_agent(None, 'Maine') is False
         fake_thread.assert_not_called()
 
 
@@ -194,11 +194,11 @@ class TestDoubleLaunchGuard:
     def test_runtime_error_caught_and_logged_debug(self):
         pool = make_pool(make_instance(AgentState.IDLE))
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is True
+            assert relaunch_idle_agent(pool, 'Maine') is True
         ft = fake_thread.instances[0]
 
         l1_error = RuntimeError(
-            "[BUG] Maine entered engine.run() in state RUNNING — should be IDLE. L1 race guard failed!"
+            '[BUG] Maine entered engine.run() in state RUNNING — should be IDLE. L1 race guard failed!'
         )
         with patch(
             'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
@@ -209,18 +209,18 @@ class TestDoubleLaunchGuard:
         assert ft.exc is None  # not propagated / crashed
         # Logged at DEBUG (expected concurrent wakeup), never at ERROR.
         debug_msgs = [str(c) for c in mock_logger.debug.call_args_list]
-        assert any("concurrent wakeup" in m for m in debug_msgs)
+        assert any('concurrent wakeup' in m for m in debug_msgs)
         mock_logger.error.assert_not_called()
 
     def test_thread_registration_cleaned_up_after_guard_hit(self):
         pool = make_pool(make_instance(AgentState.IDLE))
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is True
+            assert relaunch_idle_agent(pool, 'Maine') is True
         ft = fake_thread.instances[0]
 
         with patch(
             'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
-            side_effect=RuntimeError("L1 race guard failed!"),
+            side_effect=RuntimeError('L1 race guard failed!'),
         ):
             ft.run()
 
@@ -231,18 +231,18 @@ class TestDoubleLaunchGuard:
         """Non-RuntimeError failures must surface at ERROR (real errors are visible)."""
         pool = make_pool(make_instance(AgentState.IDLE))
         with patch('threading.Thread', new=_FakeThreadFactory()) as fake_thread:
-            assert relaunch_idle_agent(pool, "Maine") is True
+            assert relaunch_idle_agent(pool, 'Maine') is True
         ft = fake_thread.instances[0]
 
         with patch(
             'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
-            side_effect=ValueError("boom"),
+            side_effect=ValueError('boom'),
         ), patch('agent_cascade.utils.wakeup_helpers.logger') as mock_logger:
             ft.run()
 
         assert ft.exc is None  # thread itself must not crash
         error_msgs = [str(c) for c in mock_logger.error.call_args_list]
-        assert any("boom" in m for m in error_msgs)
+        assert any('boom' in m for m in error_msgs)
 
 
 # ============================================================================
@@ -258,17 +258,17 @@ class TestMultipleResultsSameTick:
         pool = make_pool(make_instance(AgentState.IDLE))
         launched = []  # (relaunch_return, fake_thread) per call
 
-        def recording_thread(target=None, args=(), name="", daemon=False):
+        def recording_thread(target=None, args=(), name='', daemon=False):
             ft = _FakeThread(target=target, args=args, name=name, daemon=daemon)
             ft.start()
             launched.append(ft)
             return ft
 
         with patch('threading.Thread', recording_thread):
-            r1 = relaunch_idle_agent(pool, "Maine")
+            r1 = relaunch_idle_agent(pool, 'Maine')
             # First run won the IDLE->RUNNING race (as engine.run() would do).
             pool.get_instance.return_value.state = AgentState.RUNNING
-            r2 = relaunch_idle_agent(pool, "Maine")
+            r2 = relaunch_idle_agent(pool, 'Maine')
 
         assert r1 is True
         assert r2 is False  # pre-check: no longer IDLE -> no second thread
@@ -280,15 +280,15 @@ class TestMultipleResultsSameTick:
         pool = make_pool(make_instance(AgentState.IDLE))
         launched = []
 
-        def recording_thread(target=None, args=(), name="", daemon=False):
+        def recording_thread(target=None, args=(), name='', daemon=False):
             ft = _FakeThread(target=target, args=args, name=name, daemon=daemon)
             ft.start()
             launched.append(ft)
             return ft
 
         with patch('threading.Thread', recording_thread):
-            assert relaunch_idle_agent(pool, "Maine") is True
-            assert relaunch_idle_agent(pool, "Maine") is True  # raced past pre-check
+            assert relaunch_idle_agent(pool, 'Maine') is True
+            assert relaunch_idle_agent(pool, 'Maine') is True  # raced past pre-check
 
         assert len(launched) == 2
 
@@ -296,7 +296,7 @@ class TestMultipleResultsSameTick:
         gen = iter([])
         with patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool', side_effect=[
             lambda pool, name: iter(gen),
-            lambda pool, name: (_ for _ in ()).throw(RuntimeError("L1 race guard failed!")),
+            lambda pool, name: (_ for _ in ()).throw(RuntimeError('L1 race guard failed!')),
         ]):
             launched[0].run()
             launched[1].run()
@@ -325,9 +325,9 @@ class TestAsyncCompletionWiring:
 
     def _register_and_wait(self, registry, timeout=5.0):
         """Register a trivial tool and poll until it completes (no blind sleep)."""
-        registry.register("Maine", lambda: "child_output", function_id="call_1")
+        registry.register('Maine', lambda: 'child_output', function_id='call_1')
         deadline = time.monotonic() + timeout
-        while registry.has_pending("Maine") and time.monotonic() < deadline:
+        while registry.has_pending('Maine') and time.monotonic() < deadline:
             time.sleep(0.02)
 
     def test_idle_parent_async_result_relaunches_after_enqueue(self):
@@ -341,17 +341,17 @@ class TestAsyncCompletionWiring:
             self._register_and_wait(registry)
             wait_for(lambda: mock_drive.called)  # bounded wait for background thread to invoke mock
 
-        assert not registry.has_pending("Maine")
+        assert not registry.has_pending('Maine')
         # Enqueue happened exactly once with the result.
         pool.enqueue_message.assert_called_once()
         agent_name, msg = pool.enqueue_message.call_args[0]
-        assert agent_name == "Maine"
-        assert "child_output" in msg
+        assert agent_name == 'Maine'
+        assert 'child_output' in msg
         # Relaunch was attempted for the IDLE instance (enqueue first: the
         # helper is called after enqueue in _execute).
         mock_drive.assert_called_once()
         spawn_args = mock_drive.call_args[0]
-        assert spawn_args == (pool, "Maine")
+        assert spawn_args == (pool, 'Maine')
 
     def test_sleeping_parent_async_result_no_relaunch(self):
         pool = self._make_pool_with_registry_surface(AgentState.SLEEPING)
@@ -390,12 +390,12 @@ class TestDismissWiring:
         from agent_cascade.pool.lifecycle import LifecycleMixin
 
         parent = make_instance(parent_state)
-        child = make_child_instance(AgentState.IDLE, parent="Maine")
+        child = make_child_instance(AgentState.IDLE, parent='Maine')
 
         pool = SimpleNamespace()
         pool.children = {}
         pool._children_lock = threading.RLock()
-        pool.instances = {"child1": child, "Maine": parent}
+        pool.instances = {'child1': child, 'Maine': parent}
         pool._pool_lock = threading.RLock()
         pool.terminated_instances = set()
         pool._instance_threads = {}
@@ -406,7 +406,7 @@ class TestDismissWiring:
         pool.enqueue_message = MagicMock()
         pool.is_instance_terminated = lambda name: False
         pool._async_registry = SimpleNamespace(
-            get_parent_for_child=lambda cname: ("Maine", "call_1") if cname == "child1" else None,
+            get_parent_for_child=lambda cname: ('Maine', 'call_1') if cname == 'child1' else None,
             remove_child_mapping=MagicMock(),
         )
         # Surface touched by the post-wakeup tail of dismiss_instance.
@@ -431,19 +431,19 @@ class TestDismissWiring:
         # unpatched (its tail has no thread spawns; the relaunch is the only one).
         with patch('agent_cascade.utils.wakeup_helpers.threading.Thread',
                    new=_FakeThreadFactory()) as fake_thread:
-            LifecycleMixin.dismiss_instance(mixin, "child1")
+            LifecycleMixin.dismiss_instance(mixin, 'child1')
 
         # Dismissal result enqueued for the parent...
         pool.enqueue_message.assert_called_once()
         agent_name, msg = pool.enqueue_message.call_args[0]
-        assert agent_name == "Maine"
-        assert "Dismissed" in msg
+        assert agent_name == 'Maine'
+        assert 'Dismissed' in msg
         # ...and the IDLE parent was relaunched.
         ft = fake_thread.instances[0]
         assert ft.started
-        assert ft.args == (mixin, "Maine")
+        assert ft.args == (mixin, 'Maine')
         # Child mapping cleaned up.
-        pool._async_registry.remove_child_mapping.assert_called_once_with("child1")
+        pool._async_registry.remove_child_mapping.assert_called_once_with('child1')
 
     def test_sleeping_parent_dismiss_no_relaunch(self):
         from agent_cascade.pool.lifecycle import LifecycleMixin
@@ -452,9 +452,9 @@ class TestDismissWiring:
 
         with patch('agent_cascade.utils.wakeup_helpers.threading.Thread',
                    new=_FakeThreadFactory()) as fake_thread:
-            LifecycleMixin.dismiss_instance(mixin, "child1")
+            LifecycleMixin.dismiss_instance(mixin, 'child1')
 
         # Existing SLEEPING behavior: enqueue only, no relaunch thread.
         pool.enqueue_message.assert_called_once()
         assert not fake_thread.instances
-        pool._async_registry.remove_child_mapping.assert_called_once_with("child1")
+        pool._async_registry.remove_child_mapping.assert_called_once_with('child1')

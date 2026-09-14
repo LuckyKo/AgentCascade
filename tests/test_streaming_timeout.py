@@ -34,11 +34,11 @@ def test_watch_stream_silence_timeout():
     from agent_cascade.utils.streaming import watch_stream
 
     def slow_gen():
-        yield "first"          # first item — no silence check yet
+        yield 'first'          # first item — no silence check yet
         time.sleep(0.3)        # gap exceeds max_silence
-        yield "second"
+        yield 'second'
 
-    with pytest.raises(RuntimeError, match="stream_stalled"):
+    with pytest.raises(RuntimeError, match='stream_stalled'):
         list(watch_stream(slow_gen(), max_silence_seconds=0.1, max_total_seconds=60.0))
 
 
@@ -47,11 +47,11 @@ def test_watch_stream_total_timeout():
     from agent_cascade.utils.streaming import watch_stream
 
     def slow_gen():
-        yield "first"
+        yield 'first'
         time.sleep(0.3)
-        yield "second"
+        yield 'second'
 
-    with pytest.raises(RuntimeError, match="stream_stalled.*total"):
+    with pytest.raises(RuntimeError, match='stream_stalled.*total'):
         list(watch_stream(slow_gen(), max_silence_seconds=60.0, max_total_seconds=0.1))
 
 
@@ -61,10 +61,10 @@ def test_watch_stream_first_item_delay_allowed():
 
     def slow_first_gen():
         time.sleep(0.3)        # long delay before first item
-        yield "first"
-        yield "second"         # quick follow-up
+        yield 'first'
+        yield 'second'         # quick follow-up
 
     # Should NOT raise: first-item delay is allowed even if > max_silence
     result = list(watch_stream(slow_first_gen(), max_silence_seconds=0.1, max_total_seconds=60.0))
-    assert result == ["first", "second"]
+    assert result == ['first', 'second']
 

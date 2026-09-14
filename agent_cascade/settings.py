@@ -206,7 +206,7 @@ ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
 # Per-endpoint reasoning effort values (UI pulldown → LLM API `reasoning_effort`).
 # "none" means the param is NOT sent (model uses default behavior).
 # "xhigh" maps to "high" at the API level (future-proofing for extended levels).
-REASONING_EFFORT_VALUES: tuple = ("none", "low", "medium", "high", "xhigh")
+REASONING_EFFORT_VALUES: tuple = ('none', 'low', 'medium', 'high', 'xhigh')
 
 # Settings for endpoint cooldown (time-based skip of failed endpoints)
 def _parse_endpoint_cooldown():
@@ -463,8 +463,8 @@ WAIT_CMD_DEFAULT_TIMEOUT: float = 30.0        # Seconds __wait blocks when no he
 WAIT_CMD_POLL_INTERVAL: float = 0.5           # Seconds between state polls inside the __wait loop
 
 # ── Skills system settings (Feature: Skills System Phase 1) ────────────
-LOAD_SKILL_AUTO: str = "AUTO"     # Auto-match relevant skills from task context
-LOAD_SKILL_NONE: str = "NONE"     # No skill loading (saves tokens)
+LOAD_SKILL_AUTO: str = 'AUTO'     # Auto-match relevant skills from task context
+LOAD_SKILL_NONE: str = 'NONE'     # No skill loading (saves tokens)
 DEFAULT_LOAD_SKILL_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_LOAD_SKILL', 'AUTO')  # Default load_skill mode: AUTO or NONE
 # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == AUTO):
 #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior, no extra LLM call)
@@ -473,9 +473,9 @@ DEFAULT_LOAD_SKILL_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_LOAD_SKILL', 'AU
 #                no Advanced advisor). Self-Augmentation (global toggle) and caller-explicit
 #                load_skill lists are still preserved.
 DEFAULT_AUTO_SKILL_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_AUTO_SKILL_MODE', 'basic')
-AUTO_SKILL_MODE_BASIC: str = "basic"
-AUTO_SKILL_MODE_ADVANCED: str = "advanced"
-AUTO_SKILL_MODE_NONE: str = "none"
+AUTO_SKILL_MODE_BASIC: str = 'basic'
+AUTO_SKILL_MODE_ADVANCED: str = 'advanced'
+AUTO_SKILL_MODE_NONE: str = 'none'
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_MATCH_THRESHOLD', '0.15'))  # Minimum relevance score for AUTO mode skill loading
 SKILL_CACHE_TTL_SECONDS: float = float(os.getenv(
     'AGENT_CASCADE_SKILL_CACHE_TTL', 30.0))  # Cache TTL for mtime-based discovery cache

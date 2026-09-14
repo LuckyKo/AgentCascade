@@ -34,9 +34,9 @@ def _get_media_root() -> Path:
     depending on whether AGENT_CASCADE_INSTANCE_ID is set. This places media
     alongside agent logs for easy session cleanup and instance isolation.
     """
-    base_logs = str(Path(DEFAULT_WORKSPACE) / "logs")
+    base_logs = str(Path(DEFAULT_WORKSPACE) / 'logs')
     instance_logs = make_instance_dir(base_logs)
-    return Path(instance_logs) / "media"
+    return Path(instance_logs) / 'media'
 
 
 def get_images_dir() -> str:
@@ -49,9 +49,9 @@ def get_images_dir() -> str:
         MediaStorageError: If directory creation fails.
     """
     try:
-        images_dir = _get_media_root() / "images"
+        images_dir = _get_media_root() / 'images'
         images_dir.mkdir(parents=True, exist_ok=True)
-        return os.path.abspath(str(images_dir)).replace("\\", "/")
+        return os.path.abspath(str(images_dir)).replace('\\', '/')
     except OSError as e:
         raise MediaStorageError(f"Failed to create images directory: {e}") from e
 
@@ -69,7 +69,7 @@ def _generate_media_filename(prefix: str, extension: str) -> str:
         Filename string.
     """
     now = datetime.now()
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    timestamp = now.strftime('%Y%m%d_%H%M%S')
     # 8-char hex hash from random bytes for uniqueness under high concurrency
     short_hash = secrets.token_hex(4)
     return f"{prefix}_{timestamp}_{short_hash}.{extension}"
@@ -102,7 +102,7 @@ def save_image_to_media(
         MediaStorageError: If any step fails (open, resize, encode, write, size check).
     """
     images_dir = get_images_dir()
-    filename = _generate_media_filename("img", "jpg")
+    filename = _generate_media_filename('img', 'jpg')
     dest_path = Path(images_dir) / filename
 
     try:
@@ -133,19 +133,19 @@ def save_image_to_media(
             image = image.resize((new_width, new_height), resample=Image.Resampling.LANCZOS)
 
         # Convert to RGB for JPEG compatibility (handles RGBA, LA, P modes with transparency)
-        if image.mode in ("RGBA", "LA", "P"):
+        if image.mode in ('RGBA', 'LA', 'P'):
             # Composite onto white background to preserve visible content of transparent areas
-            rgb_image = Image.new("RGB", image.size, (255, 255, 255))
-            if image.mode == "P":
-                image = image.convert("RGBA")
-            rgb_image.paste(image, mask=image.split()[-1] if image.mode in ("RGBA", "LA") else None)
+            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            rgb_image.paste(image, mask=image.split()[-1] if image.mode in ('RGBA', 'LA') else None)
             image = rgb_image
-        elif image.mode != "RGB":
-            image = image.convert("RGB")
+        elif image.mode != 'RGB':
+            image = image.convert('RGB')
 
         # Encode to JPEG in memory first (to check size before writing)
         output_buffer = io.BytesIO()
-        image.save(output_buffer, format="JPEG", quality=int(quality * 100))
+        image.save(output_buffer, format='JPEG', quality=int(quality * 100))
         encoded_data = output_buffer.getvalue()
 
         # Check file size limit
@@ -158,7 +158,7 @@ def save_image_to_media(
         # Write to disk
         dest_path.write_bytes(encoded_data)
 
-        return os.path.abspath(str(dest_path)).replace("\\", "/")
+        return os.path.abspath(str(dest_path)).replace('\\', '/')
 
     except MediaStorageError:
         raise
@@ -169,7 +169,7 @@ def save_image_to_media(
                 dest_path.unlink()
             except OSError:
                 pass
-        source_hint = source_name or str(image_source) if isinstance(image_source, (str, Path)) else "<binary>"
+        source_hint = source_name or str(image_source) if isinstance(image_source, (str, Path)) else '<binary>'
         raise MediaStorageError(f"Failed to save image from {source_hint}: {e}") from e
 
 
@@ -186,11 +186,11 @@ def save_image_from_data_uri(data_uri: str) -> str:
         MediaStorageError: If the data URI is invalid or saving fails.
     """
     # Validate data URI format
-    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+    if not isinstance(data_uri, str) or not data_uri.startswith('data:'):
         raise MediaStorageError("Invalid data URI: does not start with 'data:'")
 
     # Extract base64 portion (everything after the first comma)
-    match = re.match(r"data:[^;]+;base64,(.+)", data_uri, re.IGNORECASE)
+    match = re.match(r'data:[^;]+;base64,(.+)', data_uri, re.IGNORECASE)
     if not match:
         raise MediaStorageError("Invalid data URI format: expected 'data:<type>;base64,<data>'")
 
@@ -199,7 +199,7 @@ def save_image_from_data_uri(data_uri: str) -> str:
     except Exception as e:
         raise MediaStorageError(f"Failed to decode base64 from data URI: {e}") from e
 
-    return save_image_to_media(image_source=image_bytes, source_name="data_uri")
+    return save_image_to_media(image_source=image_bytes, source_name='data_uri')
 
 
 def cleanup_old_media(max_age_days: int = 30) -> dict:
@@ -211,7 +211,7 @@ def cleanup_old_media(max_age_days: int = 30) -> dict:
     Returns:
         Dict with keys 'files_removed' (int), 'bytes_freed' (int), 'errors' (list of str).
     """
-    result = {"files_removed": 0, "bytes_freed": 0, "errors": []}
+    result = {'files_removed': 0, 'bytes_freed': 0, 'errors': []}
 
     media_root = _get_media_root()
     if not media_root.exists():
@@ -221,7 +221,7 @@ def cleanup_old_media(max_age_days: int = 30) -> dict:
 
     for dirpath, dirnames, filenames in os.walk(media_root):
         # Skip hidden directories
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if not d.startswith('.')]
 
         for filename in filenames:
             filepath = Path(dirpath) / filename
@@ -230,10 +230,10 @@ def cleanup_old_media(max_age_days: int = 30) -> dict:
                 if stat.st_mtime < cutoff_time:
                     file_size = stat.st_size
                     filepath.unlink()
-                    result["files_removed"] += 1
-                    result["bytes_freed"] += file_size
+                    result['files_removed'] += 1
+                    result['bytes_freed'] += file_size
             except OSError as e:
-                result["errors"].append(f"Failed to remove {filepath}: {e}")
+                result['errors'].append(f"Failed to remove {filepath}: {e}")
 
     return result
 
@@ -245,15 +245,15 @@ def _cleanup_worker(max_age_days: int, interval_hours: float):
         time.sleep(interval_seconds)
         try:
             result = cleanup_old_media(max_age_days=max_age_days)
-            if result["files_removed"] > 0:
+            if result['files_removed'] > 0:
                 from agent_cascade.log import logger
                 logger.info(
                     f"Media cleanup: removed {result['files_removed']} files, "
                     f"freed {result['bytes_freed'] / (1024*1024):.1f} MB"
                 )
-            if result["errors"]:
+            if result['errors']:
                 from agent_cascade.log import logger
-                for err in result["errors"]:
+                for err in result['errors']:
                     logger.warning(f"Media cleanup error: {err}")
         except Exception as e:
             from agent_cascade.log import logger
@@ -277,7 +277,7 @@ def start_media_cleanup_scheduler(max_age_days: int = 30, interval_hours: float 
         thread = threading.Thread(
             target=_cleanup_worker,
             args=(max_age_days, interval_hours),
-            name="media-cleanup-scheduler",
+            name='media-cleanup-scheduler',
             daemon=True,
         )
         thread.start()

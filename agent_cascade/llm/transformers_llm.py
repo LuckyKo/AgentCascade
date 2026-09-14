@@ -119,13 +119,13 @@ class Transformers(BaseFnCallModel):
 
                 audios = []
                 for path in audio_paths:
-                    if path.startswith("file://"):
-                        audios.append(librosa.load(path[len("file://") :], sr=self.processor.feature_extractor.sampling_rate)[0])
+                    if path.startswith('file://'):
+                        audios.append(librosa.load(path[len('file://') :], sr=self.processor.feature_extractor.sampling_rate)[0])
                     else:
                         audios.append(librosa.load(path, sr=self.processor.feature_extractor.sampling_rate)[0])
                 processor_kwargs['audios'] = audios
             
-            inputs = self.processor(**processor_kwargs, return_tensors="pt")
+            inputs = self.processor(**processor_kwargs, return_tensors='pt')
 
         for k, v in inputs.items():
             if torch.is_tensor(v):

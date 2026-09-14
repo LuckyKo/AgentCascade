@@ -47,7 +47,7 @@ def _make_pool_and_engine():
     compression_lock.__exit__ = MagicMock()
     instance._compression_lock = compression_lock
     instance._streaming_responses = []
-    instance.instance_name = "test-agent"
+    instance.instance_name = 'test-agent'
     instance._force_compress_count = 0
     instance.compression_summary = None
     instance.latest_marker_index = -1
@@ -59,21 +59,21 @@ def _make_pool_and_engine():
     pool._run_generation = 1
 
     pool.get_instance.return_value = instance
-    history = [Message(role="system", content="sys")] + [
-        Message(role="user", content=f"msg{i}") for i in range(20)
+    history = [Message(role='system', content='sys')] + [
+        Message(role='user', content=f"msg{i}") for i in range(20)
     ]
     pool.get_conversation.return_value = history
     pool.get_compression_target_set_from_conversation.return_value = (2, history[2:], -1)
     pool.slice_history_for_llm.return_value = history[2:]
 
-    comp_chain = [{"max_input_tokens": 32768}]
+    comp_chain = [{'max_input_tokens': 32768}]
     pool.api_router = MagicMock()
     pool.api_router.get_endpoint_chain.side_effect = (
-        lambda agent_type, **kw: comp_chain if agent_type == "Compressor" else [{"max_input_tokens": 10000}]
+        lambda agent_type, **kw: comp_chain if agent_type == 'Compressor' else [{'max_input_tokens': 10000}]
     )
 
     comp_agent = MagicMock()
-    comp_agent.system_message = "You are a compressor."
+    comp_agent.system_message = 'You are a compressor.'
     pool.get_agent.return_value = comp_agent
 
     class Settings:
@@ -99,7 +99,7 @@ def _make_pool_and_engine():
 
 def _make_template():
     template = MagicMock()
-    template.llm_cfg = {"model": "test"}
+    template.llm_cfg = {'model': 'test'}
     template.function_map = {}
     template.llm = MagicMock()
     template.llm.generate_cfg = {}
@@ -122,13 +122,13 @@ class TestFallbackCompressionStopCheck:
         # Stop is pressed DURING round 1's compression call.
         def stopped_during_round(*args, **kwargs):
             pool.stopped = True
-            return MagicMock(success=False, error="simulated failure")
+            return MagicMock(success=False, error='simulated failure')
 
-        with patch.object(engine, "_execute_llm_call",
-                          side_effect=FallbackCompressionRequired("test-agent", "Coder", "small-model")):
-            with patch("agent_cascade.compression.core.compress_context", side_effect=stopped_during_round):
+        with patch.object(engine, '_execute_llm_call',
+                          side_effect=FallbackCompressionRequired('test-agent', 'Coder', 'small-model')):
+            with patch('agent_cascade.compression.core.compress_context', side_effect=stopped_during_round):
                 gen = engine._execute_llm_call_with_retry(
-                    instance, [Message(role="user", content="test")], _make_template(), []
+                    instance, [Message(role='user', content='test')], _make_template(), []
                 )
                 with pytest.raises(AgentTerminatedError):
                     list(gen)
@@ -142,13 +142,13 @@ class TestFallbackCompressionStopCheck:
         def stopped_during_round(*args, **kwargs):
             compress_calls.append(1)
             pool.stopped = True  # Stop lands mid-round-1
-            return MagicMock(success=False, error="simulated failure")
+            return MagicMock(success=False, error='simulated failure')
 
-        with patch.object(engine, "_execute_llm_call",
-                          side_effect=FallbackCompressionRequired("test-agent", "Coder", "small-model")):
-            with patch("agent_cascade.compression.core.compress_context", side_effect=stopped_during_round):
+        with patch.object(engine, '_execute_llm_call',
+                          side_effect=FallbackCompressionRequired('test-agent', 'Coder', 'small-model')):
+            with patch('agent_cascade.compression.core.compress_context', side_effect=stopped_during_round):
                 gen = engine._execute_llm_call_with_retry(
-                    instance, [Message(role="user", content="test")], _make_template(), []
+                    instance, [Message(role='user', content='test')], _make_template(), []
                 )
                 with pytest.raises(AgentTerminatedError):
                     list(gen)
@@ -168,13 +168,13 @@ class TestFallbackCompressionStopCheck:
         def stop_mid_compression(*args, **kwargs):
             compress_calls.append(1)
             pool.stopped = True  # Stop lands while compress_context is executing
-            raise AgentTerminatedError("Compressor_1")
+            raise AgentTerminatedError('Compressor_1')
 
-        with patch.object(engine, "_execute_llm_call",
-                          side_effect=FallbackCompressionRequired("test-agent", "Coder", "small-model")):
-            with patch("agent_cascade.compression.core.compress_context", side_effect=stop_mid_compression):
+        with patch.object(engine, '_execute_llm_call',
+                          side_effect=FallbackCompressionRequired('test-agent', 'Coder', 'small-model')):
+            with patch('agent_cascade.compression.core.compress_context', side_effect=stop_mid_compression):
                 gen = engine._execute_llm_call_with_retry(
-                    instance, [Message(role="user", content="test")], _make_template(), []
+                    instance, [Message(role='user', content='test')], _make_template(), []
                 )
                 with pytest.raises(AgentTerminatedError):
                     list(gen)
@@ -194,13 +194,13 @@ class TestFallbackCompressionStopCheck:
 
         def should_not_run(*args, **kwargs):
             compress_calls.append(1)
-            return MagicMock(success=False, error="should never be reached")
+            return MagicMock(success=False, error='should never be reached')
 
-        with patch.object(engine, "_execute_llm_call",
-                          side_effect=FallbackCompressionRequired("test-agent", "Coder", "small-model")):
-            with patch("agent_cascade.compression.core.compress_context", side_effect=should_not_run):
+        with patch.object(engine, '_execute_llm_call',
+                          side_effect=FallbackCompressionRequired('test-agent', 'Coder', 'small-model')):
+            with patch('agent_cascade.compression.core.compress_context', side_effect=should_not_run):
                 gen = engine._execute_llm_call_with_retry(
-                    instance, [Message(role="user", content="test")], _make_template(), []
+                    instance, [Message(role='user', content='test')], _make_template(), []
                 )
                 with pytest.raises(AgentTerminatedError):
                     list(gen)
@@ -218,7 +218,7 @@ class _FakeCompressorInstance:
     def __init__(self, name):
         self.instance = AgentInstance(
             instance_name=name,
-            agent_class="Compressor",
+            agent_class='Compressor',
             conversation=[],
             created_at=time.monotonic(),
             last_activity=time.monotonic(),
@@ -238,7 +238,7 @@ class TestInvokerGeneratorCloseOnStop:
     def _make_mock_pool(self, stopped):
         pool = MagicMock()
         pool.stopped = stopped
-        pool.session_name = "TestCaller"
+        pool.session_name = 'TestCaller'
         # _ensure_compressor_loaded needs get_agent to return truthy
         comp_agent = MagicMock()
         comp_agent.llm.generate_cfg = {}
@@ -266,13 +266,13 @@ class TestInvokerGeneratorCloseOnStop:
 
         # invoke_compression_agent lazily imports ExecutionEngine inside its body,
         # so patch at the source module (same pattern as TestCompressionRetryReuse).
-        with patch("agent_cascade.execution_engine.ExecutionEngine") as mock_engine_cls:
+        with patch('agent_cascade.execution_engine.ExecutionEngine') as mock_engine_cls:
             mock_engine_cls.return_value = engine
-            with patch.object(agent_invoker, "_configure_compressor_instance"):
+            with patch.object(agent_invoker, '_configure_compressor_instance'):
                 return agent_invoker.invoke_compression_agent(
                     agent_pool=pool,
-                    target_messages=[{"role": "user", "content": "hello"}],
-                    caller_name="TestCaller",
+                    target_messages=[{'role': 'user', 'content': 'hello'}],
+                    caller_name='TestCaller',
                 )
 
     def test_gen_closed_on_stop_break_and_instance_ends_idle(self):
@@ -284,7 +284,7 @@ class TestInvokerGeneratorCloseOnStop:
         guarantees the exit finally runs (mirrors production where tracebacks and
         cross-thread transitions defer generator finalization)."""
         pool = self._make_mock_pool(stopped=False)
-        fake_inst = _FakeCompressorInstance("Compressor_9001")
+        fake_inst = _FakeCompressorInstance('Compressor_9001')
         close_calls = []
         held_gens = []  # Keep generators alive → refcount cleanup cannot fire
 
@@ -294,12 +294,12 @@ class TestInvokerGeneratorCloseOnStop:
                 # back to IDLE in an exit finally (which only runs if close() is called).
                 comp_instance._transition(AgentState.RUNNING)
                 try:
-                    yield {"role": "assistant", "content": "tick"}
+                    yield {'role': 'assistant', 'content': 'tick'}
                     # User presses Stop while the compressor is generating.
                     pool.stopped = True
-                    yield {"role": "assistant", "content": "tick2"}
+                    yield {'role': 'assistant', 'content': 'tick2'}
                 finally:
-                    close_calls.append("exit-finally")
+                    close_calls.append('exit-finally')
                     if comp_instance.state in (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING):
                         comp_instance._transition(AgentState.IDLE)
 
@@ -311,7 +311,7 @@ class TestInvokerGeneratorCloseOnStop:
             self._invoke(pool, fake_inst, fake_run)
 
         # The exit finally inside the generator MUST have run (via gen.close()).
-        assert close_calls == ["exit-finally"]
+        assert close_calls == ['exit-finally']
         # Instance must NOT be wedged in RUNNING.
         assert fake_inst.state is AgentState.IDLE
 
@@ -319,16 +319,16 @@ class TestInvokerGeneratorCloseOnStop:
         """After a stopped compressor run, re-entering engine.run() must find the
         instance IDLE — i.e., no [BUG] L1 race guard RuntimeError."""
         pool = self._make_mock_pool(stopped=False)
-        fake_inst = _FakeCompressorInstance("Compressor_9002")
+        fake_inst = _FakeCompressorInstance('Compressor_9002')
         held_gens = []
 
         def fake_run(comp_instance):
             def _g():
                 comp_instance._transition(AgentState.RUNNING)
                 try:
-                    yield {"role": "assistant", "content": "tick"}
+                    yield {'role': 'assistant', 'content': 'tick'}
                     pool.stopped = True  # Stop lands mid-generation
-                    yield {"role": "assistant", "content": "tick2"}
+                    yield {'role': 'assistant', 'content': 'tick2'}
                 finally:
                     if comp_instance.state in (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING):
                         comp_instance._transition(AgentState.IDLE)
@@ -355,10 +355,10 @@ class TestInvokerGeneratorCloseOnStop:
         """If the pool is already stopped when the invoker starts, the retry-loop
         stop-check aborts BEFORE any compressor invocation (B1 defense)."""
         pool = self._make_mock_pool(stopped=True)
-        fake_inst = _FakeCompressorInstance("Compressor_9004")
+        fake_inst = _FakeCompressorInstance('Compressor_9004')
 
         def should_not_run(comp_instance):
-            raise AssertionError("engine.run() must not be invoked after a stop")
+            raise AssertionError('engine.run() must not be invoked after a stop')
             yield  # pragma: no cover — makes this a generator
 
         with pytest.raises(AgentTerminatedError):
@@ -368,13 +368,13 @@ class TestInvokerGeneratorCloseOnStop:
         """Without a stop, the generator runs to completion and close() is a no-op;
         summary extraction still works end-to-end."""
         pool = self._make_mock_pool(stopped=False)
-        fake_inst = _FakeCompressorInstance("Compressor_9003")
-        marker = "--- END SUMMARY ---"
+        fake_inst = _FakeCompressorInstance('Compressor_9003')
+        marker = '--- END SUMMARY ---'
 
         def fake_run(comp_instance):
             comp_instance._transition(AgentState.RUNNING)
             try:
-                msg = Message(role="assistant", content=f"Compressed context notes.\n{marker}")
+                msg = Message(role='assistant', content=f"Compressed context notes.\n{marker}")
                 # Mimic _process_response(): final message lands in conversation.
                 comp_instance.append_message(msg)
                 yield ([msg], False)
@@ -385,8 +385,8 @@ class TestInvokerGeneratorCloseOnStop:
         result = self._invoke(pool, fake_inst, fake_run)
 
         # invoke_compression_agent now returns (summary, caption).
-        assert result[0].strip() == "Compressed context notes."
-        assert result[1] == ""
+        assert result[0].strip() == 'Compressed context notes.'
+        assert result[1] == ''
         assert fake_inst.state is AgentState.IDLE
 
 
@@ -398,11 +398,11 @@ class TestPreTryEarlyReturnStateWedge:
     """engine.run()'s pre-try terminal-stop returns must pass through the exit
     finally so the instance ends IDLE, not wedged in RUNNING."""
 
-    def _make_real_instance(self, name="wedge-test"):
+    def _make_real_instance(self, name='wedge-test'):
         return AgentInstance(
             instance_name=name,
-            agent_class="coder",
-            conversation=[Message(role="system", content="sys")],
+            agent_class='coder',
+            conversation=[Message(role='system', content='sys')],
             created_at=time.monotonic(),
             last_activity=time.monotonic(),
             latest_marker_index=-1,
@@ -459,8 +459,8 @@ class TestPreTryEarlyReturnStateWedge:
 
         yielded = list(engine.run(inst))
         assert yielded == []
-        assert acquire_calls == ["initial"]
-        assert released, "Slot must be explicitly released on the post-acquire stop path"
+        assert acquire_calls == ['initial']
+        assert released, 'Slot must be explicitly released on the post-acquire stop path'
         assert inst.state is AgentState.IDLE
 
     def test_l1_guard_does_not_fire_on_reentry_after_wedge_path(self):

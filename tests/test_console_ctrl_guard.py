@@ -118,7 +118,7 @@ class TestConsoleCtrlGuard:
         fake = _FakeKernel32(ok=True)
         assert _install_windows_console_guard(kernel32=fake) is True
         raw = _shared._console_ctrl_raw_handler
-        assert callable(raw), "test hook: raw handler must be reachable"
+        assert callable(raw), 'test hook: raw handler must be reachable'
 
         with patch.object(_sig, 'raise_signal') as mock_raise:
             # CTRL_C / CTRL_BREAK / CTRL_CLOSE / CTRL_SHUTDOWN -> re-dispatch + handled.
@@ -131,7 +131,7 @@ class TestConsoleCtrlGuard:
             # CTRL_LOGOFF -> not handled, and NO re-dispatch.
             mock_raise.reset_mock()
             result = raw(CTRL_LOGOFF_EVENT)
-            assert result is False, "logoff must fall through to default handler"
+            assert result is False, 'logoff must fall through to default handler'
             mock_raise.assert_not_called()
 
     def test_wiring_pins_source_contains_guard_call(self):

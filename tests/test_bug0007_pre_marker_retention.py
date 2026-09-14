@@ -32,35 +32,35 @@ from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
 # ──────────────────────────────────────────────
 
 def _user(content: str) -> dict:
-    return {"role": "user", "content": content}
+    return {'role': 'user', 'content': content}
 
 
 def _assistant(content: str) -> dict:
-    return {"role": "assistant", "content": content}
+    return {'role': 'assistant', 'content': content}
 
 
-def _marker(summary: str, kind: str = "l1") -> dict:
-    if kind == "l2":
-        header = "L2, 7 summaries consolidated"
+def _marker(summary: str, kind: str = 'l1') -> dict:
+    if kind == 'l2':
+        header = 'L2, 7 summaries consolidated'
     else:
         header = summary
     return {
-        "role": "user",
-        "content": (
+        'role': 'user',
+        'content': (
             f"{COMPRESSION_MARKER} ({header}) ---\n"
-            "<context_summary>\n"
+            '<context_summary>\n'
             f"{summary}\n"
-            "</context_summary>"
+            '</context_summary>'
         ),
     }
 
 
 @pytest.fixture
 def tmp_log(tmp_path):
-    log_file = tmp_path / "bug0007.jsonl"
+    log_file = tmp_path / 'bug0007.jsonl'
     logger_inst = AgentInstanceLogger(
-        agent_class="orchestrator",
-        instance_name="Maine",
+        agent_class='orchestrator',
+        instance_name='Maine',
         log_dir=str(tmp_path),
         log_path=str(log_file),
     )
@@ -69,20 +69,20 @@ def tmp_log(tmp_path):
 
 def _seed_full_history(log_path: Path, n_pre: int, n_mid: int):
     """Write a full-history file: [SYS][U0] + n_pre raw + L2 marker + n_mid raw."""
-    lines = [json.dumps({"metadata": {"agent_class": "orchestrator"}})]
-    lines.append(json.dumps(_user("system")))
-    lines.append(json.dumps(_user("initial user")))
+    lines = [json.dumps({'metadata': {'agent_class': 'orchestrator'}})]
+    lines.append(json.dumps(_user('system')))
+    lines.append(json.dumps(_user('initial user')))
     for i in range(n_pre):
         lines.append(json.dumps(_user(f"pre {i}") if i % 2 == 0 else _assistant(f"pa {i}")))
-    lines.append(json.dumps(_marker("L2 consolidated", kind="l2")))
+    lines.append(json.dumps(_marker('L2 consolidated', kind='l2')))
     for i in range(n_mid):
         lines.append(json.dumps(_user(f"mid {i}") if i % 2 == 0 else _assistant(f"m {i}")))
-    log_path.write_text("\n".join(lines) + "\n")
+    log_path.write_text('\n'.join(lines) + '\n')
 
 
 def _read_msgs(log_path: Path):
     out = []
-    for line in log_path.read_text(encoding="utf-8").splitlines():
+    for line in log_path.read_text(encoding='utf-8').splitlines():
         line = line.strip()
         if not line:
             continue
@@ -90,15 +90,15 @@ def _read_msgs(log_path: Path):
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+        if isinstance(item, dict) and 'metadata' not in item and 'event' not in item:
             out.append(item)
     return out
 
 
 def _raw_contents(msgs):
     return [
-        m["content"] for m in msgs
-        if isinstance(m.get("content"), str) and not m["content"].startswith(COMPRESSION_MARKER)
+        m['content'] for m in msgs
+        if isinstance(m.get('content'), str) and not m['content'].startswith(COMPRESSION_MARKER)
     ]
 
 
@@ -119,10 +119,10 @@ def test_trimmed_pool_preserves_all_pre_marker_raw(tmp_log):
 
     # Trimmed pool working set (what get_conversation returns after compression):
     # [SYS][U0] + L2 + a fresh newest marker + small tail. Does NOT contain the raw.
-    l2 = _marker("L2 consolidated", kind="l2")
-    fresh = _marker("FRESH L1", kind="l1")
-    pool = [_user("system"), _user("initial user"), l2, fresh,
-            _user("tail 0"), _assistant("t 0")]
+    l2 = _marker('L2 consolidated', kind='l2')
+    fresh = _marker('FRESH L1', kind='l1')
+    pool = [_user('system'), _user('initial user'), l2, fresh,
+            _user('tail 0'), _assistant('t 0')]
 
     ok = lg.reset_history(pool, rewrite=True)
     assert ok is True
@@ -148,15 +148,15 @@ def test_marker_already_present_is_noop(tmp_log):
     before_bytes = [json.dumps(m, sort_keys=True) for m in before]
 
     # Pool whose newest marker (L2) is already present verbatim in the file.
-    l2 = _marker("L2 consolidated", kind="l2")
-    pool = [_user("system"), _user("initial user"), l2, _user("tail")]
+    l2 = _marker('L2 consolidated', kind='l2')
+    pool = [_user('system'), _user('initial user'), l2, _user('tail')]
 
     ok = lg.reset_history(pool, rewrite=True)
     assert ok is True
 
     after = _read_msgs(log_file)
     after_bytes = [json.dumps(m, sort_keys=True) for m in after]
-    assert before_bytes == after_bytes, "no-op violated: file changed when marker already present"
+    assert before_bytes == after_bytes, 'no-op violated: file changed when marker already present'
 
 
 # ──────────────────────────────────────────────
@@ -183,9 +183,9 @@ def test_concurrent_append_and_rewrite_no_loss(tmp_log):
                 errors.append(str(e))
 
     def compressor():
-        l2 = _marker("L2 consolidated", kind="l2")
-        fresh = _marker("FRESH L1", kind="l1")
-        pool = [_user("system"), _user("initial user"), l2, fresh]
+        l2 = _marker('L2 consolidated', kind='l2')
+        fresh = _marker('FRESH L1', kind='l1')
+        pool = [_user('system'), _user('initial user'), l2, fresh]
         for _ in range(5):
             lg.reset_history(pool, rewrite=True)
 
@@ -199,8 +199,8 @@ def test_concurrent_append_and_rewrite_no_loss(tmp_log):
     assert errors == [], f"append raised (handle race not closed): {errors[:3]}"
 
     after = _read_msgs(log_file)
-    survived = [m for m in after if isinstance(m.get("content"), str)
-                and m["content"].startswith("live append")]
+    survived = [m for m in after if isinstance(m.get('content'), str)
+                and m['content'].startswith('live append')]
     assert len(survived) == 40, (
         f"BUG_0007 regression: {40 - len(survived)} of 40 concurrent appends lost "
         f"(append/rewrite race)"
@@ -222,7 +222,7 @@ def test_consolidation_sequence_retains_pre_marker_raw(tmp_log):
     before = _read_msgs(log_file)
     pre_raw_before = _raw_contents(before)
 
-    l2 = _marker("L2 consolidated", kind="l2")
+    l2 = _marker('L2 consolidated', kind='l2')
     # Simulate consolidation: new L2 replaces first marker; pool state passed in.
     from agent_cascade.compression.helpers import filter_jsonl_for_consolidation
     result_msgs, removed = filter_jsonl_for_consolidation(before, lg._format_message(l2), -1)

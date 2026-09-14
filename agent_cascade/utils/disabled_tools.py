@@ -62,19 +62,19 @@ def normalize_disabled_tools(raw: Optional[Union[Dict, List, Set, tuple]]) -> Se
         result: Set[str] = set()
         for key, tools in raw.items():
             if not isinstance(tools, (dict, list, tuple, set, frozenset)):
-                logger.warning("disabled_tools value for key %r is type %r — ignoring", key, type(tools).__name__)
+                logger.warning('disabled_tools value for key %r is type %r — ignoring', key, type(tools).__name__)
             result |= normalize_disabled_tools(tools)
         return result
     if raw is not None:
-        logger.warning("Unrecognized disabled_tools type %r — ignoring", type(raw).__name__)
+        logger.warning('Unrecognized disabled_tools type %r — ignoring', type(raw).__name__)
     return set()
 
 
 def resolve_disabled_tools_for_agent(
     instance_override: Optional[Dict] = None,
     template_cfg: Optional[Dict] = None,
-    agent_name: str = "",
-    agent_type: str = "",
+    agent_name: str = '',
+    agent_type: str = '',
 ) -> Set[str]:
     """Resolve the complete set of disabled tools for a single agent.
 
@@ -183,8 +183,8 @@ def validate_tool_names(
         # are available to every agent type, so listing disabled tools that
         # aren't in the registry is normal (e.g. python_compiler for coders).
         logger.debug(
-            "Unknown tool names in disabled_tools: %s. "
-            "These will be silently ignored.",
+            'Unknown tool names in disabled_tools: %s. '
+            'These will be silently ignored.',
             sorted(unknown),
         )
 

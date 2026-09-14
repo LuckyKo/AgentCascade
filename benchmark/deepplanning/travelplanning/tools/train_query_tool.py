@@ -15,9 +15,9 @@ class TrainQueryTool(BaseTravelTool):
     LANG_FIELDS = {
         'zh': {
             'segment': lambda idx: f"第{idx}段",
-            'remaining_seats': "剩余票数量",
-            'sufficient': "充足",
-            'no_info': "未查询到信息",
+            'remaining_seats': '剩余票数量',
+            'sufficient': '充足',
+            'no_info': '未查询到信息',
             'not_found': lambda o, d, date: f"未找到从 {o} 到 {d} 在 {date} 的火车票信息",
             'station_sep': '站',
             'db_loaded': lambda count, path: f"✓ 火车票数据库加载成功: {count} 条记录 (路径: {path})",
@@ -25,9 +25,9 @@ class TrainQueryTool(BaseTravelTool):
         },
         'en': {
             'segment': lambda idx: f"Segment {idx}",
-            'remaining_seats': "Remaining Seats",
-            'sufficient': "Available",
-            'no_info': "No information found",
+            'remaining_seats': 'Remaining Seats',
+            'sufficient': 'Available',
+            'no_info': 'No information found',
             'not_found': lambda o, d, date: f"No train information found from {o} to {d} on {date}",
             'station_sep': ' Station',
             'db_loaded': lambda count, path: f"✓ Train database loaded: {count} records (path: {path})",
@@ -96,24 +96,24 @@ class TrainQueryTool(BaseTravelTool):
             
             for idx, row in enumerate(route_segments.itertuples(), 1):
                 seat_status = row.seat_status
-                if seat_status is None or str(seat_status).strip() == "" or str(seat_status).lower() == "nan":
+                if seat_status is None or str(seat_status).strip() == '' or str(seat_status).lower() == 'nan':
                     seat_status = self.fields['sufficient']
                 
                 # Use language-specific field names
                 segment = {
                     self.fields['segment'](idx): {
-                        "arrCityName": row.destination_city,
-                        "arrStationCode": row.arr_station_code,
-                        "arrStationName": row.arr_station_name,
-                        "depCityName": row.origin_city if idx == 1 else prev_row.arr_station_name.split(self.fields['station_sep'])[0],
-                        "depStationCode": row.dep_station_code,
-                        "depStationName": row.dep_station_name,
-                        "duration": int(row.duration),
-                        "arrDateTime": row.arr_datetime,
-                        "depDateTime": row.dep_datetime,
-                        "marketingTransportName": row.train_type,
-                        "marketingTransportNo": row.train_no,
-                        "seatClassName": row.seat_class,
+                        'arrCityName': row.destination_city,
+                        'arrStationCode': row.arr_station_code,
+                        'arrStationName': row.arr_station_name,
+                        'depCityName': row.origin_city if idx == 1 else prev_row.arr_station_name.split(self.fields['station_sep'])[0],
+                        'depStationCode': row.dep_station_code,
+                        'depStationName': row.dep_station_name,
+                        'duration': int(row.duration),
+                        'arrDateTime': row.arr_datetime,
+                        'depDateTime': row.dep_datetime,
+                        'marketingTransportName': row.train_type,
+                        'marketingTransportNo': row.train_no,
+                        'seatClassName': row.seat_class,
                         self.fields['remaining_seats']: seat_status
                     }
                 }
@@ -125,7 +125,7 @@ class TrainQueryTool(BaseTravelTool):
                         route_price = None
                 prev_row = row
             
-            route_data["price"] = route_price if route_price is not None else 0
+            route_data['price'] = route_price if route_price is not None else 0
             routes.append([route_data])
         
         return self.format_result_as_json(routes)

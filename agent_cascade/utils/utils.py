@@ -207,14 +207,14 @@ def has_chinese_messages(messages: List[Union[Message, dict, list, bool, None]],
     for m in messages:
         # Defensive type checking: skip unexpected types that can leak into messages list
         if m is None:
-            logger.debug("has_chinese_messages: skipping None value in messages list")
+            logger.debug('has_chinese_messages: skipping None value in messages list')
             continue
         elif isinstance(m, bool):
             # Check bool BEFORE int since bool is a subclass of int in Python
             logger.debug(f"has_chinese_messages: skipping unexpected bool value in messages list: {m}")
             continue
         elif isinstance(m, list):
-            logger.debug("has_chinese_messages: skipping unexpected list item in messages list")
+            logger.debug('has_chinese_messages: skipping unexpected list item in messages list')
             continue
         elif not isinstance(m, (dict, Message)):
             logger.debug(f"has_chinese_messages: skipping unexpected type {type(m).__name__} in messages list")
@@ -539,7 +539,7 @@ def json_loads(text: str) -> Union[dict, str]:
     try:
         return json5.loads(original_text)
     except Exception:
-        _logger.debug("JSON parse attempt 1 failed (direct)")
+        _logger.debug('JSON parse attempt 1 failed (direct)')
 
     # 2. Try stripping markdown code blocks (handles cases where the whole response is wrapped)
     text = original_text
@@ -553,14 +553,14 @@ def json_loads(text: str) -> Union[dict, str]:
     try:
         return json5.loads(text)
     except Exception:
-        _logger.debug("JSON parse attempt 2 failed (markdown strip)")
+        _logger.debug('JSON parse attempt 2 failed (markdown strip)')
 
     # 3. Try repairing common mistakes (triple quotes, literal newlines)
     try:
         repaired = repair_invalid_json(original_text)
         return json5.loads(repaired)
     except Exception:
-        _logger.debug("JSON parse attempt 3 failed (repair)")
+        _logger.debug('JSON parse attempt 3 failed (repair)')
 
     # 4. Try extracting just the JSON object between the first { and last }
     try:
@@ -575,14 +575,14 @@ def json_loads(text: str) -> Union[dict, str]:
             except Exception:
                 return json5.loads(repaired)
     except Exception:
-        _logger.debug("Failed to parse JSON from extracted block")
+        _logger.debug('Failed to parse JSON from extracted block')
 
     # 5. Try repairing the STRIPPED text as a last resort
     try:
         repaired = repair_invalid_json(text)
         return json5.loads(repaired)
     except Exception:
-        _logger.debug("Failed to parse JSON after repair")
+        _logger.debug('Failed to parse JSON after repair')
 
     # 6. Return stripped original text as string fallback (for non-JSON input)
     return text.strip()
@@ -820,9 +820,9 @@ def _format_tool_calls_for_text(msg):
             
             call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
         
-        return "\n".join(call_parts)
+        return '\n'.join(call_parts)
 
-    return ""
+    return ''
 
 
 def _reasoning_to_text(rc, truncate=True) -> str:
@@ -883,18 +883,18 @@ def extract_text_from_message(
 
     # Handle None gracefully (defensive check)
     if msg is None:
-        logger.debug("extract_text_from_message received None (returning empty)")
-        return ""
+        logger.debug('extract_text_from_message received None (returning empty)')
+        return ''
     
     # Handle list values gracefully (defensive check)
     if isinstance(msg, list):
         logger.debug(f"extract_text_from_message received a list (returning empty): {str(msg)[:50]}")
-        return ""
+        return ''
     
     # Handle boolean values gracefully (defensive check - must come before generic isinstance checks since bool is a subclass of int)
     if isinstance(msg, bool):
         logger.debug(f"extract_text_from_message received a bool (returning empty): {msg}")
-        return ""
+        return ''
     
     # Handle dict by converting to Message
     if isinstance(msg, dict):
@@ -903,7 +903,7 @@ def extract_text_from_message(
     # Now msg should be a Message object - extract content safely
     if not msg_has_field(msg, 'content'):
         logger.debug(f"extract_text_from_message: message has no 'content' attribute: {type(msg)}")
-        return ""
+        return ''
         
     if isinstance(msg.content, list):
         text = format_as_text_message(msg, add_upload_info=add_upload_info, lang=lang).content
@@ -912,7 +912,7 @@ def extract_text_from_message(
     else:
         # Handle other unexpected content types gracefully instead of raising
         logger.debug(f"extract_text_from_message: unexpected content type {type(msg.content).__name__}")
-        return ""
+        return ''
 
     # For assistant messages with empty/missing text, check reasoning first, then tool calls
     if not text.strip() and msg.role == 'assistant':
@@ -1234,7 +1234,7 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     
     # Handle None gracefully (defensive check)
     if msg is None:
-        logger.debug("get_message_stats received None (skipping)")
+        logger.debug('get_message_stats received None (skipping)')
         return {'tokens': 0, 'words': 0}
     
     if isinstance(msg, dict):

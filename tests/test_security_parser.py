@@ -48,7 +48,7 @@ def parse_security_response(display_response: str):
             verdict_end_idx = v_no.end()
 
     # 3. Extract justification: everything AFTER the final verdict token
-    justification = ""
+    justification = ''
     if verdict_idx != -1:
         justification = clean_text[verdict_end_idx:].strip()
         # Clean up leftover markdown bolding or prefixes
@@ -58,10 +58,10 @@ def parse_security_response(display_response: str):
     
     # Fallback 2: if still no verdict found, look for safe/unsafe keywords
     if not is_yes and not is_no:
-        if "SAFE" in check_text and "UNSAFE" not in check_text:
+        if 'SAFE' in check_text and 'UNSAFE' not in check_text:
             is_yes = True
             justification = clean_text
-        elif "UNSAFE" in check_text or "DANGEROUS" in check_text or "REJECT" in check_text:
+        elif 'UNSAFE' in check_text or 'DANGEROUS' in check_text or 'REJECT' in check_text:
             is_no = True
             justification = clean_text
             
@@ -70,69 +70,69 @@ def parse_security_response(display_response: str):
 def test_parser():
     test_cases = [
         {
-            "name": "Standard YES",
-            "input": "[YES] Reason: The command is safe.",
-            "expected": (True, False, "The command is safe.")
+            'name': 'Standard YES',
+            'input': '[YES] Reason: The command is safe.',
+            'expected': (True, False, 'The command is safe.')
         },
         {
-            "name": "Standard NO",
-            "input": "[NO] Reason: Dangerous command.",
-            "expected": (False, True, "Dangerous command.")
+            'name': 'Standard NO',
+            'input': '[NO] Reason: Dangerous command.',
+            'expected': (False, True, 'Dangerous command.')
         },
         {
-            "name": "User Log Case",
-            "input": "\n\n[NO] Reason: Before approving any shell command execution, I need to inspect the actual content of temp_test_coder.py to ensure it doesn't contain malicious or destructive operations. Let me check the file first.",
-            "expected": (False, True, "Before approving any shell command execution, I need to inspect the actual content of temp_test_coder.py to ensure it doesn't contain malicious or destructive operations. Let me check the file first.")
+            'name': 'User Log Case',
+            'input': "\n\n[NO] Reason: Before approving any shell command execution, I need to inspect the actual content of temp_test_coder.py to ensure it doesn't contain malicious or destructive operations. Let me check the file first.",
+            'expected': (False, True, "Before approving any shell command execution, I need to inspect the actual content of temp_test_coder.py to ensure it doesn't contain malicious or destructive operations. Let me check the file first.")
         },
         {
-            "name": "Lowercase brackets",
-            "input": "[yes] it is fine",
-            "expected": (True, False, "it is fine")
+            'name': 'Lowercase brackets',
+            'input': '[yes] it is fine',
+            'expected': (True, False, 'it is fine')
         },
         {
-            "name": "No brackets YES (Plausible failure)",
-            "input": "Verdict: YES\nReason: Safe",
-            "expected": (True, False, "Safe") # This will likely fail currently
+            'name': 'No brackets YES (Plausible failure)',
+            'input': 'Verdict: YES\nReason: Safe',
+            'expected': (True, False, 'Safe') # This will likely fail currently
         },
         {
-            "name": "SAFE keyword fallback",
-            "input": "This command is safe to run.",
-            "expected": (True, False, "This command is safe to run.")
+            'name': 'SAFE keyword fallback',
+            'input': 'This command is safe to run.',
+            'expected': (True, False, 'This command is safe to run.')
         },
         {
-            "name": "Markdown bolding",
-            "input": "**[YES]** Reason: approved",
-            "expected": (True, False, "approved")
+            'name': 'Markdown bolding',
+            'input': '**[YES]** Reason: approved',
+            'expected': (True, False, 'approved')
         },
         {
-            "name": "No Reason prefix",
-            "input": "[YES] approved immediately",
-            "expected": (True, False, "approved immediately")
+            'name': 'No Reason prefix',
+            'input': '[YES] approved immediately',
+            'expected': (True, False, 'approved immediately')
         },
         {
-            "name": "Ambiguous investigation",
-            "input": "I need to check the file `temp.py` before I can decide.",
-            "expected": (False, False, "")
+            'name': 'Ambiguous investigation',
+            'input': 'I need to check the file `temp.py` before I can decide.',
+            'expected': (False, False, '')
         },
         {
-            "name": "Mixed verdicts (Last one wins)",
-            "input": "[YES] wait actually [NO] reason: I saw a virus",
-            "expected": (False, True, "I saw a virus")
+            'name': 'Mixed verdicts (Last one wins)',
+            'input': '[YES] wait actually [NO] reason: I saw a virus',
+            'expected': (False, True, 'I saw a virus')
         }
     ]
     
     print(f"{'Test Case':<30} | {'Status':<10} | {'Result'}")
-    print("-" * 80)
+    print('-' * 80)
     
     for case in test_cases:
-        y, n, just = parse_security_response(case["input"])
+        y, n, just = parse_security_response(case['input'])
         actual = (y, n, just)
-        passed = actual == case["expected"]
-        status = "PASSED" if passed else "FAILED"
+        passed = actual == case['expected']
+        status = 'PASSED' if passed else 'FAILED'
         
         print(f"{case['name']:<30} | {status:<10} | {actual}")
         if not passed:
             print(f"   Expected: {case['expected']}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     test_parser()

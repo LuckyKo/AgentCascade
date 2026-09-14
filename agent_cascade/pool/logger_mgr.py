@@ -24,7 +24,7 @@ class LoggerManager:
         self.pool = pool
         self.workspace_dir = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
         # Instance-specific log directory
-        instance_log_base = make_instance_dir(str(self.workspace_dir / "logs"))
+        instance_log_base = make_instance_dir(str(self.workspace_dir / 'logs'))
         self.log_dir = Path(instance_log_base)
 
         try:
@@ -79,6 +79,6 @@ class LoggerManager:
                 agent_class=agent_class,
                 instance_name=instance_name,
                 log_dir=str(self.log_dir),
-                base_metadata={"supervisor": "User"},
+                base_metadata={'supervisor': 'User'},
             )
         return

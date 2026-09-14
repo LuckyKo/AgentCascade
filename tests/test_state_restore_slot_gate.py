@@ -32,27 +32,27 @@ from agent_cascade.llm.schema import Message
 # Helpers
 # ============================================================================
 
-AUTOLOADER_X = "http://localhost:1234/v1/"  # the shared conc=0 autoloader (held)
-STALE_Y = "http://stale-host:9123/v1/"      # stale _last_endpoint_config (NOT held)
+AUTOLOADER_X = 'http://localhost:1234/v1/'  # the shared conc=0 autoloader (held)
+STALE_Y = 'http://stale-host:9123/v1/'      # stale _last_endpoint_config (NOT held)
 
 
-def make_instance(name="B", label="B"):
+def make_instance(name='B', label='B'):
     """Real AgentInstance with a saved state label and a STALE endpoint config."""
     inst = AgentInstance(
         instance_name=name,
-        agent_class="coder",
-        conversation=[Message(role="system", content="sys")],
+        agent_class='coder',
+        conversation=[Message(role='system', content='sys')],
         created_at=time.monotonic(),
         last_activity=time.monotonic(),
         latest_marker_index=0,
-        parent_instance="Main",
+        parent_instance='Main',
     )
     with inst._state_lock:
         inst._state_label = label
         # Stale config pointing at endpoint Y — must NOT be the restore target.
         inst._last_endpoint_config = {
             'api_base': STALE_Y,
-            'model': "stale-model-B",
+            'model': 'stale-model-B',
             'state_save_enabled': True,
         }
     return inst
@@ -76,14 +76,14 @@ def make_engine(instance):
 def wire_router_held_endpoint(pool):
     """Router resolves the held endpoint (X / model-A) for this instance."""
     pool.api_router.get_effective_slot_info.return_value = {
-        'slot_key': "pool-x",
+        'slot_key': 'pool-x',
         'is_sequential': True,
         'concurrency_limit': 0,
         'api_base': AUTOLOADER_X,
         'needs_slot': True,
     }
     pool.api_router.get_endpoint_chain.return_value = [
-        {'api_base': AUTOLOADER_X, 'model': "model-A", 'state_save_enabled': True},
+        {'api_base': AUTOLOADER_X, 'model': 'model-A', 'state_save_enabled': True},
     ]
 
 
@@ -112,24 +112,24 @@ class TestRestoreTargetsHeldEndpoint:
         """With held_endpoint_cfg, the load POSTs to the HELD endpoint X/model-A,
         never to the stale _last_endpoint_config Y/stale-model-B."""
         inst = make_instance()
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
             ok = state_ops.restore_instance_state(
-                inst, held_endpoint_cfg={'api_base': AUTOLOADER_X, 'model': "model-A"})
+                inst, held_endpoint_cfg={'api_base': AUTOLOADER_X, 'model': 'model-A'})
 
         assert ok is True
         load_urls = _recorded_load_urls(post_mock)
         assert len(load_urls) == 1, f"exactly one state/load expected: {load_urls}"
         url = load_urls[0]
         assert AUTOLOADER_X.rstrip('/') in url, f"must target held endpoint X: {url}"
-        assert "model-A" in url, f"must target held model: {url}"
-        assert STALE_Y not in url and "stale-model-B" not in url, \
+        assert 'model-A' in url, f"must target held model: {url}"
+        assert STALE_Y not in url and 'stale-model-B' not in url, \
             f"must NOT target stale config Y: {url}"
 
     def test_none_held_cfg_falls_back_to_last_endpoint_config(self):
         """Backward compat: held_endpoint_cfg=None restores via _last_endpoint_config."""
         inst = make_instance()
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
             ok = state_ops.restore_instance_state(inst)
 
@@ -142,9 +142,9 @@ class TestRestoreTargetsHeldEndpoint:
     def test_no_label_is_noop_without_http(self):
         """No saved label → no restore HTTP at all."""
         inst = make_instance(label=None)
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             ok = state_ops.restore_instance_state(
-                inst, held_endpoint_cfg={'api_base': AUTOLOADER_X, 'model': "model-A"})
+                inst, held_endpoint_cfg={'api_base': AUTOLOADER_X, 'model': 'model-A'})
 
         assert ok is False
         post_mock.assert_not_called()
@@ -166,7 +166,7 @@ class TestSetupTurnRestoreGate:
         engine, pool = make_engine(inst)
         wire_router_held_endpoint(pool)
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             drive_setup_turn(engine, inst)
 
         load_urls = _recorded_load_urls(post_mock)
@@ -183,16 +183,16 @@ class TestSetupTurnRestoreGate:
         engine, pool = make_engine(inst)
         wire_router_held_endpoint(pool)
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
             drive_setup_turn(engine, inst)
 
         load_urls = _recorded_load_urls(post_mock)
         assert len(load_urls) == 1, f"exactly one state/load expected: {load_urls}"
         url = load_urls[0]
-        assert AUTOLOADER_X.rstrip('/') in url and "model-A" in url, \
+        assert AUTOLOADER_X.rstrip('/') in url and 'model-A' in url, \
             f"must target held endpoint X: {url}"
-        assert STALE_Y not in url and "stale-model-B" not in url, \
+        assert STALE_Y not in url and 'stale-model-B' not in url, \
             f"must NOT target stale config Y: {url}"
 
     def test_resolution_error_skips_restore_never_evicts(self):
@@ -202,9 +202,9 @@ class TestSetupTurnRestoreGate:
         inst._slot_release = lambda: None  # holding a slot
 
         engine, pool = make_engine(inst)
-        pool.api_router.get_effective_slot_info.side_effect = RuntimeError("boom")
+        pool.api_router.get_effective_slot_info.side_effect = RuntimeError('boom')
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             result = drive_setup_turn(engine, inst)  # must not raise
 
         assert result is not None  # setup turn still completed
@@ -218,16 +218,16 @@ class TestSetupTurnRestoreGate:
 
         engine, pool = make_engine(inst)
         pool.api_router.get_effective_slot_info.return_value = {
-            'slot_key': "pool-x", 'is_sequential': True, 'concurrency_limit': 0,
+            'slot_key': 'pool-x', 'is_sequential': True, 'concurrency_limit': 0,
             'api_base': AUTOLOADER_X, 'needs_slot': True,
         }
         pool.api_router.get_endpoint_chain.return_value = []  # empty chain
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             drive_setup_turn(engine, inst)
 
         assert _recorded_load_urls(post_mock) == [], \
-            "no model resolved → restore must be skipped"
+            'no model resolved → restore must be skipped'
 
 
 # ============================================================================
@@ -242,8 +242,8 @@ class TestCompressionResumeRestoreGate:
         pool._compression_halted = set()  # not suspended → zero iterations
         # NOTE: core.py imports save/restore lazily from agent_cascade.state_ops, so
         # both must be patched at the state_ops module (patching engine.core would fail).
-        with patch.object(engine, "reacquire_for", return_value=reacquire_result), \
-             patch("agent_cascade.state_ops.save_instance_state", return_value=True):
+        with patch.object(engine, 'reacquire_for', return_value=reacquire_result), \
+             patch('agent_cascade.state_ops.save_instance_state', return_value=True):
             return engine._wait_for_compression_to_clear(inst.instance_name)
 
     def test_degraded_slotless_resume_skips_restore(self):
@@ -254,11 +254,11 @@ class TestCompressionResumeRestoreGate:
         wire_router_held_endpoint(pool)
         inst._slot_release = None  # no-slot agent
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             self._drive(engine, inst, reacquire_result=True)
 
         assert _recorded_load_urls(post_mock) == [], \
-            "no state/load may fire when the instance holds no slot"
+            'no state/load may fire when the instance holds no slot'
 
     def test_slot_held_resume_restores_to_held_endpoint(self):
         """Re-acquired holder → restore fires to the HELD endpoint X, not stale Y."""
@@ -267,21 +267,21 @@ class TestCompressionResumeRestoreGate:
         wire_router_held_endpoint(pool)
 
         # The (mocked) re-acquire sets _slot_release, like reacquire_for does.
-        def fake_reacquire(instance_arg, holder_name, context="reacquire"):
+        def fake_reacquire(instance_arg, holder_name, context='reacquire'):
             instance_arg._slot_release = lambda: None
-            instance_arg._slot_key = "pool-x"
+            instance_arg._slot_key = 'pool-x'
             return True
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
             pool._compression_halted = set()
-            with patch.object(engine, "reacquire_for", side_effect=fake_reacquire), \
-                 patch("agent_cascade.state_ops.save_instance_state", return_value=True):
+            with patch.object(engine, 'reacquire_for', side_effect=fake_reacquire), \
+                 patch('agent_cascade.state_ops.save_instance_state', return_value=True):
                 engine._wait_for_compression_to_clear(inst.instance_name)
 
         load_urls = _recorded_load_urls(post_mock)
         assert len(load_urls) == 1
-        assert AUTOLOADER_X.rstrip('/') in load_urls[0] and "model-A" in load_urls[0]
+        assert AUTOLOADER_X.rstrip('/') in load_urls[0] and 'model-A' in load_urls[0]
         assert STALE_Y not in load_urls[0]
 
 
@@ -299,7 +299,7 @@ class TestSleepWakeupRestoreGate:
         wire_router_held_endpoint(pool)
         inst._slot_release = None  # unlimited endpoint — acquire left it None
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             # The caller-side gate (same check used by the sleep-wakeup sites):
             if inst._slot_release is not None:
                 engine._restore_held_slot_state(inst, inst.instance_name)
@@ -317,14 +317,14 @@ class TestNoWrongfulEviction:
         """Agent B holds the conc=0 slot on X and restores. Agent A's resident
         lives on a DIFFERENT endpoint (not X) — since restore only ever fires to
         the held endpoint, A's autoloader can never receive a load/evict call."""
-        agent_a_autoloader = "http://a-host:1234/v1/"  # A's resident lives here
-        inst_b = make_instance(name="B")
+        agent_a_autoloader = 'http://a-host:1234/v1/'  # A's resident lives here
+        inst_b = make_instance(name='B')
         inst_b._slot_release = lambda: None  # B holds the conc=0 slot on X
 
         engine, pool = make_engine(inst_b)
         wire_router_held_endpoint(pool)
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
             drive_setup_turn(engine, inst_b)
 
@@ -340,16 +340,16 @@ class TestNoWrongfulEviction:
         """Two agents sharing the conc=0 pool: only the one HOLDING the slot may
         restore; the slotless one must produce zero load calls. This is the FIFO
         single-holder guarantee pinned as a unit invariant."""
-        holder = make_instance(name="holder")
+        holder = make_instance(name='holder')
         holder._slot_release = lambda: None  # holds the conc=0 slot
 
-        other = make_instance(name="other")
+        other = make_instance(name='other')
         other._slot_release = None  # waiting in FIFO — holds nothing
 
         engine, pool = make_engine(holder)
         wire_router_held_endpoint(pool)
 
-        with patch.object(state_ops.httpx, "post") as post_mock:
+        with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
             drive_setup_turn(engine, holder)   # holder → exactly one load (to X)
             # Drive the slotless agent through the same engine path.

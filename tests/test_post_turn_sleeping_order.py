@@ -54,11 +54,11 @@ def _make_engine(has_pending):
     return engine
 
 
-def _make_instance(name="parent"):
+def _make_instance(name='parent'):
     """A RUNNING AgentInstance — the state a post-turn check runs in."""
     inst = AgentInstance(
         instance_name=name,
-        agent_class="Orchestrator",
+        agent_class='Orchestrator',
         conversation=[],
         created_at=time.monotonic(),
         last_activity=time.monotonic(),
@@ -76,11 +76,11 @@ def _reasoning_only_response():
     if that check ran before the pending-tool check.
     """
     return [
-        Message(role=USER, content="Dispatch the research child and wait for it."),
+        Message(role=USER, content='Dispatch the research child and wait for it.'),
         Message(
             role=ASSISTANT,
-            content="",  # no real text — reasoning only
-            reasoning_content="Let me think about what to do next…",
+            content='',  # no real text — reasoning only
+            reasoning_content='Let me think about what to do next…',
         ),
     ]
 
@@ -88,11 +88,11 @@ def _reasoning_only_response():
 def _tool_call_response():
     """A response with an unexecuted (standard) tool call on the last assistant message."""
     return [
-        Message(role=USER, content="Read the file."),
+        Message(role=USER, content='Read the file.'),
         Message(
             role=ASSISTANT,
-            content="",
-            function_call={"name": "read_file", "arguments": '{"path": "x"}'},
+            content='',
+            function_call={'name': 'read_file', 'arguments': '{"path": "x"}'},
         ),
     ]
 
@@ -113,11 +113,11 @@ class TestPostTurnSleepingOrder:
 
         # The pending check won: continue (True), not a stall-break (False).
         assert result is True, (
-            "Pending async tool must take priority over the pure-thinking break — "
-            "_post_turn_checks returned False (broke to IDLE) instead of continuing to SLEEPING"
+            'Pending async tool must take priority over the pure-thinking break — '
+            '_post_turn_checks returned False (broke to IDLE) instead of continuing to SLEEPING'
         )
         # The pending check actually consulted the pool and transitioned the instance.
-        engine.pool.has_pending.assert_called_once_with("parent")
+        engine.pool.has_pending.assert_called_once_with('parent')
         assert inst.state == AgentState.SLEEPING, (
             f"instance should be SLEEPING after a pending-tool post-turn, got {inst.state}"
         )
@@ -134,7 +134,7 @@ class TestPostTurnSleepingOrder:
         result = engine._post_turn_checks(inst, [], [], _reasoning_only_response())
 
         assert result is False, (
-            "A reasoning-only turn with no pending async work must still break out of the loop"
+            'A reasoning-only turn with no pending async work must still break out of the loop'
         )
         # No sleep transition was taken.
         assert inst.state == AgentState.RUNNING, (
@@ -152,7 +152,7 @@ class TestPostTurnSleepingOrder:
 
         result = engine._post_turn_checks(inst, [], [], _tool_call_response())
 
-        assert result is True, "An unexecuted tool call must continue the loop (check #1)"
+        assert result is True, 'An unexecuted tool call must continue the loop (check #1)'
         # Check #1 short-circuits: the pending check should never have been consulted.
         engine.pool.has_pending.assert_not_called()
         assert inst.state == AgentState.RUNNING

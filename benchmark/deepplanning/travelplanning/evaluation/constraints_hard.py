@@ -182,7 +182,7 @@ def _eval_hotel_constraint(constraint_key: str, constraint_data: Dict, plan: Dic
     required_hotel_name = constraint_data.get('hotel_name')
     
     if not required_hotel_name:
-        return (False, "No hotel name specified in constraint data")
+        return (False, 'No hotel name specified in constraint data')
     
     # Check if required hotel is in the plan
     if required_hotel_name not in hotel_names:
@@ -246,7 +246,7 @@ def _eval_restaurant_constraint(constraint_key: str, constraint_data: Dict, plan
     required_restaurant = constraint_data.get('restaurant_name')
     
     if not required_restaurant:
-        return (False, "No restaurant name specified in constraint data")
+        return (False, 'No restaurant name specified in constraint data')
     
     # Check if required restaurant is in the plan
     if required_restaurant not in restaurant_names:
@@ -308,7 +308,7 @@ def _eval_attraction_constraint(constraint_key: str, constraint_data: Dict, plan
     required_attractions = constraint_data.get('attraction_names', [])
     
     if not required_attractions:
-        return (False, "No attraction names specified in constraint data")
+        return (False, 'No attraction names specified in constraint data')
     
     # Check if all required attractions are in the plan
     missing_attractions = []
@@ -472,7 +472,7 @@ def _eval_budget_constraint(constraint_data: Dict, plan: Dict, meta: Dict) -> Tu
     max_budget = constraint_data.get('max_budget')
     
     if max_budget is None:
-        return (False, "Budget constraint missing max_budget value")
+        return (False, 'Budget constraint missing max_budget value')
     
     try:
         max_budget = float(max_budget)
@@ -482,11 +482,11 @@ def _eval_budget_constraint(constraint_data: Dict, plan: Dict, meta: Dict) -> Tu
     # Get daily plans
     daily_plans = plan.get('daily_plans', [])
     if not daily_plans:
-        return (False, "Plan missing daily_plans")
+        return (False, 'Plan missing daily_plans')
     
     # Get meta info
-    people_number = int(meta.get("people_number", 1))
-    room_number = int(meta.get("room_number", 1))
+    people_number = int(meta.get('people_number', 1))
+    room_number = int(meta.get('room_number', 1))
     
     # Calculate actual costs (same logic as check_budget_accuracy)
     transportation_cost = 0.0
@@ -500,10 +500,10 @@ def _eval_budget_constraint(constraint_data: Dict, plan: Dict, meta: Dict) -> Tu
         # So we only count the FIRST one to avoid double counting
         day_intercity_cost = 0.0
         found_first = False
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "travel_intercity_public" and not found_first:
-                details = act.get("details") or {}
-                cost = details.get("cost", 0)
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'travel_intercity_public' and not found_first:
+                details = act.get('details') or {}
+                cost = details.get('cost', 0)
                 try:
                     day_intercity_cost = float(cost)
                     found_first = True
@@ -516,9 +516,9 @@ def _eval_budget_constraint(constraint_data: Dict, plan: Dict, meta: Dict) -> Tu
     
     # 2. Calculate accommodation costs
     for day_idx, day in enumerate(daily_plans[:-1]):  # Except last day
-        accom = day.get("accommodation")
+        accom = day.get('accommodation')
         if isinstance(accom, dict):
-            price = accom.get("price") or accom.get("price_per_night") or accom.get("cost")
+            price = accom.get('price') or accom.get('price_per_night') or accom.get('cost')
             if price:
                 try:
                     accommodation_cost += float(price) * room_number
@@ -527,10 +527,10 @@ def _eval_budget_constraint(constraint_data: Dict, plan: Dict, meta: Dict) -> Tu
     
     # 3. Calculate meals costs
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "meal":
-                details = act.get("details") or {}
-                cost = details.get("cost")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'meal':
+                details = act.get('details') or {}
+                cost = details.get('cost')
                 if cost:
                     try:
                         meals_cost += float(cost) * people_number
@@ -539,10 +539,10 @@ def _eval_budget_constraint(constraint_data: Dict, plan: Dict, meta: Dict) -> Tu
     
     # 4. Calculate attraction costs
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "attraction":
-                details = act.get("details") or {}
-                cost = details.get("cost")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'attraction':
+                details = act.get('details') or {}
+                cost = details.get('cost')
                 if cost:
                     try:
                         attractions_cost += float(cost) * people_number
@@ -552,10 +552,10 @@ def _eval_budget_constraint(constraint_data: Dict, plan: Dict, meta: Dict) -> Tu
     # 5. Calculate city transportation costs (taxis)
     taxis_needed = max(1, (people_number + 3) // 4)
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "travel_city":
-                details = act.get("details") or {}
-                cost = details.get("cost")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'travel_city':
+                details = act.get('details') or {}
+                cost = details.get('cost')
                 if cost:
                     try:
                         transportation_cost += float(cost) * taxis_needed

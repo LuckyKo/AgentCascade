@@ -116,7 +116,7 @@ class TestBreakerStress:
 
         # Each cycle ended on a successful probe -> breaker closed (popped from the dict).
         assert normalize_api_base(base) not in router._server_breakers, (
-            "breaker should be closed after every cycle ended on success"
+            'breaker should be closed after every cycle ended on success'
         )
 
     def test_bounded_http_no_deadlock_under_concurrency(self, router, mock_servers):
@@ -134,7 +134,7 @@ class TestBreakerStress:
 
         # 3 models on ONE physical (busy) server + one healthy endpoint elsewhere.
         ids = [_add_endpoint(router, f"busy_m{i}", busy_base, model=f'model-{i}') for i in range(3)]
-        id_h = _add_endpoint(router, "healthy", healthy_base, model='hm')
+        id_h = _add_endpoint(router, 'healthy', healthy_base, model='hm')
         router.set_agent_priorities('coder', ids + [id_h])
 
         # Monkeypatch the underlying call_fn to hit the mock servers (mirrors the
@@ -176,7 +176,7 @@ class TestBreakerStress:
 
             # No deadlock: every thread must have finished.
             assert not any(t.is_alive() for t in threads), (
-                "a call_with_fallback thread is still alive (possible deadlock)"
+                'a call_with_fallback thread is still alive (possible deadlock)'
             )
 
             busy_hits = mock_servers['busy_ref']['hits'].get('/v1/chat/completions', 0)
@@ -202,7 +202,7 @@ class TestBreakerStress:
             )
 
             # Failover still works: the healthy base got at least one hit.
-            assert healthy_hits >= 1, "failover to the healthy base must have happened"
+            assert healthy_hits >= 1, 'failover to the healthy base must have happened'
 
             # No thread raised an UNEXPECTED exception type. ServerBusyError / RuntimeError
             # are acceptable degradations (record them); anything else is a real bug.

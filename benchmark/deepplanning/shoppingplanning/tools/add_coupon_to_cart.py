@@ -5,16 +5,16 @@ from base_shopping_tool import BaseShoppingTool, register_tool
 from pathlib import Path
 
 VALID_COUPONS = [
-    "Cross-store: ¥30 off every ¥300",
-    "Cross-store: ¥60 off every ¥500",
-    "Cross-store: ¥120 off every ¥900",
-    "Cross-store: ¥200 off every ¥1,200",
-    "Cross-store: ¥300 off every ¥1,500",
-    "Same-brand: ¥25 off every ¥200",
-    "Same-brand: ¥60 off every ¥400",
-    "Same-brand: ¥180 off every ¥1,000",
-    "Same-brand: ¥300 off every ¥1,200",
-    "VIP: ¥200 off every ¥1,000",
+    'Cross-store: ¥30 off every ¥300',
+    'Cross-store: ¥60 off every ¥500',
+    'Cross-store: ¥120 off every ¥900',
+    'Cross-store: ¥200 off every ¥1,200',
+    'Cross-store: ¥300 off every ¥1,500',
+    'Same-brand: ¥25 off every ¥200',
+    'Same-brand: ¥60 off every ¥400',
+    'Same-brand: ¥180 off every ¥1,000',
+    'Same-brand: ¥300 off every ¥1,200',
+    'VIP: ¥200 off every ¥1,000',
 ]
 
 @register_tool('add_coupon_to_cart')
@@ -46,9 +46,9 @@ class AddCouponToCartTool(BaseShoppingTool):
     def _load_cart(self, path: Path):
         """Load cart data from JSON file."""
         default_cart = {
-            "items": [],
-            "used_coupons": [],
-            "summary": {"total_items_count": 0, "total_price": 0.0},
+            'items': [],
+            'used_coupons': [],
+            'summary': {'total_items_count': 0, 'total_price': 0.0},
         }
 
         try:
@@ -67,8 +67,8 @@ class AddCouponToCartTool(BaseShoppingTool):
                         self.cart_data['used_coupons'] = []
                     if 'summary' not in self.cart_data:
                         self.cart_data['summary'] = {
-                            "total_items_count": len(self.cart_data.get('items', [])),
-                            "total_price": 0.0
+                            'total_items_count': len(self.cart_data.get('items', [])),
+                            'total_price': 0.0
                         }
                 else:
                     self.cart_data = default_cart
@@ -183,7 +183,7 @@ class AddCouponToCartTool(BaseShoppingTool):
                 f"Cart total {base_total} is insufficient for this combination of coupons"
                 f" (requires at least {total_threshold_required})"
             )
-        return True, ""
+        return True, ''
 
     def _update_summary(self):
         """Update cart summary statistics, including discount."""
@@ -213,19 +213,19 @@ class AddCouponToCartTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         coupon_name = params_dict.get('coupon_name')
         quantity = params_dict.get('quantity', 1)
 
         if not coupon_name:
             return self.format_result_as_json({
-                "error": "coupon_name is required",
+                'error': 'coupon_name is required',
             })
 
         if not isinstance(quantity, (int, float)) or quantity <= 0:
             return self.format_result_as_json({
-                "error": "quantity must be a positive number",
+                'error': 'quantity must be a positive number',
             })
 
         quantity = int(quantity)
@@ -233,7 +233,7 @@ class AddCouponToCartTool(BaseShoppingTool):
         # 1. Validate if coupon exists
         if coupon_name not in VALID_COUPONS:
             return self.format_result_as_json({
-                "error": f"Coupon not found: '{coupon_name}'. Valid coupons are: {', '.join(VALID_COUPONS)}",
+                'error': f"Coupon not found: '{coupon_name}'. Valid coupons are: {', '.join(VALID_COUPONS)}",
             })
 
         # 2. Validate user ownership
@@ -251,18 +251,18 @@ class AddCouponToCartTool(BaseShoppingTool):
 
         if total_needed > user_owned_quantity:
             return self.format_result_as_json({
-                "error": (
+                'error': (
                     f"Insufficient coupon quantity: User owns {user_owned_quantity} of '{coupon_name}', "
                     f"cart already uses {currently_used}, cannot add {quantity} more"
                 ),
             })
 
         # 3. Check VIP status (if VIP coupon)
-        if coupon_name.startswith("VIP:"):
+        if coupon_name.startswith('VIP:'):
             is_vip = self.user_data.get('is_vip', False)
             if not is_vip:
                 return self.format_result_as_json({
-                    "error": (
+                    'error': (
                         f"VIP coupon '{coupon_name}' requires VIP status, but user is not a VIP"
                     ),
                 })
@@ -277,8 +277,8 @@ class AddCouponToCartTool(BaseShoppingTool):
 
         if not coupon_found:
             used_coupons.append({
-                "coupon_name": coupon_name,
-                "quantity": quantity
+                'coupon_name': coupon_name,
+                'quantity': quantity
             })
 
         # 5. Check coupon combination validity
@@ -296,7 +296,7 @@ class AddCouponToCartTool(BaseShoppingTool):
             self.cart_data['used_coupons'] = used_coupons
 
             return self.format_result_as_json({
-                "error": error_msg,
+                'error': error_msg,
             })
 
         # 6. Update summary and persist changes
@@ -307,7 +307,7 @@ class AddCouponToCartTool(BaseShoppingTool):
             self._save_cart()
         except Exception as e:
             return self.format_result_as_json({
-                "error": f"Failed to save cart: {str(e)}",
+                'error': f"Failed to save cart: {str(e)}",
             })
 
         return self.format_result_as_json(self.cart_data)

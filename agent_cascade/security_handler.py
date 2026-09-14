@@ -135,7 +135,7 @@ class ResettableRLock:
 
     def __enter__(self):
         if not self.acquire():
-            raise RuntimeError("ResettableRLock: timed out acquiring lock")
+            raise RuntimeError('ResettableRLock: timed out acquiring lock')
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -159,7 +159,7 @@ class ResettableRLock:
         owner = self._owner_thread
         return owner is not None and owner.is_alive()
 
-    def force_reset(self, reason: str = "") -> bool:
+    def force_reset(self, reason: str = '') -> bool:
         """Force-release a leaked lock by swapping in a fresh RLock.
 
         DANGEROUS — only call when the previous holder is known to be dead.
@@ -478,8 +478,8 @@ class SecurityAdvisorHandler:
                     try:
                         self.agent_pool.enqueue_message(
                             sec_state_key,
-                            "[SYSTEM WARNING] Your analysis is taking longer than expected. "
-                            "Please provide a verdict as soon as possible — the approval request may timeout soon.",
+                            '[SYSTEM WARNING] Your analysis is taking longer than expected. '
+                            'Please provide a verdict as soon as possible — the approval request may timeout soon.',
                         )
                     except Exception as e:
                         logger.debug(f"Security advisor warning injection failed (non-critical): {e}")
@@ -559,9 +559,9 @@ class SecurityAdvisorHandler:
                 # If we released anything, _yielded_slot is set so the finally block re-acquires.
                 _yielded_slot = yield_caller_slot(
                     self.agent_pool, engine, caller_inst_sec, caller_agent,
-                    log_prefix="SECURITY_SLOT_YIELD",
-                    release_reason="before_security_check",
-                    before_action="Security check",
+                    log_prefix='SECURITY_SLOT_YIELD',
+                    release_reason='before_security_check',
+                    before_action='Security check',
                 )
 
                 # Last-resort guard against a generator that never yields its first token.
@@ -661,7 +661,7 @@ class SecurityAdvisorHandler:
                 if (tel := engine._telemetry()) is not None:
                     try:
                         tel.record_agent_instance_call(
-                            sec_state_key, "Security", caller_agent, latency_ms=_call_latency_ms,
+                            sec_state_key, 'Security', caller_agent, latency_ms=_call_latency_ms,
                         )
                     except Exception:
                         pass
@@ -717,7 +717,7 @@ class SecurityAdvisorHandler:
                 logger.debug(
                     f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check"
                 )
-                engine.reacquire_for(caller_inst_sec, caller_agent, "after_security_check")
+                engine.reacquire_for(caller_inst_sec, caller_agent, 'after_security_check')
 
             # ── Cleanup: always remove instance state and release tracking ──
             self._cleanup(sec_state_key)
@@ -757,12 +757,12 @@ class SecurityAdvisorHandler:
 
         is_yes = False
         is_no = False
-        justification = ""
+        justification = ''
 
         try:
             # ── Strategy 1: Check last non-empty line ─────────────────────
             lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-            last_line = lines[-1] if lines else ""
+            last_line = lines[-1] if lines else ''
 
             # Remove markdown bolding (e.g. **[YES]** → [YES])
             last_line_clean = _MARKDOWN_BOLD_RE.sub('', last_line).strip()
@@ -812,7 +812,7 @@ class SecurityAdvisorHandler:
             logger.error(f"Error extracting security verdict: {e}")
             is_yes = False
             is_no = False
-            justification = ""
+            justification = ''
 
         return is_yes, is_no, justification
 
@@ -854,17 +854,17 @@ class SecurityAdvisorHandler:
             self.agent_pool.halt_instance(f'Security_{rid}')
 
         reject_msg = (
-            "SECURITY ADVISOR TIMEOUT: The security check took too long to complete. "
-            "This may indicate an overly complex request or insufficient justification. "
-            "Please resubmit the request with a clearer, more specific justification "
-            "to help the security advisor reach a verdict faster."
+            'SECURITY ADVISOR TIMEOUT: The security check took too long to complete. '
+            'This may indicate an overly complex request or insufficient justification. '
+            'Please resubmit the request with a clearer, more specific justification '
+            'to help the security advisor reach a verdict faster.'
         )
         self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
         # Notify UI about the timeout
         response_text = f"[TIMEOUT] Security check exceeded {timeout_seconds:.0f}s limit after {elapsed:.0f}s."
         if not auto_apply:
-            response_text += " Please resubmit with clearer justification if needed."
+            response_text += ' Please resubmit with clearer justification if needed.'
 
         loop = _get_ws_loop(self.agent_pool)
         if loop:
@@ -903,7 +903,7 @@ class SecurityAdvisorHandler:
                 self.agent_pool.operation_manager.user_approve(rid, reason=justification)
             else:
                 logger.info(f"[SECURITY] Automatic Rejection for {rid} with reason: {justification[:50]}...")
-                reject_msg = justification or "The security advisor flagged this operation as unsafe."
+                reject_msg = justification or 'The security advisor flagged this operation as unsafe.'
                 self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
             # Broadcast updated approvals list to UI after auto-apply
@@ -924,7 +924,7 @@ class SecurityAdvisorHandler:
                         'request_id': rid,
                         'response': parsing_response,
                         'verdict': 'YES' if is_yes else 'NO',
-                        'reason': justification if is_no else "",
+                        'reason': justification if is_no else '',
                     }),
                     loop,
                 )
@@ -939,8 +939,8 @@ class SecurityAdvisorHandler:
             # Strict enforcement: Invalid format = Automatic NO
             logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
             reject_msg = (
-                "The security advisor provided an ambiguous response "
-                "without a clear [YES] or [NO] verdict. Please try a different method or provide a clearer justification."
+                'The security advisor provided an ambiguous response '
+                'without a clear [YES] or [NO] verdict. Please try a different method or provide a clearer justification.'
             )
             self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
@@ -949,7 +949,7 @@ class SecurityAdvisorHandler:
                     self.send_queue.put({
                         'type': 'security_response',
                         'request_id': rid,
-                        'response': parsing_response + "\n\n**[AUTO-REJECTED: Ambiguous Format]**",
+                        'response': parsing_response + '\n\n**[AUTO-REJECTED: Ambiguous Format]**',
                         'verdict': 'AMBIGUOUS',
                     }),
                     loop,

@@ -65,120 +65,120 @@ def V(line: int, col: int, name: str):
 
 CASES = [
     # ---- simple undefined name in executable code IS flagged ---------------------
-    ("simple_undefined_name", "def f():\n    return _nope_\n", {V(2, 11, "_nope_")}),
+    ('simple_undefined_name', 'def f():\n    return _nope_\n', {V(2, 11, '_nope_')}),
 
     # ---- no false positives: locally-bound names ---------------------------------
-    ("local_var_not_flagged", "def f():\n    x = 1\n    return x\n", set()),
-    ("param_not_flagged", "def f(x):\n    return x\n", set()),
-    ("for_loop_target_not_flagged", "def f():\n    for i in range(3):\n        print(i)\n", set()),
-    ("except_as_var_not_flagged",
-     "def f():\n    try:\n        1/0\n    except Exception as e:\n        print(e)\n", set()),
+    ('local_var_not_flagged', 'def f():\n    x = 1\n    return x\n', set()),
+    ('param_not_flagged', 'def f(x):\n    return x\n', set()),
+    ('for_loop_target_not_flagged', 'def f():\n    for i in range(3):\n        print(i)\n', set()),
+    ('except_as_var_not_flagged',
+     'def f():\n    try:\n        1/0\n    except Exception as e:\n        print(e)\n', set()),
 
     # ---- comprehension walrus scoping --------------------------------------------
     # NOTE: a walrus in the *iterator* of a comprehension is a CPython SyntaxError, so the
     # "binds in enclosing scope" variant cannot be expressed with valid code. The element
     # variant (below) is the unambiguous, valid case: it binds only in the comp scope.
-    ("walrus_in_element_binds_only_in_comp_scope",
-     "def f():\n    r = [(x:=1) for _ in range(1)]\n    print(x)\n", {V(3, 10, "x")}),
+    ('walrus_in_element_binds_only_in_comp_scope',
+     'def f():\n    r = [(x:=1) for _ in range(1)]\n    print(x)\n', {V(3, 10, 'x')}),
 
     # ---- class body is NOT a lexical scope for methods ---------------------------
-    ("class_body_not_scope_for_method",
-     "class C:\n    x = 1\n    def m(self):\n        return x\n", {V(4, 15, "x")}),
-    ("self_attr_not_flagged",
-     "class C:\n    x = 1\n    def m(self):\n        return self.x\n", set()),
-    ("class_attr_access_not_flagged",
-     "class C:\n    x = 1\n    def m(self):\n        return C.x\n", set()),
+    ('class_body_not_scope_for_method',
+     'class C:\n    x = 1\n    def m(self):\n        return x\n', {V(4, 15, 'x')}),
+    ('self_attr_not_flagged',
+     'class C:\n    x = 1\n    def m(self):\n        return self.x\n', set()),
+    ('class_attr_access_not_flagged',
+     'class C:\n    x = 1\n    def m(self):\n        return C.x\n', set()),
 
     # ---- module-level two-phase forward reference ---------------------------------
-    ("module_forward_ref_ok", "def f():\n    return later\nlater = 1\n", set()),
+    ('module_forward_ref_ok', 'def f():\n    return later\nlater = 1\n', set()),
     # A default/annotation evaluated in the function's eval scope cannot see a local that is
     # only defined later in the body -> flagged (CPython: NameError at call time).
-    ("default_uses_local_defined_later_flagged",
-     "def f(g=lambda: h()):\n    def h():\n        return 1\n    return g()\n", {V(1, 16, "h")}),
+    ('default_uses_local_defined_later_flagged',
+     'def f(g=lambda: h()):\n    def h():\n        return 1\n    return g()\n', {V(1, 16, 'h')}),
 
     # ---- string annotations (forward refs) are exempt ----------------------------
-    ("string_annotation_exempt",
+    ('string_annotation_exempt',
      "class C:\n    def m(self) -> 'ForwardRef':\n        pass\n", set()),
 
     # ---- del does NOT create a binding -------------------------------------------
     # ``del x`` is a Del-context Name (not a Load), so it is not itself flagged; but it binds
     # nothing, so the later use of x IS flagged. (CPython: NameError on the use.)
-    ("del_does_not_bind", "def f():\n    del x\n    print(x)\n", {V(3, 10, "x")}),
+    ('del_does_not_bind', 'def f():\n    del x\n    print(x)\n', {V(3, 10, 'x')}),
 
     # ---- global / nonlocal -------------------------------------------------------
     # ``global x`` does not create a binding; if x is undefined at module scope the load is flagged.
-    ("global_undefined_flagged", "def f():\n    global x\n    print(x)\n", {V(3, 10, "x")}),
+    ('global_undefined_flagged', 'def f():\n    global x\n    print(x)\n', {V(3, 10, 'x')}),
     # A valid nonlocal that resolves to an enclosing local (assigned in both branches) -> clean.
-    ("nonlocal_valid_not_flagged",
-     "def outer(flag):\n    if flag:\n        x = 1\n    else:\n        x = 2\n"
-     "    def inner():\n        nonlocal x\n        print(x)\n    return inner\n", set()),
+    ('nonlocal_valid_not_flagged',
+     'def outer(flag):\n    if flag:\n        x = 1\n    else:\n        x = 2\n'
+     '    def inner():\n        nonlocal x\n        print(x)\n    return inner\n', set()),
 
     # ---- walrus in comprehension IF-clause binds in comp scope (analyzer fix B2) --
-    ("walrus_in_comp_if_not_flagged",
-     "def f():\n    result = [x for y in range(3) if (x := y) > 1]\n", set()),
+    ('walrus_in_comp_if_not_flagged',
+     'def f():\n    result = [x for y in range(3) if (x := y) > 1]\n', set()),
 
     # ---- lambda scoping ----------------------------------------------------------
-    ("lambda_default_uses_enclosing_ok", "x = 1\nf = lambda y=x: y\n", set()),
-    ("lambda_body_sees_enclosing_local_ok",
-     "def outer():\n    x = 1\n    f = lambda y: x + y\n    return f(1)\n", set()),
+    ('lambda_default_uses_enclosing_ok', 'x = 1\nf = lambda y=x: y\n', set()),
+    ('lambda_body_sees_enclosing_local_ok',
+     'def outer():\n    x = 1\n    f = lambda y: x + y\n    return f(1)\n', set()),
     # O34: a walrus in a lambda body binds ONLY inside the lambda scope, so the later module-level
     # use of x is undefined (CPython NameError; ruff F821 flags it). Analyzer fix B4.
-    ("walrus_in_lambda_body_does_not_leak",
-     "f = lambda: (x := 1)\nprint(x)\n", {V(2, 6, "x")}),
+    ('walrus_in_lambda_body_does_not_leak',
+     'f = lambda: (x := 1)\nprint(x)\n', {V(2, 6, 'x')}),
 
     # ---- function default referencing a later-defined local ----------------------
-    ("default_uses_later_local_flagged",
-     "def f(g=lambda: h()):\n    def h():\n        return 1\n    return g()\n", {V(1, 16, "h")}),
+    ('default_uses_later_local_flagged',
+     'def f(g=lambda: h()):\n    def h():\n        return 1\n    return g()\n', {V(1, 16, 'h')}),
     # Forward reference WITHIN a function body (call site after the def) resolves fine.
-    ("body_forward_ref_after_def_ok",
-     "def f():\n    def h():\n        return 1\n    g = lambda: h()\n    return g()\n", set()),
+    ('body_forward_ref_after_def_ok',
+     'def f():\n    def h():\n        return 1\n    g = lambda: h()\n    return g()\n', set()),
 
     # ---- annotations -------------------------------------------------------------
-    ("return_annotation_module_name_ok", "x = 1\ndef f() -> x:\n    pass\n", set()),
+    ('return_annotation_module_name_ok', 'x = 1\ndef f() -> x:\n    pass\n', set()),
 
     # ---- imports / builtins ------------------------------------------------------
-    ("star_import_file_skipped", "from os import *\nprint(path)\n", set()),
-    ("import_alias_ok", "import os as operating_system\nprint(operating_system)\n", set()),
-    ("builtin_in_annotation_ok", "x: int = 1\n", set()),
+    ('star_import_file_skipped', 'from os import *\nprint(path)\n', set()),
+    ('import_alias_ok', 'import os as operating_system\nprint(operating_system)\n', set()),
+    ('builtin_in_annotation_ok', 'x: int = 1\n', set()),
 
     # ---- aug-assign / ann-assign -------------------------------------------------
-    ("augassign_not_flagged", "def f():\n    x = 1\n    x += 1\n    print(x)\n", set()),
-    ("annassign_value_not_flagged", "def f():\n    x: int = 1\n    print(x)\n", set()),
+    ('augassign_not_flagged', 'def f():\n    x = 1\n    x += 1\n    print(x)\n', set()),
+    ('annassign_value_not_flagged', 'def f():\n    x: int = 1\n    print(x)\n', set()),
 
     # ---- nested function default evaluated in enclosing scope --------------------
-    ("nested_fn_default_uses_enclosing_ok",
-     "def outer():\n    x = 1\n    def inner(f=lambda y=x: y):\n        return f()\n    return inner()\n", set()),
+    ('nested_fn_default_uses_enclosing_ok',
+     'def outer():\n    x = 1\n    def inner(f=lambda y=x: y):\n        return f()\n    return inner()\n', set()),
 
     # ---- module-level two-phase: class method referencing a later class ----------
-    ("module_two_phase_class_method_ok",
-     "class C:\n    def method(self):\n        return D\nclass D:\n    pass\n", set()),
+    ('module_two_phase_class_method_ok',
+     'class C:\n    def method(self):\n        return D\nclass D:\n    pass\n', set()),
 
     # ---- global referencing a module name defined later --------------------------
-    ("global_module_defined_later_ok", "def f():\n    global x\n    print(x)\nx = 1\n", set()),
+    ('global_module_defined_later_ok', 'def f():\n    global x\n    print(x)\nx = 1\n', set()),
 
     # ---- dict / generator comprehension walrus (element positions) ---------------
-    ("dict_comp_walrus_not_flagged",
-     "def f():\n    result = {k: (v := k*2) for k in range(3)}\n", set()),
-    ("genexp_walrus_untouched_ok",
-     "def f():\n    result = sum((x := i) for i in range(3))\n", set()),
+    ('dict_comp_walrus_not_flagged',
+     'def f():\n    result = {k: (v := k*2) for k in range(3)}\n', set()),
+    ('genexp_walrus_untouched_ok',
+     'def f():\n    result = sum((x := i) for i in range(3))\n', set()),
 
     # ---- class decorator evaluated in enclosing (module) scope -------------------
-    ("class_deco_module_name_ok",
-     "x = 1\ndef decorator(v):\n    return v\n@decorator(x)\nclass C:\n    pass\n", set()),
+    ('class_deco_module_name_ok',
+     'x = 1\ndef decorator(v):\n    return v\n@decorator(x)\nclass C:\n    pass\n', set()),
 
     # ---- async function: undefined name is flagged --------------------------------
-    ("async_undefined_flagged",
-     "async def f():\n    x = 1\n    await something()\n", {V(3, 10, "something")}),
+    ('async_undefined_flagged',
+     'async def f():\n    x = 1\n    await something()\n', {V(3, 10, 'something')}),
 ]
 
 
 @pytest.mark.parametrize(
-    "case_id, code, expected",
+    'case_id, code, expected',
     CASES,
 )
 def test_analyzer_edge_case(case_id: str, code: str, expected):
     """Assert the analyzer's undefined-name output matches the verified expectation."""
-    got = sorted((v.line, v.col, v.name) for v in check_source(code, "test.py"))
+    got = sorted((v.line, v.col, v.name) for v in check_source(code, 'test.py'))
     exp = sorted(expected)
     assert got == exp, (
         f"Analyzer output mismatch [{case_id}].\n"
@@ -190,4 +190,4 @@ def test_analyzer_edge_case(case_id: str, code: str, expected):
 
 def test_all_cases_collected():
     """Sanity guard: the suite is not empty (prevents a regression to 'no tests ran')."""
-    assert len(CASES) > 0, "edge-case suite must contain at least one case"
+    assert len(CASES) > 0, 'edge-case suite must contain at least one case'

@@ -58,8 +58,8 @@ class WebExtractor(BaseTool):
             # and any HTTP status code for quick diagnosis.
             detail = self._describe_fetch_error(e)
             return (f"Failed to fetch {url}: {detail}. "
-                    "Check that the URL is correct, the page exists, and is not blocked or "
-                    "requiring JavaScript rendering.")
+                    'Check that the URL is correct, the page exists, and is not blocked or '
+                    'requiring JavaScript rendering.')
 
     @staticmethod
     def _describe_fetch_error(e: Exception) -> str:

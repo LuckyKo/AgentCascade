@@ -86,7 +86,7 @@ def run_auto_skill_proposal(
                 if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION
             ))
     except Exception as e:
-        logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
+        logger.warning('[AUTO-SKILL] Extra turn error for %s: %s', instance_name, e)
     finally:
         inst.max_turns = _orig_max_turns
 

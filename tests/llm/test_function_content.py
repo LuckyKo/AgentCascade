@@ -80,7 +80,7 @@ def test_function_content(local_llm_cfg, cfg, gen_cfg1, gen_cfg2):
 
     # For local models, function calls might not always be produced;
     # verify at least one response has content before checking function_call
-    assert len(responses) > 0, "No responses from model"
+    assert len(responses) > 0, 'No responses from model'
 
     if gen_cfg2:
         # When gen_cfg2 forces a specific function_choice, the model should comply

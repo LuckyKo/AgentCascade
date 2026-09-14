@@ -52,16 +52,16 @@ class TestFeatureFlagGating:
         # Feed arbitrary content — should never detect anything
         for i in range(20):
             result = d.feed(f"This is chunk number {i} with unique content.")
-            assert result is None, "Disabled detector must always return None"
+            assert result is None, 'Disabled detector must always return None'
 
     def test_disabled_no_state_change(self):
         """With two_phase_enabled=False, internal state should remain empty."""
         d = make_detector()
         d.two_phase_enabled = False
 
-        d.feed("Some content here")
-        assert len(d.token_buffer) == 0, "Disabled detector should not accumulate tokens"
-        assert len(d.tail_buffer) == 0, "Disabled detector should not accumulate tail"
+        d.feed('Some content here')
+        assert len(d.token_buffer) == 0, 'Disabled detector should not accumulate tokens'
+        assert len(d.tail_buffer) == 0, 'Disabled detector should not accumulate tail'
 
 
 class TestBasicSuspicionConfirmationFlow:
@@ -76,8 +76,8 @@ class TestBasicSuspicionConfirmationFlow:
 
         # Create a short repeating block (~200 chars)
         block = (
-            "The system needs to validate the input parameters and ensure they are correct. "
-            "After validation, we process the request through the pipeline and generate output."
+            'The system needs to validate the input parameters and ensure they are correct. '
+            'After validation, we process the request through the pipeline and generate output.'
         )
         assert 150 <= len(block) <= 250, f"Block size {len(block)} out of expected range"
 
@@ -85,12 +85,12 @@ class TestBasicSuspicionConfirmationFlow:
         for i in range(30):
             result = d.feed(block)
             if result is not None:
-                assert result["loop"] is True, f"Expected loop detection, got: {result}"
-                assert "reason" in result
-                assert "confirmed_repetitions" in result
+                assert result['loop'] is True, f"Expected loop detection, got: {result}"
+                assert 'reason' in result
+                assert 'confirmed_repetitions' in result
                 return
 
-        pytest.fail("Loop was not detected after 30 repetitions of the same block")
+        pytest.fail('Loop was not detected after 30 repetitions of the same block')
 
     def test_medium_interval_loop(self):
         """Feed a repeating block of ~500 chars multiple times → triggers loop."""
@@ -98,21 +98,21 @@ class TestBasicSuspicionConfirmationFlow:
 
         # Create a medium repeating block (~500 chars)
         block = (
-            "To implement this feature we need to consider several factors. First, the data model "
-            "must support the new requirements without breaking existing functionality. Second, the API "
-            "interface should remain backward compatible while exposing new capabilities. Third, error "
-            "handling must be robust enough to deal with edge cases gracefully. Finally, we need to add "
-            "appropriate logging and monitoring so that issues can be detected early in production."
+            'To implement this feature we need to consider several factors. First, the data model '
+            'must support the new requirements without breaking existing functionality. Second, the API '
+            'interface should remain backward compatible while exposing new capabilities. Third, error '
+            'handling must be robust enough to deal with edge cases gracefully. Finally, we need to add '
+            'appropriate logging and monitoring so that issues can be detected early in production.'
         )
         assert 400 <= len(block) <= 600, f"Block size {len(block)} out of expected range"
 
         for i in range(30):
             result = d.feed(block)
             if result is not None:
-                assert result["loop"] is True, f"Expected loop detection, got: {result}"
+                assert result['loop'] is True, f"Expected loop detection, got: {result}"
                 return
 
-        pytest.fail("Loop was not detected after 30 repetitions of the same block")
+        pytest.fail('Loop was not detected after 30 repetitions of the same block')
 
 
 class TestNonLoopContentNoConfirmation:
@@ -128,27 +128,27 @@ class TestNonLoopContentNoConfirmation:
 
         # Normal technical prose — repeated words/phrases in different contexts
         chunks = [
-            "The function validate_input checks whether the provided parameters are correct. "
-            "It returns an error if any validation fails.",
-            "Next we call process_request which handles the main business logic. "
-            "This function is responsible for transforming the input data.",
-            "After processing, the system generates a response object containing the results. "
-            "The response is then serialized and sent back to the client.",
-            "Error handling in this module uses try-except blocks around critical operations. "
-            "Any unhandled exceptions are logged and converted to appropriate error responses.",
-            "The configuration manager loads settings from environment variables and config files. "
-            "It provides a centralized way to access all configuration values throughout the application.",
+            'The function validate_input checks whether the provided parameters are correct. '
+            'It returns an error if any validation fails.',
+            'Next we call process_request which handles the main business logic. '
+            'This function is responsible for transforming the input data.',
+            'After processing, the system generates a response object containing the results. '
+            'The response is then serialized and sent back to the client.',
+            'Error handling in this module uses try-except blocks around critical operations. '
+            'Any unhandled exceptions are logged and converted to appropriate error responses.',
+            'The configuration manager loads settings from environment variables and config files. '
+            'It provides a centralized way to access all configuration values throughout the application.',
         ]
 
         loop_detected = False
         for chunk in chunks:
             result = d.feed(chunk)
-            if result is not None and result.get("loop"):
+            if result is not None and result.get('loop'):
                 loop_detected = True
                 break
 
         # Should NOT detect a loop — this is normal prose with repeated terminology
-        assert not loop_detected, "Normal technical prose should not be detected as a loop"
+        assert not loop_detected, 'Normal technical prose should not be detected as a loop'
 
     def test_same_tool_names_different_contexts(self):
         """Feed text mentioning same tool names multiple times in different contexts → no loop.
@@ -159,23 +159,23 @@ class TestNonLoopContentNoConfirmation:
 
         chunks = [
             "I'll use read_file to examine the main module first. Let me check what's in src/main.py.",
-            "Now I need to call code_interpreter to run a quick test of the logic.",
-            "Let me use grep to search for all occurrences of that function name across the codebase.",
+            'Now I need to call code_interpreter to run a quick test of the logic.',
+            'Let me use grep to search for all occurrences of that function name across the codebase.',
             "I'll call read_file again on the configuration file to see the settings.",
-            "Using code_interpreter once more to verify the calculation results.",
+            'Using code_interpreter once more to verify the calculation results.',
             "Finally I'll use write_file to create the new module with the fix.",
-            "Let me run grep one more time to make sure we caught all instances.",
-            "I should call read_file on the test file to understand the existing coverage.",
+            'Let me run grep one more time to make sure we caught all instances.',
+            'I should call read_file on the test file to understand the existing coverage.',
         ]
 
         loop_detected = False
         for chunk in chunks:
             result = d.feed(chunk)
-            if result is not None and result.get("loop"):
+            if result is not None and result.get('loop'):
                 loop_detected = True
                 break
 
-        assert not loop_detected, "Same tool names in different contexts should not be a loop"
+        assert not loop_detected, 'Same tool names in different contexts should not be a loop'
 
 
 class TestCooldownBehavior:
@@ -197,12 +197,12 @@ class TestCooldownBehavior:
         d._apply_cooldown()
 
         # Verify cooldown state changes
-        assert d.cooldown_active is True, "Cooldown should be active after _apply_cooldown()"
+        assert d.cooldown_active is True, 'Cooldown should be active after _apply_cooldown()'
         assert d.cooldown_remaining_feeds == d.cooldown_duration, \
             f"Cooldown remaining should equal duration ({d.cooldown_duration})"
         # Ngram tracking state cleared on cooldown
-        assert len(d.ngram_counter) == 0, "ngram_counter should be cleared on cooldown"
-        assert len(d.ngram_positions) == 0, "ngram_positions should be cleared on cooldown"
+        assert len(d.ngram_counter) == 0, 'ngram_counter should be cleared on cooldown'
+        assert len(d.ngram_positions) == 0, 'ngram_positions should be cleared on cooldown'
 
     def test_cooldown_suppresses_detection(self):
         """During cooldown, suspicious content should be suppressed.
@@ -215,7 +215,7 @@ class TestCooldownBehavior:
         # Manually activate cooldown (simulates failed confirmation)
         d._apply_cooldown()
 
-        assert d.cooldown_active is True, "Cooldown should be active after _apply_cooldown()"
+        assert d.cooldown_active is True, 'Cooldown should be active after _apply_cooldown()'
 
         # Feed content during cooldown — all should return None without checking suspicion
         suppressed_count = 0
@@ -227,7 +227,7 @@ class TestCooldownBehavior:
         assert suppressed_count == 10, f"All feeds during cooldown should return None, got {suppressed_count}"
         # Verify cooldown decremented and deactivated after duration exceeded
         assert d.cooldown_remaining_feeds <= 0, \
-            "Cooldown remaining feeds should reach 0 or below after enough feeds"
+            'Cooldown remaining feeds should reach 0 or below after enough feeds'
 
     def test_cooldown_expires_and_detection_resumes(self):
         """After cooldown duration expires → detection resumes normally.
@@ -238,10 +238,10 @@ class TestCooldownBehavior:
 
         # Manually activate cooldown (simulates failed confirmation on prior content)
         d._apply_cooldown()
-        assert d.cooldown_active is True, "Cooldown should be active"
+        assert d.cooldown_active is True, 'Cooldown should be active'
 
         # Feed exact loop content — first few feeds suppressed by cooldown
-        exact_block = "REPEAT: This is an exact repeating block for testing purposes only.\n"
+        exact_block = 'REPEAT: This is an exact repeating block for testing purposes only.\n'
 
         # During cooldown: feeds return None (suppressed)
         for i in range(3):
@@ -253,11 +253,11 @@ class TestCooldownBehavior:
         for i in range(30):
             result = d.feed(exact_block)
             if result is not None:
-                assert result["loop"] is True, \
+                assert result['loop'] is True, \
                     f"After cooldown expires, loop should be detected. Got: {result}"
                 return
 
-        pytest.fail("Loop was not detected after cooldown expired")
+        pytest.fail('Loop was not detected after cooldown expired')
 
 
 class TestResetBehavior:
@@ -271,19 +271,19 @@ class TestResetBehavior:
         for i in range(10):
             d.feed(f"Building state with chunk {i}.")
 
-        assert len(d.token_buffer) > 0, "Token buffer should have content before reset"
-        assert len(d.tail_buffer) > 0, "Tail buffer should have content before reset"
+        assert len(d.token_buffer) > 0, 'Token buffer should have content before reset'
+        assert len(d.tail_buffer) > 0, 'Tail buffer should have content before reset'
 
         # Reset
         d.reset()
 
         # Verify all state cleared
-        assert len(d.token_buffer) == 0, "token_buffer not cleared by reset()"
-        assert len(d.ngram_counter) == 0, "ngram_counter not cleared by reset()"
-        assert len(d.ngram_positions) == 0, "ngram_positions not cleared by reset()"
-        assert d.cooldown_active is False, "cooldown_active not cleared by reset()"
-        assert d.cooldown_remaining_feeds == 0, "cooldown_remaining_feeds not cleared by reset()"
-        assert d.tail_buffer == "", "tail_buffer not cleared by reset()"
+        assert len(d.token_buffer) == 0, 'token_buffer not cleared by reset()'
+        assert len(d.ngram_counter) == 0, 'ngram_counter not cleared by reset()'
+        assert len(d.ngram_positions) == 0, 'ngram_positions not cleared by reset()'
+        assert d.cooldown_active is False, 'cooldown_active not cleared by reset()'
+        assert d.cooldown_remaining_feeds == 0, 'cooldown_remaining_feeds not cleared by reset()'
+        assert d.tail_buffer == '', 'tail_buffer not cleared by reset()'
 
     def test_reset_allows_fresh_detection(self):
         """After reset(), detector can start fresh and detect new loops."""
@@ -297,14 +297,14 @@ class TestResetBehavior:
         d.reset()
 
         # Now feed an actual loop — should be detected from fresh state
-        block = "Fresh loop block that repeats exactly the same way every time.\n"
+        block = 'Fresh loop block that repeats exactly the same way every time.\n'
         for i in range(30):
             result = d.feed(block)
             if result is not None:
-                assert result["loop"] is True, "Should detect loop after reset with fresh content"
+                assert result['loop'] is True, 'Should detect loop after reset with fresh content'
                 return
 
-        pytest.fail("Loop not detected after reset")
+        pytest.fail('Loop not detected after reset')
 
 
 class TestEdgeCases:
@@ -319,7 +319,7 @@ class TestEdgeCases:
         d = make_detector()
 
         for i in range(50):
-            result = d.feed("x ")
+            result = d.feed('x ')
             assert result is None, f"Very short repeat should not confirm as loop, got: {result}"
 
     def test_empty_feeds_no_errors(self):
@@ -327,7 +327,7 @@ class TestEdgeCases:
         d = make_detector()
 
         for i in range(10):
-            result = d.feed("")
+            result = d.feed('')
             assert result is None, f"Empty feed should return None, got: {result}"
 
     def test_whitespace_only_feeds_no_errors(self):
@@ -335,7 +335,7 @@ class TestEdgeCases:
         d = make_detector()
 
         for i in range(10):
-            result = d.feed("   \n\t  ")
+            result = d.feed('   \n\t  ')
             assert result is None, f"Whitespace feed should return None, got: {result}"
 
     def test_single_character_repeated(self):
@@ -343,7 +343,7 @@ class TestEdgeCases:
         d = make_detector()
 
         for i in range(20):
-            result = d.feed("a")
+            result = d.feed('a')
             # Single chars can't form 64-token ngrams, so no suspicion → no detection
             assert result is None, f"Single char repeat should not detect loop, got: {result}"
 
@@ -362,31 +362,31 @@ class TestLoopVsNonLoopDiscrimination:
         d = make_detector()
 
         # Phase A: Some unique preamble content
-        d.feed("Starting analysis of the system architecture and design patterns.\n")
-        d.feed("The main components include the controller, service layer, and data access.\n")
+        d.feed('Starting analysis of the system architecture and design patterns.\n')
+        d.feed('The main components include the controller, service layer, and data access.\n')
 
         # Phase B: More unique setup content
-        d.feed("Now examining the error handling strategy and logging configuration.\n")
-        d.feed("All exceptions should be caught at the boundary and converted to responses.\n")
+        d.feed('Now examining the error handling strategy and logging configuration.\n')
+        d.feed('All exceptions should be caught at the boundary and converted to responses.\n')
 
         # Phase C: Transition content
-        d.feed("Beginning detailed review of each module in sequence.\n")
+        d.feed('Beginning detailed review of each module in sequence.\n')
 
         # Phase D,D,D: Exact same block repeated (actual loop)
         loop_block = (
-            "The read_file tool returns the contents of a specified file path. "
-            "It supports line range selection and handles both text and binary files. "
-            "For large files, content is truncated with details on how to read more.\n"
+            'The read_file tool returns the contents of a specified file path. '
+            'It supports line range selection and handles both text and binary files. '
+            'For large files, content is truncated with details on how to read more.\n'
         )
 
         for i in range(10):
             result = d.feed(loop_block)
             if result is not None:
-                assert result["loop"] is True, \
+                assert result['loop'] is True, \
                     f"[A,B,C,D,D,D] pattern should trigger loop confirmation, got: {result}"
                 return
 
-        pytest.fail("[A,B,C,D,D,D] actual loop was not detected")
+        pytest.fail('[A,B,C,D,D,D] actual loop was not detected')
 
     def test_scattered_repetition_does_not_confirm(self):
         """[A,D,B,C,D,E,D] pattern: same tool mentioned with different args scattered → no loop.
@@ -400,55 +400,55 @@ class TestLoopVsNonLoopDiscrimination:
             "I'll use read_file to examine src/main.py and understand the entry point.\n",
 
             # D variant 1: Use code_interpreter
-            "Now calling code_interpreter to run a quick test of the main function.\n",
+            'Now calling code_interpreter to run a quick test of the main function.\n',
 
             # B: Some analysis content
-            "The code structure looks clean. There are three main classes defined here.\n",
+            'The code structure looks clean. There are three main classes defined here.\n',
 
             # C: More unique content
-            "Let me check the configuration by reading the settings file next.\n",
+            'Let me check the configuration by reading the settings file next.\n',
 
             # D variant 2: Use code_interpreter again (different context)
             "I'll use code_interpreter once more to validate the configuration parsing logic.\n",
 
             # E: Different tool usage
-            "Running grep to find all references to the config class across the project.\n",
+            'Running grep to find all references to the config class across the project.\n',
 
             # D variant 3: Use code_interpreter third time (yet different context)
-            "Finally, code_interpreter will help me verify the edge case handling works correctly.\n",
+            'Finally, code_interpreter will help me verify the edge case handling works correctly.\n',
         ]
 
         loop_detected = False
         for chunk in chunks:
             result = d.feed(chunk)
-            if result is not None and result.get("loop"):
+            if result is not None and result.get('loop'):
                 loop_detected = True
                 break
 
         assert not loop_detected, \
-            "[A,D,B,C,D,E,D] scattered repetition should NOT trigger loop confirmation"
+            '[A,D,B,C,D,E,D] scattered repetition should NOT trigger loop confirmation'
 
     def test_identical_tool_calls_are_loop(self):
         """If the EXACT same tool call description repeats → it IS a loop."""
         d = make_detector()
 
         # Preamble
-        d.feed("Analyzing the codebase structure.\n")
+        d.feed('Analyzing the codebase structure.\n')
 
         # Exact repeated block (simulating agent stuck in a loop describing same action)
         block = (
-            "I will call read_file on tests/conftest.py to examine the test fixtures. "
-            "This file contains pytest configuration and shared fixtures for all tests.\n"
+            'I will call read_file on tests/conftest.py to examine the test fixtures. '
+            'This file contains pytest configuration and shared fixtures for all tests.\n'
         )
 
         for i in range(15):
             result = d.feed(block)
             if result is not None:
-                assert result["loop"] is True, \
+                assert result['loop'] is True, \
                     f"Identical repeated tool call descriptions should be a loop, got: {result}"
                 return
 
-        pytest.fail("Identical repeated block was not detected as loop")
+        pytest.fail('Identical repeated block was not detected as loop')
 
 
 class TestReturnFormat:
@@ -458,22 +458,22 @@ class TestReturnFormat:
         """When loop is detected, result dict has expected keys and types."""
         d = make_detector()
 
-        block = "This block repeats exactly to form a detectable semantic loop pattern.\n"
+        block = 'This block repeats exactly to form a detectable semantic loop pattern.\n'
         for i in range(20):
             result = d.feed(block)
             if result is not None:
-                assert isinstance(result, dict), "Result should be a dict"
-                assert result.get("loop") is True, "loop key should be True"
-                assert "reason" in result, "reason key should be present"
-                assert isinstance(result["reason"], str), "reason should be string"
-                assert "confirmed_repetitions" in result, "confirmed_repetitions key should be present"
-                assert isinstance(result["confirmed_repetitions"], int), \
-                    "confirmed_repetitions should be integer"
-                assert result["confirmed_repetitions"] >= d.confirmed_matches_required, \
+                assert isinstance(result, dict), 'Result should be a dict'
+                assert result.get('loop') is True, 'loop key should be True'
+                assert 'reason' in result, 'reason key should be present'
+                assert isinstance(result['reason'], str), 'reason should be string'
+                assert 'confirmed_repetitions' in result, 'confirmed_repetitions key should be present'
+                assert isinstance(result['confirmed_repetitions'], int), \
+                    'confirmed_repetitions should be integer'
+                assert result['confirmed_repetitions'] >= d.confirmed_matches_required, \
                     f"confirmed_repetitions ({result['confirmed_repetitions']}) should be >= required ({d.confirmed_matches_required})"
                 return
 
-        pytest.fail("Loop not detected to verify format")
+        pytest.fail('Loop not detected to verify format')
 
 
 class TestMemoryBoundedness:
@@ -495,7 +495,7 @@ class TestMemoryBoundedness:
         d = make_detector()
 
         # Feed repetitive content that will create many positions for same ngram
-        block = "Repeated block with enough tokens to form stable ngrams across feeds.\n"
+        block = 'Repeated block with enough tokens to form stable ngrams across feeds.\n'
         for i in range(50):
             d.feed(block)
 
@@ -515,40 +515,40 @@ class TestReturnDictContract:
     def test_detection_result_contains_score(self):
         """When a loop is detected, the result dict MUST contain 'score'."""
         d = make_detector()
-        repeating = "The quick brown fox jumps over the lazy dog again and again\n"
+        repeating = 'The quick brown fox jumps over the lazy dog again and again\n'
         result = None
         for i in range(20):
             r = d.feed(repeating)
             if r is not None:
                 result = r
                 break
-        assert result is not None, "Expected loop detection but got None"
-        assert "score" in result, f"Missing 'score' key in detection result: {result.keys()}"
-        assert result["score"] == 100
+        assert result is not None, 'Expected loop detection but got None'
+        assert 'score' in result, f"Missing 'score' key in detection result: {result.keys()}"
+        assert result['score'] == 100
 
     def test_detection_result_contains_reason(self):
         """When a loop is detected, the result dict MUST contain 'reason'."""
         d = make_detector()
-        repeating = "The quick brown fox jumps over the lazy dog again and again\n"
+        repeating = 'The quick brown fox jumps over the lazy dog again and again\n'
         result = None
         for i in range(20):
             r = d.feed(repeating)
             if r is not None:
                 result = r
                 break
-        assert result is not None, "Expected loop detection but got None"
-        assert "reason" in result, f"Missing 'reason' key in detection result: {result.keys()}"
-        assert isinstance(result["reason"], str) and len(result["reason"]) > 0
+        assert result is not None, 'Expected loop detection but got None'
+        assert 'reason' in result, f"Missing 'reason' key in detection result: {result.keys()}"
+        assert isinstance(result['reason'], str) and len(result['reason']) > 0
 
     def test_detection_result_contains_loop_flag(self):
         """When a loop is detected, the result dict MUST contain loop=True."""
         d = make_detector()
-        repeating = "The quick brown fox jumps over the lazy dog again and again\n"
+        repeating = 'The quick brown fox jumps over the lazy dog again and again\n'
         result = None
         for i in range(20):
             r = d.feed(repeating)
             if r is not None:
                 result = r
                 break
-        assert result is not None, "Expected loop detection but got None"
-        assert result.get("loop") is True
+        assert result is not None, 'Expected loop detection but got None'
+        assert result.get('loop') is True

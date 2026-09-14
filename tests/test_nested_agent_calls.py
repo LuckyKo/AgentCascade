@@ -25,10 +25,10 @@ from agent_cascade.llm.schema import SYSTEM, USER, Message
 # ──────────────────────────────────────────────
 
 def _make_mock_template(
-    name="TestAgent",
+    name='TestAgent',
     llm=None,
     function_map=None,
-    agent_class="test_agent",
+    agent_class='test_agent',
 ):
     """Create a minimal template with configurable attributes."""
     tmpl = MagicMock()
@@ -41,8 +41,8 @@ def _make_mock_template(
 
 
 def _make_mock_instance(
-    instance_name="worker1",
-    agent_class="test_agent",
+    instance_name='worker1',
+    agent_class='test_agent',
     generate_cfg_override=None,
 ):
     """Create a minimal AgentInstance mock."""
@@ -66,7 +66,7 @@ class TestGetActiveFunctionsDefensiveChecks:
     def test_no_llm_attribute(self):
         """Template with no 'llm' attribute should not crash."""
         tmpl = MagicMock(spec=[])  # Empty spec — no attributes
-        tmpl.name = "NoLLM"
+        tmpl.name = 'NoLLM'
         tmpl.function_map = {}
         
         result = _get_active_functions_from_template(tmpl, instance=None)
@@ -82,7 +82,7 @@ class TestGetActiveFunctionsDefensiveChecks:
     def test_no_function_map_attribute(self):
         """Template with no 'function_map' attribute should return empty list."""
         tmpl = MagicMock(spec=[])  # Empty spec
-        tmpl.name = "NoFuncMap"
+        tmpl.name = 'NoFuncMap'
         
         result = _get_active_functions_from_template(tmpl, instance=None)
         assert result == []
@@ -104,33 +104,33 @@ class TestGetActiveFunctionsDefensiveChecks:
     def test_with_valid_llm_and_function_map(self):
         """Normal case: template with llm and function_map works correctly."""
         func_obj = MagicMock()
-        func_obj.function = {"name": "test_tool", "description": "A test tool"}
+        func_obj.function = {'name': 'test_tool', 'description': 'A test tool'}
         tmpl = _make_mock_template(
-            llm=MagicMock(generate_cfg={"disabled_tools": {}}),
-            function_map={"test_tool": func_obj},
+            llm=MagicMock(generate_cfg={'disabled_tools': {}}),
+            function_map={'test_tool': func_obj},
         )
         
         result = _get_active_functions_from_template(tmpl, instance=None)
         assert len(result) == 1
-        assert result[0]["name"] == "test_tool"
+        assert result[0]['name'] == 'test_tool'
 
     def test_with_instance_override_no_llm(self):
         """Instance override for disabled_tools works even when template has no llm."""
         inst = _make_mock_instance(
-            generate_cfg_override={"disabled_tools": {"TestAgent": ["bad_tool"]}}
+            generate_cfg_override={'disabled_tools': {'TestAgent': ['bad_tool']}}
         )
         func_good = MagicMock()
-        func_good.function = {"name": "good_tool"}
+        func_good.function = {'name': 'good_tool'}
         func_bad = MagicMock()
-        func_bad.function = {"name": "bad_tool"}
+        func_bad.function = {'name': 'bad_tool'}
         tmpl = _make_mock_template(
             llm=None,  # No LLM — should rely on instance override
-            function_map={"good_tool": func_good, "bad_tool": func_bad},
+            function_map={'good_tool': func_good, 'bad_tool': func_bad},
         )
         
         result = _get_active_functions_from_template(tmpl, instance=inst)
         assert len(result) == 1
-        assert result[0]["name"] == "good_tool"
+        assert result[0]['name'] == 'good_tool'
 
 
 # ──────────────────────────────────────────────
@@ -144,27 +144,27 @@ class TestBuildResourcesBlockFallback:
         """When _generate_cfg_override has max_input_tokens but no disabled_tools,
         the template's disabled_tools should still be used (not skipped)."""
         tmpl_llm = MagicMock()
-        tmpl_llm.generate_cfg = {"disabled_tools": ["secret_tool"]}
+        tmpl_llm.generate_cfg = {'disabled_tools': ['secret_tool']}
         
         func_call_agent = MagicMock()
-        func_call_agent.function = {"name": "call_agent"}
+        func_call_agent.function = {'name': 'call_agent'}
         func_secret = MagicMock()
-        func_secret.function = {"name": "secret_tool"}
+        func_secret.function = {'name': 'secret_tool'}
         func_normal = MagicMock()
-        func_normal.function = {"name": "normal_tool"}
+        func_normal.function = {'name': 'normal_tool'}
         
         tmpl = _make_mock_template(
             llm=tmpl_llm,
             function_map={
-                "call_agent": func_call_agent,
-                "secret_tool": func_secret,
-                "normal_tool": func_normal,
+                'call_agent': func_call_agent,
+                'secret_tool': func_secret,
+                'normal_tool': func_normal,
             },
         )
         
         # Override exists but has no 'disabled_tools' key — only max_input_tokens
         inst = _make_mock_instance(
-            generate_cfg_override={"max_input_tokens": 80000}
+            generate_cfg_override={'max_input_tokens': 80000}
         )
         
         mock_pool = MagicMock()
@@ -173,33 +173,33 @@ class TestBuildResourcesBlockFallback:
         result = _build_resources_block(mock_pool, tmpl, instance=inst)
         
         # secret_tool should NOT appear (it's disabled by template config)
-        assert "secret_tool" not in result
+        assert 'secret_tool' not in result
         # call_agent and normal_tool SHOULD appear
-        assert "call_agent" in result or "Available Agent Types" in result
+        assert 'call_agent' in result or 'Available Agent Types' in result
 
     def test_override_has_disabled_tools_takes_precedence(self):
         """When override has disabled_tools, it should be used (not template)."""
         tmpl_llm = MagicMock()
-        tmpl_llm.generate_cfg = {"disabled_tools": ["template_tool"]}
+        tmpl_llm.generate_cfg = {'disabled_tools': ['template_tool']}
         
         func_call_agent = MagicMock()
-        func_call_agent.function = {"name": "call_agent"}
+        func_call_agent.function = {'name': 'call_agent'}
         func_template_tool = MagicMock()
-        func_template_tool.function = {"name": "template_tool"}
+        func_template_tool.function = {'name': 'template_tool'}
         func_override_tool = MagicMock()
-        func_override_tool.function = {"name": "override_tool"}
+        func_override_tool.function = {'name': 'override_tool'}
         
         tmpl = _make_mock_template(
             llm=tmpl_llm,
             function_map={
-                "call_agent": func_call_agent,
-                "template_tool": func_template_tool,
-                "override_tool": func_override_tool,
+                'call_agent': func_call_agent,
+                'template_tool': func_template_tool,
+                'override_tool': func_override_tool,
             },
         )
         
         inst = _make_mock_instance(
-            generate_cfg_override={"disabled_tools": ["override_tool"]}
+            generate_cfg_override={'disabled_tools': ['override_tool']}
         )
         
         mock_pool = MagicMock()
@@ -209,41 +209,41 @@ class TestBuildResourcesBlockFallback:
         
         # Both tools are disabled: resolve_disabled_tools_for_agent unions all layers.
         # Instance override disables override_tool, template config disables template_tool.
-        assert "override_tool" not in result
-        assert "template_tool" not in result
+        assert 'override_tool' not in result
+        assert 'template_tool' not in result
         # call_agent should appear (not disabled by either layer)
-        assert "call_agent" in result
+        assert 'call_agent' in result
 
     def test_no_llm_no_override(self):
         """Template with no llm and no instance override should work fine."""
         func_call_agent = MagicMock()
-        func_call_agent.function = {"name": "call_agent"}
+        func_call_agent.function = {'name': 'call_agent'}
         
         tmpl = _make_mock_template(
             llm=None,
-            function_map={"call_agent": func_call_agent},
+            function_map={'call_agent': func_call_agent},
         )
         
         mock_pool = MagicMock()
         mock_pool.templates = {}
         
         result = _build_resources_block(mock_pool, tmpl, instance=None)
-        assert "call_agent" in result or "Available Agent Types" in result
+        assert 'call_agent' in result or 'Available Agent Types' in result
 
     def test_empty_resources_returns_empty_string(self):
         """When call_agent is disabled and cache_pool is disabled,
         _build_resources_block should return empty string (no header alone)."""
         func_secret = MagicMock()
-        func_secret.function = {"name": "secret_tool"}
+        func_secret.function = {'name': 'secret_tool'}
         
         tmpl_llm = MagicMock()
-        tmpl_llm.generate_cfg = {"disabled_tools": ["call_agent"]}
+        tmpl_llm.generate_cfg = {'disabled_tools': ['call_agent']}
         
         tmpl = _make_mock_template(
             llm=tmpl_llm,
             function_map={
-                "call_agent": MagicMock(function={"name": "call_agent"}),
-                "secret_tool": func_secret,
+                'call_agent': MagicMock(function={'name': 'call_agent'}),
+                'secret_tool': func_secret,
             },
         )
         
@@ -254,17 +254,17 @@ class TestBuildResourcesBlockFallback:
         result = _build_resources_block(mock_pool, tmpl, instance=None)
         
         # Should return empty string, not just the header
-        assert result == ""
+        assert result == ''
 
     def test_empty_resources_no_call_agent_in_map(self):
         """When call_agent is not in function_map and cache_pool is disabled,
         _build_resources_block should return empty string."""
         func_normal = MagicMock()
-        func_normal.function = {"name": "normal_tool"}
+        func_normal.function = {'name': 'normal_tool'}
         
         tmpl = _make_mock_template(
             llm=None,
-            function_map={"normal_tool": func_normal},
+            function_map={'normal_tool': func_normal},
         )
         
         mock_pool = MagicMock()
@@ -274,26 +274,26 @@ class TestBuildResourcesBlockFallback:
         result = _build_resources_block(mock_pool, tmpl, instance=None)
         
         # Should return empty string since no agent types and cache disabled
-        assert result == ""
+        assert result == ''
 
     def test_missing_pool_settings_no_error(self):
         """When pool lacks settings attribute, should not raise AttributeError.
         Should default to cache_pool_enabled=True behavior."""
         func_call_agent = MagicMock()
-        func_call_agent.function = {"name": "call_agent"}
+        func_call_agent.function = {'name': 'call_agent'}
         
         tmpl = _make_mock_template(
             llm=None,
-            function_map={"call_agent": func_call_agent},
+            function_map={'call_agent': func_call_agent},
         )
         
         # Use a real object without settings attribute to test the nested getattr
-        mock_pool = type("MockPool", (), {"templates": {}})()
+        mock_pool = type('MockPool', (), {'templates': {}})()
         
         result = _build_resources_block(mock_pool, tmpl, instance=None)
         
         # Should not raise and should include cache pool info (default enabled)
-        assert "Available Agent Types" in result or "call_agent" in result
+        assert 'Available Agent Types' in result or 'call_agent' in result
 
 
 # ──────────────────────────────────────────────
@@ -312,52 +312,52 @@ class TestDisabledToolsMergeOnSettingsPropagation:
         # Create template with generate_cfg that has disabled_tools
         tmpl_llm = MagicMock()
         tmpl_llm.generate_cfg = {
-            "disabled_tools": {"TestChild": ["ui_disabled_tool"]}
+            'disabled_tools': {'TestChild': ['ui_disabled_tool']}
         }
         
         func_call_agent = MagicMock()
-        func_call_agent.function = {"name": "call_agent"}
+        func_call_agent.function = {'name': 'call_agent'}
         func_ui_tool = MagicMock()
-        func_ui_tool.function = {"name": "ui_disabled_tool"}
+        func_ui_tool.function = {'name': 'ui_disabled_tool'}
         func_normal_tool = MagicMock()
-        func_normal_tool.function = {"name": "normal_tool"}
+        func_normal_tool.function = {'name': 'normal_tool'}
         
         child_template = _make_mock_template(
-            name="TestChild",
-            agent_class="test_child",
+            name='TestChild',
+            agent_class='test_child',
             llm=tmpl_llm,
             function_map={
-                "call_agent": func_call_agent,
-                "ui_disabled_tool": func_ui_tool,
-                "normal_tool": func_normal_tool,
+                'call_agent': func_call_agent,
+                'ui_disabled_tool': func_ui_tool,
+                'normal_tool': func_normal_tool,
             },
         )
 
         # Create parent template with disabled_tools to propagate
         parent_llm = MagicMock()
         parent_llm.generate_cfg = {
-            "disabled_tools": {"TestParent": ["parent_disabled_tool"]},
-            "max_input_tokens": 128000,
+            'disabled_tools': {'TestParent': ['parent_disabled_tool']},
+            'max_input_tokens': 128000,
         }
         
         func_parent_tool = MagicMock()
-        func_parent_tool.function = {"name": "parent_disabled_tool"}
+        func_parent_tool.function = {'name': 'parent_disabled_tool'}
         
         parent_template = _make_mock_template(
-            name="TestParent",
-            agent_class="test_parent",
+            name='TestParent',
+            agent_class='test_parent',
             llm=parent_llm,
             function_map={
-                "call_agent": func_call_agent,
-                "parent_disabled_tool": func_parent_tool,
+                'call_agent': func_call_agent,
+                'parent_disabled_tool': func_parent_tool,
             },
         )
 
         # Create mock pool with both templates
         mock_pool = MagicMock()
         mock_pool.templates = {
-            "test_parent": parent_template,
-            "test_child": child_template,
+            'test_parent': parent_template,
+            'test_child': child_template,
         }
         mock_pool.stopped = False
         
@@ -380,11 +380,11 @@ class TestDisabledToolsMergeOnSettingsPropagation:
         # Simulate the settings propagation logic from _create_and_run_agent
         # by calling it with a child agent and checking the override
         inst = AgentInstance(
-            instance_name="child1",
-            agent_class="test_child",
+            instance_name='child1',
+            agent_class='test_child',
             conversation=[],
             max_turns=None,
-            parent_instance="parent1",
+            parent_instance='parent1',
             created_at=0.0,
             last_activity=0.0,
             compression_summary=None,
@@ -395,7 +395,7 @@ class TestDisabledToolsMergeOnSettingsPropagation:
         caller_llm_cfg = parent_llm.generate_cfg
         llm_cfg = dict(caller_llm_cfg) if caller_llm_cfg else {}
         
-        target_template = mock_pool.templates.get("test_child")
+        target_template = mock_pool.templates.get('test_child')
         assert target_template is not None
         
         with mock_pool._execution._state_lock:
@@ -431,7 +431,7 @@ class TestDisabledToolsMergeOnSettingsPropagation:
         
         # Check that ui_disabled_tool path still exists (from template)
         if isinstance(merged_disabled, dict):
-            assert "TestChild" in merged_disabled or "ui_disabled_tool" in str(merged_disabled)
+            assert 'TestChild' in merged_disabled or 'ui_disabled_tool' in str(merged_disabled)
         elif isinstance(merged_disabled, list):
             # If it was converted to a list, both tool names should be present
             pass  # This depends on the actual merge behavior with dicts
@@ -449,7 +449,7 @@ class TestExecuteAgentSyncExceptionHandling:
         from agent_cascade.execution_engine import ExecutionEngine
 
         mock_pool = MagicMock()
-        mock_pool.templates = {"test_agent": MagicMock()}
+        mock_pool.templates = {'test_agent': MagicMock()}
         mock_pool.stopped = False
         mock_pool.is_instance_terminated = MagicMock(return_value=False)
         
@@ -473,26 +473,26 @@ class TestExecuteAgentSyncExceptionHandling:
         engine.stream_publisher = MagicMock()
         
         # Patch engine.run() to raise an exception mid-execution
-        with patch.object(engine, 'run', side_effect=ValueError("Test error")):
-            with pytest.raises(ValueError, match="Test error"):
+        with patch.object(engine, 'run', side_effect=ValueError('Test error')):
+            with pytest.raises(ValueError, match='Test error'):
                 engine._create_and_run_agent(
-                    agent_class="test_agent",
-                    instance_name="worker1",
-                    args={"task": "do something"},
-                    caller="main",
+                    agent_class='test_agent',
+                    instance_name='worker1',
+                    args={'task': 'do something'},
+                    caller='main',
                     nest_depth=0,
                 )
         
         # Verify active stack was cleaned up (worker1 should not be in active_stack)
-        assert not any(name == "worker1" for name, _ in mock_execution.active_stack), \
-            "Active stack should be cleaned up on exception"
+        assert not any(name == 'worker1' for name, _ in mock_execution.active_stack), \
+            'Active stack should be cleaned up on exception'
 
     def test_endpoint_slot_released_on_exception(self):
         """Endpoint slot should be released even when engine.run() raises."""
         from agent_cascade.execution_engine import ExecutionEngine
 
         mock_pool = MagicMock()
-        mock_pool.templates = {"test_agent": MagicMock()}
+        mock_pool.templates = {'test_agent': MagicMock()}
         mock_pool.stopped = False
         mock_pool.is_instance_terminated = MagicMock(return_value=False)
         
@@ -522,19 +522,19 @@ class TestExecuteAgentSyncExceptionHandling:
         engine.stream_publisher = MagicMock()
         
         # Patch engine.run() to raise an exception mid-execution
-        with patch.object(engine, 'run', side_effect=RuntimeError("fail")):
-            with pytest.raises(RuntimeError, match="fail"):
+        with patch.object(engine, 'run', side_effect=RuntimeError('fail')):
+            with pytest.raises(RuntimeError, match='fail'):
                 engine._create_and_run_agent(
-                    agent_class="test_agent",
-                    instance_name="worker1",
-                    args={"task": "do something"},
-                    caller="main",
+                    agent_class='test_agent',
+                    instance_name='worker1',
+                    args={'task': 'do something'},
+                    caller='main',
                     nest_depth=0,
                 )
         
         # Verify active stack was cleaned up despite exception
-        assert not any(name == "worker1" for name, _ in mock_execution.active_stack), \
-            "Active stack should be cleaned up on exception"
+        assert not any(name == 'worker1' for name, _ in mock_execution.active_stack), \
+            'Active stack should be cleaned up on exception'
 
 
 # ──────────────────────────────────────────────
@@ -550,12 +550,12 @@ class TestExecuteLlmCallDefensiveCheck:
 
         tmpl = _make_mock_template(llm=None, function_map={})
         mock_pool = MagicMock()
-        mock_pool.templates = {"test_agent": tmpl}
+        mock_pool.templates = {'test_agent': tmpl}
         
         engine = ExecutionEngine(mock_pool)
         
-        inst = _make_mock_instance(agent_class="test_agent")
-        messages = [Message(role=SYSTEM, content="You are a test agent")]
+        inst = _make_mock_instance(agent_class='test_agent')
+        messages = [Message(role=SYSTEM, content='You are a test agent')]
         
         # Should not raise — should yield an error message
         results = list(engine._execute_llm_call(inst, tmpl, messages, []))

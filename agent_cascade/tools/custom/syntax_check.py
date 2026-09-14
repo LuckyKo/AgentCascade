@@ -62,9 +62,9 @@ def _check_python(content: str, path: str) -> str:
         compile(content, path, 'exec')
         return 'Valid'
     except SyntaxError as e:
-        line_info = f" at line {e.lineno}" if e.lineno else ""
-        offset_info = f", column {e.offset}" if e.offset else ""
-        text_info = f"\n{e.text.rstrip()}" if e.text else ""
+        line_info = f" at line {e.lineno}" if e.lineno else ''
+        offset_info = f", column {e.offset}" if e.offset else ''
+        text_info = f"\n{e.text.rstrip()}" if e.text else ''
         return f"Syntax Error: {e.msg}{line_info}{offset_info}{text_info}"
 
 
@@ -82,7 +82,7 @@ def _check_yaml(content: str, _path: str) -> str:
     try:
         import yaml
     except ImportError:
-        return "Error: PyYAML is not installed. Cannot validate YAML."
+        return 'Error: PyYAML is not installed. Cannot validate YAML.'
     try:
         yaml.safe_load(content)
         return 'Valid'
@@ -164,7 +164,7 @@ def _check_html(content: str, _path: str) -> str:
         return f"HTML Parse Error: {e}"
 
     if errors:
-        return "HTML Issues:\n" + "\n".join(errors[:20])  # Cap at 20 issues
+        return 'HTML Issues:\n' + '\n'.join(errors[:20])  # Cap at 20 issues
     return 'Valid'
 
 
@@ -198,7 +198,7 @@ def _check_css(content: str, _path: str) -> str:
         errors.append(f"Error: {abs(brace_depth)} extra closing brace(s) '}}' in file")
 
     if errors:
-        return "CSS Issues:\n" + "\n".join(errors[:20])
+        return 'CSS Issues:\n' + '\n'.join(errors[:20])
     return 'Valid'
 
 
@@ -359,7 +359,7 @@ def _check_c_family(content: str, _path: str) -> str:
         )
 
     if errors:
-        return "Syntax Issues:\n" + "\n".join(errors[:20])
+        return 'Syntax Issues:\n' + '\n'.join(errors[:20])
     return 'Valid'
 
 
@@ -405,7 +405,7 @@ def _check_bash(content: str, _path: str) -> str:
         errors.append(f"Error: {case_count} unclosed 'case' statement(s) (missing 'esac')")
 
     if errors:
-        return "Shell Issues:\n" + "\n".join(errors)
+        return 'Shell Issues:\n' + '\n'.join(errors)
     return 'Valid'
 
 
@@ -471,12 +471,12 @@ class SyntaxCheck(BaseTool):
             return f"Invalid parameters: {str(e)}"
 
         if not rel_path.strip():
-            return "ERROR: No file path provided."
+            return 'ERROR: No file path provided.'
 
         # Resolve absolute path with validation
         from agent_cascade.utils.tool_path_resolver import resolve_tool_path
         try:
-            abs_path = resolve_tool_path(rel_path, mode="ro", agent_pool=self.agent_pool)
+            abs_path = resolve_tool_path(rel_path, mode='ro', agent_pool=self.agent_pool)
         except ValueError as e:
             return f"ERROR: {str(e)}"
 

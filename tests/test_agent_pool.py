@@ -59,35 +59,35 @@ class TestMessageQueue:
     """Test per-agent message queue enqueue/drain/dedup logic."""
 
     def test_enqueue_and_drain(self, agent_pool):
-        agent_pool.enqueue_message("worker1", "task A")
-        agent_pool.enqueue_message("worker1", "task B")
-        msgs = agent_pool.drain_queue("worker1")
-        assert msgs == ["task A", "task B"]
+        agent_pool.enqueue_message('worker1', 'task A')
+        agent_pool.enqueue_message('worker1', 'task B')
+        msgs = agent_pool.drain_queue('worker1')
+        assert msgs == ['task A', 'task B']
 
     def test_drain_empty(self, agent_pool):
-        msgs = agent_pool.drain_queue("nobody")
+        msgs = agent_pool.drain_queue('nobody')
         assert msgs == []
 
     def test_drain_consumes_messages(self, agent_pool):
         """After drain, the queue should be empty."""
-        agent_pool.enqueue_message("w1", "msg1")
-        agent_pool.drain_queue("w1")
-        msgs = agent_pool.drain_queue("w1")
+        agent_pool.enqueue_message('w1', 'msg1')
+        agent_pool.drain_queue('w1')
+        msgs = agent_pool.drain_queue('w1')
         assert msgs == []
 
     def test_has_messages_true(self, agent_pool):
-        agent_pool.enqueue_message("w1", "hello")
-        assert agent_pool.has_messages("w1") is True
+        agent_pool.enqueue_message('w1', 'hello')
+        assert agent_pool.has_messages('w1') is True
 
     def test_has_messages_false(self, agent_pool):
-        assert agent_pool.has_messages("nobody") is False
+        assert agent_pool.has_messages('nobody') is False
 
     def test_multiple_agents_isolated_queues(self, agent_pool):
         """Different agents have separate queues."""
-        agent_pool.enqueue_message("a", "msg_a")
-        agent_pool.enqueue_message("b", "msg_b")
-        assert agent_pool.drain_queue("a") == ["msg_a"]
-        assert agent_pool.drain_queue("b") == ["msg_b"]
+        agent_pool.enqueue_message('a', 'msg_a')
+        agent_pool.enqueue_message('b', 'msg_b')
+        assert agent_pool.drain_queue('a') == ['msg_a']
+        assert agent_pool.drain_queue('b') == ['msg_b']
 
 
 # ===========================================================================
@@ -103,9 +103,9 @@ class TestDismissal:
         from agent_cascade.llm.schema import Message
         import time
         inst = AgentInstance(
-            instance_name="ghost",
-            agent_class="researcher",
-            conversation=[Message(role="user", content="hi")],
+            instance_name='ghost',
+            agent_class='researcher',
+            conversation=[Message(role='user', content='hi')],
             max_turns=None,
             parent_instance=None,
             created_at=time.monotonic(),
@@ -113,18 +113,18 @@ class TestDismissal:
             compression_summary=None,
             latest_marker_index=-1,
         )
-        agent_pool.instances["ghost"] = inst
-        agent_pool.dismiss_instance("ghost")
-        assert "ghost" not in agent_pool.instances or \
-                len(agent_pool.get_conversation("ghost")) == 0
+        agent_pool.instances['ghost'] = inst
+        agent_pool.dismiss_instance('ghost')
+        assert 'ghost' not in agent_pool.instances or \
+                len(agent_pool.get_conversation('ghost')) == 0
 
     def test_dismiss_active_agent_sets_stop_flag(self, agent_pool):
         """Dismissing an active agent should remove it from the pool (Bug5 Fix #1: no global stop flag)."""
         from agent_cascade.agent_instance import AgentInstance, AgentState
         import time
         inst = AgentInstance(
-            instance_name="busy_agent",
-            agent_class="researcher",
+            instance_name='busy_agent',
+            agent_class='researcher',
             conversation=[],
             state=AgentState.RUNNING,
             max_turns=None,
@@ -134,20 +134,20 @@ class TestDismissal:
             compression_summary=None,
             latest_marker_index=-1,
         )
-        agent_pool.instances["busy_agent"] = inst
+        agent_pool.instances['busy_agent'] = inst
         assert not agent_pool.stopped
-        agent_pool.dismiss_instance("busy_agent")
+        agent_pool.dismiss_instance('busy_agent')
         # Bug5 Fix: dismiss_instance no longer sets global stopped flag — it only removes the instance
-        assert "busy_agent" not in agent_pool.instances, \
-            "dismiss_instance should remove the active agent from the pool"
+        assert 'busy_agent' not in agent_pool.instances, \
+            'dismiss_instance should remove the active agent from the pool'
 
     def test_terminate_instance_sets_stop_when_active(self, agent_pool):
         """Terminating an active instance should set the stopped flag."""
         from agent_cascade.agent_instance import AgentInstance, AgentState
         import time
         inst = AgentInstance(
-            instance_name="term_agent",
-            agent_class="researcher",
+            instance_name='term_agent',
+            agent_class='researcher',
             conversation=[],
             state=AgentState.RUNNING,
             max_turns=None,
@@ -157,16 +157,16 @@ class TestDismissal:
             compression_summary=None,
             latest_marker_index=-1,
         )
-        agent_pool.instances["term_agent"] = inst
-        agent_pool.terminate_instance("term_agent", set_global_stopped=True)  # Bug5: explicitly request global stop
+        agent_pool.instances['term_agent'] = inst
+        agent_pool.terminate_instance('term_agent', set_global_stopped=True)  # Bug5: explicitly request global stop
         assert agent_pool.stopped is True
-        assert "term_agent" in agent_pool.terminated_instances
+        assert 'term_agent' in agent_pool.terminated_instances
 
     def test_terminate_instance_no_stop_when_inactive(self, agent_pool):
         """Terminating an inactive instance only marks it, doesn't stop."""
-        agent_pool.terminate_instance("inactive_agent")
+        agent_pool.terminate_instance('inactive_agent')
         assert agent_pool.stopped is False
-        assert "inactive_agent" in agent_pool.terminated_instances
+        assert 'inactive_agent' in agent_pool.terminated_instances
 
 
 # ===========================================================================
@@ -177,20 +177,20 @@ class TestHaltLifecycle:
     """Test per-instance halt/resume for forced compression."""
 
     def test_halt_and_resume(self, agent_pool):
-        agent_pool.halt_instance("w1")
-        assert agent_pool.is_instance_halted("w1") is True
-        agent_pool.resume_instance("w1")
-        assert agent_pool.is_instance_halted("w1") is False
+        agent_pool.halt_instance('w1')
+        assert agent_pool.is_instance_halted('w1') is True
+        agent_pool.resume_instance('w1')
+        assert agent_pool.is_instance_halted('w1') is False
 
     def test_halt_all_except_one(self, agent_pool):
         """halt_all_instances halts all instances except the one specified."""
         from agent_cascade.agent_instance import AgentInstance
         import time
         # Create actual instances so halt_all_instances can find them
-        for name in ("a", "b"):
+        for name in ('a', 'b'):
             inst = AgentInstance(
                 instance_name=name,
-                agent_class="researcher",
+                agent_class='researcher',
                 conversation=[],
                 max_turns=None,
                 parent_instance=None,
@@ -201,23 +201,23 @@ class TestHaltLifecycle:
             )
             agent_pool.instances[name] = inst
         # "c" is excluded — just needs to not be in self.instances
-        agent_pool.active_stack_append("c", 0)
-        agent_pool.halt_all_instances(except_instance="c")
-        assert agent_pool.is_instance_halted("a") is True
-        assert agent_pool.is_instance_halted("b") is True
-        assert agent_pool.is_instance_halted("c") is False
+        agent_pool.active_stack_append('c', 0)
+        agent_pool.halt_all_instances(except_instance='c')
+        assert agent_pool.is_instance_halted('a') is True
+        assert agent_pool.is_instance_halted('b') is True
+        assert agent_pool.is_instance_halted('c') is False
 
     def test_resume_all_only_compression_halted(self, agent_pool):
         """resume_all_instances should only clear compression-halted instances."""
         # Manually halt "a" (not via compression)
-        agent_pool.halt_instance("a")
+        agent_pool.halt_instance('a')
         # Halt "b" via compression path
         from agent_cascade.agent_instance import AgentInstance
         import time
-        for name in ("b",):
+        for name in ('b',):
             inst = AgentInstance(
                 instance_name=name,
-                agent_class="researcher",
+                agent_class='researcher',
                 conversation=[],
                 max_turns=None,
                 parent_instance=None,
@@ -227,11 +227,11 @@ class TestHaltLifecycle:
                 latest_marker_index=-1,
             )
             agent_pool.instances[name] = inst
-        agent_pool.halt_all_instances(except_instance="c_nonexistent")
+        agent_pool.halt_all_instances(except_instance='c_nonexistent')
         # Now resume all — only "b" should be resumed (was compression-halted)
         agent_pool.resume_all_instances()
-        assert agent_pool.is_instance_halted("a") is True   # still halted (manual)
-        assert agent_pool.is_instance_halted("b") is False  # resumed
+        assert agent_pool.is_instance_halted('a') is True   # still halted (manual)
+        assert agent_pool.is_instance_halted('b') is False  # resumed
 
     def test_state_lock_protection(self, agent_pool):
         """State mutations should be lock-guarded via _state_lock."""
@@ -251,34 +251,34 @@ class TestPauseHaltDecoupling:
     def test_is_instance_halted_excludes_global_pause(self, agent_pool):
         """pause() alone must not mark any instance halted; genuine halt persists past resume()."""
         assert agent_pool.is_paused() is False
-        assert agent_pool.is_instance_halted("w1") is False
+        assert agent_pool.is_instance_halted('w1') is False
 
         # Global pause — w1 is NOT in _halted_instances, so it must stay non-halted.
         agent_pool.pause()
         try:
             assert agent_pool.is_paused() is True
-            assert agent_pool.is_instance_halted("w1") is False
+            assert agent_pool.is_instance_halted('w1') is False
 
             # A genuine per-instance halt IS reflected, even while globally paused.
-            agent_pool.halt_instance("w1")
-            assert agent_pool.is_instance_halted("w1") is True
+            agent_pool.halt_instance('w1')
+            assert agent_pool.is_instance_halted('w1') is True
 
             # resume() clears the global pause but must NOT clear a genuine halt.
             agent_pool.resume()
             assert agent_pool.is_paused() is False
-            assert agent_pool.is_instance_halted("w1") is True  # genuine halt persists after resume
+            assert agent_pool.is_instance_halted('w1') is True  # genuine halt persists after resume
         finally:
             # Leave the pool in a clean, non-paused state for other tests.
             agent_pool.resume()
-            agent_pool.resume_instance("w1")
+            agent_pool.resume_instance('w1')
 
     def test_global_pause_does_not_set_is_halted(self, agent_pool):
         """After pause(), every (running) instance reports is_instance_halted False."""
         from agent_cascade.agent_instance import AgentInstance
         import time
-        for name in ("w1", "w2"):
+        for name in ('w1', 'w2'):
             inst = AgentInstance(
-                instance_name=name, agent_class="researcher", conversation=[],
+                instance_name=name, agent_class='researcher', conversation=[],
                 max_turns=None, parent_instance=None,
                 created_at=time.monotonic(), last_activity=time.monotonic(),
                 compression_summary=None, latest_marker_index=-1,
@@ -287,7 +287,7 @@ class TestPauseHaltDecoupling:
 
         agent_pool.pause()
         try:
-            for name in ("w1", "w2"):
+            for name in ('w1', 'w2'):
                 assert agent_pool.is_instance_halted(name) is False
         finally:
             agent_pool.resume()
@@ -299,24 +299,24 @@ class TestPauseHaltDecoupling:
         import time
 
         inst = AgentInstance(
-            instance_name="w1", agent_class="researcher", conversation=[],
+            instance_name='w1', agent_class='researcher', conversation=[],
             max_turns=None, parent_instance=None,
             created_at=time.monotonic(), last_activity=time.monotonic(),
             compression_summary=None, latest_marker_index=-1,
         )
-        agent_pool.instances["w1"] = inst
+        agent_pool.instances['w1'] = inst
 
         # No halt -> is_halted False (stream would continue).
-        assert agent_pool.is_instance_halted("w1") is False
-        assert _serialize_instance(inst, agent_pool)["is_halted"] is False
+        assert agent_pool.is_instance_halted('w1') is False
+        assert _serialize_instance(inst, agent_pool)['is_halted'] is False
 
         # Genuine per-instance halt -> is_halted True (stream gate freezes).
-        agent_pool.halt_instance("w1")
+        agent_pool.halt_instance('w1')
         try:
-            assert agent_pool.is_instance_halted("w1") is True
-            assert _serialize_instance(inst, agent_pool)["is_halted"] is True
+            assert agent_pool.is_instance_halted('w1') is True
+            assert _serialize_instance(inst, agent_pool)['is_halted'] is True
         finally:
-            agent_pool.resume_instance("w1")
+            agent_pool.resume_instance('w1')
 
     def test_pause_resume_invalidates_stream_cache(self, agent_pool):
         """pause()/resume() must evict the per-instance stream-serialization cache.
@@ -332,35 +332,35 @@ class TestPauseHaltDecoupling:
         import time
 
         inst = AgentInstance(
-            instance_name="w1", agent_class="researcher", conversation=[],
+            instance_name='w1', agent_class='researcher', conversation=[],
             max_turns=None, parent_instance=None,
             created_at=time.monotonic(), last_activity=time.monotonic(),
             compression_summary=None, latest_marker_index=-1,
         )
-        agent_pool.instances["w1"] = inst
+        agent_pool.instances['w1'] = inst
 
         # Seed the incremental cache as if a prior broadcast had serialized w1.
-        _cache_mgr.stream_versions["w1"] = (0, None, 0, 0)
-        _cache_mgr.cached_instances["w1"] = {"instance_name": "w1", "is_halted": False}
-        assert "w1" in _cache_mgr.stream_versions
-        assert "w1" in _cache_mgr.cached_instances
+        _cache_mgr.stream_versions['w1'] = (0, None, 0, 0)
+        _cache_mgr.cached_instances['w1'] = {'instance_name': 'w1', 'is_halted': False}
+        assert 'w1' in _cache_mgr.stream_versions
+        assert 'w1' in _cache_mgr.cached_instances
 
         # pause() must evict w1's cache entry.
         agent_pool.pause()
         try:
-            assert "w1" not in _cache_mgr.stream_versions, "pause() did not evict stream_versions"
-            assert "w1" not in _cache_mgr.cached_instances, "pause() did not evict cached_instances"
+            assert 'w1' not in _cache_mgr.stream_versions, 'pause() did not evict stream_versions'
+            assert 'w1' not in _cache_mgr.cached_instances, 'pause() did not evict cached_instances'
 
             # resume() must also evict (re-seed first to prove the transition clears it).
-            _cache_mgr.stream_versions["w1"] = (0, None, 0, 0)
-            _cache_mgr.cached_instances["w1"] = {"instance_name": "w1", "is_halted": False}
+            _cache_mgr.stream_versions['w1'] = (0, None, 0, 0)
+            _cache_mgr.cached_instances['w1'] = {'instance_name': 'w1', 'is_halted': False}
             agent_pool.resume()
-            assert "w1" not in _cache_mgr.stream_versions, "resume() did not evict stream_versions"
-            assert "w1" not in _cache_mgr.cached_instances, "resume() did not evict cached_instances"
+            assert 'w1' not in _cache_mgr.stream_versions, 'resume() did not evict stream_versions'
+            assert 'w1' not in _cache_mgr.cached_instances, 'resume() did not evict cached_instances'
         finally:
             # Leave a clean, non-paused pool and clear any cache residue.
             agent_pool.resume()
-            _cache_mgr.evict_instance("w1")
+            _cache_mgr.evict_instance('w1')
 
     def test_stop_session_invalidates_stream_cache(self, agent_pool):
         """stop_session() sets _paused directly (not via resume()), so it must still evict the
@@ -372,25 +372,25 @@ class TestPauseHaltDecoupling:
         import time
 
         inst = AgentInstance(
-            instance_name="w1", agent_class="researcher", conversation=[],
+            instance_name='w1', agent_class='researcher', conversation=[],
             max_turns=None, parent_instance=None,
             created_at=time.monotonic(), last_activity=time.monotonic(),
             compression_summary=None, latest_marker_index=-1,
         )
-        agent_pool.instances["w1"] = inst
+        agent_pool.instances['w1'] = inst
 
         # Seed the incremental cache as if a prior broadcast had serialized w1.
-        _cache_mgr.stream_versions["w1"] = (0, None, 0, 0)
-        _cache_mgr.cached_instances["w1"] = {"instance_name": "w1", "is_halted": False}
+        _cache_mgr.stream_versions['w1'] = (0, None, 0, 0)
+        _cache_mgr.cached_instances['w1'] = {'instance_name': 'w1', 'is_halted': False}
 
         try:
             agent_pool.stop_session()
-            assert "w1" not in _cache_mgr.stream_versions, "stop_session() did not evict stream_versions"
-            assert "w1" not in _cache_mgr.cached_instances, "stop_session() did not evict cached_instances"
+            assert 'w1' not in _cache_mgr.stream_versions, 'stop_session() did not evict stream_versions'
+            assert 'w1' not in _cache_mgr.cached_instances, 'stop_session() did not evict cached_instances'
         finally:
             # Restore a clean, non-stopped pool and clear any cache residue.
             agent_pool.stopped = False
-            _cache_mgr.evict_instance("w1")
+            _cache_mgr.evict_instance('w1')
 
 
 # ===========================================================================
@@ -406,12 +406,12 @@ class TestSnapshots:
         import time
         # Create an actual instance with a conversation
         inst = AgentInstance(
-            instance_name="w1",
-            agent_class="researcher",
+            instance_name='w1',
+            agent_class='researcher',
             conversation=[
-                Message(role="system", content="sys"),
-                Message(role="user", content="hi"),
-                Message(role="assistant", content="ok"),
+                Message(role='system', content='sys'),
+                Message(role='user', content='hi'),
+                Message(role='assistant', content='ok'),
             ],
             max_turns=None,
             parent_instance=None,
@@ -420,19 +420,19 @@ class TestSnapshots:
             compression_summary=None,
             latest_marker_index=-1,
         )
-        agent_pool.instances["w1"] = inst
+        agent_pool.instances['w1'] = inst
 
         snaps = agent_pool.capture_snapshots()
-        assert snaps["w1"] == 3
+        assert snaps['w1'] == 3
 
         # Add more messages
         with inst._compression_lock:
-            inst.conversation.append(Message(role="user", content="more"))
-            inst.conversation.append(Message(role="assistant", content="done"))
+            inst.conversation.append(Message(role='user', content='more'))
+            inst.conversation.append(Message(role='assistant', content='done'))
 
         # Rollback
         agent_pool.rollback_to_snapshots(snaps)
-        assert len(agent_pool.get_conversation("w1")) == 3
+        assert len(agent_pool.get_conversation('w1')) == 3
 
 
 # ===========================================================================
@@ -449,14 +449,14 @@ class TestThreadSafety:
         def enqueuer(n):
             try:
                 for i in range(50):
-                    agent_pool.enqueue_message("w1", f"msg-{n}-{i}")
+                    agent_pool.enqueue_message('w1', f"msg-{n}-{i}")
             except Exception as e:
                 errors.append(str(e))
 
         def drainer():
             try:
                 for _ in range(25):
-                    agent_pool.drain_queue("w1")
+                    agent_pool.drain_queue('w1')
             except Exception as e:
                 errors.append(str(e))
 
@@ -476,14 +476,14 @@ class TestThreadSafety:
         def halter():
             try:
                 for _ in range(50):
-                    agent_pool.halt_instance("w1")
+                    agent_pool.halt_instance('w1')
             except Exception as e:
                 errors.append(str(e))
 
         def resumer():
             try:
                 for _ in range(50):
-                    agent_pool.resume_instance("w1")
+                    agent_pool.resume_instance('w1')
             except Exception as e:
                 errors.append(str(e))
 
@@ -508,8 +508,8 @@ class TestInstanceConversations:
 
     def test_instance_conversations_can_be_written(self, agent_pool):
         """Instances can be added to the map."""
-        agent_pool.instance_conversations["scope1"] = object()
-        assert "scope1" in agent_pool.instance_conversations
+        agent_pool.instance_conversations['scope1'] = object()
+        assert 'scope1' in agent_pool.instance_conversations
 
 
 # NOTE: The old TestTailOnlySerialization class (max_messages parameter) was removed.

@@ -32,14 +32,14 @@ from agent_cascade.llm.schema import (
 # Helpers — message factories & fixture loading
 # ──────────────────────────────────────────────
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-SAMPLES_DIR = Path(__file__).resolve().parents[1].parent / "loop_failure_samples"
+FIXTURES_DIR = Path(__file__).parent / 'fixtures'
+SAMPLES_DIR = Path(__file__).resolve().parents[1].parent / 'loop_failure_samples'
 
 
 def _fc_msg(tool: str, args: dict):
     # Assistant message carrying a function_call.
     return Message(
-        role=ASSISTANT, content="",
+        role=ASSISTANT, content='',
         function_call=FunctionCall(name=tool, arguments=json.dumps(args)),
     )
 
@@ -60,19 +60,19 @@ POLL_OUTPUT = "No running shell found for agent 'kv-restore-confirm' with tool_i
 PYTEST_CMD = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INFO"'
 
 
-def _poll_pair(justification="Check progress"):
+def _poll_pair(justification='Check progress'):
     # Sample-1-style __status poll pair (FC + terminal-error output).
     return [
-        _fc_msg("shell_cmd", {"command": "__status", "tool_id": "1", "justification": justification}),
-        _fn_msg("shell_cmd", POLL_OUTPUT),
+        _fc_msg('shell_cmd', {'command': '__status', 'tool_id': '1', 'justification': justification}),
+        _fn_msg('shell_cmd', POLL_OUTPUT),
     ]
 
 
 def _pytest_pair(cmd: str, output: str):
-    return [_fc_msg("shell_cmd", {"command": cmd}), _fn_msg("shell_cmd", output)]
+    return [_fc_msg('shell_cmd', {'command': cmd}), _fn_msg('shell_cmd', output)]
 
 
-def failing_poll_pairs(count, user="poll"):
+def failing_poll_pairs(count, user='poll'):
     # `count` identical __status poll pairs, varying justification (Layer 1 fixture).
     msgs = [Message(role=USER, content=user)]
     for i in range(count):
@@ -80,7 +80,7 @@ def failing_poll_pairs(count, user="poll"):
     return msgs
 
 
-def churned_pytest_pairs(count, user="run"):
+def churned_pytest_pairs(count, user='run'):
     # `count` failing pytest pairs differing only in GENUINE substantive content (line
     # number + prose) — isolates Layer 2; wrapper-only churn would normalize away and let
     # Layer 1 fire at its own threshold.
@@ -93,7 +93,7 @@ def churned_pytest_pairs(count, user="run"):
     return msgs
 
 
-def identical_pytest_pairs(count, output, user="run"):
+def identical_pytest_pairs(count, output, user='run'):
     # `count` failing pytest pairs with byte-identical output (Layer 1 fixture).
     msgs = [Message(role=USER, content=user)]
     for _ in range(count):
@@ -101,18 +101,18 @@ def identical_pytest_pairs(count, output, user="run"):
     return msgs
 
 
-def read_error_pairs(count, path="missing.txt", user="read it"):
+def read_error_pairs(count, path='missing.txt', user='read it'):
     # `count` identical failing read_file pairs (Layer 1 generic-branch fixture).
     err = "FileNotFoundError: [Errno 2] No such file or directory: 'missing.txt'"
     msgs = [Message(role=USER, content=user)]
     for _ in range(count):
-        msgs.append(_fc_msg("read_file", {"path": path}))
-        msgs.append(_fn_msg("read_file", err))
+        msgs.append(_fc_msg('read_file', {'path': path}))
+        msgs.append(_fn_msg('read_file', err))
     return msgs
 
 
 def _load_fixture(name: str):
-    with open(FIXTURES_DIR / name, encoding="utf-8") as f:
+    with open(FIXTURES_DIR / name, encoding='utf-8') as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
@@ -121,7 +121,7 @@ def _load_raw_sample(name: str):
     path = SAMPLES_DIR / name
     if not path.exists():
         pytest.skip(f"raw sample not available: {path}")
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding='utf-8') as f:
         return [json.loads(line) for line in f if line.strip()][1:]  # drop metadata line
 
 
@@ -133,29 +133,29 @@ class TestFixtures:
     # Regression fixtures trimmed from the two real failure samples.
 
     def test_sample1_tail_layer1_fires(self):
-        msgs = _load_fixture("tool_loop_sample1_tail.jsonl")
+        msgs = _load_fixture('tool_loop_sample1_tail.jsonl')
         result = detect_tool_loop(msgs)
-        assert result is not None, "Layer 1 should fire on sample-1 tail (async-shell polling)"
+        assert result is not None, 'Layer 1 should fire on sample-1 tail (async-shell polling)'
         reason, pop_count = result
-        assert reason.startswith("tool-call loop:")
-        assert "__status" in reason, "reason should mention the poll directive"
-        assert "stable/terminal output" in reason
+        assert reason.startswith('tool-call loop:')
+        assert '__status' in reason, 'reason should mention the poll directive'
+        assert 'stable/terminal output' in reason
         assert pop_count > 0
 
     def test_sample2_tail_fires(self):
         # Post-normalization sample-2 fires via Layer 1 (byte-identical run), not Layer 2.
-        msgs = _load_fixture("tool_loop_sample2_tail.jsonl")
+        msgs = _load_fixture('tool_loop_sample2_tail.jsonl')
         result = detect_tool_loop(msgs)
-        assert result is not None, "detector should fire on sample-2 tail"
+        assert result is not None, 'detector should fire on sample-2 tail'
         reason, pop_count = result
-        assert reason.startswith("tool-call loop:")
-        assert "stable/terminal output" in reason or "near-duplicate failing command" in reason
+        assert reason.startswith('tool-call loop:')
+        assert 'stable/terminal output' in reason or 'near-duplicate failing command' in reason
         assert pop_count > 0
 
     def test_sample2_tail_trigger_point_unchanged(self):
         # Normalization must not shift the trigger point: the run of 8 identical
         # normalized polls starts at the same pair (pop_count == 15).
-        msgs = _load_fixture("tool_loop_sample2_tail.jsonl")
+        msgs = _load_fixture('tool_loop_sample2_tail.jsonl')
         _, pop_count = detect_tool_loop(msgs)
         assert pop_count == 15, f"trigger point shifted: {pop_count} != 15"
 
@@ -165,12 +165,12 @@ class TestFixtures:
         # traceback. 7 pairs > min_fuzzy=6, cores ~99% similar, identical TRACEBACK
         # failure class. The OLD shell_cmd-only Layer 2 returned None here; the
         # generalized path must now fire via the generic (non-shell) core.
-        msgs = _load_fixture("tool_loop_sample3_codeinterp_tail.jsonl")
+        msgs = _load_fixture('tool_loop_sample3_codeinterp_tail.jsonl')
         result = detect_tool_loop(msgs)
-        assert result is not None, "generic Layer 2 should fire on near-duplicate code_interpreter probes"
+        assert result is not None, 'generic Layer 2 should fire on near-duplicate code_interpreter probes'
         reason, pop_count = result
-        assert "near-duplicate" in reason, f"reason should mention near-duplicate, got: {reason}"
-        assert "code_interpreter" in reason
+        assert 'near-duplicate' in reason, f"reason should mention near-duplicate, got: {reason}"
+        assert 'code_interpreter' in reason
         assert pop_count > 0
 
     def test_layer2_still_fires_on_synthetic_churn(self):
@@ -178,20 +178,20 @@ class TestFixtures:
         # only fuzzy matching can chain them.
         msgs = churned_pytest_pairs(6)
         result = detect_tool_loop(msgs)
-        assert result is not None, "Layer 2 should fire on near-duplicate failing churn"
+        assert result is not None, 'Layer 2 should fire on near-duplicate failing churn'
         reason, pop_count = result
-        assert "near-duplicate failing command" in reason
-        assert "EXIT:1" in reason
+        assert 'near-duplicate failing command' in reason
+        assert 'EXIT:1' in reason
         assert pop_count > 0
 
     def test_fixture_pop_count_keeps_first_pair(self):
         # pop_count convention: dropping that many messages leaves ONE pair of the run.
-        msgs = _load_fixture("tool_loop_sample1_tail.jsonl")
+        msgs = _load_fixture('tool_loop_sample1_tail.jsonl')
         reason, pop_count = detect_tool_loop(msgs)
         trimmed = msgs[:len(msgs) - pop_count]
         # After trimming, the trailing run must be shorter than the threshold (5),
         # i.e. only the first pair of the run remains.
-        pairs_after = len([m for m in trimmed if isinstance(m, dict) and m.get("function_call")])
+        pairs_after = len([m for m in trimmed if isinstance(m, dict) and m.get('function_call')])
         assert pop_count > 0
         assert len(msgs) - pop_count < len(msgs)
 
@@ -201,14 +201,14 @@ class TestFixtures:
         # 5 identical __status polls; every iteration has assistant prose both
         # before the FC and between FC and output.
         out = POLL_OUTPUT
-        msgs = [Message(role=USER, content="poll")]
+        msgs = [Message(role=USER, content='poll')]
         for i in range(5):
             msgs.append(_prose(f"checking status {i}"))
-            msgs.append(_fc_msg("shell_cmd", {"command": "__status", "tool_id": "1"}))
+            msgs.append(_fc_msg('shell_cmd', {'command': '__status', 'tool_id': '1'}))
             msgs.append(_prose(f"waiting for output {i}"))  # prose between FC and FUNCTION
-            msgs.append(_fn_msg("shell_cmd", out))
+            msgs.append(_fn_msg('shell_cmd', out))
         result = detect_tool_loop(msgs)
-        assert result is not None, "Layer 1 should fire on 5 identical terminal-error polls"
+        assert result is not None, 'Layer 1 should fire on 5 identical terminal-error polls'
         reason, pop_count = result
         trimmed = msgs[:len(msgs) - pop_count]
         # Exactly ONE function_call and exactly ONE function output remain.
@@ -217,7 +217,7 @@ class TestFixtures:
         assert len(fc_left) == 1, f"expected exactly 1 FC after rollback, got {len(fc_left)}"
         assert len(fn_left) == 1, f"expected exactly 1 FUNCTION output after rollback, got {len(fn_left)}"
         # The remaining pair is the FIRST iteration of the run.
-        assert fc_left[0].function_call.arguments == _fc_msg("shell_cmd", {"command": "__status", "tool_id": "1"}).function_call.arguments
+        assert fc_left[0].function_call.arguments == _fc_msg('shell_cmd', {'command': '__status', 'tool_id': '1'}).function_call.arguments
         assert fn_left[0].content == out
 
 
@@ -233,17 +233,17 @@ class TestExactTierSampleBehavior:
     # None — regression guard against loosening Tier 1 into fuzzy territory.
 
     def test_raw_sample1_exact_none(self):
-        msgs = _load_raw_sample("async_shell_polling_loop_20260821_kv-restore-confirm.jsonl")
-        assert detect_exact_loop(msgs) is None, "exact tier must not flag sample 1 (fuzzy-only loop)"
+        msgs = _load_raw_sample('async_shell_polling_loop_20260821_kv-restore-confirm.jsonl')
+        assert detect_exact_loop(msgs) is None, 'exact tier must not flag sample 1 (fuzzy-only loop)'
 
     def test_raw_sample2_exact_hit(self):
-        msgs = _load_raw_sample("coder_impl_phase1_D_fixup_20260824_124318.jsonl")
+        msgs = _load_raw_sample('coder_impl_phase1_D_fixup_20260824_124318.jsonl')
         result = detect_exact_loop(msgs)
         assert result is not None, "exact tier should flag sample 2's tail loop"
         reason, pop_count = result
         # Planner-verified (plan header): L=2 period, K>=3 repeats at the stable tail.
-        assert "period=2" in reason, f"expected L=2 period, got: {reason}"
-        assert "repeated 3 times" in reason or "repeated 4 times" in reason, \
+        assert 'period=2' in reason, f"expected L=2 period, got: {reason}"
+        assert 'repeated 3 times' in reason or 'repeated 4 times' in reason, \
             f"expected K>=3 repetitions, got: {reason}"
         assert pop_count > 0
 
@@ -257,34 +257,34 @@ class TestFalsePositiveBattery:
 
     def test_retry_until_success(self):
         # 4 failing retries followed by success — no detection.
-        msgs = [Message(role=USER, content="run the test")]
+        msgs = [Message(role=USER, content='run the test')]
         for i in range(4):
             msgs += _pytest_pair(PYTEST_CMD, f"APPROVED: Command exited with return code 1. (elapsed {i + 10}s)")
-        msgs += _pytest_pair(PYTEST_CMD, "APPROVED: Command completed successfully.")
+        msgs += _pytest_pair(PYTEST_CMD, 'APPROVED: Command completed successfully.')
         assert detect_tool_loop(msgs) is None
 
     def test_live_progress_polling_changing_outputs(self):
         # 10 polls with changing progress outputs — no detection.
-        msgs = [Message(role=USER, content="watch the build")]
+        msgs = [Message(role=USER, content='watch the build')]
         for i in range(10):
             out = f"Build progress: {i * 10}% done. Compiling module_{i}..."
-            msgs.append(_fc_msg("shell_cmd", {"command": "__status", "tool_id": "7"}))
-            msgs.append(_fn_msg("shell_cmd", out))
+            msgs.append(_fc_msg('shell_cmd', {'command': '__status', 'tool_id': '7'}))
+            msgs.append(_fn_msg('shell_cmd', out))
         assert detect_tool_loop(msgs) is None
 
     def test_exploratory_grep_read_streak(self):
         # Many different grep/read_file calls — no detection.
-        msgs = [Message(role=USER, content="find the bug")]
+        msgs = [Message(role=USER, content='find the bug')]
         for i in range(8):
-            msgs.append(_fc_msg("grep", {"pattern": f"error_{i}", "path": "src"}))
-            msgs.append(_fn_msg("grep", f"src/file{i}.py:12: match {i}"))
-            msgs.append(_fc_msg("read_file", {"path": f"src/file{i}.py"}))
-            msgs.append(_fn_msg("read_file", f"line {i}: code content number {i}"))
+            msgs.append(_fc_msg('grep', {'pattern': f"error_{i}", 'path': 'src'}))
+            msgs.append(_fn_msg('grep', f"src/file{i}.py:12: match {i}"))
+            msgs.append(_fc_msg('read_file', {'path': f"src/file{i}.py"}))
+            msgs.append(_fn_msg('read_file', f"line {i}: code content number {i}"))
         assert detect_tool_loop(msgs) is None
 
     def test_multi_file_failing_survey(self):
         # Failing tests across DIFFERENT files (different targets) — no detection.
-        msgs = [Message(role=USER, content="survey the failing suite")]
+        msgs = [Message(role=USER, content='survey the failing suite')]
         for i in range(8):
             cmd = f'python -m pytest tests/test_module_{i}.py -x 2>&1 | findstr /n "INFO"'
             out = (f"APPROVED: Command exited with return code 1. (elapsed {i + 9}s)\n"
@@ -294,23 +294,23 @@ class TestFalsePositiveBattery:
 
     def test_failing_test_interleaved_with_edit_file(self):
         # 7 failing pytest runs each followed by an edit_file — run always broken.
-        out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
-        msgs = [Message(role=USER, content="fix the test")]
+        out = 'APPROVED: Command exited with return code 1. (elapsed 11.3s)'
+        msgs = [Message(role=USER, content='fix the test')]
         for i in range(7):
             msgs += _pytest_pair(PYTEST_CMD, out)
-            msgs.append(_fc_msg("edit_file", {"path": "tests/test_x.py", "new_content": f"v{i}"}))
-            msgs.append(_fn_msg("edit_file", f"OK: edited tests/test_x.py (version {i})"))
+            msgs.append(_fc_msg('edit_file', {'path': 'tests/test_x.py', 'new_content': f"v{i}"}))
+            msgs.append(_fn_msg('edit_file', f"OK: edited tests/test_x.py (version {i})"))
         assert detect_tool_loop(msgs) is None
 
     def test_identical_successful_read_file_streak(self):
         # Repeated identical SUCCESSFUL reads — no detection (no failure class).
-        msgs = [Message(role=USER, content="read it again")]
+        msgs = [Message(role=USER, content='read it again')]
         for i in range(8):
-            msgs.append(_fc_msg("read_file", {"path": "src/main.py"}))
-            msgs.append(_fn_msg("read_file", "def main():\n    print('hello')"))
+            msgs.append(_fc_msg('read_file', {'path': 'src/main.py'}))
+            msgs.append(_fn_msg('read_file', "def main():\n    print('hello')"))
         assert detect_tool_loop(msgs) is None
 
-    @pytest.mark.parametrize("n_pairs, expected", [
+    @pytest.mark.parametrize('n_pairs, expected', [
         (4, None),   # below Layer 1 threshold (5)
         (5, True),   # at Layer 1 threshold
     ])
@@ -322,7 +322,7 @@ class TestFalsePositiveBattery:
         else:
             assert result is not None
 
-    @pytest.mark.parametrize("n_pairs, expected", [
+    @pytest.mark.parametrize('n_pairs, expected', [
         (5, None),   # below Layer 2 threshold (6)
         (6, True),   # at Layer 2 threshold
     ])
@@ -341,15 +341,15 @@ class TestFalsePositiveBattery:
         base = 'python -m pytest tests/test_x.py::test_y -x --timeout=30 --maxfail=1 -q'
         # ~27-char unique tail per command → min pairwise sim ≈ 0.84 < 0.85
         suffixes = [f"--filter-token={chr(97 + i)}{'z' * (i * 6)}" for i in range(6)]
-        out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
-        msgs = [Message(role=USER, content="run")]
+        out = 'APPROVED: Command exited with return code 1. (elapsed 11.3s)'
+        msgs = [Message(role=USER, content='run')]
         for sfx in suffixes:
-            msgs += _pytest_pair(base + " " + sfx, out)
+            msgs += _pytest_pair(base + ' ' + sfx, out)
         assert detect_tool_loop(msgs) is None
 
     def test_similarity_at_threshold_fires(self):
         # Identical core commands (sim 1.0 ≥ 0.85) — detection.
-        msgs = identical_pytest_pairs(6, "APPROVED: Command exited with return code 1. (elapsed 11.3s)")
+        msgs = identical_pytest_pairs(6, 'APPROVED: Command exited with return code 1. (elapsed 11.3s)')
         assert detect_tool_loop(msgs) is not None
 
     def test_similarity_just_above_threshold(self):
@@ -360,23 +360,23 @@ class TestFalsePositiveBattery:
         base = 'python -m pytest tests/test_x.py::test_y -x --timeout=30 --maxfail=1 -q'
         # ~4-char unique tail per command → pairwise sim ≈ 0.98 > 0.85
         suffixes = [f"-t{chr(97 + i)}" for i in range(6)]
-        cmds = [base + " " + sfx for sfx in suffixes]
+        cmds = [base + ' ' + sfx for sfx in suffixes]
         min_sim = min(SequenceMatcher(None, a, b).ratio()
                       for i, a in enumerate(cmds) for b in cmds[i + 1:])
         assert min_sim > 0.85, f"fixture premise broken: min pairwise sim {min_sim:.4f} ≤ 0.85"
-        out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
-        msgs = [Message(role=USER, content="run")]
+        out = 'APPROVED: Command exited with return code 1. (elapsed 11.3s)'
+        msgs = [Message(role=USER, content='run')]
         for sfx in suffixes:
-            msgs += _pytest_pair(base + " " + sfx, out)
+            msgs += _pytest_pair(base + ' ' + sfx, out)
         assert detect_tool_loop(msgs) is not None
 
     def test_non_shell_identical_error_streak_fires_layer1(self):
         # Byte-identical errors from a NON-shell tool (read_file ×5) → Layer 1 generic branch.
         msgs = read_error_pairs(5)
         result = detect_tool_loop(msgs)
-        assert result is not None, "identical non-shell error streak should fire Layer 1"
+        assert result is not None, 'identical non-shell error streak should fire Layer 1'
         reason, pop_count = result
-        assert reason.startswith("tool-call loop:")
+        assert reason.startswith('tool-call loop:')
         assert pop_count > 0
 
     def test_non_shell_identical_error_below_threshold(self):
@@ -387,29 +387,29 @@ class TestFalsePositiveBattery:
         # 'Connection refused' is a terminal signature — 5 polls with that byte-identical
         # output fire Layer 1 (exit-code line keeps the output classifiable; the terminal
         # signature lets identical outputs chain).
-        out = "APPROVED: Command exited with return code 1.\nConnection refused (host api.internal:8080)"
-        msgs = [Message(role=USER, content="poll")]
+        out = 'APPROVED: Command exited with return code 1.\nConnection refused (host api.internal:8080)'
+        msgs = [Message(role=USER, content='poll')]
         for i in range(5):
             msgs += _poll_pair(justification=f"Check {i}")
             # override the output with the connection-refused text
-            msgs[-1] = _fn_msg("shell_cmd", out)
+            msgs[-1] = _fn_msg('shell_cmd', out)
         assert detect_tool_loop(msgs) is not None
 
     def test_different_failure_class_breaks_run(self):
         # Alternating EXIT:1 and TESTFAIL outputs — run broken, no detection.
-        out_exit = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
-        out_fail = ("APPROVED: Command completed successfully.\n"
-                    "FAILED tests/test_x.py::test_y")
-        msgs = [Message(role=USER, content="run")]
+        out_exit = 'APPROVED: Command exited with return code 1. (elapsed 11.3s)'
+        out_fail = ('APPROVED: Command completed successfully.\n'
+                    'FAILED tests/test_x.py::test_y')
+        msgs = [Message(role=USER, content='run')]
         for i in range(8):
             msgs += _pytest_pair(PYTEST_CMD, out_exit if i % 2 == 0 else out_fail)
         assert detect_tool_loop(msgs) is None
 
     def test_success_output_breaks_run(self):
         # 5 failing + 1 success at the tail — trailing run is only 1, no detection.
-        out = "APPROVED: Command exited with return code 1. (elapsed 11.3s)"
+        out = 'APPROVED: Command exited with return code 1. (elapsed 11.3s)'
         msgs = identical_pytest_pairs(5, out)
-        msgs += _pytest_pair(PYTEST_CMD, "APPROVED: Command completed successfully.")
+        msgs += _pytest_pair(PYTEST_CMD, 'APPROVED: Command completed successfully.')
         assert detect_tool_loop(msgs) is None
 
     def test_non_shell_multi_target_failing_survey(self):
@@ -418,12 +418,12 @@ class TestFalsePositiveBattery:
         # shape but differ in the path argument, and none of the outputs carry a
         # traceback/exit-code/FAILED banner (fail class is None), so no run forms —
         # legitimate multi-target work must not be flagged.
-        msgs = [Message(role=USER, content="survey the module tree")]
+        msgs = [Message(role=USER, content='survey the module tree')]
         for i in range(8):
             path = f"src/module_{i:02d}/component.py"
             err = f"FileNotFoundError: [Errno 2] No such file or directory: '{path}'"
-            msgs.append(_fc_msg("read_file", {"path": path}))
-            msgs.append(_fn_msg("read_file", err))
+            msgs.append(_fc_msg('read_file', {'path': path}))
+            msgs.append(_fn_msg('read_file', err))
         assert detect_tool_loop(msgs) is None
 
 
@@ -438,23 +438,23 @@ class TestRobustness:
         assert detect_tool_loop([]) is None
 
     def test_fewer_than_six_messages(self):
-        msgs = [Message(role=USER, content="hi"), Message(role=ASSISTANT, content="hello")]
+        msgs = [Message(role=USER, content='hi'), Message(role=ASSISTANT, content='hello')]
         assert detect_tool_loop(msgs) is None
 
     def test_malformed_json_args(self):
         # Malformed FC arguments must not crash the detector.
-        msgs = [Message(role=USER, content="run")]
+        msgs = [Message(role=USER, content='run')]
         for i in range(8):
-            fc = FunctionCall(name="shell_cmd", arguments="{not valid json")
-            msgs.append(Message(role=ASSISTANT, content="", function_call=fc))
-            msgs.append(_fn_msg("shell_cmd", f"output {i}"))
+            fc = FunctionCall(name='shell_cmd', arguments='{not valid json')
+            msgs.append(Message(role=ASSISTANT, content='', function_call=fc))
+            msgs.append(_fn_msg('shell_cmd', f"output {i}"))
         assert detect_tool_loop(msgs) is None
 
     def test_missing_outputs(self):
         # FC messages with no following FUNCTION output are dropped, not crashed on.
-        msgs = [Message(role=USER, content="run")]
+        msgs = [Message(role=USER, content='run')]
         for i in range(6):
-            msgs.append(_fc_msg("shell_cmd", {"command": "__status", "tool_id": "1"}))
+            msgs.append(_fc_msg('shell_cmd', {'command': '__status', 'tool_id': '1'}))
             if i % 2 == 0:  # every other FC has no output
                 msgs.append(_prose(f"thinking {i}"))
         assert detect_tool_loop(msgs) is None
@@ -468,9 +468,9 @@ class TestRobustness:
             out = []
             for m in msgs:
                 d = m.model_dump()
-                if d.get("function_call") is not None:
-                    d["function_call"] = {"name": d["function_call"]["name"],
-                                          "arguments": d["function_call"]["arguments"]}
+                if d.get('function_call') is not None:
+                    d['function_call'] = {'name': d['function_call']['name'],
+                                          'arguments': d['function_call']['arguments']}
                 out.append(d)
             return out
 
@@ -486,13 +486,13 @@ class TestRobustness:
         msgs = failing_poll_pairs(6)
         # Replace last output with a multimodal list carrying the same terminal text
         from agent_cascade.llm.schema import ContentItem
-        msgs[-1] = Message(role=FUNCTION, name="shell_cmd",
+        msgs[-1] = Message(role=FUNCTION, name='shell_cmd',
                            content=[ContentItem(text=POLL_OUTPUT)])
         assert detect_tool_loop(msgs) is not None
 
     def test_system_messages_ignored(self):
         # Interleaved SYSTEM messages must not break detection.
-        msgs = [Message(role=USER, content="poll")]
+        msgs = [Message(role=USER, content='poll')]
         for i in range(6):
             msgs.append(Message(role=SYSTEM, content=f"system note {i}"))
             msgs += _poll_pair(justification=f"Check {i}")
@@ -509,8 +509,8 @@ class TestOutputNormalization:
     def test_polling_loop_with_wrapper_noise_fires_layer1(self):
         # REGRESSION: error replies embedding varying timestamps, elapsed markers and
         # justification prose must still fire Layer 1.
-        base = "Command exited with return code 1.\nConnection refused (host api.internal:8080)"
-        msgs = [Message(role=USER, content="poll")]
+        base = 'Command exited with return code 1.\nConnection refused (host api.internal:8080)'
+        msgs = [Message(role=USER, content='poll')]
         for i in range(6):
             out = (
                 f"APPROVED: {base} (elapsed {10 + i * 2}.{i}s)\n"
@@ -518,34 +518,34 @@ class TestOutputNormalization:
                 f"different wording every call, mentions step {i * 7}.\n"
                 f"2026-08-25T13:{i:02d}:44.123456"
             )
-            msgs.append(_fc_msg("shell_cmd", {"command": "__status", "tool_id": "9"}))
-            msgs.append(_fn_msg("shell_cmd", out))
+            msgs.append(_fc_msg('shell_cmd', {'command': '__status', 'tool_id': '9'}))
+            msgs.append(_fn_msg('shell_cmd', out))
         result = detect_tool_loop(msgs)
-        assert result is not None, "wrapper-noise-varying polling loop must fire Layer 1"
+        assert result is not None, 'wrapper-noise-varying polling loop must fire Layer 1'
         reason, pop_count = result
-        assert "stable/terminal output" in reason
-        assert "__status" in reason
+        assert 'stable/terminal output' in reason
+        assert '__status' in reason
         assert pop_count > 0
 
     def test_genuinely_different_substantive_output_breaks_run(self):
         # No over-normalization: 6 identical failing polls + 1 poll with a genuinely
         # different message AND exit code → both layers' chaining broken.
         cmd = PYTEST_CMD
-        msgs = [Message(role=USER, content="run")]
+        msgs = [Message(role=USER, content='run')]
         # 6 identical failing polls ... (clean, non-noisy substantive error text)
         for i in range(6):
             out = (f"APPROVED: Command exited with return code 1. (elapsed {i + 10}s)\n"
                    f"Security Justification: prose variant {i}\n\n"
-                   "42: probe counter mismatch — expected 1, got 4")
+                   '42: probe counter mismatch — expected 1, got 4')
             msgs += _pytest_pair(cmd, out)
         # ... then one poll with a GENUINELY different substantive message AND
         # a different exit code (breaks both layers' chaining).
         out_diff = (f"APPROVED: Command exited with return code 3. (elapsed 99s)\n"
                     f"Security Justification: prose variant final\n\n"
-                    "77: mock server returned an unexpected 503 for the healthy endpoint")
+                    '77: mock server returned an unexpected 503 for the healthy endpoint')
         msgs += _pytest_pair(cmd, out_diff)
         assert detect_tool_loop(msgs) is None, \
-            "genuine output difference must break the run (no over-normalization)"
+            'genuine output difference must break the run (no over-normalization)'
 
     def test_fail_class_survives_normalization(self):
         # Failure-class extraction on wrapped outputs: exit code, no-output and FAILED
@@ -553,69 +553,69 @@ class TestOutputNormalization:
         from agent_cascade.tool_loop_detect import _normalize_output, _fail_class
 
         # EXIT:1 — the verdict prose is stripped but the exit-code sentence survives.
-        out_exit = ("APPROVED: Command exited with return code 1. (elapsed 11.3s)\n"
-                    "Security Justification: auto prose that varies per call\n\n"
-                    "No output produced.")
-        assert _fail_class(_normalize_output(out_exit)) == "EXIT:1"
+        out_exit = ('APPROVED: Command exited with return code 1. (elapsed 11.3s)\n'
+                    'Security Justification: auto prose that varies per call\n\n'
+                    'No output produced.')
+        assert _fail_class(_normalize_output(out_exit)) == 'EXIT:1'
 
         # NOOUT — a failing run whose reply is ONLY wrapper noise (banner +
         # justification, nothing else) must still classify as no-output.
-        out_noout = ("APPROVED: Command exited with return code 2. (elapsed 3s)\n"
-                     "Security Justification: only prose, no substantive output at all")
-        assert _fail_class(_normalize_output(out_noout)) == "EXIT:2"
+        out_noout = ('APPROVED: Command exited with return code 2. (elapsed 3s)\n'
+                     'Security Justification: only prose, no substantive output at all')
+        assert _fail_class(_normalize_output(out_noout)) == 'EXIT:2'
 
         # TESTFAIL — a FAILED banner right after the justification (no blank
         # line separator) must NOT be swallowed by the justification stripping.
         # No exit-code line: the banner is the only failure indicator, so the
         # class must be TESTFAIL (proves the banner text survived intact).
-        out_fail = ("APPROVED: Command completed successfully.\n"
-                    "Security Justification: auto prose\n"
-                    "FAILED tests/test_x.py::test_y")
-        assert _fail_class(_normalize_output(out_fail)) == "TESTFAIL"
+        out_fail = ('APPROVED: Command completed successfully.\n'
+                    'Security Justification: auto prose\n'
+                    'FAILED tests/test_x.py::test_y')
+        assert _fail_class(_normalize_output(out_fail)) == 'TESTFAIL'
 
         # And with an exit-code line present, the banner still survives
         # normalization (EXIT:n ranks above TESTFAIL in _fail_class — that is
         # pre-existing semantics, not something normalization changes).
-        out_fail2 = ("APPROVED: Command exited with return code 1. (elapsed 2s)\n"
-                     "Security Justification: auto prose\n"
-                     "FAILED tests/test_x.py::test_y")
+        out_fail2 = ('APPROVED: Command exited with return code 1. (elapsed 2s)\n'
+                     'Security Justification: auto prose\n'
+                     'FAILED tests/test_x.py::test_y')
         norm2 = _normalize_output(out_fail2)
-        assert "FAILED tests/test_x.py::test_y" in norm2, \
-            "FAILED banner must survive normalization alongside the exit-code line"
+        assert 'FAILED tests/test_x.py::test_y' in norm2, \
+            'FAILED banner must survive normalization alongside the exit-code line'
 
     def test_spillover_lines_normalize_identical(self):
         # Spillover/truncation lines with different paths/char counts → identical after
         # normalization (the path varies per run).
         from agent_cascade.tool_loop_detect import _normalize_output
 
-        body = "AssertionError: expected 4, got 1"
-        t1 = (body + "\n\n[TRUNCATED — showing 200 of 5000 lines "
-                "(4996 chars total). Full output saved to: logs/spillover/impl_phase1_D_fixup_shell_20260824_125626_155333.txt]")
-        t2 = (body + "\n\n[TRUNCATED — showing 200 of 5000 lines "
-                "(9876 chars total). Full output saved to: logs/spillover/other_agent_tool_cmd_20260825_010101_999999.txt]")
+        body = 'AssertionError: expected 4, got 1'
+        t1 = (body + '\n\n[TRUNCATED — showing 200 of 5000 lines '
+                '(4996 chars total). Full output saved to: logs/spillover/impl_phase1_D_fixup_shell_20260824_125626_155333.txt]')
+        t2 = (body + '\n\n[TRUNCATED — showing 200 of 5000 lines '
+                '(9876 chars total). Full output saved to: logs/spillover/other_agent_tool_cmd_20260825_010101_999999.txt]')
         assert _normalize_output(t1) == _normalize_output(t2)
 
     def test_elapsed_and_timestamp_stripped_everywhere(self):
         # Elapsed markers and ISO timestamps stripped from anywhere; genuine text survives.
         from agent_cascade.tool_loop_detect import _normalize_output
 
-        a = "build took (elapsed 5s) and failed at 2026-08-24T13:00:48.976877"
-        b = "build took (elapsed 42s) and failed at 2026-08-24T13:05:01.000001"
+        a = 'build took (elapsed 5s) and failed at 2026-08-24T13:00:48.976877'
+        b = 'build took (elapsed 42s) and failed at 2026-08-24T13:05:01.000001'
         assert _normalize_output(a) == _normalize_output(b)
-        assert "build took" in _normalize_output(a)
-        assert "and failed at" in _normalize_output(a)
+        assert 'build took' in _normalize_output(a)
+        assert 'and failed at' in _normalize_output(a)
 
     def test_genuine_content_differences_survive(self):
         # Conservatism: only KNOWN wrapper formats are removed — different error text,
         # stdout and exit codes all survive normalization.
         from agent_cascade.tool_loop_detect import _normalize_output
 
-        d1 = _normalize_output("APPROVED: Command exited with return code 1. (elapsed 1s)\nAssertionError: got 4")
-        d2 = _normalize_output("APPROVED: Command exited with return code 1. (elapsed 9s)\nTypeError: bad operand")
+        d1 = _normalize_output('APPROVED: Command exited with return code 1. (elapsed 1s)\nAssertionError: got 4')
+        d2 = _normalize_output('APPROVED: Command exited with return code 1. (elapsed 9s)\nTypeError: bad operand')
         assert d1 != d2
 
-        e1 = _normalize_output("APPROVED: Command exited with return code 1. (elapsed 1s)")
-        e2 = _normalize_output("APPROVED: Command exited with return code 3. (elapsed 9s)")
+        e1 = _normalize_output('APPROVED: Command exited with return code 1. (elapsed 1s)')
+        e2 = _normalize_output('APPROVED: Command exited with return code 3. (elapsed 9s)')
         assert e1 != e2
 
 
@@ -631,7 +631,7 @@ class TestPreLlmChecksIntegration:
     # FUZZY_ESCALATION_TURNS (2) turns after the warning escalates to FULL rollback; with
     # the toggle off, warnings re-issue per cooldown and NEVER roll back.
 
-    def _make_fake_instance(self, name="test_agent"):
+    def _make_fake_instance(self, name='test_agent'):
         class FakeInstance:
             def __init__(self, instance_name):
                 self.instance_name = instance_name
@@ -680,7 +680,7 @@ class TestPreLlmChecksIntegration:
 
     def _tool_loop_msgs(self):
         # Synthetic sample-1-style conversation (7 terminal-error poll pairs).
-        return failing_poll_pairs(7, user="launch the run")
+        return failing_poll_pairs(7, user='launch the run')
 
     def test_warning_injected_on_fuzzy_hit_toggle_off(self):
         # Toggle OFF (default) → ONE advisory USER message, no rollback, no turn consumed.
@@ -692,24 +692,24 @@ class TestPreLlmChecksIntegration:
         turns = [50]
         result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
-        assert result is False, "warning mode must proceed to the LLM call"
+        assert result is False, 'warning mode must proceed to the LLM call'
         engine._inline_rollback_and_hint.assert_not_called(), \
-            "toggle OFF: no code path may roll back from a Tier-2 trigger"
+            'toggle OFF: no code path may roll back from a Tier-2 trigger'
         pool.terminate_instance.assert_not_called()
-        assert turns[0] == 50, "no turn consumed in warning mode"
+        assert turns[0] == 50, 'no turn consumed in warning mode'
         # Advisory injected exactly once via the engine's warning pattern.
         # _append_and_log(instance, msg) → args[1] is the Message.
         engine._append_and_log.assert_called_once()
         warn_msg = engine._append_and_log.call_args.args[1]
-        assert "[SYSTEM WARNING: Possible repeating action]" in (warn_msg.content or "")
+        assert '[SYSTEM WARNING: Possible repeating action]' in (warn_msg.content or '')
         assert warn_msg.role == USER
         # Telemetry: fuzzy_warning, not rolled back, warned=True.
         tel = engine._telemetry.return_value
         tel.record_loop_detected.assert_called_once()
         kwargs = tel.record_loop_detected.call_args.kwargs
-        assert kwargs["auto_rolled_back"] is False
-        assert kwargs["loop_type"] == "fuzzy_warning"
-        assert kwargs["warned"] is True
+        assert kwargs['auto_rolled_back'] is False
+        assert kwargs['loop_type'] == 'fuzzy_warning'
+        assert kwargs['warned'] is True
         # State machine: disarmed after the warning, escalation NOT armed (toggle off).
         assert inst._fuzzy_warn_armed is False
         assert inst._fuzzy_escalation_armed is False
@@ -732,13 +732,13 @@ class TestPreLlmChecksIntegration:
         result = engine._pre_llm_checks(inst, msgs, [], [], [50])
         assert result is False
         engine._append_and_log.assert_called_once(), \
-            "no second advisory within the same run (throttle)"
+            'no second advisory within the same run (throttle)'
         # Suppression still telemetry'd with warned=False.
         tel = engine._telemetry.return_value
         assert tel.record_loop_detected.call_count == 2
         sup_kwargs = tel.record_loop_detected.call_args.kwargs
-        assert sup_kwargs["warned"] is False
-        assert sup_kwargs["loop_type"] == "fuzzy_warning"
+        assert sup_kwargs['warned'] is False
+        assert sup_kwargs['loop_type'] == 'fuzzy_warning'
 
     def test_rearm_after_pattern_breaks(self):
         # Pattern stops matching → re-arm; a later fresh run warns again.
@@ -764,7 +764,7 @@ class TestPreLlmChecksIntegration:
         inst._current_turn = 12
         result = engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
         assert result is False
-        assert engine._append_and_log.call_count == 2, "re-armed run must warn again"
+        assert engine._append_and_log.call_count == 2, 're-armed run must warn again'
 
     def test_escalation_rollback_when_toggle_on(self):
         # Toggle ON: warn@T, suppress@T+1, FULL rollback@T+2 (fuzzy pop_count).
@@ -780,32 +780,32 @@ class TestPreLlmChecksIntegration:
         result = engine._pre_llm_checks(inst, msgs, [], [], [50])
         assert result is False
         engine._append_and_log.assert_called_once()
-        assert inst._fuzzy_escalation_armed is True, "countdown armed when toggle on"
+        assert inst._fuzzy_escalation_armed is True, 'countdown armed when toggle on'
 
         # Turn T+1: suppressed (no second message, no rollback yet).
         inst._current_turn = 11
         result = engine._pre_llm_checks(inst, msgs, [], [], [50])
         assert result is False
-        engine._append_and_log.assert_called_once(), "no second advisory at T+1"
-        engine._inline_rollback_and_hint.assert_not_called(), "no rollback before T+2"
+        engine._append_and_log.assert_called_once(), 'no second advisory at T+1'
+        engine._inline_rollback_and_hint.assert_not_called(), 'no rollback before T+2'
 
         # Turn T+2: pattern still matching → FULL ROLLBACK with the fuzzy pop_count.
         inst._current_turn = 12
         turns = [50]
         result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
-        assert result is True, "escalation rollback cycle should continue the loop"
+        assert result is True, 'escalation rollback cycle should continue the loop'
         engine._inline_rollback_and_hint.assert_called_once()
         args = engine._inline_rollback_and_hint.call_args.args
-        assert args[2] == expected_pop, "pop_count passed to rollback must match the fuzzy detector"
+        assert args[2] == expected_pop, 'pop_count passed to rollback must match the fuzzy detector'
         assert inst._loop_rollback_count == 1
         pool.terminate_instance.assert_not_called()
-        assert turns[0] == 49, "turn consumed on escalation rollback"
+        assert turns[0] == 49, 'turn consumed on escalation rollback'
         # Telemetry: fuzzy_rollback with auto_rolled_back=True.
         tel = engine._telemetry.return_value
         rb_kwargs = tel.record_loop_detected.call_args.kwargs
-        assert rb_kwargs["loop_type"] == "fuzzy_rollback"
-        assert rb_kwargs["auto_rolled_back"] is True
+        assert rb_kwargs['loop_type'] == 'fuzzy_rollback'
+        assert rb_kwargs['auto_rolled_back'] is True
         # Post-escalation: fuzzy state fully reset (re-armed).
         assert inst._fuzzy_warn_armed is True
         assert inst._fuzzy_escalation_armed is False
@@ -827,14 +827,14 @@ class TestPreLlmChecksIntegration:
         inst._current_turn = 11
         result = engine._pre_llm_checks(inst, unique, [], [], [50])
         assert result is False
-        assert inst._fuzzy_escalation_armed is False, "countdown must cancel on pattern break"
+        assert inst._fuzzy_escalation_armed is False, 'countdown must cancel on pattern break'
 
         # Turn T+2: even though the loop resumes, the fresh run only WARNS again.
         inst._current_turn = 12
         result = engine._pre_llm_checks(inst, msgs, [], [], [50])
         assert result is False
         engine._inline_rollback_and_hint.assert_not_called(), \
-            "cancelled countdown must not roll back later"
+            'cancelled countdown must not roll back later'
 
     def test_warn_break_resume_within_cooldown_toggle_off(self):
         # REGRESSION (pre-commit review T2-1, toggle OFF): warn@T → break@T+1 → resume@T+2
@@ -862,9 +862,9 @@ class TestPreLlmChecksIntegration:
         result = engine._pre_llm_checks(inst, msgs, [], [], [50])
         assert result is False
         assert engine._append_and_log.call_count == 2, \
-            "resumed loop must warn again — silent suppression of a resumed loop is the T2-1 bug"
+            'resumed loop must warn again — silent suppression of a resumed loop is the T2-1 bug'
         engine._inline_rollback_and_hint.assert_not_called(), \
-            "toggle OFF: no rollback path may fire"
+            'toggle OFF: no rollback path may fire'
 
     def test_warn_break_resume_within_cooldown_toggle_on(self):
         # REGRESSION (pre-commit review T2-1, toggle ON): warn@T → break@T+1 → resume@T+2
@@ -893,9 +893,9 @@ class TestPreLlmChecksIntegration:
         result = engine._pre_llm_checks(inst, msgs, [], [], [50])
         assert result is False
         assert engine._append_and_log.call_count == 2, \
-            "resumed loop must warn again — no warning AND no rollback would be the T2-1 bug"
+            'resumed loop must warn again — no warning AND no rollback would be the T2-1 bug'
         engine._inline_rollback_and_hint.assert_not_called(), \
-            "cancelled countdown must not roll back at the resume point"
+            'cancelled countdown must not roll back at the resume point'
 
         # T+4: still matching FUZZY_ESCALATION_TURNS (2) turns after the fresh
         # warning → escalation rollback within the documented window.
@@ -906,7 +906,7 @@ class TestPreLlmChecksIntegration:
         result = engine._pre_llm_checks(inst, msgs, [], [], turns)
         assert result is True
         engine._inline_rollback_and_hint.assert_called_once(), \
-            "resumed loop must escalate to rollback within the documented window"
+            'resumed loop must escalate to rollback within the documented window'
         assert inst._loop_rollback_count == 1
 
     def test_post_compression_cooldown_resets_fuzzy_state(self):
@@ -981,9 +981,9 @@ class TestPreLlmChecksIntegration:
         tel = engine._telemetry.return_value
         tel.record_loop_detected.assert_called_once()
         kwargs = tel.record_loop_detected.call_args.kwargs
-        assert kwargs["loop_type"] == "fuzzy_warning"
-        assert kwargs["auto_rolled_back"] is False
-        assert kwargs["warned"] is True
+        assert kwargs['loop_type'] == 'fuzzy_warning'
+        assert kwargs['auto_rolled_back'] is False
+        assert kwargs['warned'] is True
 
     def test_exact_tier_takes_priority(self):
         # Both tiers enabled and BOTH detectors armed: an exact (Tier 1) hit rolls back and
@@ -999,31 +999,31 @@ class TestPreLlmChecksIntegration:
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = [
-            Message(role=USER, content="q"), Message(role=ASSISTANT, content="a"),
-            Message(role=USER, content="q"), Message(role=ASSISTANT, content="a"),
-            Message(role=USER, content="q"), Message(role=ASSISTANT, content="a"),
+            Message(role=USER, content='q'), Message(role=ASSISTANT, content='a'),
+            Message(role=USER, content='q'), Message(role=ASSISTANT, content='a'),
+            Message(role=USER, content='q'), Message(role=ASSISTANT, content='a'),
         ]
 
-        with patch("agent_cascade.engine.llm_call._detect_exact_loop", return_value=("repeat", 2)), \
-             patch("agent_cascade.engine.llm_call._detect_tool_loop",
-                   return_value=("fuzzy hit", 3)) as mock_tool:
+        with patch('agent_cascade.engine.llm_call._detect_exact_loop', return_value=('repeat', 2)), \
+             patch('agent_cascade.engine.llm_call._detect_tool_loop',
+                   return_value=('fuzzy hit', 3)) as mock_tool:
             turns = [50]
             result = engine._pre_llm_checks(inst, msgs, [], [], turns)
 
-        assert result is True, "exact hit must consume the turn and continue the loop"
-        mock_tool.assert_not_called(), "fuzzy tier must not run after an exact hit"
+        assert result is True, 'exact hit must consume the turn and continue the loop'
+        mock_tool.assert_not_called(), 'fuzzy tier must not run after an exact hit'
         # Tier-1 rollback executed with the EXACT detector's pop_count (2), not fuzzy's 3.
         engine._inline_rollback_and_hint.assert_called_once()
         rb_args = engine._inline_rollback_and_hint.call_args.args
-        assert rb_args[2] == 2, "pop_count must come from the exact detector"
+        assert rb_args[2] == 2, 'pop_count must come from the exact detector'
         assert inst._loop_rollback_count == 1
-        assert turns[0] == 49, "turn consumed on Tier-1 rollback"
+        assert turns[0] == 49, 'turn consumed on Tier-1 rollback'
         # Telemetry: exactly ONE event, loop_type="exact".
         tel = engine._telemetry.return_value
         tel.record_loop_detected.assert_called_once()
         kwargs = tel.record_loop_detected.call_args.kwargs
-        assert kwargs["loop_type"] == "exact"
-        assert kwargs["auto_rolled_back"] is True
+        assert kwargs['loop_type'] == 'exact'
+        assert kwargs['auto_rolled_back'] is True
         # Fuzzy state machine untouched (Tier 2 never ran).
         assert inst._fuzzy_warn_armed is True
         assert inst._fuzzy_escalation_armed is False
@@ -1049,4 +1049,4 @@ class TestPreLlmChecksIntegration:
         assert inst._loop_rollback_count == 1
         engine._inline_rollback_and_hint.assert_called_once()
         pool.terminate_instance.assert_called_once()
-        assert pool.terminate_instance.call_args.kwargs.get("set_global_stopped") is False
+        assert pool.terminate_instance.call_args.kwargs.get('set_global_stopped') is False

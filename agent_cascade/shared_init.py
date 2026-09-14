@@ -44,26 +44,26 @@ def detect_workspace_dir(project_root: Path) -> str:
         # Only use this if we're actually inside a Docker container (/.dockerenv marker)
         if os.path.exists('/.dockerenv') and Path('/workspace').exists():
             workspace_dir = str(Path('/workspace').resolve())
-            logger.info("[INIT] Using Docker workspace mount: %s", workspace_dir)
+            logger.info('[INIT] Using Docker workspace mount: %s', workspace_dir)
 
     if not workspace_dir:
         # Prefer sibling AgentWorkspace directory (e.g., N:\work\WD\AgentWorkspace)
         sibling_ws = project_root.parent / 'AgentWorkspace'
         if sibling_ws.exists():
             workspace_dir = str(sibling_ws.resolve())
-            logger.info("[INIT] Detected sibling workspace: %s", workspace_dir)
+            logger.info('[INIT] Detected sibling workspace: %s', workspace_dir)
 
     if not workspace_dir:
         # Check for workspace/ under project root
         local_ws = project_root / 'workspace'
         if local_ws.exists():
             workspace_dir = str(local_ws.resolve())
-            logger.info("[INIT] Using local workspace: %s", workspace_dir)
+            logger.info('[INIT] Using local workspace: %s', workspace_dir)
 
     if not workspace_dir:
         # Ultimate fallback: workspace/ under project root (always valid, will be created)
         workspace_dir = str((project_root / 'workspace').resolve())
-        logger.warning("[INIT] Workspace not found, creating at: %s", workspace_dir)
+        logger.warning('[INIT] Workspace not found, creating at: %s', workspace_dir)
 
     os.environ['AGENT_CASCADE_DEFAULT_WORKSPACE'] = workspace_dir
     return workspace_dir
@@ -74,10 +74,10 @@ def ensure_workspace(workspace_dir: str) -> Path:
     try:
         path = Path(workspace_dir)
         path.mkdir(parents=True, exist_ok=True)
-        logger.debug("[INIT] Workspace directory verified: %s", workspace_dir)
+        logger.debug('[INIT] Workspace directory verified: %s', workspace_dir)
         return path
     except Exception as e:
-        logger.error("[FATAL] Cannot create/access workspace directory %s: %s", workspace_dir, e)
+        logger.error('[FATAL] Cannot create/access workspace directory %s: %s', workspace_dir, e)
         raise SystemExit(1)
 
 
@@ -98,10 +98,10 @@ def ensure_config_files(project_root_path: Path):
         from config.secrets_loader import _load_secrets
         _load_secrets()
     except ImportError as e:
-        logger.error("[INIT] Failed to import config.secrets_loader: %s", e)
+        logger.error('[INIT] Failed to import config.secrets_loader: %s', e)
         secrets_ok = False
     except Exception as e:
-        logger.error("[INIT] Failed to ensure secrets.json: %s", e)
+        logger.error('[INIT] Failed to ensure secrets.json: %s', e)
         secrets_ok = False
 
     # 2) Ensure api_endpoints.json via lightweight helper (no APIRouter instantiation)
@@ -111,19 +111,19 @@ def ensure_config_files(project_root_path: Path):
         if not ensure_api_endpoints_config(config_dir=str(project_root_path / 'config')):
             endpoints_ok = False
     except ImportError as e:
-        logger.error("[INIT] Failed to import agent_cascade.api_router.ensure_api_endpoints_config: %s", e)
+        logger.error('[INIT] Failed to import agent_cascade.api_router.ensure_api_endpoints_config: %s', e)
         endpoints_ok = False
 
     # 3) Accurate summary logging based on actual outcomes
     if secrets_ok and endpoints_ok:
-        logger.info("[INIT] Config files ensured: secrets.json, api_endpoints.json")
+        logger.info('[INIT] Config files ensured: secrets.json, api_endpoints.json')
     else:
         failed = []
         if not secrets_ok:
-            failed.append("secrets.json")
+            failed.append('secrets.json')
         if not endpoints_ok:
-            failed.append("api_endpoints.json")
-        logger.warning("[INIT] Config initialization issues with: %s", ", ".join(failed))
+            failed.append('api_endpoints.json')
+        logger.warning('[INIT] Config initialization issues with: %s', ', '.join(failed))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -135,10 +135,10 @@ def create_operation_manager(workspace_dir: str):
     from agent_cascade.operation_manager import OperationManager
     try:
         op_mgr = OperationManager(base_dir=workspace_dir)
-        logger.debug("[INIT] OperationManager initialized with base_dir: %s", op_mgr.base_dir)
+        logger.debug('[INIT] OperationManager initialized with base_dir: %s', op_mgr.base_dir)
         return op_mgr
     except Exception as e:
-        logger.error("[FATAL] OperationManager initialization failed: %s", e)
+        logger.error('[FATAL] OperationManager initialization failed: %s', e)
         raise SystemExit(1)
 
 
@@ -148,17 +148,17 @@ def create_agent_pool(llm_cfg, agents_path: str, workspace_dir: str, operation_m
     try:
         # Create TelemetryCollector — logs go into workspace/telemetry/ relative to the workspace dir
         telemetry = TelemetryCollector(log_dir=str(Path(workspace_dir) / 'telemetry'))
-        logger.debug("[INIT] TelemetryCollector initialized, log_dir=%s", telemetry.log_dir)
+        logger.debug('[INIT] TelemetryCollector initialized, log_dir=%s', telemetry.log_dir)
 
         pool = AgentPool(
             llm_cfg, agents_path, workspace_dir=workspace_dir,
             operation_manager=operation_manager,
             telemetry=telemetry,
         )
-        logger.debug("[INIT] AgentPool created successfully")
+        logger.debug('[INIT] AgentPool created successfully')
         return pool
     except Exception as e:
-        logger.error("[FATAL] AgentPool creation failed: %s", e)
+        logger.error('[FATAL] AgentPool creation failed: %s', e)
         raise SystemExit(1)
 
 
@@ -193,9 +193,9 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_
 
     try:
         agent_pool.start()
-        logger.debug("[INIT] AgentPool background services started")
+        logger.debug('[INIT] AgentPool background services started')
     except Exception as e:
-        logger.error("[FATAL] Failed to start AgentPool background services: %s", e)
+        logger.error('[FATAL] Failed to start AgentPool background services: %s', e)
         raise SystemExit(1)
 
 
@@ -215,9 +215,9 @@ def load_orchestrator(agent_pool):
         try:
             # llm_cfg is passed through the pool; we need to retrieve it
             orchestrator = load_orchestrator_agent(agent_pool, agent_pool.llm_cfg)
-            logger.info("[INIT] Orchestrator loaded via fallback path")
+            logger.info('[INIT] Orchestrator loaded via fallback path')
         except Exception as e:
-            logger.error("[FATAL] Orchestrator agent could not be loaded: %s", e)
+            logger.error('[FATAL] Orchestrator agent could not be loaded: %s', e)
             raise SystemExit(1)
 
     return orchestrator
@@ -237,7 +237,7 @@ def build_all_agents_list(agent_pool, orchestrator):
                 all_agents.append(sub_agent)
 
     if not all_agents:
-        logger.error("[FATAL] No agents available after initialization")
+        logger.error('[FATAL] No agents available after initialization')
         raise SystemExit(1)
 
     return all_agents
@@ -298,28 +298,28 @@ def setup_signal_handler(agent_pool, server=None):
         is set for a clean uvicorn shutdown (avoids resource leaks from sys.exit).
     """
     def handle_shutdown(signum, frame):
-        logger.info("\n[INFO] Initiating graceful shutdown...")
+        logger.info('\n[INFO] Initiating graceful shutdown...')
         agent_pool.stopped = True
 
         # Write session_end telemetry event with final stats (BUG 8 fix)
         if hasattr(agent_pool, 'telemetry') and agent_pool.telemetry is not None:
             try:
                 agent_pool.telemetry.record_session_end()
-                logger.debug("[INIT] Telemetry session_end recorded")
+                logger.debug('[INIT] Telemetry session_end recorded')
             except Exception as e:
-                logger.warning("Failed to record telemetry session_end: %s", e)
+                logger.warning('Failed to record telemetry session_end: %s', e)
             finally:
                 # Issue #6: close the log file handle during shutdown
                 try:
                     agent_pool.telemetry.close()
                 except Exception as e:
-                    logger.debug("[INIT] Telemetry close failed (non-critical): %s", e)
+                    logger.debug('[INIT] Telemetry close failed (non-critical): %s', e)
 
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()
             except Exception as e:
-                logger.warning("Cleanup backups failed during shutdown: %s", e)
+                logger.warning('Cleanup backups failed during shutdown: %s', e)
         if server is not None:
             # Set should_exit for graceful uvicorn shutdown (avoids resource leaks from sys.exit)
             server.should_exit = True
@@ -381,7 +381,7 @@ def _install_windows_console_guard(kernel32=None) -> bool:
             if ctrl_type == CTRL_LOGOFF_EVENT:
                 # Must not block logoff; no re-dispatch.
                 return False
-            logger.warning("console Ctrl+C received (type=%s) — initiating graceful shutdown", ctrl_type)
+            logger.warning('console Ctrl+C received (type=%s) — initiating graceful shutdown', ctrl_type)
             _signal_mod.raise_signal(_signal_mod.SIGINT)
             return True
         except Exception:

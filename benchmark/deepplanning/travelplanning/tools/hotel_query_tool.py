@@ -14,13 +14,13 @@ class HotelQueryTool(BaseTravelTool):
     # Language-specific field mappings
     LANG_FIELDS = {
         'zh': {
-            'db_not_loaded': "数据库未加载",
+            'db_not_loaded': '数据库未加载',
             'not_found': lambda dest, checkin, checkout: f"未找到满足条件的 {dest} 在 {checkin} 到 {checkout} 的酒店信息,请检查参数信息或减少约束条件",
             'db_loaded': lambda count, path: f"✓ 酒店数据库加载成功: {count} 条记录 (路径: {path})",
             'db_not_found': lambda path: f"⚠ 警告: 酒店数据库未找到于 {path}",
         },
         'en': {
-            'db_not_loaded': "Database not loaded",
+            'db_not_loaded': 'Database not loaded',
             'not_found': lambda dest, checkin, checkout: f"No hotel information found in {dest} from {checkin} to {checkout}, please check parameters or reduce constraints",
             'db_loaded': lambda count, path: f"✓ Hotel database loaded: {count} records (path: {path})",
             'db_not_found': lambda path: f"⚠ Warning: Hotel database not found at {path}",
@@ -104,15 +104,15 @@ class HotelQueryTool(BaseTravelTool):
                 stock_val = 0
 
             result = {
-                "name": to_str(row.get('name', '')),
-                "address": to_str(row.get('address', '')),
-                "latitude": to_str(row.get('latitude', '')),
-                "longitude": to_str(row.get('longitude', '')),
-                "decorationTime": to_str(row.get('decoration_time', '')),
-                "hotelStar": to_str(row.get('hotel_star', '')),
-                "price": to_str(row.get('price', '')),
-                "score": to_str(row.get('score', '')),
-                "brand": to_str(row.get('brand', '')),
+                'name': to_str(row.get('name', '')),
+                'address': to_str(row.get('address', '')),
+                'latitude': to_str(row.get('latitude', '')),
+                'longitude': to_str(row.get('longitude', '')),
+                'decorationTime': to_str(row.get('decoration_time', '')),
+                'hotelStar': to_str(row.get('hotel_star', '')),
+                'price': to_str(row.get('price', '')),
+                'score': to_str(row.get('score', '')),
+                'brand': to_str(row.get('brand', '')),
             }
             
             # If CSV has services field, add to result

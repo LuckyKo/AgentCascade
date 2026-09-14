@@ -40,7 +40,7 @@ from agent_cascade.settings import (
 class TelemetryCollector:
     """Collects and persists telemetry events for agent performance tracking."""
 
-    def __init__(self, log_dir: str = "workspace/telemetry", instance_id: str = ""):
+    def __init__(self, log_dir: str = 'workspace/telemetry', instance_id: str = ''):
         if not instance_id:
             instance_id = get_instance_id()
 
@@ -55,7 +55,7 @@ class TelemetryCollector:
         now_dt = datetime.datetime.now(datetime.timezone.utc)
         now_str = now_dt.isoformat()
         # Include microseconds in session_id to avoid collisions when multiple sessions start simultaneously
-        self.session_id = now_dt.strftime("%Y%m%d_%H%M%S%f")
+        self.session_id = now_dt.strftime('%Y%m%d_%H%M%S%f')
         self.log_path = self.log_dir / f"telemetry_{self.session_id}.jsonl"
 
         # In-memory event buffer — deque with maxlen gives O(1) rotation
@@ -72,38 +72,38 @@ class TelemetryCollector:
 
         # Session-level aggregates (updated on each event)
         self._session_stats = {
-            "total_turns": 0,
-            "total_user_turns": 0,
-            "total_llm_calls": 0,
-            "total_tool_calls": 0,
-            "total_input_tokens_est": 0,
-            "total_output_tokens_est": 0,
-            "total_llm_latency_ms": 0,
-            "total_ttft_ms": 0,
-            "total_streaming_time_ms": 0,
-            "total_tool_latency_ms": 0,
-            "call_agent_calls": 0,
-            "call_agent_latency_ms": 0,
-            "total_loops_detected": 0,
-            "loops_outer": 0,
-            "loops_inner": 0,
-            "total_auto_continues": 0,
-            "total_retries": 0,
-            "total_compressions": 0,
-            "write_failures": 0,  # Track write failures for diagnostics
-            "tool_calls_by_name": defaultdict(int),
-            "tool_failures_by_name": defaultdict(int),
-            "tool_latency_by_name": defaultdict(float),
-            "llm_calls_by_model": defaultdict(int),
-            "agent_instance_calls": 0,
+            'total_turns': 0,
+            'total_user_turns': 0,
+            'total_llm_calls': 0,
+            'total_tool_calls': 0,
+            'total_input_tokens_est': 0,
+            'total_output_tokens_est': 0,
+            'total_llm_latency_ms': 0,
+            'total_ttft_ms': 0,
+            'total_streaming_time_ms': 0,
+            'total_tool_latency_ms': 0,
+            'call_agent_calls': 0,
+            'call_agent_latency_ms': 0,
+            'total_loops_detected': 0,
+            'loops_outer': 0,
+            'loops_inner': 0,
+            'total_auto_continues': 0,
+            'total_retries': 0,
+            'total_compressions': 0,
+            'write_failures': 0,  # Track write failures for diagnostics
+            'tool_calls_by_name': defaultdict(int),
+            'tool_failures_by_name': defaultdict(int),
+            'tool_latency_by_name': defaultdict(float),
+            'llm_calls_by_model': defaultdict(int),
+            'agent_instance_calls': 0,
             # Skill Advisor (AUTO Skill Helper — Advanced mode) counters
-            "skill_advisor_calls": 0,
-            "skill_advisor_denials": 0,
-            "skill_advisor_fallbacks": 0,
+            'skill_advisor_calls': 0,
+            'skill_advisor_denials': 0,
+            'skill_advisor_fallbacks': 0,
             # RFC 9211 Cache-Status (prompt-cache hit/miss) counters
-            "llm_cache_hits": 0,
-            "llm_cache_misses": 0,
-            "llm_cache_unknown": 0,
+            'llm_cache_hits': 0,
+            'llm_cache_misses': 0,
+            'llm_cache_unknown': 0,
         }
 
         # Per-config aggregates for A/B comparison
@@ -126,26 +126,26 @@ class TelemetryCollector:
         # Keep file handle open to avoid per-event open/close overhead
         self._log_file = None
         try:
-            self._log_file = open(self.log_path, "a", encoding="utf-8")
+            self._log_file = open(self.log_path, 'a', encoding='utf-8')
         except Exception as e:
-            _logger.warning("Failed to open telemetry log file %s: %s", self.log_path, e)
+            _logger.warning('Failed to open telemetry log file %s: %s', self.log_path, e)
 
         # Write session header
         self._write_event({
-            "type": "session_start",
-            "session_id": self.session_id,
-            "timestamp": now_str,
+            'type': 'session_start',
+            'session_id': self.session_id,
+            'timestamp': now_str,
         })
 
     # ── Config Fingerprinting ─────────────────────────────────────────────
 
     @staticmethod
     def fingerprint_config(
-        model: str = "",
+        model: str = '',
         generate_cfg: Optional[Dict] = None,
-        system_prompt: str = "",
+        system_prompt: str = '',
         tools: Optional[List[str]] = None,
-        api_base: str = "",
+        api_base: str = '',
     ) -> str:
         """
         Create a stable hash fingerprint from the current agent configuration.
@@ -164,31 +164,31 @@ class TelemetryCollector:
         Returns a stable 12-char hex string so it stays compatible with
         ``_config_stats`` keying and JSONL export.
         """
-        raw = model or ""
+        raw = model or ''
         return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
     @staticmethod
     def describe_config(
-        model: str = "",
+        model: str = '',
         generate_cfg: Optional[Dict] = None,
         tools: Optional[List[str]] = None,
-        api_base: str = "",
+        api_base: str = '',
     ) -> Dict:
         """Return a human-readable config description for display."""
         cfg = generate_cfg or {}
         return {
-            "model": model,
-            "api_base": api_base,
-            "temperature": cfg.get("temperature"),
-            "top_p": cfg.get("top_p"),
-            "top_k": cfg.get("top_k"),
-            "min_p": cfg.get("min_p"),
-            "max_tokens": cfg.get("max_tokens"),
-            "max_input_tokens": cfg.get("max_input_tokens"),
-            "presence_penalty": cfg.get("presence_penalty"),
-            "frequency_penalty": cfg.get("frequency_penalty"),
-            "repetition_penalty": cfg.get("repetition_penalty"),
-            "tools_count": len(tools or []),
+            'model': model,
+            'api_base': api_base,
+            'temperature': cfg.get('temperature'),
+            'top_p': cfg.get('top_p'),
+            'top_k': cfg.get('top_k'),
+            'min_p': cfg.get('min_p'),
+            'max_tokens': cfg.get('max_tokens'),
+            'max_input_tokens': cfg.get('max_input_tokens'),
+            'presence_penalty': cfg.get('presence_penalty'),
+            'frequency_penalty': cfg.get('frequency_penalty'),
+            'repetition_penalty': cfg.get('repetition_penalty'),
+            'tools_count': len(tools or []),
         }
 
     # ── Helper: per-config stats initialization ───────────────────────
@@ -197,21 +197,21 @@ class TelemetryCollector:
         """Ensure per-config stats dict exists for *fingerprint*, creating it if needed."""
         if fingerprint and fingerprint not in self._config_stats:
             self._config_stats[fingerprint] = {
-                "config_description": config_description or {},
-                "turns": 0,
-                "llm_calls": 0,
-                "tool_calls": 0,
-                "input_tokens_est": 0,
-                "output_tokens_est": 0,
-                "total_duration_ms": 0,
-                "total_llm_latency_ms": 0,
-                "total_ttft_ms": 0,
-                "total_streaming_time_ms": 0,
-                "loops_detected": 0,
-                "retries": 0,
-                "total_compressions": 0,
-                "tool_calls_by_name": defaultdict(int),
-                "tool_failures_by_name": defaultdict(int),
+                'config_description': config_description or {},
+                'turns': 0,
+                'llm_calls': 0,
+                'tool_calls': 0,
+                'input_tokens_est': 0,
+                'output_tokens_est': 0,
+                'total_duration_ms': 0,
+                'total_llm_latency_ms': 0,
+                'total_ttft_ms': 0,
+                'total_streaming_time_ms': 0,
+                'loops_detected': 0,
+                'retries': 0,
+                'total_compressions': 0,
+                'tool_calls_by_name': defaultdict(int),
+                'tool_failures_by_name': defaultdict(int),
             }
 
     # ── Event Recording (all thread-safe via _telemetry_lock) ──────────────
@@ -219,9 +219,9 @@ class TelemetryCollector:
     def record_turn_start(
         self,
         instance_name: str,
-        config_fingerprint: str = "",
+        config_fingerprint: str = '',
         config_description: Optional[Dict] = None,
-        agent_class: str = "",
+        agent_class: str = '',
     ):
         """Mark the start of a new agent turn.
 
@@ -231,26 +231,26 @@ class TelemetryCollector:
         with _telemetry_lock:
             # Warn if an active turn already exists with a different fingerprint
             existing_turn = self._active_turns.get(instance_name)
-            if existing_turn and existing_turn["config_fingerprint"] != config_fingerprint:
+            if existing_turn and existing_turn['config_fingerprint'] != config_fingerprint:
                 _logger.warning(
-                    "Instance %r started new turn with fingerprint %s (was %s). "
-                    "Config changed mid-session.",
-                    instance_name, config_fingerprint, existing_turn["config_fingerprint"],
+                    'Instance %r started new turn with fingerprint %s (was %s). '
+                    'Config changed mid-session.',
+                    instance_name, config_fingerprint, existing_turn['config_fingerprint'],
                 )
 
             self._active_turns[instance_name] = {
-                "start_time": time.perf_counter(),
-                "config_fingerprint": config_fingerprint,
-                "config_description": config_description or {},
-                "agent_class": agent_class,
-                "llm_calls": 0,
-                "tool_calls": 0,
-                "tool_calls_detail": [],
-                "input_tokens_est": 0,
-                "output_tokens_est": 0,
-                "loops_detected": 0,
-                "retries": 0,
-                "compressions": 0,
+                'start_time': time.perf_counter(),
+                'config_fingerprint': config_fingerprint,
+                'config_description': config_description or {},
+                'agent_class': agent_class,
+                'llm_calls': 0,
+                'tool_calls': 0,
+                'tool_calls_detail': [],
+                'input_tokens_est': 0,
+                'output_tokens_est': 0,
+                'loops_detected': 0,
+                'retries': 0,
+                'compressions': 0,
             }
 
             # Initialize per-config stats on first turn — use helper method
@@ -259,15 +259,15 @@ class TelemetryCollector:
             # Live per-config / per-class turn count (moved from record_turn_end).
             # A run counts as an engagement the moment it starts.
             if config_fingerprint:
-                self._config_stats[config_fingerprint]["turns"] += 1
+                self._config_stats[config_fingerprint]['turns'] += 1
             if agent_class:
-                self._ensure_agent_class_stats(agent_class)["turns"] += 1
+                self._ensure_agent_class_stats(agent_class)['turns'] += 1
 
         event = {
-            "type": "turn_start",
-            "instance": instance_name,
-            "config_fingerprint": config_fingerprint,
-            "timestamp": _now_iso(),
+            'type': 'turn_start',
+            'instance': instance_name,
+            'config_fingerprint': config_fingerprint,
+            'timestamp': _now_iso(),
         }
         self._write_event(event)
 
@@ -277,33 +277,33 @@ class TelemetryCollector:
             turn = self._active_turns.pop(instance_name, None)
             if not turn:
                 _logger.warning(
-                    "record_turn_end called for %r but no matching turn_start found.",
+                    'record_turn_end called for %r but no matching turn_start found.',
                     instance_name,
                 )
                 return
 
-            duration_ms = (time.perf_counter() - turn["start_time"]) * 1000
-            fp = turn["config_fingerprint"]
+            duration_ms = (time.perf_counter() - turn['start_time']) * 1000
+            fp = turn['config_fingerprint']
 
             event = {
-                "type": "turn_end",
-                "instance": instance_name,
-                "config_fingerprint": fp,
-                "duration_ms": round(duration_ms, 1),
-                "llm_calls": turn["llm_calls"],
-                "tool_calls": turn["tool_calls"],
-                "tool_calls_detail": turn["tool_calls_detail"],
-                "input_tokens_est": turn["input_tokens_est"],
-                "output_tokens_est": turn["output_tokens_est"],
-                "loops_detected": turn["loops_detected"],
-                "retries": turn["retries"],
-                "compressions": turn["compressions"],
-                "timestamp": _now_iso(),
+                'type': 'turn_end',
+                'instance': instance_name,
+                'config_fingerprint': fp,
+                'duration_ms': round(duration_ms, 1),
+                'llm_calls': turn['llm_calls'],
+                'tool_calls': turn['tool_calls'],
+                'tool_calls_detail': turn['tool_calls_detail'],
+                'input_tokens_est': turn['input_tokens_est'],
+                'output_tokens_est': turn['output_tokens_est'],
+                'loops_detected': turn['loops_detected'],
+                'retries': turn['retries'],
+                'compressions': turn['compressions'],
+                'timestamp': _now_iso(),
             }
 
             # Update session stats (inside lock since RLock is reentrant)
-            self._session_stats["total_turns"] += 1
-            self._session_stats["total_retries"] += turn["retries"]
+            self._session_stats['total_turns'] += 1
+            self._session_stats['total_retries'] += turn['retries']
 
             # Update per-config stats — duration is only known at turn end. The
             # other counters (turns, llm_calls, tool_calls, tokens, loops, retries,
@@ -311,16 +311,16 @@ class TelemetryCollector:
             # methods as events happen, so they must NOT be re-flushed here or they
             # would double-count.
             if fp:
-                self._ensure_config_stats(fp, turn.get("config_description"))
+                self._ensure_config_stats(fp, turn.get('config_description'))
                 cs = self._config_stats[fp]
-                cs["total_duration_ms"] += duration_ms
+                cs['total_duration_ms'] += duration_ms
 
             # Update per-agent-class stats — same live-accumulation rule as above;
             # only total_time_ms is flushed here (duration known at end).
-            agent_class = turn.get("agent_class") or ""
+            agent_class = turn.get('agent_class') or ''
             if agent_class:
                 acs = self._ensure_agent_class_stats(agent_class)
-                acs["total_time_ms"] += duration_ms
+                acs['total_time_ms'] += duration_ms
 
         self._write_event(event)
 
@@ -331,7 +331,7 @@ class TelemetryCollector:
         record_* methods; the counter is a session-level aggregate.
         """
         with _telemetry_lock:
-            self._session_stats["total_user_turns"] += 1
+            self._session_stats['total_user_turns'] += 1
 
     def _ensure_agent_class_stats(self, agent_class: str):
         """Ensure per-agent-class stats dict exists for *agent_class*, creating it if needed.
@@ -340,33 +340,33 @@ class TelemetryCollector:
         """
         if agent_class not in self._agent_class_stats:
             self._agent_class_stats[agent_class] = {
-                "turns": 0,
-                "total_time_ms": 0,
-                "tokens_generated": 0,
-                "tool_calls": 0,
-                "tool_failures": 0,
-                "llm_calls": 0,
+                'turns': 0,
+                'total_time_ms': 0,
+                'tokens_generated': 0,
+                'tool_calls': 0,
+                'tool_failures': 0,
+                'llm_calls': 0,
             }
         return self._agent_class_stats[agent_class]
 
-    def record_llm_call_start(self, instance_name: str, input_tokens_est: int = 0, model: str = ""):
+    def record_llm_call_start(self, instance_name: str, input_tokens_est: int = 0, model: str = ''):
         """Mark the start of an LLM API call."""
         with _telemetry_lock:
             self._active_llm_calls[instance_name] = {
-                "start_time": time.perf_counter(),
-                "input_tokens_est": input_tokens_est,
-                "model": model,
-                "first_token_time": 0,
-                "completion_tokens": 0,  # Will be updated by record_token_usage callback if available
-                "usage_details": None,
+                'start_time': time.perf_counter(),
+                'input_tokens_est': input_tokens_est,
+                'model': model,
+                'first_token_time': 0,
+                'completion_tokens': 0,  # Will be updated by record_token_usage callback if available
+                'usage_details': None,
             }
 
     def record_llm_first_token(self, instance_name: str):
         """Record Time To First Token (TTFT)."""
         with _telemetry_lock:
             call = self._active_llm_calls.get(instance_name)
-            if call and call["first_token_time"] == 0:
-                call["first_token_time"] = time.perf_counter()
+            if call and call['first_token_time'] == 0:
+                call['first_token_time'] = time.perf_counter()
 
     @staticmethod
     def classify_cache_hit(cached_tokens, prompt_tokens):
@@ -398,8 +398,8 @@ class TelemetryCollector:
             ct = int(cached_tokens or 0)  # absent / None → treated as 0 (a miss)
             floor = max(1, int(0.05 * pt))
             if ct >= floor:
-                return "hit"
-            return "miss"
+                return 'hit'
+            return 'miss'
         except (TypeError, ValueError):
             return None
 
@@ -419,36 +419,36 @@ class TelemetryCollector:
         with _telemetry_lock:
             call = self._active_llm_calls.get(instance_name)
             if not call:
-                _logger.debug("record_token_usage called without active LLM call for %s", instance_name)
+                _logger.debug('record_token_usage called without active LLM call for %s', instance_name)
                 return
             
             # Update input_tokens_est with ground-truth value (was char-count estimate at call start)
             if prompt_tokens > 0:
-                call["input_tokens_est"] = prompt_tokens
+                call['input_tokens_est'] = prompt_tokens
 
             # Store completion_tokens on the active call for use in record_llm_call_end
-            call["completion_tokens"] = completion_tokens
+            call['completion_tokens'] = completion_tokens
             if details:
-                call["usage_details"] = details
+                call['usage_details'] = details
 
             # Authoritative cache hit/miss from server-reported cached_tokens
             # (llama.cpp / OpenAI usage object). Guarded by "cache_classified" so a call
             # is counted at most once even if the usage callback fires more than once.
             # Backends that don't report usable usage leave the call unmeasured.
             try:
-                if not call.get("cache_classified"):
+                if not call.get('cache_classified'):
                     cached = None
                     if details and isinstance(details, dict):
-                        cached = details.get("cached_tokens")
+                        cached = details.get('cached_tokens')
                     status = self.classify_cache_hit(cached, prompt_tokens)
                     if status is not None:
-                        call["cache_classified"] = True
-                        if status == "hit":
-                            self._session_stats["llm_cache_hits"] += 1
+                        call['cache_classified'] = True
+                        if status == 'hit':
+                            self._session_stats['llm_cache_hits'] += 1
                         else:
-                            self._session_stats["llm_cache_misses"] += 1
+                            self._session_stats['llm_cache_misses'] += 1
             except Exception as e:
-                _logger.debug("Cache classification from usage failed for %s: %s", instance_name, e)
+                _logger.debug('Cache classification from usage failed for %s: %s', instance_name, e)
 
     def record_llm_call_end(self, instance_name: str, output_tokens_est: int = 0, last_output=None):
         """Mark the end of an LLM API call."""
@@ -461,7 +461,7 @@ class TelemetryCollector:
             # (1) Ground-truth from streaming layer callback via record_token_usage()
             # (2) Caller-provided value if > 0 (backward compat during transition)
             # (3) Char-count estimate of last_output as final fallback
-            actual_output = call.get("completion_tokens", 0) or output_tokens_est
+            actual_output = call.get('completion_tokens', 0) or output_tokens_est
 
             # Final fallback: char-count estimate if nothing else available and we have output messages
             if actual_output == 0 and last_output:
@@ -495,58 +495,58 @@ class TelemetryCollector:
                 actual_output = max(total_chars // 4, 1) if total_chars > 0 else 0
 
             end_time = time.perf_counter()
-            latency_ms = (end_time - call["start_time"]) * 1000
-            ttft_ms = ((call["first_token_time"] - call["start_time"]) * 1000) if call["first_token_time"] > 0 else 0
+            latency_ms = (end_time - call['start_time']) * 1000
+            ttft_ms = ((call['first_token_time'] - call['start_time']) * 1000) if call['first_token_time'] > 0 else 0
 
             # Direct measurement: streaming time = end_time - first_token_time (not indirect subtraction)
-            streaming_time_ms = max((end_time - call["first_token_time"]) * 1000, 0) if call["first_token_time"] > 0 else 0
+            streaming_time_ms = max((end_time - call['first_token_time']) * 1000, 0) if call['first_token_time'] > 0 else 0
 
             event = {
-                "type": "llm_call",
-                "instance": instance_name,
-                "model": call["model"],
-                "input_tokens_est": call["input_tokens_est"],
-                "output_tokens_est": actual_output,
-                "latency_ms": round(latency_ms, 1),
-                "ttft_ms": round(ttft_ms, 1),
-                "streaming_time_ms": round(streaming_time_ms, 1),
-                "tps": round(actual_output / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and actual_output > 0 else 0,
-                "timestamp": _now_iso(),
+                'type': 'llm_call',
+                'instance': instance_name,
+                'model': call['model'],
+                'input_tokens_est': call['input_tokens_est'],
+                'output_tokens_est': actual_output,
+                'latency_ms': round(latency_ms, 1),
+                'ttft_ms': round(ttft_ms, 1),
+                'streaming_time_ms': round(streaming_time_ms, 1),
+                'tps': round(actual_output / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and actual_output > 0 else 0,
+                'timestamp': _now_iso(),
             }
 
             # Update session stats
-            self._session_stats["total_llm_calls"] += 1
-            self._session_stats["total_input_tokens_est"] += call["input_tokens_est"]
-            self._session_stats["total_output_tokens_est"] += actual_output
-            self._session_stats["total_llm_latency_ms"] += latency_ms
-            self._session_stats["total_ttft_ms"] += ttft_ms
-            self._session_stats["total_streaming_time_ms"] += streaming_time_ms
-            self._session_stats["llm_calls_by_model"][call["model"]] += 1
+            self._session_stats['total_llm_calls'] += 1
+            self._session_stats['total_input_tokens_est'] += call['input_tokens_est']
+            self._session_stats['total_output_tokens_est'] += actual_output
+            self._session_stats['total_llm_latency_ms'] += latency_ms
+            self._session_stats['total_ttft_ms'] += ttft_ms
+            self._session_stats['total_streaming_time_ms'] += streaming_time_ms
+            self._session_stats['llm_calls_by_model'][call['model']] += 1
 
             # Update active turn and per-config latency stats
             turn = self._active_turns.get(instance_name)
             if turn:
-                turn["llm_calls"] += 1
+                turn['llm_calls'] += 1
                 # Attribute this LLM call to the calling instance's agent class.
                 # Guarded: no active turn / empty class → not attributed (no spurious row).
-                ac = turn.get("agent_class") or ""
+                ac = turn.get('agent_class') or ''
                 if ac:
-                    self._ensure_agent_class_stats(ac)["llm_calls"] += 1
-                turn["input_tokens_est"] += call["input_tokens_est"]
-                turn["output_tokens_est"] += actual_output
+                    self._ensure_agent_class_stats(ac)['llm_calls'] += 1
+                turn['input_tokens_est'] += call['input_tokens_est']
+                turn['output_tokens_est'] += actual_output
                 # Update per-config latency fields (BUG 5 fix)
-                fp = turn.get("config_fingerprint", "")
+                fp = turn.get('config_fingerprint', '')
                 if fp and fp in self._config_stats:
                     cs = self._config_stats[fp]
-                    cs["total_llm_latency_ms"] += latency_ms
-                    cs["total_ttft_ms"] += ttft_ms
-                    cs["total_streaming_time_ms"] += streaming_time_ms
+                    cs['total_llm_latency_ms'] += latency_ms
+                    cs['total_ttft_ms'] += ttft_ms
+                    cs['total_streaming_time_ms'] += streaming_time_ms
                     # Live per-config llm_calls + tokens (moved from record_turn_end).
-                    cs["llm_calls"] += 1
-                    cs["input_tokens_est"] += call["input_tokens_est"]
-                    cs["output_tokens_est"] += actual_output
+                    cs['llm_calls'] += 1
+                    cs['input_tokens_est'] += call['input_tokens_est']
+                    cs['output_tokens_est'] += actual_output
                 if ac:
-                    self._ensure_agent_class_stats(ac)["tokens_generated"] += actual_output
+                    self._ensure_agent_class_stats(ac)['tokens_generated'] += actual_output
 
         self._write_event(event)
 
@@ -555,9 +555,9 @@ class TelemetryCollector:
         with _telemetry_lock:
             key = f"{instance_name}:{tool_name}"
             self._active_tool_calls[key] = {
-                "start_time": time.perf_counter(),
-                "tool_name": tool_name,
-                "instance": instance_name,
+                'start_time': time.perf_counter(),
+                'tool_name': tool_name,
+                'instance': instance_name,
             }
 
     def record_tool_call_end(
@@ -567,7 +567,7 @@ class TelemetryCollector:
         success: bool = True,
         result_chars: int = 0,
         truncated: bool = False,
-        error: str = "",
+        error: str = '',
         is_call_agent: bool = False,
     ):
         """Mark the end of a tool execution."""
@@ -577,61 +577,61 @@ class TelemetryCollector:
             if not call:
                 return
 
-            latency_ms = (time.perf_counter() - call["start_time"]) * 1000
+            latency_ms = (time.perf_counter() - call['start_time']) * 1000
 
             event = {
-                "type": "tool_call",
-                "instance": instance_name,
-                "tool_name": tool_name,
-                "latency_ms": round(latency_ms, 1),
-                "success": success,
-                "result_chars": result_chars,
-                "truncated": truncated,
-                "timestamp": _now_iso(),
+                'type': 'tool_call',
+                'instance': instance_name,
+                'tool_name': tool_name,
+                'latency_ms': round(latency_ms, 1),
+                'success': success,
+                'result_chars': result_chars,
+                'truncated': truncated,
+                'timestamp': _now_iso(),
             }
             if error:
-                event["error"] = error[:MAX_ERROR_MESSAGE_LENGTH]
+                event['error'] = error[:MAX_ERROR_MESSAGE_LENGTH]
 
             # Update session stats (call_agent excluded from avg tool latency)
-            self._session_stats["total_tool_calls"] += 1
+            self._session_stats['total_tool_calls'] += 1
             if is_call_agent:
                 # Single source of truth for call_agent metrics — both the count
                 # and the latency are driven by the is_call_agent flag, so they
                 # can never disagree (count used to be derived from the tool name).
-                self._session_stats["call_agent_calls"] += 1
-                self._session_stats["call_agent_latency_ms"] += latency_ms
+                self._session_stats['call_agent_calls'] += 1
+                self._session_stats['call_agent_latency_ms'] += latency_ms
             else:
-                self._session_stats["total_tool_latency_ms"] += latency_ms
-            self._session_stats["tool_calls_by_name"][tool_name] += 1
+                self._session_stats['total_tool_latency_ms'] += latency_ms
+            self._session_stats['tool_calls_by_name'][tool_name] += 1
             if not success:
-                self._session_stats["tool_failures_by_name"][tool_name] += 1
-            self._session_stats["tool_latency_by_name"][tool_name] += latency_ms
+                self._session_stats['tool_failures_by_name'][tool_name] += 1
+            self._session_stats['tool_latency_by_name'][tool_name] += latency_ms
 
             # Update active turn
             turn = self._active_turns.get(instance_name)
             if turn:
-                turn["tool_calls"] += 1
-                turn["tool_calls_detail"].append({
-                    "tool_name": tool_name,
-                    "latency_ms": round(latency_ms, 1),
-                    "success": success,
-                    "truncated": truncated,
+                turn['tool_calls'] += 1
+                turn['tool_calls_detail'].append({
+                    'tool_name': tool_name,
+                    'latency_ms': round(latency_ms, 1),
+                    'success': success,
+                    'truncated': truncated,
                 })
                 # Live per-config tool counts (moved from record_turn_end).
-                fp = turn.get("config_fingerprint", "")
+                fp = turn.get('config_fingerprint', '')
                 if fp and fp in self._config_stats:
                     cs = self._config_stats[fp]
-                    cs["tool_calls"] += 1
-                    cs["tool_calls_by_name"][tool_name] += 1
+                    cs['tool_calls'] += 1
+                    cs['tool_calls_by_name'][tool_name] += 1
                     if not success:
-                        cs["tool_failures_by_name"][tool_name] += 1
+                        cs['tool_failures_by_name'][tool_name] += 1
                 # Live per-class tool counts (moved from record_turn_end). Bumping
                 # tool_calls here — not just on failure — keeps tool_usage_accuracy live.
-                ac = turn.get("agent_class") or ""
+                ac = turn.get('agent_class') or ''
                 if ac:
-                    self._ensure_agent_class_stats(ac)["tool_calls"] += 1
+                    self._ensure_agent_class_stats(ac)['tool_calls'] += 1
                     if not success:
-                        self._ensure_agent_class_stats(ac)["tool_failures"] += 1
+                        self._ensure_agent_class_stats(ac)['tool_failures'] += 1
 
         self._write_event(event)
 
@@ -645,18 +645,18 @@ class TelemetryCollector:
         """Record an agent instance delegation."""
         with _telemetry_lock:
             event = {
-                "type": "agent_instance_call",
-                "instance": instance_name,
-                "agent_class": agent_class,
-                "caller": caller,
-                "latency_ms": round(latency_ms, 1),
-                "timestamp": _now_iso(),
+                'type': 'agent_instance_call',
+                'instance': instance_name,
+                'agent_class': agent_class,
+                'caller': caller,
+                'latency_ms': round(latency_ms, 1),
+                'timestamp': _now_iso(),
             }
-            self._session_stats["agent_instance_calls"] += 1
+            self._session_stats['agent_instance_calls'] += 1
 
         self._write_event(event)
 
-    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0, loop_type: str = "outer", warned: bool = True):
+    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0, loop_type: str = 'outer', warned: bool = True):
         """Record a loop detection event.
 
         ``warned`` (two-tier redesign): for fuzzy-warning events, True when an
@@ -666,32 +666,32 @@ class TelemetryCollector:
         """
         with _telemetry_lock:
             event = {
-                "type": "loop_detected",
-                "instance": instance_name,
-                "reason": reason,
-                "auto_rolled_back": auto_rolled_back,
-                "pop_count": pop_count,
-                "loop_type": loop_type,
-                "warned": warned,
-                "timestamp": _now_iso(),
+                'type': 'loop_detected',
+                'instance': instance_name,
+                'reason': reason,
+                'auto_rolled_back': auto_rolled_back,
+                'pop_count': pop_count,
+                'loop_type': loop_type,
+                'warned': warned,
+                'timestamp': _now_iso(),
             }
-            self._session_stats["total_loops_detected"] += 1
-            if loop_type == "inner":
-                self._session_stats["loops_inner"] += 1
+            self._session_stats['total_loops_detected'] += 1
+            if loop_type == 'inner':
+                self._session_stats['loops_inner'] += 1
             else:
-                self._session_stats["loops_outer"] += 1
+                self._session_stats['loops_outer'] += 1
 
             turn = self._active_turns.get(instance_name)
             if turn:
-                turn["loops_detected"] += 1
+                turn['loops_detected'] += 1
                 if auto_rolled_back:
-                    turn["retries"] += 1
+                    turn['retries'] += 1
                 # Live per-config loop/retry counts (moved from record_turn_end).
-                fp = turn.get("config_fingerprint", "")
+                fp = turn.get('config_fingerprint', '')
                 if fp and fp in self._config_stats:
-                    self._config_stats[fp]["loops_detected"] += 1
+                    self._config_stats[fp]['loops_detected'] += 1
                     if auto_rolled_back:
-                        self._config_stats[fp]["retries"] += 1
+                        self._config_stats[fp]['retries'] += 1
 
         self._write_event(event)
 
@@ -704,12 +704,12 @@ class TelemetryCollector:
         """
         with _telemetry_lock:
             event = {
-                "type": "auto_continue",
-                "instance": instance_name,
-                "reason": reason,
-                "timestamp": _now_iso(),
+                'type': 'auto_continue',
+                'instance': instance_name,
+                'reason': reason,
+                'timestamp': _now_iso(),
             }
-            self._session_stats["total_auto_continues"] += 1
+            self._session_stats['total_auto_continues'] += 1
 
         self._write_event(event)
 
@@ -729,19 +729,19 @@ class TelemetryCollector:
         """
         with _telemetry_lock:
             event = {
-                "type": "skill_advisor_decision",
-                "instance": instance_name,
-                "verdict": verdict,
-                "skill_count": skill_count,
-                "latency_ms": round(latency_ms, 1),
-                "was_fallback": was_fallback,
-                "timestamp": _now_iso(),
+                'type': 'skill_advisor_decision',
+                'instance': instance_name,
+                'verdict': verdict,
+                'skill_count': skill_count,
+                'latency_ms': round(latency_ms, 1),
+                'was_fallback': was_fallback,
+                'timestamp': _now_iso(),
             }
-            self._session_stats["skill_advisor_calls"] += 1
-            if verdict == "deny":
-                self._session_stats["skill_advisor_denials"] += 1
+            self._session_stats['skill_advisor_calls'] += 1
+            if verdict == 'deny':
+                self._session_stats['skill_advisor_denials'] += 1
             elif was_fallback:
-                self._session_stats["skill_advisor_fallbacks"] += 1
+                self._session_stats['skill_advisor_fallbacks'] += 1
 
         self._write_event(event)
 
@@ -755,24 +755,24 @@ class TelemetryCollector:
         """Record a context compression event."""
         with _telemetry_lock:
             event = {
-                "type": "compression",
-                "instance": instance_name,
-                "fraction": fraction,
-                "tokens_before": tokens_before,
-                "tokens_after": tokens_after,
-                "tokens_saved": tokens_before - tokens_after,
-                "timestamp": _now_iso(),
+                'type': 'compression',
+                'instance': instance_name,
+                'fraction': fraction,
+                'tokens_before': tokens_before,
+                'tokens_after': tokens_after,
+                'tokens_saved': tokens_before - tokens_after,
+                'timestamp': _now_iso(),
             }
-            self._session_stats["total_compressions"] += 1
+            self._session_stats['total_compressions'] += 1
 
             # Update active turn compression counter if one exists
             turn = self._active_turns.get(instance_name)
             if turn:
-                turn["compressions"] += 1
+                turn['compressions'] += 1
                 # Also update per-config stats for this compression
-                fp = turn.get("config_fingerprint", "")
+                fp = turn.get('config_fingerprint', '')
                 if fp and fp in self._config_stats:
-                    self._config_stats[fp]["total_compressions"] += 1
+                    self._config_stats[fp]['total_compressions'] += 1
 
         self._write_event(event)
 
@@ -788,75 +788,75 @@ class TelemetryCollector:
             }
 
         # Calculate derived metrics
-        total_tokens = stats["total_input_tokens_est"] + stats["total_output_tokens_est"]
-        total_streaming_time_sec = stats.get("total_streaming_time_ms", 0) / 1000
+        total_tokens = stats['total_input_tokens_est'] + stats['total_output_tokens_est']
+        total_streaming_time_sec = stats.get('total_streaming_time_ms', 0) / 1000
 
-        avg_tps = stats["total_output_tokens_est"] / total_streaming_time_sec if total_streaming_time_sec > 0 else 0
-        avg_llm_latency = stats["total_llm_latency_ms"] / stats["total_llm_calls"] if stats["total_llm_calls"] > 0 else 0
+        avg_tps = stats['total_output_tokens_est'] / total_streaming_time_sec if total_streaming_time_sec > 0 else 0
+        avg_llm_latency = stats['total_llm_latency_ms'] / stats['total_llm_calls'] if stats['total_llm_calls'] > 0 else 0
         # Exclude call_agent from the avg tool-latency denominator to match its
         # numerator. Derived from the is_call_agent-driven counter (single source
         # of truth) so it always agrees with call_agent_latency_ms.
-        call_agent_count = stats.get("call_agent_calls", 0)
-        non_agent_tool_calls = stats["total_tool_calls"] - call_agent_count
-        avg_tool_latency = stats["total_tool_latency_ms"] / non_agent_tool_calls if non_agent_tool_calls > 0 else 0
+        call_agent_count = stats.get('call_agent_calls', 0)
+        non_agent_tool_calls = stats['total_tool_calls'] - call_agent_count
+        avg_tool_latency = stats['total_tool_latency_ms'] / non_agent_tool_calls if non_agent_tool_calls > 0 else 0
 
         # Prompt-cache hit ratio (unknowns excluded from the denominator).
         # Derived from server-reported cached_tokens (authoritative) + header fallback.
-        _cache_total = stats.get("llm_cache_hits", 0) + stats.get("llm_cache_misses", 0)
-        llm_cache_hit_ratio = round(stats.get("llm_cache_hits", 0) / _cache_total, 3) if _cache_total > 0 else None
+        _cache_total = stats.get('llm_cache_hits', 0) + stats.get('llm_cache_misses', 0)
+        llm_cache_hit_ratio = round(stats.get('llm_cache_hits', 0) / _cache_total, 3) if _cache_total > 0 else None
 
         # Coverage: fraction of LLM calls that were actually classified (hit or miss).
         # Low coverage means most traffic came from non-supporting backends (no usage),
         # so the hit ratio above is based on a small sample. Exposed for the WebUI to
         # display measurement confidence.
-        _total_llm = stats.get("total_llm_calls", 0)
+        _total_llm = stats.get('total_llm_calls', 0)
         llm_cache_classified_ratio = round(_cache_total / _total_llm, 3) if _total_llm > 0 else None
 
         # Tool success rates
         tool_success_rates = {}
-        for name, count in stats["tool_calls_by_name"].items():
-            failures = stats["tool_failures_by_name"].get(name, 0)
+        for name, count in stats['tool_calls_by_name'].items():
+            failures = stats['tool_failures_by_name'].get(name, 0)
             tool_success_rates[name] = {
-                "total": count,
-                "failures": failures,
-                "success_rate": round((count - failures) / count * 100, 1) if count > 0 else 100.0,
-                "avg_latency_ms": round(stats["tool_latency_by_name"].get(name, 0) / count, 1) if count > 0 else 0,
+                'total': count,
+                'failures': failures,
+                'success_rate': round((count - failures) / count * 100, 1) if count > 0 else 100.0,
+                'avg_latency_ms': round(stats['tool_latency_by_name'].get(name, 0) / count, 1) if count > 0 else 0,
             }
 
         return {
-            "session_id": self.session_id,
-            "total_turns": stats["total_turns"],
-            "total_user_turns": stats["total_user_turns"],
-            "total_llm_calls": stats["total_llm_calls"],
-            "total_tool_calls": stats["total_tool_calls"],
-            "total_input_tokens_est": stats["total_input_tokens_est"],
-            "total_output_tokens_est": stats["total_output_tokens_est"],
-            "total_tokens": total_tokens,
-            "avg_tps": round(avg_tps, 1),
-            "avg_llm_latency_ms": round(avg_llm_latency, 1),
-            "avg_tool_latency_ms": round(avg_tool_latency, 1),
-            "call_agent_count": call_agent_count,
-            "call_agent_latency_ms": stats.get("call_agent_latency_ms", 0),
-            "total_loops_detected": stats["total_loops_detected"],
-            "loops_outer": stats.get("loops_outer", 0),
-            "loops_inner": stats.get("loops_inner", 0),
-            "total_auto_continues": stats.get("total_auto_continues", 0),
-            "total_retries": stats["total_retries"],
-            "total_compressions": stats["total_compressions"],
-            "write_failures": stats.get("write_failures", 0),
-            "agent_instance_calls": stats["agent_instance_calls"],
-            "llm_calls_by_model": dict(stats["llm_calls_by_model"]),
-            "tool_effectiveness": tool_success_rates,
+            'session_id': self.session_id,
+            'total_turns': stats['total_turns'],
+            'total_user_turns': stats['total_user_turns'],
+            'total_llm_calls': stats['total_llm_calls'],
+            'total_tool_calls': stats['total_tool_calls'],
+            'total_input_tokens_est': stats['total_input_tokens_est'],
+            'total_output_tokens_est': stats['total_output_tokens_est'],
+            'total_tokens': total_tokens,
+            'avg_tps': round(avg_tps, 1),
+            'avg_llm_latency_ms': round(avg_llm_latency, 1),
+            'avg_tool_latency_ms': round(avg_tool_latency, 1),
+            'call_agent_count': call_agent_count,
+            'call_agent_latency_ms': stats.get('call_agent_latency_ms', 0),
+            'total_loops_detected': stats['total_loops_detected'],
+            'loops_outer': stats.get('loops_outer', 0),
+            'loops_inner': stats.get('loops_inner', 0),
+            'total_auto_continues': stats.get('total_auto_continues', 0),
+            'total_retries': stats['total_retries'],
+            'total_compressions': stats['total_compressions'],
+            'write_failures': stats.get('write_failures', 0),
+            'agent_instance_calls': stats['agent_instance_calls'],
+            'llm_calls_by_model': dict(stats['llm_calls_by_model']),
+            'tool_effectiveness': tool_success_rates,
             # Skill Advisor (AUTO Skill Helper — Advanced) session counters.
-            "skill_advisor_calls": stats.get("skill_advisor_calls", 0),
-            "skill_advisor_denials": stats.get("skill_advisor_denials", 0),
-            "skill_advisor_fallbacks": stats.get("skill_advisor_fallbacks", 0),
+            'skill_advisor_calls': stats.get('skill_advisor_calls', 0),
+            'skill_advisor_denials': stats.get('skill_advisor_denials', 0),
+            'skill_advisor_fallbacks': stats.get('skill_advisor_fallbacks', 0),
             # RFC 9211 prompt-cache hit/miss counters + derived hit ratio.
-            "llm_cache_hits": stats.get("llm_cache_hits", 0),
-            "llm_cache_misses": stats.get("llm_cache_misses", 0),
-            "llm_cache_unknown": stats.get("llm_cache_unknown", 0),
-            "llm_cache_hit_ratio": llm_cache_hit_ratio,
-            "llm_cache_classified_ratio": llm_cache_classified_ratio,
+            'llm_cache_hits': stats.get('llm_cache_hits', 0),
+            'llm_cache_misses': stats.get('llm_cache_misses', 0),
+            'llm_cache_unknown': stats.get('llm_cache_unknown', 0),
+            'llm_cache_hit_ratio': llm_cache_hit_ratio,
+            'llm_cache_classified_ratio': llm_cache_classified_ratio,
         }
 
     def get_config_comparison(self) -> List[Dict]:
@@ -864,41 +864,41 @@ class TelemetryCollector:
         with _telemetry_lock:
             result = []
             for fp, cs in self._config_stats.items():
-                total_tokens = cs["input_tokens_est"] + cs["output_tokens_est"]
-                total_time_sec = cs["total_duration_ms"] / 1000 if cs["total_duration_ms"] > 0 else 0
-                avg_turn_time = cs["total_duration_ms"] / cs["turns"] if cs["turns"] > 0 else 0
-                avg_tokens_per_turn = total_tokens / cs["turns"] if cs["turns"] > 0 else 0
+                total_tokens = cs['input_tokens_est'] + cs['output_tokens_est']
+                total_time_sec = cs['total_duration_ms'] / 1000 if cs['total_duration_ms'] > 0 else 0
+                avg_turn_time = cs['total_duration_ms'] / cs['turns'] if cs['turns'] > 0 else 0
+                avg_tokens_per_turn = total_tokens / cs['turns'] if cs['turns'] > 0 else 0
 
                 # Streaming time and TPS for this config
-                config_streaming_sec = cs["total_streaming_time_ms"] / 1000 if cs["total_streaming_time_ms"] > 0 else 0
-                config_tps = cs["output_tokens_est"] / config_streaming_sec if config_streaming_sec > 0 else 0
+                config_streaming_sec = cs['total_streaming_time_ms'] / 1000 if cs['total_streaming_time_ms'] > 0 else 0
+                config_tps = cs['output_tokens_est'] / config_streaming_sec if config_streaming_sec > 0 else 0
 
                 # Tool success rates for this config
                 tool_rates = {}
-                for name, count in cs["tool_calls_by_name"].items():
-                    failures = cs["tool_failures_by_name"].get(name, 0)
+                for name, count in cs['tool_calls_by_name'].items():
+                    failures = cs['tool_failures_by_name'].get(name, 0)
                     tool_rates[name] = {
-                        "total": count,
-                        "success_rate": round((count - failures) / count * 100, 1) if count > 0 else 100.0,
+                        'total': count,
+                        'success_rate': round((count - failures) / count * 100, 1) if count > 0 else 100.0,
                     }
 
                 result.append({
-                    "config_fingerprint": fp,
-                    "config_description": dict(cs["config_description"]),
-                    "turns": cs["turns"],
-                    "llm_calls": cs["llm_calls"],
-                    "tool_calls": cs["tool_calls"],
-                    "input_tokens_est": cs["input_tokens_est"],
-                    "output_tokens_est": cs["output_tokens_est"],
-                    "total_tokens": total_tokens,
-                    "total_duration_sec": round(total_time_sec, 1),
-                    "avg_turn_duration_ms": round(avg_turn_time, 1),
-                    "avg_tokens_per_turn": round(avg_tokens_per_turn),
-                    "total_streaming_time_sec": round(config_streaming_sec, 1),
-                    "avg_tps": round(config_tps, 1),
-                    "loops_detected": cs["loops_detected"],
-                    "retries": cs["retries"],
-                    "tool_effectiveness": tool_rates,
+                    'config_fingerprint': fp,
+                    'config_description': dict(cs['config_description']),
+                    'turns': cs['turns'],
+                    'llm_calls': cs['llm_calls'],
+                    'tool_calls': cs['tool_calls'],
+                    'input_tokens_est': cs['input_tokens_est'],
+                    'output_tokens_est': cs['output_tokens_est'],
+                    'total_tokens': total_tokens,
+                    'total_duration_sec': round(total_time_sec, 1),
+                    'avg_turn_duration_ms': round(avg_turn_time, 1),
+                    'avg_tokens_per_turn': round(avg_tokens_per_turn),
+                    'total_streaming_time_sec': round(config_streaming_sec, 1),
+                    'avg_tps': round(config_tps, 1),
+                    'loops_detected': cs['loops_detected'],
+                    'retries': cs['retries'],
+                    'tool_effectiveness': tool_rates,
                 })
 
         return result
@@ -916,18 +916,18 @@ class TelemetryCollector:
             result = []
             for agent_class in sorted(self._agent_class_stats):
                 acs = self._agent_class_stats[agent_class]
-                tool_calls = acs["tool_calls"]
+                tool_calls = acs['tool_calls']
                 if tool_calls > 0:
-                    accuracy = round((tool_calls - acs["tool_failures"]) / tool_calls * 100, 1)
+                    accuracy = round((tool_calls - acs['tool_failures']) / tool_calls * 100, 1)
                 else:
                     accuracy = None
                 result.append({
-                    "agent_class": agent_class,
-                    "llm_calls": acs["llm_calls"],
-                    "tool_usage_accuracy": accuracy,
-                    "total_time_sec": round(acs["total_time_ms"] / 1000, 1),
-                    "tokens_generated": acs["tokens_generated"],
-                    "turns": acs["turns"],
+                    'agent_class': agent_class,
+                    'llm_calls': acs['llm_calls'],
+                    'tool_usage_accuracy': accuracy,
+                    'total_time_sec': round(acs['total_time_ms'] / 1000, 1),
+                    'tokens_generated': acs['tokens_generated'],
+                    'turns': acs['turns'],
                 })
         return result
 
@@ -946,14 +946,14 @@ class TelemetryCollector:
                 entry = self._skill_usage_stats.get(name)
                 if entry is None:
                     entry = {
-                        "loads": 0,
-                        "agent_classes": set(),
-                        "modes": collections.Counter(),
+                        'loads': 0,
+                        'agent_classes': set(),
+                        'modes': collections.Counter(),
                     }
                     self._skill_usage_stats[name] = entry
-                entry["loads"] += 1
-                entry["agent_classes"].add(agent_class)
-                entry["modes"][mode] += 1
+                entry['loads'] += 1
+                entry['agent_classes'].add(agent_class)
+                entry['modes'][mode] += 1
 
     def get_skill_usage_summary(self) -> List[Dict]:
         """Get per-skill usage stats for the "Skill Usage" table.
@@ -967,19 +967,19 @@ class TelemetryCollector:
         with _telemetry_lock:
             result = []
             for name, entry in self._skill_usage_stats.items():
-                modes = entry["modes"]
+                modes = entry['modes']
                 if modes:
                     # Most common mode; ties broken alphabetically (sort by -count then name).
                     top_mode = sorted(modes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
                 else:
-                    top_mode = ""
+                    top_mode = ''
                 result.append({
-                    "skill": name,
-                    "loads": entry["loads"],
-                    "agent_classes": sorted(entry["agent_classes"]),
-                    "top_mode": top_mode,
+                    'skill': name,
+                    'loads': entry['loads'],
+                    'agent_classes': sorted(entry['agent_classes']),
+                    'top_mode': top_mode,
                 })
-        result.sort(key=lambda r: (-r["loads"], r["skill"]))
+        result.sort(key=lambda r: (-r['loads'], r['skill']))
         return result
 
     def get_recent_events(self, count: int = DEFAULT_RECENT_EVENT_COUNT) -> List[Dict]:
@@ -1012,11 +1012,11 @@ class TelemetryCollector:
             config_comparison = self.get_config_comparison()
 
         event = {
-            "type": "session_end",
-            "session_id": self.session_id,
-            "timestamp": _now_iso(),
-            "summary": summary,
-            "config_comparison": config_comparison,
+            'type': 'session_end',
+            'session_id': self.session_id,
+            'timestamp': _now_iso(),
+            'summary': summary,
+            'config_comparison': config_comparison,
         }
         try:
             self._write_critical_event(event)
@@ -1024,10 +1024,10 @@ class TelemetryCollector:
         except Exception as e:
             # Fallback — log the full summary at INFO so it appears in console logs
             _logger.info(
-                "[TELEMETRY] Session %s end (summary: turns=%d, llm_calls=%d, tool_calls=%d, "
-                "write_failures=%d) — file write failed: %s",
-                self.session_id, summary["total_turns"], summary["total_llm_calls"],
-                summary["total_tool_calls"], summary.get("write_failures", 0), e,
+                '[TELEMETRY] Session %s end (summary: turns=%d, llm_calls=%d, tool_calls=%d, '
+                'write_failures=%d) — file write failed: %s',
+                self.session_id, summary['total_turns'], summary['total_llm_calls'],
+                summary['total_tool_calls'], summary.get('write_failures', 0), e,
             )
 
     def _write_to_file(self, event: Dict, raise_on_error: bool = False):
@@ -1042,7 +1042,7 @@ class TelemetryCollector:
             raise_on_error: If True, raises on I/O failure (for critical events like session_end).
                            If False, logs warning and increments write_failures counter.
         """
-        line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+        line = json.dumps(event, ensure_ascii=False, default=str) + '\n'
 
         try:
             with _telemetry_lock:
@@ -1054,7 +1054,7 @@ class TelemetryCollector:
                     self._log_file.flush()  # Flush to avoid data loss on crash
                 else:
                     # Fallback: reopen file handle so subsequent writes don't pay open/close cost
-                    fh = open(self.log_path, "a", encoding="utf-8")
+                    fh = open(self.log_path, 'a', encoding='utf-8')
                     fh.write(line)
                     fh.flush()
                     self._log_file = fh  # Update cached handle for future writes
@@ -1062,11 +1062,11 @@ class TelemetryCollector:
             if raise_on_error:
                 raise
             _logger.warning(
-                "Failed to write telemetry event [%s]: %s", event.get("type", "unknown"), e,
+                'Failed to write telemetry event [%s]: %s', event.get('type', 'unknown'), e,
             )
             # Increment under lock since this runs outside the main with block above (exception path)
             with _telemetry_lock:
-                self._session_stats["write_failures"] += 1
+                self._session_stats['write_failures'] += 1
 
     def _write_critical_event(self, event: Dict):
         """Append an event to the JSONL log file; raise on I/O failure.
@@ -1094,17 +1094,17 @@ class TelemetryCollector:
                     self._log_file.flush()
                     self._log_file.close()
                 except Exception as e:
-                    _logger.warning("Error closing telemetry log file: %s", e)
+                    _logger.warning('Error closing telemetry log file: %s', e)
 
     def __del__(self):
         """Cleanup guarantee: close file handle if still open (handles crashes/uncaught exceptions)."""
         # Defensive no-op if already closed or not yet initialized
         try:
-            if hasattr(self, "_log_file") and self._log_file is not None and not self._log_file.closed:
+            if hasattr(self, '_log_file') and self._log_file is not None and not self._log_file.closed:
                 try:
                     self._log_file.close()
                 except Exception as e:
-                    _logger.warning("Error in __del__ closing telemetry log file: %s", e)
+                    _logger.warning('Error in __del__ closing telemetry log file: %s', e)
         except Exception:
             # Last resort: never let __del__ raise (avoids interpreter shutdown issues)
             pass

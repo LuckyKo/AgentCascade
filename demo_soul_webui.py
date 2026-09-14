@@ -116,9 +116,9 @@ print(f"  Tools: {config['capabilities']['tools']}")
 chatbot_config = {
     'input.placeholder': f"Chat with {config['name']}...",
     'prompt.suggestions': [
-        "Tell me about yourself",
+        'Tell me about yourself',
         "What's the weather like in Tokyo?",
-        "Search for the latest space discoveries",
+        'Search for the latest space discoveries',
         "Visit https://nasa.gov and tell me what's new",
     ],
     'user.name': 'You',

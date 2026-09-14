@@ -63,10 +63,10 @@ class ViolationRecorder:
         with self._lock:
             self.violations.append(msg)
 
-    def assert_no_violations(self, test_name: str = ""):
+    def assert_no_violations(self, test_name: str = ''):
         with self._lock:
             if self.violations:
-                msgs = "\n".join(f"  - {v}" for v in self.violations[:20])
+                msgs = '\n'.join(f"  - {v}" for v in self.violations[:20])
                 pytest.fail(f"{test_name} had scheduling violations:\n{msgs}")
 
 
@@ -102,9 +102,9 @@ class ConcurrencyTracker:
         with self._lock:
             self.current[slot_key] -= 1
 
-    def assert_no_over_capacity(self, test_name: str = ""):
+    def assert_no_over_capacity(self, test_name: str = ''):
         if self.violations:
-            msgs = "\n".join(f"  - {v}" for v in self.violations[:20])
+            msgs = '\n'.join(f"  - {v}" for v in self.violations[:20])
             pytest.fail(f"{test_name} had concurrency violations:\n{msgs}")
 
 
@@ -113,7 +113,7 @@ class AgentNode:
 
     def __init__(self, name: str):
         self.name = name
-        self.children: List["AgentNode"] = []
+        self.children: List['AgentNode'] = []
         self.is_async_child: bool = False  # True if spawned async
 
 
@@ -135,12 +135,12 @@ def test_router():
     from unittest.mock import patch
 
     test_dir = tempfile.mkdtemp()
-    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_dir}):
+    with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_dir}):
         router = APIRouter(default_llm_cfg={
             'api_base': 'http://default', 'model': 'default-model', 'max_tokens': 2048,
         })
         ep = APIEndpoint(
-            id="ep_default", name="Default", api_base='http://default', model='default-model',
+            id='ep_default', name='Default', api_base='http://default', model='default-model',
             enabled=True, concurrency_limit=0,
         )
         router.add_endpoint(ep)
@@ -167,7 +167,7 @@ def _make_test_router(conc_map: Optional[Dict[str, int]] = None) -> APIRouter:
     from unittest.mock import patch
 
     test_dir = tempfile.mkdtemp()
-    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_dir}):
+    with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_dir}):
         router = APIRouter(default_llm_cfg={
             'api_base': 'http://default', 'model': 'default-model', 'max_tokens': 2048,
         })
@@ -181,7 +181,7 @@ def _make_test_router(conc_map: Optional[Dict[str, int]] = None) -> APIRouter:
                 router.add_endpoint(ep)
         else:
             ep = APIEndpoint(
-                id="ep_default", name="Default", api_base='http://default', model='default-model',
+                id='ep_default', name='Default', api_base='http://default', model='default-model',
                 enabled=True, concurrency_limit=0,
             )
             router.add_endpoint(ep)
@@ -213,7 +213,7 @@ class FIFOWaiterSetup:
     def _waiter(self, name: str, idx: int):
         self.gates[idx].wait()
         self.ready[idx].set()
-        release_cb = self.pool.acquire(instance_name=name, agent_class="test", timeout=5.0)
+        release_cb = self.pool.acquire(instance_name=name, agent_class='test', timeout=5.0)
         with self.lock:
             self.granted_order.append(name)
         time.sleep(self.work_duration)
@@ -264,7 +264,7 @@ class SchedulerFIFOWaiterSetup:
             api_base=self.api_base,
             concurrency_limit=0,
             instance_name=name,
-            agent_class="test",
+            agent_class='test',
             timeout=5.0,
         )
         with self.lock:
@@ -306,7 +306,7 @@ def assert_fifo_order(granted: List[str], expected: Optional[List[str]] = None):
     if expected is not None:
         assert granted == expected, f"FIFO order violated: expected {expected}, got {granted}"
     else:
-        assert len(granted) == len(set(granted)), "Duplicate grants detected"
+        assert len(granted) == len(set(granted)), 'Duplicate grants detected'
 
 
 # ============================================================================
@@ -318,8 +318,8 @@ class TestFIFOOrderingUnderContention:
 
     def test_fifo_grant_order_sequential(self):
         """Multiple agents queue on same sequential slot — grants in exact enqueue order."""
-        pool = SlotPool(key="test_seq", capacity=1)
-        holder_a = pool.create_held_slot("A")
+        pool = SlotPool(key='test_seq', capacity=1)
+        holder_a = pool.create_held_slot('A')
 
         names = [f"T{i+1}" for i in range(FIFO_TEST_WAITERS)]
         setup = FIFOWaiterSetup(pool, names, work_duration=0.05)
@@ -332,7 +332,7 @@ class TestFIFOOrderingUnderContention:
 
     def test_fifo_grant_order_parallel_pool(self):
         """Multiple agents queue on parallel pool (conc=3) — grants respect capacity + FIFO."""
-        pool = SlotPool(key="test_par", capacity=3)
+        pool = SlotPool(key='test_par', capacity=3)
         n_waiters = 9
         names = [f"T{i+1}" for i in range(n_waiters)]
 
@@ -345,9 +345,9 @@ class TestFIFOOrderingUnderContention:
         assert len(granted) == n_waiters, f"All waiters should be granted: got {len(granted)}"
 
         batch1, batch2, batch3 = granted[0:3], granted[3:6], granted[6:9]
-        assert batch1 == ["T1", "T2", "T3"], f"First batch must be T1,T2,T3 in FIFO order, got {batch1}"
-        assert batch2 == ["T4", "T5", "T6"], f"Second batch must be T4,T5,T6 in FIFO order, got {batch2}"
-        assert batch3 == ["T7", "T8", "T9"], f"Third batch must be T7,T8,T9 in FIFO order, got {batch3}"
+        assert batch1 == ['T1', 'T2', 'T3'], f"First batch must be T1,T2,T3 in FIFO order, got {batch1}"
+        assert batch2 == ['T4', 'T5', 'T6'], f"Second batch must be T4,T5,T6 in FIFO order, got {batch2}"
+        assert batch3 == ['T7', 'T8', 'T9'], f"Third batch must be T7,T8,T9 in FIFO order, got {batch3}"
 
         for i in range(n_waiters - 1):
             idx_i = int(granted[i][1:]) - 1
@@ -356,8 +356,8 @@ class TestFIFOOrderingUnderContention:
 
     def test_fifo_no_barging_under_contention(self):
         """Later waiters never granted before earlier ones — even under high contention."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
+        pool = SlotPool(key='test', capacity=1)
+        holder_a = pool.create_held_slot('A')
 
         names = [f"W{i}" for i in range(STRESS_TEST_WAITERS)]
         setup = FIFOWaiterSetup(pool, names, work_duration=0.01)
@@ -370,10 +370,10 @@ class TestFIFOOrderingUnderContention:
 
     def test_fifo_mixed_conc_pools(self):
         """Agents on conc=0 and conc=N pools queue independently — no cross-pool interference."""
-        seq_pool = SlotPool(key="_shared_sequential_slot_", capacity=1)
-        par_pool = SlotPool(key="http://parallel", capacity=2)
+        seq_pool = SlotPool(key='_shared_sequential_slot_', capacity=1)
+        par_pool = SlotPool(key='http://parallel', capacity=2)
 
-        holder_a = seq_pool.create_held_slot("A")
+        holder_a = seq_pool.create_held_slot('A')
 
         n_seq, n_par = FIFO_TEST_WAITERS, 4
         seq_setup = FIFOWaiterSetup(seq_pool, [f"S{i}" for i in range(n_seq)], work_duration=0.03)
@@ -389,7 +389,7 @@ class TestFIFOOrderingUnderContention:
         par_setup.join_all(timeout=10)
 
         assert_fifo_order(seq_setup.granted_order, [f"S{i}" for i in range(n_seq)])
-        assert_fifo_order(par_setup.granted_order, ["P0", "P1", "P2", "P3"])
+        assert_fifo_order(par_setup.granted_order, ['P0', 'P1', 'P2', 'P3'])
 
 
 # ============================================================================
@@ -401,8 +401,8 @@ class TestCancelOnTermination:
 
     def test_cancel_queued_agent_next_waiter_granted(self):
         """Agent queued on slot, terminated -> ticket cancelled within ≤1s, next waiter granted."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
+        pool = SlotPool(key='test', capacity=1)
+        holder_a = pool.create_held_slot('A')
 
         b_granted_event = threading.Event()
         b_released_event = threading.Event()
@@ -410,7 +410,7 @@ class TestCancelOnTermination:
 
         def waiter_b():
             b_ready.set()
-            release_cb = pool.acquire(instance_name="B", agent_class="test")
+            release_cb = pool.acquire(instance_name='B', agent_class='test')
             b_granted_event.set()
             time.sleep(0.5)  # Hold slot while C waits in queue
             release_cb()
@@ -418,7 +418,7 @@ class TestCancelOnTermination:
 
         t_b = threading.Thread(target=waiter_b)
         t_b.start()
-        assert b_ready.wait(timeout=2), "B should have started acquiring"
+        assert b_ready.wait(timeout=2), 'B should have started acquiring'
 
         c_cancelled = threading.Event()
         c_ready = threading.Event()
@@ -426,23 +426,23 @@ class TestCancelOnTermination:
         def waiter_c():
             c_ready.set()
             try:
-                pool.acquire(instance_name="C", agent_class="test")
+                pool.acquire(instance_name='C', agent_class='test')
             except SlotCancelled:
                 c_cancelled.set()
 
         t_c = threading.Thread(target=waiter_c)
         t_c.start()
-        assert c_ready.wait(timeout=2), "C should have started acquiring"
+        assert c_ready.wait(timeout=2), 'C should have started acquiring'
 
         pool.release(holder_a)
-        assert b_granted_event.wait(timeout=2), "B should be granted after A releases"
+        assert b_granted_event.wait(timeout=2), 'B should be granted after A releases'
 
         start = time.monotonic()
-        cancelled = pool.cancel(agent_name="C")
+        cancelled = pool.cancel(agent_name='C')
         elapsed = time.monotonic() - start
 
         assert cancelled, "C's ticket should be cancelled"
-        assert c_cancelled.wait(timeout=2), "C should receive SlotCancelled within 1s tick"
+        assert c_cancelled.wait(timeout=2), 'C should receive SlotCancelled within 1s tick'
         assert elapsed < 0.5, f"Cancel took {elapsed:.2f}s — should be immediate under lock"
 
         t_c.join(timeout=3)
@@ -450,8 +450,8 @@ class TestCancelOnTermination:
 
     def test_mass_termination_active_queue_all_cleaned(self):
         """Mass termination during active queue — all tickets cleaned."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
+        pool = SlotPool(key='test', capacity=1)
+        holder_a = pool.create_held_slot('A')
 
         n_agents = 50
         cancelled_events = {f"agent_{i}": threading.Event() for i in range(n_agents)}
@@ -460,7 +460,7 @@ class TestCancelOnTermination:
         def waiter(name: str):
             ready_events[name].set()
             try:
-                pool.acquire(instance_name=name, agent_class="test", timeout=10)
+                pool.acquire(instance_name=name, agent_class='test', timeout=10)
             except SlotCancelled:
                 cancelled_events[name].set()
 
@@ -475,7 +475,7 @@ class TestCancelOnTermination:
             assert ready_events[f"agent_{i}"].wait(timeout=3), f"agent_{i} should have started acquiring"
 
         status_before = pool.get_status()
-        assert status_before["waiting_count"] == n_agents, f"All {n_agents} agents should be waiting"
+        assert status_before['waiting_count'] == n_agents, f"All {n_agents} agents should be waiting"
 
         start = time.monotonic()
         for i in range(n_agents // 2):
@@ -484,7 +484,7 @@ class TestCancelOnTermination:
 
         status_after = pool.get_status()
         expected_remaining = n_agents - (n_agents // 2)
-        assert status_after["waiting_count"] == expected_remaining, \
+        assert status_after['waiting_count'] == expected_remaining, \
             f"After mass cancel: expected {expected_remaining} remaining, got {status_after['waiting_count']}"
 
         for i in range(n_agents // 2):
@@ -509,7 +509,7 @@ class TestStressAndSoak:
     def _stress_agent_task(self, name: str, pool: SlotPool, tracker: ConcurrencyTracker,
                            pool_key: str, sleep_range: Tuple[float, float]):
         """Common agent task for stress tests."""
-        release_cb = pool.acquire(instance_name=name, agent_class="test")
+        release_cb = pool.acquire(instance_name=name, agent_class='test')
         tracker.enter(pool_key, name)
         try:
             time.sleep(random.uniform(*sleep_range))
@@ -519,16 +519,16 @@ class TestStressAndSoak:
 
     def test_concurrent_agents_shared_sequential_pool(self):
         """Many concurrent agents on conc=0 pool — never more than 1 running simultaneously."""
-        pool = SlotPool(key="_shared_sequential_slot_", capacity=1)
+        pool = SlotPool(key='_shared_sequential_slot_', capacity=1)
         tracker = ConcurrencyTracker()
-        tracker.set_capacity("_shared_sequential_slot_", 1)
+        tracker.set_capacity('_shared_sequential_slot_', 1)
 
         n_agents = 30
         completed = [0]
         lock = threading.Lock()
 
         def agent_task(name: str):
-            self._stress_agent_task(name, pool, tracker, "_shared_sequential_slot_", (0.01, 0.05))
+            self._stress_agent_task(name, pool, tracker, '_shared_sequential_slot_', (0.01, 0.05))
             with lock:
                 completed[0] += 1
 
@@ -538,20 +538,20 @@ class TestStressAndSoak:
                 f.result()
 
         assert completed[0] == n_agents, f"All {n_agents} agents should complete"
-        tracker.assert_no_over_capacity("test_concurrent_agents_shared_sequential_pool")
+        tracker.assert_no_over_capacity('test_concurrent_agents_shared_sequential_pool')
 
     def test_concurrent_agents_parallel_pool(self):
         """Many concurrent agents on conc=3 pool — never more than 3 running simultaneously."""
-        pool = SlotPool(key="http://parallel", capacity=3)
+        pool = SlotPool(key='http://parallel', capacity=3)
         tracker = ConcurrencyTracker()
-        tracker.set_capacity("http://parallel", 3)
+        tracker.set_capacity('http://parallel', 3)
 
         n_agents = 40
         completed = [0]
         lock = threading.Lock()
 
         def agent_task(name: str):
-            self._stress_agent_task(name, pool, tracker, "http://parallel", (0.01, 0.04))
+            self._stress_agent_task(name, pool, tracker, 'http://parallel', (0.01, 0.04))
             with lock:
                 completed[0] += 1
 
@@ -561,24 +561,24 @@ class TestStressAndSoak:
                 f.result()
 
         assert completed[0] == n_agents
-        tracker.assert_no_over_capacity("test_concurrent_agents_parallel_pool")
+        tracker.assert_no_over_capacity('test_concurrent_agents_parallel_pool')
 
     def test_mixed_sync_async_contention(self):
         """Mixed sync/async patterns on limited pools — track per-slot turn ownership."""
-        seq_pool = SlotPool(key="_shared_sequential_slot_", capacity=1)
-        par_pool = SlotPool(key="http://parallel", capacity=2)
+        seq_pool = SlotPool(key='_shared_sequential_slot_', capacity=1)
+        par_pool = SlotPool(key='http://parallel', capacity=2)
 
         tracker_seq = ConcurrencyTracker()
-        tracker_seq.set_capacity("_shared_sequential_slot_", 1)
+        tracker_seq.set_capacity('_shared_sequential_slot_', 1)
         tracker_par = ConcurrencyTracker()
-        tracker_par.set_capacity("http://parallel", 2)
+        tracker_par.set_capacity('http://parallel', 2)
 
         violations = ViolationRecorder()
         completed = [0]
         lock = threading.Lock()
 
         def sync_agent(name: str, pool: SlotPool, tracker: ConcurrencyTracker, pool_key: str):
-            release_cb = pool.acquire(instance_name=name, agent_class="test")
+            release_cb = pool.acquire(instance_name=name, agent_class='test')
             over = tracker.enter(pool_key, name)
             if over:
                 violations.record(f"{name}: over capacity on {pool_key}")
@@ -591,22 +591,22 @@ class TestStressAndSoak:
                 completed[0] += 1
 
         def async_parent(name: str):
-            parent_chain = ("root", name)
-            seq_release = seq_pool.acquire(instance_name=name, agent_class="test")
-            tracker_seq.enter("_shared_sequential_slot_", name)
+            parent_chain = ('root', name)
+            seq_release = seq_pool.acquire(instance_name=name, agent_class='test')
+            tracker_seq.enter('_shared_sequential_slot_', name)
 
             child_done = threading.Event()
 
             def async_child():
                 par_release = par_pool.acquire(
                     instance_name=f"{name}_child",
-                    agent_class="test",
+                    agent_class='test',
                 )
-                tracker_par.enter("http://parallel", f"{name}_child")
+                tracker_par.enter('http://parallel', f"{name}_child")
                 try:
                     time.sleep(random.uniform(0.01, 0.02))
                 finally:
-                    tracker_par.leave("http://parallel", f"{name}_child")
+                    tracker_par.leave('http://parallel', f"{name}_child")
                     par_release()
                 child_done.set()
 
@@ -617,7 +617,7 @@ class TestStressAndSoak:
             child_done.wait(timeout=5)
             child_thread.join(timeout=6)
 
-            tracker_seq.leave("_shared_sequential_slot_", name)
+            tracker_seq.leave('_shared_sequential_slot_', name)
             seq_release()
             with lock:
                 completed[0] += 1
@@ -630,7 +630,7 @@ class TestStressAndSoak:
             for i in range(n_sync):
                 pool = random.choice([seq_pool, par_pool])
                 tracker = tracker_seq if pool is seq_pool else tracker_par
-                key = "_shared_sequential_slot_" if pool is seq_pool else "http://parallel"
+                key = '_shared_sequential_slot_' if pool is seq_pool else 'http://parallel'
                 futures.append(executor.submit(sync_agent, f"sync_{i}", pool, tracker, key))
 
             for i in range(n_async_parents):
@@ -640,29 +640,29 @@ class TestStressAndSoak:
                 f.result()
 
         assert completed[0] == n_sync + n_async_parents
-        tracker_seq.assert_no_over_capacity("test_mixed_sync_async_contention")
-        tracker_par.assert_no_over_capacity("test_mixed_sync_async_contention")
-        violations.assert_no_violations("test_mixed_sync_async_contention")
+        tracker_seq.assert_no_over_capacity('test_mixed_sync_async_contention')
+        tracker_par.assert_no_over_capacity('test_mixed_sync_async_contention')
+        violations.assert_no_violations('test_mixed_sync_async_contention')
 
     def test_soak_test_no_deadlock(self):
         """Extended run with contention — verify no deadlocks under FIFO scheduling."""
-        pool = SlotPool(key="soak_test", capacity=2)
+        pool = SlotPool(key='soak_test', capacity=2)
         tracker = ConcurrencyTracker()
-        tracker.set_capacity("soak_test", 2)
+        tracker.set_capacity('soak_test', 2)
 
         n_iterations = 100
         completed = [0]
         lock = threading.Lock()
 
         def agent_task(name: str):
-            chain = ("root", name)
-            release_cb = pool.acquire(instance_name=name, agent_class="test")
-            tracker.enter("soak_test", name)
+            chain = ('root', name)
+            release_cb = pool.acquire(instance_name=name, agent_class='test')
+            tracker.enter('soak_test', name)
 
             try:
                 time.sleep(random.uniform(0.005, 0.02))
             finally:
-                tracker.leave("soak_test", name)
+                tracker.leave('soak_test', name)
                 release_cb()
             with lock:
                 completed[0] += 1
@@ -680,7 +680,7 @@ class TestStressAndSoak:
                         pytest.fail(f"Soak test round {round_i} agent failed: {e}")
 
         assert completed[0] == n_iterations * 5
-        tracker.assert_no_over_capacity("test_soak_test_no_deadlock")
+        tracker.assert_no_over_capacity('test_soak_test_no_deadlock')
 
 
 # ============================================================================
@@ -690,16 +690,16 @@ class TestStressAndSoak:
 class TestProceduralBruteForce:
     """Randomly generated agent call graphs under contention."""
 
-    @pytest.mark.parametrize("seed", PROCEDURAL_SEEDS)
+    @pytest.mark.parametrize('seed', PROCEDURAL_SEEDS)
     def test_random_agent_call_graphs(self, seed: int):
         """Randomly generates agent call graphs and runs them under contention.
 
         Monitors for violations: >capacity running, FIFO order broken.
         """
         rng = random.Random(seed)
-        pool = SlotPool(key="proc_test", capacity=2)
+        pool = SlotPool(key='proc_test', capacity=2)
         tracker = ConcurrencyTracker()
-        tracker.set_capacity("proc_test", 2)
+        tracker.set_capacity('proc_test', 2)
 
         violations = ViolationRecorder()
         completed = [0]
@@ -717,8 +717,8 @@ class TestProceduralBruteForce:
 
         def run_agent(node: AgentNode, parent_chain: Tuple[str, ...]):
             chain = parent_chain + (node.name,)
-            release_cb = pool.acquire(instance_name=node.name, agent_class="test")
-            over = tracker.enter("proc_test", node.name)
+            release_cb = pool.acquire(instance_name=node.name, agent_class='test')
+            over = tracker.enter('proc_test', node.name)
             if over:
                 violations.record(f"{node.name}: over capacity")
 
@@ -734,7 +734,7 @@ class TestProceduralBruteForce:
                 for t in child_threads:
                     t.join(timeout=10)
             finally:
-                tracker.leave("proc_test", node.name)
+                tracker.leave('proc_test', node.name)
                 release_cb()
 
             with lock:
@@ -744,7 +744,7 @@ class TestProceduralBruteForce:
         root_nodes = [generate_graph(f"root_{i}", 0, 3) for i in range(n_graphs)]
 
         with ThreadPoolExecutor(max_workers=n_graphs * 4) as executor:
-            futures = [executor.submit(run_agent, root, ("proc",)) for root in root_nodes]
+            futures = [executor.submit(run_agent, root, ('proc',)) for root in root_nodes]
             for f in as_completed(futures, timeout=60):
                 try:
                     f.result()
@@ -762,8 +762,8 @@ class TestProceduralBruteForce:
         - Only non-cancelled agents are granted in FIFO order
         """
         rng = random.Random(42)
-        pool = SlotPool(key="cancel_test", capacity=1)
-        holder_a = pool.create_held_slot("A")
+        pool = SlotPool(key='cancel_test', capacity=1)
+        holder_a = pool.create_held_slot('A')
 
         n_waiters = 30
         granted_order: List[str] = []
@@ -775,7 +775,7 @@ class TestProceduralBruteForce:
             gates[idx].wait()
             ready[idx].set()
             try:
-                release_cb = pool.acquire(instance_name=name, agent_class="test")
+                release_cb = pool.acquire(instance_name=name, agent_class='test')
                 with lock:
                     granted_order.append(name)
                 time.sleep(0.01)
@@ -798,7 +798,7 @@ class TestProceduralBruteForce:
             pool.cancel(agent_name=name)
 
         status = pool.get_status()
-        waiting_names = {w["instance_name"] for w in status["waiters"]}
+        waiting_names = {w['instance_name'] for w in status['waiters']}
         assert not (waiting_names & cancelled_set), \
             f"Cancelled agents still in queue: {waiting_names & cancelled_set}"
 
@@ -814,7 +814,7 @@ class TestProceduralBruteForce:
         assert actual_grantees == expected_grantees, \
             f"Grant set mismatch:\n  Expected: {sorted(expected_grantees)}\n  Got:      {sorted(actual_grantees)}"
 
-        assert len(granted_order) == len(set(granted_order)), "Duplicate grants detected"
+        assert len(granted_order) == len(set(granted_order)), 'Duplicate grants detected'
 
         expected_fifo = sorted(expected_grantees, key=lambda x: int(x[1:]))
         assert_fifo_order(granted_order, expected_fifo)
@@ -849,8 +849,8 @@ class TestEndpointSchedulerIntegration:
         release_a = scheduler.acquire(
             api_base='http://seq',
             concurrency_limit=0,
-            instance_name="A",
-            agent_class="test",
+            instance_name='A',
+            agent_class='test',
         )
 
         c_cancelled = threading.Event()
@@ -862,8 +862,8 @@ class TestEndpointSchedulerIntegration:
                 scheduler.acquire(
                     api_base='http://seq',
                     concurrency_limit=0,
-                    instance_name="C",
-                    agent_class="test",
+                    instance_name='C',
+                    agent_class='test',
                     timeout=10,
                 )
             except (SlotCancelled, TimeoutError):
@@ -871,12 +871,12 @@ class TestEndpointSchedulerIntegration:
 
         t_c = threading.Thread(target=agent_c)
         t_c.start()
-        assert c_ready.wait(timeout=2), "C should have started acquiring"
+        assert c_ready.wait(timeout=2), 'C should have started acquiring'
 
-        cancelled = scheduler.cancel(instance_name="C")
+        cancelled = scheduler.cancel(instance_name='C')
         assert cancelled, f"C should be cancelled: {cancelled}"
 
-        assert c_cancelled.wait(timeout=3), "C should receive cancellation"
+        assert c_cancelled.wait(timeout=3), 'C should receive cancellation'
         t_c.join(timeout=5)
 
 
@@ -895,47 +895,47 @@ class TestEdgeCasesAndNegatives:
         release_cb = scheduler.acquire(
             api_base='http://unlim',
             concurrency_limit=-1,
-            instance_name="A",
-            agent_class="test",
+            instance_name='A',
+            agent_class='test',
         )
 
-        assert release_cb is None, "Unlimited endpoint should return None"
+        assert release_cb is None, 'Unlimited endpoint should return None'
 
     def test_concurrent_pool_resize(self):
         """Pool capacity change under contention — no crash, existing holders unaffected."""
-        pool = SlotPool(key="resize_test", capacity=2)
+        pool = SlotPool(key='resize_test', capacity=2)
 
-        holder_a = pool.create_held_slot("A")
-        holder_b = pool.create_held_slot("B")
+        holder_a = pool.create_held_slot('A')
+        holder_b = pool.create_held_slot('B')
 
         c_granted_event = threading.Event()
         c_ready = threading.Event()
 
         def waiter_c():
             c_ready.set()
-            release_cb = pool.acquire(instance_name="C", agent_class="test")
+            release_cb = pool.acquire(instance_name='C', agent_class='test')
             c_granted_event.set()
             release_cb()
 
         t_c = threading.Thread(target=waiter_c)
         t_c.start()
-        assert c_ready.wait(timeout=2), "C should have started acquiring"
+        assert c_ready.wait(timeout=2), 'C should have started acquiring'
 
-        assert not c_granted_event.is_set(), "C should be blocked"
+        assert not c_granted_event.is_set(), 'C should be blocked'
 
         pool.capacity = 1
         pool.release(holder_b)
         # No sleep needed — release doesn't wake C because capacity is still full (A holding, cap=1)
-        assert not c_granted_event.is_set(), "C should still be blocked (cap=1, A holding)"
+        assert not c_granted_event.is_set(), 'C should still be blocked (cap=1, A holding)'
 
         pool.release(holder_a)
         t_c.join(timeout=5)
-        assert c_granted_event.is_set(), "C should be granted after resize + release"
+        assert c_granted_event.is_set(), 'C should be granted after resize + release'
 
     def test_double_release_idempotent(self):
         """Double release should be idempotent, not crash."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
+        pool = SlotPool(key='test', capacity=1)
+        holder_a = pool.create_held_slot('A')
 
         with pool._cond:
             def release():
@@ -945,20 +945,20 @@ class TestEdgeCasesAndNegatives:
         release()  # Second release — should be no-op
 
         status = pool.get_status()
-        assert status["running_count"] == 0, "Holder should be released"
+        assert status['running_count'] == 0, 'Holder should be released'
 
     def test_timeout_raises_proper_exception(self):
         """Timeout should raise SlotQueueTimeout, ticket removed from queue."""
-        pool = SlotPool(key="test", capacity=1)
-        holder_a = pool.create_held_slot("A")
+        pool = SlotPool(key='test', capacity=1)
+        holder_a = pool.create_held_slot('A')
 
         with pytest.raises(SlotQueueTimeout):
-            pool.acquire(instance_name="B", agent_class="test", timeout=0.5)
+            pool.acquire(instance_name='B', agent_class='test', timeout=0.5)
 
         status = pool.get_status()
-        assert status["waiting_count"] == 0, "Timed-out ticket should be removed"
-        assert status["running_count"] == 1, "A should still hold the slot"
+        assert status['waiting_count'] == 0, 'Timed-out ticket should be removed'
+        assert status['running_count'] == 1, 'A should still hold the slot'
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])
+if __name__ == '__main__':
+    pytest.main([__file__, '-v', '--tb=short'])

@@ -20,7 +20,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 
 def resolve_tool_path(
     path: str,
-    mode: str = "ro",
+    mode: str = 'ro',
     agent_pool: Optional[Any] = None,
 ) -> Path:
     """Resolve *path* against the allowed directory set.

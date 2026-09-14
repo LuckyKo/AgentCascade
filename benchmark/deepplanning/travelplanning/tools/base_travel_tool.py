@@ -221,20 +221,20 @@ class BaseTravelTool(BaseTool):
                 
                 import pandas as pd
                 PANDAS_AVAILABLE = pd
-                print("✓ pandas imported successfully")
+                print('✓ pandas imported successfully')
             except Exception as e:
                 PANDAS_AVAILABLE = False
                 raise ImportError(
                     f"pandas import failed: {e}\n"
-                    "Please run: pip install pandas\n"
-                    "Or use JSON format database"
+                    'Please run: pip install pandas\n'
+                    'Or use JSON format database'
                 )
         
         if PANDAS_AVAILABLE is False:
             raise ImportError(
-                "pandas not installed or import failed, cannot load CSV database.\n"
-                "Please run: pip install pandas\n"
-                "Or use JSON format database"
+                'pandas not installed or import failed, cannot load CSV database.\n'
+                'Please run: pip install pandas\n'
+                'Or use JSON format database'
             )
         
         # Use imported pandas
@@ -278,15 +278,15 @@ class BaseTravelTool(BaseTool):
             }
         """
         return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters
+            'type': 'function',
+            'function': {
+                'name': self.name,
+                'description': self.description,
+                'parameters': self.parameters
             }
         }
     
-    def get_schema(self, format: str = "openai") -> Dict:
+    def get_schema(self, format: str = 'openai') -> Dict:
         """
         Get tool schema in specified format
         
@@ -301,14 +301,14 @@ class BaseTravelTool(BaseTool):
             >>> openai_schema = tool.get_schema('openai')
             >>> anthropic_schema = tool.get_schema('anthropic')
         """
-        if format == "openai" or format == "qwen":
+        if format == 'openai' or format == 'qwen':
             return self.openai_schema
-        elif format == "anthropic":
+        elif format == 'anthropic':
             # Anthropic Claude format
             return {
-                "name": self.name,
-                "description": self.description,
-                "input_schema": self.parameters
+                'name': self.name,
+                'description': self.description,
+                'input_schema': self.parameters
             }
         else:
             raise ValueError(
@@ -328,11 +328,11 @@ class BaseTravelTool(BaseTool):
             >>> schema = TrainQueryTool.get_openai_schema_from_class()
         """
         return {
-            "type": "function",
-            "function": {
-                "name": cls.name,
-                "description": cls.description,
-                "parameters": cls.parameters
+            'type': 'function',
+            'function': {
+                'name': cls.name,
+                'description': cls.description,
+                'parameters': cls.parameters
             }
         }
 

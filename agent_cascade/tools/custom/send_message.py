@@ -41,16 +41,16 @@ class SendMessage(BaseTool):
 
     def call(self, params: str, **kwargs) -> str:
         if not self.agent_pool:
-            return "Error: No agent pool available."
+            return 'Error: No agent pool available.'
 
         parsed = self._verify_json_format_args(params)
         destination = str(parsed.get('destination', '')).strip()
         message = str(parsed.get('message', '')).strip()
 
         if not destination:
-            return "Failed: Destination cannot be empty."
+            return 'Failed: Destination cannot be empty.'
         if not message:
-            return "Failed: Message content cannot be empty."
+            return 'Failed: Message content cannot be empty.'
 
         # Handle user destination
         if destination == 'user':
@@ -74,7 +74,7 @@ class SendMessage(BaseTool):
 
             if not (ws_queue and ws_loop and not ws_loop.is_closed()):
                 logger.warning(f"WebSocket unavailable, message to user not delivered via notification: [{sender}] {message}")
-                return "Warning: User notification sent but WebSocket unavailable. Message logged."
+                return 'Warning: User notification sent but WebSocket unavailable. Message logged.'
 
             event = {
                 'type': 'agent_message_to_user',
@@ -87,11 +87,11 @@ class SendMessage(BaseTool):
                 _put_stream_update(ws_queue, event),
                 ws_loop
             )
-            return "Message sent successfully to the user. They will see it in their notifications."
+            return 'Message sent successfully to the user. They will see it in their notifications.'
         except Exception as e:
             # Log full traceback, don't expose details to caller
-            logger.exception("Failed to send message to user via WebSocket")
-            return "Warning: Message queued but notification may not be delivered immediately."
+            logger.exception('Failed to send message to user via WebSocket')
+            return 'Warning: Message queued but notification may not be delivered immediately.'
 
     def _send_to_agent(self, destination: str, message: str) -> str:
         """Queue message for target agent."""
@@ -100,7 +100,7 @@ class SendMessage(BaseTool):
 
         # Self-message guard
         if destination == sender:
-            return "Failed: Cannot send a message to yourself."
+            return 'Failed: Cannot send a message to yourself.'
 
         # Thread-safe access: acquire pool lock while checking instance + state
         with pool._pool_lock:

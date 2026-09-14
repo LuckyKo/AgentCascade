@@ -35,39 +35,39 @@ def _write_temp_html(html: str) -> str:
 
 def test_parse_html_bs_main_content_stripping():
     """<main> content kept; <nav>, role=banner header stripped."""
-    html = ("<html><head><title>Test Title</title></head><body>"
-            "<nav>NAV-NOISE</nav>"
-            "<header role=banner>BANNER-NOISE</header>"
-            "<main>MAIN-CONTENT</main>"
-            "<footer>FOOT-METADATA</footer>"
-            "</body></html>")
+    html = ('<html><head><title>Test Title</title></head><body>'
+            '<nav>NAV-NOISE</nav>'
+            '<header role=banner>BANNER-NOISE</header>'
+            '<main>MAIN-CONTENT</main>'
+            '<footer>FOOT-METADATA</footer>'
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path)
         text = result[0]['content'][0]['text']
-        assert "MAIN-CONTENT" in text
-        assert "NAV-NOISE" not in text
-        assert "BANNER-NOISE" not in text
+        assert 'MAIN-CONTENT' in text
+        assert 'NAV-NOISE' not in text
+        assert 'BANNER-NOISE' not in text
         # When <main> exists, only main content is extracted (footer is outside)
-        assert "FOOT-METADATA" not in text
+        assert 'FOOT-METADATA' not in text
     finally:
         os.unlink(path)
 
 
 def test_parse_html_bs_fallback_to_body():
     """Page without <main>: falls back to body; nav still stripped."""
-    html = ("<html><head><title>Fallback Page</title></head><body>"
-            "<nav>NAV-NOISE</nav>"
-            "<p>PARA-ONE</p>"
-            "<p>PARA-TWO</p>"
-            "</body></html>")
+    html = ('<html><head><title>Fallback Page</title></head><body>'
+            '<nav>NAV-NOISE</nav>'
+            '<p>PARA-ONE</p>'
+            '<p>PARA-TWO</p>'
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path)
         text = ' '.join(item['text'] for item in result[0]['content'])
-        assert "PARA-ONE" in text
-        assert "PARA-TWO" in text
-        assert "NAV-NOISE" not in text
+        assert 'PARA-ONE' in text
+        assert 'PARA-TWO' in text
+        assert 'NAV-NOISE' not in text
     finally:
         os.unlink(path)
 
@@ -79,54 +79,54 @@ def test_strip_boilerplate_nested_role_elements_no_crash():
     'get' because decomposing a parent during find_all iteration left its children with
     attrs=None, and a later .get('role') on them crashed. This is the exact repro shape.
     """
-    html = ("<html><head><title>Nested Roles</title></head><body>"
+    html = ('<html><head><title>Nested Roles</title></head><body>'
             '<div role="navigation">'
             '  <span role="banner">NAV-INNER</span>'
             '  <a href="#">link</a>'
             '</div>'
-            "<p>REAL-CONTENT</p>"
-            "</body></html>")
+            '<p>REAL-CONTENT</p>'
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path)  # must NOT raise
         text = ' '.join(item['text'] for item in result[0]['content'])
-        assert "REAL-CONTENT" in text
-        assert "NAV-INNER" not in text  # nested role element stripped, no crash
+        assert 'REAL-CONTENT' in text
+        assert 'NAV-INNER' not in text  # nested role element stripped, no crash
     finally:
         os.unlink(path)
 
 
 def test_strip_boilerplate_sibling_role_elements():
     """Multiple sibling role-bearing elements where the first is stripped — second still processed."""
-    html = ("<html><head><title>Sibling Roles</title></head><body>"
+    html = ('<html><head><title>Sibling Roles</title></head><body>'
             '<div role="banner">FIRST-BANNER</div>'
             '<div role="navigation">SECOND-NAV</div>'
-            "<p>KEEP-ME</p>"
-            "</body></html>")
+            '<p>KEEP-ME</p>'
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path)  # must NOT raise
         text = ' '.join(item['text'] for item in result[0]['content'])
-        assert "KEEP-ME" in text
-        assert "FIRST-BANNER" not in text
-        assert "SECOND-NAV" not in text
+        assert 'KEEP-ME' in text
+        assert 'FIRST-BANNER' not in text
+        assert 'SECOND-NAV' not in text
     finally:
         os.unlink(path)
 
 
 def test_collapse_math_nested_no_crash():
     """Nested <math> elements must not crash _collapse_math (two-phase snapshot)."""
-    html = ("<html><head><title>Nested Math</title></head><body>"
-            "<p>x is "
+    html = ('<html><head><title>Nested Math</title></head><body>'
+            '<p>x is '
             '<math alttext="{\\displaystyle a}"><mi>a</mi>'
             '  <math alttext="{\\displaystyle b}"><mi>b</mi></math>'
-            "</math> here.</p>"
-            "</body></html>")
+            '</math> here.</p>'
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path, extract_image=False)  # must NOT raise
         text = ' '.join(item.get('text', '') for item in result[0]['content'])
-        assert "here" in text
+        assert 'here' in text
     finally:
         os.unlink(path)
 
@@ -137,21 +137,21 @@ def test_parse_html_bs_header_with_nav_fallback():
     This is the case that exposed the ordering bug: if navs are decomposed
     before the header check, find('nav') returns None and the header leaks.
     """
-    html = ("<html><head><title>Header Nav Page</title></head><body>"
-            "<header><nav>NAV INSIDE HEADER</nav><h1>Header Content</h1></header>"
-            "<p>BODY-PARA-ONE</p>"
-            "<p>BODY-PARA-TWO</p>"
-            "</body></html>")
+    html = ('<html><head><title>Header Nav Page</title></head><body>'
+            '<header><nav>NAV INSIDE HEADER</nav><h1>Header Content</h1></header>'
+            '<p>BODY-PARA-ONE</p>'
+            '<p>BODY-PARA-TWO</p>'
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path)
         text = ' '.join(item['text'] for item in result[0]['content'])
         # Body paragraphs should remain
-        assert "BODY-PARA-ONE" in text
-        assert "BODY-PARA-TWO" in text
+        assert 'BODY-PARA-ONE' in text
+        assert 'BODY-PARA-TWO' in text
         # Header (containing a nav child) must be stripped entirely
-        assert "NAV INSIDE HEADER" not in text
-        assert "Header Content" not in text
+        assert 'NAV INSIDE HEADER' not in text
+        assert 'Header Content' not in text
     finally:
         os.unlink(path)
 
@@ -160,15 +160,15 @@ def test_get_plain_doc_title_prepended():
     """get_plain_doc prepends 'Title: <title>' exactly once."""
     doc = [{'page_num': 1, 'content': [{'text': 'Hello'}], 'title': 'Test Title'}]
     output = get_plain_doc(doc)
-    assert output.startswith("Title: Test Title")
+    assert output.startswith('Title: Test Title')
 
 
 def test_parse_html_bs_js_spa_note_appended():
     """Short JS shell with a SPA marker (id="root") gets the JS-rendering note."""
-    html = ("<html><head><title>SPA Shell</title></head><body>"
+    html = ('<html><head><title>SPA Shell</title></head><body>'
             "<div id=\"root\"></div>"
             "<script src=\"/bundle.js\"></script>"
-            "</body></html>")
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path)
@@ -177,30 +177,30 @@ def test_parse_html_bs_js_spa_note_appended():
         assert result[0]['title'] == 'SPA Shell'
         texts = [item['text'] for item in result[0]['content']]
         joined = '\n'.join(texts)
-        assert "JavaScript rendering" in joined
+        assert 'JavaScript rendering' in joined
         # The note is its own content item (last), not merged into body text.
-        assert texts[-1].startswith("[Note: this page appears to require JavaScript")
+        assert texts[-1].startswith('[Note: this page appears to require JavaScript')
     finally:
         os.unlink(path)
 
 
 def test_parse_html_bs_no_note_on_server_rendered():
     """Server-rendered page with real content + scripts but NO SPA marker: no note."""
-    paragraphs = "".join(f"<p>Real paragraph {i} with enough words to fill the page.</p>"
+    paragraphs = ''.join(f"<p>Real paragraph {i} with enough words to fill the page.</p>"
                          for i in range(10))
-    html = ("<html><head><title>Normal Page</title></head><body>"
-            "<nav>NAV-NOISE</nav>"
+    html = ('<html><head><title>Normal Page</title></head><body>'
+            '<nav>NAV-NOISE</nav>'
             f"{paragraphs}"
             "<script src=\"/analytics.js\"></script>"
-            "</body></html>")
+            '</body></html>')
     path = _write_temp_html(html)
     try:
         result = parse_html_bs(path)
         texts = [item['text'] for item in result[0]['content']]
         joined = '\n'.join(texts)
         # Enough real text + no SPA marker => the note must NOT appear.
-        assert "JavaScript rendering" not in joined
-        assert all(not t.startswith("[Note:") for t in texts)
+        assert 'JavaScript rendering' not in joined
+        assert all(not t.startswith('[Note:') for t in texts)
     finally:
         os.unlink(path)
 

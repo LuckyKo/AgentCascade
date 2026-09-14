@@ -14,6 +14,7 @@
 
 __version__ = '0.1.27'
 
+
 # Lazy imports to avoid circular dependency deadlocks when importing submodules
 # (e.g., 'from agent_cascade.instance_id import get_instance_id').
 # The heavy Agent/MultiAgentHub imports are deferred until first access.
@@ -25,6 +26,7 @@ def __getattr__(name):
         from .multi_agent_hub import MultiAgentHub
         return MultiAgentHub
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     'Agent',

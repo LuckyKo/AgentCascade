@@ -50,9 +50,9 @@ def _make_instance(max_turns: int) -> AgentInstance:
     """Minimal real AgentInstance with a pre-seeded conversation (so _setup_turn works)."""
     now = time.monotonic()
     inst = AgentInstance(
-        instance_name="WarnAgent",
-        agent_class="coder",
-        conversation=[Message(role=USER, content="do the task")],
+        instance_name='WarnAgent',
+        agent_class='coder',
+        conversation=[Message(role=USER, content='do the task')],
         created_at=now,
         last_activity=now,
         latest_marker_index=-1,
@@ -72,16 +72,16 @@ def _tool_call_msg(i: int) -> Message:
     alive for one more turn. This is what lets us drive max_turns iterations of the
     real run().
     """
-    return Message(role=ASSISTANT, content="", function_call={"name": f"noop_{i}", "arguments": "{}"})
+    return Message(role=ASSISTANT, content='', function_call={'name': f"noop_{i}", 'arguments': '{}'})
 
 
 class _FakeLogger:
     def __init__(self):
         self.log_path = None
-        self.data = {"history": []}
+        self.data = {'history': []}
 
     def log_message(self, msg):
-        self.data["history"].append(msg)
+        self.data['history'].append(msg)
 
 
 class _FakeCompressionHandler:
@@ -96,7 +96,7 @@ class _FakeCompressionHandler:
     def _assemble_tool_result(self, *args, **kwargs):
         """Return the tool result unchanged (no spillover/truncation in tests)."""
         # args: (instance, tool_result, ...) — tool_result is the 2nd positional arg.
-        return args[1] if len(args) > 1 else kwargs.get("tool_result", "")
+        return args[1] if len(args) > 1 else kwargs.get('tool_result', '')
 
     def _legacy_drain_tool_result(self, instance, tool_result):
         return tool_result
@@ -118,12 +118,12 @@ class _FakeTemplate:
     """
 
     def __init__(self, tool_names):
-        self.name = "coder"
-        self.agent_type = "coder"
+        self.name = 'coder'
+        self.agent_type = 'coder'
         # Include every per-turn tool name so the real execution path treats each as
         # a valid (non-auto-denied) tool and dispatches through our stub dispatcher.
         self.function_map = {n: (lambda **kw: f"[stub] {n} executed") for n in tool_names}
-        self.llm = type("LLM", (), {"generate_cfg": {}})()
+        self.llm = type('LLM', (), {'generate_cfg': {}})()
 
 
 class _FakePool:
@@ -132,15 +132,15 @@ class _FakePool:
     def __init__(self, max_turns: int):
         # Pre-build the template with every per-turn tool name (noop_0..noop_{max-1}).
         self._template = _FakeTemplate([f"noop_{i}" for i in range(max_turns)])
-        self.settings = type("Settings", (), {
-            "auto_continue": True,
-            "tail_sync_check_enabled": False,          # keep tail-sync off the filesystem path
-            "compression_force_threshold": 96.0,
-            "compression_warning_threshold": 90.0,
-            "compression_context_reserve_tokens": 2048,
-            "auto_rollback_on_loop": False,         # disable loop-detection rollback (repetitive scripted output would trip it)
-            "max_auto_rollbacks": 5,
-            "cache_threshold_chars": 100000,        # tool-output cache threshold (large → never spillover)
+        self.settings = type('Settings', (), {
+            'auto_continue': True,
+            'tail_sync_check_enabled': False,          # keep tail-sync off the filesystem path
+            'compression_force_threshold': 96.0,
+            'compression_warning_threshold': 90.0,
+            'compression_context_reserve_tokens': 2048,
+            'auto_rollback_on_loop': False,         # disable loop-detection rollback (repetitive scripted output would trip it)
+            'max_auto_rollbacks': 5,
+            'cache_threshold_chars': 100000,        # tool-output cache threshold (large → never spillover)
         })()
         self.stopped = False
         self._run_generation = 0
@@ -213,7 +213,7 @@ class _ScriptedLLM:
         if self._script:
             yield self._script.pop(0)
         else:
-            raise AssertionError("LLM called more times than scripted")
+            raise AssertionError('LLM called more times than scripted')
 
 
 def _build_engine(pool: _FakePool, instance: AgentInstance, llm: _ScriptedLLM) -> ExecutionEngine:
@@ -255,7 +255,7 @@ def _find_warning_in_call(call_msgs: List[Message], text_fragment: str):
         content = m.content
         if not isinstance(content, str):
             continue
-        if text_fragment in content and content.strip().startswith("[SYSTEM WARNING:"):
+        if text_fragment in content and content.strip().startswith('[SYSTEM WARNING:'):
             return m
     return None
 
@@ -290,7 +290,7 @@ class TestTurnLimitWarningUserMessages:
         # Computed from the threshold math: turns_available==turns_50pct → LLM call index max_turns - turns_50pct.
         turns_50pct = max(3, int(max_turns * 0.5))
         halfway_call = llm.calls[max_turns - turns_50pct]
-        warn = _find_warning_in_call(halfway_call, "Halfway through your turn budget")
+        warn = _find_warning_in_call(halfway_call, 'Halfway through your turn budget')
         assert warn is not None, (
             "50% 'Halfway' warning not found as a standalone message in the LLM call "
             f"where turns_available=={turns_50pct}"
@@ -299,7 +299,7 @@ class TestTurnLimitWarningUserMessages:
         assert _msg_role(warn) == USER, f"50% warning role is {_msg_role(warn)!r}, expected USER"
         # Standalone message contains ONLY the warning text (not stitched onto a prior msg).
         content = warn.content if isinstance(warn, Message) else warn.get('content', '')
-        assert content.strip().startswith("[SYSTEM WARNING: Halfway"), (
+        assert content.strip().startswith('[SYSTEM WARNING: Halfway'), (
             f"50% warning is not a clean standalone message; content={content[:80]!r}"
         )
 
@@ -312,7 +312,7 @@ class TestTurnLimitWarningUserMessages:
         # Computed from the threshold math: turns_available==turns_90pct → LLM call index max_turns - turns_90pct.
         turns_90pct = max(2, int(max_turns * 0.1))
         ninety_call = llm.calls[max_turns - turns_90pct]
-        warn = _find_warning_in_call(ninety_call, "Turn limit approaching")
+        warn = _find_warning_in_call(ninety_call, 'Turn limit approaching')
         assert warn is not None, (
             "90% 'Turn limit approaching' warning not found as a standalone message in the "
             f"LLM call where turns_available=={turns_90pct}"
@@ -324,9 +324,9 @@ class TestTurnLimitWarningUserMessages:
         max_turns = 6
         llm, instance = _run(max_turns)
 
-        halfway_count = _count_in_conversation(instance, "Halfway through your turn budget")
-        ninety_count = _count_in_conversation(instance, "Turn limit approaching")
-        final_count = _count_in_conversation(instance, "Final turn.")
+        halfway_count = _count_in_conversation(instance, 'Halfway through your turn budget')
+        ninety_count = _count_in_conversation(instance, 'Turn limit approaching')
+        final_count = _count_in_conversation(instance, 'Final turn.')
 
         assert halfway_count == 1, f"50% warning appears {halfway_count}x in conversation (expected 1)"
         assert ninety_count == 1, f"90% warning appears {ninety_count}x in conversation (expected 1)"
@@ -344,13 +344,13 @@ class TestTurnLimitWarningUserMessages:
         # Computed from the threshold math: turns_available==turn → LLM call index max_turns - turn.
         turns_50pct = max(3, int(max_turns * 0.5))
         turns_90pct = max(2, int(max_turns * 0.1))
-        assert _find_warning_in_call(llm.calls[max_turns - turns_50pct], "Halfway through your turn budget") is not None, \
+        assert _find_warning_in_call(llm.calls[max_turns - turns_50pct], 'Halfway through your turn budget') is not None, \
             f"50% warning missing on the turns_available=={turns_50pct} call"
-        assert _find_warning_in_call(llm.calls[max_turns - turns_90pct], "Turn limit approaching") is not None, \
+        assert _find_warning_in_call(llm.calls[max_turns - turns_90pct], 'Turn limit approaching') is not None, \
             f"90% warning missing on the turns_available=={turns_90pct} call"
 
-        assert _count_in_conversation(instance, "Halfway through your turn budget") == 1
-        assert _count_in_conversation(instance, "Turn limit approaching") == 1
+        assert _count_in_conversation(instance, 'Halfway through your turn budget') == 1
+        assert _count_in_conversation(instance, 'Turn limit approaching') == 1
 
     def test_warning_texts_unchanged(self):
         """The exact warning text (incl. [SYSTEM WARNING: ...] prefixes) is preserved."""
@@ -366,17 +366,17 @@ class TestTurnLimitWarningUserMessages:
                 user_msgs.append(content)
 
         expected_halfway = (
-            "[SYSTEM WARNING: Halfway through your turn budget. "
+            '[SYSTEM WARNING: Halfway through your turn budget. '
             f"You have 3 turn(s) remaining out of {max_turns} total. "
-            "Assess your progress and plan remaining steps.]"
+            'Assess your progress and plan remaining steps.]'
         )
         expected_ninety = (
-            "[SYSTEM WARNING: Turn limit approaching. "
+            '[SYSTEM WARNING: Turn limit approaching. '
             f"You have 2 turn(s) remaining out of {max_turns} total. "
-            "Plan your remaining steps carefully.]"
+            'Plan your remaining steps carefully.]'
         )
-        assert expected_halfway in user_msgs, "exact 50% warning text not preserved"
-        assert expected_ninety in user_msgs, "exact 90% warning text not preserved"
+        assert expected_halfway in user_msgs, 'exact 50% warning text not preserved'
+        assert expected_ninety in user_msgs, 'exact 90% warning text not preserved'
 
     def test_warning_present_in_conversation_and_llm_messages(self):
         """REGRESSION: pin the observable guarantees of the USER-message pattern.
@@ -405,21 +405,21 @@ class TestTurnLimitWarningUserMessages:
         for msg in instance.conversation:
             role = _msg_role(msg)
             content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if role == USER and isinstance(content, str) and "Halfway through your turn budget" in content:
-                assert conv_warning is None, "50% warning appears more than once in conversation"
+            if role == USER and isinstance(content, str) and 'Halfway through your turn budget' in content:
+                assert conv_warning is None, '50% warning appears more than once in conversation'
                 conv_warning = msg
-        assert conv_warning is not None, "50% warning missing from instance.conversation"
+        assert conv_warning is not None, '50% warning missing from instance.conversation'
 
         # (b) Present as a distinct USER message in the LLM call where it fired.
         # Computed from the threshold math: turns_available==turns_50pct → LLM call index max_turns - turns_50pct.
         turns_50pct = max(3, int(max_turns * 0.5))
         halfway_call = llm.calls[max_turns - turns_50pct]
-        llm_warning = _find_warning_in_call(halfway_call, "Halfway through your turn budget")
-        assert llm_warning is not None, "50% warning missing from the LLM messages at its injection turn"
+        llm_warning = _find_warning_in_call(halfway_call, 'Halfway through your turn budget')
+        assert llm_warning is not None, '50% warning missing from the LLM messages at its injection turn'
         assert _msg_role(llm_warning) == USER
 
         # Object identity: the message the LLM saw IS the one stored in conversation.
         assert llm_warning is conv_warning, (
-            "the 50% warning message seen by the LLM is not the same object as the one "
-            "stored in instance.conversation"
+            'the 50% warning message seen by the LLM is not the same object as the one '
+            'stored in instance.conversation'
         )

@@ -27,13 +27,13 @@ def init_agent_service():
     llm_cfg = {'model': 'qwen-max'}
     system = ('你扮演一个数据库助手，你具有查询数据库的能力')
     tools = [{
-        "mcpServers": {
-            "sqlite" : {
-                "command": "uvx",
-                "args": [
-                    "mcp-server-sqlite",
-                    "--db-path",
-                    "test.db"
+        'mcpServers': {
+            'sqlite' : {
+                'command': 'uvx',
+                'args': [
+                    'mcp-server-sqlite',
+                    '--db-path',
+                    'test.db'
                 ]
             }
         }

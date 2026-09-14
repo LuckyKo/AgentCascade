@@ -132,18 +132,18 @@ def call_llm(
     for attempt in range(max_retries):
         try:
             params = {
-                "model": actual_model_name,
-                "messages": messages,
+                'model': actual_model_name,
+                'messages': messages,
             }
             
             if tools:
-                params["tools"] = tools
+                params['tools'] = tools
             
             if not is_reasoning_model and temperature:
-                params["temperature"] = temperature
+                params['temperature'] = temperature
             
             if extra_body:
-                params["extra_body"] = extra_body
+                params['extra_body'] = extra_body
             response = client.chat.completions.create(**params)
             
             # Validate response
@@ -152,7 +152,7 @@ def call_llm(
             has_tool_calls = hasattr(msg, 'tool_calls') and msg.tool_calls
             
             if not has_content and not has_tool_calls:
-                raise ValueError("Model returned an empty response without tool calls")
+                raise ValueError('Model returned an empty response without tool calls')
             
             return response
             
@@ -167,4 +167,4 @@ def call_llm(
             print(f"     Retrying in {wait_time:.1f}s...")
             time.sleep(wait_time)
     
-    raise last_err if last_err else RuntimeError("LLM API call failed")
+    raise last_err if last_err else RuntimeError('LLM API call failed')

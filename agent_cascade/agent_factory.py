@@ -11,10 +11,25 @@ from agent_cascade.log import logger
 from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.web_extractor import WebExtractor
 from agent_cascade.tools.custom import (
-    ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
-    DeleteFile, CopyFile, ReIndent, ListAgents, ShellCmd,
-    ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck, ScanSkills,
-    ProposeSkill, LoadSkill,
+    ReadFile,
+    ViewImage,
+    WriteFile,
+    EditFile,
+    ListDir,
+    Grep,
+    DeleteFile,
+    CopyFile,
+    ReIndent,
+    ListAgents,
+    ShellCmd,
+    ReadLogs,
+    Calculate,
+    CodeMap,
+    ForgetLast,
+    SyntaxCheck,
+    ScanSkills,
+    ProposeSkill,
+    LoadSkill,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from agent_cascade.tools.custom import SystemInfo as _SystemInfo
@@ -115,12 +130,12 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
                     if hasattr(om, 'extra_work_folders_rw') and om.extra_work_folders_rw:
                         code_cfg['extra_work_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
                     if not code_cfg.get('extra_work_folders_ro') and not code_cfg.get('extra_work_folders_rw'):
-                        logger.debug("CodeInterpreter: No extra work folders configured (RO/RW)")
+                        logger.debug('CodeInterpreter: No extra work folders configured (RO/RW)')
                     t = CodeInterpreter(cfg=code_cfg)
                     t._operation_manager = om
                     tools_to_register[tool_name] = (t, False, False)
                 else:
-                    logger.warning("Skipping CodeInterpreter for agent %s: operation_manager is None", agent_name)
+                    logger.warning('Skipping CodeInterpreter for agent %s: operation_manager is None', agent_name)
             except Exception as e:
                 logger.warning(f"Failed to load CodeInterpreter for agent {agent_name}: {e}")
         elif tool_name == 'web_search':
@@ -201,14 +216,12 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None):
         agent_llm_cfg = agent_pool.api_router.get_llm_config(agent_name)
     else:
         agent_llm_cfg = llm_cfg or agent_pool.llm_cfg
-    
+
     # Validate that we have a usable LLM config before proceeding
     if agent_llm_cfg is None:
-        raise ValueError(
-            f"No LLM configuration available for agent '{agent_name}'. "
-            "Pass llm_cfg to load_agent() or provide it when constructing AgentPool."
-        )
-        
+        raise ValueError(f"No LLM configuration available for agent '{agent_name}'. "
+                         'Pass llm_cfg to load_agent() or provide it when constructing AgentPool.')
+
     # Deepcopy to prevent shared references in the LLM object tree
     agent_llm_cfg = copy.deepcopy(agent_llm_cfg)
 
@@ -233,7 +246,8 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None):
             system_message=system_prompt,
             function_list=[],
         )
-        agent.agent_type = agent_name.replace('_', ' ').title()  # Mirrors main branch — needed for disabled_tools lookup
+        agent.agent_type = agent_name.replace('_',
+                                              ' ').title()  # Mirrors main branch — needed for disabled_tools lookup
         agent.agent_configs = {agent_name: config}
         agent.base_system_message = system_prompt
 
@@ -244,6 +258,7 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None):
 
 
 # ── Convenience wrappers ────────────────────────────────────────────────────────
+
 
 def load_orchestrator_agent(agent_pool, llm_cfg: dict):
     """Load the orchestrator agent. Delegates to load_agent('orchestrator')."""

@@ -53,16 +53,16 @@ class SortProductsTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         sort_by = params_dict.get('sort_by', '').lower()
         order = params_dict.get('order', 'desc').lower()
         product_ids = params_dict.get('product_ids')
 
         if not sort_by:
-            return self.format_result_as_json({"error": "Missing required parameter: sort_by."})
+            return self.format_result_as_json({'error': 'Missing required parameter: sort_by.'})
         if order not in ['asc', 'desc']:
-            return self.format_result_as_json({"error": f"Invalid value for 'order': '{params_dict.get('order')}'. Must be 'asc' or 'desc'."})
+            return self.format_result_as_json({'error': f"Invalid value for 'order': '{params_dict.get('order')}'. Must be 'asc' or 'desc'."})
 
         if product_ids:
             search_space = [self.products_map[pid] for pid in product_ids if pid in self.products_map]
@@ -70,7 +70,7 @@ class SortProductsTool(BaseShoppingTool):
             search_space = self.products
 
         if not search_space:
-            return self.format_result_as_json({"sorted_product_ids": []})
+            return self.format_result_as_json({'sorted_product_ids': []})
 
         try:
             first_product_value = self._get_nested_value(search_space[0], sort_by)
@@ -96,8 +96,8 @@ class SortProductsTool(BaseShoppingTool):
             sorted_ids = [p['product_id'] for p in sorted_products]
 
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
         except Exception as e:
-            return self.format_result_as_json({"error": f"An error occurred during sorting on key '{sort_by}': {e}"})
+            return self.format_result_as_json({'error': f"An error occurred during sorting on key '{sort_by}': {e}"})
 
-        return self.format_result_as_json({"sorted_product_ids": sorted_ids})
+        return self.format_result_as_json({'sorted_product_ids': sorted_ids})

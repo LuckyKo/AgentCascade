@@ -61,7 +61,7 @@ class GetUserInfoTool(BaseShoppingTool):
         try:
             params_dict = self._verify_json_format_args(params)
         except ValueError as e:
-            return self.format_result_as_json({"error": str(e)})
+            return self.format_result_as_json({'error': str(e)})
 
         user_id = params_dict.get('user_id')
 
@@ -71,8 +71,8 @@ class GetUserInfoTool(BaseShoppingTool):
                 return self.format_result_as_json(user)
             else:
                 return self.format_result_as_json({
-                    "error": f"User with user_id '{user_id}' not found",
-                    "user": None
+                    'error': f"User with user_id '{user_id}' not found",
+                    'user': None
                 })
         else:
             return self.format_result_as_json(self.users[0] if self.users else {})

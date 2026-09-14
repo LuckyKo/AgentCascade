@@ -26,65 +26,65 @@ from typing import Dict, Any, List, Tuple, Optional
 # ----------------------
 
 EVALUATION_DIMENSIONS = {
-    "Route Consistency": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "valid_trip_duration",
-            "closed_loop_route_structure",
-            "seamless_intercity_transfers"
+    'Route Consistency': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'valid_trip_duration',
+            'closed_loop_route_structure',
+            'seamless_intercity_transfers'
         ]
     },
-    "Sandbox Compliance": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "validated_accommodation",
-            "validated_attractions",
-            "validated_meals",
-            "validated_transportation"
+    'Sandbox Compliance': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'validated_accommodation',
+            'validated_attractions',
+            'validated_meals',
+            'validated_transportation'
         ]
     },
-    "Itinerary Structure": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "traceable_accommodation",
-            "ends_with_accommodation",
-            "essential_meal_coverage",
-            "essential_attraction_coverage"
+    'Itinerary Structure': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'traceable_accommodation',
+            'ends_with_accommodation',
+            'essential_meal_coverage',
+            'essential_attraction_coverage'
         ]
     },
-    "Time Feasibility": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "no_time_overlaps",
-            "reasonable_transfer_time"
+    'Time Feasibility': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'no_time_overlaps',
+            'reasonable_transfer_time'
         ]
     },
-    "Business Hours": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "attraction_visit_within_opening_hours",
-            "dining_within_service_hours",
-            "avoidance_of_closure_days"
+    'Business Hours': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'attraction_visit_within_opening_hours',
+            'dining_within_service_hours',
+            'avoidance_of_closure_days'
         ]
     },
-    "Duration Rationality": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "reasonable_duration_at_attractions",
-            "reasonable_meal_duration"
+    'Duration Rationality': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'reasonable_duration_at_attractions',
+            'reasonable_meal_duration'
         ]
     },
-    "Cost Calculation Accuracy": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "cost_calculation_correctness"
+    'Cost Calculation Accuracy': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'cost_calculation_correctness'
         ]
     },
-    "Activity Diversity": {
-        "weight": 0.125,  # 1/8
-        "checks": [
-            "diverse_meal_options",
-            "diverse_attraction_options"
+    'Activity Diversity': {
+        'weight': 0.125,  # 1/8
+        'checks': [
+            'diverse_meal_options',
+            'diverse_attraction_options'
         ]
     }
 }
@@ -137,10 +137,10 @@ from .utils import (
 _BASE_DIR = get_base_dir()
 _DATABASE_DIR = get_database_dir()
 
-RESTAURANTS_CSV_PATH = str(_DATABASE_DIR / "restaurants" / "restaurants.csv")
-HOTELS_CSV_PATH = str(_DATABASE_DIR / "hotels" / "hotels.csv")
-ATTRACTIONS_CSV_PATH = str(_DATABASE_DIR / "attractions" / "attractions.csv")
-LOCATIONS_COORDS_CSV_PATH = str(_DATABASE_DIR / "locations" / "locations_coords.csv")
+RESTAURANTS_CSV_PATH = str(_DATABASE_DIR / 'restaurants' / 'restaurants.csv')
+HOTELS_CSV_PATH = str(_DATABASE_DIR / 'hotels' / 'hotels.csv')
+ATTRACTIONS_CSV_PATH = str(_DATABASE_DIR / 'attractions' / 'attractions.csv')
+LOCATIONS_COORDS_CSV_PATH = str(_DATABASE_DIR / 'locations' / 'locations_coords.csv')
 
 # Note: Path validation removed - actual database paths are passed during evaluation
 
@@ -152,16 +152,16 @@ LOCATIONS_COORDS_CSV_PATH = str(_DATABASE_DIR / "locations" / "locations_coords.
 
 def check_valid_days(daily_plans: List[Dict[str, Any]], meta: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """Check if the number of days matches expected."""
-    expected_days = int(meta.get("days") or 0)
+    expected_days = int(meta.get('days') or 0)
     is_days_valid = len(daily_plans) == expected_days and expected_days > 0
     return is_days_valid, None if is_days_valid else f"Plan has {len(daily_plans)} days, expected {expected_days}"
 
 
 def check_route_closed_loop(daily_plans: List[Dict[str, Any]], meta: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """Check if first day starts from org and last day returns to org (for intercity days)."""
-    org = normalize_city(meta.get("org"))
-    start_from, start_to = extract_from_to(daily_plans[0].get("current_city", "")) if daily_plans else (None, None)
-    end_from, end_to = extract_from_to(daily_plans[-1].get("current_city", "")) if daily_plans else (None, None)
+    org = normalize_city(meta.get('org'))
+    start_from, start_to = extract_from_to(daily_plans[0].get('current_city', '')) if daily_plans else (None, None)
+    end_from, end_to = extract_from_to(daily_plans[-1].get('current_city', '')) if daily_plans else (None, None)
 
     is_closed_loop = True
     reason = None
@@ -192,12 +192,12 @@ def check_intercity_transportation_consistency(daily_plans: List[Dict[str, Any]]
     violations: List[str] = []
     
     # Initial location
-    current_location = normalize_city(meta.get("org"))
+    current_location = normalize_city(meta.get('org'))
     if not current_location:
-        return False, "Missing org info, cannot track location"
+        return False, 'Missing org info, cannot track location'
     
     for day_idx, day in enumerate(daily_plans, start=1):
-        current_city = day.get("current_city", "")
+        current_city = day.get('current_city', '')
         from_city, to_city = extract_from_to(current_city)
         
         if from_city and to_city:
@@ -214,8 +214,8 @@ def check_intercity_transportation_consistency(daily_plans: List[Dict[str, Any]]
             
             # Check if there's corresponding intercity transportation activity
             intercity_acts = []
-            for act in day.get("activities", []) or []:
-                if act.get("type") == "travel_intercity_public":
+            for act in day.get('activities', []) or []:
+                if act.get('type') == 'travel_intercity_public':
                     intercity_acts.append(act)
             
             if not intercity_acts:
@@ -226,9 +226,9 @@ def check_intercity_transportation_consistency(daily_plans: List[Dict[str, Any]]
                 # Check if intercity transportation route matches
                 matched = False
                 for act in intercity_acts:
-                    details = act.get("details") or {}
-                    act_from = (details.get("from") or "").strip()
-                    act_to = (details.get("to") or "").strip()
+                    details = act.get('details') or {}
+                    act_from = (details.get('from') or '').strip()
+                    act_to = (details.get('to') or '').strip()
                     
                     if not act_from or not act_to:
                         continue
@@ -248,9 +248,9 @@ def check_intercity_transportation_consistency(daily_plans: List[Dict[str, Any]]
                     # List all intercity transportation routes
                     routes = []
                     for act in intercity_acts:
-                        details = act.get("details") or {}
-                        act_from = details.get("from", "")
-                        act_to = details.get("to", "")
+                        details = act.get('details') or {}
+                        act_from = details.get('from', '')
+                        act_to = details.get('to', '')
                         routes.append(f"{act_from}→{act_to}")
                     
                     violations.append(
@@ -289,17 +289,17 @@ def check_intercity_transportation_consistency(daily_plans: List[Dict[str, Any]]
 def check_hotels_from_search(daily_plans: List[Dict[str, Any]], hotels_index: Dict[str, Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if all hotels are from search results and prices match."""
     if not hotels_index:
-        return False, "Hotel database failed to load or is empty"
+        return False, 'Hotel database failed to load or is empty'
     not_found: List[str] = []
     price_mismatch: List[str] = []
     
     # 1. Check accommodation field: check name and price
     for idx, day in enumerate(daily_plans):
-        accom = day.get("accommodation")
+        accom = day.get('accommodation')
         if isinstance(accom, dict):
-            name = (accom.get("name") or "").strip()
+            name = (accom.get('name') or '').strip()
             # Last day's name if "-" then skip
-            if idx == len(daily_plans) - 1 and name == "-":
+            if idx == len(daily_plans) - 1 and name == '-':
                 continue
             if not name:
                 continue
@@ -308,8 +308,8 @@ def check_hotels_from_search(daily_plans: List[Dict[str, Any]], hotels_index: Di
                 not_found.append(name)
                 continue
             # Check price
-            price_val = accom.get("price") or accom.get("cost") or accom.get("price_per_night")
-            price_str = hotels_index[name].get("price_per_night")
+            price_val = accom.get('price') or accom.get('cost') or accom.get('price_per_night')
+            price_str = hotels_index[name].get('price_per_night')
             if price_str:
                 try:
                     price_num = float(str(price_str))
@@ -325,7 +325,7 @@ def check_hotels_from_search(daily_plans: List[Dict[str, Any]], hotels_index: Di
     # 2. Check hotel activities: only check name (not price)
     for idx, day in enumerate(daily_plans[:-1]):  # Except last day
         for act, details, name in iter_hotel_acts([day]):
-            name = (name or "").strip()
+            name = (name or '').strip()
             if not name:
                 continue
             # Only check if name is in database
@@ -342,16 +342,16 @@ def check_hotels_from_search(daily_plans: List[Dict[str, Any]], hotels_index: Di
 def check_attractions_from_search(daily_plans: List[Dict[str, Any]], attractions_index: Dict[str, Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if all attractions are from search results and prices match."""
     if not attractions_index:
-        return False, "Attraction database failed to load or is empty"
+        return False, 'Attraction database failed to load or is empty'
     not_found: List[str] = []
     cost_mismatch: List[str] = []
     for _act, details, name in iter_attraction_acts(daily_plans):
         if not name or name not in attractions_index:
-            not_found.append(name or "<empty>")
+            not_found.append(name or '<empty>')
             continue
-        ticket_price = attractions_index[name].get("ticket_price")
-        plan_cost = details.get("cost")
-        if ticket_price is None or ticket_price == "":
+        ticket_price = attractions_index[name].get('ticket_price')
+        plan_cost = details.get('cost')
+        if ticket_price is None or ticket_price == '':
             continue
         try:
             db_price = int(round(float(ticket_price)))
@@ -372,19 +372,19 @@ def check_attractions_from_search(daily_plans: List[Dict[str, Any]], attractions
 def check_meals_from_search(daily_plans: List[Dict[str, Any]], restaurants_index: Dict[str, Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if all meals are from search results and prices match."""
     if not restaurants_index:
-        return False, "Restaurant database failed to load or is empty"
+        return False, 'Restaurant database failed to load or is empty'
 
     not_found: List[str] = []
     cost_mismatch: List[str] = []
 
     for _act, details, name in iter_meal_acts(daily_plans):
-        cost_val = details.get("cost")
+        cost_val = details.get('cost')
 
         if not name or name not in restaurants_index:
-            not_found.append(name or "<empty>")
+            not_found.append(name or '<empty>')
             continue
 
-        price_str = restaurants_index[name].get("price_per_person")
+        price_str = restaurants_index[name].get('price_per_person')
         if not price_str:
             continue
         try:
@@ -423,19 +423,19 @@ def check_intercity_public_from_search(
     not_found: List[str] = []
     price_mismatch: List[str] = []
     
-    required_fields = ("number", "from", "to", "cost")
+    required_fields = ('number', 'from', 'to', 'cost')
     
     for act, details in iter_intercity_public_acts(daily_plans):
         # Step 1: Check required fields exist
-        missing = [k for k in required_fields if details.get(k) in (None, "")]
+        missing = [k for k in required_fields if details.get(k) in (None, '')]
         if missing:
             intercity_missing.append(f"{act.get('time_slot') or '<no time_slot>'}: missing {missing}")
             continue
         
-        number = str(details.get("number")).strip()
+        number = str(details.get('number')).strip()
         
         try:
-            plan_cost = float(details.get("cost"))
+            plan_cost = float(details.get('cost'))
         except (ValueError, TypeError):
             plan_cost = None
         
@@ -466,7 +466,7 @@ def check_intercity_public_from_search(
                 db_prices = []
                 
                 for record in records:
-                    db_price = record.get("price")
+                    db_price = record.get('price')
                     if db_price is not None:
                         try:
                             db_price_float = float(db_price)
@@ -492,7 +492,7 @@ def check_intercity_public_from_search(
         error_parts.append(f"Price mismatch: {price_mismatch}")
     
     if error_parts:
-        return False, "; ".join(error_parts)
+        return False, '; '.join(error_parts)
     return True, None
 
 
@@ -504,23 +504,23 @@ def check_intercity_public_from_search(
 def check_accommodation_traceable(daily_plans: List[Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if accommodation is traceable (both hotel activity and accommodation field present)."""
     if not daily_plans:
-        return False, "Missing daily_plans"
+        return False, 'Missing daily_plans'
     missing_days: List[int] = []
     for i, day in enumerate(daily_plans[:-1]):  # Except last day, must have accommodation
         has_hotel_act = any(True for _ in iter_hotel_acts([day]))
-        accom = day.get("accommodation")
+        accom = day.get('accommodation')
         has_accom_field = bool(accom)
         if not (has_hotel_act and has_accom_field):
             missing_days.append(i + 1)
     # Last day: allow accommodation field, but name must be "-" (indicating no accommodation) or empty
     last_day = daily_plans[-1]
-    last_accom = last_day.get("accommodation")
+    last_accom = last_day.get('accommodation')
     if last_accom:
         # If accommodation is a dict, check if name is "-" or empty
         if isinstance(last_accom, dict):
-            last_accom_name = (last_accom.get("name") or "").strip()
+            last_accom_name = (last_accom.get('name') or '').strip()
             # Only report error when name exists and is not "-"
-            if last_accom_name and last_accom_name != "-":
+            if last_accom_name and last_accom_name != '-':
                 if missing_days:
                     return False, f"Accommodation not traceable on days: {missing_days}; last day accommodation.name should be '-' or empty, actual '{last_accom_name}'"
                 return False, f"Last day accommodation.name should be '-' or empty, actual '{last_accom_name}'"
@@ -538,15 +538,15 @@ def check_accommodation_traceable(daily_plans: List[Dict[str, Any]]) -> Tuple[bo
 def check_last_activity_is_hotel(daily_plans: List[Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if last activity of each day (except last day) is hotel."""
     if not daily_plans:
-        return False, "Missing daily_plans"
+        return False, 'Missing daily_plans'
     invalid_days: List[int] = []
     for i, day in enumerate(daily_plans[:-1]):  # Except last day
-        activities = day.get("activities", []) or []
+        activities = day.get('activities', []) or []
         if not activities:
             invalid_days.append(i + 1)
             continue
         last_act = activities[-1]
-        if last_act.get("type") != "hotel":
+        if last_act.get('type') != 'hotel':
             invalid_days.append(i + 1)
     if invalid_days:
         return False, f"Last activity not hotel on days: {invalid_days}"
@@ -575,30 +575,30 @@ def check_meal_necessity(daily_plans: List[Dict[str, Any]], meta: Dict[str, Any]
 
     def _get_start_time_minutes(act: Dict[str, Any]) -> Optional[int]:
         """Get activity start time (in minutes)."""
-        start_time = act.get("start_time")
+        start_time = act.get('start_time')
         if not start_time:
-            ts = act.get("time_slot", "")
-            if ts and "-" in ts:
-                start_time = ts.split("-")[0]
+            ts = act.get('time_slot', '')
+            if ts and '-' in ts:
+                start_time = ts.split('-')[0]
         if not start_time:
             return None
         try:
-            h, m = map(int, start_time.split(":"))
+            h, m = map(int, start_time.split(':'))
             return h * 60 + m
         except:
             return None
 
     def _get_end_time_minutes(act: Dict[str, Any]) -> Optional[int]:
         """Get activity end time (in minutes)."""
-        end_time = act.get("end_time")
+        end_time = act.get('end_time')
         if not end_time:
-            ts = act.get("time_slot", "")
-            if ts and "-" in ts:
-                end_time = ts.split("-")[1]
+            ts = act.get('time_slot', '')
+            if ts and '-' in ts:
+                end_time = ts.split('-')[1]
         if not end_time:
             return None
         try:
-            h, m = map(int, end_time.split(":"))
+            h, m = map(int, end_time.split(':'))
             return h * 60 + m
         except:
             return None
@@ -614,21 +614,21 @@ def check_meal_necessity(daily_plans: List[Dict[str, Any]], meta: Dict[str, Any]
                 violations.append(f"D{day_idx}: Gap between two meals less than 2 hours (gap {gap} minutes)")
 
     # Get org city
-    org_city = normalize_city(meta.get("org"))
+    org_city = normalize_city(meta.get('org'))
     if not org_city:
-        return False, "Missing org info, cannot determine meal necessity"
+        return False, 'Missing org info, cannot determine meal necessity'
 
     current_location = org_city
 
     # Check each day
     for day_idx, day in enumerate(daily_plans, start=1):
-        current_city = day.get("current_city", "")
+        current_city = day.get('current_city', '')
         from_city, to_city = extract_from_to(current_city)
         
         # Collect meals for the day
         meal_times: List[Tuple[int, int]] = []
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "meal":
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'meal':
                 st_min = _get_start_time_minutes(act)
                 ed_min = _get_end_time_minutes(act)
                 if st_min is not None and ed_min is not None:
@@ -725,7 +725,7 @@ def check_attraction_necessity(daily_plans: List[Dict[str, Any]], meta: Dict[str
         if not time_str:
             return None
         try:
-            hour, minute = map(int, time_str.split(":"))
+            hour, minute = map(int, time_str.split(':'))
             return hour + minute / 60.0
         except:
             return None
@@ -744,16 +744,16 @@ def check_attraction_necessity(daily_plans: List[Dict[str, Any]], meta: Dict[str
     def _get_activity_duration(act: Dict[str, Any]) -> int:
         """Get activity duration (in minutes)."""
         # Priority: use start_time and end_time
-        start_time = act.get("start_time", "")
-        end_time = act.get("end_time", "")
+        start_time = act.get('start_time', '')
+        end_time = act.get('end_time', '')
         
         if not start_time or not end_time:
             # Try to extract from time_slot
-            time_slot = act.get("time_slot", "")
-            if time_slot and "-" in time_slot:
-                parts = time_slot.split("-")
+            time_slot = act.get('time_slot', '')
+            if time_slot and '-' in time_slot:
+                parts = time_slot.split('-')
                 start_time = parts[0]
-                end_time = parts[1] if len(parts) > 1 else ""
+                end_time = parts[1] if len(parts) > 1 else ''
         
         if start_time and end_time:
             return _calculate_duration_minutes(start_time, end_time)
@@ -767,30 +767,30 @@ def check_attraction_necessity(daily_plans: List[Dict[str, Any]], meta: Dict[str
         2. Travel to/from attractions (type="travel_city", from or to is attraction name)
         """
         total_minutes = 0
-        activities = day.get("activities", []) or []
+        activities = day.get('activities', []) or []
         
         # Collect all attraction names
         attraction_names = set()
         for act in activities:
-            if act.get("type") == "attraction":
-                details = act.get("details") or {}
-                name = (details.get("name") or "").strip()
+            if act.get('type') == 'attraction':
+                details = act.get('details') or {}
+                name = (details.get('name') or '').strip()
                 if name:
                     attraction_names.add(name)
         
         # Calculate attraction-related duration
         for act in activities:
-            act_type = act.get("type")
+            act_type = act.get('type')
             
-            if act_type == "attraction":
+            if act_type == 'attraction':
                 # Attraction visit time
                 total_minutes += _get_activity_duration(act)
             
-            elif act_type == "travel_city":
+            elif act_type == 'travel_city':
                 # Check if it's travel to/from attraction
-                details = act.get("details") or {}
-                from_loc = (details.get("from") or "").strip()
-                to_loc = (details.get("to") or "").strip()
+                details = act.get('details') or {}
+                from_loc = (details.get('from') or '').strip()
+                to_loc = (details.get('to') or '').strip()
                 
                 # If from or to is an attraction, count in attraction-related time
                 if from_loc in attraction_names or to_loc in attraction_names:
@@ -799,14 +799,14 @@ def check_attraction_necessity(daily_plans: List[Dict[str, Any]], meta: Dict[str
         return total_minutes
     
     # Initial location (departure city)
-    org_city = normalize_city(meta.get("org"))
+    org_city = normalize_city(meta.get('org'))
     if not org_city:
-        return False, "Missing org info, cannot determine attraction necessity"
+        return False, 'Missing org info, cannot determine attraction necessity'
     
     current_location = org_city
     
     for day_idx, day in enumerate(daily_plans, start=1):
-        current_city = day.get("current_city", "")
+        current_city = day.get('current_city', '')
         from_city, to_city = extract_from_to(current_city)
         
         # Calculate attraction-related duration for the day
@@ -814,7 +814,7 @@ def check_attraction_necessity(daily_plans: List[Dict[str, Any]], meta: Dict[str
         attraction_hours = attraction_minutes / 60.0
         
         # Count number of attractions for the day
-        attraction_count = sum(1 for act in day.get("activities", []) or [] if act.get("type") == "attraction")
+        attraction_count = sum(1 for act in day.get('activities', []) or [] if act.get('type') == 'attraction')
         
         # Determine if it's an intercity day
         is_intercity_day = bool(from_city and to_city)
@@ -879,14 +879,14 @@ def check_time_no_overlap(daily_plans: List[Dict[str, Any]]) -> Tuple[bool, Opti
     conflicts: List[str] = []
     for day_idx, day in enumerate(daily_plans, start=1):
         ranges: List[Tuple[int, int, str]] = []
-        for act in day.get("activities", []) or []:
-            slot = act.get("time_slot")
+        for act in day.get('activities', []) or []:
+            slot = act.get('time_slot')
             if not slot:
                 continue
             s, e = slot_to_minutes(slot)
             if s is None or e is None:
                 continue
-            ranges.append((s, e, act.get("type") or ""))
+            ranges.append((s, e, act.get('type') or ''))
         ranges.sort(key=lambda x: x[0])
         for i in range(1, len(ranges)):
             prev = ranges[i - 1]
@@ -902,7 +902,7 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
     """Check if transfer times between anchor activities are reasonable."""
     violations: List[str] = []
     skipped: List[str] = []
-    anchor_types = {"hotel", "attraction", "meal", "travel_intercity_public"}
+    anchor_types = {'hotel', 'attraction', 'meal', 'travel_intercity_public'}
 
     def _coord_key(lat_str: str, lon_str: str) -> str:
         """Generate coordinate key, format 'latitude,longitude', directly use string concatenation to preserve original precision."""
@@ -916,16 +916,16 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
         # Use passed database_dir (if any), otherwise use default global path
         if database_dir is not None:
             db_dir = get_database_dir(database_dir)
-            distance_matrix_path = db_dir / "transportation" / "distance_matrix.csv"
+            distance_matrix_path = db_dir / 'transportation' / 'distance_matrix.csv'
         else:
-            distance_matrix_path = _DATABASE_DIR / "transportation" / "distance_matrix.csv"
+            distance_matrix_path = _DATABASE_DIR / 'transportation' / 'distance_matrix.csv'
         
         try:
-            with open(str(distance_matrix_path), "r", encoding="utf-8-sig") as f:  # Use utf-8-sig to handle BOM
+            with open(str(distance_matrix_path), 'r', encoding='utf-8-sig') as f:  # Use utf-8-sig to handle BOM
                 reader = csv.DictReader(f)
                 for row in reader:
-                    if (row.get("origin") == key_o and row.get("destination") == key_d):
-                        dur = row.get("duration_minutes")
+                    if (row.get('origin') == key_o and row.get('destination') == key_d):
+                        dur = row.get('duration_minutes')
                         try:
                             return float(dur)
                         except Exception:
@@ -936,11 +936,11 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
     
     for day_idx, day in enumerate(daily_plans, start=1):
         anchors: List[Tuple[int, int, Dict[str, Any]]] = []
-        activities = day.get("activities", []) or []
+        activities = day.get('activities', []) or []
         for act in activities:
-            if act.get("type") not in anchor_types:
+            if act.get('type') not in anchor_types:
                 continue
-            s, e = slot_to_minutes(act.get("time_slot"))
+            s, e = slot_to_minutes(act.get('time_slot'))
             if s is None or e is None:
                 continue
             anchors.append((s, e, act))
@@ -965,9 +965,9 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
             # Calculate buffer time and subtract from gap
             buffer_duration = 0.0
             for act_buf in activities:
-                act_type = act_buf.get("type", "").strip()
-                if act_type == "buffer":
-                    s_buf, e_buf = slot_to_minutes(act_buf.get("time_slot"))
+                act_type = act_buf.get('type', '').strip()
+                if act_type == 'buffer':
+                    s_buf, e_buf = slot_to_minutes(act_buf.get('time_slot'))
 
                     if s_buf is None or e_buf is None:
                         continue
@@ -998,16 +998,16 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
             # - Intercity anchor (travel_intercity_public):
             #   * As previous anchor, take arrival airport (details.to)
             #   * As next anchor, take departure airport (details.from)
-            prev_details = (prev_act.get("details") or {})
-            curr_details = (curr_act.get("details") or {})
-            if prev_act.get("type") == "travel_intercity_public":
-                prev_name = (prev_details.get("to") or prev_act.get("type") or "").strip()
+            prev_details = (prev_act.get('details') or {})
+            curr_details = (curr_act.get('details') or {})
+            if prev_act.get('type') == 'travel_intercity_public':
+                prev_name = (prev_details.get('to') or prev_act.get('type') or '').strip()
             else:
-                prev_name = (prev_details.get("name") or prev_act.get("type") or "").strip()
-            if curr_act.get("type") == "travel_intercity_public":
-                curr_name = (curr_details.get("from") or curr_act.get("type") or "").strip()
+                prev_name = (prev_details.get('name') or prev_act.get('type') or '').strip()
+            if curr_act.get('type') == 'travel_intercity_public':
+                curr_name = (curr_details.get('from') or curr_act.get('type') or '').strip()
             else:
-                curr_name = (curr_details.get("name") or curr_act.get("type") or "").strip()
+                curr_name = (curr_details.get('name') or curr_act.get('type') or '').strip()
 
             # Only when both names can be resolved to coordinates, look up distance_matrix; otherwise skip (record)
             if prev_name and curr_name:
@@ -1020,7 +1020,7 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
                     skipped.append(f"D{day_idx}:{prev_name}->{curr_name}")
                     print(f"D{day_idx}:{prev_name}->{curr_name} missing coordinates")
                     continue
-                taxi_min = _lookup_duration_minutes_in_matrix(lon1, lat1, lon2, lat2, "taxi")
+                taxi_min = _lookup_duration_minutes_in_matrix(lon1, lat1, lon2, lat2, 'taxi')
                 if taxi_min is None:
                     skipped.append(f"D{day_idx}:{prev_name}->{curr_name}")
                     print(f"D{day_idx}:{prev_name}->{curr_name} missing distance matrix (query: {lat1},{lon1} -> {lat2},{lon2})")
@@ -1057,7 +1057,7 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
 def check_attractions_in_opening_hours(daily_plans: List[Dict[str, Any]], attractions_index: Dict[str, Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if attractions are visited within opening hours."""
     if not attractions_index:
-        return False, "Attraction database failed to load or is empty"
+        return False, 'Attraction database failed to load or is empty'
     out_of_hours: List[str] = []
     missing_time_info: List[str] = []
     for act, _details, name in iter_attraction_acts(daily_plans):
@@ -1065,10 +1065,10 @@ def check_attractions_in_opening_hours(daily_plans: List[Dict[str, Any]], attrac
             # Handled by authenticity validation
             continue
         idx = attractions_index[name]
-        slot = act.get("time_slot")
+        slot = act.get('time_slot')
         slot_start, slot_end = parse_time_slot(slot)
-        open_str = (idx.get("opening_time") or "").strip()
-        close_str = (idx.get("closing_time") or "").strip()
+        open_str = (idx.get('opening_time') or '').strip()
+        close_str = (idx.get('closing_time') or '').strip()
         if is_all_day(open_str, close_str):
             continue
         open_t = parse_time_hhmm(open_str)
@@ -1088,7 +1088,7 @@ def check_attractions_in_opening_hours(daily_plans: List[Dict[str, Any]], attrac
 def check_meals_in_business_hours(daily_plans: List[Dict[str, Any]], restaurants_index: Dict[str, Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if meals are scheduled within restaurant business hours."""
     if not restaurants_index:
-        return False, "Restaurant database failed to load or is empty"
+        return False, 'Restaurant database failed to load or is empty'
 
     out_of_hours: List[str] = []
     missing_slot: List[str] = []
@@ -1098,10 +1098,10 @@ def check_meals_in_business_hours(daily_plans: List[Dict[str, Any]], restaurants
             # Name not in database, handled by source validation, skip here
             continue
 
-        slot = act.get("time_slot")
+        slot = act.get('time_slot')
         slot_start, slot_end = parse_time_slot(slot)
-        open_str = (restaurants_index[name].get("opening_time") or "").strip()
-        close_str = (restaurants_index[name].get("closing_time") or "").strip()
+        open_str = (restaurants_index[name].get('opening_time') or '').strip()
+        close_str = (restaurants_index[name].get('closing_time') or '').strip()
         open_t = parse_time_hhmm(open_str)
         close_t = parse_time_hhmm(close_str)
 
@@ -1142,10 +1142,10 @@ def check_attractions_not_closed(
         (False, error_message) if any attraction is visited on a closed day
     """
     if not attractions_index:
-        return False, "Attraction database failed to load or is empty"
+        return False, 'Attraction database failed to load or is empty'
     
     # Get departure weekday from meta (1=Monday, 7=Sunday)
-    depart_weekday = meta.get("depart_weekday")
+    depart_weekday = meta.get('depart_weekday')
     if not depart_weekday:
         # If depart_weekday is not provided, skip this check
         return True, None
@@ -1162,25 +1162,25 @@ def check_attractions_not_closed(
         current_weekday = calculate_day_of_week(depart_weekday, day_index)
         
         # Check all attractions in this day
-        for act in day.get("activities", []) or []:
-            if act.get("type") != "attraction":
+        for act in day.get('activities', []) or []:
+            if act.get('type') != 'attraction':
                 continue
             
-            details = act.get("details") or {}
-            name = (details.get("name") or "").strip()
+            details = act.get('details') or {}
+            name = (details.get('name') or '').strip()
             
             if not name or name not in attractions_index:
                 # Not in database, handled by authenticity validation
                 continue
             
             attraction_info = attractions_index[name]
-            closing_dates_str = attraction_info.get("closing_dates")
+            closing_dates_str = attraction_info.get('closing_dates')
             
             # Check if attraction is closed on this weekday
             if is_attraction_closed_on_day(closing_dates_str, current_weekday):
                 # Map weekday number to name for error message
-                weekday_names = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 
-                                4: "Thursday", 5: "Friday", 6: "Saturday", 7: "Sunday"}
+                weekday_names = {1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 
+                                4: 'Thursday', 5: 'Friday', 6: 'Saturday', 7: 'Sunday'}
                 weekday_name = weekday_names.get(current_weekday, str(current_weekday))
                 
                 closed_attractions.append(
@@ -1202,7 +1202,7 @@ def check_attractions_not_closed(
 def check_attractions_duration_reasonable(daily_plans: List[Dict[str, Any]], attractions_index: Dict[str, Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """Check if attraction visit durations are within reasonable ranges."""
     if not attractions_index:
-        return False, "Attraction database failed to load or is empty"
+        return False, 'Attraction database failed to load or is empty'
     duration_invalid: List[str] = []
     for _act, details, name in iter_attraction_acts(daily_plans):
         if not name or name not in attractions_index:
@@ -1210,13 +1210,13 @@ def check_attractions_duration_reasonable(daily_plans: List[Dict[str, Any]], att
             continue
         idx = attractions_index[name]
         # Use activity's time_slot to parse actual visit duration
-        time_slot = _act.get("time_slot")
+        time_slot = _act.get('time_slot')
         start_m, end_m = slot_to_minutes(time_slot)
         plan_duration = None
         if start_m is not None and end_m is not None and end_m >= start_m:
             plan_duration = (end_m - start_m) / 60.0
-        min_hours = parse_duration_hours(idx.get("min_visit_hours"))
-        max_hours = parse_duration_hours(idx.get("max_visit_hours"))
+        min_hours = parse_duration_hours(idx.get('min_visit_hours'))
+        max_hours = parse_duration_hours(idx.get('max_visit_hours'))
         if plan_duration is None or min_hours is None or max_hours is None:
             duration_invalid.append(f"{name}: Missing duration")
             continue
@@ -1249,7 +1249,7 @@ def check_meal_duration_reasonable(daily_plans: List[Dict[str, Any]]) -> Tuple[b
             continue
         
         # Use activity's time_slot to parse actual meal duration
-        time_slot = act.get("time_slot")
+        time_slot = act.get('time_slot')
         start_m, end_m = slot_to_minutes(time_slot)
         
         if start_m is None or end_m is None:
@@ -1294,13 +1294,13 @@ def check_budget_accuracy(plan: Dict[str, Any], daily_plans: List[Dict[str, Any]
     Allow 10% margin of error.
     """
     # Get plan's budget summary
-    budget_summary = plan.get("budget_summary", {})
+    budget_summary = plan.get('budget_summary', {})
     if not budget_summary:
-        return False, "Missing budget_summary in plan"
+        return False, 'Missing budget_summary in plan'
     
-    plan_total = budget_summary.get("total_estimated_budget")
+    plan_total = budget_summary.get('total_estimated_budget')
     if plan_total is None:
-        return False, "Missing total_estimated_budget in budget_summary"
+        return False, 'Missing total_estimated_budget in budget_summary'
     
     try:
         plan_total = float(plan_total)
@@ -1308,8 +1308,8 @@ def check_budget_accuracy(plan: Dict[str, Any], daily_plans: List[Dict[str, Any]
         return False, f"Invalid total_estimated_budget: {plan_total}"
     
     # Get meta info
-    people_number = int(meta.get("people_number", 1))
-    room_number = int(meta.get("room_number", 1))
+    people_number = int(meta.get('people_number', 1))
+    room_number = int(meta.get('room_number', 1))
     
     # Calculate actual costs
     transportation_cost = 0.0
@@ -1323,10 +1323,10 @@ def check_budget_accuracy(plan: Dict[str, Any], daily_plans: List[Dict[str, Any]
         # So we only count the FIRST one to avoid double counting
         day_intercity_cost = 0.0
         found_first = False
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "travel_intercity_public" and not found_first:
-                details = act.get("details") or {}
-                cost = details.get("cost", 0)
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'travel_intercity_public' and not found_first:
+                details = act.get('details') or {}
+                cost = details.get('cost', 0)
                 try:
                     day_intercity_cost = float(cost)
                     found_first = True
@@ -1341,9 +1341,9 @@ def check_budget_accuracy(plan: Dict[str, Any], daily_plans: List[Dict[str, Any]
     # Count nights (days - 1, as last day doesn't need accommodation)
     nights = len(daily_plans) - 1 if len(daily_plans) > 1 else 0
     for day_idx, day in enumerate(daily_plans[:-1]):  # Except last day
-        accom = day.get("accommodation")
+        accom = day.get('accommodation')
         if isinstance(accom, dict):
-            price = accom.get("price") or accom.get("price_per_night") or accom.get("cost")
+            price = accom.get('price') or accom.get('price_per_night') or accom.get('cost')
             if price:
                 try:
                     accommodation_cost += float(price) * room_number
@@ -1352,10 +1352,10 @@ def check_budget_accuracy(plan: Dict[str, Any], daily_plans: List[Dict[str, Any]
     
     # 3. Calculate meals costs
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "meal":
-                details = act.get("details") or {}
-                cost = details.get("cost")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'meal':
+                details = act.get('details') or {}
+                cost = details.get('cost')
                 if cost:
                     try:
                         meals_cost += float(cost) * people_number
@@ -1364,10 +1364,10 @@ def check_budget_accuracy(plan: Dict[str, Any], daily_plans: List[Dict[str, Any]
     
     # 4. Calculate attraction costs
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "attraction":
-                details = act.get("details") or {}
-                cost = details.get("cost")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'attraction':
+                details = act.get('details') or {}
+                cost = details.get('cost')
                 if cost:
                     try:
                         attractions_cost += float(cost) * people_number
@@ -1378,10 +1378,10 @@ def check_budget_accuracy(plan: Dict[str, Any], daily_plans: List[Dict[str, Any]
     # ≤4 people = 1 taxi, >4 people = need more taxis
     taxis_needed = max(1, (people_number + 3) // 4)  # Round up division
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "travel_city":
-                details = act.get("details") or {}
-                cost = details.get("cost")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'travel_city':
+                details = act.get('details') or {}
+                cost = details.get('cost')
                 if cost:
                     try:
                         transportation_cost += float(cost) * taxis_needed
@@ -1426,9 +1426,9 @@ def check_diverse_restaurants(daily_plans: List[Dict[str, Any]]) -> Tuple[bool, 
     """
     restaurant_names: set[str] = set()
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "meal":
-                name = (act.get("details") or {}).get("name")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'meal':
+                name = (act.get('details') or {}).get('name')
                 if name and name in restaurant_names:
                     return False, f"Duplicate restaurant: {name}"
                 if name:
@@ -1440,9 +1440,9 @@ def check_diverse_attractions(daily_plans: List[Dict[str, Any]]) -> Tuple[bool, 
     """Check if all attractions are unique (no duplicates)."""
     attraction_names: set[str] = set()
     for day in daily_plans:
-        for act in day.get("activities", []) or []:
-            if act.get("type") == "attraction":
-                name = (act.get("details") or {}).get("name")
+        for act in day.get('activities', []) or []:
+            if act.get('type') == 'attraction':
+                name = (act.get('details') or {}).get('name')
                 if name and name in attraction_names:
                     return False, f"Duplicate attraction: {name}"
                 if name:
@@ -1477,8 +1477,8 @@ def calculate_dimension_scores(check_results: Dict[str, Tuple[bool, Optional[str
     total_checks = 0
     
     for dim_name, dim_config in EVALUATION_DIMENSIONS.items():
-        weight = dim_config["weight"]
-        checks = dim_config["checks"]
+        weight = dim_config['weight']
+        checks = dim_config['checks']
         
         passed_count = 0
         check_details = []
@@ -1487,9 +1487,9 @@ def calculate_dimension_scores(check_results: Dict[str, Tuple[bool, Optional[str
             if check_name in check_results:
                 passed, msg = check_results[check_name]
                 check_details.append({
-                    "name": check_name,
-                    "passed": passed,
-                    "message": msg
+                    'name': check_name,
+                    'passed': passed,
+                    'message': msg
                 })
                 if passed:
                     passed_count += 1
@@ -1497,9 +1497,9 @@ def calculate_dimension_scores(check_results: Dict[str, Tuple[bool, Optional[str
             else:
                 # Check not found in results, consider as not evaluated
                 check_details.append({
-                    "name": check_name,
-                    "passed": False,
-                    "message": "Check not evaluated"
+                    'name': check_name,
+                    'passed': False,
+                    'message': 'Check not evaluated'
                 })
                 total_checks += 1
         
@@ -1508,22 +1508,22 @@ def calculate_dimension_scores(check_results: Dict[str, Tuple[bool, Optional[str
         dimension_scores[dim_name] = dim_score
         
         dimension_details[dim_name] = {
-            "checks": check_details,
-            "passed": passed_count,
-            "total": len(checks),
-            "weight": weight,
-            "weighted_score": dim_score * weight
+            'checks': check_details,
+            'passed': passed_count,
+            'total': len(checks),
+            'weight': weight,
+            'weighted_score': dim_score * weight
         }
         
         total_weighted_score += dim_score * weight
         total_checks_passed += passed_count
     
     return {
-        "dimension_scores": dimension_scores,
-        "dimension_details": dimension_details,
-        "total_weighted_score": total_weighted_score,
-        "total_checks_passed": total_checks_passed,
-        "total_checks": total_checks
+        'dimension_scores': dimension_scores,
+        'dimension_details': dimension_details,
+        'total_weighted_score': total_weighted_score,
+        'total_checks_passed': total_checks_passed,
+        'total_checks': total_checks
     }
 
 
@@ -1538,31 +1538,31 @@ def get_dimension_summary(dimension_result: Dict[str, Any]) -> str:
         Formatted string summary
     """
     lines = []
-    lines.append("=" * 60)
-    lines.append("COMMONSENSE EVALUATION SUMMARY")
-    lines.append("=" * 60)
+    lines.append('=' * 60)
+    lines.append('COMMONSENSE EVALUATION SUMMARY')
+    lines.append('=' * 60)
     lines.append(f"Total Weighted Score: {dimension_result['total_weighted_score']:.2%}")
     lines.append(f"Checks Passed: {dimension_result['total_checks_passed']}/{dimension_result['total_checks']}")
-    lines.append("-" * 60)
-    lines.append("DIMENSION BREAKDOWN:")
-    lines.append("-" * 60)
+    lines.append('-' * 60)
+    lines.append('DIMENSION BREAKDOWN:')
+    lines.append('-' * 60)
     
-    for dim_name, details in dimension_result["dimension_details"].items():
-        score = dimension_result["dimension_scores"][dim_name]
+    for dim_name, details in dimension_result['dimension_details'].items():
+        score = dimension_result['dimension_scores'][dim_name]
         lines.append(f"\n{dim_name} (weight: {details['weight']:.0%}):")
         lines.append(f"  Score: {score:.2%} ({details['passed']}/{details['total']} checks passed)")
         lines.append(f"  Weighted contribution: {details['weighted_score']:.4f}")
         
-        for check in details["checks"]:
-            status = "✓" if check["passed"] else "✗"
+        for check in details['checks']:
+            status = '✓' if check['passed'] else '✗'
             lines.append(f"    {status} {check['name']}")
-            if not check["passed"] and check["message"]:
+            if not check['passed'] and check['message']:
                 # Truncate long messages
-                msg = check["message"][:100] + "..." if len(check["message"]) > 100 else check["message"]
+                msg = check['message'][:100] + '...' if len(check['message']) > 100 else check['message']
                 lines.append(f"      └─ {msg}")
     
-    lines.append("=" * 60)
-    return "\n".join(lines)
+    lines.append('=' * 60)
+    return '\n'.join(lines)
 
 
 # ==============================================================================
@@ -1579,48 +1579,48 @@ def eval_commonsense(plan: Dict[str, Any], meta: Dict[str, Any], database_dir: O
         database_dir: Database directory path (if specified, will use that sample's database)
     """
     res: Dict[str, Tuple[bool, Optional[str]]] = {}
-    daily_plans: List[Dict[str, Any]] = plan.get("daily_plans", []) or []
+    daily_plans: List[Dict[str, Any]] = plan.get('daily_plans', []) or []
     
     # If daily_plans is missing, all checks that depend on itinerary will be False with unified reason
     if not daily_plans:
-        reason = "Missing daily_plans"
-        res["valid_trip_duration"] = (False, reason)
-        res["closed_loop_route_structure"] = (False, reason)
-        res["seamless_intercity_transfers"] = (False, reason)
-        res["validated_accommodation"] = (False, reason)
-        res["validated_attractions"] = (False, reason)
-        res["validated_meals"] = (False, reason)
-        res["validated_transportation"] = (False, reason)
-        res["traceable_accommodation"] = (False, reason)
-        res["ends_with_accommodation"] = (False, reason)
-        res["essential_meal_coverage"] = (False, reason)
-        res["essential_attraction_coverage"] = (False, reason)
-        res["no_time_overlaps"] = (False, reason)
-        res["reasonable_transfer_time"] = (False, reason)
-        res["attraction_visit_within_opening_hours"] = (False, reason)
-        res["dining_within_service_hours"] = (False, reason)
-        res["reasonable_duration_at_attractions"] = (False, reason)
-        res["reasonable_meal_duration"] = (False, reason)
-        res["cost_calculation_correctness"] = (False, reason)
-        res["diverse_meal_options"] = (False, reason)
-        res["diverse_attraction_options"] = (False, reason)
+        reason = 'Missing daily_plans'
+        res['valid_trip_duration'] = (False, reason)
+        res['closed_loop_route_structure'] = (False, reason)
+        res['seamless_intercity_transfers'] = (False, reason)
+        res['validated_accommodation'] = (False, reason)
+        res['validated_attractions'] = (False, reason)
+        res['validated_meals'] = (False, reason)
+        res['validated_transportation'] = (False, reason)
+        res['traceable_accommodation'] = (False, reason)
+        res['ends_with_accommodation'] = (False, reason)
+        res['essential_meal_coverage'] = (False, reason)
+        res['essential_attraction_coverage'] = (False, reason)
+        res['no_time_overlaps'] = (False, reason)
+        res['reasonable_transfer_time'] = (False, reason)
+        res['attraction_visit_within_opening_hours'] = (False, reason)
+        res['dining_within_service_hours'] = (False, reason)
+        res['reasonable_duration_at_attractions'] = (False, reason)
+        res['reasonable_meal_duration'] = (False, reason)
+        res['cost_calculation_correctness'] = (False, reason)
+        res['diverse_meal_options'] = (False, reason)
+        res['diverse_attraction_options'] = (False, reason)
         return res
     
     # ==================== Load all database indices ====================
     if database_dir is not None:
         db_dir = get_database_dir(database_dir)
-        hotels_csv_path = str(db_dir / "hotels" / "hotels.csv")
-        attractions_csv_path = str(db_dir / "attractions" / "attractions.csv")
-        restaurants_csv_path = str(db_dir / "restaurants" / "restaurants.csv")
-        flights_csv_path = str(db_dir / "flights" / "flights.csv")
-        trains_csv_path = str(db_dir / "trains" / "trains.csv")
-        locations_coords_path = str(db_dir / "locations" / "locations_coords.csv")
+        hotels_csv_path = str(db_dir / 'hotels' / 'hotels.csv')
+        attractions_csv_path = str(db_dir / 'attractions' / 'attractions.csv')
+        restaurants_csv_path = str(db_dir / 'restaurants' / 'restaurants.csv')
+        flights_csv_path = str(db_dir / 'flights' / 'flights.csv')
+        trains_csv_path = str(db_dir / 'trains' / 'trains.csv')
+        locations_coords_path = str(db_dir / 'locations' / 'locations_coords.csv')
     else:
         hotels_csv_path = HOTELS_CSV_PATH
         attractions_csv_path = ATTRACTIONS_CSV_PATH
         restaurants_csv_path = RESTAURANTS_CSV_PATH
-        flights_csv_path = str(_DATABASE_DIR / "flights" / "flights.csv")
-        trains_csv_path = str(_DATABASE_DIR / "trains" / "trains.csv")
+        flights_csv_path = str(_DATABASE_DIR / 'flights' / 'flights.csv')
+        trains_csv_path = str(_DATABASE_DIR / 'trains' / 'trains.csv')
         locations_coords_path = LOCATIONS_COORDS_CSV_PATH
     
     hotels_index = load_hotel_index(hotels_csv_path)
@@ -1631,41 +1631,41 @@ def eval_commonsense(plan: Dict[str, Any], meta: Dict[str, Any], database_dir: O
     locations_index = load_locations_index(locations_coords_path)
 
     # ==================== DIMENSION 1: Route Consistency ====================
-    res["valid_trip_duration"] = check_valid_days(daily_plans, meta)
-    res["closed_loop_route_structure"] = check_route_closed_loop(daily_plans, meta)
-    res["seamless_intercity_transfers"] = check_intercity_transportation_consistency(daily_plans, meta, database_dir)
+    res['valid_trip_duration'] = check_valid_days(daily_plans, meta)
+    res['closed_loop_route_structure'] = check_route_closed_loop(daily_plans, meta)
+    res['seamless_intercity_transfers'] = check_intercity_transportation_consistency(daily_plans, meta, database_dir)
 
     # ==================== DIMENSION 2: Sandbox Compliance ====================
-    res["validated_accommodation"] = check_hotels_from_search(daily_plans, hotels_index)
-    res["validated_attractions"] = check_attractions_from_search(daily_plans, attractions_index)
-    res["validated_meals"] = check_meals_from_search(daily_plans, restaurants_index)
-    res["validated_transportation"] = check_intercity_public_from_search(daily_plans, flights_index, trains_index)
+    res['validated_accommodation'] = check_hotels_from_search(daily_plans, hotels_index)
+    res['validated_attractions'] = check_attractions_from_search(daily_plans, attractions_index)
+    res['validated_meals'] = check_meals_from_search(daily_plans, restaurants_index)
+    res['validated_transportation'] = check_intercity_public_from_search(daily_plans, flights_index, trains_index)
 
     # ==================== DIMENSION 3: Itinerary Structure ====================
-    res["traceable_accommodation"] = check_accommodation_traceable(daily_plans)
-    res["ends_with_accommodation"] = check_last_activity_is_hotel(daily_plans)
-    res["essential_meal_coverage"] = check_meal_necessity(daily_plans, meta)
-    res["essential_attraction_coverage"] = check_attraction_necessity(daily_plans, meta)
+    res['traceable_accommodation'] = check_accommodation_traceable(daily_plans)
+    res['ends_with_accommodation'] = check_last_activity_is_hotel(daily_plans)
+    res['essential_meal_coverage'] = check_meal_necessity(daily_plans, meta)
+    res['essential_attraction_coverage'] = check_attraction_necessity(daily_plans, meta)
 
     # ==================== DIMENSION 4: Time Feasibility ====================
-    res["no_time_overlaps"] = check_time_no_overlap(daily_plans)
-    res["reasonable_transfer_time"] = check_transfer_time_reasonable(daily_plans, locations_index, database_dir)
+    res['no_time_overlaps'] = check_time_no_overlap(daily_plans)
+    res['reasonable_transfer_time'] = check_transfer_time_reasonable(daily_plans, locations_index, database_dir)
 
     # ==================== DIMENSION 5: Business Hours ====================
-    res["attraction_visit_within_opening_hours"] = check_attractions_in_opening_hours(daily_plans, attractions_index)
-    res["dining_within_service_hours"] = check_meals_in_business_hours(daily_plans, restaurants_index)
-    res["avoidance_of_closure_days"] = check_attractions_not_closed(daily_plans, attractions_index, meta)
+    res['attraction_visit_within_opening_hours'] = check_attractions_in_opening_hours(daily_plans, attractions_index)
+    res['dining_within_service_hours'] = check_meals_in_business_hours(daily_plans, restaurants_index)
+    res['avoidance_of_closure_days'] = check_attractions_not_closed(daily_plans, attractions_index, meta)
 
     # ==================== DIMENSION 6: Duration Rationality ====================
-    res["reasonable_duration_at_attractions"] = check_attractions_duration_reasonable(daily_plans, attractions_index)
-    res["reasonable_meal_duration"] = check_meal_duration_reasonable(daily_plans)
+    res['reasonable_duration_at_attractions'] = check_attractions_duration_reasonable(daily_plans, attractions_index)
+    res['reasonable_meal_duration'] = check_meal_duration_reasonable(daily_plans)
 
     # ==================== DIMENSION 7: Cost Calculation Accuracy ====================
-    res["cost_calculation_correctness"] = check_budget_accuracy(plan, daily_plans, meta)
+    res['cost_calculation_correctness'] = check_budget_accuracy(plan, daily_plans, meta)
 
     # ==================== DIMENSION 8: Activity Diversity ====================
-    res["diverse_meal_options"] = check_diverse_restaurants(daily_plans)
-    res["diverse_attraction_options"] = check_diverse_attractions(daily_plans)
+    res['diverse_meal_options'] = check_diverse_restaurants(daily_plans)
+    res['diverse_attraction_options'] = check_diverse_attractions(daily_plans)
 
     return res
 
@@ -1705,7 +1705,7 @@ def eval_commonsense_with_dimensions(
     
     # Combine results
     result = {
-        "check_results": check_results,
+        'check_results': check_results,
         **dimension_result
     }
     
@@ -1725,5 +1725,5 @@ def get_all_check_names() -> List[str]:
     """
     all_checks = []
     for dim_config in EVALUATION_DIMENSIONS.values():
-        all_checks.extend(dim_config["checks"])
+        all_checks.extend(dim_config['checks'])
     return all_checks

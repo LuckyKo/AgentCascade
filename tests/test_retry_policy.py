@@ -83,113 +83,113 @@ class TestClassifyErrorFatal:
     """Errors that should NOT be retried."""
 
     def test_auth_invalid_api_key(self):
-        assert classify_error(Exception("invalid_api_key")) == 'fatal'
+        assert classify_error(Exception('invalid_api_key')) == 'fatal'
 
     def test_auth_unauthorized(self):
-        assert classify_error(Exception("401 Unauthorized")) == 'fatal'
+        assert classify_error(Exception('401 Unauthorized')) == 'fatal'
 
     def test_auth_forbidden(self):
-        assert classify_error(Exception("403 Forbidden")) == 'fatal'
+        assert classify_error(Exception('403 Forbidden')) == 'fatal'
 
     def test_auth_permission_denied(self):
-        assert classify_error(Exception("Permission denied for this model")) == 'fatal'
+        assert classify_error(Exception('Permission denied for this model')) == 'fatal'
 
     def test_quota_insufficient(self):
-        assert classify_error(Exception("insufficient_quota")) == 'fatal'
+        assert classify_error(Exception('insufficient_quota')) == 'fatal'
 
     def test_billing_error(self):
-        assert classify_error(Exception("billing_error: account overdue")) == 'fatal'
+        assert classify_error(Exception('billing_error: account overdue')) == 'fatal'
 
     def test_account_not_active(self):
-        assert classify_error(Exception("account_not_active")) == 'fatal'
+        assert classify_error(Exception('account_not_active')) == 'fatal'
 
     def test_model_not_found(self):
-        assert classify_error(Exception("model_not_found: gpt-999")) == 'fatal'
+        assert classify_error(Exception('model_not_found: gpt-999')) == 'fatal'
 
     def test_invalid_model(self):
-        assert classify_error(Exception("invalid_model name")) == 'fatal'
+        assert classify_error(Exception('invalid_model name')) == 'fatal'
 
     def test_invalid_request(self):
-        assert classify_error(Exception("invalid_request: bad parameters")) == 'fatal'
+        assert classify_error(Exception('invalid_request: bad parameters')) == 'fatal'
 
     def test_validation_error(self):
-        assert classify_error(Exception("validation failed for field temperature")) == 'fatal'
+        assert classify_error(Exception('validation failed for field temperature')) == 'fatal'
 
     def test_case_insensitive(self):
         """Error classification is case-insensitive."""
-        assert classify_error(Exception("INVALID_API_KEY")) == 'fatal'
-        assert classify_error(Exception("Insufficient_Quota")) == 'fatal'
+        assert classify_error(Exception('INVALID_API_KEY')) == 'fatal'
+        assert classify_error(Exception('Insufficient_Quota')) == 'fatal'
 
 
 class TestClassifyErrorRetryable:
     """Transient errors that should be retried."""
 
     def test_connection_reset(self):
-        assert classify_error(Exception("Connection reset by peer")) == 'retryable'
+        assert classify_error(Exception('Connection reset by peer')) == 'retryable'
 
     def test_timeout(self):
-        assert classify_error(Exception("Request timed out")) == 'retryable'
+        assert classify_error(Exception('Request timed out')) == 'retryable'
 
     def test_timed_out(self):
-        assert classify_error(Exception("Operation timed out after 30s")) == 'retryable'
+        assert classify_error(Exception('Operation timed out after 30s')) == 'retryable'
 
     def test_ssl_error(self):
-        assert classify_error(Exception("SSL handshake failed")) == 'retryable'
+        assert classify_error(Exception('SSL handshake failed')) == 'retryable'
 
     def test_broken_pipe(self):
-        assert classify_error(Exception("[Errno 32] Broken pipe")) == 'retryable'
+        assert classify_error(Exception('[Errno 32] Broken pipe')) == 'retryable'
 
     def test_disconnected(self):
-        assert classify_error(Exception("Server disconnected unexpectedly")) == 'retryable'
+        assert classify_error(Exception('Server disconnected unexpectedly')) == 'retryable'
 
     def test_eof(self):
-        assert classify_error(Exception("EOF when reading from socket")) == 'retryable'
+        assert classify_error(Exception('EOF when reading from socket')) == 'retryable'
 
     def test_refused(self):
-        assert classify_error(Exception("Connection refused")) == 'retryable'
+        assert classify_error(Exception('Connection refused')) == 'retryable'
 
     def test_terminated(self):
-        assert classify_error(Exception("Fetch failed: terminated")) == 'retryable'
+        assert classify_error(Exception('Fetch failed: terminated')) == 'retryable'
 
     def test_fetch_failed(self):
-        assert classify_error(Exception("fetch failed due to network error")) == 'retryable'
+        assert classify_error(Exception('fetch failed due to network error')) == 'retryable'
 
     def test_server_error_503(self):
-        assert classify_error(Exception("HTTP 503 Service Unavailable")) == 'retryable'
+        assert classify_error(Exception('HTTP 503 Service Unavailable')) == 'retryable'
 
     def test_server_error_502(self):
-        assert classify_error(Exception("502 Bad Gateway")) == 'retryable'
+        assert classify_error(Exception('502 Bad Gateway')) == 'retryable'
 
     def test_server_error_504(self):
-        assert classify_error(Exception("504 Gateway Timeout")) == 'retryable'
+        assert classify_error(Exception('504 Gateway Timeout')) == 'retryable'
 
     def test_rate_limit_429(self):
-        assert classify_error(Exception("429 Too Many Requests")) == 'retryable'
+        assert classify_error(Exception('429 Too Many Requests')) == 'retryable'
 
     def test_network_unreachable(self):
-        assert classify_error(Exception("Network unreachable")) == 'retryable'
+        assert classify_error(Exception('Network unreachable')) == 'retryable'
 
     def test_dns_failure(self):
-        assert classify_error(Exception("DNS resolution failed")) == 'retryable'
+        assert classify_error(Exception('DNS resolution failed')) == 'retryable'
 
     def test_overloaded(self):
-        assert classify_error(Exception("Server overloaded")) == 'retryable'
+        assert classify_error(Exception('Server overloaded')) == 'retryable'
 
     def test_service_unavailable(self):
-        assert classify_error(Exception("Service unavailable")) == 'retryable'
+        assert classify_error(Exception('Service unavailable')) == 'retryable'
 
 
 class TestClassifyErrorUnknown:
     """Uncategorized errors default to retryable for safety."""
 
     def test_unknown_error_defaults_to_retryable(self):
-        assert classify_error(Exception("Something weird happened")) == 'unknown'
+        assert classify_error(Exception('Something weird happened')) == 'unknown'
 
     def test_empty_error_message(self):
-        assert classify_error(Exception("")) == 'unknown'
+        assert classify_error(Exception('')) == 'unknown'
 
     def test_generic_exception(self):
-        assert classify_error(RuntimeError("unexpected state")) == 'unknown'
+        assert classify_error(RuntimeError('unexpected state')) == 'unknown'
 
 
 class TestClassifyErrorPriority:
@@ -198,7 +198,7 @@ class TestClassifyErrorPriority:
     def test_fatal_takes_priority_over_retryable(self):
         """If an error message contains both fatal and retryable patterns, fatal wins."""
         # e.g., "Connection timeout with invalid_api_key" — auth issue is more important
-        assert classify_error(Exception("Connection failed: invalid_api_key")) == 'fatal'
+        assert classify_error(Exception('Connection failed: invalid_api_key')) == 'fatal'
 
 
 # ── classify_error() — deterministic client errors (Fix B2) ─────────────────
@@ -214,33 +214,33 @@ class TestClassifyErrorDeterministicClientErrors:
     def test_classify_deterministic_400_is_fatal(self):
         """A bare 400 client error is fatal, even with a non-specific message."""
         from agent_cascade.llm.base import ModelServiceError
-        err = ModelServiceError(code='400', message="Bad Request")
+        err = ModelServiceError(code='400', message='Bad Request')
         assert classify_error(err) == 'fatal'
 
     def test_classify_reasoning_effort_error_is_fatal(self):
         """The incident's exact error message is classified as fatal."""
-        msg = "Function tools with reasoning_effort are not supported for gpt-5.6-luna"
+        msg = 'Function tools with reasoning_effort are not supported for gpt-5.6-luna'
         assert classify_error(Exception(msg)) == 'fatal'
 
     def test_classify_not_supported_feature_is_fatal(self):
-        assert classify_error(Exception("Feature X is not supported for this model")) == 'fatal'
+        assert classify_error(Exception('Feature X is not supported for this model')) == 'fatal'
 
     def test_classify_invalid_api_key_phrase_is_fatal(self):
         # Space-separated "invalid api key" (the deterministic pattern) vs. the
         # underscored fatal_patterns entry — both must resolve to fatal.
-        assert classify_error(Exception("Error: invalid api key provided")) == 'fatal'
+        assert classify_error(Exception('Error: invalid api key provided')) == 'fatal'
 
     def test_classify_model_not_found_phrase_is_fatal(self):
-        assert classify_error(Exception("model not found: gpt-999")) == 'fatal'
+        assert classify_error(Exception('model not found: gpt-999')) == 'fatal'
 
     def test_classify_does_not_exist_is_fatal(self):
-        assert classify_error(Exception("The requested model does not exist")) == 'fatal'
+        assert classify_error(Exception('The requested model does not exist')) == 'fatal'
 
     def test_classify_4xx_codes_are_fatal(self):
         """ModelServiceError carrying a 4xx status code is fatal."""
         from agent_cascade.llm.base import ModelServiceError
         for code in ('400', '401', '403', '404', '422'):
-            err = ModelServiceError(code=code, message="opaque server error")
+            err = ModelServiceError(code=code, message='opaque server error')
             assert classify_error(err) == 'fatal', f"code {code} should be fatal"
 
     def test_classify_deterministic_4xx_beats_retryable_pattern(self):
@@ -250,46 +250,46 @@ class TestClassifyErrorDeterministicClientErrors:
         the client error takes priority over the retryable pattern.
         """
         from agent_cascade.llm.base import ModelServiceError
-        err = ModelServiceError(code='400', message="request timeout in tool schema")
+        err = ModelServiceError(code='400', message='request timeout in tool schema')
         assert classify_error(err) == 'fatal'
 
     def test_classify_transient_errors_unchanged(self):
         """Transient (5xx / network) errors keep their previous classification — no regression."""
-        assert classify_error(Exception("HTTP 503 Service Unavailable")) == 'retryable'
-        assert classify_error(Exception("502 Bad Gateway")) == 'retryable'
-        assert classify_error(Exception("Request timed out")) == 'retryable'
-        assert classify_error(Exception("Connection reset by peer")) == 'retryable'
-        assert classify_error(Exception("429 Too Many Requests")) == 'retryable'
+        assert classify_error(Exception('HTTP 503 Service Unavailable')) == 'retryable'
+        assert classify_error(Exception('502 Bad Gateway')) == 'retryable'
+        assert classify_error(Exception('Request timed out')) == 'retryable'
+        assert classify_error(Exception('Connection reset by peer')) == 'retryable'
+        assert classify_error(Exception('429 Too Many Requests')) == 'retryable'
 
     def test_classify_unknown_unchanged(self):
         """Uncategorized errors still default to 'unknown' — no regression."""
-        assert classify_error(Exception("Something weird happened")) == 'unknown'
-        assert classify_error(Exception("")) == 'unknown'
+        assert classify_error(Exception('Something weird happened')) == 'unknown'
+        assert classify_error(Exception('')) == 'unknown'
 
 
 class TestIsDeterministicClientErrorHelper:
     """The shared helper used by both classify_error and the router blacklist (Fix B1)."""
 
     def test_helper_detects_pattern_in_message(self):
-        assert is_deterministic_client_error(Exception("tools not supported")) is True
-        assert is_deterministic_client_error(Exception("reasoning_effort rejected")) is True
+        assert is_deterministic_client_error(Exception('tools not supported')) is True
+        assert is_deterministic_client_error(Exception('reasoning_effort rejected')) is True
 
     def test_helper_detects_4xx_code_on_model_service_error(self):
         from agent_cascade.llm.base import ModelServiceError
         for code in ('400', '401', '403', '404', '422'):
-            assert is_deterministic_client_error(ModelServiceError(code=code, message="x")) is True
+            assert is_deterministic_client_error(ModelServiceError(code=code, message='x')) is True
 
     def test_helper_false_for_transient(self):
-        assert is_deterministic_client_error(Exception("connection reset by peer")) is False
-        assert is_deterministic_client_error(Exception("HTTP 503 Service Unavailable")) is False
+        assert is_deterministic_client_error(Exception('connection reset by peer')) is False
+        assert is_deterministic_client_error(Exception('HTTP 503 Service Unavailable')) is False
 
     def test_helper_false_for_non_4xx_model_service_error(self):
         """A ModelServiceError with a non-4xx code and no matching pattern is not deterministic."""
         from agent_cascade.llm.base import ModelServiceError
-        assert is_deterministic_client_error(ModelServiceError(code='503', message="server hiccup")) is False
+        assert is_deterministic_client_error(ModelServiceError(code='503', message='server hiccup')) is False
 
     def test_helper_false_for_empty(self):
-        assert is_deterministic_client_error(Exception("")) is False
+        assert is_deterministic_client_error(Exception('')) is False
 
     def test_patterns_tuple_is_nonempty_and_lowercase(self):
         """The shared pattern tuple exists and entries are lowercase (matching lowercased input)."""
@@ -362,7 +362,7 @@ class TestCalculateBackoffJitter:
         results = [calculate_backoff(1, policy) for _ in range(50)]
         unique_results = set(results)
 
-        assert len(unique_results) > 1, "Jitter not producing variation"
+        assert len(unique_results) > 1, 'Jitter not producing variation'
 
 
 class TestCalculateBackoffCaps:

@@ -37,7 +37,7 @@ def test_single_message_overhead():
     
     assert stats['tokens'] == raw_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD, \
         f"Mismatch: got {stats['tokens']}, expected {raw_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD}"
-    print("  PASS\n")
+    print('  PASS\n')
 
 
 def test_conversation_underestimation_comparison():
@@ -64,7 +64,7 @@ def test_conversation_underestimation_comparison():
     for m in messages:
         templated = f"▌{m.role}\n{m.content}▌\n"
         templated_parts.append(templated)
-    templated_text = ''.join(templated_parts) + "▌assistant\n"  # Generation prompt suffix
+    templated_text = ''.join(templated_parts) + '▌assistant\n'  # Generation prompt suffix
     llama_cpp_tokens = qwen_count(templated_text)
     
     print(f"Conversation test ({len(messages)} messages):")
@@ -82,7 +82,7 @@ def test_conversation_underestimation_comparison():
     # The new estimate should be closer to llama.cpp's actual count
     assert new_error < old_error, \
         f"New estimate ({new_error:.1f}% error) should be better than old ({old_error:.1f}% error)"
-    print("  PASS: New estimate is closer to actual llama.cpp token count\n")
+    print('  PASS: New estimate is closer to actual llama.cpp token count\n')
 
 
 def test_overhead_constant_configurable():
@@ -91,18 +91,18 @@ def test_overhead_constant_configurable():
     assert CHAT_TEMPLATE_TOKEN_OVERHEAD == 8, \
         f"Default overhead should be 8, got {CHAT_TEMPLATE_TOKEN_OVERHEAD}"
     print(f"Configurable overhead constant: CHAT_TEMPLATE_TOKEN_OVERHEAD = {CHAT_TEMPLATE_TOKEN_OVERHEAD}")
-    print("  PASS\n")
+    print('  PASS\n')
 
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("Token Estimation Fix Verification")
-    print("=" * 60 + "\n")
+    print('=' * 60)
+    print('Token Estimation Fix Verification')
+    print('=' * 60 + '\n')
     
     test_single_message_overhead()
     test_conversation_underestimation_comparison()
     test_overhead_constant_configurable()
     
-    print("=" * 60)
-    print("All tests passed!")
-    print("=" * 60)
+    print('=' * 60)
+    print('All tests passed!')
+    print('=' * 60)

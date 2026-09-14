@@ -33,8 +33,8 @@ from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.custom.ddg_search import search_duckduckgo
 from config.secrets_loader import get_secret
 
-_KNOWN_BACKENDS = {"serper", "duckduckgo"}
-_DEFAULT_PRIORITY = ["serper", "duckduckgo"]
+_KNOWN_BACKENDS = {'serper', 'duckduckgo'}
+_DEFAULT_PRIORITY = ['serper', 'duckduckgo']
 
 
 def get_search_backend_priority() -> List[str]:
@@ -43,7 +43,7 @@ def get_search_backend_priority() -> List[str]:
     Returns a list of backend names in priority order, filtered to known backends.
     Falls back to default ["serper", "duckduckgo"] if missing or invalid.
     """
-    value = get_secret("search_backend_priority")
+    value = get_secret('search_backend_priority')
     if not isinstance(value, list):
         return list(_DEFAULT_PRIORITY)
 
@@ -54,7 +54,7 @@ def get_search_backend_priority() -> List[str]:
 def _resolve_serper_api_key() -> str:
     """Resolve Serper API key from secrets config or environment variable."""
     # Prefer dedicated secrets config if present
-    key = get_secret("serper_api_key")
+    key = get_secret('serper_api_key')
     if isinstance(key, str) and key.strip():
         return key.strip()
     # Fallback to environment variable
@@ -112,7 +112,7 @@ class WebSearch(BaseTool):
 
         for backend in priority:
             try:
-                if backend == "serper":
+                if backend == 'serper':
                     api_key = _resolve_serper_api_key()
                     if not api_key:
                         logger.info(f"Serper in priority but no API key configured, skipping")
@@ -120,7 +120,7 @@ class WebSearch(BaseTool):
                     search_results = self._search_serper(query, api_key)
                     return self._format_serper_results(search_results)
 
-                elif backend == "duckduckgo":
+                elif backend == 'duckduckgo':
                     return search_duckduckgo(query)
 
             except (requests.RequestException, ValueError, RuntimeError) as e:
@@ -145,7 +145,7 @@ class WebSearch(BaseTool):
         data = response.json()
         organic = data.get('organic')
         if not organic:
-            raise ValueError("Serper returned no organic results")
+            raise ValueError('Serper returned no organic results')
         return organic
 
     @staticmethod
@@ -168,4 +168,4 @@ class WebSearch(BaseTool):
             if date:
                 entry += f"\n({date})"
             lines.append(entry)
-        return "\n\n".join(lines)
+        return '\n\n'.join(lines)

@@ -60,9 +60,9 @@ def _disable_sanity_probe():
 @pytest.fixture
 def router(tmp_path_factory):
     """Create an isolated APIRouter instance with its own config dir."""
-    test_config_dir = str(tmp_path_factory.mktemp("api_router_test"))
+    test_config_dir = str(tmp_path_factory.mktemp('api_router_test'))
 
-    with patch.dict(os.environ, {"AGENT_CASCADE_TEST_CONFIG_DIR": test_config_dir}):
+    with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_config_dir}):
         r = APIRouter(default_llm_cfg={
             'api_base': 'http://default-api',
             'model': 'default-model',
@@ -102,12 +102,12 @@ class TestNoCallerInheritanceSignature:
     def test_get_endpoint_chain_has_no_caller_agent_type(self, router):
         sig = inspect.signature(router.get_endpoint_chain)
         assert 'caller_agent_type' not in sig.parameters, \
-            "get_endpoint_chain must not accept caller_agent_type (inheritance removed)"
+            'get_endpoint_chain must not accept caller_agent_type (inheritance removed)'
 
     def test_call_with_fallback_has_no_caller_agent_type(self, router):
         sig = inspect.signature(router.call_with_fallback)
         assert 'caller_agent_type' not in sig.parameters, \
-            "call_with_fallback must not accept caller_agent_type (inheritance removed)"
+            'call_with_fallback must not accept caller_agent_type (inheritance removed)'
 
     def test_resolve_own_endpoints_has_no_caller_param(self, router):
         """The renamed resolver takes only agent_type — no caller context."""
@@ -131,11 +131,11 @@ class TestNoCallerInheritanceBehavior:
         Regression: this is exactly the path that caused the self-deadlock — inheriting
         the caller's sequential endpoint meant metering against the caller's slot key.
         """
-        _add_endpoint(router, "caller_ep", "http://caller-api")
-        router.set_agent_priorities("orchestrator", ["ep_caller_ep"])
+        _add_endpoint(router, 'caller_ep', 'http://caller-api')
+        router.set_agent_priorities('orchestrator', ['ep_caller_ep'])
 
         # 'security' has no configured priorities — must NOT inherit caller's endpoint
-        chain = router.get_endpoint_chain("security")
+        chain = router.get_endpoint_chain('security')
 
         api_bases = [cfg.get('api_base') for cfg in chain]
         assert 'http://caller-api' not in api_bases, \
@@ -145,25 +145,25 @@ class TestNoCallerInheritanceBehavior:
 
     def test_unconfigured_agent_no_last_success_falls_to_default_only(self, router):
         """With no own endpoints AND no last-successful eligibility, chain is just default."""
-        _add_endpoint(router, "other_ep", "http://other-api")
-        router.set_agent_priorities("coder", ["ep_other_ep"])
+        _add_endpoint(router, 'other_ep', 'http://other-api')
+        router.set_agent_priorities('coder', ['ep_other_ep'])
 
         # 'security' never had priorities configured → not eligible for Tier 3
-        chain = router.get_endpoint_chain("security")
+        chain = router.get_endpoint_chain('security')
 
         assert [cfg.get('api_base') for cfg in chain] == ['http://default-api']
 
     def test_configured_agent_uses_own_endpoints_not_caller(self, router):
         """A configured agent resolves through its OWN endpoints regardless of any caller."""
-        _add_endpoint(router, "coder_ep", "http://coder-api")
-        _add_endpoint(router, "caller_ep", "http://caller-api")
-        router.set_agent_priorities("coder", ["ep_coder_ep"])
-        router.set_agent_priorities("orchestrator", ["ep_caller_ep"])
+        _add_endpoint(router, 'coder_ep', 'http://coder-api')
+        _add_endpoint(router, 'caller_ep', 'http://caller-api')
+        router.set_agent_priorities('coder', ['ep_coder_ep'])
+        router.set_agent_priorities('orchestrator', ['ep_caller_ep'])
 
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
         api_bases = [cfg.get('api_base') for cfg in chain]
 
-        assert 'http://coder-api' in api_bases, "Own endpoint must be present"
+        assert 'http://coder-api' in api_bases, 'Own endpoint must be present'
         assert 'http://caller-api' not in api_bases, "Caller's endpoint must NOT leak in"
 
 
@@ -177,9 +177,9 @@ class TestChainOrdering:
     then the global default — for agents that are eligible for Tier 3."""
 
     def test_chain_includes_own_and_last_successful(self, router):
-        _add_endpoint(router, "agent_ep", "http://agent-api")
-        _add_endpoint(router, "recovery_ep", "http://recovery-api")
-        router.set_agent_priorities("coder", ["ep_agent_ep"])
+        _add_endpoint(router, 'agent_ep', 'http://agent-api')
+        _add_endpoint(router, 'recovery_ep', 'http://recovery-api')
+        router.set_agent_priorities('coder', ['ep_agent_ep'])
 
         # Agent had priorities; its own endpoint is disabled so Tier 3 kicks in
         with router._lock:
@@ -189,17 +189,17 @@ class TestChainOrdering:
                 'model': 'recovery-model',
             }
 
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
         api_bases = [cfg.get('api_base') for cfg in chain]
 
         assert 'http://recovery-api' in api_bases, f"Tier 3 (last-successful) missing: {api_bases}"
-        assert chain[-1]['api_base'] == 'http://default-api', "Default must be last"
+        assert chain[-1]['api_base'] == 'http://default-api', 'Default must be last'
 
     def test_default_always_last(self, router):
-        _add_endpoint(router, "ep1", "http://ep1")
-        router.set_agent_priorities("coder", ["ep_ep1"])
+        _add_endpoint(router, 'ep1', 'http://ep1')
+        router.set_agent_priorities('coder', ['ep_ep1'])
 
-        chain = router.get_endpoint_chain("coder")
+        chain = router.get_endpoint_chain('coder')
         assert chain[-1]['api_base'] == 'http://default-api'
 
 
@@ -212,23 +212,23 @@ class TestCallWithFallbackNoInheritance:
     """The live fallback path must only try the agent's own/default endpoints."""
 
     def test_unconfigured_agent_only_tries_default(self, router):
-        _add_endpoint(router, "caller_ep", "http://caller-api")
-        router.set_agent_priorities("orchestrator", ["ep_caller_ep"])
+        _add_endpoint(router, 'caller_ep', 'http://caller-api')
+        router.set_agent_priorities('orchestrator', ['ep_caller_ep'])
 
         call_bases = []
 
         def track_calls(llm_cfg, *args, **kwargs):
             call_bases.append(llm_cfg.get('api_base'))
-            return "ok"
+            return 'ok'
 
         # 'security' has no own endpoints → only the default should be tried
-        result = router.call_with_fallback("security", track_calls)
+        result = router.call_with_fallback('security', track_calls)
 
-        assert result == "ok"
+        assert result == 'ok'
         assert 'http://caller-api' not in call_bases, \
             f"Caller's endpoint must not be tried: {call_bases}"
         assert 'http://default-api' in call_bases
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+if __name__ == '__main__':
+    pytest.main([__file__, '-v'])

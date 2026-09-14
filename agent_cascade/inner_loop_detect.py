@@ -88,9 +88,9 @@ class InnerLoopDetector:
         # Max char guard: force-trigger if output exceeds limit (gated by toggle).
         if self._settings.loop_max_chars_enabled and self._chars_fed >= self.max_chars:
             return {
-                "loop": True,
-                "reason": f"max chars exceeded ({self._chars_fed}/{self.max_chars})",
-                "score": 100,
+                'loop': True,
+                'reason': f"max chars exceeded ({self._chars_fed}/{self.max_chars})",
+                'score': 100,
             }
 
         # Character repetition (per-char scan — always runs to maintain state)
@@ -104,9 +104,9 @@ class InnerLoopDetector:
             if self._settings.char_run_enabled and self.char_run > self.char_run_limit:
                 # Char runs are a strong signal — return immediately regardless of threshold.
                 return {
-                    "loop": True,
-                    "reason": f"character run '{ch}' ({self.char_run})",
-                    "score": 100,
+                    'loop': True,
+                    'reason': f"character run '{ch}' ({self.char_run})",
+                    'score': 100,
                 }
 
         # Skip two-phase detection until minimum chars threshold reached
@@ -124,10 +124,10 @@ class InnerLoopDetector:
 # Loop sample saving helper
 
 # Default path for loop samples: under the workspace logs directory.
-_LOOP_SAMPLES_DIR = os.path.join(DEFAULT_WORKSPACE, "logs", "loop_samples")
+_LOOP_SAMPLES_DIR = os.path.join(DEFAULT_WORKSPACE, 'logs', 'loop_samples')
 
 
-def save_loop_sample(text, reason, instance_name="", filepath=None):
+def save_loop_sample(text, reason, instance_name='', filepath=None):
     """Append a loop detection sample to a JSONL file for debugging and tuning.
 
     Each line is a JSON object with:
@@ -146,20 +146,20 @@ def save_loop_sample(text, reason, instance_name="", filepath=None):
     # Resolve output path — default to one file per day to avoid unbounded growth
     if filepath is None:
         os.makedirs(_LOOP_SAMPLES_DIR, exist_ok=True)
-        date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        date_str = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
         filepath = os.path.join(_LOOP_SAMPLES_DIR, f"samples_{date_str}.jsonl")
 
     record = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "instance_name": instance_name,
-        "reason": reason,
-        "token_estimate": max(1, len(text) // int(TOKEN_ESTIMATE_CHAR_DIVISOR)),
-        "text": text[:8000],  # Cap at ~2K tokens to keep files manageable
+        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'instance_name': instance_name,
+        'reason': reason,
+        'token_estimate': max(1, len(text) // int(TOKEN_ESTIMATE_CHAR_DIVISOR)),
+        'text': text[:8000],  # Cap at ~2K tokens to keep files manageable
     }
 
     try:
-        with open(filepath, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with open(filepath, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
         return filepath
     except OSError:
         return None  # Non-critical — don't fail execution over debug logging

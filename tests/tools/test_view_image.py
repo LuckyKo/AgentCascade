@@ -47,12 +47,12 @@ _RECORDING_CONTENT = object()
 @pytest.fixture
 def test_image_200x150(tmp_path):
     """Create a 200x150 test image and return its path as a string."""
-    img = Image.new("RGB", (200, 150), color="green")
+    img = Image.new('RGB', (200, 150), color='green')
     for x in range(100, 200):
         for y in range(75, 150):
             img.putpixel((x, y), (255, 0, 0))
-    p = tmp_path / "view_test_200x150.png"
-    img.save(str(p), format="PNG")
+    p = tmp_path / 'view_test_200x150.png'
+    img.save(str(p), format='PNG')
     return str(p)
 
 
@@ -62,7 +62,7 @@ def view_image_tool(test_image_200x150):
     from agent_cascade.tools.custom.file_ops import ViewImage
     tool = ViewImage()
 
-    def _mock_resolve(path, mode="ro"):
+    def _mock_resolve(path, mode='ro'):
         p = Path(path)
         if p.exists():
             return p
@@ -76,7 +76,7 @@ def _guard_flags(items):
     """Wrap a tool result list in a FUNCTION message and ask the router's return-path guard
     whether any image still needs captioning (the exact check that gates the 2nd vision call)."""
     from agent_cascade.api_router_pkg.router import APIRouter
-    fn_msg = Message(role=FUNCTION, name="view_image", content=list(items))
+    fn_msg = Message(role=FUNCTION, name='view_image', content=list(items))
     return APIRouter._has_uncaptioned_images([fn_msg])
 
 
@@ -102,16 +102,16 @@ class TestViewImageExistingFileUncaptioned:
         assert len(result) == 2
         # Image item points at the ORIGINAL resolved path (forward-slash normalized),
         # NOT a newly-minted media path.
-        assert result[0].image == test_image_200x150.replace("\\", "/")
+        assert result[0].image == test_image_200x150.replace('\\', '/')
         # Image item is deliberately NOT pre-filled with a caption (post-revert behavior).
         assert result[0].caption is None
         # The separate descriptive text item carries the "Viewing image ... (WxH)" line
         # plus the in-place marker.
         assert isinstance(result[1], ContentItem)
         assert result[1].text is not None
-        assert "Viewing image" in result[1].text
-        assert "200x150" in result[1].text
-        assert "(existing file, no copy saved)" in result[1].text
+        assert 'Viewing image' in result[1].text
+        assert '200x150' in result[1].text
+        assert '(existing file, no copy saved)' in result[1].text
 
     def test_guard_fires_for_genuine_caption(self, view_image_tool, test_image_200x150):
         """The return-path guard MUST report the image as uncaptioned so the router generates
@@ -127,13 +127,13 @@ class TestViewImageExistingFileUncaptioned:
         accidentally dropped into a pre-filled state by serialization."""
         result = view_image_tool.call(json.dumps({'path': test_image_200x150}))
 
-        fn_msg = Message(role=FUNCTION, name="view_image", content=list(result))
+        fn_msg = Message(role=FUNCTION, name='view_image', content=list(result))
         dumped = json.loads(fn_msg.model_dump_json())
         # The image item must NOT carry a caption key after serialization (exclude_none
         # drops the None), so it is unambiguously uncaptioned on restore.
-        assert not dumped["content"][0].get("caption"), (
-            "image item unexpectedly carried a caption through serialization; "
-            "this would suppress genuine vision captioning on session restore"
+        assert not dumped['content'][0].get('caption'), (
+            'image item unexpectedly carried a caption through serialization; '
+            'this would suppress genuine vision captioning on session restore'
         )
         # Re-parse the persisted form (dict items) and confirm the guard still fires.
         restored = Message(**dumped)
@@ -161,24 +161,24 @@ class TestViewImageBase64FallbackUncaptioned:
         from agent_cascade.tools.custom.file_ops import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
-                    side_effect=MediaStorageError("disk full")), \
+                    side_effect=MediaStorageError('disk full')), \
               patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
-                    return_value="data:image/png;base64,AAAA") as mock_b64:
+                    return_value='data:image/png;base64,AAAA') as mock_b64:
             result = view_image_tool.call(json.dumps({
                 'path': test_image_200x150,
-                'crop_region': "0,0,100,75",
+                'crop_region': '0,0,100,75',
             }))
 
         assert isinstance(result, list)
         assert len(result) == 2
         # The fallback actually ran (save was attempted and raised).
-        assert result[0].image == "data:image/png;base64,AAAA"
+        assert result[0].image == 'data:image/png;base64,AAAA'
         assert mock_b64.called
         # Image item left uncaptioned on the fallback branch as well (post-revert behavior).
         assert result[0].caption is None
         # Descriptive line carried by the separate text item.
         assert isinstance(result[1], ContentItem)
-        assert "Viewing image" in result[1].text
+        assert 'Viewing image' in result[1].text
 
     def test_base64_fallback_guard_fires_for_genuine_caption(self, view_image_tool, test_image_200x150):
         """The base64 fallback result must ALSO be reported as uncaptioned by the guard so a
@@ -193,12 +193,12 @@ class TestViewImageBase64FallbackUncaptioned:
         from agent_cascade.tools.custom.file_ops import MediaStorageError
 
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
-                    side_effect=MediaStorageError("disk full")), \
+                    side_effect=MediaStorageError('disk full')), \
               patch('agent_cascade.tools.custom.file_ops.encode_image_as_base64',
-                    return_value="data:image/png;base64,AAAA"):
+                    return_value='data:image/png;base64,AAAA'):
             result = view_image_tool.call(json.dumps({
                 'path': test_image_200x150,
-                'crop_region': "0,0,100,75",
+                'crop_region': '0,0,100,75',
             }))
 
         assert _guard_flags(result) is True
@@ -213,10 +213,10 @@ class TestViewImageCropRegionUncaptioned:
         """A cropped view carries the crop region in its descriptive text item AND is left
         uncaptioned (caption=None) so the guard still fires a genuine vision caption."""
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
-            mock_save.return_value = str(tmp_path / "crop_result.png")
+            mock_save.return_value = str(tmp_path / 'crop_result.png')
             result = view_image_tool.call(json.dumps({
                 'path': test_image_200x150,
-                'crop_region': "10,20,100,80",
+                'crop_region': '10,20,100,80',
             }))
 
         assert isinstance(result, list) and len(result) == 2
@@ -224,8 +224,8 @@ class TestViewImageCropRegionUncaptioned:
         assert result[0].caption is None
         # Descriptive text item carries the size AND the crop region.
         text = result[1].text
-        assert "200x150" in text
-        assert "cropped region x=10,y=20,w=100,h=80" in text
+        assert '200x150' in text
+        assert 'cropped region x=10,y=20,w=100,h=80' in text
         # Guard still fires for genuine captioning.
         assert _guard_flags(result) is True
 
@@ -250,11 +250,11 @@ class TestViewImageUrl:
 
     def _png_bytes(self, w=200, h=150):
         buf = io.BytesIO()
-        Image.new("RGB", (w, h), color="blue").save(buf, format="PNG")
+        Image.new('RGB', (w, h), color='blue').save(buf, format='PNG')
         return buf.getvalue()
 
     @staticmethod
-    def _fake_response(content=b"", content_length=None, status_code=200):
+    def _fake_response(content=b'', content_length=None, status_code=200):
         """Build a fake requests.Response.
 
         ``content`` is normally a plain bytes value. Pass the module-level sentinel
@@ -264,7 +264,7 @@ class TestViewImageUrl:
         when the guard fires. A plain MagicMock attribute cannot be a property, so the
         recording case returns a dedicated wrapper instance (no shared-class mutation).
         """
-        headers = {} if content_length is None else {"Content-Length": str(content_length)}
+        headers = {} if content_length is None else {'Content-Length': str(content_length)}
 
         if content is _RECORDING_CONTENT:
             # A plain (non-MagicMock) object so that `content` is a REAL class-level
@@ -282,7 +282,7 @@ class TestViewImageUrl:
                 @property
                 def content(self):
                     flag[0] = True
-                    return b""  # opaque; never a valid image
+                    return b''  # opaque; never a valid image
 
                 def raise_for_status(self):
                     return None
@@ -307,29 +307,29 @@ class TestViewImageUrl:
         ContentItem under the real media images dir, and the caption includes dimensions."""
         from agent_cascade.utils.media_utils import _get_media_root
 
-        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+        with patch('agent_cascade.tools.custom.file_ops.requests.get',
                    return_value=self._fake_response(self._png_bytes(200, 150))) as mock_get:
-            result = view_image_tool.call(json.dumps({"path": "http://example.com/img.png"}))
+            result = view_image_tool.call(json.dumps({'path': 'http://example.com/img.png'}))
 
         assert mock_get.called
         assert isinstance(result, list) and len(result) == 2
         media_path = result[0].image
         # Media path lives under the instance-aware media/images/ dir.
-        images_dir_str = str(_get_media_root() / "images").replace("\\", "/")
+        images_dir_str = str(_get_media_root() / 'images').replace('\\', '/')
         assert media_path.startswith(images_dir_str), f"{media_path} not under {images_dir_str}"
         # Caption (text item) carries dimensions.
         assert isinstance(result[1], ContentItem)
-        assert "Viewing image" in result[1].text
-        assert "200x150" in result[1].text
+        assert 'Viewing image' in result[1].text
+        assert '200x150' in result[1].text
 
     def test_url_media_file_persists_after_cleanup(self, view_image_tool):
         """CRITICAL regression guard: after the URL call returns, the returned media path MUST
         still exist on disk. The v1 bug pointed temp_png at the media file and let the
         finally-block unlink it; with the v2 approach temp_png is a tempdir file so cleanup
         must NOT touch the persistent media output."""
-        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+        with patch('agent_cascade.tools.custom.file_ops.requests.get',
                    return_value=self._fake_response(self._png_bytes(120, 80))):
-            result = view_image_tool.call(json.dumps({"path": "http://example.com/persist.png"}))
+            result = view_image_tool.call(json.dumps({'path': 'http://example.com/persist.png'}))
 
         media_path = result[0].image
         try:
@@ -341,24 +341,24 @@ class TestViewImageUrl:
 
     def test_url_non_image_returns_clean_error(self, view_image_tool):
         """Non-image URL (HTML bytes) → clean error string, no exception."""
-        with patch("agent_cascade.tools.custom.file_ops.requests.get",
-                   return_value=self._fake_response(b"<html>oops</html>", content_length=17)):
-            result = view_image_tool.call(json.dumps({"path": "http://example.com/page.html"}))
+        with patch('agent_cascade.tools.custom.file_ops.requests.get',
+                   return_value=self._fake_response(b'<html>oops</html>', content_length=17)):
+            result = view_image_tool.call(json.dumps({'path': 'http://example.com/page.html'}))
 
         assert isinstance(result, str)
-        assert result.startswith("ERROR:")
-        assert "did not return a valid viewable image" in result
+        assert result.startswith('ERROR:')
+        assert 'did not return a valid viewable image' in result
 
     def test_url_download_failure_returns_clean_error(self, view_image_tool):
         """requests.RequestException → clean error string (do NOT raise)."""
         import requests as _requests
-        with patch("agent_cascade.tools.custom.file_ops.requests.get",
-                   side_effect=_requests.RequestException("connection refused")):
-            result = view_image_tool.call(json.dumps({"path": "http://example.com/down.png"}))
+        with patch('agent_cascade.tools.custom.file_ops.requests.get',
+                   side_effect=_requests.RequestException('connection refused')):
+            result = view_image_tool.call(json.dumps({'path': 'http://example.com/down.png'}))
 
         assert isinstance(result, str)
-        assert result.startswith("ERROR:")
-        assert "Failed to download image from" in result
+        assert result.startswith('ERROR:')
+        assert 'Failed to download image from' in result
 
     def test_url_oversized_rejected_without_body(self, view_image_tool):
         """Content-Length over the 50 MB cap → rejected WITHOUT downloading the body.
@@ -371,18 +371,18 @@ class TestViewImageUrl:
         # Use the recording sentinel: resp.content becomes a property that flips
         # resp._body_read_flag[0] to True if (and only if) the body is accessed.
         resp = self._fake_response(content=_RECORDING_CONTENT, content_length=declared)
-        with patch("agent_cascade.tools.custom.file_ops.requests.get", return_value=resp) as mock_get:
-            result = view_image_tool.call(json.dumps({"path": "http://example.com/huge.png"}))
+        with patch('agent_cascade.tools.custom.file_ops.requests.get', return_value=resp) as mock_get:
+            result = view_image_tool.call(json.dumps({'path': 'http://example.com/huge.png'}))
 
         assert isinstance(result, str)
-        assert result.startswith("ERROR:")
-        assert "too large" in result.lower()
+        assert result.startswith('ERROR:')
+        assert 'too large' in result.lower()
         # Body was never read — only the Content-Length header was inspected before
         # rejecting. If the guard regressed and the code fell through to `response.content`,
         # this property would have been accessed and the flag would be True → test fails.
         assert resp._body_read_flag[0] is False, (
-            "Content-Length guard should reject BEFORE reading the body; "
-            "resp.content was accessed"
+            'Content-Length guard should reject BEFORE reading the body; '
+            'resp.content was accessed'
         )
         mock_get.assert_called_once()
 
@@ -394,17 +394,17 @@ class TestViewImageUrl:
         from agent_cascade.utils.media_utils import _get_media_root
 
         # content_length=None → headers={} → no Content-Length key.
-        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+        with patch('agent_cascade.tools.custom.file_ops.requests.get',
                    return_value=self._fake_response(self._png_bytes(200, 150), content_length=None)) as mock_get:
-            result = view_image_tool.call(json.dumps({"path": "http://example.com/noclen.png"}))
+            result = view_image_tool.call(json.dumps({'path': 'http://example.com/noclen.png'}))
 
         assert mock_get.called
         assert isinstance(result, list) and len(result) == 2
         media_path = result[0].image
-        images_dir_str = str(_get_media_root() / "images").replace("\\", "/")
+        images_dir_str = str(_get_media_root() / 'images').replace('\\', '/')
         assert media_path.startswith(images_dir_str), f"{media_path} not under {images_dir_str}"
         assert isinstance(result[1], ContentItem)
-        assert "200x150" in result[1].text
+        assert '200x150' in result[1].text
         try:
             assert Path(media_path).exists()
         finally:
@@ -414,20 +414,20 @@ class TestViewImageUrl:
         """crop_region on a downloaded URL image works and the result is saved to media."""
         from agent_cascade.utils.media_utils import _get_media_root
 
-        with patch("agent_cascade.tools.custom.file_ops.requests.get",
+        with patch('agent_cascade.tools.custom.file_ops.requests.get',
                    return_value=self._fake_response(self._png_bytes(200, 150))):
             result = view_image_tool.call(json.dumps({
-                "path": "http://example.com/crop.png",
-                "crop_region": "10,20,100,80",
+                'path': 'http://example.com/crop.png',
+                'crop_region': '10,20,100,80',
             }))
 
         assert isinstance(result, list) and len(result) == 2
         media_path = result[0].image
-        images_dir_str = str(_get_media_root() / "images").replace("\\", "/")
+        images_dir_str = str(_get_media_root() / 'images').replace('\\', '/')
         assert media_path.startswith(images_dir_str), f"{media_path} not under {images_dir_str}"
         text = result[1].text
-        assert "200x150" in text
-        assert "cropped region x=10,y=20,w=100,h=80" in text
+        assert '200x150' in text
+        assert 'cropped region x=10,y=20,w=100,h=80' in text
         try:
             assert Path(media_path).exists()
         finally:

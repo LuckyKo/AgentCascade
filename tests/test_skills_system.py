@@ -28,26 +28,26 @@ from agent_cascade.skills.manager import SkillManager
 # Fixtures — paths to real skill files in the repo
 # ===========================================================================
 
-_SKILLS_DIR = _PROJECT_ROOT / "agents" / "global" / "skills"
+_SKILLS_DIR = _PROJECT_ROOT / 'agents' / 'global' / 'skills'
 
 
 def _skill_path(name: str) -> Path:
     """Return path to a SKILL.md inside agents/global/skills/<name>/"""
-    return _SKILLS_DIR / name / "SKILL.md"
+    return _SKILLS_DIR / name / 'SKILL.md'
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def version_control_skill_file():
     """Path to the version-control skill file."""
-    p = _skill_path("version-control")
+    p = _skill_path('version-control')
     assert p.exists(), f"version-control skill not found at {p}"
     return p
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def debugging_skill_file():
     """Path to the systematic-debugging skill file."""
-    p = _skill_path("systematic-debugging")
+    p = _skill_path('systematic-debugging')
     assert p.exists(), f"systematic-debugging skill not found at {p}"
     return p
 
@@ -61,72 +61,72 @@ class TestParseFrontmatter:
 
     def test_valid_frontmatter_returns_dict_and_body(self):
         content = (
-            "---\n"
-            "name: my-skill\n"
-            "description: Does a thing\n"
-            "triggers:\n"
-            "  - trigger1\n"
-            "---\n"
-            "\n"
-            "# Instructions body\n"
+            '---\n'
+            'name: my-skill\n'
+            'description: Does a thing\n'
+            'triggers:\n'
+            '  - trigger1\n'
+            '---\n'
+            '\n'
+            '# Instructions body\n'
         )
         fm, body = parse_frontmatter(content)
         assert isinstance(fm, dict)
-        assert fm["name"] == "my-skill"
-        assert fm["description"] == "Does a thing"
-        assert fm["triggers"] == ["trigger1"]
-        assert "# Instructions body" in body
+        assert fm['name'] == 'my-skill'
+        assert fm['description'] == 'Does a thing'
+        assert fm['triggers'] == ['trigger1']
+        assert '# Instructions body' in body
 
     def test_missing_frontmatter_returns_empty_dict(self):
-        content = "Just plain markdown text\nwith no frontmatter at all."
+        content = 'Just plain markdown text\nwith no frontmatter at all.'
         fm, body = parse_frontmatter(content)
         assert fm == {}
         assert body.strip() == content.strip()
 
     def test_malformed_yaml_returns_empty_dict(self):
         # Truly malformed YAML: wrong indentation in a list causes ScannerError
-        content = "---\nname: my-skill\ntriggers:\n- trigger1\nsub\n---\nBody text"
+        content = '---\nname: my-skill\ntriggers:\n- trigger1\nsub\n---\nBody text'
         fm, body = parse_frontmatter(content)
         # Malformed YAML -> empty dict, full content as body
         assert fm == {}
 
     def test_empty_content(self):
-        fm, body = parse_frontmatter("")
+        fm, body = parse_frontmatter('')
         assert fm == {}
-        assert body == ""
+        assert body == ''
 
     def test_only_delimiters_no_yaml(self):
-        content = "---\n---\nsome body"
+        content = '---\n---\nsome body'
         fm, body = parse_frontmatter(content)
         assert isinstance(fm, dict)  # empty YAML parses to None → {}
-        assert "some body" in body
+        assert 'some body' in body
 
     def test_numeric_frontmatter_returns_empty_dict(self):
         """Frontmatter that is a plain number should be treated as non-dict."""
-        content = "---\n42\n---\nbody"
+        content = '---\n42\n---\nbody'
         fm, body = parse_frontmatter(content)
         assert fm == {}
-        assert "body" in body
+        assert 'body' in body
 
     def test_list_frontmatter_returns_empty_dict(self):
         """Frontmatter that is a plain list should be treated as non-dict."""
-        content = "---\n- a\n- b\n---\nbody"
+        content = '---\n- a\n- b\n---\nbody'
         fm, body = parse_frontmatter(content)
         assert fm == {}
 
     def test_name_and_description_extracted_correctly(self):
         content = (
-            "---\n"
-            "name: httpx-pooling\n"
-            "description: Fix connection reuse issues\n"
-            "source: auto-skill\n"
-            "---\n"
-            "# Body here\n"
+            '---\n'
+            'name: httpx-pooling\n'
+            'description: Fix connection reuse issues\n'
+            'source: auto-skill\n'
+            '---\n'
+            '# Body here\n'
         )
         fm, _ = parse_frontmatter(content)
-        assert fm["name"] == "httpx-pooling"
-        assert fm["description"] == "Fix connection reuse issues"
-        assert fm["source"] == "auto-skill"
+        assert fm['name'] == 'httpx-pooling'
+        assert fm['description'] == 'Fix connection reuse issues'
+        assert fm['source'] == 'auto-skill'
 
 
 class TestParseSkillFile:
@@ -134,26 +134,26 @@ class TestParseSkillFile:
 
     def test_parse_real_version_control_skill(self, version_control_skill_file):
         result = parse_skill_file(version_control_skill_file)
-        assert "frontmatter" in result
-        assert "body" in result
-        assert "path" in result
-        assert isinstance(result["frontmatter"], dict)
-        assert result["frontmatter"]["name"] == "version-control"
-        assert len(result["body"]) > 100
+        assert 'frontmatter' in result
+        assert 'body' in result
+        assert 'path' in result
+        assert isinstance(result['frontmatter'], dict)
+        assert result['frontmatter']['name'] == 'version-control'
+        assert len(result['body']) > 100
 
     def test_parse_real_debugging_skill(self, debugging_skill_file):
         result = parse_skill_file(debugging_skill_file)
-        assert result["frontmatter"]["name"] == "systematic-debugging"
-        assert len(result["body"]) > 50
+        assert result['frontmatter']['name'] == 'systematic-debugging'
+        assert len(result['body']) > 50
 
     def test_missing_file_raises(self):
-        p = Path("/tmp/nonexistent_skill_SKILL.md")
-        with pytest.raises(FileNotFoundError, match="Skill file not found"):
+        p = Path('/tmp/nonexistent_skill_SKILL.md')
+        with pytest.raises(FileNotFoundError, match='Skill file not found'):
             parse_skill_file(p)
 
     def test_path_in_result(self, version_control_skill_file):
         result = parse_skill_file(version_control_skill_file)
-        assert str(version_control_skill_file) in result["path"]
+        assert str(version_control_skill_file) in result['path']
 
 
 # ===========================================================================
@@ -171,28 +171,28 @@ class TestSkillMatcher:
 
     def test_build_index_from_metadata(self):
         skills_meta = [
-            {"name": "httpx-connection-pooling", "description": "Fix connection reuse issues in HTTP clients"},
-            {"name": "startup-error-audit", "description": "Audit entry points for missing error handling"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix connection reuse issues in HTTP clients'},
+            {'name': 'startup-error-audit', 'description': 'Audit entry points for missing error handling'},
         ]
         self.matcher.build_index(skills_meta)
         assert len(self.matcher._inverted_index) > 0
         # The regex groups hyphenated words, so the full compound token is indexed
-        assert "httpx-connection-pooling" in self.matcher._inverted_index
+        assert 'httpx-connection-pooling' in self.matcher._inverted_index
 
     def test_build_index_ignores_empty_name(self):
         skills_meta = [
-            {"name": "", "description": "No name"},
-            {"name": "good-skill", "description": "Has a name"},
+            {'name': '', 'description': 'No name'},
+            {'name': 'good-skill', 'description': 'Has a name'},
         ]
         self.matcher.build_index(skills_meta)
         # Only good-skill should be in index values
         for kw, names in self.matcher._inverted_index.items():
-            assert "" not in names
+            assert '' not in names
 
     def test_build_index_deduplicates_per_skill(self):
         """Same keyword appearing twice in one skill's text should only add once."""
         skills_meta = [
-            {"name": "repeat-repeat", "description": "repeat repeat"},
+            {'name': 'repeat-repeat', 'description': 'repeat repeat'},
         ]
         self.matcher.build_index(skills_meta)
         for kw, names in self.matcher._inverted_index.items():
@@ -207,12 +207,12 @@ class TestSkillMatcher:
 
     def test_match_returns_sorted_results(self):
         skills_meta = [
-            {"name": "httpx-connection-pooling", "description": "Fix slow API connection reuse issues"},
-            {"name": "startup-error-audit", "description": "Audit entry points for errors"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix slow API connection reuse issues'},
+            {'name': 'startup-error-audit', 'description': 'Audit entry points for errors'},
         ]
         self.matcher.build_index(skills_meta)
 
-        results = self.matcher.match("slow API calls")
+        results = self.matcher.match('slow API calls')
         assert len(results) > 0
         # Results should be sorted by score descending
         scores = [score for _, score in results]
@@ -220,10 +220,10 @@ class TestSkillMatcher:
 
     def test_match_returns_tuples_with_name_and_score(self):
         skills_meta = [
-            {"name": "httpx-connection-pooling", "description": "Fix connection reuse issues"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix connection reuse issues'},
         ]
         self.matcher.build_index(skills_meta)
-        results = self.matcher.match("connection pooling")
+        results = self.matcher.match('connection pooling')
         for item in results:
             assert isinstance(item, tuple)
             assert len(item) == 2
@@ -234,47 +234,47 @@ class TestSkillMatcher:
 
     def test_match_empty_query_returns_empty(self):
         skills_meta = [
-            {"name": "httpx-connection-pooling", "description": "Fix connection issues"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix connection issues'},
         ]
         self.matcher.build_index(skills_meta)
-        assert self.matcher.match("") == []
+        assert self.matcher.match('') == []
 
     def test_match_on_empty_index_returns_empty(self):
         # No index built at all
-        assert self.matcher.match("anything") == []
+        assert self.matcher.match('anything') == []
 
     def test_match_only_positive_scores(self):
         skills_meta = [
-            {"name": "httpx-connection-pooling", "description": "Fix connection reuse issues"},
-            {"name": "startup-error-audit", "description": "Audit entry points for errors"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix connection reuse issues'},
+            {'name': 'startup-error-audit', 'description': 'Audit entry points for errors'},
         ]
         self.matcher.build_index(skills_meta)
-        results = self.matcher.match("slow API calls")
+        results = self.matcher.match('slow API calls')
         for _, score in results:
             assert score > 0
 
     def test_match_score_capped_at_1_0(self):
         """Score normalization should cap at 1.0."""
         skills_meta = [
-            {"name": "httpx-connection-pooling", "description": "Fix connection reuse issues"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix connection reuse issues'},
         ]
         self.matcher.build_index(skills_meta)
-        results = self.matcher.match("httpx connection pooling fix reuse")
+        results = self.matcher.match('httpx connection pooling fix reuse')
         for _, score in results:
             assert score <= 1.0
 
     def test_match_relevance_ranked_correctly(self):
         """A more relevant skill should rank higher."""
         skills_meta = [
-            {"name": "httpx-connection-pooling", "description": "Fix slow API connection reuse issues"},
-            {"name": "startup-error-audit", "description": "Audit entry points for errors"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix slow API connection reuse issues'},
+            {'name': 'startup-error-audit', 'description': 'Audit entry points for errors'},
         ]
         self.matcher.build_index(skills_meta)
-        results = self.matcher.match("slow API connection issues")
+        results = self.matcher.match('slow API connection issues')
         # httpx skill should rank higher than startup audit
         assert len(results) >= 1
         top_name = results[0][0]
-        assert "httpx" in top_name or "connection" in top_name.lower()
+        assert 'httpx' in top_name or 'connection' in top_name.lower()
 
 
 # ===========================================================================
@@ -294,17 +294,17 @@ class TestSkillManager:
         """Discover skills from the real agents/global/skills/ directory."""
         self.manager.discover([_SKILLS_DIR])
         assert len(self.manager._skills_registry) >= 2
-        assert "version-control" in self.manager._skills_registry
-        assert "systematic-debugging" in self.manager._skills_registry
+        assert 'version-control' in self.manager._skills_registry
+        assert 'systematic-debugging' in self.manager._skills_registry
 
     def test_discover_from_nonexistent_dir(self):
         """Should not crash on missing directory."""
-        self.manager.discover([Path("/tmp/no_such_dir_123")])
+        self.manager.discover([Path('/tmp/no_such_dir_123')])
         assert len(self.manager._skills_registry) == 0
 
     def test_discover_empty_dir(self):
         """Empty dir should register zero skills without error."""
-        tmp = Path("/tmp/empty_skills_test")
+        tmp = Path('/tmp/empty_skills_test')
         tmp.mkdir(exist_ok=True)
         self.manager.discover([tmp])
         assert len(self.manager._skills_registry) == 0
@@ -324,12 +324,12 @@ class TestSkillManager:
         """
         from agent_cascade.skills.cache_helper import compute_scan_signature
 
-        root = tmp_path / "skills"
-        skill_dir = root / "demo-skill"
+        root = tmp_path / 'skills'
+        skill_dir = root / 'demo-skill'
         skill_dir.mkdir(parents=True)
-        skill_file = skill_dir / "SKILL.md"
+        skill_file = skill_dir / 'SKILL.md'
         skill_file.write_text(
-            "---\nname: demo-skill\ndescription: x\n---\n# Body v1\n", encoding="utf-8"
+            '---\nname: demo-skill\ndescription: x\n---\n# Body v1\n', encoding='utf-8'
         )
 
         sig_before = compute_scan_signature([root], frozenset())
@@ -337,41 +337,41 @@ class TestSkillManager:
         # In-place edit of the nested SKILL.md (content change -> new mtime).
         time.sleep(0.02)  # ensure the mtime actually advances on coarse filesystems
         skill_file.write_text(
-            "---\nname: demo-skill\ndescription: x\n---\n# Body v2 (edited)\n", encoding="utf-8"
+            '---\nname: demo-skill\ndescription: x\n---\n# Body v2 (edited)\n', encoding='utf-8'
         )
 
         sig_after = compute_scan_signature([root], frozenset())
         assert sig_before != sig_after, (
-            "Editing a nested <skill>/SKILL.md must change the scan signature so that "
-            "discover() re-reads from disk instead of serving a stale cache hit."
+            'Editing a nested <skill>/SKILL.md must change the scan signature so that '
+            'discover() re-reads from disk instead of serving a stale cache hit.'
         )
 
     def test_discover_picks_up_nested_skillmd_edit(self, tmp_path):
         """End-to-end: after an in-place edit, discover() re-loads the new body."""
-        root = tmp_path / "skills"
-        skill_dir = root / "demo-skill"
+        root = tmp_path / 'skills'
+        skill_dir = root / 'demo-skill'
         skill_dir.mkdir(parents=True)
-        skill_file = skill_dir / "SKILL.md"
+        skill_file = skill_dir / 'SKILL.md'
         skill_file.write_text(
-            "---\nname: demo-skill\ndescription: x\n---\n# Body v1\n", encoding="utf-8"
+            '---\nname: demo-skill\ndescription: x\n---\n# Body v1\n', encoding='utf-8'
         )
 
         sm = self.manager
         sm._cache_ttl = 0.0  # force the TTL branch to age out immediately (no sleeping)
         sm.discover([root])
-        body1 = sm.load_full_instructions("demo-skill")
-        assert "Body v1" in body1
+        body1 = sm.load_full_instructions('demo-skill')
+        assert 'Body v1' in body1
 
         time.sleep(0.02)
         skill_file.write_text(
-            "---\nname: demo-skill\ndescription: x\n---\n# Body v2 (edited)\n", encoding="utf-8"
+            '---\nname: demo-skill\ndescription: x\n---\n# Body v2 (edited)\n', encoding='utf-8'
         )
 
         sm._ensure_discovered()  # same path scan_skills / load_skill use
-        body2 = sm.load_full_instructions("demo-skill")
-        assert "Body v2" in body2, (
-            "After an in-place edit of a nested SKILL.md, discover() must re-read the "
-            "file so the updated body is served (regression for stale-cache bug)."
+        body2 = sm.load_full_instructions('demo-skill')
+        assert 'Body v2' in body2, (
+            'After an in-place edit of a nested SKILL.md, discover() must re-read the '
+            'file so the updated body is served (regression for stale-cache bug).'
         )
 
     # -- Cache invalidation (regression: stale discovery cache after NONE-mode clear) --
@@ -404,7 +404,7 @@ class TestSkillManager:
         # Step 1: discover from the real skills dir.
         sm.discover([_SKILLS_DIR])
         initial_count = len(sm._skills_registry)
-        assert initial_count > 0, "Expected at least one skill in the real skills dir"
+        assert initial_count > 0, 'Expected at least one skill in the real skills dir'
 
         # Step 2 (OLD/buggy behavior): clear registry + rebuild index WITHOUT
         # invalidating the cache. The cache still holds a valid signature and a
@@ -418,8 +418,8 @@ class TestSkillManager:
         # stale-but-valid cache it must NOT re-register (documents the old bug).
         sm._ensure_discovered()
         assert len(sm._skills_registry) == 0, (
-            "Old buggy behavior: registry stayed empty because the discovery "
-            "cache was not invalidated after the NONE-mode clear"
+            'Old buggy behavior: registry stayed empty because the discovery '
+            'cache was not invalidated after the NONE-mode clear'
         )
 
         # Step 3 (FIXED flow): clear again, then invalidate the cache. The next
@@ -433,9 +433,9 @@ class TestSkillManager:
 
         sm._ensure_discovered()
         assert len(sm._skills_registry) == initial_count, (
-            "Fixed flow: registry should be fully repopulated after invalidate_cache()"
+            'Fixed flow: registry should be fully repopulated after invalidate_cache()'
         )
-        assert "version-control" in sm._skills_registry
+        assert 'version-control' in sm._skills_registry
 
     def test_invalidate_cache_resets_fields_under_lock(self):
         """invalidate_cache() must reset both cache fields (thread-safe)."""
@@ -453,14 +453,14 @@ class TestSkillManager:
 
     def test_get_skill_metadata_known_name(self):
         self.manager.discover([_SKILLS_DIR])
-        meta = self.manager.get_skill_metadata("version-control")
+        meta = self.manager.get_skill_metadata('version-control')
         assert meta is not None
-        assert meta["name"] == "version-control"
-        assert len(meta["description"]) > 10
+        assert meta['name'] == 'version-control'
+        assert len(meta['description']) > 10
 
     def test_get_skill_metadata_unknown_name(self):
         self.manager.discover([_SKILLS_DIR])
-        meta = self.manager.get_skill_metadata("nonexistent-skill")
+        meta = self.manager.get_skill_metadata('nonexistent-skill')
         assert meta is None
 
     def test_get_all_metadata_excludes_internal_fields(self):
@@ -468,10 +468,10 @@ class TestSkillManager:
         self.manager.discover([_SKILLS_DIR])
         all_meta = self.manager.get_all_metadata()
         for m in all_meta:
-            assert "_priority" not in m
-            assert "_parsed_data" not in m
-            assert "name" in m
-            assert "description" in m
+            assert '_priority' not in m
+            assert '_parsed_data' not in m
+            assert 'name' in m
+            assert 'description' in m
 
     def test_get_all_metadata_returns_list(self):
         self.manager.discover([_SKILLS_DIR])
@@ -483,15 +483,15 @@ class TestSkillManager:
 
     def test_load_full_instructions_known_skill(self):
         self.manager.discover([_SKILLS_DIR])
-        body = self.manager.load_full_instructions("version-control")
+        body = self.manager.load_full_instructions('version-control')
         assert body is not None
         assert len(body) > 100
         # Body should contain markdown content from the SKILL.md
-        assert "##" in body or "#" in body
+        assert '##' in body or '#' in body
 
     def test_load_full_instructions_unknown_skill(self):
         self.manager.discover([_SKILLS_DIR])
-        body = self.manager.load_full_instructions("nonexistent-skill")
+        body = self.manager.load_full_instructions('nonexistent-skill')
         assert body is None
 
     # -- Resolution: load_skill argument handling --
@@ -504,8 +504,8 @@ class TestSkillManager:
         """resolve_load_skill with a list should return instruction strings."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            ["version-control"],
-            task_text="Fix connection issues",
+            ['version-control'],
+            task_text='Fix connection issues',
         )
         assert isinstance(result, list)
         assert len(result) == 1
@@ -515,8 +515,8 @@ class TestSkillManager:
         """resolve_load_skill with 'AUTO' should use the matcher."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            "AUTO",
-            task_text="slow API connection pooling issues",
+            'AUTO',
+            task_text='slow API connection pooling issues',
         )
         # Should match httpx skill based on keywords
         assert isinstance(result, list)
@@ -527,7 +527,7 @@ class TestSkillManager:
 
     def test_resolve_none_returns_empty_list(self):
         self._setup_manager_with_skills()
-        assert self.manager.resolve_load_skill("NONE") == []
+        assert self.manager.resolve_load_skill('NONE') == []
 
     def test_resolve_null_returns_empty_list(self):
         self._setup_manager_with_skills()
@@ -537,21 +537,21 @@ class TestSkillManager:
         """Missing skill names in a list should not crash, just be skipped."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            ["version-control", "nonexistent-skill"],
-            task_text="test",
+            ['version-control', 'nonexistent-skill'],
+            task_text='test',
         )
         assert len(result) == 1  # Only the valid skill loaded
 
     def test_resolve_unknown_string_value_returns_empty(self):
         self._setup_manager_with_skills()
-        result = self.manager.resolve_load_skill("UNKNOWN_MODE")
+        result = self.manager.resolve_load_skill('UNKNOWN_MODE')
         assert result == []
 
     def test_resolve_list_multiple_skills(self):
         """Loading multiple skills by name should return all available."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            ["version-control", "systematic-debugging"],
+            ['version-control', 'systematic-debugging'],
         )
         assert len(result) == 2
 
@@ -559,8 +559,8 @@ class TestSkillManager:
         """AUTO mode with no relevant query should return empty."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill(
-            "AUTO",
-            task_text="quantum physics entanglement experiments",
+            'AUTO',
+            task_text='quantum physics entanglement experiments',
         )
         assert isinstance(result, list)
 
@@ -570,18 +570,18 @@ class TestSkillManager:
         """Explicit list returns only the names that are actually loadable."""
         self._setup_manager_with_skills()
         result = self.manager.resolve_load_skill_names(
-            ["version-control", "nonexistent-skill"],
+            ['version-control', 'nonexistent-skill'],
         )
-        assert result == ["version-control"]
+        assert result == ['version-control']
 
     def test_resolve_names_auto_returns_above_threshold_and_loadable(self):
         """AUTO returns names that are above threshold AND loadable."""
         self._setup_manager_with_skills()
         bodies = self.manager.resolve_load_skill(
-            "AUTO", task_text="slow API connection pooling issues",
+            'AUTO', task_text='slow API connection pooling issues',
         )
         names = self.manager.resolve_load_skill_names(
-            "AUTO", task_text="slow API connection pooling issues",
+            'AUTO', task_text='slow API connection pooling issues',
         )
         # Every name must be a real registered skill, and count matches bodies.
         assert len(names) == len(bodies)
@@ -590,7 +590,7 @@ class TestSkillManager:
 
     def test_resolve_names_none_and_null_return_empty(self):
         self._setup_manager_with_skills()
-        assert self.manager.resolve_load_skill_names("NONE") == []
+        assert self.manager.resolve_load_skill_names('NONE') == []
         assert self.manager.resolve_load_skill_names(None) == []
 
     def test_resolve_names_matches_bodies_drift_guard(self):
@@ -602,11 +602,11 @@ class TestSkillManager:
         """
         self._setup_manager_with_skills()
         for value, kwargs in [
-            (["version-control", "systematic-debugging"], {}),
-            ("AUTO", {"task_text": "slow API connection pooling issues"}),
-            ("NONE", {}),
+            (['version-control', 'systematic-debugging'], {}),
+            ('AUTO', {'task_text': 'slow API connection pooling issues'}),
+            ('NONE', {}),
             (None, {}),
-            ("UNKNOWN_MODE", {}),
+            ('UNKNOWN_MODE', {}),
         ]:
             bodies = self.manager.resolve_load_skill(value, **kwargs)
             names = self.manager.resolve_load_skill_names(value, **kwargs)
@@ -628,120 +628,120 @@ class TestSkillManager:
         """Skills in workspace/skills/ are discovered with _PRIORITY_USER."""
         from agent_cascade.skills.manager import _PRIORITY_USER
 
-        root = tmp_path / "workspace" / "skills" / "ws-skill"
+        root = tmp_path / 'workspace' / 'skills' / 'ws-skill'
         root.mkdir(parents=True)
-        (root / "SKILL.md").write_text(
-            "---\nname: ws-skill\ndescription: test\n---\n# Body\n", encoding="utf-8"
+        (root / 'SKILL.md').write_text(
+            '---\nname: ws-skill\ndescription: test\n---\n# Body\n', encoding='utf-8'
         )
 
         sm = self.manager
         sm._cache_ttl = 0.0
-        sm.discover([tmp_path / "workspace" / "skills"])
+        sm.discover([tmp_path / 'workspace' / 'skills'])
 
-        assert "ws-skill" in sm._skills_registry
-        assert sm._skills_registry["ws-skill"]["_priority"] == _PRIORITY_USER
+        assert 'ws-skill' in sm._skills_registry
+        assert sm._skills_registry['ws-skill']['_priority'] == _PRIORITY_USER
 
     def test_discover_picks_up_agent_tier(self, tmp_path):
         """Skills in agents/<name>/skills/ are discovered with _PRIORITY_AGENT."""
         from agent_cascade.skills.manager import _PRIORITY_AGENT
 
-        root = tmp_path / "agents" / "coder" / "skills" / "agent-skill"
+        root = tmp_path / 'agents' / 'coder' / 'skills' / 'agent-skill'
         root.mkdir(parents=True)
-        (root / "SKILL.md").write_text(
-            "---\nname: agent-skill\ndescription: test\n---\n# Body\n", encoding="utf-8"
+        (root / 'SKILL.md').write_text(
+            '---\nname: agent-skill\ndescription: test\n---\n# Body\n', encoding='utf-8'
         )
 
         sm = self.manager
         sm._cache_ttl = 0.0
-        sm.discover([tmp_path / "agents" / "coder" / "skills"])
+        sm.discover([tmp_path / 'agents' / 'coder' / 'skills'])
 
-        assert "agent-skill" in sm._skills_registry
-        assert sm._skills_registry["agent-skill"]["_priority"] == _PRIORITY_AGENT
+        assert 'agent-skill' in sm._skills_registry
+        assert sm._skills_registry['agent-skill']['_priority'] == _PRIORITY_AGENT
 
     def test_priority_resolution_user_overrides_system(self, tmp_path):
         """When the same skill name exists in system and user tiers, user wins."""
         from agent_cascade.skills.manager import _PRIORITY_SYSTEM, _PRIORITY_USER
 
         # System tier: .qwen/skills/dup-skill
-        sys_root = tmp_path / ".qwen" / "skills" / "dup-skill"
+        sys_root = tmp_path / '.qwen' / 'skills' / 'dup-skill'
         sys_root.mkdir(parents=True)
-        (sys_root / "SKILL.md").write_text(
-            "---\nname: dup-skill\ndescription: system version\n---\n# System body\n",
-            encoding="utf-8",
+        (sys_root / 'SKILL.md').write_text(
+            '---\nname: dup-skill\ndescription: system version\n---\n# System body\n',
+            encoding='utf-8',
         )
 
         # User tier: workspace/skills/dup-skill
-        user_root = tmp_path / "workspace" / "skills" / "dup-skill"
+        user_root = tmp_path / 'workspace' / 'skills' / 'dup-skill'
         user_root.mkdir(parents=True)
-        (user_root / "SKILL.md").write_text(
-            "---\nname: dup-skill\ndescription: user version\n---\n# User body\n",
-            encoding="utf-8",
+        (user_root / 'SKILL.md').write_text(
+            '---\nname: dup-skill\ndescription: user version\n---\n# User body\n',
+            encoding='utf-8',
         )
 
         sm = self.manager
         sm._cache_ttl = 0.0
-        sm.discover([tmp_path / ".qwen" / "skills", tmp_path / "workspace" / "skills"])
+        sm.discover([tmp_path / '.qwen' / 'skills', tmp_path / 'workspace' / 'skills'])
 
-        assert "dup-skill" in sm._skills_registry
-        assert sm._skills_registry["dup-skill"]["_priority"] == _PRIORITY_USER
+        assert 'dup-skill' in sm._skills_registry
+        assert sm._skills_registry['dup-skill']['_priority'] == _PRIORITY_USER
         # User version should be the one registered (higher priority wins).
-        assert "user version" in sm._skills_registry["dup-skill"]["description"]
+        assert 'user version' in sm._skills_registry['dup-skill']['description']
 
     def test_priority_resolution_agent_overrides_system(self, tmp_path):
         """Agent-tier skill should override system-tier duplicate."""
         from agent_cascade.skills.manager import _PRIORITY_SYSTEM, _PRIORITY_AGENT
 
         # System tier: .qwen/skills/dup-skill
-        sys_root = tmp_path / ".qwen" / "skills" / "dup-skill"
+        sys_root = tmp_path / '.qwen' / 'skills' / 'dup-skill'
         sys_root.mkdir(parents=True)
-        (sys_root / "SKILL.md").write_text(
-            "---\nname: dup-skill\ndescription: system version\n---\n# System body\n",
-            encoding="utf-8",
+        (sys_root / 'SKILL.md').write_text(
+            '---\nname: dup-skill\ndescription: system version\n---\n# System body\n',
+            encoding='utf-8',
         )
 
         # Agent tier: agents/coder/skills/dup-skill
-        agent_root = tmp_path / "agents" / "coder" / "skills" / "dup-skill"
+        agent_root = tmp_path / 'agents' / 'coder' / 'skills' / 'dup-skill'
         agent_root.mkdir(parents=True)
-        (agent_root / "SKILL.md").write_text(
-            "---\nname: dup-skill\ndescription: agent version\n---\n# Agent body\n",
-            encoding="utf-8",
+        (agent_root / 'SKILL.md').write_text(
+            '---\nname: dup-skill\ndescription: agent version\n---\n# Agent body\n',
+            encoding='utf-8',
         )
 
         sm = self.manager
         sm._cache_ttl = 0.0
-        sm.discover([tmp_path / ".qwen" / "skills", tmp_path / "agents" / "coder" / "skills"])
+        sm.discover([tmp_path / '.qwen' / 'skills', tmp_path / 'agents' / 'coder' / 'skills'])
 
-        assert "dup-skill" in sm._skills_registry
-        assert sm._skills_registry["dup-skill"]["_priority"] == _PRIORITY_AGENT
+        assert 'dup-skill' in sm._skills_registry
+        assert sm._skills_registry['dup-skill']['_priority'] == _PRIORITY_AGENT
         # Agent version should be the one registered (higher priority than system).
-        assert "agent version" in sm._skills_registry["dup-skill"]["description"]
+        assert 'agent version' in sm._skills_registry['dup-skill']['description']
 
     def test_ensure_discovered_covers_all_tiers(self, tmp_path):
         """Hot-reload via _ensure_discovered() works for non-system tiers."""
-        user_root = tmp_path / "workspace" / "skills" / "ws-skill"
+        user_root = tmp_path / 'workspace' / 'skills' / 'ws-skill'
         user_root.mkdir(parents=True)
-        skill_file = user_root / "SKILL.md"
+        skill_file = user_root / 'SKILL.md'
         skill_file.write_text(
-            "---\nname: ws-skill\ndescription: test\n---\n# Body v1\n", encoding="utf-8"
+            '---\nname: ws-skill\ndescription: test\n---\n# Body v1\n', encoding='utf-8'
         )
 
         sm = self.manager
         sm._cache_ttl = 0.0
-        sm.discover([tmp_path / "workspace" / "skills"])
-        body1 = sm.load_full_instructions("ws-skill")
-        assert "Body v1" in body1
+        sm.discover([tmp_path / 'workspace' / 'skills'])
+        body1 = sm.load_full_instructions('ws-skill')
+        assert 'Body v1' in body1
 
         # Edit the user-tier skill in place.
         time.sleep(0.02)
         skill_file.write_text(
-            "---\nname: ws-skill\ndescription: test\n---\n# Body v2 (edited)\n",
-            encoding="utf-8",
+            '---\nname: ws-skill\ndescription: test\n---\n# Body v2 (edited)\n',
+            encoding='utf-8',
         )
 
         sm._ensure_discovered()
-        body2 = sm.load_full_instructions("ws-skill")
-        assert "Body v2" in body2, (
-            "Hot-reload via _ensure_discovered must pick up edits in non-system tiers."
+        body2 = sm.load_full_instructions('ws-skill')
+        assert 'Body v2' in body2, (
+            'Hot-reload via _ensure_discovered must pick up edits in non-system tiers.'
         )
 
 
@@ -754,23 +754,23 @@ class TestIntegration:
 
     def test_scan_skills_in_tool_metadata(self):
         from agent_cascade.prompts.dna import TOOL_METADATA
-        assert "scan_skills" in TOOL_METADATA, (
-            "scan_skills tool schema missing from TOOL_METADATA"
+        assert 'scan_skills' in TOOL_METADATA, (
+            'scan_skills tool schema missing from TOOL_METADATA'
         )
-        meta = TOOL_METADATA["scan_skills"]
-        assert "description" in meta
-        assert "parameters" in meta
-        assert "query" in meta["parameters"]
+        meta = TOOL_METADATA['scan_skills']
+        assert 'description' in meta
+        assert 'parameters' in meta
+        assert 'query' in meta['parameters']
 
     def test_load_skill_in_call_agent_metadata(self):
         """Verify load_skill parameter is defined for call_agent tool."""
         from agent_cascade.prompts.dna import TOOL_METADATA
-        assert "call_agent" in TOOL_METADATA, (
-            "call_agent missing from TOOL_METADATA"
+        assert 'call_agent' in TOOL_METADATA, (
+            'call_agent missing from TOOL_METADATA'
         )
-        params = TOOL_METADATA["call_agent"]["parameters"]
-        assert "load_skill" in params, (
-            "load_skill parameter missing from call_agent TOOL_METADATA"
+        params = TOOL_METADATA['call_agent']['parameters']
+        assert 'load_skill' in params, (
+            'load_skill parameter missing from call_agent TOOL_METADATA'
         )
 
     def test_default_load_skill_mode_exists(self):
@@ -779,20 +779,20 @@ class TestIntegration:
         assert isinstance(DEFAULT_LOAD_SKILL_MODE, str)
         # Should be either AUTO or NONE (or empty string for env override)
         upper = DEFAULT_LOAD_SKILL_MODE.upper()
-        assert upper in ("AUTO", "NONE"), (
+        assert upper in ('AUTO', 'NONE'), (
             f"DEFAULT_LOAD_SKILL_MODE has unexpected value: {DEFAULT_LOAD_SKILL_MODE}"
         )
 
     def test_scan_skills_description_mentions_load_skill(self):
         """scan_skills description should mention load_skill for discoverability."""
         from agent_cascade.prompts.dna import TOOL_METADATA
-        desc = TOOL_METADATA["scan_skills"]["description"].lower()
-        assert "load_skill" in desc or "load skill" in desc
+        desc = TOOL_METADATA['scan_skills']['description'].lower()
+        assert 'load_skill' in desc or 'load skill' in desc
 
     def test_available_tools_includes_scan_skills(self):
         """scan_skills should be listed in AVAILABLE_TOOLS."""
         from agent_cascade.prompts.dna import AVAILABLE_TOOLS
-        assert "scan_skills" in AVAILABLE_TOOLS
+        assert 'scan_skills' in AVAILABLE_TOOLS
 
 
 # ===========================================================================
@@ -803,18 +803,18 @@ class TestEdgeCases:
     """Cross-cutting edge cases for the skills system."""
 
     def test_parse_frontmatter_with_unicode(self):
-        content = "---\nname: café-skill\ndescription: Réglage des problèmes\n---\nCorps"
+        content = '---\nname: café-skill\ndescription: Réglage des problèmes\n---\nCorps'
         fm, body = parse_frontmatter(content)
-        assert fm["name"] == "café-skill"
-        assert "Réglage" in fm["description"]
+        assert fm['name'] == 'café-skill'
+        assert 'Réglage' in fm['description']
 
     def test_matcher_with_special_characters_in_query(self):
         """Matcher should handle queries with punctuation and special chars."""
         m = SkillMatcher()
         m.build_index([
-            {"name": "httpx-connection-pooling", "description": "Fix connection issues"},
+            {'name': 'httpx-connection-pooling', 'description': 'Fix connection issues'},
         ])
-        results = m.match("What about slow API calls??? (very slow!)")
+        results = m.match('What about slow API calls??? (very slow!)')
         assert isinstance(results, list)
 
     def test_manager_resolve_with_empty_list(self):
@@ -825,23 +825,23 @@ class TestEdgeCases:
     def test_parse_frontmatter_preserves_body_order(self):
         """Body text order should be preserved after frontmatter removal."""
         content = (
-            "---\nname: test\n---\n\n"
-            "## Section 1\nFirst paragraph.\n\n"
-            "## Section 2\nSecond paragraph."
+            '---\nname: test\n---\n\n'
+            '## Section 1\nFirst paragraph.\n\n'
+            '## Section 2\nSecond paragraph.'
         )
         fm, body = parse_frontmatter(content)
-        assert body.index("Section 1") < body.index("Section 2")
+        assert body.index('Section 1') < body.index('Section 2')
 
     def test_matcher_rebuild_index_clears_old(self):
         """Rebuilding the index should clear previous entries."""
         m = SkillMatcher()
-        m.build_index([{"name": "old-skill", "description": "Old description"}])
-        assert "old" in m._inverted_index
+        m.build_index([{'name': 'old-skill', 'description': 'Old description'}])
+        assert 'old' in m._inverted_index
 
-        m.build_index([{"name": "new-skill", "description": "New stuff here"}])
+        m.build_index([{'name': 'new-skill', 'description': 'New stuff here'}])
         # Old keyword should be gone if it doesn't appear in new data
         for kw, names in m._inverted_index.items():
-            assert "old-skill" not in names
+            assert 'old-skill' not in names
 
 
 # ===========================================================================

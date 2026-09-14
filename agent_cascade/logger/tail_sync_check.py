@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple
 from agent_cascade.log import logger as _log
 
 # Compression marker prefix (matches dna.py COMPRESSION_MARKER)
-_COMPRESSED_PREFIX = "--- CONTEXT COMPRESSED"
+_COMPRESSED_PREFIX = '--- CONTEXT COMPRESSED'
 
 
 # ── Tail length counting helpers ──────────────────────────────────────────────
@@ -78,7 +78,7 @@ def _count_jsonl_tail(log_path: str) -> Tuple[int, int, Optional[int]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(item, dict):
-                if "metadata" in item or "event" in item:
+                if 'metadata' in item or 'event' in item:
                     continue
                 total_msgs += 1
         
@@ -96,7 +96,7 @@ def _count_jsonl_tail(log_path: str) -> Tuple[int, int, Optional[int]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(item, dict):
-                if "metadata" in item or "event" in item:
+                if 'metadata' in item or 'event' in item:
                     continue
                 msg_count += 1
                 # Check for compression marker (must match find_last_marker behavior)
@@ -156,7 +156,7 @@ def check_and_log(
     instance_name: str,
     conv: List,
     log_path: Optional[str] = None,
-    context: str = "write",
+    context: str = 'write',
 ) -> bool:
     """Run the tail sync check and log a warning if drift is detected.
     
@@ -191,12 +191,12 @@ def check_and_log(
             if last_marker_idx >= 0:
                 pool_marker_info = f"marker@idx={last_marker_idx}"
             else:
-                pool_marker_info = "no_marker"
+                pool_marker_info = 'no_marker'
             
             if marker_line is not None:
                 jsonl_marker_info = f"marker@line={marker_line}"
             else:
-                jsonl_marker_info = "no_marker"
+                jsonl_marker_info = 'no_marker'
             
             _log.warning(
                 f"[TAIL SYNC DRIFT] '{instance_name}' after {context}: "
