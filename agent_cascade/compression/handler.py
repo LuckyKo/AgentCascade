@@ -23,8 +23,8 @@ from agent_cascade.llm.schema import USER, ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import (COMPRESSION_DEFAULT_FRACTION, COMPRESSION_MAX_FRACTION, COMPRESSION_MIN_FRACTION,
                                     TOKEN_ESTIMATE_CHAR_DIVISOR)
-from agent_cascade.tool_utils import (clear_truncation_state, get_and_clear_truncation_hints, truncate_with_spillover,
-                                      was_tool_call_truncated)
+from agent_cascade.tool_utils import (clear_truncation_state, format_truncation_notice, get_and_clear_truncation_hints,
+                                      truncate_with_spillover, was_tool_call_truncated)
 from agent_cascade.utils.pool_validation import validate_message_pool
 from agent_cascade.utils.utils import VISION_MODEL_TYPES, is_multimodal_content, msg_field
 
@@ -515,7 +515,7 @@ class CompressionHandler:
                     raw_tool_result.append(
                         ContentItem(
                             text=
-                            f"\n[TRUNCATED — Character limit exceeded for {instance_name}:{tool_name}. Full output may be available in logs/spillover/]"
+                            f"\n{format_truncation_notice(shown_lines=_hints_shown, total_lines=_hints_total)}"
                         ))
 
                 return raw_tool_result
@@ -580,12 +580,17 @@ class CompressionHandler:
         # Step 6: Drain pending compression notifications (append after body)
         raw_tool_result = self._drain_pending_into_tool_result(instance, raw_tool_result)
 
-        # Step 7: Add a simple fallback footer only if truncation happened and no
+        # Step 7: Add a fallback footer only if truncation happened and no
         # [TRUNCATED marker is present. truncate_with_spillover already adds its own
         # footer; this is a safety net for tools that set the truncation flag but
         # forget to append the marker themselves.
         if was_truncated and '[TRUNCATED' not in raw_tool_result:
-            raw_tool_result += f"\n\n[TRUNCATED — Character limit exceeded for {instance_name}:{tool_name}. Full output may be available in logs/spillover/]"
+            notice = format_truncation_notice(
+                shown_lines=_hints_shown,
+                total_lines=_hints_total,
+                total_chars=len(raw_tool_result),
+            )
+            raw_tool_result += f"\n\n{notice}"
 
         return raw_tool_result
 
