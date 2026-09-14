@@ -471,6 +471,10 @@ class CompressionHandler:
         Returns:
             Assembled tool result — string for text-only, or ContentItem list for vision endpoints.
         """
+        # Clear truncation hints unconditionally at entry so they never leak
+        # across tool calls, even on early returns (multimodal) or exceptions.
+        _hints_total, _hints_shown = get_and_clear_truncation_hints()
+
         # Step 1: Handle multimodal ContentItem lists for vision-capable agents
         if isinstance(raw_tool_result, list):
             has_multimodal = is_multimodal_content(raw_tool_result)
@@ -550,11 +554,6 @@ class CompressionHandler:
         # Clear immediately so truncation flags don't leak into subsequent tool calls
         # in the same turn (e.g., a later small __wait response after a large truncated one).
         clear_truncation_state()
-
-        # Step 2a: Read and clear any line-count hints set by the tool (e.g. read_file).
-        # Done unconditionally so stale hints never leak into a later, different tool's
-        # result even when this result is not itself truncated.
-        _hints_total, _hints_shown = get_and_clear_truncation_hints()
 
         # Step 3: If char_limit is set and exceeded, truncate now.
         # truncate_with_spillover adds its own [TRUNCATED ...] footer, so we don't
