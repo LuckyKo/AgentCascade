@@ -2195,7 +2195,8 @@ function handleServerMessage(data) {
 
           // D1: the visible agent's last message grew in this frame → request a smooth-cadence render.
           if (state.activeSubTab === 'sub-' + name && !hasNewMessage) {
-            const _curLast = state.subAgents[name]?.messages?.at(-1);
+            const _msgs = state.subAgents[name]?.messages;
+            const _curLast = _msgs && _msgs.length > 0 ? _msgs[_msgs.length - 1] : null;
             if (_curLast) {
               const curLastMsgLen = (_curLast.content || '').length + (_curLast.reasoning_content || '').length;
               if (curLastMsgLen > prevLastMsgLen) visibleContentGrowing = true;
