@@ -1,17 +1,17 @@
 """Grep subsystem — pattern compilation, tool availability check, and mixin for file search."""
 
+import fnmatch
 import json
 import re
 import time
-import fnmatch
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 from agent_cascade.tool_utils import truncate_with_spillover
 
-
 # ─── Module-level cached helpers ──────────────────────────────────────────
+
 
 def _resolve_spill_path(spill_file_path: Optional[str]) -> Optional[Path]:
     """Convert optional string spill path to Path, or None."""
@@ -21,7 +21,7 @@ def _resolve_spill_path(spill_file_path: Optional[str]) -> Optional[Path]:
 @lru_cache(maxsize=256)
 def _compile_grep_pattern(pattern: str, *, flags: int = 0):
     """Cache compiled regex patterns for grep to avoid recompiling on each call.
-    
+
     Args:
         pattern: The regex pattern string.
         flags: Optional re.IGNORECASE flag for case-insensitive matching (smart_case).
@@ -33,12 +33,12 @@ def _compile_grep_pattern(pattern: str, *, flags: int = 0):
 @lru_cache(maxsize=1)
 def _check_tool_availability():
     """Check if ripgrep or system grep are available at runtime.
-    
+
     Returns a tuple of (rg_available, grep_available).
     Uses lru_cache for performance — tool availability doesn't change during execution.
     """
-    import shutil
     import os
+    import shutil
     rg_path = shutil.which('rg')
     grep_path = shutil.which('grep')
 
@@ -50,17 +50,25 @@ def _check_tool_availability():
 
 # ─── Mixin: Grep methods for OperationManager ─────────────────────────────
 
+
 class GrepMixin:
     """Grep/search methods. Expects self to have __init__-set attributes including class-level exclude constants."""
 
     # Default exclude patterns for standard grep (basename matching)
     _GREP_DEFAULT_EXCLUDES = [
-        '*.pyc', '*.so', '*.dll', '*.exe', '*.zip',
+        '*.pyc',
+        '*.so',
+        '*.dll',
+        '*.exe',
+        '*.zip',
     ]
 
     # Default directory excludes for GNU grep --exclude-dir (may not be available on all systems)
     _GREP_DEFAULT_EXCLUDE_DIRS = [
-        'node_modules', '__pycache__', '.git', '*.egg-info',
+        'node_modules',
+        '__pycache__',
+        '.git',
+        '*.egg-info',
     ]
 
     @staticmethod
@@ -85,15 +93,15 @@ class GrepMixin:
 
         # Reject UNC-style paths first (e.g., "//server/share" or "\\server\share")
         if cleaned.startswith('//'):
-            raise ValueError("Invalid glob pattern: UNC paths are not allowed")
+            raise ValueError('Invalid glob pattern: UNC paths are not allowed')
 
         # Reject absolute Unix paths
         if cleaned.startswith('/'):
-            raise ValueError("Invalid glob pattern: absolute paths are not allowed")
+            raise ValueError('Invalid glob pattern: absolute paths are not allowed')
 
         # Reject drive-letter absolute paths (e.g., "C:", "C:/", "C:*")
         if len(cleaned) >= 2 and cleaned[0].isalpha() and cleaned[1] == ':':
-            raise ValueError("Invalid glob pattern: absolute paths are not allowed")
+            raise ValueError('Invalid glob pattern: absolute paths are not allowed')
 
         if not allow_traversal:
             parts = cleaned.split('/')
@@ -103,24 +111,54 @@ class GrepMixin:
 
         return cleaned
 
-    def _try_subprocess_grep(self, pattern: str, path: Path, include: str, char_limit: int, timeout: float,
-                             agent_name: str = "unknown",
-                             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
+    @staticmethod
+    def _extract_spill_path(truncated_with_notice: str) -> Optional[str]:
+        """Recover the spillover file's relative path from a truncate_with_spillover result.
+
+        truncate_with_spillover appends a notice of the form
+        "...Full output saved to: <rel>" (same format read_file uses). The fast path
+        needs that rel path to surface it in its own summary, but does its own
+        line-based truncation instead of returning the notice verbatim. Returns None
+        if no such notice is present (e.g. text was under the limit).
+        """
+        marker = 'Full output saved to: '
+        idx = truncated_with_notice.rfind(marker)
+        if idx == -1:
+            return None
+        path = truncated_with_notice[idx + len(marker):].strip()
+        # The notice is closed with a trailing "]"; drop it if present.
+        if path.endswith(']'):
+            path = path[:-1].rstrip()
+        return path or None
+
+    def _try_subprocess_grep(self,
+                             pattern: str,
+                             path: Path,
+                             include: str,
+                             char_limit: int,
+                             timeout: float,
+                             agent_name: str = 'unknown',
+                             exclude: str = '',
+                             ignore_vcs: bool = True,
+                             context: int = 0,
+                             smart_case: bool = True,
                              spill_file_path: Optional[str] = None):
         """Fast-path grep using system ripgrep or grep via subprocess.
-        
-        Returns (results_list, count, was_timed_out, was_truncated, original_output_size) on success, 
-        or (None, 0, False, False, 0) on failure.
+
+        Returns (results_list, count, was_timed_out, was_truncated, original_output_size, spillover_rel_path)
+        on success, or (None, 0, False, False, 0, None) on failure.
         Output format matches Python fallback: "relative_path:line_number: content"
         """
         import subprocess
+
         from agent_cascade.log import logger
 
         _rg_available, _grep_available = _check_tool_availability()
 
         if not _rg_available and not _grep_available:
-            logger.debug("grep: subprocess fast path unavailable (rg=%s, grep=%s), falling back to Python", _rg_available, _grep_available)
-            return None, 0, False, False, 0
+            logger.debug('grep: subprocess fast path unavailable (rg=%s, grep=%s), falling back to Python',
+                         _rg_available, _grep_available)
+            return None, 0, False, False, 0, None
 
         try:
             if _rg_available:
@@ -130,7 +168,8 @@ class GrepMixin:
                     '--no-heading',
                     '-n',
                     '--json',
-                    '--color', 'never',
+                    '--color',
+                    'never',
                     '--no-mmap',
                 ]
 
@@ -183,15 +222,13 @@ class GrepMixin:
 
                 cmd.extend(['-e', pattern])
 
-            result = subprocess.run(
-                cmd,
-                cwd=str(path),
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=timeout
-            )
+            result = subprocess.run(cmd,
+                                    cwd=str(path),
+                                    capture_output=True,
+                                    text=True,
+                                    encoding='utf-8',
+                                    errors='replace',
+                                    timeout=timeout)
 
             if result.returncode == 0:
                 lines = result.stdout.split('\n') if result.stdout.strip() else []
@@ -244,7 +281,7 @@ class GrepMixin:
                                 formatted.append(f"{normalized_path}:{line_num}:     {match_text}")
 
                         except json.JSONDecodeError as e:
-                            logger.debug("ripgrep JSON parse error: %s", e)
+                            logger.debug('ripgrep JSON parse error: %s', e)
 
                     count = match_count
 
@@ -255,8 +292,8 @@ class GrepMixin:
                     for line in lines:
                         if not line:
                             continue
-                        if line == "---" or line == "--":
-                            formatted.append("---")
+                        if line == '---' or line == '--':
+                            formatted.append('---')
                             continue
 
                         m = _match_re.match(line)
@@ -282,28 +319,34 @@ class GrepMixin:
                             formatted.append(line)
 
                     if context > 0:
-                        count = sum(1 for l in formatted if ">>>" in l)
+                        count = sum(1 for l in formatted if '>>>' in l)
                     else:
-                        count = sum(1 for l in formatted if l != "---")
+                        count = sum(1 for l in formatted if l != '---')
 
                 _was_truncated = False
                 _original_output_size = 0
+                _spill_rel_path = None
                 if char_limit != -1 and count > 0:
                     output_size = sum(len(l) for l in formatted) + count
                     if output_size > char_limit:
                         _original_output_size = output_size
 
                         # Write spillover file for full output (side effect only;
-                        # truncation is done below with line-aware byte budget)
+                        # truncation is done below with line-aware byte budget).
+                        # truncate_with_spillover returns the truncated text WITH a
+                        # "...Full output saved to: <rel>" notice appended — we keep
+                        # only that rel path here and do our own line-based truncation.
                         full_text = '\n'.join(formatted)
-                        truncate_with_spillover(
-                            full_text, char_limit,
+                        _truncated_with_notice = truncate_with_spillover(
+                            full_text,
+                            char_limit,
                             instance_name=agent_name,
                             tool_name='grep',
                             base_dir=self.base_dir,
                             operation_mode='head',
                             spill_path=_resolve_spill_path(spill_file_path),
-                        )  # return value intentionally ignored — we do line-based truncation below
+                        )  # return value used only to recover the spillover rel path
+                        _spill_rel_path = self._extract_spill_path(_truncated_with_notice)
 
                         byte_budget = char_limit
                         truncated = []
@@ -314,35 +357,45 @@ class GrepMixin:
                             byte_budget -= len(line) + 1
                         formatted = truncated
                         if context > 0:
-                            count = sum(1 for l in formatted if ">>>" in l)
+                            count = sum(1 for l in formatted if '>>>' in l)
                         else:
-                            count = sum(1 for l in formatted if l != "---")
+                            count = sum(1 for l in formatted if l != '---')
                         _was_truncated = True
 
-                return formatted, count, False, _was_truncated, _original_output_size
+                return formatted, count, False, _was_truncated, _original_output_size, _spill_rel_path
 
             # Non-zero return code (e.g., grep returns 1 for no matches) — still valid
             if result.returncode == 1:
-                return [], 0, False, False, 0
+                return [], 0, False, False, 0, None
 
             # Unexpected non-zero exit code (e.g., rg returns 2 for usage errors like unrecognized flags)
-            stderr_msg = (result.stderr or "").strip()[:500]
-            logger.warning(f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
-            return None, 0, False, False, 0
+            stderr_msg = (result.stderr or '').strip()[:500]
+            logger.warning(
+                f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
+            return None, 0, False, False, 0, None
 
         except subprocess.TimeoutExpired as e:
-            logger.warning(f"grep subprocess timed out after {timeout}s (pattern/scope too broad); returning error instead of falling back to Python")
-            return None, 0, True, False, 0
+            logger.warning(
+                f"grep subprocess timed out after {timeout}s (pattern/scope too broad); returning error instead of falling back to Python"
+            )
+            return None, 0, True, False, 0, None
 
         except (FileNotFoundError, PermissionError, OSError) as e:
             logger.debug(f"grep subprocess unavailable (falling back to Python): {e}")
 
-        return None, 0, False, False, 0
+        return None, 0, False, False, 0, None
 
-    def _grep_single_file(self, file_path: Path, pattern: str, char_limit: int,
-                          include: str = "*", exclude: str = "", context: int = 0, smart_case: bool = True,
-                          agent_name: str = "unknown",
-                          spill_file_path: Optional[str] = None, timeout: float = 5.0) -> str:
+    def _grep_single_file(self,
+                          file_path: Path,
+                          pattern: str,
+                          char_limit: int,
+                          include: str = '*',
+                          exclude: str = '',
+                          context: int = 0,
+                          smart_case: bool = True,
+                          agent_name: str = 'unknown',
+                          spill_file_path: Optional[str] = None,
+                          timeout: float = 5.0) -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
 
         try:
@@ -387,9 +440,9 @@ class GrepMixin:
                     start = max(1, line_num - context)
                     end = min(len(lines), line_num + context)
                     for ctx_line in range(start - 1, end):
-                        prefix = ">>>" if ctx_line + 1 == line_num else "    "
+                        prefix = '>>>' if ctx_line + 1 == line_num else '    '
                         results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
-                    results.append("---")
+                    results.append('---')
                 if len(results) % 200 == 0 and time.time() - start_time > timeout:
                     was_timed_out = True
                     break
@@ -419,10 +472,11 @@ class GrepMixin:
         if was_timed_out:
             summary += f" [TIMED OUT after {int(timeout)}s]"
         elif hit_result_limit:
-            summary += " [TRUNCATED at 5000 results]"
+            summary += ' [TRUNCATED at 5000 results]'
 
         result = truncate_with_spillover(
-            output_text, char_limit,
+            output_text,
+            char_limit,
             instance_name=agent_name,
             tool_name='grep',
             base_dir=self.base_dir,
@@ -431,15 +485,24 @@ class GrepMixin:
         )
         if result is not output_text:
             output_text = result
-            summary += " [TRUNCATED]"
+            summary += ' [TRUNCATED]'
 
         return f"{summary}:\n\n" + output_text
 
-    def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, timeout: float = 5.0, agent_name: str = "unknown",
-             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
+    def grep(self,
+             pattern: str,
+             path: str = '.',
+             include: str = '*',
+             char_limit: int = 2000,
+             timeout: float = 5.0,
+             agent_name: str = 'unknown',
+             exclude: str = '',
+             ignore_vcs: bool = True,
+             context: int = 0,
+             smart_case: bool = True,
              spill_file_path: Optional[str] = None) -> str:
         """Search for text pattern in files.
-        
+
         Uses subprocess-based grep (ripgrep or system grep) as a fast path,
         falling back to pure Python if the subprocess approach fails/times out.
         """
@@ -463,19 +526,30 @@ class GrepMixin:
                     return f"ERROR: Invalid glob pattern in 'exclude': {e}"
 
             if resolved.is_file():
-                return self._grep_single_file(resolved, pattern, char_limit, include=include,
-                                             exclude=exclude, context=context, smart_case=smart_case,
-                                             agent_name=agent_name,
-                                             spill_file_path=spill_file_path, timeout=timeout)
-            
+                return self._grep_single_file(resolved,
+                                              pattern,
+                                              char_limit,
+                                              include=include,
+                                              exclude=exclude,
+                                              context=context,
+                                              smart_case=smart_case,
+                                              agent_name=agent_name,
+                                              spill_file_path=spill_file_path,
+                                              timeout=timeout)
+
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
-            results, count, was_timed_out, _sub_truncated, _original_output_size = self._try_subprocess_grep(
-                pattern=pattern, path=resolved, include=include,
-                char_limit=char_limit, timeout=timeout,  # Use configurable timeout
+            results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel = self._try_subprocess_grep(
+                pattern=pattern,
+                path=resolved,
+                include=include,
+                char_limit=char_limit,
+                timeout=timeout,  # Use configurable timeout
                 agent_name=agent_name,
-                exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case,
-                spill_file_path=spill_file_path
-            )
+                exclude=exclude,
+                ignore_vcs=ignore_vcs,
+                context=context,
+                smart_case=smart_case,
+                spill_file_path=spill_file_path)
             if was_timed_out:
                 return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
             if results is not None:
@@ -489,27 +563,39 @@ class GrepMixin:
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
 
-                    result = truncate_with_spillover(
-                        output_text, char_limit,
-                        instance_name=agent_name,
-                        tool_name='grep',
-                        base_dir=self.base_dir,
-                        operation_mode='head',
-                        spill_path=_resolve_spill_path(spill_file_path),
-                    )
-                    if result is not output_text:
-                        output_text = result
-                        summary += " [TRUNCATED]"
-                    elif _sub_truncated:
-                        summary += " [TRUNCATED]"
+                    if _sub_truncated:
+                        # Fast path already line-truncated the body to fit the byte budget and
+                        # wrote the full output to a spillover file (path captured in
+                        # _try_subprocess_grep). Skip truncate_with_spillover here — calling it
+                        # would be a no-op on already-bounded text and risks re-writing the
+                        # spillover file with truncated content. Surface the captured path,
+                        # matching the format read_file / the Python fallback produce.
+                        if _sub_spill_rel:
+                            summary += f" [TRUNCATED — full output saved to: {_sub_spill_rel}]"
+                        else:
+                            summary += ' [TRUNCATED]'
+                    else:
+                        result = truncate_with_spillover(
+                            output_text,
+                            char_limit,
+                            instance_name=agent_name,
+                            tool_name='grep',
+                            base_dir=self.base_dir,
+                            operation_mode='head',
+                            spill_path=_resolve_spill_path(spill_file_path),
+                        )
+                        if result is not output_text:
+                            output_text = result
+                            summary += ' [TRUNCATED]'
 
                     return f"{summary}:\n\n" + output_text
 
             # ── Slow path: pure Python fallback ──
             import os
-            
+
             _rg_avail, _grep_avail = _check_tool_availability()
-            logger.debug(f"grep: subprocess fast path unavailable (rg={_rg_avail}, grep={_grep_avail}), falling back to Python")
+            logger.debug(
+                f"grep: subprocess fast path unavailable (rg={_rg_avail}, grep={_grep_avail}), falling back to Python")
             results = []
 
             has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
@@ -546,6 +632,7 @@ class GrepMixin:
                         if ignore_vcs:
                             dirs[:] = [d for d in dirs if d not in skip_dirs]
                         yield root, dirs, files
+
                 file_iter_gen = (Path(os.path.join(root, f)) for root, dirs, files in _walk_with_skips() for f in files)
             else:
                 file_iter_gen = resolved.rglob(include)
@@ -556,7 +643,7 @@ class GrepMixin:
                     break
                 if not file_path.is_file():
                     continue
-                
+
                 # Skip files under ignored directories (for rglob path; os.walk already prunes dirs)
                 if ignore_vcs:
                     try:
@@ -566,7 +653,7 @@ class GrepMixin:
                     except ValueError:
                         # File path is not relative to resolved search root — skip it
                         continue
-                
+
                 # Apply default excludes (aligns with subprocess behavior)
                 if any(fnmatch.fnmatch(file_path.name, pat) for pat in _PY_DEFAULT_EXCLUDES):
                     continue
@@ -617,9 +704,9 @@ class GrepMixin:
                                 start = max(1, line_num - context)
                                 end = min(len(lines), line_num + context)
                                 for ctx_line in range(start - 1, end):
-                                    prefix = ">>>" if ctx_line + 1 == line_num else "    "
+                                    prefix = '>>>' if ctx_line + 1 == line_num else '    '
                                     results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
-                                results.append("---")
+                                results.append('---')
                             if len(results) % 200 == 0 and time.time() - start_time > timeout:
                                 was_timed_out = True
                                 break
@@ -655,12 +742,13 @@ class GrepMixin:
                     continue
 
             if not results and not was_timed_out:
-                logger.debug(f"grep: Python fallback also found no matches for '{pattern}' (subprocess already confirmed)")
+                logger.debug(
+                    f"grep: Python fallback also found no matches for '{pattern}' (subprocess already confirmed)")
 
             if not results:
                 if was_timed_out:
                     return f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
-                exclude_info = f", excluding {exclude}" if exclude else ""
+                exclude_info = f", excluding {exclude}" if exclude else ''
                 return f"No matches found for pattern '{pattern}' in {path}/**/{include}{exclude_info}"
 
             summary = f"Found {match_count} matches for '{pattern}'"
@@ -672,10 +760,11 @@ class GrepMixin:
                 summary += f" [TIMED OUT after {int(timeout)}s]"
                 output_text += f"\n\n[TOOL RESPONSE TIMED OUT — Searched {file_count} files before exceeding {int(timeout)} second limit. Narrow your pattern or scope to a specific directory.]"
             elif hit_result_limit:
-                summary += " [TRUNCATED at 5000 results]"
+                summary += ' [TRUNCATED at 5000 results]'
 
             result = truncate_with_spillover(
-                output_text, char_limit,
+                output_text,
+                char_limit,
                 instance_name=agent_name,
                 tool_name='grep',
                 base_dir=self.base_dir,
@@ -684,7 +773,7 @@ class GrepMixin:
             )
             if result is not output_text:
                 output_text = result
-                summary += " [TRUNCATED]"
+                summary += ' [TRUNCATED]'
 
             return f"{summary}:\n\n" + output_text
         except Exception as e:
