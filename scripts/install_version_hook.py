@@ -41,7 +41,7 @@ if [ -z "$PY" ]; then
     exit 0
 fi
 case "$("$PY" --version 2>&1)" in
-    *\"Python 3\"*|*"Python 3."*) : ;;   # Python 3 — OK
+    *"Python 3"*) : ;;   # Python 3 — OK (quoted portion is a literal substring match)
     *)
         echo "bump_version: no Python 3 available (found: $("$PY" --version 2>&1)) (non-fatal)" >&2
         exit 0
@@ -53,6 +53,7 @@ exit 0
 
 
 def main():
+    """Install the post-commit version-bump hook (idempotent)."""
     if not os.path.isfile(os.path.join(_REPO_ROOT, '.git', 'HEAD')):
         print('ERROR: not a git repository (no .git/HEAD)', file=sys.stderr)
         return 1

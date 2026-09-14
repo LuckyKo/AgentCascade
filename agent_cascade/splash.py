@@ -70,25 +70,27 @@ def _info_rows(mode, port, host, version):
     ]
 
 
-def _banner_width(rows):
-    """Width (in columns) of the full banner: max(art width, box total width).
+def _inner_width(rows):
+    """Inner width of the info box: fits both the wordmark and the widest info cell.
 
-    The box is ``+`` + inner + ``+`` where inner fits both the art and the widest
-    info cell — so a long URL/host can make the box wider than the wordmark.
+    A long URL/host can make the box wider than the art, so we take the max of the two.
     """
-    inner_w = max(_ART_WIDTH, max(len(k) + 2 + len(v) for k, v in rows))
-    return max(_ART_WIDTH, inner_w + 2)
+    return max(_ART_WIDTH, max(len(k) + 2 + len(v) for k, v in rows))
 
 
-def _build_banner(mode, port, host, version):
+def _banner_width(rows):
+    """Total rendered banner width (in columns): the box is ``+`` + inner + ``+``."""
+    return _inner_width(rows) + 2
+
+
+def _build_banner(rows):
     """Build the full multi-line banner (art + info box). Caller handles output."""
     lines = list(_ART)
     lines += ['']
     lines += list(_ART_SUFFIX)
     lines.append('')
 
-    rows = _info_rows(mode, port, host, version)
-    inner_w = max(_ART_WIDTH, max(len(k) + 2 + len(v) for k, v in rows))
+    inner_w = _inner_width(rows)
     top = '+' + '-' * inner_w + '+'
     bottom = '+' + '-' * inner_w + '+'
 
@@ -114,6 +116,7 @@ def print_startup_banner(mode, port, host='127.0.0.1', version=None):
     """
     try:
         ver = _resolve_version(version)
+        rows = _info_rows(mode, port, host, ver)
 
         # Non-TTY (piped/CI) or explicit opt-out → compact one-liner only.
         non_tty = False
@@ -128,16 +131,17 @@ def print_startup_banner(mode, port, host='127.0.0.1', version=None):
 
         # Narrow terminal → compact one-liner (no art/box to avoid wrapping).
         # Compare against the ACTUAL rendered width (the box can be wider than the
-        # wordmark when the URL/host is long), not just _ART_WIDTH.
+        # wordmark when the URL/host is long), not just _ART_WIDTH. The +2 margin
+        # leaves a little breathing room so the box never touches the terminal edge.
         try:
             cols = shutil.get_terminal_size((80, 24)).columns
         except Exception:  # noqa: BLE001
             cols = 80
-        if cols < _banner_width(_info_rows(mode, port, host, ver)) + 2:
+        if cols < _banner_width(rows) + 2:
             print(_compact_line(mode, port, host, ver))
             return
 
-        banner = _build_banner(mode, port, host, ver)
+        banner = _build_banner(rows)
         # Blank line before/after for clean separation from surrounding logs.
         print()
         print(banner)
