@@ -219,16 +219,17 @@ def _ts(*args):
     return datetime.datetime(*args).timestamp()
 
 
-class TestMarkerTimestampInheritance:
-    """Repeat compression must inherit the previous marker's start time from the marker
-    MESSAGE's own ts (full float precision), not from re-parsing its minute-granularity
-    header text. The old marker is inserted BEFORE the messages it summarizes (stacked
-    behind the last marker position), so its ts is out of order with surrounding messages —
-    consumers must use min() over the window, never positional first/last.
+class TestMarkerTimestampPositional:
+    """Repeat compression must use POSITIONAL timestamps from the compressed chunk.
 
-    Known limitation (documented in core.py): when a repeat compression discards the first
-    active message after the old marker (often stamped in the same batch as the marker),
-    the inherited start jumps to that message's ts instead of the true session start.
+    The marker header shows the span of the actual messages being summarized:
+    start = ts of the first message in target_messages, end = ts of the last message.
+    No inheritance from the previous marker's .ts (its creation time), which can be later
+    than the messages being compressed and cause inverted spans like 11:33 → 11:16.
+
+    The old marker is inserted BEFORE the messages it summarizes (stacked behind the last
+    marker position), so its creation-time ts is out of order with surrounding messages —
+    using it would invert the span. Positional extraction skips markers entirely.
     """
 
     def _build_pool_with_ts(self, marker_ts=None, msg_ts_list=None):
@@ -261,10 +262,10 @@ class TestMarkerTimestampInheritance:
 
         return MockAgentPool(history), marker
 
-    def test_inherits_marker_message_ts_not_header_text(self):
-        """first_ts must come from the old marker's message ts, not its parsed header."""
-        # Header text claims start 10:00; message ts says 10:37 (full precision).
-        # Active messages span 11:00–12:00 — far later than either.
+    def test_uses_first_active_message_ts_not_marker(self):
+        """first_ts must come from the first active message, NOT the old marker's ts."""
+        # Marker has ts 10:37 (creation time); active messages span 10:00–12:00.
+        # Positional extraction skips the marker and uses the first active message (10:00).
         marker_ts = _ts(2026, 9, 1, 10, 37)
         pool, marker = self._build_pool_with_ts(marker_ts=marker_ts)
 
@@ -278,14 +279,14 @@ class TestMarkerTimestampInheritance:
         assert result.success is True
         parsed_start, _ = _parse_marker_timestamps(result.marker_message)
         assert parsed_start is not None
-        # Minute-granularity round-trip: marker ts 10:37 → header "10:37" → parsed back.
-        assert abs(parsed_start - marker_ts) < 60, \
-            f"Inherited start {parsed_start} != old marker message ts {marker_ts}"
+        # Must be the first active message's ts (10:00), NOT the marker's creation ts (10:37).
+        expected = _ts(2026, 9, 1, 10, 0)
+        assert abs(parsed_start - expected) < 60, \
+            f"Start {parsed_start} should be first active msg ts {expected}, not marker ts"
 
-    def test_falls_back_to_header_when_marker_has_no_ts(self):
-        """Old marker without a ts: fall back to parsing its header text."""
-        # Header claims 10:00 → 10:30; no message ts on the marker.
-        # Active messages span 11:00–12:00 (later), so min() would pick 11:00 without inheritance.
+    def test_uses_first_active_message_when_marker_has_no_ts(self):
+        """Old marker without a ts: still uses the first active message positionally."""
+        # No ts on the marker; active messages span 10:00–12:00.
         pool, marker = self._build_pool_with_ts(marker_ts=None)
 
         with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
@@ -298,16 +299,16 @@ class TestMarkerTimestampInheritance:
         assert result.success is True
         parsed_start, _ = _parse_marker_timestamps(result.marker_message)
         assert parsed_start is not None
-        expected = _ts(2026, 9, 1, 10, 0)  # from the marker's header text
+        expected = _ts(2026, 9, 1, 10, 0)  # first active message
         assert abs(parsed_start - expected) < 60, \
-            f"Fallback start {parsed_start} != old marker header start {expected}"
+            f"Start {parsed_start} != first active message ts {expected}"
 
-    def test_marker_ts_wins_over_earlier_header_text(self):
-        """When both are present, the message ts wins (no min() with the parsed header)."""
-        # Header claims 09:00 (older); message ts says 10:37 (newer). Message ts must win.
+    def test_marker_ts_does_not_affect_span(self):
+        """Even when the marker has a ts, it does NOT influence the span (no inheritance)."""
+        # Marker ts 10:37; header claims 09:00. Neither should affect the new marker's span.
+        # Active messages span 10:00–12:00 → start must be 10:00 (first active message).
         marker_ts = _ts(2026, 9, 1, 10, 37)
         pool, marker = self._build_pool_with_ts(marker_ts=marker_ts)
-        # Rewrite the header to claim an earlier start (simulating a stale/incorrect header).
         marker.content = (f"{COMPRESSION_MARKER} (50% summarized) ---\n"
                           f"[2026-09-01 09:00 → 2026-09-01 09:30, 30m]\n"
                           f"<context_summary>old stuff</context_summary>")
@@ -322,9 +323,10 @@ class TestMarkerTimestampInheritance:
         assert result.success is True
         parsed_start, _ = _parse_marker_timestamps(result.marker_message)
         assert parsed_start is not None
-        # Must be the marker's message ts (10:37), NOT the header's 09:00.
-        assert abs(parsed_start - marker_ts) < 60, \
-            f"Start {parsed_start} should be marker ts {marker_ts}, not header text"
+        # Must be the first active message's ts (10:00), NOT marker ts (10:37) or header (09:00).
+        expected = _ts(2026, 9, 1, 10, 0)
+        assert abs(parsed_start - expected) < 60, \
+            f"Start {parsed_start} should be first active msg ts {expected}, not marker/header"
 
 
 # ──────────────────────────────────────────────
@@ -337,10 +339,9 @@ class TestLiveMarkerTsStamping:
     Compression markers are inserted via DIRECT pool mutation (core.py step 10 /
     rebuild_conversation), bypassing append_message — the only place normal messages get
     their Message.ts float. build_marker_message() therefore creates a marker with ts=None.
-    The fix stamps marker.ts = time.time() in the live compression path, so that on a repeat
-    compression L1 inheritance reads getattr(marker, 'ts', None) → a real float instead of
-    falling back to re-parsing the minute-granularity header text (which converges and loses
-    precision every hop).
+    The fix stamps marker.ts = time.time() in the live compression path, so that L2
+    consolidation (which consolidates OTHER markers) can read a real float instead of
+    falling back to re-parsing the minute-granularity header text.
 
     Key assertion: a live-created marker HAS a usable ts float after going through the
     compression path — no append_message involved.
@@ -380,37 +381,6 @@ class TestLiveMarkerTsStamping:
         import time as _time
         now = _time.time()
         assert abs(result.marker_message.ts - now) < 3600
-
-    def test_next_inheritance_uses_ts_not_header(self):
-        """A live-stamped marker, on the next compression hop, drives inheritance via .ts.
-
-        We pre-seed the pool with a marker that has BOTH a real ts (10:37) and a header
-        claiming an earlier start (09:00). If the live stamp is in effect, the repeat
-        compression inherits 10:37 from .ts — NOT the header's 09:00. This mirrors what a
-        marker produced by the live path would look like on its next hop.
-        """
-        marker_ts = _ts(2026, 9, 1, 10, 37)
-        pool, marker = self._build_pool(ts_list=None)
-        # Give the marker a real .ts (as the live path now stamps at creation time).
-        marker.ts = marker_ts
-        # Header claims an EARLIER start than the ts — proves .ts wins over header re-parse.
-        marker.content = (f"{COMPRESSION_MARKER} (50% summarized) ---\n"
-                          f"[2026-09-01 09:00 → 2026-09-01 09:30, 30m]\n"
-                          f"<context_summary>old stuff</context_summary>")
-
-        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
-            mock_invoke.return_value = ("Repeat summary", "")
-            result = compress_context(
-                agent_pool=pool, target_agent_name="TestAgent",
-                fraction=0.5, mode="auto", force=False,
-            )
-
-        assert result.success is True
-        parsed_start, _ = _parse_marker_timestamps(result.marker_message)
-        assert parsed_start is not None
-        # Inherited start must be the marker's .ts (10:37), not the header's 09:00.
-        assert abs(parsed_start - marker_ts) < 60, \
-            f"Inherited start {parsed_start} should use marker ts {marker_ts}, not header text"
 
     @staticmethod
     def _build_pool(ts_list=None):

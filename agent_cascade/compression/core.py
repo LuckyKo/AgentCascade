@@ -16,13 +16,13 @@ from agent_cascade.compression.helpers import (
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message, strip_base64_from_images
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-from agent_cascade.llm.schema import FUNCTION, Message
+from agent_cascade.llm.schema import FUNCTION, USER, Message
 from agent_cascade.settings import (
     CHARS_PER_TOKEN_ESTIMATE,
     COMPRESSION_DEFAULT_FRACTION,
     COMPRESSION_MAX_CONSOLIDATION_TOKENS,
 )
-from agent_cascade.prompts.dna import COMPRESSION_PROMPT
+from agent_cascade.prompts.dna import COMPRESSION_MARKER, COMPRESSION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -216,10 +216,9 @@ def _consolidate_markers(
             # immediately after them and its content is already covered by one of those
             # ranges). Folding it in here would pin l2_first_ts to the newest compression's
             # start time — i.e. every consolidation marker would report the same "first
-            # timestamp" as the latest L1, breaking the intended span. The cumulative
-            # behavior is provided by L1 (compress_context step 9), which inherits from the
-            # previous marker's .ts field on repeat compression, not from re-parsing header
-            # text.
+            # timestamp" as the latest L1, breaking the intended span. L1 markers use
+            # positional timestamps (first/last message of their compressed chunk), so each
+            # L1 header reflects its own chunk's time range independently.
             new_marker = build_consolidation_marker_message(
                 consolidated_summary,
                 len(summaries_to_consolidate),
@@ -621,50 +620,44 @@ def compress_context(
     # of the compressor output above and must NEVER leak into this <context_summary>
     # body (it would otherwise re-enter model context on future turns).
     # Extract the timestamp interval from the compressed window for the header.
-    # Non-fatal: any failure falls back to a neutral "N messages summarized" header.
+    # Positional: start = ts of the first message in target_messages, end = ts of the
+    # last message. This reflects the actual chunk being summarized (no inheritance from
+    # a previous marker's creation time, which could cause inverted spans). Non-fatal: any
+    # failure falls back to a neutral "N messages summarized" header.
+    def _msg_ts(_msg):
+        ts = _msg.get('ts') if isinstance(_msg, dict) else getattr(_msg, 'ts', None)
+        return float(ts) if ts is not None else None
+
+    def _is_marker(_msg):
+        role = get_message_role(_msg)
+        content = _msg.get('content', '') if isinstance(_msg, dict) else getattr(_msg, 'content', '')
+        return (role == USER and isinstance(content, str)
+                and content.startswith(COMPRESSION_MARKER))
+
     try:
-        _ts_list = []
-        for _msg in target_messages:
-            _ts = _msg.get('ts') if isinstance(_msg, dict) else getattr(_msg, 'ts', None)
-            if _ts is not None:
-                _ts_list.append(float(_ts))
+        # Start: first message's ts. If it happens to be a marker (whose creation-time ts
+        # is out of order with the chunk), fall back to the next non-marker message.
+        first_ts = _msg_ts(target_messages[0])
+        if first_ts is None or _is_marker(target_messages[0]):
+            for _m in target_messages:
+                if not _is_marker(_m):
+                    _t = _msg_ts(_m)
+                    if _t is not None:
+                        first_ts = _t
+                        break
+
+        # End: last message's ts. If it happens to be a marker, walk backwards.
+        last_ts = _msg_ts(target_messages[-1])
+        if last_ts is None or _is_marker(target_messages[-1]):
+            for _m in reversed(target_messages):
+                if not _is_marker(_m):
+                    _t = _msg_ts(_m)
+                    if _t is not None:
+                        last_ts = _t
+                        break
     except Exception as e:
         logger.debug(f"Timestamp extraction for marker header failed (non-fatal): {e}")
-        _ts_list = []
-    first_ts = min(_ts_list) if _ts_list else None
-    last_ts = max(_ts_list) if _ts_list else None
-
-    # On a repeat compression the new summary also encompasses the previously-compressed
-    # content, so the header range must start from the ORIGINAL first message — i.e. the old
-    # marker's start time — not just the newly-discarded messages.
-    #
-    # Source of truth: the old marker MESSAGE's own ts (the completion timestamp stamped when
-    # that marker was created), NOT its parsed header text. The header is minute-granularity,
-    # so re-parsing it and re-inheriting loses precision on every compression hop; the message
-    # ts carries full float precision and round-trips through JSONL (ts → 'timestamp' field in
-    # _format_message, backfilled on session load via _backfill_ts_from_dict).
-    #
-    # KNOWN LIMITATION: the marker's ts is its CREATION time (when the compression agent
-    # completed), which is usually AFTER all the messages it summarizes — and the marker is
-    # inserted BEFORE those messages (stacked behind the last marker position), so its ts is
-    # out of order with surrounding messages. The inherited start is therefore the previous
-    # marker's creation time, not the true earliest message of the session; each hop adds at
-    # most one compression-agent run-time of drift. Accepted: minute-granularity headers can't
-    # express sub-minute deltas anyway, and every later repeat re-anchors on the previous
-    # marker's own ts (full float precision), so no further precision is lost after hop one.
-    if latest_summary_idx != -1:
-        _old_marker = history[latest_summary_idx]
-        _old_ts = (_old_marker.get('ts') if isinstance(_old_marker, dict)
-                   else getattr(_old_marker, 'ts', None))
-        try:
-            if _old_ts is not None:
-                first_ts = float(_old_ts)
-            else:
-                old_start, _old_end = _parse_marker_timestamps(_old_marker)
-                if old_start is not None:
-                    first_ts = old_start if first_ts is None else min(first_ts, old_start)
-        except Exception as e:
-            logger.debug(f"Old marker start-time inheritance failed (non-fatal): {e}")
+        first_ts, last_ts = None, None
 
     marker_message = build_marker_message(
         generated_summary,

@@ -1182,22 +1182,16 @@ class TestCompressContextConsolidationTrigger:
                 assert result.success is True
                 mock_consolidate.assert_not_called()
 
-    def test_repeat_compression_carries_forward_original_start_time(self):
-        """Regression: on a 2nd compression the new marker inherits the previous marker's start.
+    def test_repeat_compression_uses_positional_chunk_timestamps(self):
+        """Regression: on a 2nd compression the new marker's span reflects the actual chunk.
 
-        Since the live-path fix, compress_context stamps each marker's Message.ts at creation
-        time (the marker is inserted via direct pool mutation, bypassing append_message). On a
-        repeat compression (latest_summary_idx != -1) the inherited start comes from the old
-        marker's .ts float (full precision), NOT from re-parsing its minute-granularity header.
+        The marker header shows the timestamp span of the compressed chunk itself — start is
+        the ts of the first message in target_messages, end is the ts of the last message.
+        No inheritance from the previous marker's .ts (its creation time), which can be later
+        than the messages being compressed and cause inverted spans like 11:33 → 11:16.
 
-        KNOWN LIMITATION (documented in core.py): the marker's ts is its CREATION time, which
-        is after the messages it summarizes and out of order with surrounding messages. So the
-        2nd marker inherits the 1st marker's creation-time ts — not the true earliest message
-        of the session. Each hop adds at most one compression-agent run-time of drift; full
-        float precision is preserved thereafter (no more minute-granularity convergence).
-
-        This test asserts the inheritance actually used marker1's .ts (not its header text and
-        not the newer batch), i.e. start2 ≈ marker1.ts within minute-resolution rounding.
+        This test asserts the 2nd marker's start/end match the first/last message of the new
+        batch (~base+100h), NOT marker1's creation-time ts or its header text (base+10h).
         """
         from agent_cascade.compression.core import compress_context, _consolidate_markers
         from tests.conftest import MockAgentPool
@@ -1260,22 +1254,22 @@ class TestCompressContextConsolidationTrigger:
         start2, end2 = _parse_marker_timestamps(marker2)
         assert start2 is not None and end2 is not None, "2nd marker must have a parseable range"
 
-        # Live-path fix: the 1st marker carries a real .ts (its creation time). The 2nd
-        # compression must inherit THAT value — not re-parse marker1's header text (base+10h)
-        # and not use the newer batch (~base+100h). This is the regression guard for the
-        # field-lifecycle gap: without the fix, marker1.ts would be None and inheritance
-        # would fall back to the minute-granularity header re-parse (converging every hop).
-        assert marker1.ts is not None, "live-path compression must stamp marker1.ts at creation"
-        assert abs(start2 - marker1.ts) < 60, \
-            f"2nd marker start {start2} should inherit marker1's .ts {marker1.ts}, not header/batch"
+        # Positional span: the 2nd marker's start/end must reflect the actual compressed chunk,
+        # NOT inherit from marker1's creation-time .ts or its header text (base+10h).
+        # After comp1, active set = [Msg 4..7 (tail), New msg 0..7] = 12 messages.
+        # fraction=0.5 → discard 6 → target_messages = Msg 4..7 + New msg 0..1.
+        # start = ts(Msg 4) ≈ base+14h, end = ts(New msg 1) ≈ base+101h.
+        assert abs(start2 - (base + 14 * hour)) < 60, \
+            f"2nd marker start {start2} should be first discarded msg (~{base + 14*hour}), " \
+            f"not inherited from marker1"
+        assert abs(end2 - (base + 101 * hour)) < 60, \
+            f"2nd marker end {end2} should be last discarded msg (~{base + 101*hour})"
 
-        # Sanity: the inherited start is NOT marker1's header text (base+10h). This proves the
-        # live-path fix took effect — inheritance used the .ts float, not the minute-granularity
-        # header re-parse that would converge to base+10h. (marker1.ts is its creation time,
-        # which differs from the header start by design; see known limitation in core.py.)
+        # Sanity: the span is NOT marker1's header text (base+10h) — proves inheritance was
+        # removed and the chunk's own timestamps are used.
         assert abs(start2 - start1) > 60, \
-            f"2nd marker start {start2} matches marker1's header {start1} — inheritance used " \
-            f"header re-parse, not marker1.ts (live-path fix not in effect)"
+            f"2nd marker start {start2} matches marker1's header {start1} — " \
+            f"positional span not in effect"
 
 
 # ────────────────────────────────────────────────────────────────────────────
