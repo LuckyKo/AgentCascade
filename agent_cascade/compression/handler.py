@@ -578,7 +578,9 @@ class CompressionHandler:
                 base_dir=base_dir,
                 operation_mode='head',
                 total_lines_hint=_hints_total,
-                shown_lines_hint=_hints_shown,
+                # Don't pass shown_lines_hint: the tool's count reflects what IT showed,
+                # but we're about to cut it further. Let truncate_with_spillover compute
+                # the actual shown lines from the truncated text.
             )
             if len(raw_tool_result) < _before_len:
                 was_truncated = True
