@@ -348,12 +348,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
         limit = params.get('limit')
 
         # Wild-read truncation uses two distinct values:
-        #   - char_threshold (trip threshold, when to warn): tool_result_max_chars (~25000).
-        #     This is the true high-water mark; it also acts as the outer safety net via
-        #     _assemble_tool_result in compression/handler.py.
-        #   - wild_truncation (cut point, where to cut): wild_read_truncation_chars (~2000).
-        # The read proceeds normally up to the line limit and is only truncated post-hoc if
-        # content exceeds char_threshold, at which point it is cut down to wild_truncation.
+        #   - char_threshold (trip threshold): tool_result_max_chars (~25k) — the high-water mark.
+        #   - wild_truncation (cut point): wild_read_truncation_chars (~2k).
         wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
         char_threshold = DEFAULT_TOOL_RESULT_MAX_CHARS
         if self.agent_pool is not None:

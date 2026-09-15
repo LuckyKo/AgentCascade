@@ -176,11 +176,8 @@ class ConfigPersistMixin:
                         pass
 
                 # Boot-time safety: the live-update clamping handlers (config_handlers.py) only run on
-                # runtime changes, NOT here. A stale pool_settings.json can persist an inverted pair
-                # (wild_read_truncation_chars > tool_result_max_chars), which would make the inner
-                # wild-read cut higher than the trip threshold and let the outer safety net re-trigger.
-                # Clamp target <= threshold only when BOTH keys are present; absent keys keep their
-                # code defaults (do not invent values here).
+                # runtime changes, so a stale persisted pair can invert target > threshold. Clamp when
+                # both keys are present; absent keys keep their code defaults.
                 _tr = self.llm_cfg.get('tool_result_max_chars')
                 _wc = self.llm_cfg.get('wild_read_truncation_chars')
                 if _tr is not None and _wc is not None and _wc > _tr:
