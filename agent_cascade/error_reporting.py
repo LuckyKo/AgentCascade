@@ -240,6 +240,35 @@ def format_endpoint_error(e: Any) -> str:
         return f'{type(e).__name__}: (formatting error: {_clean_text(str(inner_err), 80)})'
 
 
+def format_crash(e: Any) -> str:
+    """Compact single-line root-cause summary for a *generic* Python exception.
+
+    Sibling of :func:`format_endpoint_error` for non-endpoint crashes (a tool function
+    raising, dispatcher/plumbing errors, top-level run-thread crashes). It intentionally does
+    NOT walk the chain hunting for HTTP/status-carrying frames — that is endpoint-specific and
+    would produce a misleading ``RuntimeError: <msg>``-flavored line for ordinary exceptions.
+    Instead it summarizes the ROOT cause (innermost exception in the causal chain) as
+    ``{Type}: {message}``, or just ``{Type}`` when the message is empty.
+
+    Preserves the leaf-module constraint of this file: stdlib-only, no SDK imports, never raises.
+    """
+    if e is None:
+        return 'no error information'
+    if not isinstance(e, BaseException):
+        # Non-Exception object passed by mistake — describe it safely.
+        return f'{type(e).__name__}: {_clean_text(str(e), MAX_MSG_CHARS)}'
+
+    try:
+        root = _root_cause(e)
+        name = type(root).__name__
+        msg = _clean_text(str(root), MAX_MSG_CHARS)
+        if msg:
+            return f'{name}: {msg}'
+        return name
+    except Exception as inner_err:  # pragma: no cover - defensive; reporting must never raise
+        return f'{type(e).__name__}: (formatting error: {_clean_text(str(inner_err), 80)})'
+
+
 def classify_endpoint_failure(e: Any) -> str:
     """Human-facing short category label for UI messages.
 

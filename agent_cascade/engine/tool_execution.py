@@ -8,33 +8,25 @@ and the imports needed by these methods were added. The mixin is composed into
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 from typing import List
 
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS
+from agent_cascade.error_reporting import TB_DEDUP, format_crash
+from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.log import logger
-from agent_cascade.exceptions import AgentTerminatedError
+from agent_cascade.operation_manager import clear_current_instance_name, set_current_instance_name
+from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS
 from agent_cascade.utils.pool_validation import validate_message_pool
-from agent_cascade.operation_manager import (
-    set_current_instance_name,
-    clear_current_instance_name,
-)
 
 
 class ToolExecMixin:
     """Mixin providing tool-execution and image-handling methods."""
 
-    def _execute_detected_tools(
-        self,
-        instance: AgentInstance,
-        inst_name: str,
-        turn_output: List[Message],
-        messages: List[Message],
-        llm_messages: List[Message],
-        response: List[Message]
-    ) -> bool:
+    def _execute_detected_tools(self, instance: AgentInstance, inst_name: str, turn_output: List[Message],
+                                messages: List[Message], llm_messages: List[Message], response: List[Message]) -> bool:
         """Execute tools detected in turn output.
 
         Scans turn_output for tool calls, executes them with telemetry tracking,
@@ -69,10 +61,10 @@ class ToolExecMixin:
             # Use the centralized resolver instead of duplicating inline logic
             agent_name = getattr(_primary_template, 'name', '') or ''
             agent_type = getattr(_primary_template, 'agent_type', '') or ''
-            instance_override = (getattr(instance, '_generate_cfg_override', None)
-                                if hasattr(instance, '_generate_cfg_override') else None)
-            template_cfg = (getattr(_primary_template.llm, 'generate_cfg', None)
-                            if getattr(_primary_template, 'llm', None) is not None else {})
+            instance_override = (getattr(instance, '_generate_cfg_override', None) if hasattr(
+                instance, '_generate_cfg_override') else None)
+            template_cfg = (getattr(_primary_template.llm, 'generate_cfg', None) if getattr(
+                _primary_template, 'llm', None) is not None else {})
 
             _primary_disabled_tools = resolve_disabled_tools_for_agent(
                 instance_override=instance_override,
@@ -143,7 +135,8 @@ class ToolExecMixin:
                     try:
                         tel.record_tool_call_start(inst_name, tool_name)
                         tel.record_tool_call_end(
-                            inst_name, tool_name,
+                            inst_name,
+                            tool_name,
                             success=False,
                             result_chars=len(tool_result),
                             truncated=False,
@@ -202,23 +195,33 @@ class ToolExecMixin:
 
                 try:
                     # Phase 4.3: Delegate to ToolDispatcher
-                    tool_result = self.tool_dispatcher.execute_tool(
-                        instance, tool_name, tool_args, llm_messages, function_id=function_id
-                    )
+                    tool_result = self.tool_dispatcher.execute_tool(instance,
+                                                                    tool_name,
+                                                                    tool_args,
+                                                                    llm_messages,
+                                                                    function_id=function_id)
                 except AgentTerminatedError:
                     # Clean abort from stop-check during tool execution — re-raise for caller
                     raise
                 except Exception as e:
-                    logger.error(f"Tool {tool_name} failed for {inst_name}: {e}")
-                    tool_result = f"Error: {e}"
+                    # R3: present dispatcher/plumbing crashes with the SAME shape as a tool crash
+                    # (agent.py:_call_tool) — one compact root-cause line at ERROR, full traceback
+                    # demoted to DEBUG and deduped per (root type+msg). The LLM-facing result stays
+                    # compact (no multi-frame stack) for consistency with the tool-crash path.
+                    summary = format_crash(e)
+                    logger.error(f"Tool {tool_name} failed for {inst_name}: {summary}")
+                    if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+                        logger.debug(f"Tool {tool_name} failed for {inst_name} — full traceback:\n"
+                                     f"{traceback.format_exc()}")
+                    tool_result = f"Error: {summary}"
                     _tool_success = False
                     _tool_error = str(e)
                 # Cache full output (if exceeds threshold)
                 if isinstance(tool_result, str):
-                    self._cache_tool_output(
-                        inst_name, tool_name, tool_result,
-                        threshold=self.pool.settings.cache_threshold_chars
-                    )
+                    self._cache_tool_output(inst_name,
+                                            tool_name,
+                                            tool_result,
+                                            threshold=self.pool.settings.cache_threshold_chars)
 
                 # ── Post-execution success detection
                 # ────────────────────────────────
@@ -237,8 +240,8 @@ class ToolExecMixin:
                             first_line = stripped.lower()
                             break
                     error_indicators = [
-                        'error:', 'rejected by user:', 'rejected:', 'failed:', 'invalid:',
-                        'permission denied:', 'an error occurred', 'does not exist'
+                        'error:', 'rejected by user:', 'rejected:', 'failed:', 'invalid:', 'permission denied:',
+                        'an error occurred', 'does not exist'
                     ]
                     if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
                         _tool_success = False
@@ -249,7 +252,8 @@ class ToolExecMixin:
                 if (tel := self._telemetry()) is not None:
                     try:
                         tel.record_tool_call_end(
-                            inst_name, tool_name,
+                            inst_name,
+                            tool_name,
                             success=_tool_success,
                             result_chars=len(tool_result) if isinstance(tool_result, str) else 0,
                             error=_tool_error,
@@ -268,12 +272,8 @@ class ToolExecMixin:
                         # char_threshold: when to trigger (Wild Read Threshold)
                         # char_limit: how much to keep after triggering (Wild Read Truncation)
                         _llm_cfg = self.pool.llm_cfg or {}
-                        char_threshold = _llm_cfg.get(
-                            'tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS
-                        )
-                        char_limit = _llm_cfg.get(
-                            'wild_read_truncation_chars', DEFAULT_WILD_READ_TRUNCATION_CHARS
-                        )
+                        char_threshold = _llm_cfg.get('tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS)
+                        char_limit = _llm_cfg.get('wild_read_truncation_chars', DEFAULT_WILD_READ_TRUNCATION_CHARS)
 
                         # Get base_dir from operation_manager for spillover path resolution
                         om = getattr(self.pool, 'operation_manager', None)
@@ -301,17 +301,11 @@ class ToolExecMixin:
                         # Log the failure (was previously silent), then fall back
                         # to a thin drain chain that still ensures warnings and
                         # notifications are delivered.
-                        logger.error(
-                            f"assemble_tool_result failed for '{inst_name}' (tool={tool_name}): {e}"
-                        )
+                        logger.error(f"assemble_tool_result failed for '{inst_name}' (tool={tool_name}): {e}")
                         try:
-                            tool_result = self.compression_handler._legacy_drain_tool_result(
-                                instance, tool_result
-                            )
+                            tool_result = self.compression_handler._legacy_drain_tool_result(instance, tool_result)
                         except Exception as drain_err:
-                            logger.error(
-                                f"Legacy drain also failed for '{inst_name}' (tool={tool_name}): {drain_err}"
-                            )
+                            logger.error(f"Legacy drain also failed for '{inst_name}' (tool={tool_name}): {drain_err}")
                             # Ensure we have something non-None to return
                             if not isinstance(tool_result, str):
                                 tool_result = str(tool_result) if tool_result is not None else ''
@@ -329,7 +323,8 @@ class ToolExecMixin:
                 # compression
                 conv = self.pool.get_conversation(inst_name)
                 if conv and not validate_message_pool(conv, inst_name):
-                    logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
+                    logger.error(
+                        f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
 
                 # Build function result message — include function_id and
                 # tool_success per OpenAI spec
@@ -374,10 +369,10 @@ class ToolExecMixin:
                 # logic
                 agent_name = getattr(_orphan_template, 'name', '') or ''
                 agent_type = getattr(_orphan_template, 'agent_type', '') or ''
-                instance_override = (getattr(instance, '_generate_cfg_override', None)
-                                    if hasattr(instance, '_generate_cfg_override') else None)
-                template_cfg = (getattr(_orphan_template.llm, 'generate_cfg', None)
-                                if getattr(_orphan_template, 'llm', None) is not None else {})
+                instance_override = (getattr(instance, '_generate_cfg_override', None) if hasattr(
+                    instance, '_generate_cfg_override') else None)
+                template_cfg = (getattr(_orphan_template.llm, 'generate_cfg', None) if getattr(
+                    _orphan_template, 'llm', None) is not None else {})
 
                 _orphan_disabled_tools = resolve_disabled_tools_for_agent(
                     instance_override=instance_override,
@@ -407,7 +402,8 @@ class ToolExecMixin:
                     # "skipped" message.
                     deny_reason = None
                     # Template guard for consistency with primary loop
-                    if _orphan_template and (tool_name in _orphan_disabled_tools or tool_name not in _orphan_function_map):
+                    if _orphan_template and (tool_name in _orphan_disabled_tools or
+                                             tool_name not in _orphan_function_map):
                         # Determine deny reason with same logic as legacy
                         # implementation
                         if tool_name in _orphan_disabled_tools and tool_name not in _orphan_function_map:
@@ -439,7 +435,8 @@ class ToolExecMixin:
                         try:
                             tel.record_tool_call_start(inst_name, tool_name)
                             tel.record_tool_call_end(
-                                inst_name, tool_name,
+                                inst_name,
+                                tool_name,
                                 success=False,
                                 result_chars=len(fn_content),
                                 truncated=False,
@@ -468,13 +465,13 @@ class ToolExecMixin:
                     tools_processed += 1
 
                 if tools_processed > 0:
-                    logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+                    logger.warning(
+                        f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
 
         if used_any_tool:
             self._proactive_compression_check(instance, messages, llm_messages, response, check_label='post-tool')
 
         return used_any_tool
-
 
     @staticmethod
     def _has_images(messages):
@@ -486,7 +483,6 @@ class ToolExecMixin:
                 if img_val:
                     return True
         return False
-
 
     def _ensure_image_captions(self, messages, agent_type=None, instance_name=None):
         """Generate captions for uncaptioned images using any vision-capable endpoint.
@@ -502,8 +498,5 @@ class ToolExecMixin:
         """
         router = getattr(self.pool, 'api_router', None)
         if router and hasattr(router, 'caption_images'):
-            return router.caption_images(
-                messages, agent_type=agent_type, instance_name=instance_name
-            )
+            return router.caption_images(messages, agent_type=agent_type, instance_name=instance_name)
         return messages
-

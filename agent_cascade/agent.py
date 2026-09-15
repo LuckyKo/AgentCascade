@@ -19,6 +19,7 @@ import traceback
 from abc import ABC, abstractmethod
 from typing import Dict, Iterator, List, Optional, Tuple, Union
 
+from agent_cascade.error_reporting import TB_DEDUP, format_crash
 from agent_cascade.llm import get_chat_model
 from agent_cascade.llm.base import BaseChatModel
 from agent_cascade.llm.schema import CONTENT, DEFAULT_SYSTEM_MESSAGE, ROLE, SYSTEM, ContentItem, Message
@@ -272,14 +273,18 @@ class Agent(ABC):
             logger.warning(f'Tool `{tool_name}` reported a service error:\n{error_message}')
             return error_message
         except Exception as ex:
-            exception_type = type(ex).__name__
-            exception_message = str(ex)
-            traceback_info = ''.join(traceback.format_tb(ex.__traceback__))
-            error_message = f'An error occurred when calling tool `{tool_name}`:\n' \
-                            f'{exception_type}: {exception_message}\n' \
-                            f'Traceback:\n{traceback_info}'
-            logger.warning(error_message)
-            return error_message
+            # R1/R2: compact root-cause line at WARNING; full traceback demoted to DEBUG and
+            # deduped per (root type+msg) so a repeated crash does not re-dump the stack on every
+            # call. The LLM-facing tool result carries ONLY the compact one-liner — never the full
+            # multi-frame stack — to keep it out of the model's context window. This is the single
+            # canonical logging point for the crash detail (R5); the returned string is what gets
+            # re-logged via _append_and_log → log_message and cached, so keeping it compact removes
+            # the R5 double/triple full-stack redundancy.
+            summary = format_crash(ex)
+            logger.warning(f'Tool `{tool_name}` crashed: {summary}')
+            if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(ex)):
+                logger.debug(f'Tool `{tool_name}` crashed — full traceback:\n{traceback.format_exc()}')
+            return f'An error occurred when calling tool `{tool_name}`: {summary}'
 
         if isinstance(tool_result, str):
             return tool_result

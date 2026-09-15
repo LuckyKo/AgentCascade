@@ -583,3 +583,317 @@ class TestMakeRetryingMessage:
         assert m.content.startswith('[RETRYING]')
         assert 'server error (HTTP 502)' in m.content
         assert 'retrying (1/3) in 2.5s...' in m.content
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7. Non-API Python module crashes — compact line + deduped DEBUG traceback
+#    (plans/api_failure_feedback_GAP_REPORT.md R1-R6)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _fresh_dedup():
+    """Reset the shared TB_DEDUP singleton so "exactly one DEBUG" assertions are deterministic."""
+    from agent_cascade.error_reporting import TB_DEDUP
+    TB_DEDUP.__init__()
+
+
+class TestFormatCrash:
+    """format_crash — generic (non-endpoint) root-cause line, stdlib-only leaf constraint."""
+
+    def test_simple_exception_type_and_message(self):
+        from agent_cascade.error_reporting import format_crash
+        assert format_crash(ValueError('boom')) == 'ValueError: boom'
+
+    def test_empty_message_returns_type_only(self):
+        from agent_cascade.error_reporting import format_crash
+        assert format_crash(KeyError()) == 'KeyError'
+
+    def test_none_input_safe_fallback(self):
+        from agent_cascade.error_reporting import format_crash
+        assert format_crash(None) == 'no error information'
+
+    def test_non_exception_described_safely(self):
+        from agent_cascade.error_reporting import format_crash
+        out = format_crash('not an exception')
+        assert 'str: not an exception' in out
+
+    def test_root_cause_walks_chain_to_innermost(self):
+        """A chained (raise ... from) crash summarizes the INNERMOST root cause, not the wrapper."""
+        from agent_cascade.error_reporting import format_crash
+        try:
+            try:
+                raise ZeroDivisionError('division by zero')
+            except ZeroDivisionError as inner:
+                raise RuntimeError('outer wrapper') from inner
+        except RuntimeError as e:
+            # Root cause is the ZeroDivisionError, not the outer RuntimeError.
+            assert format_crash(e) == 'ZeroDivisionError: division by zero'
+
+    def test_message_truncated_to_max(self):
+        from agent_cascade.error_reporting import MAX_MSG_CHARS, format_crash
+        out = format_crash(ValueError('x' * 500))
+        # Bounded to MAX_MSG_CHARS + the ellipsis marker.
+        assert len(out) <= len('ValueError: ') + MAX_MSG_CHARS + 1
+        assert out.endswith('…')
+
+    def test_never_raises_on_hostile_str(self):
+        """A type whose __str__ raises must not break reporting (defensive fallback)."""
+        from agent_cascade.error_reporting import format_crash
+
+        class Hostile(Exception):
+
+            def __str__(self):
+                raise RuntimeError('no str')
+
+        out = format_crash(Hostile())
+        assert isinstance(out, str) and len(out) > 0
+
+
+def _make_agent_with_failing_tool(exc):
+    """Build a minimal concrete Agent whose single tool always raises ``exc``.
+
+    Uses BasicAgent (a concrete subclass of the abstract Agent) so instantiation succeeds, and
+    passes llm=None so __init__ stays cheap. The tool subclasses BaseTool (required by _init_tool);
+    only function_map matters to _call_tool, so the test is focused on the crash-handler logic.
+    """
+    from agent_cascade.agent import BasicAgent
+    from agent_cascade.tools.base import BaseTool
+
+    class _CrashTool(BaseTool):
+        name = 'crashy'
+
+        def call(self, params='{}', **kwargs):
+            raise exc
+
+    return BasicAgent(llm=None, function_list=[_CrashTool()])
+
+
+class TestToolCrashFeedback:
+    """R1/R2/R5 — Agent._call_tool crash handler (agent.py)."""
+
+    def test_returns_compact_result_no_full_stack(self, caplog):
+        """The LLM-facing tool result is a compact one-liner — NEVER the multi-frame stack."""
+        import logging
+
+        _fresh_dedup()
+        agent = _make_agent_with_failing_tool(ValueError('boom'))
+        with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'):
+            result = agent._call_tool('crashy', '{}')
+
+        # R2: compact — no traceback frames, no 'Traceback:' marker, single line.
+        assert isinstance(result, str)
+        assert 'ValueError: boom' in result
+        assert 'Traceback' not in result
+        assert 'File "' not in result
+        assert '\n' not in result
+
+    def test_warning_compact_and_debug_has_full_tb_once(self, caplog):
+        """WARNING is a compact line; the full traceback appears at DEBUG exactly once (deduped)."""
+        import logging
+
+        _fresh_dedup()
+        agent = _make_agent_with_failing_tool(ValueError('boom'))
+        with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'):
+            # Two identical crashes → the full traceback must be logged only once (dedup window).
+            agent._call_tool('crashy', '{}')
+            agent._call_tool('crashy', '{}')
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any('ValueError: boom' in w for w in warnings)
+        # No WARNING line may embed a full stack.
+        for w in warnings:
+            assert 'Traceback' not in w
+
+        debug_tbs = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG and 'full traceback' in r.getMessage()
+        ]
+        assert len(debug_tbs) == 1, f"expected exactly 1 deduped DEBUG traceback, got {len(debug_tbs)}"
+        # The DEBUG block carries a real stack (multi-frame).
+        assert 'Traceback' in debug_tbs[0] and '\n' in debug_tbs[0]
+
+
+class TestDispatcherCrashFeedback:
+    """R3 — tool_execution.py dispatcher crash handler uses the same shape as agent.py."""
+
+    def test_dispatcher_crash_compact_and_deduped(self, caplog):
+        import logging
+        from types import SimpleNamespace
+
+        import agent_cascade.engine.tool_execution as te
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.llm.schema import Message
+
+        _fresh_dedup()
+
+        engine = object.__new__(te.ToolExecMixin)  # skip __init__ (heavy handlers)
+        instance = AgentInstance(
+            instance_name='test-inst',
+            agent_class='coder',
+            conversation=[],
+            created_at=0.0,
+            last_activity=0.0,
+            latest_marker_index=0,
+        )
+
+        pool = SimpleNamespace()
+        pool.get_template = lambda name: None  # no template → skip disabled-tool auto-deny path
+        pool.get_instance = lambda name: instance  # is_terminated=False → no AgentTerminatedError
+        pool.is_paused = lambda: False
+        pool.settings = SimpleNamespace(cache_threshold_chars=10**9)  # _cache_tool_output threshold
+        engine.pool = pool
+        engine._telemetry = lambda: None
+        engine.compression_handler = None  # skip _assemble_tool_result
+        engine._is_terminal_stop = lambda name: False
+        engine._is_suspended_by_compression = lambda name: False
+        engine._is_stopped = lambda name: False
+        engine._proactive_compression_check = lambda *a, **k: None
+        engine._cache_tool_output = lambda *a, **k: None  # skip rolling-cache (defined on ExecutionEngine)
+
+        # A tool call message the mixin's _detect_tool recognizes (reads msg.function_call).
+        from agent_cascade.llm.schema import FunctionCall
+        out = Message(role='assistant',
+                      content='',
+                      extra={'function_id': '1'},
+                      function_call=FunctionCall(name='crashy', arguments='{}'))
+
+        def failing_execute(*args, **kwargs):
+            raise ValueError('dispatcher boom')
+
+        engine.tool_dispatcher = SimpleNamespace(execute_tool=failing_execute)
+        # _detect_tool is defined on the Agent base class; bind it onto the mixin instance.
+        from agent_cascade.agent import Agent
+        engine._detect_tool = Agent._detect_tool.__get__(engine, type(engine))
+        # Stub _append_and_log (defined on ExecutionEngine) to just append so fn_msg is captured.
+        appended = []
+        engine._append_and_log = lambda inst, msg, **k: appended.append(msg)
+
+        with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'):
+            engine._execute_detected_tools(instance, 'test-inst', [out], [], [], [])
+
+        # R3: the FUNCTION result is a compact one-liner — same shape as agent.py (no full stack).
+        assert appended, 'expected a FUNCTION message to be appended'
+        fn_content = appended[0].content
+        assert isinstance(fn_content, str)
+        assert 'ValueError: dispatcher boom' in fn_content
+        assert 'Traceback' not in fn_content
+        assert 'File "' not in fn_content
+
+        # ERROR line is compact; full traceback at DEBUG exactly once (deduped).
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert any('ValueError: dispatcher boom' in e for e in errors)
+        debug_tbs = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG and 'full traceback' in r.getMessage()
+        ]
+        assert len(debug_tbs) == 1, f"expected exactly 1 deduped DEBUG traceback, got {len(debug_tbs)}"
+
+
+class TestTopLevelCrashFeedback:
+    """R4 — run_agent_unified.py top-level handler logs a compact line + deduped DEBUG traceback."""
+
+    def test_top_level_handler_logs_traceback(self, caplog):
+        import logging
+        import threading
+        from types import SimpleNamespace
+
+        import agent_cascade.run_agent_unified as rau
+
+        _fresh_dedup()
+
+        # run_agent_thread_unified does a LOCAL `from .api_integration import ...`, so patching the
+        # rau module attributes is shadowed. Patch the real api_integration module attrs instead.
+        from agent_cascade import api_integration as ai
+        _orig = (ai.run_agent_in_pool_with_recovery, ai.build_stream_update_from_pool)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError('engine crash')
+
+        ai.run_agent_in_pool_with_recovery = boom  # raises inside the try → outer except handler
+        ai.build_stream_update_from_pool = lambda *a, **k: None  # broadcast path is a no-op here
+        pool = SimpleNamespace(
+            stopped=False,
+            _run_generation=0,
+            _instance_threads_lock=threading.Lock(),
+            _instance_threads={},
+            _halted_instances=set(),
+            is_instance_terminated=lambda name: False,
+            get_instance=lambda name: None,
+        )
+
+        try:
+            with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'):
+                # pool._execution is absent → hasattr guard skips it; then boom() raises inside the try.
+                rau.run_agent_thread_unified(pool, 'test-inst', None, {}, None, None)
+        finally:
+            ai.run_agent_in_pool_with_recovery, ai.build_stream_update_from_pool = _orig
+
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert any('engine crash' in e for e in errors), f"expected a compact ERROR line, got: {errors}"
+        # R4: the full traceback is now present at DEBUG (was previously absent entirely).
+        debug_tbs = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG and 'full traceback' in r.getMessage()
+        ]
+        assert len(debug_tbs) == 1, f"expected exactly 1 deduped DEBUG traceback, got {len(debug_tbs)}"
+        assert 'Traceback' in debug_tbs[0]
+
+    def test_top_level_error_message_is_compact(self):
+        """The user-facing [SYSTEM ERROR] message carries the compact root cause, not a stack."""
+        import threading
+        from types import SimpleNamespace
+
+        import agent_cascade.run_agent_unified as rau
+
+        _fresh_dedup()
+
+        captured = {}
+
+        from agent_cascade import api_integration as ai
+        _orig = (ai.run_agent_in_pool_with_recovery, ai.build_stream_update_from_pool)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError('engine crash')
+
+        # Capture the error_msg built in the handler via the broadcast path:
+        # build_stream_update_from_pool receives [error_msg].
+        def capture(pool, instance_name, responses, **k):
+            captured['responses'] = responses
+            return None  # returning None → no stream_update sent (send_queue is None anyway)
+
+        ai.run_agent_in_pool_with_recovery = boom  # raises inside the try → outer except handler
+        ai.build_stream_update_from_pool = capture
+        pool = SimpleNamespace(
+            stopped=False,
+            _run_generation=0,
+            _instance_threads_lock=threading.Lock(),
+            _instance_threads={},
+            _halted_instances=set(),
+            is_instance_terminated=lambda name: False,
+            get_instance=lambda name: None,
+        )
+
+        try:
+            with caplog_dummy():  # noqa - silence logs; we only inspect captured content
+                rau.run_agent_thread_unified(pool, 'test-inst', None, {}, None, None)
+        finally:
+            ai.run_agent_in_pool_with_recovery, ai.build_stream_update_from_pool = _orig
+
+        responses = captured.get('responses') or []
+        assert responses, 'expected the handler to build an error message'
+        content = str(responses[0].content)
+        assert '[SYSTEM ERROR:' in content
+        assert 'engine crash' in content
+        # Compact: no full stack embedded in the user-facing message.
+        assert 'Traceback' not in content and 'File "' not in content
+
+
+def caplog_dummy():
+    """Minimal no-op context manager to keep logs quiet where only captured data is asserted."""
+
+    class _Ctx:
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    return _Ctx()

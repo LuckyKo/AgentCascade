@@ -18,8 +18,10 @@ integration is complete.
 
 import asyncio
 import time
+import traceback
 from typing import Any, Dict, Optional
 
+from agent_cascade.error_reporting import TB_DEDUP, format_crash
 from agent_cascade.llm.schema import ASSISTANT, FUNCTION, ROLE, USER, Message
 from agent_cascade.log import logger
 
@@ -264,11 +266,19 @@ def run_agent_thread_unified(
         # Never swallow user interrupts or explicit exits
         raise
     except Exception as e:
-        # Catch unhandled exceptions — log and yield error state
-        logger.error(f"run_agent_thread_unified failed for {instance_name}: {e}")
+        # Catch unhandled exceptions — log and yield error state.
+        # R4: a genuine engine crash (TypeError/AttributeError/…) previously left only one cryptic
+        # str(e) line with NO stack. Log a compact root-cause line at ERROR plus the full traceback
+        # at DEBUG, deduped per (root type+msg), so an unhandled engine bug is diagnosable. The
+        # user-facing [SYSTEM ERROR] message stays compact (root cause only).
+        summary = format_crash(e)
+        logger.error(f"run_agent_thread_unified failed for {instance_name}: {summary}")
+        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+            logger.debug(f"run_agent_thread_unified failed for {instance_name} — full traceback:\n"
+                         f"{traceback.format_exc()}")
         error_msg = Message(
             role=ASSISTANT,
-            content=f"[SYSTEM ERROR: {e}]",
+            content=f"[SYSTEM ERROR: {summary}]",
         )
         try:
             stream_update = build_stream_update_from_pool(
