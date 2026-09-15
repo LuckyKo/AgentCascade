@@ -17,23 +17,17 @@ All tests are self-contained: no LLM, API server, or network required.
 
 import asyncio
 import json
-import sys
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
-
-import pytest
-
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.ws_handlers import WsMessageHandler
-
 
 # ──────────────────────────────────────────────
 # Helpers / fakes
 # ──────────────────────────────────────────────
+
 
 def _user(content: str, ts: str = None) -> dict:
     m = {'role': 'user', 'content': content}
@@ -50,7 +44,7 @@ def _assistant(content: str, ts: str = None) -> dict:
 
 
 def _marker(summary: str, ts: str, kind: str = 'l1') -> dict:
-    header = f"L2, 7 summaries consolidated" if kind == 'l2' else summary
+    header = 'L2, 7 summaries consolidated' if kind == 'l2' else summary
     return {
         'role': 'user',
         'content': (f"{COMPRESSION_MARKER} ({header}) ---\n<context_summary>\n{summary}\n</context_summary>"),
@@ -78,6 +72,7 @@ class _FakeInstance:
 
 
 class _FakePool:
+
     def __init__(self, instance, logger_inst):
         self._inst = instance
         self._logger = logger_inst
@@ -116,8 +111,10 @@ def _make_handler(tmp_path: Path) -> tuple:
     log_file.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
     logger_inst = AgentInstanceLogger(
-        agent_class='orchestrator', instance_name='Maine',
-        log_dir=str(tmp_path), log_path=str(log_file),
+        agent_class='orchestrator',
+        instance_name='Maine',
+        log_dir=str(tmp_path),
+        log_path=str(log_file),
     )
     # Mirror what load_session_from_log leaves: data["history"] = full tracked set.
     logger_inst.load_history_from_file()
@@ -161,8 +158,11 @@ def _read_msgs(log_file: Path):
 
 
 def _raw_contents(msgs):
-    return [m['content'] for m in msgs
-            if isinstance(m.get('content'), str) and not m['content'].startswith(COMPRESSION_MARKER)]
+    return [
+        m['content']
+        for m in msgs
+        if isinstance(m.get('content'), str) and not m['content'].startswith(COMPRESSION_MARKER)
+    ]
 
 
 def _run(coro):
@@ -173,11 +173,11 @@ def _run(coro):
 # (a) Delete one displayed message on a full-history file → pre-marker raw survive
 # ──────────────────────────────────────────────
 
+
 def test_delete_one_preserves_pre_marker_raw(tmp_path):
     handler, lg, fake_inst, log_file = _make_handler(tmp_path)
 
     before = _read_msgs(log_file)
-    raw_before = set(_raw_contents(before))
     # Pre-marker raw = every non-marker message that sits BEFORE the L2 marker on disk.
     l2_idx = next(i for i, m in enumerate(before)
                   if isinstance(m.get('content'), str) and m['content'].startswith(COMPRESSION_MARKER))
@@ -211,6 +211,7 @@ def test_delete_one_preserves_pre_marker_raw(tmp_path):
 # (b) Shrink guard aborts a rewrite that would drop far more than requested
 # ──────────────────────────────────────────────
 
+
 def test_shrink_guard_aborts_massive_drop(tmp_path):
     handler, lg, fake_inst, log_file = _make_handler(tmp_path)
 
@@ -230,11 +231,11 @@ def test_shrink_guard_aborts_massive_drop(tmp_path):
 # (c) Edit path preserves pre-marker raw
 # ──────────────────────────────────────────────
 
+
 def test_edit_preserves_pre_marker_raw(tmp_path):
     handler, lg, fake_inst, log_file = _make_handler(tmp_path)
 
     before = _read_msgs(log_file)
-    raw_before = set(_raw_contents(before))
     l2_idx = next(i for i, m in enumerate(before)
                   if isinstance(m.get('content'), str) and m['content'].startswith(COMPRESSION_MARKER))
     pre_marker_raw = set(_raw_contents(before[:l2_idx]))
@@ -265,13 +266,16 @@ def test_edit_preserves_pre_marker_raw(tmp_path):
 # (d) Fresh/uncompressed session: pool == file, delete still works via fallback
 # ──────────────────────────────────────────────
 
+
 def test_delete_on_fresh_session_no_file(tmp_path):
     """When the on-disk file is empty/missing (fresh session), delete falls back to the pool
     view and still removes the targeted message without error."""
     log_file = tmp_path / 'fresh.jsonl'
     logger_inst = AgentInstanceLogger(
-        agent_class='orchestrator', instance_name='Maine',
-        log_dir=str(tmp_path), log_path=str(log_file),
+        agent_class='orchestrator',
+        instance_name='Maine',
+        log_dir=str(tmp_path),
+        log_path=str(log_file),
     )
     # No file written yet.
     conv = [_user('system', _ts(0)), _user('hello', _ts(1)), _assistant('hi', _ts(2))]
@@ -282,9 +286,15 @@ def test_delete_on_fresh_session_no_file(tmp_path):
         return None
 
     handler = WsMessageHandler(
-        session={'session_name': 'Maine'}, agent_pool=fake_pool, agents=[], send_queue=None,
-        broadcast_fn=_noop, build_state_fn=lambda *a, **k: {}, start_gen_fn=None,
-        session_lock=threading.Lock(), app=None,
+        session={'session_name': 'Maine'},
+        agent_pool=fake_pool,
+        agents=[],
+        send_queue=None,
+        broadcast_fn=_noop,
+        build_state_fn=lambda *a, **k: {},
+        start_gen_fn=None,
+        session_lock=threading.Lock(),
+        app=None,
     )
 
     _run(handler.handle_delete_messages({'indices': [1], 'instance_name': 'Maine'}))
@@ -299,6 +309,7 @@ def test_delete_on_fresh_session_no_file(tmp_path):
 #     silently lost. The handler must persist it via the pool fallback rather than writing an
 #     un-edited full-history file that lacks a claim the UI already shows as applied.
 # ──────────────────────────────────────────────
+
 
 def test_edit_drifted_identity_not_silently_lost(tmp_path):
     """The displayed (pool) message's identity does not exist in the on-disk file. After edit,
@@ -320,8 +331,10 @@ def test_edit_drifted_identity_not_silently_lost(tmp_path):
     log_file.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
     logger_inst = AgentInstanceLogger(
-        agent_class='orchestrator', instance_name='Maine',
-        log_dir=str(tmp_path), log_path=str(log_file),
+        agent_class='orchestrator',
+        instance_name='Maine',
+        log_dir=str(tmp_path),
+        log_path=str(log_file),
     )
     logger_inst.load_history_from_file()
 
@@ -336,15 +349,19 @@ def test_edit_drifted_identity_not_silently_lost(tmp_path):
         return None
 
     handler = WsMessageHandler(
-        session={'session_name': 'Maine'}, agent_pool=fake_pool, agents=[], send_queue=None,
-        broadcast_fn=_noop, build_state_fn=lambda *a, **k: {}, start_gen_fn=None,
-        session_lock=threading.Lock(), app=None,
+        session={'session_name': 'Maine'},
+        agent_pool=fake_pool,
+        agents=[],
+        send_queue=None,
+        broadcast_fn=_noop,
+        build_state_fn=lambda *a, **k: {},
+        start_gen_fn=None,
+        session_lock=threading.Lock(),
+        app=None,
     )
 
     # Edit the drifted message (index 3 in the displayed pool).
-    _run(handler.handle_edit_message(
-        {'index': 3, 'content': 'DRIFT EDITED', 'instance_name': 'Maine'}
-    ))
+    _run(handler.handle_edit_message({'index': 3, 'content': 'DRIFT EDITED', 'instance_name': 'Maine'}))
 
     # The edit must be persisted to the pool working set (fallback path).
     rebuilt = fake_inst.rebuilt

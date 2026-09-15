@@ -15,21 +15,18 @@ All tests are self-contained: no LLM, API server, or network required.
 """
 
 import json
-import sys
 import threading
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
-
 import pytest
 
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
-
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
 # ──────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────
+
 
 def _user(content: str) -> dict:
     return {'role': 'user', 'content': content}
@@ -46,12 +43,10 @@ def _marker(summary: str, kind: str = 'l1') -> dict:
         header = summary
     return {
         'role': 'user',
-        'content': (
-            f"{COMPRESSION_MARKER} ({header}) ---\n"
-            '<context_summary>\n'
-            f"{summary}\n"
-            '</context_summary>'
-        ),
+        'content': (f"{COMPRESSION_MARKER} ({header}) ---\n"
+                    '<context_summary>\n'
+                    f"{summary}\n"
+                    '</context_summary>'),
     }
 
 
@@ -97,7 +92,8 @@ def _read_msgs(log_path: Path):
 
 def _raw_contents(msgs):
     return [
-        m['content'] for m in msgs
+        m['content']
+        for m in msgs
         if isinstance(m.get('content'), str) and not m['content'].startswith(COMPRESSION_MARKER)
     ]
 
@@ -105,6 +101,7 @@ def _raw_contents(msgs):
 # ──────────────────────────────────────────────
 # 1. Full-history retention: trimmed pool state must NOT shrink a larger file
 # ──────────────────────────────────────────────
+
 
 def test_trimmed_pool_preserves_all_pre_marker_raw(tmp_log):
     """reset_history(rewrite=True) with a TRIMMED pool against a LARGER full-history file
@@ -121,8 +118,7 @@ def test_trimmed_pool_preserves_all_pre_marker_raw(tmp_log):
     # [SYS][U0] + L2 + a fresh newest marker + small tail. Does NOT contain the raw.
     l2 = _marker('L2 consolidated', kind='l2')
     fresh = _marker('FRESH L1', kind='l1')
-    pool = [_user('system'), _user('initial user'), l2, fresh,
-            _user('tail 0'), _assistant('t 0')]
+    pool = [_user('system'), _user('initial user'), l2, fresh, _user('tail 0'), _assistant('t 0')]
 
     ok = lg.reset_history(pool, rewrite=True)
     assert ok is True
@@ -137,6 +133,7 @@ def test_trimmed_pool_preserves_all_pre_marker_raw(tmp_log):
 # ──────────────────────────────────────────────
 # 2. Idempotency: marker already present = no-op (file unchanged)
 # ──────────────────────────────────────────────
+
 
 def test_marker_already_present_is_noop(tmp_log):
     """If the pool's newest marker is already byte-identical in the file, the rewrite
@@ -162,6 +159,7 @@ def test_marker_already_present_is_noop(tmp_log):
 # ──────────────────────────────────────────────
 # 3. Concurrency: appends + rewrites never lose messages (the actual BUG_0007 race)
 # ──────────────────────────────────────────────
+
 
 def test_concurrent_append_and_rewrite_no_loss(tmp_log):
     """BUG_0007 root cause: _append_line raced the locked rewrite path, dropping messages.
@@ -199,17 +197,15 @@ def test_concurrent_append_and_rewrite_no_loss(tmp_log):
     assert errors == [], f"append raised (handle race not closed): {errors[:3]}"
 
     after = _read_msgs(log_file)
-    survived = [m for m in after if isinstance(m.get('content'), str)
-                and m['content'].startswith('live append')]
-    assert len(survived) == 40, (
-        f"BUG_0007 regression: {40 - len(survived)} of 40 concurrent appends lost "
-        f"(append/rewrite race)"
-    )
+    survived = [m for m in after if isinstance(m.get('content'), str) and m['content'].startswith('live append')]
+    assert len(survived) == 40, (f"BUG_0007 regression: {40 - len(survived)} of 40 concurrent appends lost "
+                                 f"(append/rewrite race)")
 
 
 # ──────────────────────────────────────────────
 # 4. End-to-end L2 consolidation sequence retains pre-marker raw
 # ──────────────────────────────────────────────
+
 
 def test_consolidation_sequence_retains_pre_marker_raw(tmp_log):
     """Full L2 consolidation flow: consolidation rewrite followed by the handler's

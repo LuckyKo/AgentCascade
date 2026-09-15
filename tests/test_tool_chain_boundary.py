@@ -5,12 +5,8 @@ if the discard boundary lands on a FUNCTION result, it walks back to include
 the paired ASSISTANT tool call so both are discarded together.
 """
 
-import sys
-from pathlib import Path
-from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
-
-sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
 from agent_cascade.compression.helpers import compute_discard_count
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 
 
 def _make_msg(role, content='text', function_call=None, extra=None):
@@ -60,7 +56,8 @@ class TestToolChainBoundaryProtection:
         """If the boundary falls on a FUNCTION result, walk forward to include its pair."""
         msgs = [
             _make_msg(USER, 'prompt'),
-            _make_msg(ASSISTANT, 'thinking', function_call='shell_cmd'),  # tool call at index 1, extra={'function_id': 'call_shell_cmd'}
+            _make_msg(ASSISTANT, 'thinking',
+                      function_call='shell_cmd'),  # tool call at index 1, extra={'function_id': 'call_shell_cmd'}
             _make_msg(FUNCTION, 'tool output', extra={'function_id': 'call_shell_cmd'}),  # matches ASSISTANT above
             _make_msg(ASSISTANT, 'response'),
         ]
@@ -89,9 +86,9 @@ class TestToolChainBoundaryProtection:
             _make_msg(USER, 'hello'),
             _make_msg(ASSISTANT, 'thinking', function_call='read_file'),  # tool call at index 1
             _make_msg(FUNCTION, 'file content'),  # boundary at index 2
-            _make_msg(ASSISTANT, 'analysis'),     # index 3
-            _make_msg(USER, 'next'),              # index 4
-            _make_msg(ASSISTANT, 'response'),     # index 5
+            _make_msg(ASSISTANT, 'analysis'),  # index 3
+            _make_msg(USER, 'next'),  # index 4
+            _make_msg(ASSISTANT, 'response'),  # index 5
         ]
         discard = compute_discard_count(msgs, 0.375, False)
         assert discard == 3
@@ -132,10 +129,25 @@ class TestToolChainBoundaryProtection:
     def test_dict_messages_work(self):
         """Tool chain detection works with dict messages — returns -1 when no clean split."""
         msgs = [
-            {'role': 'user', 'content': 'hello'},
-            {'role': 'assistant', 'content': 'thinking', 'function_call': {'name': 'read_file'}},  # tool call at index 1
-            {'role': 'function', 'content': 'file content'},  # boundary at index 2
-            {'role': 'user', 'content': 'next'},
+            {
+                'role': 'user',
+                'content': 'hello'
+            },
+            {
+                'role': 'assistant',
+                'content': 'thinking',
+                'function_call': {
+                    'name': 'read_file'
+                }
+            },  # tool call at index 1
+            {
+                'role': 'function',
+                'content': 'file content'
+            },  # boundary at index 2
+            {
+                'role': 'user',
+                'content': 'next'
+            },
         ]
         discard = compute_discard_count(msgs, 0.5, False)
         assert discard == -1

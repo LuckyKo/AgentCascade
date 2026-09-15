@@ -10,13 +10,8 @@ Key distinction:
 - A→A → F→F = one batched chain (should NOT split within it)
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
-
-from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 from agent_cascade.compression.helpers import compute_discard_count
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 
 
 def _make_msg(role, content='text', function_call=None, extra=None):
@@ -44,7 +39,7 @@ class TestIndependentPairsVsChains:
 
     def test_two_independent_pairs_no_overshoot(self):
         """A→F→A→F pattern: two independent pairs should allow clean split between them.
-        
+
         Layout: [A(fc0), F(res0), A(fc1), F(res1)]
         Cut at position 2 (start of second pair) → should include both A(fc1)+F(res1).
         """
@@ -61,7 +56,7 @@ class TestIndependentPairsVsChains:
 
     def test_four_independent_pairs_clean_split(self):
         """Four A→F pairs: should find clean boundary between pairs.
-        
+
         Layout: [A(fc0), F(res0), A(fc1), F(res1), A(fc2), F(res2), A(fc3), F(res3)]
         fraction=0.5 → discard=4 (at A fc2) → should include pair 2 and stop at 6.
         """
@@ -69,7 +64,7 @@ class TestIndependentPairsVsChains:
         for i in range(4):
             msgs.append(_make_assistant(f"tool_{i}"))
             msgs.append(_make_function(f"result_{i}", f"call_tool_{i}"))
-        
+
         count = compute_discard_count(msgs, 0.5, False)
         # Should discard first 3 pairs (6 messages), keeping last pair + room for tail
         assert count > 0 and count <= len(msgs) - 2, \
@@ -80,7 +75,7 @@ class TestIndependentPairsVsChains:
 
     def test_batched_chain_not_split(self):
         """Batched chain with no room to split returns -1.
-        
+
         Layout: [A(fc0), A(fc1), F(res0), F(res1)]
         Cut at position 2 (at first F) → skip past Fs → discard=4 > max_discard(2) → -1.
         """
@@ -90,7 +85,7 @@ class TestIndependentPairsVsChains:
             _make_function('result_0', 'call_tool_0'),
             _make_function('result_1', 'call_tool_1'),
         ]
-        
+
         count = compute_discard_count(msgs, 0.5, False)
         # fraction=0.5 → discard=int(4*0.5)=2, max_discard=2
         # At pos 2: FUNCTION → skip past consecutive Fs → 4 > len-2=2 → -1
@@ -106,7 +101,7 @@ class TestIndependentPairsVsChains:
             _make_msg(ASSISTANT, 'done'),
             _make_msg(USER, 'next'),
         ]
-        
+
         count = compute_discard_count(msgs, 0.5, False)
         assert count >= 2 and count <= len(msgs) - 2
 
@@ -120,7 +115,7 @@ class TestIndependentPairsVsChains:
             _make_assistant('tool_1'),
             _make_function('result_1', 'call_tool_1'),
         ]
-        
+
         count = compute_discard_count(msgs, 0.5, False)
         assert count >= 0 and count <= len(msgs) - 2
 
@@ -134,7 +129,7 @@ class TestIndependentPairsVsChains:
             _make_function('result_1', 'call_tool_1'),
             _make_function('result_2', 'call_tool_2'),
         ]
-        
+
         count = compute_discard_count(msgs, 0.5, False)
         assert count == -1
 
@@ -145,7 +140,7 @@ class TestIndependentPairsVsChains:
         for i in range(8):
             msgs.append(_make_assistant(f"tool_{i}"))
             msgs.append(_make_function(f"result_{i}", f"call_tool_{i}"))
-        
+
         count = compute_discard_count(msgs, 0.5, False)
         assert count != -1, 'Independent pairs should not cause compression failure'
         assert count > 0, 'Should discard some messages'
@@ -158,7 +153,7 @@ class TestIndependentPairsVsChains:
             _make_function('result_0', 'call_tool_0'),
             _make_function('result_1', 'call_tool_1'),
         ]
-        
+
         # fraction=1.0 → discard=int(4*1.0)=2, max_discard=min(2, 4-2)=2
         # Same as test_batched_chain_not_split: at pos 2 (F) → skip past Fs → -1
         count = compute_discard_count(msgs, 1.0, False)
@@ -183,7 +178,7 @@ class TestEdgeCases:
         for i in range(3):
             msgs.append(_make_assistant(f"tool_{i}"))
             msgs.append(_make_function(f"result_{i}", f"call_tool_{i}"))
-        
+
         count = compute_discard_count(msgs, 0.5, False)
         assert count >= 0 and count <= len(msgs) - 2
 
@@ -199,7 +194,7 @@ class TestEdgeCases:
             _make_assistant('tool_1'),
             _make_function('result_1', 'call_tool_1'),
         ]
-        
+
         count = compute_discard_count(msgs, 0.5, force=True)
         assert count >= 1 and count <= len(msgs) - 2
 
@@ -210,7 +205,7 @@ class TestRefinementLogic:
     def test_refinement_stops_at_independent_pair(self):
         """Refinement should stop after completing one pair, not advance to next."""
         from agent_cascade.compression.helpers import _refine_tool_call_boundary
-        
+
         msgs = [
             _make_assistant('tool_0'),
             _make_function('result_0', 'call_tool_0'),
@@ -219,7 +214,7 @@ class TestRefinementLogic:
             _make_assistant('tool_2'),
             _make_function('result_2', 'call_tool_2'),
         ]
-        
+
         # Start at position 0 (A with tool_call), max_discard=4
         result = _refine_tool_call_boundary(msgs, 0, 4)
         assert result <= 4
@@ -227,7 +222,7 @@ class TestRefinementLogic:
     def test_refinement_includes_matching_functions_only(self):
         """Refinement should only include FUNCTION results matching collected IDs."""
         from agent_cascade.compression.helpers import _refine_tool_call_boundary
-        
+
         msgs = [
             _make_assistant('tool_0'),
             _make_function('result_0', 'call_tool_0'),
@@ -236,7 +231,7 @@ class TestRefinementLogic:
             _make_assistant('tool_2'),
             _make_function('result_2', 'call_tool_2'),
         ]
-        
+
         # Start at position 2 (A with tool_1), max_discard=4
         result = _refine_tool_call_boundary(msgs, 2, 4)
         assert result >= 2 and result <= 4

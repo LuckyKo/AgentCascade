@@ -14,20 +14,17 @@ All tests are self-contained: no LLM, API server, or network required.
 
 import json
 import os
-import sys
 import threading
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
 
 import pytest
 
 from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
 
-
 # ──────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────
+
 
 def _user(content: str) -> dict:
     return {'role': 'user', 'content': content}
@@ -114,13 +111,14 @@ def _temp_files(dir_path: Path):
 # 1. Shrink guard
 # ──────────────────────────────────────────────
 
+
 class TestShrinkGuard:
     """rewrite_log_with_history must refuse a drastic shrink of the tracked working set."""
 
     def test_refuses_drastic_shrink(self, tmp_log):
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 10)
-        _set_tracked(logger_inst, 10)          # tracked working set = 10
+        _set_tracked(logger_inst, 10)  # tracked working set = 10
 
         result = logger_inst.rewrite_log_with_history([_user('tiny')])  # incoming = 1 (< 5)
 
@@ -133,7 +131,7 @@ class TestShrinkGuard:
     def test_allows_same_size(self, tmp_log):
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 8)
-        _set_tracked(logger_inst, 8)           # tracked = 8
+        _set_tracked(logger_inst, 8)  # tracked = 8
 
         result = logger_inst.rewrite_log_with_history([_user(f"same {i}") for i in range(8)])
 
@@ -144,7 +142,7 @@ class TestShrinkGuard:
     def test_allows_additive_growth(self, tmp_log):
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 6)
-        _set_tracked(logger_inst, 6)           # tracked = 6
+        _set_tracked(logger_inst, 6)  # tracked = 6
 
         result = logger_inst.rewrite_log_with_history([_user(f"growth {i}") for i in range(12)])
 
@@ -155,7 +153,7 @@ class TestShrinkGuard:
     def test_allows_shrink_when_override(self, tmp_log):
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 10)
-        _set_tracked(logger_inst, 10)          # tracked = 10
+        _set_tracked(logger_inst, 10)  # tracked = 10
 
         result = logger_inst.rewrite_log_with_history([_user('kept')], allow_shrink=True)
 
@@ -167,7 +165,7 @@ class TestShrinkGuard:
         """new_count < prev_tracked * _SHRINK_GUARD_RATIO → refused."""
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 10)
-        _set_tracked(logger_inst, 10)          # tracked = 10, half = 5
+        _set_tracked(logger_inst, 10)  # tracked = 10, half = 5
 
         result = logger_inst.rewrite_log_with_history([_user(f"under {i}") for i in range(4)])  # 4 < 5
 
@@ -178,7 +176,7 @@ class TestShrinkGuard:
         """new_count > prev_tracked * _SHRINK_GUARD_RATIO → allowed."""
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 10)
-        _set_tracked(logger_inst, 10)          # tracked = 10, half = 5
+        _set_tracked(logger_inst, 10)  # tracked = 10, half = 5
 
         result = logger_inst.rewrite_log_with_history([_user(f"above {i}") for i in range(7)])  # 7 > 5
 
@@ -189,6 +187,7 @@ class TestShrinkGuard:
 # ──────────────────────────────────────────────
 # 1b. Regression: original data-loss scenario
 # ──────────────────────────────────────────────
+
 
 class TestOriginalScenarioRegression:
     """Mirror the real trigger that caused the bug.
@@ -222,6 +221,7 @@ class TestOriginalScenarioRegression:
 # 2. Atomic write
 # ──────────────────────────────────────────────
 
+
 class TestAtomicWrite:
     """_atomic_write_lines must replace atomically and never litter temp files."""
 
@@ -229,9 +229,13 @@ class TestAtomicWrite:
         log_path, logger_inst = tmp_log
         _seed_file(log_path, 3)
 
-        new_lines = [json.dumps({'metadata': {'agent_class': 'coder'}}) + '\n',
-                     json.dumps(_user('fresh a')) + '\n',
-                     json.dumps(_assistant('fresh b')) + '\n']
+        new_lines = [
+            json.dumps({'metadata': {
+                'agent_class': 'coder'
+            }}) + '\n',
+            json.dumps(_user('fresh a')) + '\n',
+            json.dumps(_assistant('fresh b')) + '\n'
+        ]
         assert logger_inst._atomic_write_lines(new_lines) is True
         assert _count_messages(log_path) == 2
         ok, bad = _all_lines_valid_jsonl(log_path)
@@ -266,6 +270,7 @@ class TestAtomicWrite:
 # ──────────────────────────────────────────────
 # 3. Concurrency
 # ──────────────────────────────────────────────
+
 
 class TestConcurrentWrites:
     """Many threads hammering the same log file must never corrupt it."""

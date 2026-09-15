@@ -13,20 +13,17 @@ All tests are self-contained — no LLM or API server required.
 """
 
 import json
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
 
 import pytest
 
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
-
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
 # ──────────────────────────────────────────────
 # Helper factories — dict-based messages
 # ──────────────────────────────────────────────
+
 
 def _user(content: str) -> dict:
     """Create a USER role message (dict format)."""
@@ -53,6 +50,7 @@ def _marker(summary: str = 'summarized context') -> dict:
 # Fixture: create a logger backed by a temp file
 # ──────────────────────────────────────────────
 
+
 @pytest.fixture
 def tmp_log(tmp_path):
     """Return (log_path, AgentInstanceLogger) for a fresh temp log file.
@@ -74,6 +72,7 @@ def tmp_log(tmp_path):
 # Helper: read log file and return list of message dicts (skip metadata line)
 # ──────────────────────────────────────────────
 
+
 def _read_log_messages(log_path: Path) -> list:
     """Read a JSONL log file and return all non-metadata, non-event entries as dicts.
 
@@ -94,6 +93,7 @@ def _read_log_messages(log_path: Path) -> list:
 # Helper: count markers in a list of message dicts
 # ──────────────────────────────────────────────
 
+
 def _count_markers(msgs: list) -> int:
     """Count how many messages contain COMPRESSION_MARKER in their content."""
     return sum(1 for m in msgs if isinstance(m.get('content'), str) and m['content'].startswith(COMPRESSION_MARKER))
@@ -102,6 +102,7 @@ def _count_markers(msgs: list) -> int:
 # ──────────────────────────────────────────────
 # Helper: check whether a single message dict is a compression marker
 # ──────────────────────────────────────────────
+
 
 def _is_marker_dict(msg: dict) -> bool:
     """Check if a message dict is a compression marker."""
@@ -112,6 +113,7 @@ def _is_marker_dict(msg: dict) -> bool:
 # Helper: verify _format_message added timestamps to written messages
 # ──────────────────────────────────────────────
 
+
 def _assert_has_timestamps(msgs: list):
     """Assert every message in the log has a timestamp (added by _format_message)."""
     for i, m in enumerate(msgs):
@@ -121,6 +123,7 @@ def _assert_has_timestamps(msgs: list):
 # ──────────────────────────────────────────────
 # 1. Previous compression markers are preserved (parameterized)
 # ──────────────────────────────────────────────
+
 
 class TestPreviousMarkersPreserved:
     """After sequential forced compressions, the log should contain ALL markers cumulatively."""
@@ -138,12 +141,8 @@ class TestPreviousMarkersPreserved:
         log_path, logger_inst = tmp_log
 
         # Seed the log file with pre-existing messages (simulating original conversation)
-        orig_msgs = [_user(f"original {i}") for i in range(3)] + [
-            _assistant(f"orig reply {i}") for i in range(2)
-        ]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        orig_msgs = [_user(f"original {i}") for i in range(3)] + [_assistant(f"orig reply {i}") for i in range(2)]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Run sequential compression cycles
@@ -153,8 +152,7 @@ class TestPreviousMarkersPreserved:
 
             file_msgs = _read_log_messages(log_path)
             assert _count_markers(file_msgs) == cycle, (
-                f"After cycle {cycle}, expected {cycle} markers but got {_count_markers(file_msgs)}"
-            )
+                f"After cycle {cycle}, expected {cycle} markers but got {_count_markers(file_msgs)}")
             # Verify return value is True on success
             assert result is True, 'reset_history should return True on success'
 
@@ -163,19 +161,18 @@ class TestPreviousMarkersPreserved:
         all_content = '\n'.join(m.get('content', '') for m in final_msgs)
         for cycle in range(1, num_cycles + 1):
             assert f"summary round {cycle}" in all_content, (
-                f"Marker summary from cycle {cycle} should be preserved in the log"
-            )
+                f"Marker summary from cycle {cycle} should be preserved in the log")
 
         # DESIGN DOC CHECK: discarded original messages must still be in JSONL!
         for i in range(3):
             assert any(f"original {i}" in m.get('content', '') for m in final_msgs), (
-                f"Discarded original message 'original {i}' was lost from JSONL — data loss!"
-            )
+                f"Discarded original message 'original {i}' was lost from JSONL — data loss!")
 
 
 # ──────────────────────────────────────────────
 # 2. New marker inserted at correct mirrored position
 # ──────────────────────────────────────────────
+
 
 class TestMarkerMirroredPosition:
     """The new marker should be placed so that tail distance from end matches pool state."""
@@ -186,9 +183,7 @@ class TestMarkerMirroredPosition:
 
         # Seed log with 10 original messages
         orig_msgs = [_user(f"orig {i}") for i in range(5)] + [_assistant(f"reply {i}") for i in range(5)]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Pool history: marker + 3 tail messages (tail_count = 3)
@@ -214,8 +209,7 @@ class TestMarkerMirroredPosition:
         # The marker is at mirrored position: first `insert_pos` originals, then marker+pool_tail, then rest
         assert tail_in_log >= actual_tail, (
             f"Tail distance mismatch: pool has {actual_tail} msgs after marker, "
-            f"log has {tail_in_log}. Marker should be at mirrored position with AT LEAST pool tail."
-        )
+            f"log has {tail_in_log}. Marker should be at mirrored position with AT LEAST pool tail.")
 
     def test_zero_tail_count(self, tmp_log):
         """Marker is the LAST message in pool → actual_tail_count=0 → insert at end of log.
@@ -226,9 +220,7 @@ class TestMarkerMirroredPosition:
         log_path, logger_inst = tmp_log
 
         orig_msgs = [_user('orig 1'), _assistant('reply 1')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Pool: only the marker, no tail messages → actual_tail_count = 0
@@ -252,9 +244,7 @@ class TestMarkerMirroredPosition:
 
         # Only 2 messages in the file
         orig_msgs = [_user('orig')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Pool: marker + 5 tail messages → actual_tail_count = 5 > len(existing_msgs)=1
@@ -287,6 +277,7 @@ class TestMarkerMirroredPosition:
 # 3. "No markers" fallback branch
 # ──────────────────────────────────────────────
 
+
 class TestNoMarkersFallback:
     """When new_history has no compression markers, the correct fallback is used."""
 
@@ -299,9 +290,7 @@ class TestNoMarkersFallback:
 
         # Seed log with different messages than pool (to verify pool wins)
         orig_msgs = [_user('file original 1'), _assistant('file reply')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Pool has no markers — just plain messages
@@ -328,9 +317,7 @@ class TestNoMarkersFallback:
         log_path, logger_inst = tmp_log
 
         orig_msgs = [_user('file msg'), _assistant('file reply')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         logger_inst.reset_history([], rewrite=True)
@@ -359,6 +346,7 @@ class TestNoMarkersFallback:
 # 4. Internal state verification after reset_history
 # ──────────────────────────────────────────────
 
+
 class TestInternalStateAfterReset:
     """Verify internal tracking is updated correctly by reset_history(rewrite=True)."""
 
@@ -367,24 +355,21 @@ class TestInternalStateAfterReset:
         log_path, logger_inst = tmp_log
 
         orig_msgs = [_user('orig')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         pool_history = [_marker('summary'), _user('new msg')]
         logger_inst.reset_history(pool_history, rewrite=True)
 
         # Internal history should match pool state (not file content which has more msgs)
-        assert len(logger_inst.data['history']) == 2, (
-            "data['history'] should reflect compressed pool size"
-        )
+        assert len(logger_inst.data['history']) == 2, ("data['history'] should reflect compressed pool size")
         assert logger_inst.data['history'][0]['content'].startswith(COMPRESSION_MARKER)
 
 
 # ──────────────────────────────────────────────
 # 5. Exception and edge case handling
 # ──────────────────────────────────────────────
+
 
 class TestExceptionHandling:
     """Verify graceful error handling in reset_history(rewrite=True)."""
@@ -395,7 +380,9 @@ class TestExceptionHandling:
 
         # Write valid metadata + 2 messages + a malformed line
         lines = [
-            json.dumps({'metadata': {'agent_class': 'coder'}}),
+            json.dumps({'metadata': {
+                'agent_class': 'coder'
+            }}),
             json.dumps(_user('valid msg')),
             'not valid json {{{',  # Malformed line
             json.dumps(_assistant('reply')),
@@ -435,12 +422,8 @@ class TestFullMessageRetention:
         log_path, logger_inst = tmp_log
 
         # Seed: 10 original messages that will be "discarded" by compression
-        orig_msgs = [_user(f"chat {i}") for i in range(5)] + [
-            _assistant(f"reply {i}") for i in range(5)
-        ]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        orig_msgs = [_user(f"chat {i}") for i in range(5)] + [_assistant(f"reply {i}") for i in range(5)]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Cycle 1: pool has marker + 3 tail messages (tails are subset of existing file content)
@@ -479,8 +462,7 @@ class TestFullMessageRetention:
         expected_total = len(orig_msgs) + 3  # 10 originals + 3 markers
         assert len(final_msgs) == expected_total, (
             f"Expected {expected_total} messages in JSONL but got {len(final_msgs)}. "
-            f"Messages: {[m['content'][:20] for m in final_msgs]}"
-        )
+            f"Messages: {[m['content'][:20] for m in final_msgs]}")
 
     def test_tail_messages_match_pool_after_last_compression(self, tmp_log):
         """After the last compression, messages AFTER the newest marker must match pool tail exactly.
@@ -492,9 +474,7 @@ class TestFullMessageRetention:
 
         # Seed with some messages that will serve as both originals and tails
         orig_msgs = [_user('old 1'), _assistant('old reply'), _user('final A'), _assistant('final B'), _user('final C')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Compression: pool has marker + 3 tail messages (same tails exist in file at end)
@@ -523,8 +503,7 @@ class TestFullMessageRetention:
             actual_content = tail_in_log[i].get('content', '')
             expected_content = expected_tail.get('content', '')
             assert expected_content in actual_content, (
-                f"Tail message {i} mismatch: pool has '{expected_content}' but log has '{actual_content[:30]}'"
-            )
+                f"Tail message {i} mismatch: pool has '{expected_content}' but log has '{actual_content[:30]}'")
 
     def test_no_message_loss_or_duplication_across_5_compressions(self, tmp_log):
         """Track every single message and marker across 5 compression cycles.
@@ -538,12 +517,8 @@ class TestFullMessageRetention:
         log_path, logger_inst = tmp_log
 
         # Seed: 8 unique original messages that will serve as both originals and tails
-        orig_msgs = [_user(f"orig_{i}") for i in range(4)] + [
-            _assistant(f"areply_{i}") for i in range(4)
-        ]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        orig_msgs = [_user(f"orig_{i}") for i in range(4)] + [_assistant(f"areply_{i}") for i in range(4)]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Track expected total after each cycle (only markers are new; tails exist in file)
@@ -551,11 +526,11 @@ class TestFullMessageRetention:
 
         # Define compression cycles — tails are subsets of existing messages, not new ones
         cycles = [
-            (_marker('cycle_1'), [_user(f"orig_{i}") for i in range(2, 4)]),   # orig_2, orig_3 exist in file
-            (_marker('cycle_2'), [_user(f"orig_{i}") for i in range(3, 4)]),   # orig_3 exists in file
+            (_marker('cycle_1'), [_user(f"orig_{i}") for i in range(2, 4)]),  # orig_2, orig_3 exist in file
+            (_marker('cycle_2'), [_user(f"orig_{i}") for i in range(3, 4)]),  # orig_3 exists in file
             (_marker('cycle_3'), [_assistant(f"areply_{i}") for i in range(2, 4)]),  # areply_2, areply_3 exist
-            (_marker('cycle_4'), [_user('orig_0')]),                            # orig_0 exists
-            (_marker('cycle_5'), []),                                           # Zero tail — marker only
+            (_marker('cycle_4'), [_user('orig_0')]),  # orig_0 exists
+            (_marker('cycle_5'), []),  # Zero tail — marker only
         ]
 
         for cycle_num, (marker_msg, tail_list) in enumerate(cycles, 1):
@@ -567,16 +542,14 @@ class TestFullMessageRetention:
 
             # CHECK: Exactly cycle_num markers after cycle_num compressions
             assert marker_count == cycle_num, (
-                f"After cycle {cycle_num}: expected {cycle_num} markers but found {marker_count}"
-            )
+                f"After cycle {cycle_num}: expected {cycle_num} markers but found {marker_count}")
 
             # Only the marker is new; tails already exist in file
             expected_total += 1  # 1 marker added this cycle
             assert len(file_msgs) == expected_total, (
                 f"After cycle {cycle_num}: expected {expected_total} messages but got "
                 f"{len(file_msgs)}. Delta = {len(file_msgs) - expected_total}. "
-                f"Messages: {[m['content'][:25] for m in file_msgs]}"
-            )
+                f"Messages: {[m['content'][:25] for m in file_msgs]}")
 
         # Final verification: count messages by category
         final_msgs = _read_log_messages(log_path)
@@ -595,15 +568,14 @@ class TestFullMessageRetention:
             assert marker_count == 1, f"'cycle_{cycle_num}' appears {marker_count} times (expected exactly 1)"
 
         # Final total: 8 originals + 5 markers = 13
-        assert len(final_msgs) == 13, (
-            f"Final message count should be 13 but got {len(final_msgs)}. "
-            f"Data integrity violation! Messages: {[m['content'][:25] for m in final_msgs]}"
-        )
+        assert len(final_msgs) == 13, (f"Final message count should be 13 but got {len(final_msgs)}. "
+                                       f"Data integrity violation! Messages: {[m['content'][:25] for m in final_msgs]}")
 
 
 # ──────────────────────────────────────────────
 # 8. Idempotency: calling reset_history(rewrite=True) twice with same pool state
 # ──────────────────────────────────────────────
+
 
 class TestIdempotentRewrite:
     """reset_history(rewrite=True) must be idempotent when called with the same pool state.
@@ -619,9 +591,7 @@ class TestIdempotentRewrite:
 
         # Seed file with some original messages
         orig_msgs = [_user('orig_a'), _assistant('reply_a'), _user('orig_b')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Pool state: one marker + 2 tail messages
@@ -641,24 +611,18 @@ class TestIdempotentRewrite:
         total_second = len(msgs_after_second)
 
         # Marker count must NOT increase
-        assert marker_count_second == 1, (
-            f"Idempotency violation: marker count went from {marker_count_first} to "
-            f"{marker_count_second} after second call with same pool state"
-        )
+        assert marker_count_second == 1, (f"Idempotency violation: marker count went from {marker_count_first} to "
+                                          f"{marker_count_second} after second call with same pool state")
         # Total message count must NOT change
-        assert total_second == total_first, (
-            f"Idempotency violation: message count changed from {total_first} to "
-            f"{total_second} after redundant reset_history call"
-        )
+        assert total_second == total_first, (f"Idempotency violation: message count changed from {total_first} to "
+                                             f"{total_second} after redundant reset_history call")
 
     def test_triple_call_stable(self, tmp_log):
         """Three consecutive calls with same state remain stable."""
         log_path, logger_inst = tmp_log
 
         orig_msgs = [_user('seed_1'), _assistant('seed_reply')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         pool_history = [_marker('triple_call_test'), _user('tail_x')]
@@ -668,23 +632,21 @@ class TestIdempotentRewrite:
 
         final_msgs = _read_log_messages(log_path)
         assert _count_markers(final_msgs) == 1, (
-            f"After 3 identical calls, expected exactly 1 marker, got {_count_markers(final_msgs)}"
-        )
+            f"After 3 identical calls, expected exactly 1 marker, got {_count_markers(final_msgs)}")
         # 2 originals + 1 marker + 1 tail (already in file? No — tail_x is new) = 4
         # Actually: existing_msgs has 2, pool tail = 1, insert_pos = max(0, 2-1) = 1
         # result = [seed_1] + [marker] + [seed_reply] → but wait, tail_x from pool is NOT in file
         # The code does: existing_msgs[:insert_pos] + [marker] + existing_msgs[insert_pos:]
         # So it inserts marker into existing msgs, doesn't add pool tails that aren't in file.
         # Total = 2 originals + 1 marker = 3
-        assert len(final_msgs) == 3, (
-            f"Expected 3 messages (2 orig + 1 marker), got {len(final_msgs)}: "
-            f"{[m['content'][:30] for m in final_msgs]}"
-        )
+        assert len(final_msgs) == 3, (f"Expected 3 messages (2 orig + 1 marker), got {len(final_msgs)}: "
+                                      f"{[m['content'][:30] for m in final_msgs]}")
 
 
 # ──────────────────────────────────────────────
 # 9. Multi-marker pool state: only newest marker is inserted
 # ──────────────────────────────────────────────
+
 
 class TestMultiMarkerPoolState:
     """When pool state contains multiple markers (e.g., [M_old, M_new, tail]),
@@ -699,9 +661,9 @@ class TestMultiMarkerPoolState:
         # Seed file: original messages + M_old (from a previous compression cycle)
         m_old = _marker('old_summary_from_previous_cycle')
         orig_msgs = [_user('orig_1'), _assistant('reply_1')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ] + [json.dumps(m_old)]
+        lines = [json.dumps({'metadata': {
+            'agent_class': 'coder'
+        }})] + [json.dumps(m) for m in orig_msgs] + [json.dumps(m_old)]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Verify M_old is in the file
@@ -719,19 +681,15 @@ class TestMultiMarkerPoolState:
         marker_count = _count_markers(post_msgs)
 
         # Should have exactly 2 markers: M_old (already in file) + M_new (just inserted)
-        assert marker_count == 2, (
-            f"Expected 2 markers after inserting M_new into file that has M_old, "
-            f"got {marker_count}. Markers: "
-            f"{[m['content'][:50] for m in post_msgs if _is_marker_dict(m)]}"
-        )
+        assert marker_count == 2, (f"Expected 2 markers after inserting M_new into file that has M_old, "
+                                   f"got {marker_count}. Markers: "
+                                   f"{[m['content'][:50] for m in post_msgs if _is_marker_dict(m)]}")
 
         # M_old must appear exactly once (not re-inserted)
         old_content = m_old['content']
         old_count = sum(1 for m in post_msgs if m.get('content') == old_content)
-        assert old_count == 1, (
-            f"M_old appears {old_count} times in file — should be exactly 1 "
-            f"(dedup guard must prevent re-insertion)"
-        )
+        assert old_count == 1, (f"M_old appears {old_count} times in file — should be exactly 1 "
+                                f"(dedup guard must prevent re-insertion)")
 
         # M_new must appear exactly once
         new_content = m_new['content']
@@ -745,9 +703,9 @@ class TestMultiMarkerPoolState:
         m1 = _marker('summary_one')
         m2 = _marker('summary_two')
         orig_msgs = [_user('base_msg')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ] + [json.dumps(m1), json.dumps(m2)]
+        lines = [json.dumps({'metadata': {
+            'agent_class': 'coder'
+        }})] + [json.dumps(m) for m in orig_msgs] + [json.dumps(m1), json.dumps(m2)]
         log_path.write_text('\n'.join(lines) + '\n')
 
         pre_msgs = _read_log_messages(log_path)
@@ -761,16 +719,12 @@ class TestMultiMarkerPoolState:
 
         post_msgs = _read_log_messages(log_path)
         marker_count = _count_markers(post_msgs)
-        assert marker_count == 3, (
-            f"Expected 3 markers total (M_1 + M_2 + M_3), got {marker_count}"
-        )
+        assert marker_count == 3, (f"Expected 3 markers total (M_1 + M_2 + M_3), got {marker_count}")
 
         # Each marker appears exactly once
         for m in (m1, m2, m3):
             count = sum(1 for msg in post_msgs if msg.get('content') == m['content'])
-            assert count == 1, (
-                f"Marker '{m['content'][:40]}...' appears {count} times — expected exactly 1"
-            )
+            assert count == 1, (f"Marker '{m['content'][:40]}...' appears {count} times — expected exactly 1")
 
     def test_multi_marker_pool_no_file_markers_only_newest_inserted(self, tmp_log):
         """Pool has [M_old, M_new, tail] but file has NO markers. Only M_new is inserted.
@@ -784,9 +738,7 @@ class TestMultiMarkerPoolState:
 
         # File has only raw messages, no markers
         orig_msgs = [_user('raw_1'), _assistant('raw_reply_1')]
-        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [
-            json.dumps(m) for m in orig_msgs
-        ]
+        lines = [json.dumps({'metadata': {'agent_class': 'coder'}})] + [json.dumps(m) for m in orig_msgs]
         log_path.write_text('\n'.join(lines) + '\n')
 
         # Pool state has two markers (old one from memory, new one just created)
@@ -801,17 +753,13 @@ class TestMultiMarkerPoolState:
 
         # Only the NEWEST marker (M_new) should be inserted. M_old is NOT in the file
         # and the code only inserts the last marker it finds in pool state.
-        assert marker_count == 1, (
-            f"Expected exactly 1 marker (M_new) in file, got {marker_count}. "
-            f"The code should only insert the newest pool marker, not all of them."
-        )
+        assert marker_count == 1, (f"Expected exactly 1 marker (M_new) in file, got {marker_count}. "
+                                   f"The code should only insert the newest pool marker, not all of them.")
 
         # Verify it's M_new, not M_old
         new_content = m_new['content']
         assert any(m.get('content') == new_content for m in post_msgs), (
-            'The inserted marker should be M_new (the newest in pool state)'
-        )
+            'The inserted marker should be M_new (the newest in pool state)')
         old_content = m_old['content']
         assert not any(m.get('content') == old_content for m in post_msgs), (
-            'M_old should NOT have been inserted — only the last marker in pool is synced'
-        )
+            'M_old should NOT have been inserted — only the last marker in pool is synced')

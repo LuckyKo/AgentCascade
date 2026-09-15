@@ -5,14 +5,9 @@ ensuring that working directory resolution behaves consistently with file tools.
 No LLM or network connections required.
 """
 
-import sys
 import os
 from pathlib import Path
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-# tool_path_resolver lives in AgentCascade (refactor target), add it for imports
-sys.path.insert(0, r'N:\work\WD\AgentCascade')
 
 import pytest
 
@@ -48,6 +43,7 @@ def tool_with_tracker(shell_cmd_tool):
 # ============================================================================
 # Test resolve_tool_path behavior (fallback mode, no operation_manager)
 # ============================================================================
+
 
 class TestResolveToolPathFallback:
     """Tests for resolve_tool_path in fallback mode (no agent_pool/operation_manager)."""
@@ -86,7 +82,8 @@ class TestResolveToolPathFallback:
     def test_invalid_path_outside_workspace_raises_value_error(self):
         """Path outside allowed directories should raise ValueError with clear message."""
         # Use a path that's clearly outside workspace
-        outside = Path('/tmp/../../../etc/passwd').resolve() if os.name != 'nt' else Path('C:\\Windows\\System32').resolve()
+        outside = Path('/tmp/../../../etc/passwd').resolve() if os.name != 'nt' else Path(
+            'C:\\Windows\\System32').resolve()
 
         with pytest.raises(ValueError) as exc_info:
             resolve_tool_path(str(outside), mode='rw')
@@ -114,6 +111,7 @@ class TestResolveToolPathFallback:
 # Test shell_cmd integration with resolve_tool_path for cwd handling
 # ============================================================================
 
+
 class TestShellCmdCwdResolution:
     """Tests that shell_cmd uses resolve_tool_path correctly for cwd parameter."""
 
@@ -124,8 +122,7 @@ class TestShellCmdCwdResolution:
         expected_cwd = Path(DEFAULT_WORKSPACE).resolve()
 
         result = shell_cmd_tool.call(
-            '{"command": "pwd", "cwd": ".", "execution_mode": "async", "justification": "test"}'
-        )
+            '{"command": "pwd", "cwd": ".", "execution_mode": "async", "justification": "test"}')
 
         assert 'ERROR' not in result
         tracker.launch.assert_called_once()
@@ -140,8 +137,7 @@ class TestShellCmdCwdResolution:
         expected_cwd = (base / 'tests').resolve()
 
         result = shell_cmd_tool.call(
-            '{"command": "ls", "cwd": "/workspace/tests", "execution_mode": "async", "justification": "test"}'
-        )
+            '{"command": "ls", "cwd": "/workspace/tests", "execution_mode": "async", "justification": "test"}')
 
         assert 'ERROR' not in result
         tracker.launch.assert_called_once()
@@ -157,8 +153,7 @@ class TestShellCmdCwdResolution:
             outside_path = '/etc/passwd'
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{outside_path}", "execution_mode": "async", "justification": "test"}}'
-        )
+            f'{{"command": "ls", "cwd": "{outside_path}", "execution_mode": "async", "justification": "test"}}')
 
         assert 'ERROR' in result
         assert 'Invalid working directory' in result
@@ -182,8 +177,7 @@ class TestShellCmdCwdResolution:
         abs_cwd_str = str(abs_cwd).replace('\\', '/')
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{abs_cwd_str}", "execution_mode": "async", "justification": "test"}}'
-        )
+            f'{{"command": "ls", "cwd": "{abs_cwd_str}", "execution_mode": "async", "justification": "test"}}')
 
         assert 'ERROR' not in result
         tracker.launch.assert_called_once()
@@ -199,8 +193,7 @@ class TestShellCmdCwdResolution:
             bad_cwd = '/etc/shadow'
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{bad_cwd}", "execution_mode": "async", "justification": "test"}}'
-        )
+            f'{{"command": "ls", "cwd": "{bad_cwd}", "execution_mode": "async", "justification": "test"}}')
 
         assert 'ERROR' in result
         # Error should reference the path so user knows what was invalid
@@ -210,6 +203,7 @@ class TestShellCmdCwdResolution:
 # ============================================================================
 # Test consistency between shell_cmd cwd and file tool path resolution
 # ============================================================================
+
 
 class TestCwdResolutionConsistency:
     """Verify shell_cmd cwd resolution matches file tool behavior."""

@@ -9,15 +9,10 @@ Verifies that _refine_tool_call_boundary and compute_discard_count correctly han
 Uses dict-based messages to simulate real message structures without Message objects.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
-
 from agent_cascade.compression.helpers import _refine_tool_call_boundary, compute_discard_count, get_message_role
 
-
 # ── Helper factories for dict-based messages ────────────────────────────────
+
 
 def user(content='text'):
     """Create a USER message."""
@@ -29,7 +24,13 @@ def assistant_tc(name='tool_0'):
     return {
         'role': 'assistant',
         'content': f"calling {name}",
-        'tool_calls': [{'id': f"call_{name}", 'function': {'name': name, 'arguments': '{}'}}],
+        'tool_calls': [{
+            'id': f"call_{name}",
+            'function': {
+                'name': name,
+                'arguments': '{}'
+            }
+        }],
     }
 
 
@@ -38,11 +39,14 @@ def function(content='result', function_id=None):
     return {
         'role': 'function',
         'content': content,
-        'extra': {'function_id': function_id},
+        'extra': {
+            'function_id': function_id
+        },
     }
 
 
 # ── Test 1: Independent A->F pairs (A->F -> A->F) ──────────────────────────
+
 
 class TestIndependentPairsRefine:
     """Test _refine_tool_call_boundary with independent A->F pairs.
@@ -62,13 +66,13 @@ class TestIndependentPairsRefine:
         Starting discard at position 1 (first A) should stay at 1.
         """
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1 - first A of pair 1
-            function('res_0'),        # 2 - F of pair 1
-            assistant_tc('tool_1'),   # 3 - first A of pair 2
-            function('res_1'),        # 4 - F of pair 2
-            assistant_tc('tool_2'),   # 5 - first A of pair 3
-            function('res_2'),        # 6 - F of pair 3
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1 - first A of pair 1
+            function('res_0'),  # 2 - F of pair 1
+            assistant_tc('tool_1'),  # 3 - first A of pair 2
+            function('res_1'),  # 4 - F of pair 2
+            assistant_tc('tool_2'),  # 5 - first A of pair 3
+            function('res_2'),  # 6 - F of pair 3
         ]
 
         result = _refine_tool_call_boundary(active, 1, 5)
@@ -80,11 +84,11 @@ class TestIndependentPairsRefine:
         The previous message is F (not an assistant with tool calls), so rule 3 applies.
         """
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1
-            function('res_0'),        # 2
-            assistant_tc('tool_1'),   # 3 - second A (prev is F, not A(tc))
-            function('res_1'),        # 4
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1
+            function('res_0'),  # 2
+            assistant_tc('tool_1'),  # 3 - second A (prev is F, not A(tc))
+            function('res_1'),  # 4
         ]
 
         result = _refine_tool_call_boundary(active, 3, 5)
@@ -93,10 +97,10 @@ class TestIndependentPairsRefine:
     def test_refine_advances_through_pair(self):
         """When discard lands at first A, it advances through the complete A->F pair."""
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1 - A(tc) at boundary
-            function('res_0'),        # 2 - F matching above
-            assistant_tc('tool_1'),   # 3
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1 - A(tc) at boundary
+            function('res_0'),  # 2 - F matching above
+            assistant_tc('tool_1'),  # 3
         ]
 
         result = _refine_tool_call_boundary(active, 1, 4)
@@ -104,6 +108,7 @@ class TestIndependentPairsRefine:
 
 
 # ── Test 2: Batched chain (A->A->F->F) ─────────────────────────────────────
+
 
 class TestBatchedChainRefine:
     """Test _refine_tool_call_boundary with batched chains.
@@ -117,11 +122,11 @@ class TestBatchedChainRefine:
     def test_intermediate_a_skips_to_end(self):
         """A->A->F->F: discard at second A should advance to end of chain (unclamped)."""
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1 - first A (safe)
-            assistant_tc('tool_1'),   # 2 - intermediate A (unsafe)
-            function('res_0'),        # 3
-            function('res_1'),        # 4
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1 - first A (safe)
+            assistant_tc('tool_1'),  # 2 - intermediate A (unsafe)
+            function('res_0'),  # 3
+            function('res_1'),  # 4
         ]
 
         result = _refine_tool_call_boundary(active, 2, 4)
@@ -130,11 +135,11 @@ class TestBatchedChainRefine:
     def test_first_a_of_chain_is_safe(self):
         """A->A->F->F: the first A of the chain is safe (no prev A(tc))."""
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1 - first A (prev is USER)
-            assistant_tc('tool_1'),   # 2
-            function('res_0'),        # 3
-            function('res_1'),        # 4
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1 - first A (prev is USER)
+            assistant_tc('tool_1'),  # 2
+            function('res_0'),  # 3
+            function('res_1'),  # 4
         ]
 
         result = _refine_tool_call_boundary(active, 1, 5)
@@ -143,13 +148,13 @@ class TestBatchedChainRefine:
     def test_three_consecutive_as(self):
         """A->A->A->F->F->F: three consecutive As should all advance (unclamped)."""
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1
-            assistant_tc('tool_1'),   # 2 - intermediate A
-            assistant_tc('tool_2'),   # 3 - also intermediate
-            function('res_0'),        # 4
-            function('res_1'),        # 5
-            function('res_2'),        # 6
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1
+            assistant_tc('tool_1'),  # 2 - intermediate A
+            assistant_tc('tool_2'),  # 3 - also intermediate
+            function('res_0'),  # 4
+            function('res_1'),  # 5
+            function('res_2'),  # 6
         ]
 
         result = _refine_tool_call_boundary(active, 2, 6)
@@ -157,6 +162,7 @@ class TestBatchedChainRefine:
 
 
 # ── Test 3: Landed on FUNCTION ─────────────────────────────────────────────
+
 
 class TestLandedOnFunctionRefine:
     """Test _refine_tool_call_boundary when discard lands on a FUNCTION result.
@@ -168,11 +174,11 @@ class TestLandedOnFunctionRefine:
     def test_landed_on_single_function(self):
         """A->F->F->A: discard at first F should skip both Fs."""
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1
-            function('res_0'),        # 2 - landed here
-            function('res_1'),        # 3
-            assistant_tc('tool_1'),   # 4
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1
+            function('res_0'),  # 2 - landed here
+            function('res_1'),  # 3
+            assistant_tc('tool_1'),  # 4
         ]
 
         result = _refine_tool_call_boundary(active, 2, 5)
@@ -181,10 +187,10 @@ class TestLandedOnFunctionRefine:
     def test_landed_on_function_at_start(self):
         """F->F at the very start: skip both."""
         active = [
-            function('res_0'),        # 0 - landed here
-            function('res_1'),        # 1
-            assistant_tc('tool_0'),   # 2
-            user('prompt'),           # 3
+            function('res_0'),  # 0 - landed here
+            function('res_1'),  # 1
+            assistant_tc('tool_0'),  # 2
+            user('prompt'),  # 3
         ]
 
         result = _refine_tool_call_boundary(active, 0, 4)
@@ -193,11 +199,11 @@ class TestLandedOnFunctionRefine:
     def test_exact_scenario_from_spec(self):
         """Exact scenario: active=[U, A(tc), F, F, A], discard=2 -> landed on F -> skip to 4."""
         active = [
-            user('prompt'),          # 0 - U
-            assistant_tc('tool_0'),   # 1 - A(tc)
-            function('res_0'),        # 2 - F (discard lands here)
-            function('res_1'),        # 3 - F
-            assistant_tc('tool_1'),   # 4 - A
+            user('prompt'),  # 0 - U
+            assistant_tc('tool_0'),  # 1 - A(tc)
+            function('res_0'),  # 2 - F (discard lands here)
+            function('res_1'),  # 3 - F
+            assistant_tc('tool_1'),  # 4 - A
         ]
 
         result = _refine_tool_call_boundary(active, 2, 5)
@@ -205,6 +211,7 @@ class TestLandedOnFunctionRefine:
 
 
 # ── Test 4: Mixed pattern (A->F, then A->A->F->F) ─────────────────────────
+
 
 class TestMixedPatternRefine:
     """Test _refine_tool_call_boundary with mixed patterns.
@@ -218,13 +225,13 @@ class TestMixedPatternRefine:
     def test_split_after_first_pair(self):
         """Split right after the first A->F pair (at first A of batched part)."""
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1 - A of independent pair
-            function('res_0'),        # 2 - F of independent pair
-            assistant_tc('tool_1'),   # 3 - first A of batched chain (prev is F)
-            assistant_tc('tool_2'),   # 4 - second A of batched chain
-            function('res_1'),        # 5
-            function('res_2'),        # 6
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1 - A of independent pair
+            function('res_0'),  # 2 - F of independent pair
+            assistant_tc('tool_1'),  # 3 - first A of batched chain (prev is F)
+            assistant_tc('tool_2'),  # 4 - second A of batched chain
+            function('res_1'),  # 5
+            function('res_2'),  # 6
         ]
 
         result = _refine_tool_call_boundary(active, 3, 7)
@@ -233,13 +240,13 @@ class TestMixedPatternRefine:
     def test_at_intermediate_a_of_batched_part(self):
         """Discard at the second A of the batched chain part (unclamped)."""
         active = [
-            user('prompt'),          # 0
-            assistant_tc('tool_0'),   # 1
-            function('res_0'),        # 2
-            assistant_tc('tool_1'),   # 3 - first A of batched chain
-            assistant_tc('tool_2'),   # 4 - second A (intermediate, unsafe)
-            function('res_1'),        # 5
-            function('res_2'),        # 6
+            user('prompt'),  # 0
+            assistant_tc('tool_0'),  # 1
+            function('res_0'),  # 2
+            assistant_tc('tool_1'),  # 3 - first A of batched chain
+            assistant_tc('tool_2'),  # 4 - second A (intermediate, unsafe)
+            function('res_1'),  # 5
+            function('res_2'),  # 6
         ]
 
         result = _refine_tool_call_boundary(active, 4, 6)
@@ -247,6 +254,7 @@ class TestMixedPatternRefine:
 
 
 # ── Test 5: compute_discard_count integration tests ────────────────────────
+
 
 class TestComputeDiscardCount:
     """Test compute_discard_count with various scenarios.
@@ -259,7 +267,7 @@ class TestComputeDiscardCount:
 
     def _make_msg(self, role, content='text', function_call=None, extra=None):
         """Create a Message object like the existing test suite does."""
-        from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
+        from agent_cascade.llm.schema import ASSISTANT, Message
         if role == ASSISTANT and function_call:
             fc = {'name': function_call, 'arguments': '{}'}
             if extra is None:
@@ -350,6 +358,7 @@ class TestComputeDiscardCount:
 
 # ── Test 6: Boundary conditions ────────────────────────────────────────────
 
+
 class TestBoundaryConditions:
     """Edge cases for the refinement logic."""
 
@@ -370,22 +379,21 @@ class TestBoundaryConditions:
 
     def test_refine_stays_within_max_discard(self):
         """Result should never exceed max_discard."""
-        active = [user('prompt'), assistant_tc('tool_0'), function('res_0'),
-                  assistant_tc('tool_1'), function('res_1')]
+        active = [user('prompt'), assistant_tc('tool_0'), function('res_0'), assistant_tc('tool_1'), function('res_1')]
 
         result = _refine_tool_call_boundary(active, 1, 2)
         assert result <= 2, f"Result {result} exceeds max_discard=2"
 
     def test_refine_respects_max_bound(self):
         """Refinement should clamp to max_discard even when chain extends further."""
-        active = [user('prompt'), assistant_tc('tool_0'), function('res_0'),
-                  assistant_tc('tool_1'), function('res_1')]
+        active = [user('prompt'), assistant_tc('tool_0'), function('res_0'), assistant_tc('tool_1'), function('res_1')]
 
         result = _refine_tool_call_boundary(active, 1, 3)
         assert result <= 3
 
 
 # ── Test 7: get_message_role helper (minimal coverage) ──────────────────────
+
 
 class TestGetMessageRole:
     """Minimal coverage for get_message_role shared helper function."""
@@ -399,13 +407,14 @@ class TestGetMessageRole:
         assert get_message_role({'content': 'no role key'}) == ''
 
         # Message objects
-        from agent_cascade.llm.schema import USER, FUNCTION, Message
+        from agent_cascade.llm.schema import FUNCTION, USER, Message
         assert get_message_role(Message(role=USER, content='hello')) == USER
         assert get_message_role(Message(role=FUNCTION, content='result')) == FUNCTION
 
         # Missing attribute
         class PlainMsg:
             pass
+
         assert get_message_role(PlainMsg()) == ''
 
 
