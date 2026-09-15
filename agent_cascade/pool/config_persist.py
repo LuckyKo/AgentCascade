@@ -175,6 +175,19 @@ class ConfigPersistMixin:
                     except (ValueError, TypeError):
                         pass
 
+                # Boot-time safety: the live-update clamping handlers (config_handlers.py) only run on
+                # runtime changes, NOT here. A stale pool_settings.json can persist an inverted pair
+                # (wild_read_truncation_chars > tool_result_max_chars), which would make the inner
+                # wild-read cut higher than the trip threshold and let the outer safety net re-trigger.
+                # Clamp target <= threshold only when BOTH keys are present; absent keys keep their
+                # code defaults (do not invent values here).
+                _tr = self.llm_cfg.get('tool_result_max_chars')
+                _wc = self.llm_cfg.get('wild_read_truncation_chars')
+                if _tr is not None and _wc is not None and _wc > _tr:
+                    logger.warning(f"[PoolSettings] wild_read_truncation_chars ({_wc}) exceeds "
+                                   f"tool_result_max_chars ({_tr}); clamping to {_tr} at boot.")
+                    self.llm_cfg['wild_read_truncation_chars'] = _tr
+
                 # grep_char_limit
                 val = data.pop('grep_char_limit', None)
                 if val is not None:

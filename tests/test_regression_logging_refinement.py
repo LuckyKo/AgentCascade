@@ -43,7 +43,13 @@ class TestReadLogsAutoResolution:
             self._write_test_log(  # noqa: F841  (side effect: writes the test log file)
                 tmp_path,
                 'test_agent.jsonl',
-                [{'type': 'user', 'content': 'hello'}, {'type': 'assistant', 'content': 'hi'}],
+                [{
+                    'type': 'user',
+                    'content': 'hello'
+                }, {
+                    'type': 'assistant',
+                    'content': 'hi'
+                }],
             )
 
             pool = self._create_mock_agent_pool(str(tmp_path))
@@ -134,7 +140,10 @@ class TestReadLogsAutoResolution:
             self._write_test_log(
                 tmp_path,
                 'agent_one.jsonl',
-                [{'role': 'user', 'content': 'single match'}],
+                [{
+                    'role': 'user',
+                    'content': 'single match'
+                }],
             )
 
             pool = self._create_mock_agent_pool(str(tmp_path))
@@ -300,15 +309,22 @@ class TestReadFileWildReadHighWaterMark:
         p.write_text(content, encoding='utf-8')
         tool = ReadFile()
         return tool._read_text_file(
-            path=str(p), resolved=p, start_line=1, limit=150, **kwargs,
+            path=str(p),
+            resolved=p,
+            start_line=1,
+            limit=150,
+            **kwargs,
         )
 
     def test_wild_read_multi_line_truncates_at_hwm(self):
         """A wild read exceeding the HWM on a multi-line file warns and cuts at a line boundary."""
         with tempfile.TemporaryDirectory() as tmp:
-            lines = [f"line {i} " + 'p' * 35 for i in range(1, 60)]  # ~2.6KB > 2000
-            out = self._read(Path(tmp), '\n'.join(lines) + '\n',
-                             is_wild_read=True, wild_truncation=2000)
+            lines = [f"line {i} " + 'p' * 35 for i in range(1, 60)]  # ~2.6KB > char_threshold
+            out = self._read(Path(tmp),
+                             '\n'.join(lines) + '\n',
+                             is_wild_read=True,
+                             wild_truncation=1000,
+                             char_threshold=2500)
             assert '[TRUNCATION WARNING: Unbound read detected!]' in out
             assert '[TRUNCATED]' not in out
             # Pagination hint present and consistent with the last displayed line.
@@ -318,10 +334,9 @@ class TestReadFileWildReadHighWaterMark:
             assert f"→ continue at start_line={last_num + 1}" in out
 
     def test_wild_read_single_long_line_hard_cut(self):
-        """A single very long line (no newline before the threshold) is hard-cut."""
+        """A single very long line (no newline before the cut point) is hard-cut."""
         with tempfile.TemporaryDirectory() as tmp:
-            out = self._read(Path(tmp), 'x' * 5000,
-                             is_wild_read=True, wild_truncation=2000)
+            out = self._read(Path(tmp), 'x' * 5000, is_wild_read=True, wild_truncation=1000, char_threshold=2500)
             assert '[TRUNCATION WARNING: Unbound read detected!]' in out
             # Content body should be bounded near the threshold (not 5000 chars).
             body = out.split('```')[1]
@@ -330,8 +345,7 @@ class TestReadFileWildReadHighWaterMark:
     def test_wild_read_under_hwm_no_warning(self):
         """A wild read under the HWM is returned in full with no truncation marker."""
         with tempfile.TemporaryDirectory() as tmp:
-            out = self._read(Path(tmp), 'short\nfile\nunder limit\n',
-                             is_wild_read=True, wild_truncation=2000)
+            out = self._read(Path(tmp), 'short\nfile\nunder limit\n', is_wild_read=True, wild_truncation=2000)
             assert 'TRUNCATION WARNING' not in out
             assert '[TRUNCATED]' not in out
 
@@ -339,11 +353,130 @@ class TestReadFileWildReadHighWaterMark:
         """An explicit limit (even beyond the HWM) uses [TRUNCATED], never the wild warning."""
         with tempfile.TemporaryDirectory() as tmp:
             lines = [f"line {i} " + 'p' * 35 for i in range(1, 200)]
-            out = self._read(Path(tmp), '\n'.join(lines) + '\n',
-                             is_wild_read=False, wild_truncation=2000)
+            out = self._read(Path(tmp), '\n'.join(lines) + '\n', is_wild_read=False, wild_truncation=2000)
             assert 'TRUNCATION WARNING' not in out
             # limit=150 on a 199-line file -> line-limit truncation marker.
             assert '[TRUNCATED]' in out
+
+    def test_wild_read_between_cut_and_threshold_no_warning(self):
+        """Regression: content between the cut point (2000) and the high-water mark
+        (default ~25000) must NOT trigger the unbound-read warning; full content returned.
+
+        Related: commit 1e38253 "wild read high-water mark".
+        Bug: line 222 used `wild_truncation` (the low cut target, 2000) as the trip
+        threshold instead of `tool_result_max_chars` (25000), so any wild read over
+        ~2KB was falsely flagged and truncated.
+        Fix: trigger on `char_threshold` (default DEFAULT_TOOL_RESULT_MAX_CHARS);
+        keep `wild_truncation` only as the cut point.
+        """
+        from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS
+        with tempfile.TemporaryDirectory() as tmp:
+            # ~10KB of multi-line content: > 2000 (old false trigger) but < 25000.
+            lines = [f"line {i} " + 'q' * 90 for i in range(1, 120)]
+            content = '\n'.join(lines) + '\n'
+            assert DEFAULT_WILD_READ_TRUNCATION_CHARS < len(content) < DEFAULT_TOOL_RESULT_MAX_CHARS
+            # Default char_threshold (25000): no explicit threshold passed.
+            out = self._read(Path(tmp), content, is_wild_read=True, wild_truncation=DEFAULT_WILD_READ_TRUNCATION_CHARS)
+            assert 'Unbound read detected!' not in out
+            assert '[TRUNCATED]' not in out
+            # Full content returned intact (all lines present).
+            body = out.split('```')[1]
+            assert 'line 119' in body
+
+    def test_wild_read_over_threshold_truncates_to_cut(self):
+        """Regression: content above the high-water mark warns and is cut to ~2000 chars."""
+        from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS
+        with tempfile.TemporaryDirectory() as tmp:
+            # ~30KB of multi-line content: > 25000 (default threshold) within the
+            # default 150-line window (~205 chars/line * 150 ≈ 30KB).
+            lines = [f"line {i} " + 'q' * 190 for i in range(1, 160)]
+            content = '\n'.join(lines) + '\n'
+            assert len(content) > DEFAULT_TOOL_RESULT_MAX_CHARS
+            # Default char_threshold (25000): no explicit threshold passed.
+            out = self._read(Path(tmp), content, is_wild_read=True, wild_truncation=DEFAULT_WILD_READ_TRUNCATION_CHARS)
+            assert '[TRUNCATION WARNING: Unbound read detected!]' in out
+            # Content body cut near the low cut point (~2000), not the full 30KB.
+            body = out.split('```')[1]
+            assert len(body) < DEFAULT_WILD_READ_TRUNCATION_CHARS + 500
+
+
+class TestPoolSettingsBootTimeClamp:
+    """Regression tests for boot-time clamping of persisted pool settings.
+
+    The live-update clamping handlers in config_handlers.py only run on runtime changes,
+    NOT when loading a persisted ``pool_settings.json`` at boot (``_load_pool_settings``).
+    A stale file could persist an inverted pair where ``wild_read_truncation_chars``
+    (the cut target) exceeds ``tool_result_max_chars`` (the trip threshold), causing the
+    inner wild-read truncation to cut higher than intended and letting the outer safety
+    net re-trigger. The load path must clamp target <= threshold at boot.
+
+    Related: commit 1e38253 "wild read high-water mark".
+    """
+
+    def _load(self, tmp_path: Path, data: dict):
+        """Drive the REAL ``_load_pool_settings`` with a minimal harness and return llm_cfg."""
+        from agent_cascade.pool.config_persist import ConfigPersistMixin
+
+        settings_path = tmp_path / 'pool_settings.json'
+        settings_path.write_text(json.dumps(data), encoding='utf-8')
+
+        # Minimal host object exposing exactly the attributes _load_pool_settings touches.
+        class _Harness(ConfigPersistMixin):
+
+            def __init__(self, path, llm_cfg):
+                self._pool_settings_path = path
+                self.llm_cfg = llm_cfg
+                self.settings = None  # PoolSettings.from_dict(data) fills this
+
+        harness = _Harness(settings_path, {})
+        harness._load_pool_settings()
+        return harness.llm_cfg
+
+    def test_boot_clamps_inverted_wild_read_to_threshold(self):
+        """Inverted persisted pair (wild_read > tool_result) is clamped to the threshold at boot."""
+        with tempfile.TemporaryDirectory() as tmp:
+            llm_cfg = self._load(
+                Path(tmp),
+                {
+                    'tool_result_max_chars': 25000,
+                    'wild_read_truncation_chars': 30000,  # inverted: > threshold
+                })
+            assert llm_cfg['tool_result_max_chars'] == 25000
+            assert llm_cfg['wild_read_truncation_chars'] == 25000  # clamped down
+
+    def test_boot_non_inverted_pair_unchanged(self):
+        """A correctly ordered pair (wild_read < tool_result) is left unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            llm_cfg = self._load(Path(tmp), {
+                'tool_result_max_chars': 25000,
+                'wild_read_truncation_chars': 2000,
+            })
+            assert llm_cfg['tool_result_max_chars'] == 25000
+            assert llm_cfg['wild_read_truncation_chars'] == 2000  # unchanged
+
+    def test_boot_absent_key_left_alone(self):
+        """When a key is absent, the clamp must not invent a default — only present keys are read."""
+        with tempfile.TemporaryDirectory() as tmp:
+            llm_cfg = self._load(
+                Path(tmp),
+                {
+                    'tool_result_max_chars': 25000,
+                    # wild_read_truncation_chars absent -> code default applies downstream
+                })
+            assert llm_cfg['tool_result_max_chars'] == 25000
+            assert 'wild_read_truncation_chars' not in llm_cfg  # untouched
+
+    def test_boot_zero_threshold_clamps_despite_falsy(self):
+        """A zero (falsy) threshold must still trigger the clamp — guard uses `is not None`, not truthiness."""
+        with tempfile.TemporaryDirectory() as tmp:
+            llm_cfg = self._load(
+                Path(tmp),
+                {
+                    'tool_result_max_chars': 0,  # falsy but present
+                    'wild_read_truncation_chars': 5,  # > threshold -> must clamp to 0
+                })
+            assert llm_cfg['tool_result_max_chars'] == 0
+            assert llm_cfg['wild_read_truncation_chars'] == 0  # clamped despite falsy threshold
 
 
 class TestForgetLastToolRefactoring:
@@ -390,8 +523,14 @@ class TestReadLogsFormatParameter:
                 tmp_path,
                 'test.jsonl',
                 [
-                    {'role': 'user', 'content': 'hello'},
-                    {'role': 'assistant', 'content': 'hi there'},
+                    {
+                        'role': 'user',
+                        'content': 'hello'
+                    },
+                    {
+                        'role': 'assistant',
+                        'content': 'hi there'
+                    },
                 ],
             )
 
@@ -430,7 +569,10 @@ class TestReadLogsFormatParameter:
                 tmp_path,
                 'test.jsonl',
                 [
-                    {'role': 'user', 'content': 'hello world'},
+                    {
+                        'role': 'user',
+                        'content': 'hello world'
+                    },
                     {
                         'role': 'assistant',
                         'timestamp': '2026-08-14T10:30:00Z',
@@ -476,8 +618,14 @@ class TestReadLogsFormatParameter:
                 tmp_path,
                 'test.jsonl',
                 [
-                    {'role': 'user', 'content': 'hello'},
-                    {'role': 'assistant', 'content': 'hi'},
+                    {
+                        'role': 'user',
+                        'content': 'hello'
+                    },
+                    {
+                        'role': 'assistant',
+                        'content': 'hi'
+                    },
                 ],
             )
 
@@ -507,7 +655,10 @@ class TestReadLogsFormatParameter:
                     {
                         'role': 'assistant',
                         'content': 'calling tool',
-                        'function_call': {'name': 'big_tool', 'arguments': long_args},
+                        'function_call': {
+                            'name': 'big_tool',
+                            'arguments': long_args
+                        },
                     },
                     {
                         'role': 'function',
@@ -523,9 +674,12 @@ class TestReadLogsFormatParameter:
             tool = ReadLogs(agent_pool=pool)
 
             # trim_tools: assistant tool-call arguments must be INTACT; tool-output content truncated
-            result_trim_tools = tool.call(
-                {'log_file': 'test.jsonl', 'format': 'raw', 'mode': 'trim_tools', 'max_chars_per_message': 100}
-            )
+            result_trim_tools = tool.call({
+                'log_file': 'test.jsonl',
+                'format': 'raw',
+                'mode': 'trim_tools',
+                'max_chars_per_message': 100
+            })
             assert 'Error' not in result_trim_tools, f"Unexpected error: {result_trim_tools}"
             # Tool call arguments are preserved (no TRUNCATED marker on them)
             assert long_args in result_trim_tools
@@ -533,18 +687,19 @@ class TestReadLogsFormatParameter:
             assert 'TRUNCATED' in result_trim_tools
 
             # trim_all: should truncate all long strings (both args and output)
-            result_trim_all = tool.call(
-                {'log_file': 'test.jsonl', 'format': 'raw', 'mode': 'trim_all', 'max_chars_per_message': 100}
-            )
+            result_trim_all = tool.call({
+                'log_file': 'test.jsonl',
+                'format': 'raw',
+                'mode': 'trim_all',
+                'max_chars_per_message': 100
+            })
             assert 'Error' not in result_trim_all, f"Unexpected error: {result_trim_all}"
             assert long_args not in result_trim_all
             assert long_output not in result_trim_all
             assert 'TRUNCATED' in result_trim_all
 
             # none: should NOT truncate anything
-            result_none = tool.call(
-                {'log_file': 'test.jsonl', 'format': 'raw', 'mode': 'none'}
-            )
+            result_none = tool.call({'log_file': 'test.jsonl', 'format': 'raw', 'mode': 'none'})
             assert 'Error' not in result_none, f"Unexpected error: {result_none}"
             assert long_args in result_none
             assert long_output in result_none
@@ -559,7 +714,10 @@ class TestReadLogsFormatParameter:
                 tmp_path,
                 'test.jsonl',
                 [
-                    {'role': 'user', 'content': long_content},
+                    {
+                        'role': 'user',
+                        'content': long_content
+                    },
                 ],
             )
 
@@ -569,18 +727,19 @@ class TestReadLogsFormatParameter:
             tool = ReadLogs(agent_pool=pool)
 
             # trim_all: content preview in simple mode should be truncated
-            result_trim_all = tool.call(
-                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'trim_all', 'max_chars_per_message': 100}
-            )
+            result_trim_all = tool.call({
+                'log_file': 'test.jsonl',
+                'format': 'simple',
+                'mode': 'trim_all',
+                'max_chars_per_message': 100
+            })
             assert 'Error' not in result_trim_all, f"Unexpected error: {result_trim_all}"
             # Simple mode content preview is capped at ~200 chars regardless of max_chars,
             # but trim_all should still truncate the underlying data before formatting
             assert 'USER' in result_trim_all
 
             # none: no truncation applied
-            result_none = tool.call(
-                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'none'}
-            )
+            result_none = tool.call({'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'none'})
             assert 'Error' not in result_none, f"Unexpected error: {result_none}"
             assert 'USER' in result_none
 
@@ -598,7 +757,10 @@ class TestReadLogsFormatParameter:
                 tmp_path,
                 'test.jsonl',
                 [
-                    {'type': 'custom_event', 'payload': long_value},
+                    {
+                        'type': 'custom_event',
+                        'payload': long_value
+                    },
                 ],
             )
 
@@ -608,18 +770,19 @@ class TestReadLogsFormatParameter:
             tool = ReadLogs(agent_pool=pool)
 
             # none: role-less RAW entry must be emitted in full, no TRUNCATED marker
-            result_none = tool.call(
-                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'none'}
-            )
+            result_none = tool.call({'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'none'})
             assert 'Error' not in result_none, f"Unexpected error: {result_none}"
             assert '[RAW]' in result_none
             assert long_value in result_none
             assert 'TRUNCATED' not in result_none
 
             # trim_all: same entry must still be truncated (guard is mode-specific)
-            result_trim_all = tool.call(
-                {'log_file': 'test.jsonl', 'format': 'simple', 'mode': 'trim_all', 'max_chars_per_message': 100}
-            )
+            result_trim_all = tool.call({
+                'log_file': 'test.jsonl',
+                'format': 'simple',
+                'mode': 'trim_all',
+                'max_chars_per_message': 100
+            })
             assert 'Error' not in result_trim_all, f"Unexpected error: {result_trim_all}"
             assert '[RAW]' in result_trim_all
             assert long_value not in result_trim_all
@@ -632,7 +795,10 @@ class TestReadLogsFormatParameter:
             self._write_test_log(
                 tmp_path,
                 'test.jsonl',
-                [{'role': 'user', 'content': 'hello'}],
+                [{
+                    'role': 'user',
+                    'content': 'hello'
+                }],
             )
 
             pool = self._create_mock_agent_pool(str(tmp_path))

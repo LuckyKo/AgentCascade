@@ -14,7 +14,7 @@ import requests
 from PIL import Image
 
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_LINES,
+from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS,
                                     DEFAULT_WILD_READ_TRUNCATION_CHARS)
 from agent_cascade.tool_utils import set_truncation_hints
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -170,12 +170,15 @@ class ReadFile(BaseTool, PathResolutionMixin):
         limit: int,
         is_wild_read: bool = False,
         wild_truncation: int = 0,
+        char_threshold: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
     ) -> str:
         """Read a text file using streaming line-by-line iteration.
 
         For wild reads (no explicit limit), if accumulated content exceeds the
-        high-water mark (`wild_truncation`), the output is truncated to that
-        threshold with an unbound-read warning.
+        high-water mark (`char_threshold`, default ``DEFAULT_TOOL_RESULT_MAX_CHARS``),
+        the output is truncated to the smaller cut point (`wild_truncation`) with an
+        unbound-read warning. The two values are distinct: `char_threshold` is the
+        trip threshold (when to warn), `wild_truncation` is where to cut.
 
         Returns formatted content string ready for the user.
         """
@@ -219,7 +222,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         # truncate to that limit and flag it.
         wild_truncated = False
         displayed_lines = len(lines_read)
-        if is_wild_read and wild_truncation > 0 and len(content) > wild_truncation:
+        if (is_wild_read and wild_truncation > 0 and char_threshold > 0 and len(content) > char_threshold):
             # Cut at the line boundary closest to (and below) the threshold.
             cut_pos = content.rfind('\n', 0, wild_truncation)
             if cut_pos > 0:
@@ -263,7 +266,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
         if wild_truncated:
             header += ' [TRUNCATION WARNING: Unbound read detected!]'
             truncated_msg = (f"\n\n[SYSTEM]: Content exceeded the "
-                             f"{wild_truncation}-char high-water mark and was truncated. "
+                             f"{char_threshold}-char high-water mark and was truncated to "
+                             f"{wild_truncation} chars. "
                              f"Use start_line/limit for targeted reads."
                              f"\n→ continue at start_line={actual_end + 1}")
         elif hit_line_limit:
@@ -343,13 +347,19 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         limit = params.get('limit')
 
-        # High-water mark (trip threshold) for wild reads: the read proceeds normally up
-        # to the line/char limits, and is only truncated post-hoc if content exceeds this.
-        # (tool_result_max_chars still acts as the outer safety net via _assemble_tool_result
-        # in compression/handler.py — no need to read it here.)
+        # Wild-read truncation uses two distinct values:
+        #   - char_threshold (trip threshold, when to warn): tool_result_max_chars (~25000).
+        #     This is the true high-water mark; it also acts as the outer safety net via
+        #     _assemble_tool_result in compression/handler.py.
+        #   - wild_truncation (cut point, where to cut): wild_read_truncation_chars (~2000).
+        # The read proceeds normally up to the line limit and is only truncated post-hoc if
+        # content exceeds char_threshold, at which point it is cut down to wild_truncation.
         wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
+        char_threshold = DEFAULT_TOOL_RESULT_MAX_CHARS
         if self.agent_pool is not None:
-            wild_truncation = getattr(self.agent_pool, 'llm_cfg', {}).get('wild_read_truncation_chars', wild_truncation)
+            _cfg = getattr(self.agent_pool, 'llm_cfg', {}) or {}
+            wild_truncation = _cfg.get('wild_read_truncation_chars', wild_truncation)
+            char_threshold = _cfg.get('tool_result_max_chars', char_threshold)
 
         # Determine line limit and whether this is a "wild read" (no explicit limit)
         limit, is_wild_read = self._determine_limits(limit)
@@ -385,6 +395,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 limit=limit,
                 is_wild_read=is_wild_read,
                 wild_truncation=wild_truncation,
+                char_threshold=char_threshold,
             )
 
         except ValueError as e:
