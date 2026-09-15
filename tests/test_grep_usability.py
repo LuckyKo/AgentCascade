@@ -313,7 +313,8 @@ def test_grep_fast_path_truncation_surfaces_spillover():
         # Truncation must be signalled...
         assert '[TRUNCATED' in result, f"Expected truncation marker: {result[:300]}"
         # ...and the spillover file path must now be surfaced (the BUG_0010 fix).
-        assert 'full output saved to:' in result, \
+        # Case-insensitive: format_truncation_notice emits "Full output saved to:" (capitalized).
+        assert 'full output saved to:' in result.lower(), \
             f"Spillover path notice missing from fast-path grep response: {result[:400]}"
         assert 'logs/spillover/' in result, \
             f"Spillover file path not surfaced in fast-path grep response: {result[:400]}"

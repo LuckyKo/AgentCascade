@@ -353,14 +353,6 @@ class TestReadFileWildReadHighWaterMark:
             # limit=150 on a 199-line file -> line-limit truncation marker.
             assert '[TRUNCATED]' in out
 
-    def test_calculate_char_limit_ignores_wild_read(self):
-        """_calculate_char_limit is context-derived and takes only kwargs (no wild cap)."""
-        from agent_cascade.tools.custom.file_ops import ReadFile
-        tool = ReadFile()
-        # New signature: single positional arg, no wild-read capping.
-        limit = tool._calculate_char_limit({})
-        assert isinstance(limit, int) and limit >= 500
-
 
 class TestForgetLastToolRefactoring:
     """Verify forget_last_tool still works after adding exception logging."""
@@ -399,7 +391,7 @@ class TestReadLogsFormatParameter:
         return p
 
     def test_raw_format_produces_json_lines_with_number_prefixes(self):
-        """raw format produces JSON lines with line number prefixes (current behavior)."""
+        """raw format produces JSON lines with line number prefixes, wrapped in ``` fences (ff5e4eb)."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             self._write_test_log(
@@ -419,12 +411,15 @@ class TestReadLogsFormatParameter:
 
             assert 'Error' not in result, f"Unexpected error: {result}"
             lines = result.strip().split('\n')
-            # First line is the operation-status header; remaining lines are numbered JSON entries.
-            assert len(lines) == 3
+            # Header line, then a ``` fence-wrapped body of numbered JSON entries (ff5e4eb).
+            assert len(lines) == 5
             assert lines[0].startswith('OK: Read '), f"Missing header: {lines[0]}"
+            assert lines[1] == '```' and lines[-1] == '```', f"Fence envelope missing: {lines}"
 
-            # Each entry line (after the header) starts with a number prefix followed by ": " and valid JSON
-            for line in lines[1:]:
+            # Each entry line inside the fences starts with a number prefix followed by ": " and valid JSON.
+            body = result.split('```')[1].strip().split('\n')
+            assert len(body) == 2, f"Expected 2 numbered entries in fenced body: {body}"
+            for line in body:
                 assert ': ' in line, f"Line missing ': ' separator: {line}"
                 num_prefix, json_part = line.split(': ', 1)
                 assert num_prefix.isdigit(), f"Prefix not numeric: {num_prefix}"

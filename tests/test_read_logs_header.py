@@ -1,10 +1,14 @@
-"""Tests for the read_logs operation-status header and pagination footer.
+"""Tests for the read_logs operation-status header.
 
 These cover the additive change that mirrors read_file's output style:
   - a first-line status header with entry window, total count, format, humanized size
-  - a [TRUNCATED] marker for partial explicit ranges (not for full ranges or the default)
-  - a pagination footer pointing at the next range / the "showing last N of M" hint
   - an empty-log message mirroring read_file's empty-file style
+
+The [TRUNCATED] marker, pagination footer and "showing last N of M" hint were
+intentionally dropped in 10b3266: the header window `lines first-last/total`
+already conveys which entries are shown and how to derive the next range. The
+tests below pin that the header encodes the window (and that no stale footer
+remains) instead of the removed affordances.
 
 Per-entry rendering (truncation modes, raw vs simple) is NOT re-tested here — see
 test_regression_logging_refinement.py for that.
@@ -58,47 +62,63 @@ class TestReadLogsHeader:
             import re
             assert re.search(r'\(\w+, \d+ B\)$', lines[0]), f"No 'N B' size in header: {lines[0]}"
 
-    def test_truncated_marker_for_partial_range_not_full(self):
-        """(b) [TRUNCATED] appears for a partial explicit range, not for a full range."""
+    def test_header_window_conveys_partial_range(self):
+        """(b) The header window encodes a partial explicit range (10b3266 dropped the [TRUNCATED] tag).
+
+        For a 10-entry log, range='3:7' must show exactly `lines 3-7/10`, which tells
+        the model entries 1-2 and 8-10 are absent; a full range or default shows `1-10/10`.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             p = _write_jsonl(Path(tmp), 't.jsonl', [{'role': 'user', 'content': f"m{i}"} for i in range(10)])
 
-            # Partial range -> marker present
+            # Partial range -> header pins the exact window
             partial = _read(p, format='raw', range='3:7')
-            assert '[TRUNCATED]' in partial.split('\n')[0]
+            assert 'lines 3-7/10' in partial.split('\n')[0]
 
-            # Full range -> no marker
+            # Full range -> full window
             full = _read(p, format='raw', range='1:10')
-            assert '[TRUNCATED]' not in full.split('\n')[0]
+            assert 'lines 1-10/10' in full.split('\n')[0]
 
-            # Default (no range) covering all entries -> no marker
+            # Default (no range) covering all entries -> full window
             default = _read(p, format='raw')
-            assert '[TRUNCATED]' not in default.split('\n')[0]
+            assert 'lines 1-10/10' in default.split('\n')[0]
 
-    def test_pagination_footer_points_to_next_range(self):
-        """(c) Footer points to the correct next range for a partial explicit range."""
+    def test_header_encodes_range_no_stale_footer(self):
+        """(c) The header encodes the window so the next range is derivable (10b3266 dropped the pagination footer).
+
+        For a 10-entry log, range='3:7' yields `lines 3-7/10` — from which the model
+        derives both the head (`1:2`) and the next range (`8:10`). The old
+        `→ continue at range=...` footer must no longer appear anywhere in the output.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             p = _write_jsonl(Path(tmp), 't.jsonl', [{'role': 'user', 'content': f"m{i}"} for i in range(10)])
 
             result = _read(p, format='raw', range='3:7')
-            # last=7, total=10 -> continue at 8:10
-            assert '→ continue at range="8:10"' in result
+            # Header encodes first/last/total -> next range (8:10) is derivable.
+            assert 'lines 3-7/10' in result.split('\n')[0]
 
-            # A range that already reaches the end has no footer
+            # The dropped pagination footer must not resurface, for any range.
+            assert 'continue at range' not in result
+
             to_end = _read(p, format='raw', range='5:10')
+            assert 'lines 5-10/10' in to_end.split('\n')[0]
             assert 'continue at range' not in to_end
 
-    def test_default_last20_shows_tail_hint_when_log_larger(self):
-        """(d) Implicit last-20 default surfaces a 'showing last N of M' hint when log > 20."""
+    def test_default_last20_header_shows_tail_window(self):
+        """(d) Implicit last-20 default shows the tail window in the header when log > 20 (10b3266 dropped the hint).
+
+        For a 35-entry log with no range, the default reads entries 16-35; the header
+        `lines 16-35/35` conveys that entries 1-15 are not shown. The old
+        'showing last N of M' hint must no longer appear.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             p = _write_jsonl(Path(tmp), 't.jsonl', [{'role': 'user', 'content': f"m{i}"} for i in range(35)])
 
             result = _read(p, format='raw')  # no range -> default last 20
             header = result.split('\n')[0]
-            # Default is NOT marked truncated, but the footer conveys it's only the tail
-            assert '[TRUNCATED]' not in header
-            assert 'showing last 20 of 35' in result
-            assert 'range="1:35"' in result
+            assert 'lines 16-35/35' in header
+            # The dropped tail hint must not resurface.
+            assert 'showing last' not in result
 
     def test_default_last20_no_hint_when_log_small(self):
         """No tail hint when the log has <= 20 entries (default already shows everything)."""
