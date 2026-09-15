@@ -39,7 +39,6 @@ per-file-ignores =
     agent_cascade/prompts/dna.py: E122, E501, F541
     agent_cascade/security_handler.py: E741
     agent_cascade/settings.py: E124
-    agent_cascade/skills/manager.py: E713
     agent_cascade/soul_loader.py: F541
     agent_cascade/state_ops.py: E741, F821, F824
     agent_cascade/telemetry.py: E402
