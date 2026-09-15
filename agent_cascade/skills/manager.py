@@ -622,6 +622,30 @@ class SkillManager:
         """
         return self._resolve_skill_names(load_skill_value, task_text, context_text)
 
+    def _load_skill_bodies(
+        self,
+        load_skill_value: Union[List[str], str, None],
+        task_text: str = '',
+        context_text: str = '',
+    ) -> List[Tuple[str, str]]:
+        """Load full instruction bodies for the skills named by ``_resolve_skill_names``.
+
+        Shared body-loading loop behind both ``resolve_load_skill`` and
+        ``resolve_load_skill_pairs`` so the two can never drift apart. Each
+        successful body-load increments the global per-skill load metric (via
+        ``load_full_instructions`` with its default ``count_load=True``).
+
+        Returns:
+            List of ``(skill_name, full_instruction_body)`` tuples, one per
+            successfully loaded skill (unresolvable names are dropped).
+        """
+        pairs: List[Tuple[str, str]] = []
+        for name in self._resolve_skill_names(load_skill_value, task_text, context_text):
+            body = self.load_full_instructions(name)
+            if body:
+                pairs.append((name, body))
+        return pairs
+
     def resolve_load_skill(
         self,
         load_skill_value: Union[List[str], str, None],
@@ -642,15 +666,9 @@ class SkillManager:
         Returns:
             List of full instruction strings (one per loaded skill).
         """
-        # Name-computation is shared with resolve_load_skill_names so the two can
-        # never drift apart; bodies are then loaded for exactly those names.
-        _names = self._resolve_skill_names(load_skill_value, task_text, context_text)
-        instructions = []
-        for name in _names:
-            body = self.load_full_instructions(name)
-            if body:
-                instructions.append(body)
-        return instructions
+        # Name-computation and body-loading are shared with resolve_load_skill_pairs
+        # via _load_skill_bodies so the two can never drift apart.
+        return [body for _name, body in self._load_skill_bodies(load_skill_value, task_text, context_text)]
 
     def resolve_load_skill_pairs(
         self,
@@ -669,13 +687,7 @@ class SkillManager:
         Returns:
             List of ``(skill_name, full_instruction_body)`` tuples (one per loaded skill).
         """
-        _names = self._resolve_skill_names(load_skill_value, task_text, context_text)
-        pairs: List[Tuple[str, str]] = []
-        for name in _names:
-            body = self.load_full_instructions(name)
-            if body:
-                pairs.append((name, body))
-        return pairs
+        return self._load_skill_bodies(load_skill_value, task_text, context_text)
 
     # ── Dynamic Registration ─────────────────────────────────────────────
 
