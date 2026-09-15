@@ -16,30 +16,23 @@ from __future__ import annotations
 
 import sys
 import time
+import traceback
 from typing import Iterator, List, Optional
 
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.settings import (
-    LLM_CALL_DEADLINE_SECONDS,
-    STREAM_MAX_SILENCE_SECONDS,
-    STREAM_MAX_TOTAL_SECONDS,
-    TOKEN_ESTIMATE_CHAR_DIVISOR,
-)
-from agent_cascade.retry_policy import classify_error, calculate_backoff, RetryPolicy
+from agent_cascade.error_reporting import TB_DEDUP, build_terminal_message, summarize_exhaustion
+from agent_cascade.exact_loop_detect import detect_exact_loop as _detect_exact_loop
+from agent_cascade.exceptions import (AgentTerminatedError, CharacterRunDetected, ContextWindowExceeded,
+                                      FallbackCompressionRequired, MaxTokenExceeded)
+from agent_cascade.inner_loop_detect import InnerLoopDetector, save_loop_sample
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
 from agent_cascade.log import logger
-from agent_cascade.exceptions import (
-    CharacterRunDetected,
-    ContextWindowExceeded,
-    FallbackCompressionRequired,
-    MaxTokenExceeded,
-    AgentTerminatedError,
-)
-from agent_cascade.utils.utils import get_message_stats, msg_field
-from agent_cascade.inner_loop_detect import InnerLoopDetector, save_loop_sample
+from agent_cascade.retry_policy import RetryPolicy, calculate_backoff, classify_error
+from agent_cascade.settings import (LLM_CALL_DEADLINE_SECONDS, STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
+                                    TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
-from agent_cascade.exact_loop_detect import detect_exact_loop as _detect_exact_loop
 from agent_cascade.tool_loop_detect import detect_tool_loop as _detect_tool_loop
+from agent_cascade.utils.utils import get_message_stats, msg_field
 
 # ── Two-tier loop detection tunables (plan §1) ───────────────────────────────
 #: Tier 2 throttle: after a warning is injected, the detector re-arms only when
@@ -53,13 +46,11 @@ FUZZY_WARNING_COOLDOWN_TURNS = 3
 FUZZY_ESCALATION_TURNS = 2
 
 #: Final wording for the Tier-2 advisory USER message (plan §4.2 — accepted as final).
-_FUZZY_WARNING_TEMPLATE = (
-    '[SYSTEM WARNING: Possible repeating action] You appear to be repeating the same tool '
-    'action without progress — {reason}. This is a warning only; your history was NOT '
-    "modified. Change strategy: if you are polling an async shell that reports \"No running "
-    "shell found\", treat it as terminal (the run has ended) and act on the last real output; "
-    'otherwise verify preconditions or use a different tool/approach before retrying.'
-)
+_FUZZY_WARNING_TEMPLATE = ('[SYSTEM WARNING: Possible repeating action] You appear to be repeating the same tool '
+                           'action without progress — {reason}. This is a warning only; your history was NOT '
+                           "modified. Change strategy: if you are polling an async shell that reports \"No running "
+                           "shell found\", treat it as terminal (the run has ended) and act on the last real output; "
+                           'otherwise verify preconditions or use a different tool/approach before retrying.')
 
 # ── Streaming UI update throttle (burst-aware) ───────────────────────────────
 #: Time floor between _streaming_responses refreshes. Time alone fails during GPU
@@ -70,16 +61,10 @@ STREAM_UPDATE_MAX_CHUNKS = 25
 #: Refresh when this many characters of new text have accumulated since the last update.
 STREAM_UPDATE_MAX_CHARS = 150
 
-from agent_cascade.engine.compression_exec import (
-    FALLBACK_COMPRESSION_MAX_ROUNDS,
-    FALLBACK_COMPRESSION_MIN_SLICE_FRACTION,
-    _COMPRESSOR_WINDOW_SAFETY_FACTOR,
-)
-from agent_cascade.engine.helpers import (
-    _get_active_functions_from_template,
-    _make_token_count_callback,
-    _make_usage_callback,
-)
+from agent_cascade.engine.compression_exec import (_COMPRESSOR_WINDOW_SAFETY_FACTOR, FALLBACK_COMPRESSION_MAX_ROUNDS,
+                                                   FALLBACK_COMPRESSION_MIN_SLICE_FRACTION)
+from agent_cascade.engine.helpers import (_get_active_functions_from_template, _make_token_count_callback,
+                                          _make_usage_callback)
 
 # Sampling & limit parameters to strip when custom sampling is disabled for an
 # endpoint. This constant lived at module scope in the original
@@ -87,9 +72,16 @@ from agent_cascade.engine.helpers import (
 # home is this sub-module. core.py re-imports it from here (core already imports
 # LLMCallMixin from llm_call, so no circular import is introduced).
 SAMPLING_AND_LIMIT_KEYS = frozenset({
-    'temperature', 'top_p', 'top_k', 'min_p',
-    'repeat_penalty', 'repetition_penalty', 'repeatPenalty',
-    'presence_penalty', 'frequency_penalty', 'max_tokens',
+    'temperature',
+    'top_p',
+    'top_k',
+    'min_p',
+    'repeat_penalty',
+    'repetition_penalty',
+    'repeatPenalty',
+    'presence_penalty',
+    'frequency_penalty',
+    'max_tokens',
 })
 
 
@@ -97,9 +89,12 @@ class LLMCallMixin:
     """Mixin providing the LLM-call / retry / error-classification methods."""
 
     def _pre_llm_checks(
-        self, instance: AgentInstance, messages: List[Message],
-        llm_messages: List[Message], response: List[Message],
-        turns_wrapper: List[int],  # mutable wrapper around turns_available
+            self,
+            instance: AgentInstance,
+            messages: List[Message],
+            llm_messages: List[Message],
+            response: List[Message],
+            turns_wrapper: List[int],  # mutable wrapper around turns_available
     ) -> bool:
         """Phase 2: Stop/halt checks, async injection, compression check, loop detection.
 
@@ -122,12 +117,14 @@ class LLMCallMixin:
         # Pass `response` so notification messages get yielded (fixes compress feedback bug).
         if self.compression_handler.handle_rollback_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Rollback command handled for {inst_name}")
-            turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R3: user rollback command is a real cycle
+            turns_wrapper[0] = self._consume_turn(instance,
+                                                  turns_wrapper[0])  # R3: user rollback command is a real cycle
             return True  # Command handled — yield and continue
 
         if self.compression_handler.handle_compress_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Compress command handled for {inst_name}")
-            turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R4: user compress command is a real cycle
+            turns_wrapper[0] = self._consume_turn(instance,
+                                                  turns_wrapper[0])  # R4: user compress command is a real cycle
             return True  # Command handled — yield and continue
 
         # Size the compression guard against the endpoint actually about to be called
@@ -139,12 +136,17 @@ class LLMCallMixin:
             if self.pool.api_router and hasattr(self.pool.api_router, 'get_assigned_max_tokens'):
                 _agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
                 _assigned_max_tokens = self.pool.api_router.get_assigned_max_tokens(
-                    _agent_type, instance_name=instance.instance_name,
+                    _agent_type,
+                    instance_name=instance.instance_name,
                 )
         except Exception as _e:
             logger.debug(f"[PRE_LLM] Failed to resolve assigned endpoint limit for {inst_name}: {_e}")
 
-        if self._check_and_trigger_compression(instance, messages, llm_messages, response, assigned_max_tokens=_assigned_max_tokens):
+        if self._check_and_trigger_compression(instance,
+                                               messages,
+                                               llm_messages,
+                                               response,
+                                               assigned_max_tokens=_assigned_max_tokens):
             logger.debug(f"[PRE_LLM] Compression triggered for {inst_name}")
             turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R5: forced compression is a real cycle
             return True  # Compression triggered — yield and continue
@@ -163,21 +165,21 @@ class LLMCallMixin:
                 loop_info = _detect_exact_loop(messages)
                 if loop_info:
                     reason, pop_count = loop_info
-                    logger.debug(
-                        f"[LOOP_DETECTED] {inst_name}: pattern={reason}, "
-                        f"pop_count={pop_count}, messages={len(messages)}, loop_type=exact"
-                    )
+                    logger.debug(f"[LOOP_DETECTED] {inst_name}: pattern={reason}, "
+                                 f"pop_count={pop_count}, messages={len(messages)}, loop_type=exact")
 
                     if not self.pool.settings.auto_rollback_on_loop:
-                        logger.info(
-                            f"[LOOP_DETECTED_NO_ROLLBACK] {inst_name}: exact loop detected "
-                            f"(pattern={reason}) but auto-rollback is disabled. Continuing to LLM call."
-                        )
+                        logger.info(f"[LOOP_DETECTED_NO_ROLLBACK] {inst_name}: exact loop detected "
+                                    f"(pattern={reason}) but auto-rollback is disabled. Continuing to LLM call.")
                         # Telemetry for observability
                         if (tel := self._telemetry()) is not None:
                             try:
                                 tel.record_loop_detected(
-                                    inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count, loop_type='exact',
+                                    inst_name,
+                                    reason=reason,
+                                    auto_rolled_back=False,
+                                    pop_count=pop_count,
+                                    loop_type='exact',
                                 )
                             except Exception:
                                 pass
@@ -190,8 +192,13 @@ class LLMCallMixin:
                     instance._loop_rollback_count = rollbacks
 
                     self._inline_rollback_and_hint(
-                        instance, inst_name, pop_count, reason,
-                        messages, llm_messages, response,
+                        instance,
+                        inst_name,
+                        pop_count,
+                        reason,
+                        messages,
+                        llm_messages,
+                        response,
                     )
 
                     # Enforce configured max_auto_rollbacks limit
@@ -202,18 +209,14 @@ class LLMCallMixin:
                         effective_limit = max_rb
 
                     if rollbacks > effective_limit:
-                        logger.warning(
-                            f"Loop recovery for {inst_name}: exceeded configured limit "
-                            f"(rolled back {rollbacks} times, max={max_rb}). Terminating."
-                        )
+                        logger.warning(f"Loop recovery for {inst_name}: exceeded configured limit "
+                                       f"(rolled back {rollbacks} times, max={max_rb}). Terminating.")
                         # Append clear failure message for caller visibility
                         fail_msg = Message(
                             role=USER,
-                            content=(
-                                f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
-                                f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
-                                f"The detected pattern was: {reason}. Please adjust your prompt or task."
-                            ),
+                            content=(f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
+                                     f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
+                                     f"The detected pattern was: {reason}. Please adjust your prompt or task."),
                         )
                         self._append_and_log(instance, fail_msg)
                         # Terminate this instance (and its children). Use set_global_stopped=False
@@ -224,30 +227,33 @@ class LLMCallMixin:
                         return True  # Caller will break on _check_stop_conditions next iteration
                     elif rollbacks >= 3 and rollbacks < effective_limit:
                         # Warn at ≥3rd rollback only if we still have headroom before limit
-                        logger.warning(
-                            f"Loop recovery for {inst_name}: rolled back "
-                            f"{rollbacks} times without success. Continuing."
-                        )
+                        logger.warning(f"Loop recovery for {inst_name}: rolled back "
+                                       f"{rollbacks} times without success. Continuing.")
 
                     # Telemetry: record loop detection (non-blocking)
                     if (tel := self._telemetry()) is not None:
                         try:
                             tel.record_loop_detected(
-                                inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type='exact',
+                                inst_name,
+                                reason=reason,
+                                auto_rolled_back=True,
+                                pop_count=pop_count,
+                                loop_type='exact',
                             )
                         except Exception:
                             pass
 
                     # Turn consumed for this rollback cycle (Change 2 integration)
-                    turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])  # R6: loop rollback is a real cycle
+                    turns_wrapper[0] = self._consume_turn(instance,
+                                                          turns_wrapper[0])  # R6: loop rollback is a real cycle
                     return True  # Continue loop with fresh state
 
             # Tier 2 — fuzzy tool-call matcher (warning-first + optional escalation).
             # Plain `if` (NOT elif on the exact flag!) so a disabled exact tier
             # still lets the fuzzy tier run. Enablement = new flag AND legacy
             # kill switch (plan §5.3).
-            if (getattr(self.pool.settings, 'loop_fuzzy_warning_enabled', True)
-                    and getattr(self.pool.settings, 'tool_loop_detection_enabled', True)):
+            if (getattr(self.pool.settings, 'loop_fuzzy_warning_enabled', True) and
+                    getattr(self.pool.settings, 'tool_loop_detection_enabled', True)):
                 info = _detect_tool_loop(
                     messages,
                     sim_threshold=getattr(self.pool.settings, 'tool_loop_sim_threshold', 0.85),
@@ -266,21 +272,24 @@ class LLMCallMixin:
                 else:
                     reason, pop_count = info
                     current_turn = getattr(instance, '_current_turn', 0)
-                    if (getattr(self.pool.settings, 'tool_loop_fuzzy_rollback_enabled', False)
-                            and getattr(instance, '_fuzzy_escalation_armed', False)
-                            and (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) >= FUZZY_ESCALATION_TURNS):
+                    if (getattr(self.pool.settings, 'tool_loop_fuzzy_rollback_enabled', False) and
+                            getattr(instance, '_fuzzy_escalation_armed', False) and
+                        (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) >= FUZZY_ESCALATION_TURNS):
                         # Escalation: the nudge demonstrably failed → FULL ROLLBACK
-                        logger.info(
-                            f"[LOOP_ESCALATION] {inst_name}: fuzzy loop persisted "
-                            f"{current_turn - instance._fuzzy_warn_last_turn} turns after warning — "
-                            f"rolling back {pop_count}"
-                        )
+                        logger.info(f"[LOOP_ESCALATION] {inst_name}: fuzzy loop persisted "
+                                    f"{current_turn - instance._fuzzy_warn_last_turn} turns after warning — "
+                                    f"rolling back {pop_count}")
                         rollbacks = getattr(instance, '_loop_rollback_count', 0) + 1
                         instance._loop_rollback_count = rollbacks
 
                         self._inline_rollback_and_hint(
-                            instance, inst_name, pop_count, reason,
-                            messages, llm_messages, response,
+                            instance,
+                            inst_name,
+                            pop_count,
+                            reason,
+                            messages,
+                            llm_messages,
+                            response,
                         )
 
                         # Post-escalation: the conversation changed → fully reset
@@ -297,17 +306,13 @@ class LLMCallMixin:
                             effective_limit = max_rb
 
                         if rollbacks > effective_limit:
-                            logger.warning(
-                                f"Loop recovery for {inst_name}: exceeded configured limit "
-                                f"(rolled back {rollbacks} times, max={max_rb}). Terminating."
-                            )
+                            logger.warning(f"Loop recovery for {inst_name}: exceeded configured limit "
+                                           f"(rolled back {rollbacks} times, max={max_rb}). Terminating.")
                             fail_msg = Message(
                                 role=USER,
-                                content=(
-                                    f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
-                                    f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
-                                    f"The detected pattern was: {reason}. Please adjust your prompt or task."
-                                ),
+                                content=(f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
+                                         f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
+                                         f"The detected pattern was: {reason}. Please adjust your prompt or task."),
                             )
                             self._append_and_log(instance, fail_msg)
                             self.pool.terminate_instance(inst_name, set_global_stopped=False)
@@ -318,7 +323,11 @@ class LLMCallMixin:
                         if (tel := self._telemetry()) is not None:
                             try:
                                 tel.record_loop_detected(
-                                    inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count, loop_type='fuzzy_rollback',
+                                    inst_name,
+                                    reason=reason,
+                                    auto_rolled_back=True,
+                                    pop_count=pop_count,
+                                    loop_type='fuzzy_rollback',
                                 )
                             except Exception:
                                 pass
@@ -327,20 +336,23 @@ class LLMCallMixin:
                         turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])
                         return True  # Continue loop with fresh state
 
-                    if (not getattr(instance, '_fuzzy_warn_armed', True)
-                            and (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) < FUZZY_WARNING_COOLDOWN_TURNS):
+                    if (not getattr(instance, '_fuzzy_warn_armed', True) and
+                        (current_turn - getattr(instance, '_fuzzy_warn_last_turn', -10**9)) <
+                            FUZZY_WARNING_COOLDOWN_TURNS):
                         # Throttled: one warning per run; suppress this trigger
-                        logger.debug(
-                            f"[LOOP_WARNING_SUPPRESSED] {inst_name}: fuzzy loop still matching "
-                            f"(pattern={reason}, pop_hint={pop_count}) but a warning was issued "
-                            f"{current_turn - instance._fuzzy_warn_last_turn} turn(s) ago — suppressing"
-                        )
+                        logger.debug(f"[LOOP_WARNING_SUPPRESSED] {inst_name}: fuzzy loop still matching "
+                                     f"(pattern={reason}, pop_hint={pop_count}) but a warning was issued "
+                                     f"{current_turn - instance._fuzzy_warn_last_turn} turn(s) ago — suppressing")
                         # Telemetry for observability (warned=False: no message injected)
                         if (tel := self._telemetry()) is not None:
                             try:
                                 tel.record_loop_detected(
-                                    inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
-                                    loop_type='fuzzy_warning', warned=False,
+                                    inst_name,
+                                    reason=reason,
+                                    auto_rolled_back=False,
+                                    pop_count=pop_count,
+                                    loop_type='fuzzy_warning',
+                                    warned=False,
                                 )
                             except Exception:
                                 pass
@@ -361,18 +373,21 @@ class LLMCallMixin:
                     instance._fuzzy_warn_armed = False
                     instance._fuzzy_warn_last_turn = current_turn
                     # Escalation countdown is only active when the toggle allows it.
-                    instance._fuzzy_escalation_armed = bool(getattr(self.pool.settings, 'tool_loop_fuzzy_rollback_enabled', False))
+                    instance._fuzzy_escalation_armed = bool(
+                        getattr(self.pool.settings, 'tool_loop_fuzzy_rollback_enabled', False))
 
-                    logger.warning(
-                        f"[LOOP_WARNING] {inst_name}: {reason} (pop_hint={pop_count}) — "
-                        f"injected advisory, no rollback"
-                    )
+                    logger.warning(f"[LOOP_WARNING] {inst_name}: {reason} (pop_hint={pop_count}) — "
+                                   f"injected advisory, no rollback")
                     # Telemetry for observability
                     if (tel := self._telemetry()) is not None:
                         try:
                             tel.record_loop_detected(
-                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
-                                loop_type='fuzzy_warning', warned=True,
+                                inst_name,
+                                reason=reason,
+                                auto_rolled_back=False,
+                                pop_count=pop_count,
+                                loop_type='fuzzy_warning',
+                                warned=True,
                             )
                         except Exception:
                             pass
@@ -398,14 +413,8 @@ class LLMCallMixin:
 
         return False  # Continue to LLM call normally
 
-
-    def _execute_llm_call_with_retry(
-        self,
-        instance: AgentInstance,
-        llm_messages: List[Message],
-        template,
-        active_functions
-    ) -> Iterator[Message]:
+    def _execute_llm_call_with_retry(self, instance: AgentInstance, llm_messages: List[Message], template,
+                                     active_functions) -> Iterator[Message]:
         """Execute LLM call with retry logic and streaming injection.
 
         Extracted from _call_llm_with_injection() - Phase 3.6
@@ -428,7 +437,7 @@ class LLMCallMixin:
         inst_name = instance.instance_name
         last_output = None
         retry_count = 0
-        loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.retry_max_attempts)
+        loop_retry_count = 0  # Dedicated counter for inner-loop retries (gated by pool.settings.retry_max_attempts)
         error_already_yielded = False
         _max_attempts = self.pool.settings.retry_max_attempts  # At least 1 retry to avoid instant failure
 
@@ -458,7 +467,8 @@ class LLMCallMixin:
             # Sticky slot plan change #12d: thread the owning instance so captioning
             # participates in the shared sequential slot (acquire-or-keep, never drop).
             llm_messages = self._ensure_image_captions(
-                llm_messages, agent_type=agent_type,
+                llm_messages,
+                agent_type=agent_type,
                 instance_name=getattr(instance, 'instance_name', None),
             )
 
@@ -469,20 +479,19 @@ class LLMCallMixin:
                 # caught by the per-attempt `except Exception` (which would swallow it).
                 # On expiry we abort the retry loop; the outer finally still runs (cursor reset).
                 if time.monotonic() >= _deadline:
-                    logger.error(
-                        f"LLM call deadline exceeded for {inst_name} "
-                        f"(>{LLM_CALL_DEADLINE_SECONDS}s wall-clock). Aborting retry loop."
-                    )
-                    yield Message(role=ASSISTANT, content=(
-                        f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"
-                    ))
+                    logger.error(f"LLM call deadline exceeded for {inst_name} "
+                                 f"(>{LLM_CALL_DEADLINE_SECONDS}s wall-clock). Aborting retry loop.")
+                    yield Message(
+                        role=ASSISTANT,
+                        content=(f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
                     error_already_yielded = True
                     break
 
                 try:
                     # Telemetry: record LLM call start (non-blocking)
                     self._record_telemetry_event(
-                        inst_name, 'start',
+                        inst_name,
+                        'start',
                         input_tokens_est=_input_tokens_est,
                         model=getattr(template.llm, 'model', '') or '',
                     )
@@ -518,13 +527,15 @@ class LLMCallMixin:
                     _max_output_tokens = 8192  # Default cap per single response
                     _gen_override = getattr(instance, '_generate_cfg_override', None)
                     if _gen_override and isinstance(_gen_override, dict):
-                        _mt = _gen_override.get('max_tokens') or _gen_override.get('max_output_tokens') or _gen_override.get('max_input_tokens')
+                        _mt = _gen_override.get('max_tokens') or _gen_override.get(
+                            'max_output_tokens') or _gen_override.get('max_input_tokens')
                         if isinstance(_mt, int) and _mt > 0:
                             _max_output_tokens = _mt
                     # Also check template LLM generate_cfg as fallback
                     if _max_output_tokens == 8192:
                         _llm_cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
-                        _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens') or _llm_cfg.get('max_input_tokens')
+                        _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens') or _llm_cfg.get(
+                            'max_input_tokens')
                         if isinstance(_mt, int) and _mt > 0:
                             _max_output_tokens = _mt
 
@@ -566,10 +577,10 @@ class LLMCallMixin:
                     # Engine-level streaming watchdog: detect mid-stream stalls at the
                     # execution engine layer (last defense if backend didn't raise).
                     # Read configured values from pool settings, falling back to module defaults.
-                    _engine_max_silence = getattr(
-                        self.pool.settings, 'stream_max_silence_seconds', STREAM_MAX_SILENCE_SECONDS)
-                    _engine_max_total = getattr(
-                        self.pool.settings, 'stream_max_total_seconds', STREAM_MAX_TOTAL_SECONDS)
+                    _engine_max_silence = getattr(self.pool.settings, 'stream_max_silence_seconds',
+                                                  STREAM_MAX_SILENCE_SECONDS)
+                    _engine_max_total = getattr(self.pool.settings, 'stream_max_total_seconds',
+                                                STREAM_MAX_TOTAL_SECONDS)
                     _engine_stream_start = time.monotonic()
                     _engine_first_output = True
                     _engine_last_output_time = None
@@ -582,16 +593,13 @@ class LLMCallMixin:
                             if (_now - _engine_last_output_time) > _engine_max_silence:
                                 logger.info(
                                     f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
-                                    f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)"
-                                )
+                                    f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)")
                                 _abort_stream('Engine watchdog: stream_stalled')
                                 break  # Exit loop after aborting; will retry in outer while
                         # Total timeout applies from stream start regardless of first output timing
                         if (_now - _engine_stream_start) > _engine_max_total:
-                            logger.info(
-                                f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
-                                f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)"
-                            )
+                            logger.info(f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
+                                        f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)")
                             _abort_stream('Engine watchdog: stream_stalled')
                             break  # Exit loop after aborting; will retry in outer while
                         if _engine_first_output:
@@ -651,8 +659,7 @@ class LLMCallMixin:
                                                 instance_name=inst_name,
                                             )
                                             yield from _abort_stream(
-                                                f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
-                                            )
+                                                f"Detected generation loop: {_ev['reason']} (score={_ev['score']})")
                                             if _sample_path:
                                                 logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
                                             # Check dedicated loop retry budget
@@ -675,7 +682,8 @@ class LLMCallMixin:
                                     if _est_tokens > _max_output_tokens:
                                         _sample_path = save_loop_sample(
                                             text=_total_text[:4000],
-                                            reason=f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
+                                            reason=
+                                            f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
                                             instance_name=inst_name,
                                         )
                                         yield from _abort_stream(
@@ -717,7 +725,8 @@ class LLMCallMixin:
                                 except Exception:
                                     pass  # Non-critical cleanup
                             try:
-                                gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
+                                gen.close(
+                                )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
                             except RuntimeError:
                                 pass  # Already closed/exhausted
                             yield None  # Signal UI that stop was detected mid-stream
@@ -729,11 +738,9 @@ class LLMCallMixin:
                         # Update _streaming_responses on a time floor OR on rapid bursts
                         # (chunk/char volume thresholds), whichever comes first.
                         current_time = time.monotonic()
-                        should_update = (
-                            (current_time - last_streaming_update_time >= STREAM_UPDATE_MIN_INTERVAL_SEC)
-                            or (_chunks_since_last_update >= STREAM_UPDATE_MAX_CHUNKS)
-                            or (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS)
-                        )
+                        should_update = ((current_time - last_streaming_update_time >= STREAM_UPDATE_MIN_INTERVAL_SEC)
+                                         or (_chunks_since_last_update >= STREAM_UPDATE_MAX_CHUNKS) or
+                                         (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS))
                         if should_update:
                             with instance._compression_lock:
                                 self._update_streaming_responses(instance, last_output)
@@ -755,7 +762,8 @@ class LLMCallMixin:
                                 except Exception:
                                     pass  # Non-critical cleanup
                             try:
-                                gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
+                                gen.close(
+                                )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
                             except RuntimeError:
                                 pass  # Already closed/exhausted
                             yield None  # Signal UI that stop was detected mid-stream
@@ -789,10 +797,8 @@ class LLMCallMixin:
                     # Get instance from pool
                     instance = self.pool.get_instance(inst_name)
                     if not instance:
-                        logger.error(
-                            f"[FALLBACK_COMPRESSION] Instance {inst_name} not found in pool. "
-                            f"Cannot compress after context-exceeded on '{fcr.failed_endpoint}'."
-                        )
+                        logger.error(f"[FALLBACK_COMPRESSION] Instance {inst_name} not found in pool. "
+                                     f"Cannot compress after context-exceeded on '{fcr.failed_endpoint}'.")
                         retry_count += 1
                         continue
 
@@ -800,18 +806,14 @@ class LLMCallMixin:
                     with instance._compression_lock:
                         instance._streaming_responses = []
 
-                    logger.info(
-                        f"[FALLBACK_COMPRESSION] Starting smart slice-first iterative compression "
-                        f"for {inst_name} after context-exceeded on '{fcr.failed_endpoint}'."
-                    )
+                    logger.info(f"[FALLBACK_COMPRESSION] Starting smart slice-first iterative compression "
+                                f"for {inst_name} after context-exceeded on '{fcr.failed_endpoint}'.")
 
                     agent_type = fcr.agent_type
 
                     for round_num in range(1, FALLBACK_COMPRESSION_MAX_ROUNDS + 1):
-                        logger.debug(
-                            f"[FALLBACK_COMPRESSION] === Round {round_num}/{FALLBACK_COMPRESSION_MAX_ROUNDS} "
-                            f"for {inst_name} ==="
-                        )
+                        logger.debug(f"[FALLBACK_COMPRESSION] === Round {round_num}/{FALLBACK_COMPRESSION_MAX_ROUNDS} "
+                                     f"for {inst_name} ===")
 
                         # Stop-check at the TOP of each round: after a user Stop
                         # (or generation supersede), do NOT spawn another compressor.
@@ -820,10 +822,8 @@ class LLMCallMixin:
                         # turn ends normally instead of exhausting rounds into a
                         # spurious ContextWindowExceeded.
                         if self._is_terminal_stop(inst_name):
-                            logger.info(
-                                f"[FALLBACK_COMPRESSION] Fallback compression aborted by stop "
-                                f"before round {round_num} for {inst_name}."
-                            )
+                            logger.info(f"[FALLBACK_COMPRESSION] Fallback compression aborted by stop "
+                                        f"before round {round_num} for {inst_name}.")
                             raise AgentTerminatedError(inst_name)
 
                         # Check overfeeding before each round
@@ -841,14 +841,11 @@ class LLMCallMixin:
                             break
 
                         if self.compression_handler.check_overfeeding(instance, llm_messages):
-                            logger.warning(
-                                f"[FALLBACK_COMPRESSION] Overfeeding detected for {inst_name} "
-                                f"at round {round_num}. Raising ContextWindowExceeded."
-                            )
+                            logger.warning(f"[FALLBACK_COMPRESSION] Overfeeding detected for {inst_name} "
+                                           f"at round {round_num}. Raising ContextWindowExceeded.")
                             raise ContextWindowExceeded(
                                 f"Overfeeding detected during fallback compression for {inst_name} "
-                                f"(context exceeded on '{fcr.failed_endpoint}')"
-                            ) from fcr
+                                f"(context exceeded on '{fcr.failed_endpoint}')") from fcr
 
                         # Get compressor's available window (same logic as core.py lines 131-163)
                         available_for_messages = None
@@ -873,23 +870,19 @@ class LLMCallMixin:
                                         max_compressor_tokens = max_tokens
 
                             if max_compressor_tokens:
-                                available_for_messages = int(
-                                    max_compressor_tokens * _COMPRESSOR_WINDOW_SAFETY_FACTOR
-                                )
+                                available_for_messages = int(max_compressor_tokens * _COMPRESSOR_WINDOW_SAFETY_FACTOR)
                         except Exception as e:
                             logger.debug(f"[FALLBACK_COMPRESSION] Could not determine compressor window: {e}")
 
                         # Get active set for slicing
                         history = self.pool.get_conversation(inst_name)
                         active_start_idx, active_set, latest_summary_idx = (
-                            self.pool.get_compression_target_set_from_conversation(inst_name, history)
-                        )
+                            self.pool.get_compression_target_set_from_conversation(inst_name, history))
 
                         if not active_set or len(active_set) < 3:
                             logger.warning(
                                 f"[FALLBACK_COMPRESSION] Active set too small ({len(active_set) if active_set else 0}) "
-                                f"for safe compression at round {round_num}."
-                            )
+                                f"for safe compression at round {round_num}.")
                             break
 
                         # Use helper to find a slice that fits the compressor window.
@@ -903,14 +896,11 @@ class LLMCallMixin:
                         )
 
                         if slice_result is None:
-                            logger.error(
-                                f"[FALLBACK_COMPRESSION] Could not find a slice that fits compressor window "
-                                f"for {inst_name} at round {round_num}. Giving up."
-                            )
+                            logger.error(f"[FALLBACK_COMPRESSION] Could not find a slice that fits compressor window "
+                                         f"for {inst_name} at round {round_num}. Giving up.")
                             raise ContextWindowExceeded(
                                 f"Smart slicing failed for {inst_name}: no slice of active history "
-                                f"fits the compressor's context window. Cannot compress further."
-                            ) from fcr
+                                f"fits the compressor's context window. Cannot compress further.") from fcr
 
                         final_fraction, discard_count, _target_messages = slice_result
 
@@ -918,7 +908,7 @@ class LLMCallMixin:
                         # Lazy import to avoid circular dependency (see module-level comment).
                         try:
                             from agent_cascade.compression.core import compress_context as _compress_local
-                        
+
                             result = _compress_local(
                                 agent_pool=self.pool,
                                 target_agent_name=inst_name,
@@ -928,10 +918,8 @@ class LLMCallMixin:
                             )
 
                             if not result.success:
-                                logger.warning(
-                                    f"[FALLBACK_COMPRESSION] Round {round_num} compression failed for "
-                                    f"{inst_name}: {result.error}. Trying next round."
-                                )
+                                logger.warning(f"[FALLBACK_COMPRESSION] Round {round_num} compression failed for "
+                                               f"{inst_name}: {result.error}. Trying next round.")
                                 continue
 
                             # Compression succeeded — rebuild working set from compressed pool state
@@ -949,8 +937,7 @@ class LLMCallMixin:
                             logger.debug(
                                 f"[FALLBACK_COMPRESSION] Round {round_num} succeeded for {inst_name}: "
                                 f"fraction={final_fraction:.4f}, discarded {result.messages_discarded} messages, "
-                                f"tokens {result.tokens_before} → {result.tokens_after}"
-                            )
+                                f"tokens {result.tokens_before} → {result.tokens_after}")
 
                             # ── Sync JSONL logger to match the compressed pool (root-cause fix) ──
                             # compress_context() rewrote instance.conversation (the pool) but does NOT
@@ -982,14 +969,11 @@ class LLMCallMixin:
                                     f"[FALLBACK_COMPRESSION] Logger sync after compression FAILED for "
                                     f"{inst_name}: {sync_err}. The JSONL log may now be out of sync with the "
                                     f"compressed pool (possibly half-written) — recovery/reload could "
-                                    f"re-inflate it. Continuing retry."
-                                )
+                                    f"re-inflate it. Continuing retry.")
 
                             # Post-compression check: does compressed payload fit next endpoint?
                             try:
-                                chain = self.pool.api_router.get_endpoint_chain(
-                                    agent_type, instance_name=inst_name
-                                )
+                                chain = self.pool.api_router.get_endpoint_chain(agent_type, instance_name=inst_name)
                                 if chain:
                                     # `or 0` tolerates a literal None (e.g. "max_input_tokens": null in config).
                                     next_limit = chain[0].get('max_input_tokens') or 0
@@ -1015,8 +999,7 @@ class LLMCallMixin:
                                             next_limit = int(detected_limit)
                                             logger.debug(
                                                 f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens; "
-                                                f"using LLM-instance detected limit {next_limit} for {inst_name}."
-                                            )
+                                                f"using LLM-instance detected limit {next_limit} for {inst_name}.")
 
                                     if next_limit > 0:
                                         # Full message stats (reasoning, tool_calls, template overhead) —
@@ -1025,19 +1008,15 @@ class LLMCallMixin:
 
                                         logger.debug(
                                             f"[FALLBACK_COMPRESSION] Post-compression check for {inst_name}: "
-                                            f"estimated ~{estimated} tokens vs next endpoint limit {next_limit}"
-                                        )
+                                            f"estimated ~{estimated} tokens vs next endpoint limit {next_limit}")
 
                                         if estimated <= next_limit * 0.95:  # 5% safety margin
                                             # Payload fits — inject notification and resume agent
                                             from agent_cascade.compression.handler import CompressionHandler
                                             max_tokens = instance._allocated_max_input_tokens or next_limit or 0
-                                            notif_msg = Message(
-                                                role=USER,
-                                                content=CompressionHandler._format_compression_feedback(
-                                                    'fallback', 0, estimated, max_tokens
-                                                )
-                                            )
+                                            notif_msg = Message(role=USER,
+                                                                content=CompressionHandler._format_compression_feedback(
+                                                                    'fallback', 0, estimated, max_tokens))
                                             self._append_and_log(instance, notif_msg)
 
                                             # Resume all instances (compression may have halted them)
@@ -1046,10 +1025,8 @@ class LLMCallMixin:
                                             except Exception:
                                                 pass
 
-                                            logger.info(
-                                                f"[FALLBACK_COMPRESSION] Payload fits next endpoint after "
-                                                f"{round_num} compression round(s). Resuming {inst_name}."
-                                            )
+                                            logger.info(f"[FALLBACK_COMPRESSION] Payload fits next endpoint after "
+                                                        f"{round_num} compression round(s). Resuming {inst_name}.")
 
                                             # Continue outer retry loop with compressed messages
                                             break
@@ -1057,8 +1034,7 @@ class LLMCallMixin:
                                             logger.warning(
                                                 f"[FALLBACK_COMPRESSION] Compressed payload (~{estimated} tokens) "
                                                 f"still exceeds next endpoint limit ({next_limit}). "
-                                                f"Continuing to round {round_num + 1}..."
-                                            )
+                                                f"Continuing to round {round_num + 1}...")
                                     else:
                                         # No limit from the router chain AND no detected limit on the LLM
                                         # instance — we cannot verify the payload against any real server
@@ -1075,14 +1051,12 @@ class LLMCallMixin:
                                             f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens configured "
                                             f"and no detected limit on the LLM instance for {inst_name}. Cannot verify "
                                             f"compressed payload size; NOT assuming it fits. Retrying so the "
-                                            f"context-exceeded guard re-checks against the real limit."
-                                        )
+                                            f"context-exceeded guard re-checks against the real limit.")
                             except Exception as chain_err:
                                 # Non-fatal — continue retry anyway
                                 logger.debug(
                                     f"[FALLBACK_COMPRESSION] Could not verify next endpoint limit for {inst_name}: "
-                                    f"{chain_err}. Continuing retry."
-                                )
+                                    f"{chain_err}. Continuing retry.")
                                 break
 
                         except ContextWindowExceeded:
@@ -1096,8 +1070,8 @@ class LLMCallMixin:
                         except Exception as comp_err:
                             logger.error(
                                 f"[FALLBACK_COMPRESSION] Round {round_num} raised exception for {inst_name}: "
-                                f"{comp_err}", exc_info=True
-                            )
+                                f"{comp_err}",
+                                exc_info=True)
                             # Continue to next round
 
                         # After each round, check if we should trigger automatic forced compression
@@ -1108,13 +1082,11 @@ class LLMCallMixin:
                         # Exhausted all compression rounds without success
                         logger.error(
                             f"[FALLBACK_COMPRESSION] Exhausted {FALLBACK_COMPRESSION_MAX_ROUNDS} compression rounds "
-                            f"for {inst_name}. Raising ContextWindowExceeded."
-                        )
+                            f"for {inst_name}. Raising ContextWindowExceeded.")
                         raise ContextWindowExceeded(
                             f"Iterative compression exhausted ({FALLBACK_COMPRESSION_MAX_ROUNDS} rounds) for {inst_name}. "
                             f"Context still exceeds available endpoint limits after aggressive compression. "
-                            f"Original error: context exceeded on '{fcr.failed_endpoint}'."
-                        ) from fcr
+                            f"Original error: context exceeded on '{fcr.failed_endpoint}'.") from fcr
 
                     # If we got here, compression succeeded and payload fits — continue retry loop
                     # llm_messages has been updated in-place by _rebuild_working_set
@@ -1133,13 +1105,9 @@ class LLMCallMixin:
                         break
 
                     # Check if this is a termination-abort error from api_router — exit cleanly without retrying.
-                    _is_termination_abort = (
-                        isinstance(e, RuntimeError) and 
-                        len(e.args) >= 1 and 
-                        e.args[0] and 
-                        'has been terminated' in str(e.args[0])
-                    )
-                
+                    _is_termination_abort = (isinstance(e, RuntimeError) and len(e.args) >= 1 and e.args[0] and
+                                             'has been terminated' in str(e.args[0]))
+
                     if _is_termination_abort:
                         # Instance was terminated — abort LLM call cleanly without retry or error message.
                         logger.debug(f"[TERMINATION] Aborting LLM call for {inst_name} due to instance termination")
@@ -1161,8 +1129,16 @@ class LLMCallMixin:
                         elif isinstance(e, ContextWindowExceeded):
                             display_msg = f"LLM context window exceeded (tried {_max_attempts} times)"
                         else:
-                            display_msg = f"LLM call failed after {_max_attempts} retry attempts — {error_msg}"
-                        logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_max_attempts} retry attempts: {e}")
+                            # Terminal LLM failure — build a human-readable, multi-line message from
+                            # the router's structured .endpoint_failures (plan §3.4). The log line uses
+                            # a compact digest so the full concatenated stack dumps are never re-printed.
+                            display_msg = build_terminal_message(e, _max_attempts)
+                        logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_max_attempts} "
+                                     f"retry attempts: {summarize_exhaustion(e)}")
+                        # Deduped full traceback at DEBUG — this is the user-visible failure point.
+                        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+                            logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
+                                         f"({inst_name}):\n{traceback.format_exc()}")
                         yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
                         error_already_yielded = True
                         break
@@ -1197,7 +1173,8 @@ class LLMCallMixin:
                         # Telemetry: record LLM call end for fatal error (non-blocking)
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         error_msg = str(e).split('\n')[0] if e else 'Unknown error'
-                        logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable error: {e}")
+                        logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable "
+                                       f"error: {summarize_exhaustion(e)}")
                         yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
                         error_already_yielded = True
                         break
@@ -1210,27 +1187,29 @@ class LLMCallMixin:
                     # advance the cursor; other detections (sentence, ngram, block, entropy)
                     # retry the same endpoint. Non-inner-loop errors also retry same endpoint.
                     _det_reason = getattr(e, 'detection_reason', '')
-                    advancing_endpoint = isinstance(e, (MaxTokenExceeded, ContextWindowExceeded)) or (
-                        isinstance(e, CharacterRunDetected) and _det_reason.startswith('character run')
-                    )
+                    advancing_endpoint = isinstance(
+                        e, (MaxTokenExceeded, ContextWindowExceeded)) or (isinstance(e, CharacterRunDetected) and
+                                                                          _det_reason.startswith('character run'))
                     endpoint_str = ' with new endpoint' if advancing_endpoint else ''
 
                     logger.warning(
                         f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_max_attempts}. "
-                        f"Retrying in {backoff:.1f}s{endpoint_str}... Error: {e}"
-                    )
+                        f"Retrying in {backoff:.1f}s{endpoint_str}... {summarize_exhaustion(e)}")
 
-                    # Signal retry to UI before blocking on sleep
-                    yield self._make_retrying_message(instance, retry_count, _max_attempts, backoff)
+                    # Signal retry to UI before blocking on sleep (pass the error so the message
+                    # names the actual cause — e.g. "server error (HTTP 502)" instead of a generic
+                    # "Connection lost"; plan §3.5).
+                    yield self._make_retrying_message(instance, retry_count, _max_attempts, backoff, error=e)
 
                     # Phase 1: Fix A2 — don't sleep past the wall-clock deadline. If there's
                     # no time left, abort now; otherwise cap the backoff to what remains so
                     # the next iteration's top-of-loop check fires promptly.
                     _remaining = _deadline - time.monotonic()
                     if _remaining <= 0:
-                        yield Message(role=ASSISTANT, content=(
-                            f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"
-                        ))
+                        yield Message(
+                            role=ASSISTANT,
+                            content=(
+                                f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
                         error_already_yielded = True
                         break
                     time.sleep(min(backoff, _remaining))
@@ -1240,7 +1219,6 @@ class LLMCallMixin:
             if last_output is not None:
                 with instance._compression_lock:
                     self._update_streaming_responses(instance, last_output)
-
 
             if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
                 if not error_already_yielded:
@@ -1257,9 +1235,7 @@ class LLMCallMixin:
 
     # ═══════════════════════════════════════════════════════════════════════
 
-    def _call_llm_with_injection(
-        self, instance: AgentInstance, llm_messages: List[Message]
-    ) -> Iterator[Message]:
+    def _call_llm_with_injection(self, instance: AgentInstance, llm_messages: List[Message]) -> Iterator[Message]:
         """Delegate to retry logic — now ~15 lines.
 
         Extracted core logic to _execute_llm_call_with_retry() - Phase 3.6
@@ -1283,7 +1259,6 @@ class LLMCallMixin:
         # Delegate to extracted method - Phase 3.6
         yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
 
-
     @staticmethod
     def _build_merged_cfg(llm, instance, endpoint_cfg: dict = None) -> dict:
         """Merge config layers: template defaults → user override → endpoint sampler override.
@@ -1298,10 +1273,10 @@ class LLMCallMixin:
         """
         merged = {}
         if getattr(llm, 'generate_cfg', None):
-            merged.update(llm.generate_cfg)              # Layer 1: template defaults
+            merged.update(llm.generate_cfg)  # Layer 1: template defaults
         override = getattr(instance, '_generate_cfg_override', None)
         if override is not None:
-            merged.update(override)                       # Layer 2: user override
+            merged.update(override)  # Layer 2: user override
 
         # Inject pool-level settings that are read by LLM preprocessing but not sent to API.
         # These live in pool.llm_cfg (set via config handlers) and must be available in
@@ -1317,10 +1292,9 @@ class LLMCallMixin:
             use_custom = endpoint_cfg.get('_use_custom_sampling', True)
             if not use_custom:
                 merged = {k: v for k, v in merged.items() if k not in SAMPLING_AND_LIMIT_KEYS}
-            merged.update(endpoint_cfg)                   # Layer 3: endpoint config (sampler params win)
+            merged.update(endpoint_cfg)  # Layer 3: endpoint config (sampler params win)
 
         return merged
-
 
     @staticmethod
     def _store_allocated_max_input_tokens(instance, cfg: dict) -> None:
@@ -1329,7 +1303,8 @@ class LLMCallMixin:
         if isinstance(val, int) and val > 0:
             instance._allocated_max_input_tokens = val
 
-    def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message], active_functions) -> Iterator[List[Message]]:
+    def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message],
+                          active_functions) -> Iterator[List[Message]]:
         """Execute the actual LLM API call via api_router with failover.
 
         Returns an iterator of List[Message] (each item is the accumulated response).
@@ -1337,8 +1312,16 @@ class LLMCallMixin:
         # Defensive: template.llm may be None for templates without LLM config
         llm = getattr(template, 'llm', None)
         if llm is None:
+
             def _empty_iter():
-                yield [Message(role=ASSISTANT, content=f"[SYSTEM ERROR: Template '{getattr(template, 'name', instance.agent_class)}' has no LLM configured]")]
+                yield [
+                    Message(
+                        role=ASSISTANT,
+                        content=
+                        f"[SYSTEM ERROR: Template '{getattr(template, 'name', instance.agent_class)}' has no LLM configured]"
+                    )
+                ]
+
             return _empty_iter()
 
         if self.pool.api_router and hasattr(self.pool.api_router, 'call_with_fallback'):
@@ -1385,37 +1368,31 @@ class LLMCallMixin:
                                 }
                                 if prev_tokens != val:
                                     endpoint_info['prev_max_input_tokens'] = prev_tokens
-                                    logger.info(
-                                        f"Endpoint allocation updated for {agent_type}: "
-                                        f"{endpoint_info}"
-                                    )
+                                    logger.info(f"Endpoint allocation updated for {agent_type}: "
+                                                f"{endpoint_info}")
                                 else:
                                     pass  # Normal path — no need to log every successful resolution
                             else:
-                                logger.debug(
-                                    f"No endpoint found by ID '{first_ep_id}' for {agent_type}, "
-                                    f"max_input_tokens={val}"
-                                )
+                                logger.debug(f"No endpoint found by ID '{first_ep_id}' for {agent_type}, "
+                                             f"max_input_tokens={val}")
                         else:
-                            logger.debug(
-                                f"No priorities configured for {agent_type}, "
-                                f"max_input_tokens={val}"
-                            )
+                            logger.debug(f"No priorities configured for {agent_type}, "
+                                         f"max_input_tokens={val}")
                 except (KeyError, AttributeError, ValueError):
                     pass  # Fall through to template fallback below
                 except Exception:
-                    logger.warning(f"Failed to resolve max_tokens for {agent_type}, falling back to template", exc_info=True)
+                    logger.warning(f"Failed to resolve max_tokens for {agent_type}, falling back to template",
+                                   exc_info=True)
 
             # Template config as last resort (only used if no override and
             # router unavailable/empty)
-            if allocated_tokens is None and getattr(llm, 'generate_cfg', None) and 'max_input_tokens' in llm.generate_cfg:
+            if allocated_tokens is None and getattr(llm, 'generate_cfg',
+                                                    None) and 'max_input_tokens' in llm.generate_cfg:
                 val = llm.generate_cfg['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     allocated_tokens = val
-                    logger.debug(
-                        f"Template fallback for {agent_type}: "
-                        f"max_input_tokens={val}"
-                    )
+                    logger.debug(f"Template fallback for {agent_type}: "
+                                 f"max_input_tokens={val}")
 
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
                 # Config merge priority (lowest → highest):
@@ -1425,7 +1402,7 @@ class LLMCallMixin:
                 # use_custom_sampling=True) win
                 merged_cfg = self._build_merged_cfg(llm, instance, endpoint_cfg=llm_cfg)
                 merged_cfg['agent_name'] = template.name
-# Cache endpoint config for state save/restore decisions.
+                # Cache endpoint config for state save/restore decisions.
                 # This is the actual endpoint being used (may differ from template
                 # due to fallbacks/load balancing), so state_ops uses this instead
                 # of doing a fresh router lookup by agent_class.
@@ -1462,7 +1439,9 @@ class LLMCallMixin:
             # lifecycle via finally blocks. Also pass instance_name so the router
             # can apply per-instance cursor rotation (kick to next endpoint).
             return self.pool.api_router.call_with_fallback(
-                agent_type, _do_call, allocated_tokens=allocated_tokens,
+                agent_type,
+                _do_call,
+                allocated_tokens=allocated_tokens,
                 agent_instance_name=instance.instance_name,
                 messages=messages,
                 functions=active_functions,

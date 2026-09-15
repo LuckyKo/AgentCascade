@@ -24,32 +24,19 @@ from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Tu
 
 import requests
 
-from agent_cascade.settings import (
-    ENDPOINT_COOLDOWN_SECONDS,
-    ENDPOINT_FAILURE_CLEANUP_HOURS,
-    ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD,
-    ENDPOINT_BLACKLIST_SECONDS,
-    BREAKER_BASE_WINDOW_SECONDS,
-    BREAKER_MAX_WINDOW_SECONDS,
-    BREAKER_WINDOW_GROWTH,
-    SERVER_BUSY_WAIT_CAP_SECONDS,
-    SANITY_PROBE_ENABLED,
-    SANITY_PROBE_TIMEOUT_SECONDS,
-)
-from agent_cascade.exceptions import ContextWindowExceeded, AgentTerminatedError, ServerBusyError
-from agent_cascade.retry_policy import calculate_backoff, RetryPolicy, POLICY_DEFAULT, is_deterministic_client_error
-from agent_cascade.api_router_pkg.endpoints import (
-    APIEndpoint,
-    MAX_CAPTION_LENGTH,
-    RATE_LIMIT_WINDOW_SECONDS,
-    CANONICAL_AGENT_TYPES,
-)
-from agent_cascade.api_router_pkg.scheduler import EndpointScheduler
-from agent_cascade.slot_queue import release_slot_permit
+from agent_cascade.api_router_pkg.endpoints import (CANONICAL_AGENT_TYPES, MAX_CAPTION_LENGTH,
+                                                    RATE_LIMIT_WINDOW_SECONDS, APIEndpoint)
 from agent_cascade.api_router_pkg.helpers import _check_termination, _interruptible_sleep
-from agent_cascade.api_router_pkg.normalization import (
-    normalize_api_base,
-)
+from agent_cascade.api_router_pkg.normalization import normalize_api_base
+from agent_cascade.api_router_pkg.scheduler import EndpointScheduler
+from agent_cascade.error_reporting import TB_DEDUP, format_endpoint_error
+from agent_cascade.exceptions import AgentTerminatedError, ContextWindowExceeded, ServerBusyError
+from agent_cascade.retry_policy import POLICY_DEFAULT, RetryPolicy, calculate_backoff, is_deterministic_client_error
+from agent_cascade.settings import (BREAKER_BASE_WINDOW_SECONDS, BREAKER_MAX_WINDOW_SECONDS, BREAKER_WINDOW_GROWTH,
+                                    ENDPOINT_BLACKLIST_SECONDS, ENDPOINT_COOLDOWN_SECONDS,
+                                    ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD, ENDPOINT_FAILURE_CLEANUP_HOURS,
+                                    SANITY_PROBE_ENABLED, SANITY_PROBE_TIMEOUT_SECONDS, SERVER_BUSY_WAIT_CAP_SECONDS)
+from agent_cascade.slot_queue import release_slot_permit
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids circular import
     from agent_cascade.agent_instance import AgentInstance
@@ -70,6 +57,7 @@ def _get_probe_session() -> requests.Session:
         session = requests.Session()
         _probe_session_local.session = session
     return session
+
 
 # A1/A2 gate safety factor for server-reported context windows (n_ctx). llama.cpp rejects
 # at roughly n_prompt >= n_ctx - n_predict_reserve, so a payload that provably exceeds
@@ -106,9 +94,10 @@ class APIRouter:
         """
         self.default_llm_cfg = default_llm_cfg
         self.policy = policy or POLICY_DEFAULT
-        self.endpoints: Dict[str, APIEndpoint] = {}           # id → endpoint
-        self.agent_priorities: Dict[str, List[str]] = {}      # agent_type → [endpoint_ids]
-        self._agent_types_with_priorities: set = set()        # Agent types with active endpoint priorities (gates Tier 3 last-successful fallback)
+        self.endpoints: Dict[str, APIEndpoint] = {}  # id → endpoint
+        self.agent_priorities: Dict[str, List[str]] = {}  # agent_type → [endpoint_ids]
+        self._agent_types_with_priorities: set = set(
+        )  # Agent types with active endpoint priorities (gates Tier 3 last-successful fallback)
         self._lock = threading.Lock()
         self._pool = None  # Set externally by AgentPool when router is attached
 
@@ -218,16 +207,15 @@ class APIRouter:
             # Get the api_base before deleting to clean up related state
             endpoint_api_base = self.endpoints[endpoint_id].api_base
             del self.endpoints[endpoint_id]
-            
+
             # Clean up rate limit history for this endpoint's api_base
             if endpoint_api_base in self._endpoint_call_history:
                 del self._endpoint_call_history[endpoint_api_base]
-            
+
             # Also clean up any agent_priorities referencing this endpoint
             for agent_type in list(self.agent_priorities.keys()):
                 self.agent_priorities[agent_type] = [
-                    eid for eid in self.agent_priorities[agent_type]
-                    if eid != endpoint_id
+                    eid for eid in self.agent_priorities[agent_type] if eid != endpoint_id
                 ]
                 # Remove empty lists and clean up tracking set
                 if not self.agent_priorities[agent_type]:
@@ -244,7 +232,9 @@ class APIRouter:
         if self._instance_endpoint_position:
             cleared = len(self._instance_endpoint_position)
             self._instance_endpoint_position.clear()
-            logger.debug(f"[APIRouter] {reason} — reset {cleared} instance endpoint cursor(s) (stale positional cursors invalidated).")
+            logger.debug(
+                f"[APIRouter] {reason} — reset {cleared} instance endpoint cursor(s) (stale positional cursors invalidated)."
+            )
 
     def update_endpoint(self, endpoint_id: str, updates: dict) -> bool:
         """Partially update an existing endpoint. Returns True if found."""
@@ -262,8 +252,7 @@ class APIRouter:
             # idempotent: a reset cursor just means "re-try top priority," which is correct after
             # any endpoint change (mirrors the from_dict FIX-2a reset).
             self._reset_instance_cursors(
-                f"[APIRouter.update_endpoint] Endpoint '{endpoint_id}' updated ({list(updates.keys())})"
-            )
+                f"[APIRouter.update_endpoint] Endpoint '{endpoint_id}' updated ({list(updates.keys())})")
 
             self._save()
             return True
@@ -282,29 +271,29 @@ class APIRouter:
     def set_agent_priorities(self, agent_type: str, endpoint_ids: List[str]):
         """
         Set the priority-ordered endpoint list for an agent type.
-        
+
         Performs case-insensitive key normalization to prevent duplicate keys
         when frontend (PascalCase) and backend (lowercase) both update priorities.
         """
         with self._lock:
             # Normalize to canonical case (existing key or input as-is)
             canonical = self._normalize_agent_type(agent_type)
-            
+
             # If normalized key differs from input and input exists, remove it to prevent duplicates
             if canonical != agent_type and agent_type in self.agent_priorities:
                 del self.agent_priorities[agent_type]
                 self._agent_types_with_priorities.discard(agent_type)
-            
+
             # Validate that all IDs exist
             valid_ids = [eid for eid in endpoint_ids if eid in self.endpoints]
             filtered_count = len(endpoint_ids) - len(valid_ids)
-            
+
             if valid_ids:
                 self.agent_priorities[canonical] = valid_ids
                 self._agent_types_with_priorities.add(canonical)  # Track that this agent type was configured
                 logger.info(f"[APIRouter.set_agent_priorities] {canonical} → {valid_ids} "
-                           f"({'filtered ' + str(filtered_count) + ' invalid IDs, ' if filtered_count else ''}"
-                           f"canonical key: {canonical})")
+                            f"({'filtered ' + str(filtered_count) + ' invalid IDs, ' if filtered_count else ''}"
+                            f"canonical key: {canonical})")
             elif canonical in self.agent_priorities:
                 del self.agent_priorities[canonical]
                 self._agent_types_with_priorities.discard(canonical)
@@ -313,19 +302,17 @@ class APIRouter:
                 # sees "old config" behavior. Surface it loudly so it is not missed.
                 invalid_ids = [eid for eid in endpoint_ids if eid not in self.endpoints]
                 logger.warning(f"[APIRouter.set_agent_priorities] ALL endpoint IDs invalid for "
-                              f"'{agent_type}', priorities removed. Invalid IDs: {invalid_ids}")
+                               f"'{agent_type}', priorities removed. Invalid IDs: {invalid_ids}")
             else:
                 logger.debug(f"[APIRouter.set_agent_priorities] No action for {agent_type} "
-                            f"(no valid IDs, no existing priorities)")
+                             f"(no valid IDs, no existing priorities)")
 
             # FIX (priority-swap cursor): the per-instance cursor is a POSITIONAL index into
             # the tier chain — reordering/replacing an agent's priority list invalidates every
             # stale positional cursor (it would point at the WRONG endpoint, or out of range if
             # the new chain is shorter). Reset ALL instance cursors under the lock so a live
             # reorder never leaves a dangling rotation behind (mirrors the from_dict FIX-2a reset).
-            self._reset_instance_cursors(
-                f"[APIRouter.set_agent_priorities] Priorities changed for '{canonical}'"
-            )
+            self._reset_instance_cursors(f"[APIRouter.set_agent_priorities] Priorities changed for '{canonical}'")
 
             self._save()
 
@@ -376,7 +363,7 @@ class APIRouter:
         Returns 0 as a conservative default when the default config specifies an
         api_base but no matching endpoint exists in self.endpoints — this prevents
         unexpected parallel launches on unknown endpoints.
-        
+
         Args:
             agent_type: The agent type to resolve concurrency for
         """
@@ -386,11 +373,9 @@ class APIRouter:
 
             if own_endpoints:
                 eid, ep = own_endpoints[0]
-                logger.debug(
-                    f"[ENDPOINT_CONCURRENCY] get_effective_concurrency — "
-                    f"agent_type={agent_type}, endpoint_id={eid}, "
-                    f"concurrency_limit={ep.concurrency_limit}"
-                )
+                logger.debug(f"[ENDPOINT_CONCURRENCY] get_effective_concurrency — "
+                             f"agent_type={agent_type}, endpoint_id={eid}, "
+                             f"concurrency_limit={ep.concurrency_limit}")
                 return ep.concurrency_limit
 
             # Tier 3+: Fall back to default endpoint by api_base
@@ -405,7 +390,7 @@ class APIRouter:
             return 0
         # Truly no config at all — unlimited
         return -1
-    
+
     def get_agent_slot_info(self, agent_class: str) -> dict:
         """Get the slot type that an agent_class would use.
 
@@ -555,10 +540,8 @@ class APIRouter:
 
             # ── Sticky-keep: already holding exactly what is wanted. ──
             if desired_key is not None and held_key == desired_key and held_release is not None:
-                logger.debug(
-                    f"[SLOTPOOL] instance={inst_name} pool={desired_key} "
-                    f"action=sticky-keep waiters={self._pool_waiter_count(desired_key)}{origin_suffix}"
-                )
+                logger.debug(f"[SLOTPOOL] instance={inst_name} pool={desired_key} "
+                             f"action=sticky-keep waiters={self._pool_waiter_count(desired_key)}{origin_suffix}")
                 return True
 
             # ── Side-calls: acquire-or-keep for their own pool. ──
@@ -607,9 +590,8 @@ class APIRouter:
         if desired_key is None or not needs_slot:
             return False
 
-        return self._acquire_and_store_sticky_slot(
-            instance, inst_name, agent_class, desired_key, resolved, origin_suffix
-        )
+        return self._acquire_and_store_sticky_slot(instance, inst_name, agent_class, desired_key, resolved,
+                                                   origin_suffix)
 
     def _resolve_sticky_target(
         self,
@@ -700,10 +682,8 @@ class APIRouter:
             instance._slot_release = release_cb
             instance._slot_key = desired_key
 
-        logger.debug(
-            f"[SLOTPOOL] instance={inst_name} pool={desired_key} "
-            f"action=acquire-grant waiters={self._pool_waiter_count(desired_key)}{origin_suffix}"
-        )
+        logger.debug(f"[SLOTPOOL] instance={inst_name} pool={desired_key} "
+                     f"action=acquire-grant waiters={self._pool_waiter_count(desired_key)}{origin_suffix}")
         return True
 
     def _drop_held_permit(self, instance: 'AgentInstance', inst_name: str, old_key: str,
@@ -760,11 +740,9 @@ class APIRouter:
             )
             raise
 
-        logger.debug(
-            f"[SLOTPOOL] instance={inst_name} pool={old_key} "
-            f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}"
-            + (f" origin={origin}" if origin and origin != 'sticky' else '')
-        )
+        logger.debug(f"[SLOTPOOL] instance={inst_name} pool={old_key} "
+                     f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}" +
+                     (f" origin={origin}" if origin and origin != 'sticky' else ''))
 
     def _pool_waiter_count(self, slot_key: Optional[str]) -> int:
         """Snapshot the waiter count for a pool (short critical section)."""
@@ -796,7 +774,7 @@ class APIRouter:
     def get_effective_max_tokens(self, agent_type: str) -> int:
         """
         Returns the effective max_input_tokens for an agent type.
-        
+
         Uses the per-endpoint value if configured, otherwise falls back to
         the general settings value. The general settings is a fallback only,
         not a hard cap — each agent type keeps its own configured limit.
@@ -811,16 +789,16 @@ class APIRouter:
         with self._lock:
             defaults = self.default_llm_cfg or {}
             general_limit = defaults.get('max_input_tokens', 0)
-            
+
             # Normalize agent_type for case-insensitive lookup (Fix Finding 1)
             normalized_agent_type = self._normalize_agent_type(agent_type)
-            
+
             for eid in self.agent_priorities.get(normalized_agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
                     ep_limit = ep.max_input_tokens
                     break
-        
+
         # Use endpoint-specific limit; fall back to general settings only when endpoint has none configured
         if ep_limit > 0:
             return ep_limit
@@ -831,38 +809,38 @@ class APIRouter:
     def _normalize_agent_type(self, agent_type: str) -> str:
         """
         Normalize agent_type for case-insensitive lookup.
-        
+
         Frontend stores priorities with PascalCase keys (e.g., "Coder", "Security")
         while backend uses lowercase during streaming (e.g., "coder", "security").
         This method performs case-insensitive lookup to ensure live updates work.
-        
+
         Returns the canonical key from agent_priorities if found, otherwise returns
         the canonical form from CANONICAL_AGENT_TYPES or the original agent_type.
-        
+
         CONTRACT: Must be called under self._lock to prevent concurrent modification.
         """
         # Fix Finding 4: Strip whitespace before processing
         if not agent_type:
             return agent_type
-        
+
         agent_type = agent_type.strip()
         if not agent_type:
             return agent_type
-        
+
         agent_type_lower = agent_type.lower()
-        
+
         # Fix Finding 2: Take a snapshot of keys to prevent concurrent modification issues
         existing_keys_snapshot = list(self.agent_priorities.keys())
-        
+
         # Try exact match first (fastest path)
         if agent_type in self.agent_priorities:
             return agent_type
-        
+
         # Case-insensitive fallback - check existing keys first
         for key in existing_keys_snapshot:
             if key.lower() == agent_type_lower:
                 return key
-        
+
         # If no match found, return the canonical form (Fix Finding 3)
         # This ensures consistent behavior across restarts regardless of source ordering
         return CANONICAL_AGENT_TYPES.get(agent_type_lower, agent_type)
@@ -911,7 +889,7 @@ class APIRouter:
         with self._lock:
             defaults = self.default_llm_cfg or {}
             general_limit = defaults.get('max_input_tokens', 0)
-            
+
             own_endpoints, _had_own = self._resolve_own_endpoints(agent_type)
 
             # Normalize for downstream checks
@@ -951,10 +929,9 @@ class APIRouter:
                     # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
                     # it would otherwise be appended here AND again as the default below.
                     _default_cfg = self.default_llm_cfg or {}
-                    _is_default = (
-                        normalize_api_base(_default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == _la_base
-                        and _default_cfg.get('model') == _la_model
-                    )
+                    _is_default = (normalize_api_base(
+                        _default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == _la_base and
+                                   _default_cfg.get('model') == _la_model)
                     if not _is_default:
                         for ep in self.endpoints.values():
                             if normalize_api_base(ep.api_base) == _la_base and ep.model == _la_model and ep.enabled:
@@ -965,13 +942,17 @@ class APIRouter:
 
                                 # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
                                 endpoint_configs.append(cfg)
-                                logger.debug(f"[APIRouter] {agent_type}/{instance_name}: using last-active endpoint '{_la_model}' @ {_la_base}")
+                                logger.debug(
+                                    f"[APIRouter] {agent_type}/{instance_name}: using last-active endpoint '{_la_model}' @ {_la_base}"
+                                )
                                 break
 
             # Tier 3: Last successful endpoint fallback — only for agents that ever had priorities configured
             if not endpoint_configs and self._last_successful_endpoint_cfg is not None:
                 if normalized_agent_type not in self._agent_types_with_priorities:
-                    logger.debug(f"[APIRouter] Skipping Tier 3 fallback for '{normalized_agent_type}' (no priorities configured)")
+                    logger.debug(
+                        f"[APIRouter] Skipping Tier 3 fallback for '{normalized_agent_type}' (no priorities configured)"
+                    )
                 else:
                     last_success_cfg = self._last_successful_endpoint_cfg
                     # Validate last successful endpoint still exists and is enabled
@@ -1004,26 +985,20 @@ class APIRouter:
                     blacklist_expiry = self._endpoint_blacklist.get(cooldown_key, 0)
                     if blacklist_expiry > now:
                         skipped_count += 1
-                        logger.debug(
-                            f"[APIRouter] Skipping endpoint '{cfg.get('model', 'unknown')}' @ {cfg_base} "
-                            f"(blacklisted for {int(blacklist_expiry - now)}s more)"
-                        )
+                        logger.debug(f"[APIRouter] Skipping endpoint '{cfg.get('model', 'unknown')}' @ {cfg_base} "
+                                     f"(blacklisted for {int(blacklist_expiry - now)}s more)")
                         continue
                     last_fail = self._endpoint_failure_times.get(cooldown_key, 0)
                     if cfg_base and (now - last_fail) < ENDPOINT_COOLDOWN_SECONDS:
                         skipped_count += 1
-                        logger.debug(
-                            f"[APIRouter] Skipping endpoint '{cfg.get('model', 'unknown')}' @ {cfg_base} "
-                            f"in cooldown ({ENDPOINT_COOLDOWN_SECONDS - int(now - last_fail)}s remaining)"
-                        )
+                        logger.debug(f"[APIRouter] Skipping endpoint '{cfg.get('model', 'unknown')}' @ {cfg_base} "
+                                     f"in cooldown ({ENDPOINT_COOLDOWN_SECONDS - int(now - last_fail)}s remaining)")
                     else:
                         filtered_configs.append(cfg)
                 if skipped_count > 0:
                     endpoint_configs = filtered_configs if filtered_configs else []
-                    logger.info(
-                        f"[APIRouter] Endpoint cooldown: skipped {skipped_count} endpoint(s), "
-                        f"{len(endpoint_configs)} available for '{normalized_agent_type}'"
-                    )
+                    logger.info(f"[APIRouter] Endpoint cooldown: skipped {skipped_count} endpoint(s), "
+                                f"{len(endpoint_configs)} available for '{normalized_agent_type}'")
 
             # Tier 4: Always append the default as last resort — inside lock so cursor rotation reads atomically
             if self.default_llm_cfg is not None:
@@ -1036,7 +1011,7 @@ class APIRouter:
                 if not isinstance(default_cfg.get('max_input_tokens'), int) or default_cfg['max_input_tokens'] <= 0:
                     default_cfg['max_input_tokens'] = general_limit if general_limit > 0 else 0
                 endpoint_configs.append(default_cfg)
-            
+
             # NOTE: every cfg in the returned chain carries an int max_input_tokens
             # (injected above for Tier-4; set by to_llm_cfg() for tiers 1/3). The default's
             # limit is intentionally NOT inflated with allocated_tokens (see Tier-1 note above).
@@ -1065,13 +1040,11 @@ class APIRouter:
                         rotated_tiers = tier_configs[effective_cursor:] + tier_configs[:effective_cursor]
                         endpoint_configs = rotated_tiers + [default_cfg]
                         logger.debug(f"[APIRouter] Endpoint cursor for '{instance_name}' rotated by {effective_cursor}")
-                         
+
         # Validate: no endpoint configured at all
         if not endpoint_configs:
-            raise ValueError(
-                f"No LLM endpoint configured for agent type '{agent_type}'. "
-                f"Set endpoints in General Settings or assign endpoints to this agent type."
-            )
+            raise ValueError(f"No LLM endpoint configured for agent type '{agent_type}'. "
+                             f"Set endpoints in General Settings or assign endpoints to this agent type.")
 
         # Validate: only config available is incomplete (missing both api_base and model)
         if len(endpoint_configs) == 1:
@@ -1081,21 +1054,15 @@ class APIRouter:
             if not has_api_base and not has_model:
                 raise ValueError(
                     f"No usable LLM endpoint configured for agent type '{agent_type}'. "
-                    f"Configure api_base and model in General Settings or assign endpoints to this agent type."
-                )
+                    f"Configure api_base and model in General Settings or assign endpoints to this agent type.")
 
         # Validate: at least one config in the chain has required fields (multi-config case)
         if endpoint_configs:
-            has_valid = any(
-                bool(cfg.get('api_base') or cfg.get('model_server'))
-                for cfg in endpoint_configs
-            )
+            has_valid = any(bool(cfg.get('api_base') or cfg.get('model_server')) for cfg in endpoint_configs)
             if not has_valid:
-                raise ValueError(
-                    f"No usable LLM endpoint configured for agent type '{agent_type}'. "
-                    f"All endpoints in the fallback chain are missing api_base. "
-                    f"Configure endpoints in General Settings or assign endpoints to this agent type."
-                )
+                raise ValueError(f"No usable LLM endpoint configured for agent type '{agent_type}'. "
+                                 f"All endpoints in the fallback chain are missing api_base. "
+                                 f"Configure endpoints in General Settings or assign endpoints to this agent type.")
 
         return endpoint_configs
 
@@ -1146,18 +1113,13 @@ class APIRouter:
                 return (True, False)
             elif resp.status_code in (401, 403):
                 logger.warning(
-                    f"[SanityProbe] Endpoint {api_base} rejected probe with auth error (HTTP {resp.status_code})"
-                )
+                    f"[SanityProbe] Endpoint {api_base} rejected probe with auth error (HTTP {resp.status_code})")
                 return (False, False)
             elif resp.status_code == 404:
-                logger.warning(
-                    f"[SanityProbe] Endpoint {api_base} models endpoint not found (HTTP 404)"
-                )
+                logger.warning(f"[SanityProbe] Endpoint {api_base} models endpoint not found (HTTP 404)")
                 return (False, False)
             else:
-                logger.warning(
-                    f"[SanityProbe] Endpoint {api_base} returned HTTP {resp.status_code}"
-                )
+                logger.warning(f"[SanityProbe] Endpoint {api_base} returned HTTP {resp.status_code}")
                 return (False, False)
         except requests.exceptions.RequestException as e:
             # Connection-level failure: no HTTP response was received at all. The host is
@@ -1169,9 +1131,7 @@ class APIRouter:
             logger.warning(f"[SanityProbe] Unexpected probe error for {api_base}: {e}")
             return (False, False)
 
-    def pre_validate_endpoint_chain(
-        self, chain: List[dict], instance_name: Optional[str] = None
-    ) -> List[dict]:
+    def pre_validate_endpoint_chain(self, chain: List[dict], instance_name: Optional[str] = None) -> List[dict]:
         """Filter the endpoint chain by running sanity probes on endpoints that need one.
 
         Chain-level form of the lazy per-endpoint probes in call_with_fallback's loop;
@@ -1217,10 +1177,8 @@ class APIRouter:
             # breaker). The endpoint stays in the chain for the breaker machinery to handle
             # (single-probe recovery). ──
             if self._breaker_is_open(cfg_base):
-                logger.debug(
-                    f"[APIRouter] Skipping sanity validation for '{model}' @ {cfg_base} "
-                    f"(server breaker open — leaving to breaker/fallback machinery)"
-                )
+                logger.debug(f"[APIRouter] Skipping sanity validation for '{model}' @ {cfg_base} "
+                             f"(server breaker open — leaving to breaker/fallback machinery)")
                 validated.append(cfg)
                 continue
 
@@ -1251,19 +1209,15 @@ class APIRouter:
             # expiry timeout already bounds how long this matters, and a genuinely dead endpoint is
             # caught by the next real call's connection timeout.
             if is_live and not blacklisted:
-                logger.debug(
-                    f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
-                    f"(instance '{instance_name}' holds a live connection — fast path)"
-                )
+                logger.debug(f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
+                             f"(instance '{instance_name}' holds a live connection — fast path)")
                 validated.append(cfg)
                 continue
 
             # ── Blacklisted (Fix B1) — drop without probing (blacklist takes precedence). ──
             if blacklisted:
-                logger.debug(
-                    f"[APIRouter] Skipping endpoint '{model}' @ {cfg_base} "
-                    f"(blacklisted — no sanity probe)"
-                )
+                logger.debug(f"[APIRouter] Skipping endpoint '{model}' @ {cfg_base} "
+                             f"(blacklisted — no sanity probe)")
                 continue
 
             # ── Network probe (NO lock held — safe for I/O) — at most ONE per fresh acquisition. ──
@@ -1277,10 +1231,8 @@ class APIRouter:
             # machinery to handle rather than dropping it — a cached/recorded "fail" would
             # remove it entirely, breaking failover.
             if success and self._breaker_is_open(cfg_base):
-                logger.debug(
-                    f"[APIRouter] Keeping '{model}' @ {cfg_base} in chain "
-                    f"(server breaker tripped open during probe — leaving to breaker machinery)"
-                )
+                logger.debug(f"[APIRouter] Keeping '{model}' @ {cfg_base} in chain "
+                             f"(server breaker tripped open during probe — leaving to breaker machinery)")
                 validated.append(cfg)
                 continue
 
@@ -1306,27 +1258,19 @@ class APIRouter:
                     with self._lock:
                         self._cleanup_stale_failure_records(time.time())
                         self._endpoint_failure_times[key] = time.time()
-                logger.info(
-                    f"[APIRouter] Endpoint '{model}' @ {cfg_base} "
-                    f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s)."
-                )
+                logger.info(f"[APIRouter] Endpoint '{model}' @ {cfg_base} "
+                            f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s).")
 
         # If ALL endpoints failed validation, raise a clear error instead of returning
         # an empty chain (which would degrade to the generic exhaustion error in
         # call_with_fallback with no per-endpoint detail). The message carries the full
         # endpoint list so the failure is explicit and loggable.
         if not validated:
-            details = '; '.join(
-                f"{cfg.get('model', 'unknown')} @ {cfg.get('api_base') or cfg.get('model_server', '')}"
-                for cfg in chain
-            )
-            logger.error(
-                f"[APIRouter] All endpoints failed sanity probe validation: {details}. "
-                f"Refusing to allocate — check endpoint configuration."
-            )
-            raise RuntimeError(
-                f"All API endpoints failed pre-allocation sanity probe: {details}."
-            )
+            details = '; '.join(f"{cfg.get('model', 'unknown')} @ {cfg.get('api_base') or cfg.get('model_server', '')}"
+                                for cfg in chain)
+            logger.error(f"[APIRouter] All endpoints failed sanity probe validation: {details}. "
+                         f"Refusing to allocate — check endpoint configuration.")
+            raise RuntimeError(f"All API endpoints failed pre-allocation sanity probe: {details}.")
 
         return validated
 
@@ -1357,10 +1301,8 @@ class APIRouter:
         with self._lock:
             pos = self._instance_endpoint_position.get(instance_name, 0) + 1
             self._instance_endpoint_position[instance_name] = pos
-            logger.debug(
-                f"[APIRouter] Endpoint cursor advanced for '{instance_name}': "
-                f"position {pos - 1} → {pos}. Next call will skip past this endpoint."
-            )
+            logger.debug(f"[APIRouter] Endpoint cursor advanced for '{instance_name}': "
+                         f"position {pos - 1} → {pos}. Next call will skip past this endpoint.")
         return pos
 
     def reset_instance_endpoint(self, instance_name: str) -> None:
@@ -1370,10 +1312,8 @@ class APIRouter:
         with self._lock:
             old_pos = self._instance_endpoint_position.pop(instance_name, None)
             if old_pos is not None and old_pos > 0:
-                logger.debug(
-                    f"[APIRouter] Endpoint cursor reset for '{instance_name}': "
-                    f"position {old_pos} → 0 (cleaned up)."
-                )
+                logger.debug(f"[APIRouter] Endpoint cursor reset for '{instance_name}': "
+                             f"position {old_pos} → 0 (cleaned up).")
 
     @staticmethod
     def _is_context_exceeded_error(error: Exception) -> bool:
@@ -1410,19 +1350,17 @@ class APIRouter:
 
         # llama.cpp and similar servers: HTTP 400 with context-size patterns
         if code == '400' and any(
-            pattern in combined
-            for pattern in ('exceed_context_size', 'context length', 'maximum input context', 'context window')
-        ):
+                pattern in combined
+                for pattern in ('exceed_context_size', 'context length', 'maximum input context', 'context window')):
             return True
 
         # Generic patterns from various servers.
         # Only trusted on HTTP 400: free-text phrases in a 5xx body (e.g. "max_tokens exceeded"
         # inside an upstream error payload) are NOT evidence of caller overflow — treating them as
         # context-exceeded would trigger fallback compression off a service failure.
-        if code == '400' and any(
-            pattern in combined
-            for pattern in ('prompt is too long', 'input tokens exceed', 'max_tokens exceeded', 'exceeds the context limit')
-        ):
+        if code == '400' and any(pattern in combined
+                                 for pattern in ('prompt is too long', 'input tokens exceed', 'max_tokens exceeded',
+                                                 'exceeds the context limit')):
             return True
 
         return False
@@ -1450,8 +1388,7 @@ class APIRouter:
             # 1. Structured read of the decoded HTTP body.
             candidates = []
             seen = set()
-            for obj in (error, getattr(error, 'exception', None),
-                        getattr(error, '__cause__', None)):
+            for obj in (error, getattr(error, 'exception', None), getattr(error, '__cause__', None)):
                 if obj is not None and id(obj) not in seen:
                     seen.add(id(obj))
                     candidates.append(obj)
@@ -1463,7 +1400,8 @@ class APIRouter:
                         inner = body  # tolerate flat bodies without the 'error' wrapper
                     n_prompt = inner.get('n_prompt_tokens')
                     n_ctx = inner.get('n_ctx')
-                    n_prompt = int(n_prompt) if isinstance(n_prompt, (int, float)) and not isinstance(n_prompt, bool) else None
+                    n_prompt = int(n_prompt) if isinstance(n_prompt,
+                                                           (int, float)) and not isinstance(n_prompt, bool) else None
                     n_ctx = int(n_ctx) if isinstance(n_ctx, (int, float)) and not isinstance(n_ctx, bool) else None
                     if n_prompt is not None or n_ctx is not None:
                         return (n_prompt, n_ctx)
@@ -1494,7 +1432,7 @@ class APIRouter:
         if not messages:
             return 0
         try:
-            from agent_cascade.utils.utils import get_message_stats, estimate_functions_tokens
+            from agent_cascade.utils.utils import estimate_functions_tokens, get_message_stats
             total = 0
             for m in messages:
                 # Skip values that can leak via JSON parsing/logger recovery (mirrors base.py chat())
@@ -1522,15 +1460,15 @@ class APIRouter:
         if stale_keys:
             for key in stale_keys:
                 del self._endpoint_failure_times[key]
-            logger.debug(
-                f"[APIRouter] Cleaned up {len(stale_keys)} stale endpoint failure record(s) "
-                f"(older than {ENDPOINT_FAILURE_CLEANUP_HOURS}h)"
-            )
+            logger.debug(f"[APIRouter] Cleaned up {len(stale_keys)} stale endpoint failure record(s) "
+                         f"(older than {ENDPOINT_FAILURE_CLEANUP_HOURS}h)")
 
         # Clean up stale deterministic failure counts (Fix B1) — same staleness rule as the
         # cooldown records they accompany. And drop expired blacklist entries outright.
-        stale_det = [k for k in self._endpoint_deterministic_failures
-                     if now - self._endpoint_failure_times.get(k, 0) > ENDPOINT_FAILURE_CLEANUP_HOURS * 3600]
+        stale_det = [
+            k for k in self._endpoint_deterministic_failures
+            if now - self._endpoint_failure_times.get(k, 0) > ENDPOINT_FAILURE_CLEANUP_HOURS * 3600
+        ]
         for k in stale_det:
             del self._endpoint_deterministic_failures[k]
 
@@ -1553,12 +1491,8 @@ class APIRouter:
         if isinstance(error, ModelServiceError) and str(getattr(error, 'code', None)) == '503':
             return True
         err_str = str(error).lower()
-        return (
-            'failed to load model' in err_str
-            or 'failed to start' in err_str
-            or 'model load error' in err_str
-            or 'loading of model' in err_str
-        )
+        return ('failed to load model' in err_str or 'failed to start' in err_str or 'model load error' in err_str or
+                'loading of model' in err_str)
 
     def _breaker_trip(self, base_key: str, reason: str) -> None:
         """Trip or re-trip (with grown window) the breaker for a normalized base.
@@ -1578,10 +1512,8 @@ class APIRouter:
             'window': window,
             'probing': False,
         }
-        logger.warning(
-            f"[APIRouter] Server breaker OPEN for {base_key} "
-            f"(window={window:.0f}s): {reason}"
-        )
+        logger.warning(f"[APIRouter] Server breaker OPEN for {base_key} "
+                       f"(window={window:.0f}s): {reason}")
 
     def _record_server_busy(self, base_key: str, error: Exception) -> None:
         """Record a SERVER_BUSY_LOADING failure for a base (trip / grow breaker).
@@ -1623,10 +1555,8 @@ class APIRouter:
                     # (used by call_with_fallback's finally to release) checks probe_owner == get_ident().
                     br['probing'] = True
                     br['probe_owner'] = threading.get_ident()
-                    logger.info(
-                        f"[APIRouter] Server breaker {key}: open → half_open "
-                        f"(claiming exactly one probe)"
-                    )
+                    logger.info(f"[APIRouter] Server breaker {key}: open → half_open "
+                                f"(claiming exactly one probe)")
                     return False  # this caller won the single-probe claim — proceed
                 return True  # still inside the open window
             # 'half_open': skip unless this caller wins the atomic probe claim.
@@ -1637,10 +1567,8 @@ class APIRouter:
                 return True  # another caller holds THE single probe slot
             br['probing'] = True
             br['probe_owner'] = threading.get_ident()
-            logger.info(
-                f"[APIRouter] Server breaker {key}: half_open probe claimed "
-                f"(exactly one caller may fire HTTP)"
-            )
+            logger.info(f"[APIRouter] Server breaker {key}: half_open probe claimed "
+                        f"(exactly one caller may fire HTTP)")
             return False  # this caller won the single-probe claim — proceed
 
     def _breaker_claim_probe(self, base: str) -> bool:
@@ -1710,19 +1638,16 @@ class APIRouter:
             remaining = br['window'] - (time.monotonic() - br['opened_at'])
             return max(0.0, remaining)
 
-
     # ── Retry + Fallback Execution ───────────────────────────────────────
 
-    def call_with_fallback(
-        self,
-        agent_type: str,
-        call_fn: Callable,
-        *args,
-        allocated_tokens: Optional[int] = None,
-        messages: Optional[list] = None,
-        functions: Optional[list] = None,
-        **kwargs
-    ) -> Any:
+    def call_with_fallback(self,
+                           agent_type: str,
+                           call_fn: Callable,
+                           *args,
+                           allocated_tokens: Optional[int] = None,
+                           messages: Optional[list] = None,
+                           functions: Optional[list] = None,
+                           **kwargs) -> Any:
         """
         Execute ``call_fn(*args, **kwargs)`` with automatic endpoint fallback.
         Supports both regular functions and generators.
@@ -1765,7 +1690,9 @@ class APIRouter:
         # implicit-continued to cycle 1, swallowing the raise). Running the wait once up
         # front keeps the endpoint loop a single pass that hits its natural exhaustion raise.
         chain = self.get_endpoint_chain(
-            agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
+            agent_type,
+            allocated_tokens=allocated_tokens,
+            instance_name=_inst_name,
         )
 
         # FIX (Tier-4 visibility): the "only the global default will be used" log is emitted
@@ -1785,10 +1712,8 @@ class APIRouter:
             _t4_cfg = chain[0]
             _t4_model = _t4_cfg.get('model', 'unknown')
             _t4_base = _t4_cfg.get('api_base') or _t4_cfg.get('model_server', 'unknown')
-            logger.info(
-                f"[APIRouter] {agent_type}: no effective endpoints, using global default "
-                f"'{_t4_model}' @ {_t4_base}"
-            )
+            logger.info(f"[APIRouter] {agent_type}: no effective endpoints, using global default "
+                        f"'{_t4_model}' @ {_t4_base}")
             _tier4_only_logged = True
 
         # ── Fix D: sanity probe is LAZY — each endpoint is probed at most once, just before
@@ -1802,24 +1727,15 @@ class APIRouter:
         # loop re-consults, sees half_open/probing, skips the busy base, and the claimed probe
         # never fires. Only the endpoint loop's consult may claim it.
         if chain and all(
-            self._breaker_is_open(
-                cfg.get('api_base') or cfg.get('model_server', 'unknown')
-            )
-            for cfg in chain
-        ):
+                self._breaker_is_open(cfg.get('api_base') or cfg.get('model_server', 'unknown')) for cfg in chain):
             remaining = max(
-                self._breaker_wait_seconds_remaining(
-                    cfg.get('api_base') or cfg.get('model_server', 'unknown')
-                )
-                for cfg in chain
-            )
+                self._breaker_wait_seconds_remaining(cfg.get('api_base') or cfg.get('model_server', 'unknown'))
+                for cfg in chain)
             wait = min(remaining, SERVER_BUSY_WAIT_CAP_SECONDS)
             if wait > 0:
-                logger.warning(
-                    f"[APIRouter] All endpoints for '{agent_type}' are on breaker-open servers. "
-                    f"Failing fast: waiting {wait:.1f}s (cap {SERVER_BUSY_WAIT_CAP_SECONDS:.0f}s) "
-                    f"before retrying — zero HTTP requests while busy."
-                )
+                logger.warning(f"[APIRouter] All endpoints for '{agent_type}' are on breaker-open servers. "
+                               f"Failing fast: waiting {wait:.1f}s (cap {SERVER_BUSY_WAIT_CAP_SECONDS:.0f}s) "
+                               f"before retrying — zero HTTP requests while busy.")
                 try:
                     # Termination-aware sleep (D1 requirement).
                     _interruptible_sleep(wait, self._pool, _inst_name)
@@ -1852,10 +1768,8 @@ class APIRouter:
                 # move on. Mirrors the probe-failure branch below except it does not fire a
                 # request that would also fail. ──
                 if normalize_api_base(_probe_base) in _probe_failed_bases:
-                    logger.debug(
-                        f"[APIRouter] Skipping probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                        f"(same base already failed with connection error this pass)"
-                    )
+                    logger.debug(f"[APIRouter] Skipping probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                 f"(same base already failed with connection error this pass)")
                     if ENDPOINT_COOLDOWN_SECONDS > 0:
                         with self._lock:
                             self._cleanup_stale_failure_records(time.time())
@@ -1864,20 +1778,16 @@ class APIRouter:
                     # non-default endpoint, log that only the global default remains.
                     if not _tier4_only_logged and cfg_idx == len(chain) - 2:
                         _t4 = chain[-1]
-                        logger.info(
-                            f"[APIRouter] {agent_type}: no effective endpoints "
-                            f"(all filtered/exhausted), using global default "
-                            f"'{_t4.get('model', 'unknown')}' @ "
-                            f"{_t4.get('api_base') or _t4.get('model_server', 'unknown')}"
-                        )
+                        logger.info(f"[APIRouter] {agent_type}: no effective endpoints "
+                                    f"(all filtered/exhausted), using global default "
+                                    f"'{_t4.get('model', 'unknown')}' @ "
+                                    f"{_t4.get('api_base') or _t4.get('model_server', 'unknown')}")
                         _tier4_only_logged = True
                     continue
 
                 if self._breaker_is_open(_probe_base):
-                    logger.debug(
-                        f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                        f"(server breaker open — leaving to breaker/fallback machinery)"
-                    )
+                    logger.debug(f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                 f"(server breaker open — leaving to breaker/fallback machinery)")
                 else:
                     if _inst_name:
                         with self._lock:
@@ -1893,13 +1803,10 @@ class APIRouter:
                     if _is_live and not _blacklisted:
                         logger.debug(
                             f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                            f"(instance '{_inst_name}' holds a live connection — fast path)"
-                        )
+                            f"(instance '{_inst_name}' holds a live connection — fast path)")
                     elif _blacklisted:
-                        logger.debug(
-                            f"[APIRouter] Skipping endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                            f"(blacklisted — no sanity probe)"
-                        )
+                        logger.debug(f"[APIRouter] Skipping endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                     f"(blacklisted — no sanity probe)")
                         continue
                     else:
                         # Network probe (NO lock held — safe for I/O) — at most ONE per fresh
@@ -1911,10 +1818,8 @@ class APIRouter:
                         # do NOT drop it — leave it to the breaker machinery below (the consult
                         # will skip or claim the single probe). Mirrors pre_validate_endpoint_chain.
                         if _probe_ok and self._breaker_is_open(_probe_base):
-                            logger.debug(
-                                f"[APIRouter] Keeping '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                                f"(server breaker tripped open during probe — leaving to breaker machinery)"
-                            )
+                            logger.debug(f"[APIRouter] Keeping '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                         f"(server breaker tripped open during probe — leaving to breaker machinery)")
                         elif _probe_ok:
                             # Clear the Fix B1 blacklist entry on recovery (defensive — attribute
                             # may not exist until the parallel B1 workstream lands).
@@ -1925,10 +1830,8 @@ class APIRouter:
                                     _failures = getattr(self, '_endpoint_deterministic_failures', None)
                                     if _failures is not None:
                                         _failures.pop(_probe_key, None)
-                            logger.info(
-                                f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                                f"passed sanity probe."
-                            )
+                            logger.info(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                        f"passed sanity probe.")
                         else:
                             # Probe failure = the endpoint is unreachable RIGHT NOW. Record it
                             # into the cooldown so get_endpoint_chain filters it out on the next
@@ -1938,10 +1841,8 @@ class APIRouter:
                                 with self._lock:
                                     self._cleanup_stale_failure_records(time.time())
                                     self._endpoint_failure_times[_probe_key] = time.time()
-                            logger.info(
-                                f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                                f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s)."
-                            )
+                            logger.info(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                        f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s).")
 
                             # Connection-level failure → the host is unreachable RIGHT NOW. Mark
                             # the base so remaining same-base endpoints skip their probes this
@@ -1962,12 +1863,10 @@ class APIRouter:
                             # by _tier4_only_logged so a single call attempt logs at most once.
                             if not _tier4_only_logged and cfg_idx == len(chain) - 2:
                                 _t4 = chain[-1]
-                                logger.info(
-                                    f"[APIRouter] {agent_type}: no effective endpoints "
-                                    f"(all filtered/exhausted), using global default "
-                                    f"'{_t4.get('model', 'unknown')}' @ "
-                                    f"{_t4.get('api_base') or _t4.get('model_server', 'unknown')}"
-                                )
+                                logger.info(f"[APIRouter] {agent_type}: no effective endpoints "
+                                            f"(all filtered/exhausted), using global default "
+                                            f"'{_t4.get('model', 'unknown')}' @ "
+                                            f"{_t4.get('api_base') or _t4.get('model_server', 'unknown')}")
                                 _tier4_only_logged = True
 
                             continue
@@ -1977,7 +1876,7 @@ class APIRouter:
             max_retries = self.policy.endpoint_max_retries
 
             concurrency_limit = 0
-            rate_limit_rpm = 0           # Default: unlimited
+            rate_limit_rpm = 0  # Default: unlimited
 
             # Resolve endpoint-specific settings — always try to read from
             # the endpoint config, even for the default fallback endpoint.
@@ -2025,6 +1924,7 @@ class APIRouter:
                                 rest.close()
                             except Exception:
                                 pass
+
                     return _gen_wrapper(first_chunk, it)
 
                 return result
@@ -2035,10 +1935,8 @@ class APIRouter:
             # Applies to EVERY tier including the Tier-4 default (REVIEW M4). Endpoints sharing
             # this normalized base all skip together; different-server failover is unaffected.
             if self._breaker_should_skip(endpoint_base):
-                logger.info(
-                    f"[APIRouter] Server busy — skipping endpoint '{endpoint_name}' @ {endpoint_base} "
-                    f"(breaker open / another agent probing)"
-                )
+                logger.info(f"[APIRouter] Server busy — skipping endpoint '{endpoint_name}' @ {endpoint_base} "
+                            f"(breaker open / another agent probing)")
                 continue
 
             # ── Sticky slot (plan §3.1/§3.2 — replaces the former per-call acquisition). ──
@@ -2055,9 +1953,7 @@ class APIRouter:
                 try:
                     self.sync_sticky_slot(
                         self._pool.get_instance(_inst_name),
-                        desired_key=(
-                            '_shared_sequential_slot_' if concurrency_limit == 0 else None
-                        ),
+                        desired_key=('_shared_sequential_slot_' if concurrency_limit == 0 else None),
                         origin='sticky',
                     )
                 except AgentTerminatedError:
@@ -2109,8 +2005,7 @@ class APIRouter:
                                 if wait_time > 0:
                                     logger.debug(
                                         f"[APIRouter] Rate limit reached for '{endpoint_name}' @ {endpoint_base}. "
-                                        f"Waiting {wait_time:.1f}s before next call ({rate_limit_rpm} rpm)"
-                                    )
+                                        f"Waiting {wait_time:.1f}s before next call ({rate_limit_rpm} rpm)")
                                     # Interruptible sleep: check termination every 0.5s during rate-limit wait
                                     _interruptible_sleep(wait_time, self._pool, _inst_name)
                                 # After sleeping, re-check and try to record (loop handles contention)
@@ -2128,7 +2023,8 @@ class APIRouter:
                         # in case instance was terminated during rate limit wait or backoff.
                         if self._pool and _inst_name:
                             if _inst_name in self._pool.terminated_instances:
-                                logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated before API call, aborting")
+                                logger.debug(
+                                    f"[TERMINATION] Instance '{_inst_name}' terminated before API call, aborting")
                                 raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
 
                         result = execute_api_call()
@@ -2148,10 +2044,8 @@ class APIRouter:
                             self._endpoint_deterministic_failures.pop(_det_key, None)
                             if _det_key in self._endpoint_blacklist:
                                 del self._endpoint_blacklist[_det_key]
-                                logger.info(
-                                    f"[APIRouter] Endpoint '{endpoint_name}' @ {endpoint_base} "
-                                    f"recovered — blacklist cleared."
-                                )
+                                logger.info(f"[APIRouter] Endpoint '{endpoint_name}' @ {endpoint_base} "
+                                            f"recovered — blacklist cleared.")
 
                         # Part 2: record the committed endpoint for this instance (last
                         # successful call). A real call just succeeded on it, so a live
@@ -2200,8 +2094,7 @@ class APIRouter:
                                     logger.warning(
                                         f"[APIRouter] Endpoint '{endpoint_name}' @ {endpoint_base} "
                                         f"BLACKLISTED for {ENDPOINT_BLACKLIST_SECONDS}s after "
-                                        f"{count} consecutive deterministic failures. Last error: {err_msg[:200]}"
-                                    )
+                                        f"{count} consecutive deterministic failures. Last error: {err_msg[:200]}")
                         else:
                             # Non-deterministic failure — reset the counter (transient issue).
                             with self._lock:
@@ -2249,13 +2142,11 @@ class APIRouter:
                                 # invariant: the prober stays in the loop so the breaker machinery can
                                 # claim/release the probe cleanly, and recovery is not stalled by a
                                 # failed-over prober leaving the probe slot held.
-                                _next_base = (chain[cfg_idx + 1].get('api_base')
-                                              or chain[cfg_idx + 1].get('model_server', 'unknown'))
+                                _next_base = (chain[cfg_idx + 1].get('api_base') or
+                                              chain[cfg_idx + 1].get('model_server', 'unknown'))
                                 if normalize_api_base(_next_base) != normalize_api_base(endpoint_base):
-                                    logger.info(
-                                        f"[APIRouter] Server busy on '{endpoint_name}' @ {endpoint_base} — "
-                                        f"stopping retries for this endpoint (failover to next)"
-                                    )
+                                    logger.info(f"[APIRouter] Server busy on '{endpoint_name}' @ {endpoint_base} — "
+                                                f"stopping retries for this endpoint (failover to next)")
                                     break
 
                         # Detect context window exceeded errors and advance cursor.
@@ -2302,8 +2193,7 @@ class APIRouter:
                                             f"[APIRouter] Context-exceeded for '{_inst_name}' on endpoint "
                                             f"'{endpoint_name}': server-reported n_prompt_tokens={srv_n_prompt} exceeds "
                                             f"verified bound(s) {dict(zip(('configured_limit', 'safety_fraction_of_n_ctx'), _bounds))} "
-                                            f"(n_ctx={srv_n_ctx}) — genuine overflow."
-                                        )
+                                            f"(n_ctx={srv_n_ctx}) — genuine overflow.")
                                 # srv_n_prompt present but NO verified bound (unknown limit and no n_ctx):
                                 # preserve the 2026-08-21 invariant — never interpret as context-exceeded;
                                 # fall through to estimation, which also requires a known limit.
@@ -2326,42 +2216,37 @@ class APIRouter:
                                         f"[APIRouter] Context-exceeded reported by server for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}': server-reported n_prompt_tokens={srv_n_prompt} "
                                         f"(n_ctx={srv_n_ctx}) fits every verified bound — treating as service error, "
-                                        f"falling through to next endpoint."
-                                    )
+                                        f"falling through to next endpoint.")
                                 elif _estimated is None:
                                     logger.warning(
                                         f"[APIRouter] Context-exceeded reported by server for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}' but payload token estimation failed — "
-                                        f"treating as service error, falling through to next endpoint."
-                                    )
+                                        f"treating as service error, falling through to next endpoint.")
                                 else:
                                     logger.warning(
                                         f"[APIRouter] Context-exceeded reported by server for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}' but payload fits configured limit "
                                         f"{_cfg_limit} (~{_estimated} tokens) — treating as service error, "
-                                        f"falling through to next endpoint."
-                                    )
+                                        f"falling through to next endpoint.")
                             if _genuine_overflow:
                                 # For Compressor agents: just advance cursor (they handle their own compression)
                                 if agent_type.lower().startswith('compressor'):
                                     new_pos = self.advance_instance_endpoint(_inst_name)
-                                    logger.warning(
-                                        f"[APIRouter] Context window exceeded for Compressor '{_inst_name}' "
-                                        f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}."
-                                    )
+                                    logger.warning(f"[APIRouter] Context window exceeded for Compressor '{_inst_name}' "
+                                                   f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}.")
                                 else:
                                     # Advance cursor NOW so retry uses a different (hopefully larger) endpoint after compression.
                                     new_pos = self.advance_instance_endpoint(_inst_name)
                                     logger.warning(
                                         f"[APIRouter] Context window exceeded for '{_inst_name}' "
                                         f"on endpoint '{endpoint_name}'. Triggering iterative fallback compression. "
-                                        f"Cursor advanced to {new_pos}."
-                                    )
+                                        f"Cursor advanced to {new_pos}.")
                                     # Lazy import to avoid potential circular imports
                                     from agent_cascade.exceptions import FallbackCompressionRequired
-                                    raise FallbackCompressionRequired(
-                                        _inst_name, agent_type, endpoint_name, original_error=e
-                                    ) from e
+                                    raise FallbackCompressionRequired(_inst_name,
+                                                                      agent_type,
+                                                                      endpoint_name,
+                                                                      original_error=e) from e
 
                         # NOTE: CharacterRunDetected/MaxTokenExceeded exceptions are raised during
                         # generator iteration inside execution_engine.py, after this method has returned.
@@ -2371,21 +2256,24 @@ class APIRouter:
 
                         # All errors (connection, timeout, etc.) retry within the current
                         # endpoint first, then cascade through the fallback chain on exhaustion.
-                        tb_str = traceback.format_exc()
-                        error_msg = (
-                            f"Endpoint '{endpoint_name}' @ {endpoint_base} "
-                            f"attempt {attempt+1}/{max_retries+1}: {e}\nTraceback: {tb_str}"
-                        )
+                        # Compact one-line summary at WARNING; full traceback demoted to DEBUG
+                        # and deduped per (endpoint, root-cause) so a high-rate outage does not
+                        # dump 20-60 lines of stack on every attempt (plan §3.2).
+                        summary = format_endpoint_error(e)
+                        error_msg = (f"Endpoint '{endpoint_name}' @ {endpoint_base} "
+                                     f"attempt {attempt+1}/{max_retries+1}: {summary}")
                         logger.warning(f"[APIRouter] {error_msg}")
                         all_errors.append(error_msg)
+
+                        # Full traceback at DEBUG, deduped per endpoint+root-cause (once per window).
+                        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+                            logger.debug(f"[APIRouter] {error_msg}\nTraceback:\n{traceback.format_exc()}")
 
                         if attempt < max_retries:
                             # Use centralized backoff policy (consistent with execution engine)
                             delay = calculate_backoff(attempt + 1, self.policy)
-                            logger.info(
-                                f"[APIRouter] Backing off {delay:.1f}s before retry "
-                                f"for endpoint '{endpoint_name}' @ {endpoint_base}"
-                            )
+                            logger.info(f"[APIRouter] Backing off {delay:.1f}s before retry "
+                                        f"for endpoint '{endpoint_name}' @ {endpoint_base}")
                             # Interruptible sleep: check termination every 0.5s during retry backoff
                             _interruptible_sleep(delay, self._pool, _inst_name)
             finally:
@@ -2406,10 +2294,8 @@ class APIRouter:
                     # Clean up stale records to prevent unbounded growth
                     self._cleanup_stale_failure_records(now)
                     self._endpoint_failure_times[(normalize_api_base(endpoint_base), endpoint_name)] = now
-                logger.debug(
-                        f"[APIRouter] Endpoint '{endpoint_name}' @ {endpoint_base} marked as failed. "
-                        f"Cooldown for {ENDPOINT_COOLDOWN_SECONDS}s."
-                    )
+                logger.debug(f"[APIRouter] Endpoint '{endpoint_name}' @ {endpoint_base} marked as failed. "
+                             f"Cooldown for {ENDPOINT_COOLDOWN_SECONDS}s.")
 
         # ── D1 final degradation (Change D): if the chain is exhausted and every endpoint
         # was on a breaker-open physical server, this is "server busy — will retry", NOT an
@@ -2417,32 +2303,26 @@ class APIRouter:
         # RuntimeError subclass) so callers can degrade cleanly; it is deliberately NOT a
         # FallbackCompressionRequired, so the context-compression path stays untouched.
         if chain and all(
-            self._breaker_is_open(cfg.get('api_base') or cfg.get('model_server', 'unknown'))
-            for cfg in chain
-        ):
-            logger.error(
-                f"[APIRouter] Server busy — will retry: all endpoints for '{agent_type}' are on "
-                f"breaker-open servers (wait cap {SERVER_BUSY_WAIT_CAP_SECONDS:.0f}s already used). "
-                f"No HTTP requests were sent to the busy server."
-            )
-            raise ServerBusyError(
-                f"Server busy — will retry: all endpoints for agent type '{agent_type}' are on a "
-                f"busy physical server (circuit breaker open, wait cap exhausted)."
-            )
+                self._breaker_is_open(cfg.get('api_base') or cfg.get('model_server', 'unknown')) for cfg in chain):
+            logger.error(f"[APIRouter] Server busy — will retry: all endpoints for '{agent_type}' are on "
+                         f"breaker-open servers (wait cap {SERVER_BUSY_WAIT_CAP_SECONDS:.0f}s already used). "
+                         f"No HTTP requests were sent to the busy server.")
+            raise ServerBusyError(f"Server busy — will retry: all endpoints for agent type '{agent_type}' are on a "
+                                  f"busy physical server (circuit breaker open, wait cap exhausted).")
 
-        raise RuntimeError(
-            f"All API endpoints exhausted for agent type '{agent_type}'.\n"
-            + '\n'.join(all_errors)
-        )
+        # Attach the compact per-endpoint list as structured data (plan §3.4) so llm_call can
+        # build a readable terminal message WITHOUT parsing str(e). First line of the message is
+        # kept EXACTLY ("All API endpoints exhausted ...") — existing tests assert on that prefix.
+        exc = RuntimeError(f"All API endpoints exhausted for agent type '{agent_type}'.\n" + '\n'.join(all_errors))
+        exc.endpoint_failures = all_errors  # List[str], one compact line per endpoint/attempt
+        raise exc
 
     # ── Image Captioning ─────────────────────────────────────────────────
     # When images lack captions and the target endpoint is text-only, generate
     # a caption using any available vision-capable endpoint.
 
-    CAPTION_PROMPT = (
-        'Describe this image in one concise sentence suitable for use as an alt-text description. '
-        'Focus on key visual elements: objects, people, colors, layout, and any text visible.'
-    )
+    CAPTION_PROMPT = ('Describe this image in one concise sentence suitable for use as an alt-text description. '
+                      'Focus on key visual elements: objects, people, colors, layout, and any text visible.')
 
     @staticmethod
     def _has_uncaptioned_images(messages):
@@ -2489,9 +2369,7 @@ class APIRouter:
         cur_cfg = getattr(inst, '_last_endpoint_config', None) if inst is not None else None
         if not isinstance(cur_cfg, dict):
             return False
-        cur_base = normalize_api_base(
-            cur_cfg.get('api_base') or cur_cfg.get('model_server', '')
-        )
+        cur_base = normalize_api_base(cur_cfg.get('api_base') or cur_cfg.get('model_server', ''))
         cur_model = cur_cfg.get('model', '')
         with self._lock:
             for ep in self.endpoints.values():
@@ -2536,9 +2414,7 @@ class APIRouter:
             inst = self._pool.get_instance(instance_name)
             cur_cfg = getattr(inst, '_last_endpoint_config', None) if inst is not None else None
             if isinstance(cur_cfg, dict):
-                cur_base = normalize_api_base(
-                    cur_cfg.get('api_base') or cur_cfg.get('model_server', '')
-                )
+                cur_base = normalize_api_base(cur_cfg.get('api_base') or cur_cfg.get('model_server', ''))
                 cur_model = cur_cfg.get('model', '')
                 with self._lock:
                     for ep in self.endpoints.values():
@@ -2557,9 +2433,7 @@ class APIRouter:
         # (3) Fallback: any vision endpoint
         return self._get_any_vision_endpoint()
 
-    def caption_images(
-        self, messages, agent_type: str = 'generalist', instance_name: Optional[str] = None
-    ) -> List:
+    def caption_images(self, messages, agent_type: str = 'generalist', instance_name: Optional[str] = None) -> List:
         """
         Generate captions for uncaptioned images in the message list.
 
@@ -2598,10 +2472,8 @@ class APIRouter:
         if mode == 'auto':
             if self._is_active_endpoint_vision(instance_name):
                 # Active endpoint already has vision → no caption cost.
-                logger.debug(
-                    f"[APIRouter] Image captioning skipped (mode='auto') — active endpoint "
-                    f"for '{instance_name}' is vision-capable"
-                )
+                logger.debug(f"[APIRouter] Image captioning skipped (mode='auto') — active endpoint "
+                             f"for '{instance_name}' is vision-capable")
                 return messages
             # Falling back to a text-only endpoint: full-caption ALL images by clearing
             # placeholder/empty captions so previously-failed ('[Image]') items are re-captioned
@@ -2629,7 +2501,8 @@ class APIRouter:
         vision_cfg = self._get_vision_endpoint_for_agent(agent_type, instance_name=instance_name)
         if not vision_cfg:
             # Replace uncaptioned images with placeholder text to ensure safe fallback
-            logger.warning('[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders')
+            logger.warning(
+                '[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders')
             for msg in messages:
                 items = msg.content if isinstance(msg.content, list) else []
                 for item in items:
@@ -2662,10 +2535,8 @@ class APIRouter:
         # Observability: unambiguous "caption triggered" marker — fires only when a real
         # vision caption call is about to be made (i.e. NOT the already-captioned skip path).
         _cap_model = vision_cfg.get('model', 'unknown')
-        logger.info(
-            f"[APIRouter] Captioning {len(uncaptioned_items)} image(s) via vision endpoint "
-            f"model='{_cap_model}' instance={instance_name or '-'}"
-        )
+        logger.info(f"[APIRouter] Captioning {len(uncaptioned_items)} image(s) via vision endpoint "
+                    f"model='{_cap_model}' instance={instance_name or '-'}")
 
         # ── Side-call slot sync (plan §3.10): acquire-or-keep, NEVER drop. ──
         # When the vision endpoint is conc=0 and the owning instance does not already
@@ -2735,19 +2606,15 @@ class APIRouter:
                     # the '[Image]' placeholder below (same as any other caption failure).
                     _vbase = vision_cfg.get('api_base') or vision_cfg.get('model_server', 'unknown')
                     if self._breaker_is_open(_vbase):
-                        logger.info(
-                            f"[APIRouter] Server busy — skipping image captioning at {_vbase} "
-                            f"(breaker open); using '[Image]' placeholder."
-                        )
+                        logger.info(f"[APIRouter] Server busy — skipping image captioning at {_vbase} "
+                                    f"(breaker open); using '[Image]' placeholder.")
                         raise RuntimeError(f"Server busy (breaker open) at {_vbase}")
                     chat_model = get_chat_model(vision_cfg)
-                    cap_msg = Message(
-                        role='user',
-                        content=[
-                            ContentItem(text=self.CAPTION_PROMPT),
-                            ContentItem(image=img_val),
-                        ]
-                    )
+                    cap_msg = Message(role='user',
+                                      content=[
+                                          ContentItem(text=self.CAPTION_PROMPT),
+                                          ContentItem(image=img_val),
+                                      ])
                     result_iter = chat_model.chat(
                         messages=[cap_msg],
                         stream=True,
@@ -2770,7 +2637,8 @@ class APIRouter:
                                     txt = getattr(ci, 'text', '') or (ci.get('text') if isinstance(ci, dict) else '')
                                     if txt:
                                         caption_text += txt
-                        caption_text = caption_text.strip()[:MAX_CAPTION_LENGTH]  # Cap length to avoid bloating messages
+                        caption_text = caption_text.strip()[:
+                                                            MAX_CAPTION_LENGTH]  # Cap length to avoid bloating messages
                     else:
                         caption_text = '[Image]'
                 except Exception as e:
@@ -2828,13 +2696,13 @@ class APIRouter:
     def _normalize_agent_priorities(self, priorities: dict) -> dict:
         """
         Normalize agent_priorities dict to remove case-insensitive duplicate keys.
-        
+
         When both 'Coder' and 'coder' exist, keeps the first one encountered
         (typically PascalCase from frontend). This prevents double entries in UI.
-        
+
         Args:
             priorities: Raw agent_priorities dict that may have duplicates
-            
+
         Returns:
             Normalized dict with only one key per agent type (case-insensitive)
         """
@@ -2844,34 +2712,30 @@ class APIRouter:
         validated = {}
         for key, value in priorities.items():
             if not isinstance(value, list):
-                logger.warning(
-                    f"[APIRouter._normalize_agent_priorities] Invalid priority value for "
-                    f"{key!r}: {value!r} (expected list). Skipping."
-                )
+                logger.warning(f"[APIRouter._normalize_agent_priorities] Invalid priority value for "
+                               f"{key!r}: {value!r} (expected list). Skipping.")
                 continue
             validated[key] = value
         priorities = validated
 
         normalized = {}
         seen_lower = {}  # Maps lowercase key -> canonical key to track which we kept
-        
+
         for key, value in priorities.items():
             if not key:
                 continue
-                
+
             key_lower = key.lower()
             if key_lower not in seen_lower:
                 # First occurrence - keep it
                 normalized[key] = value
                 seen_lower[key_lower] = key
             # Else: duplicate found, skip this one (keep the first)
-        
+
         if len(normalized) != len(priorities):
-            logger.info(
-                f"[APIRouter] Normalized agent_priorities: {len(priorities)} keys → "
-                f"{len(normalized)} keys (removed {len(priorities) - len(normalized)} case duplicates)"
-            )
-        
+            logger.info(f"[APIRouter] Normalized agent_priorities: {len(priorities)} keys → "
+                        f"{len(normalized)} keys (removed {len(priorities) - len(normalized)} case duplicates)")
+
         return normalized
 
     def _load(self):
@@ -2892,10 +2756,8 @@ class APIRouter:
                 }
                 with open(self._config_path, 'w', encoding='utf-8') as f:
                     json.dump(default_config, f, indent=2)
-                logger.warning(
-                    'config/api_endpoints.json not found; created with empty default configuration. '
-                    'Please configure at least one LLM endpoint.'
-                )
+                logger.warning('config/api_endpoints.json not found; created with empty default configuration. '
+                               'Please configure at least one LLM endpoint.')
             except OSError as e:
                 logger.error(f"[APIRouter] Failed to create config/api_endpoints.json: {e}")
             return
@@ -2920,7 +2782,7 @@ class APIRouter:
             # Normalize agent_priorities to remove case-insensitive duplicates
             raw_priorities = data.get('agent_priorities', {})
             self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
-            
+
             # Load tracking set for agent types that ever had endpoints configured.
             # This gates the Tier 3 (last-successful) fallback: agents with no configuration should go straight to global default.
             # For backward compatibility, if the field is missing (old config), we infer it from current priorities.
@@ -2930,11 +2792,11 @@ class APIRouter:
             else:
                 # Backward compat: any agent type with current priorities was clearly configured at some point
                 self._agent_types_with_priorities = set(self.agent_priorities.keys())
-            
+
             # Sync tracking set with actual priorities — remove any stale entries from old configs.
             # Prevents incorrect Tier 3 (last-successful) fallback if config has tracked types without actual priorities.
             self._agent_types_with_priorities &= set(self.agent_priorities.keys())
-            
+
             logger.info(f"[APIRouter] Loaded {len(self.endpoints)} endpoints from {self._config_path}")
         except Exception as e:
             logger.error(f"[APIRouter] Failed to load config from {self._config_path}: {e}")
@@ -2951,7 +2813,7 @@ class APIRouter:
     def from_dict(self, data: dict):
         """
         Load full state from a dict (e.g. from UI update).
-        
+
         Normalizes agent_priorities to prevent duplicate keys from case mismatches
         between frontend and backend updates.
         """
@@ -2965,7 +2827,7 @@ class APIRouter:
                     new_endpoints[ep.id] = ep
                 except Exception as e:
                     logger.error(f"[APIRouter.from_dict] Failed to parse endpoint data: {e}")
-            
+
             # Swap atomically only after all parsing succeeds
             self.endpoints.clear()
             self.endpoints.update(new_endpoints)
@@ -2991,14 +2853,14 @@ class APIRouter:
 
             if n_blacklist > 0 or n_failures > 0 or had_last_success:
                 logger.info(f"[APIRouter] from_dict: cleared {n_blacklist} blacklist entries, "
-                            f"{n_failures} failure counters"
-                            + (', last-successful endpoint' if had_last_success else ''))
+                            f"{n_failures} failure counters" +
+                            (', last-successful endpoint' if had_last_success else ''))
 
             # Normalize agent_priorities to remove case-insensitive duplicates
             raw_priorities = data.get('agent_priorities', {})
             self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
             self._agent_types_with_priorities = set(self.agent_priorities.keys())
-            
+
             ep_ids = list(self.endpoints.keys())
 
             # FIX (trigger a): the per-instance endpoint cursor is a POSITIONAL index into the
@@ -3008,15 +2870,15 @@ class APIRouter:
             self._reset_instance_cursors('[APIRouter.from_dict] Endpoint config changed')
 
             logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "
-                       f"({ep_ids}) with "
-                       f"{len(self.agent_priorities)} priority mappings: "
-                       f"{dict(self.agent_priorities)}")
+                        f"({ep_ids}) with "
+                        f"{len(self.agent_priorities)} priority mappings: "
+                        f"{dict(self.agent_priorities)}")
             self._save()
 
     def update_default_llm_cfg(self, new_cfg: dict):
         """
         Update the default fallback config (from General Settings changes).
-        
+
         Note: This is a partial update — only keys present in new_cfg are updated.
         Keys removed from the UI will persist in default_llm_cfg until explicitly overwritten.
         """
@@ -3024,10 +2886,12 @@ class APIRouter:
             # Defensive: ensure default_llm_cfg is not None
             if self.default_llm_cfg is None:
                 self.default_llm_cfg = {}
-            
+
             # Log which keys are being updated (for debugging config propagation issues)
             # Only keys present in new_cfg are checked; keys removed from the UI persist in default_llm_cfg
-            changed_keys = [k for k in new_cfg if k not in self.default_llm_cfg or self.default_llm_cfg[k] != new_cfg[k]]
+            changed_keys = [
+                k for k in new_cfg if k not in self.default_llm_cfg or self.default_llm_cfg[k] != new_cfg[k]
+            ]
             if changed_keys:
                 logger.info(f"[APIRouter.update_default_llm_cfg] Updating {len(changed_keys)} keys: {changed_keys}")
             self.default_llm_cfg.update(new_cfg)
