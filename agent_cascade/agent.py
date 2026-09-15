@@ -17,7 +17,7 @@ import json
 import random
 import traceback
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 from agent_cascade.llm import get_chat_model
 from agent_cascade.llm.base import BaseChatModel
@@ -27,7 +27,6 @@ from agent_cascade.tools import TOOL_REGISTRY, BaseTool, MCPManager
 from agent_cascade.tools.base import ToolServiceError
 from agent_cascade.tools.simple_doc_parser import DocParserError
 from agent_cascade.utils.utils import has_chinese_messages, merge_generate_cfgs
-from agent_cascade.utils.thinking_block import strip_thinking_blocks
 
 
 class Agent(ABC):

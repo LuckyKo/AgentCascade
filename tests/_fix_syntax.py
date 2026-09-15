@@ -1,5 +1,4 @@
 """Quick script to fix remaining syntax errors in test_compression_no_duplication.py"""
-import os
 
 path = r'N:\work\WD\AgentCascade_unified\tests\test_compression_no_duplication.py'
 with open(path) as f:

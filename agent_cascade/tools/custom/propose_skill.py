@@ -19,21 +19,23 @@ class ProposeSkill(BaseTool):
     """Tool to propose a new reusable skill for future tasks."""
 
     name = 'propose_skill'
-    description = (
-        'Propose a new reusable skill for future tasks. '
-        'Provide the full SKILL.md content including YAML frontmatter '
-        'with name, description, and triggers fields.'
-    )
+    description = ('Propose a new reusable skill for future tasks. '
+                   'Provide the full SKILL.md content including YAML frontmatter '
+                   'with name, description, and triggers fields.')
     parameters = {
         'type': 'object',
         'properties': {
             'skill_content': {
-                'type': 'string',
-                'description': 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
+                'type':
+                    'string',
+                'description':
+                    'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
             },
             'test_task': {
-                'type': 'string',
-                'description': 'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.',
+                'type':
+                    'string',
+                'description':
+                    'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.',
             },
             'justification': {
                 'type': 'string',
@@ -115,35 +117,26 @@ class ProposeSkill(BaseTool):
                     effective_version = '1.0.1'
 
                 # Patch frontmatter with computed version
-                skill_content = skill_content.replace(
-                    f'version: {proposed_version}',
-                    f'version: {effective_version}',
-                    1
-                )
+                skill_content = skill_content.replace(f'version: {proposed_version}', f'version: {effective_version}',
+                                                      1)
 
             # Reject only if no explicit update flag AND proposed version equals existing
             if not update_existing and effective_version == existing_version:
-                return (
-                    f"Skill '{proposed_name}' already exists (v{existing_version}).\n\n"
-                    f"To update it, set update_existing=true or provide a higher version in frontmatter."
-                )
+                return (f"Skill '{proposed_name}' already exists (v{existing_version}).\n\n"
+                        f"To update it, set update_existing=true or provide a higher version in frontmatter.")
 
             # Approval for UPDATE
-            description = (
-                f"📝 **Update Existing Skill**: {proposed_name}\n\n"
-                f"Current version: v{existing_version} → New version: v{effective_version}\n"
-                f"Justification: {justification}"
-            )
+            description = (f"📝 **Update Existing Skill**: {proposed_name}\n\n"
+                           f"Current version: v{existing_version} → New version: v{effective_version}\n"
+                           f"Justification: {justification}")
         else:
             effective_version = normalize_version(proposed_version) or '1.0.0'
             # Approval for NEW skill
-            description = (
-                f"📝 **Propose New Skill**: {proposed_name}\n\n"
-                f"Description: {fm.get('description', '') if fm else ''}\n"
-                f"Version: v{effective_version}\n"
-                f"Justification: {justification}\n\n"
-                f"This will be registered and available to all agents via scan_skills/load_skill."
-            )
+            description = (f"📝 **Propose New Skill**: {proposed_name}\n\n"
+                           f"Description: {fm.get('description', '') if fm else ''}\n"
+                           f"Version: v{effective_version}\n"
+                           f"Justification: {justification}\n\n"
+                           f"This will be registered and available to all agents via scan_skills/load_skill.")
 
         # Request user approval (same pattern as shell_cmd)
         approved, reason = self.agent_pool.operation_manager.request_user_approval(

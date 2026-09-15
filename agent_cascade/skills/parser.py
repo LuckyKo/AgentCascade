@@ -11,12 +11,13 @@ Parses SKILL.md files following the standard YAML frontmatter format:
     Markdown instructions...
 """
 
-import re
-import yaml
 from pathlib import Path
-from typing import Tuple, Dict, Any
+from typing import Any, Dict, Tuple
+
+import yaml
 
 from agent_cascade.log import logger
+
 from .common import SEMVER_RE as _SEMVER_RE
 
 

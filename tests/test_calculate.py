@@ -12,8 +12,6 @@ The tool evaluates via a restricted ``eval`` with ``__builtins__={}`` and an
 explicit allowlist, so anything not in the allowlist is simply undefined.
 """
 
-import math
-
 import pytest
 
 from agent_cascade.tools.custom.calculation import Calculate
@@ -121,9 +119,20 @@ def test_randint_range_sanity(calc):
 # ── Safety: dangerous builtins are blocked ──────────────────────────────────
 
 DANGEROUS_BUILTINS = [
-    '__import__', 'open', 'exec', 'eval', 'compile',
-    'getattr', 'setattr', 'delattr', 'globals', 'locals',
-    'vars', 'input', 'breakpoint', '__builtins__',
+    '__import__',
+    'open',
+    'exec',
+    'eval',
+    'compile',
+    'getattr',
+    'setattr',
+    'delattr',
+    'globals',
+    'locals',
+    'vars',
+    'input',
+    'breakpoint',
+    '__builtins__',
 ]
 
 

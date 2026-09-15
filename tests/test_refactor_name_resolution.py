@@ -20,7 +20,6 @@ import threading
 import typing
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # 1. Package / facade imports resolve cleanly
 # ---------------------------------------------------------------------------
@@ -31,15 +30,12 @@ def test_all_five_packages_import():
     import agent_cascade.api_router
     import agent_cascade.async_shell
     import agent_cascade.engine.core
-    import agent_cascade.pool.core
-
+    import agent_cascade.pool.core  # noqa: F401  (side-effect import: verifies package imports)
     # And the specific sub-modules that previously had F821 errors.
-    from agent_cascade.api_integration_pkg import state_builder, streaming, cache
+    from agent_cascade.api_integration_pkg import cache, state_builder, streaming
     from agent_cascade.api_router_pkg import router
     from agent_cascade.engine import compression_exec, llm_call, tool_execution
-    from agent_cascade.pool import (
-        config_persist, conversation_map, idle_manager, logger_mgr, parallel_manager,
-    )
+    from agent_cascade.pool import config_persist, conversation_map, idle_manager, logger_mgr, parallel_manager
 
     assert state_builder is not None
     assert streaming is not None
@@ -108,7 +104,7 @@ def test_build_stream_update_reaches_token_stats_path():
 
 def test_state_builder_resolves_store_ui_cache_identity():
     """state_builder's reference to _store_ui_cache is the real cache one (module-level import)."""
-    from agent_cascade.api_integration_pkg import state_builder, cache
+    from agent_cascade.api_integration_pkg import cache, state_builder
 
     assert state_builder._store_ui_cache is cache._store_ui_cache
 
@@ -119,8 +115,8 @@ def test_state_builder_resolves_store_ui_cache_identity():
 
 def test_config_persist_poolsettings_resolves_to_real_class():
     """pool.config_persist.PoolSettings is the real class from agent_instance."""
-    from agent_cascade.pool import config_persist
     from agent_cascade.agent_instance import PoolSettings as RealPoolSettings
+    from agent_cascade.pool import config_persist
 
     assert config_persist.PoolSettings is RealPoolSettings
     # It must be a usable class (the regression was `PoolSettings.from_dict(data)`).
@@ -189,8 +185,8 @@ def test_pool_agentpool_annotations_are_resolvable_forward_refs():
 
 def test_router_endpoint_annotation_resolves():
     """router._resolve_own_endpoints return annotation resolves (was 'EndpointConfig')."""
-    from agent_cascade.api_router_pkg.router import APIRouter
     from agent_cascade.api_router_pkg.endpoints import APIEndpoint
+    from agent_cascade.api_router_pkg.router import APIRouter
 
     hints = typing.get_type_hints(APIRouter._resolve_own_endpoints)
     ret = hints['return']

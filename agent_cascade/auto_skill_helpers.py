@@ -6,8 +6,8 @@ Extracted to eliminate duplication between execution_engine.py and run_agent_uni
 
 from typing import Callable, List, Optional
 
-from agent_cascade.settings import AUTO_SKILL_ENABLED, AUTO_SKILL_EXTRA_TURNS, LOAD_SKILL_NONE
 from agent_cascade.log import logger
+from agent_cascade.settings import AUTO_SKILL_ENABLED, AUTO_SKILL_EXTRA_TURNS, LOAD_SKILL_NONE
 
 
 def run_auto_skill_proposal(
@@ -54,11 +54,11 @@ def run_auto_skill_proposal(
 
     # Check trigger and inject prompt
     if not skill_manager.check_and_inject_auto_skill_prompt(
-        inst=inst,
-        total_tool_calls=total_tool_calls,
-        task_text=task_text,
-        instance_name=instance_name,
-        append_fn=append_fn,
+            inst=inst,
+            total_tool_calls=total_tool_calls,
+            task_text=task_text,
+            instance_name=instance_name,
+            append_fn=append_fn,
     ):
         return []
 
@@ -81,10 +81,9 @@ def run_auto_skill_proposal(
                 turn_output = turn_output_raw
             # Count tool calls from FUNCTION role messages
             from agent_cascade.llm.schema import FUNCTION
-            total_tool_calls += sum(1 for m in turn_output if (
-                m.get('role', '') == FUNCTION
-                if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION
-            ))
+            total_tool_calls += sum(
+                1 for m in turn_output
+                if (m.get('role', '') == FUNCTION if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION))
     except Exception as e:
         logger.warning('[AUTO-SKILL] Extra turn error for %s: %s', instance_name, e)
     finally:
@@ -95,8 +94,7 @@ def run_auto_skill_proposal(
         instance_name=instance_name,
         snapshot_length=_conv_length,
         rollback_fn=lambda pop_count: rollback_fn(pop_count),
-        check_skill_created_fn=lambda: list(
-            set(skill_manager._skills_registry.keys()) - frozenset(_skills_before)),
+        check_skill_created_fn=lambda: list(set(skill_manager._skills_registry.keys()) - frozenset(_skills_before)),
     )
 
     # Inject notice into the last message

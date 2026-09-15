@@ -3,12 +3,14 @@ LoggerManager — manages per-agent loggers. Moved verbatim from agent_pool.py (
 """
 
 from __future__ import annotations
+
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+from agent_cascade.instance_id import make_instance_dir
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE
-from agent_cascade.instance_id import get_instance_id, make_instance_dir
 
 if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids circular import of core.py
     from .core import AgentPool
@@ -36,7 +38,7 @@ class LoggerManager:
 
     def get_logger(self, instance_name: str, agent_class: str, base_metadata: Optional[Dict] = None):
         """Get or create a real AgentInstanceLogger for an instance.
-        
+
         Uses composite key (instance_name, normalized agent_class) as defense-in-depth
         against case sensitivity mismatches in caller code.
         """
@@ -59,7 +61,7 @@ class LoggerManager:
 
         Used by "New Session" to start writing to a new log file instead of appending.
         Closes the old logger's file handle before replacing it.
-        
+
         Uses composite key (instance_name, normalized agent_class) for consistency.
         """
         with self._lock:
@@ -73,6 +75,7 @@ class LoggerManager:
                 except Exception as e:
                     logger.debug(f"Logger close during reinit failed for {instance_name} (non-critical): {e}")
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+
             # New session gets fresh metadata — no inheritance from previous session's state.
             # FIX (todo.md:117): Root agents always have "User" as supervisor.
             self._loggers[key] = AgentInstanceLogger(

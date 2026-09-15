@@ -1,11 +1,11 @@
 # Copyright 2024 Intel Corporation. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,15 +13,12 @@
 # limitations under the License.
 
 import copy
-from pprint import pformat
 from threading import Thread
 from typing import Dict, Iterator, List, Optional
 
 from agent_cascade.llm.base import register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.schema import ASSISTANT, Message
-from agent_cascade.log import logger
-from agent_cascade.utils.utils import build_text_completion_prompt
 
 
 @register_llm('openvino')
@@ -114,7 +111,9 @@ class OpenVINO(BaseFnCallModel):
         from transformers import TextIteratorStreamer
         generate_cfg = copy.deepcopy(generate_cfg)
         messages_plain = [message.model_dump() for message in messages]
-        input_token = self.tokenizer.apply_chat_template(messages_plain, add_generation_prompt=True, return_tensors='pt').to(self.ov_model.device)
+        input_token = self.tokenizer.apply_chat_template(messages_plain,
+                                                         add_generation_prompt=True,
+                                                         return_tensors='pt').to(self.ov_model.device)
         streamer = TextIteratorStreamer(self.tokenizer, timeout=60.0, skip_prompt=True, skip_special_tokens=True)
         generate_cfg.update(
             dict(
@@ -125,7 +124,7 @@ class OpenVINO(BaseFnCallModel):
             ))
         del generate_cfg['stop']
         del generate_cfg['seed']
-        
+
         def generate_and_signal_complete():
             self.ov_model.generate(**generate_cfg)
 
@@ -146,7 +145,9 @@ class OpenVINO(BaseFnCallModel):
     ) -> List[Message]:
         generate_cfg = copy.deepcopy(generate_cfg)
         messages_plain = [message.model_dump() for message in messages]
-        input_token = self.tokenizer.apply_chat_template(messages_plain, add_generation_prompt=True, return_tensors='pt').to(self.ov_model.device)
+        input_token = self.tokenizer.apply_chat_template(messages_plain,
+                                                         add_generation_prompt=True,
+                                                         return_tensors='pt').to(self.ov_model.device)
         generate_cfg.update(
             dict(
                 input_ids=input_token,

@@ -8,34 +8,17 @@ controlled via the disabled_tools policy, not by which loader function was used.
 """
 
 from agent_cascade.log import logger
-from agent_cascade.tools.code_interpreter import CodeInterpreter
-from agent_cascade.tools.web_extractor import WebExtractor
-from agent_cascade.tools.custom import (
-    ReadFile,
-    ViewImage,
-    WriteFile,
-    EditFile,
-    ListDir,
-    Grep,
-    DeleteFile,
-    CopyFile,
-    ReIndent,
-    ListAgents,
-    ShellCmd,
-    ReadLogs,
-    Calculate,
-    CodeMap,
-    ForgetLast,
-    SyntaxCheck,
-    ScanSkills,
-    ProposeSkill,
-    LoadSkill,
-)
-from agent_cascade.tools.custom.compression_tools import CompressContext
-from agent_cascade.tools.custom import SystemInfo as _SystemInfo
-from agent_cascade.tools.web_search import WebSearch
-from agent_cascade.soul_loader import create_agent_from_soul
 from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.soul_loader import create_agent_from_soul
+from agent_cascade.tools.code_interpreter import CodeInterpreter
+from agent_cascade.tools.custom import (Calculate, CodeMap, CopyFile, DeleteFile, EditFile, ForgetLast, Grep,
+                                        ListAgents, ListDir, LoadSkill, ProposeSkill, ReadFile, ReadLogs, ReIndent,
+                                        ScanSkills, ShellCmd, SyntaxCheck)
+from agent_cascade.tools.custom import SystemInfo as _SystemInfo
+from agent_cascade.tools.custom import ViewImage, WriteFile
+from agent_cascade.tools.custom.compression_tools import CompressContext
+from agent_cascade.tools.web_extractor import WebExtractor
+from agent_cascade.tools.web_search import WebSearch
 
 
 def register_standard_tools(agent, agent_pool, agent_name: str):
@@ -54,8 +37,8 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         agent_pool: The AgentPool instance (for file ops and approvals).
         agent_name: The role name (e.g. 'orchestrator', 'coder').
     """
-    from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy
     from agent_cascade.prompts.dna import AVAILABLE_TOOLS
+    from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy
 
     # ── Tool factory: maps tool name → (instance, needs_pool, needs_name) ──────
     # needs_pool  = set agent_pool attribute on the tool instance
@@ -172,7 +155,7 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
 
     # ── User approval system notice ──
     agent.system_message += """
-    
+
 User Approval System:
 - All mutating operations (file write, edit, delete, move, copy) require explicit user approval.
 - When you call a tool like write_file or edit_file, the user will see a prompt and can approve or reject.
@@ -195,16 +178,16 @@ Workspace & Path Reference:
 def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None):
     """
     Load any agent (including the orchestrator) from its soul.md.
-    
+
     Every agent is a standard Agent instance — fully capable of spawning and
     managing sub-agents. The "main orchestrator" is just another agent
     whose soul.md gives it a supervisor personality.
-    
+
     Args:
         agent_pool: The AgentPool instance.
         agent_name: The agent's role name (e.g. 'orchestrator', 'coder').
         llm_cfg: LLM config used when APIRouter is not active.
-        
+
     Returns:
         Fully configured Agent instance with tools registered.
     """

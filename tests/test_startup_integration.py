@@ -13,7 +13,7 @@ Uses a real HTTP server (not TestClient) to avoid WebSocket deadlock issues in t
 import json
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import pytest
@@ -23,7 +23,6 @@ import requests
 from tests.conftest_e2e import derive_shared_secret, encrypt_payload, generate_client_keypair
 
 # ── Mock LLM endpoint ────────────────────────────────────────────────────────
-
 
 MOCK_STREAMING_RESPONSE = """data: {"id":"mock-1","object":"chat.completion.chunk","model":"mock-model","created":0,"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 
@@ -112,10 +111,11 @@ def ac_server(mock_llm_server):
     project_root = Path(__file__).parent.parent.absolute()
     sys.path.insert(0, str(project_root))
 
-    from agent_cascade.api_server import create_app
-    from agent_cascade.agent_pool import AgentPool
-    from agent_cascade.agent_factory import load_orchestrator_agent
     from uvicorn import Config, Server
+
+    from agent_cascade.agent_factory import load_orchestrator_agent
+    from agent_cascade.agent_pool import AgentPool
+    from agent_cascade.api_server import create_app
 
     llm_cfg = {
         'model': 'mock-model',
@@ -167,10 +167,8 @@ def ac_server(mock_llm_server):
     else:
         server.should_exit = True
         thread.join(timeout=3)
-        pytest.fail(
-            f"AC server did not start within timeout. "
-            f"Last error: {last_error}. Port: {ac_port}"
-        )
+        pytest.fail(f"AC server did not start within timeout. "
+                    f"Last error: {last_error}. Port: {ac_port}")
 
     try:
         yield base_url

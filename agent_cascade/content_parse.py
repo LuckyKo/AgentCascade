@@ -1,11 +1,12 @@
 """Content parsing utilities for multimodal messages and system message extraction."""
 
+from agent_cascade.utils.media_utils import MediaStorageError, save_image_from_data_uri
 from agent_cascade.utils.thinking_block import _IMAGE_DATA_RE as _IMAGE_DATA_PATTERN
-from agent_cascade.utils.media_utils import save_image_from_data_uri, MediaStorageError
+
 
 def _extract_system_message(agent) -> str:
     """Extract system message content from an agent.
-    
+
     Priority: base_system_message > system_message > llm.cfg['system'].
     Returns '' (empty string) if no system message found — consistent with
     how downstream callers check truthiness via `if sys_content:`.
@@ -49,7 +50,7 @@ def _parse_multimodal_content(text):
             logger.warning(f"Media storage failed for user image, keeping inline base64: {e}")
             parts.append({'image': url})
         last_end = end
-    
+
     if last_end < len(text):
         parts.append({'text': text[last_end:]})
 

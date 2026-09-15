@@ -27,54 +27,35 @@ WebSocket protocol (all JSON):
 
 import argparse
 import asyncio
+import base64
 import copy
-import glob
 import json
 import os
-import platform
-import re
 import signal
 import sys
 import threading
-import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Optional, Set
 
-from agent_cascade.llm.schema import (
-    ASSISTANT, CONTENT, FUNCTION, NAME, REASONING_CONTENT,
-    ROLE, SYSTEM, USER, Message,
-)
-import base64
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_WILD_READ_TRUNCATION_CHARS
-from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX, msg_field, msg_set
-from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
-from agent_cascade.llm.base import _truncate_input_messages_roughly
-from agent_cascade.execution_engine import ExecutionEngine
-from agent_cascade.utils.media_utils import save_image_from_data_uri, MediaStorageError
 
-from agent_cascade.utils.thinking_block import (
-    _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
-    _THINK_SEARCH_RE, _TOOL_TRUNCATED_RE, _CONTEXT_SUMMARY_RE,
-    _MARKDOWN_BOLD_RE, _JUSTIFICATION_PREFIX_RE, _IMAGE_DATA_RE as _IMAGE_DATA_PATTERN,
-    strip_thinking_blocks
-)
+from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, Message
+from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-export)
+from agent_cascade.settings import DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE
+from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
+from agent_cascade.utils.utils import extract_text_from_message
 
 try:
     from agent_cascade.agents.user_agent import PENDING_USER_INPUT
 except ImportError:
     PENDING_USER_INPUT = 'PENDING_USER_INPUT'
 
-# Agent state management imports for Stop handler
-from agent_cascade.agent_instance import ACTIVE_STATES, AgentState, InvalidStateTransition
-
 # Re-exports for backward compatibility (Phase 4a refactor)
 from agent_cascade.content_parse import _extract_system_message, _parse_multimodal_content
-from agent_cascade.path_security import _is_path_allowed, _get_allowed_file_roots, _SENSITIVE_FILENAMES
+from agent_cascade.path_security import _get_allowed_file_roots, _is_path_allowed  # noqa: F401 (re-export)
 
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
@@ -105,9 +86,9 @@ def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
     Args:
         ui_cfg: The ``generate_cfg`` dictionary from the client message.
     """
-    from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
-    from agent_cascade.tools.base import TOOL_REGISTRY
     from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
+    from agent_cascade.tools.base import TOOL_REGISTRY
+    from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
 
     if 'disabled_tools' in ui_cfg and ui_cfg['disabled_tools']:
         dt = ui_cfg['disabled_tools']
@@ -240,15 +221,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         auto_security:  Whether to start with Auto-Ask Security mode enabled.
                         Defaults to True (enabled by default for safety).
     """
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile, Request
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse, JSONResponse
 
     config = config or {}
     app = FastAPI(title='AgentCascade API')
 
     # Ensure media directory exists at startup (non-critical fallback)
-    from agent_cascade.utils.media_utils import get_images_dir, MediaStorageError
+    from agent_cascade.utils.media_utils import MediaStorageError, get_images_dir
     try:
         get_images_dir()  # Creates /logs/media/images/ if needed
     except MediaStorageError as e:
@@ -272,21 +253,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     )
 
     # ── Unified architecture imports (Phase 5) ───────────────────────────
+    from agent_cascade.api_integration import (_build_agents_list, _get_approvals, _resolve_max_tokens,
+                                               build_state_from_pool, build_stream_update_from_pool,
+                                               create_main_agent_instance, serialize_message)
     from agent_cascade.run_agent_unified import run_agent_thread_unified
     from agent_cascade.ws_handlers import WsMessageHandler
-    from agent_cascade.api_integration import (
-        broadcast_stream_update,
-        build_state_from_pool,
-        build_stream_update_from_pool,
-        create_main_agent_instance,
-        serialize_message,
-        _apply_ui_config,
-        _build_agents_list,
-        _get_approvals,
-        _resolve_max_tokens,
-        _find_user_message_insertion_point,
-        _put_stream_update,
-    )
 
     # ── Helpers ───────────────────────────────────────────────────────────
     def _load_session_history(name, agent_pool):
@@ -304,7 +275,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 return False
 
             from agent_cascade.instance_id import make_instance_dir
-            
+
             if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                 log_dir = Path(make_instance_dir(str(agent_pool.operation_manager.base_dir / 'logs')))
             else:
@@ -374,10 +345,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 logger.error(f"Failed to create fallback main agent instance: {e}")
                 logger.warning('Server starting without main agent instance — first user message may fail')
 
-    # ── Unified token cache (coexists with old _cached_hist_stats during transition) ──
-    from agent_cascade.utils.token_cache import AgentTokenCache
-    unified_token_cache = AgentTokenCache(ttl=300)
-
     # ── E2E Encryption State ─────────────────────────────────────────────
     server_private_key = x25519.X25519PrivateKey.generate()
     server_public_key = server_private_key.public_key()
@@ -385,7 +352,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw
     )
-    
+
     # Session storage for external API clients
     # key: session_token (string), value: shared_secret (bytes)
     api_sessions: Dict[str, bytes] = {}
@@ -447,9 +414,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     async def _broadcast_state(ws_type: str = 'state', generating=None):
         """Broadcast a state update to all WebSocket clients.
-        
+
         Consolidates the repeated pattern: await broadcast({'type': ..., **build_state(...)})
-        
+
         Args:
             ws_type: WebSocket message type ('state' or 'done').
             generating: Override generating flag. None = read from session via _is_generating().
@@ -466,7 +433,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     def build_state(responses=None, generating=None):
         """Build a full state snapshot for the frontend.
-        
+
         Delegates to build_state_from_pool which reads from pool.instances
         instead of session['history']. This is the unified single-source path.
         """
@@ -475,7 +442,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             gen = _is_generating(session)
         else:
             gen = generating
-        
+
         result = build_state_from_pool(
             pool=agent_pool,
             instance_name=instance_name,
@@ -494,18 +461,18 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             approvals = _get_approvals(agent_pool) if agent_pool else []
             stopped = agent_pool.stopped if agent_pool else False
             has_queued = agent_pool.has_messages(instance_name) if agent_pool else False
-            
+
             # Get current model from the orchestrator agent (first in agents list)
             current_model = 'Unknown'
             if agents:
                 orch = agents[0]
                 if hasattr(orch, 'llm') and orch.llm:
                     current_model = getattr(orch.llm, 'model', 'Unknown')
-            
+
             # Resolve max_tokens via shared helper (same logic as _get_max_tokens_for_instance)
             orch_inst = agent_pool.get_instance(instance_name) if agent_pool else None
             fallback_max_tokens = _resolve_max_tokens(agent_pool, orch_inst)
-            
+
             # Get API router state
             api_router_state = {'endpoints': [], 'agent_priorities': {}}
             if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
@@ -513,13 +480,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     api_router_state = agent_pool.api_router.to_dict()
                 except Exception as e:
                     logger.debug(f"API router state serialization failed (using empty): {e}")
-            
+
             # Get default workspace
             from agent_cascade.settings import DEFAULT_WORKSPACE
             default_workspace = str(DEFAULT_WORKSPACE)
             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                 default_workspace = str(agent_pool.operation_manager.base_dir)
-            
+
             return {
                 'messages': [],
                 'agent_instances': {},
@@ -545,23 +512,23 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 'is_waiting': False,
                 'api_router': api_router_state,
             }
-        
+
         return result
 
     def build_stream_update(responses, cached_h_stats=None, agent_instances=None, telemetry=None):
         """Build a lightweight streaming delta (skips re-serializing stable history).
-        
+
         Delegates to build_stream_update_from_pool which reads from pool.instances.
         Legacy parameters are accepted but ignored — callers should use the unified path directly.
         """
         instance_name = session['session_name']
-        
+
         result = build_stream_update_from_pool(
             pool=agent_pool,
             instance_name=instance_name,
             responses=responses,
         )
-        
+
         # Fallback to minimal state if unified build failed
         if result is None:
             approvals = _get_approvals(agent_pool) if agent_pool else []
@@ -608,7 +575,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 'stopped': stopped,
                 'paused': agent_pool.is_paused() if agent_pool else False,
             }
-        
+
         return result
 
     async def broadcast(data):
@@ -670,7 +637,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """
         Unified agent execution entry point. Delegates to run_agent_thread_unified
         which uses ExecutionEngine and pool.instances instead of session['history'].
-        
+
         Signature:
           - history_for_agent → used to extract system message content (can be None if instance exists in pool)
           - agent_runner → not used (engine is stateless, reads from pool)
@@ -737,12 +704,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         _get_send_queue()
         asyncio.create_task(_sender_loop())
         asyncio.create_task(_approval_loop())
-        
+
         # Register dismissal callback for real-time UI tab removal when LLM calls dismiss_agent
         if agent_pool and hasattr(agent_pool, 'on_dismissed'):
             def _on_dismiss_callback(instance_name, log_path):
                 """Fire a state broadcast when an agent is dismissed (runs from tool thread).
-                
+
                 Uses agent_pool._ws_loop to access the event loop set by run_agent_thread.
                 Handles all dismissals: both LLM-initiated (during active generation cycle)
                 and UI-initiated (via terminate_agent_instance handler).
@@ -761,7 +728,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                         logger.debug(f"Dismissal callback failed (non-critical): {e}")
                 else:
                     logger.warning(f"Dismissal broadcast skipped for {instance_name}: ws_loop={ws_loop}, closed={ws_loop.is_closed() if ws_loop else 'N/A'}, queue={'yes' if _sq else 'no'}")
-            
+
             agent_pool.on_dismissed(_on_dismiss_callback)
 
     async def _sender_loop():
@@ -822,19 +789,19 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         client_pub_b64 = data.get('public_key')
         if not client_pub_b64:
             return JSONResponse(status_code=400, content={'message': 'Missing public_key'})
-            
+
         try:
             client_pub_bytes = base64.b64decode(client_pub_b64)
             client_public_key = x25519.X25519PublicKey.from_public_bytes(client_pub_bytes)
-            
+
             # Derive shared secret
             shared_secret = server_private_key.exchange(client_public_key)
-            
+
             # Generate a session token
             import secrets
             token = secrets.token_hex(16)
             api_sessions[token] = shared_secret
-            
+
             return {'session_token': token}
         except Exception as e:
             return JSONResponse(status_code=400, content={'message': f"Handshake failed: {str(e)}"})
@@ -848,29 +815,29 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         token = data.get('session_token')
         encrypted_b64 = data.get('payload')
         nonce_b64 = data.get('nonce')
-        
+
         if not all([token, encrypted_b64, nonce_b64]):
             return JSONResponse(status_code=400, content={'message': 'Missing token, payload, or nonce'})
-            
+
         shared_secret = api_sessions.get(token)
         if not shared_secret:
             return JSONResponse(status_code=401, content={'message': 'Invalid or expired session token'})
-            
+
         try:
             # Decrypt payload
             nonce = base64.b64decode(nonce_b64)
             ciphertext = base64.b64decode(encrypted_b64)
-            
+
             aesgcm = AESGCM(shared_secret)
             decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
             payload = json.loads(decrypted_bytes.decode('utf-8'))
-            
+
             target = payload.get('target') or session.get('session_name', 'Maine')
             text = payload.get('text', '').strip()
-            
+
             if not text:
                 return JSONResponse(status_code=400, content={'message': 'Empty message text'})
-                
+
             if agent_pool:
                 parsed_content = _parse_multimodal_content(text)
                 agent_pool.enqueue_message(target, parsed_content)
@@ -901,7 +868,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 return {'status': 'success', 'queued': True, 'target': target}
             else:
                 return JSONResponse(status_code=503, content={'message': 'Agent pool not initialized'})
-                
+
         except Exception as e:
             return JSONResponse(status_code=400, content={'message': f"Decryption failed: {str(e)}"})
 
@@ -910,12 +877,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """Returns the current state of the agents."""
         if not token or token not in api_sessions:
              return JSONResponse(status_code=401, content={'message': 'Invalid session token'})
-        
+
         # Protect session reads with session_lock to prevent race condition
         with session_lock:
             gen = session['generating']
             sess_name = session['session_name']
-            
+
         return {
             'generating': gen,
             'active_agent': sess_name,
@@ -961,15 +928,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     )
                 except Exception as e:
                     logger.debug(f"Logger reset during new session failed (non-critical): {e}")
-        
+
         # Phase 6: No need to clear session['history'] — pool is the source of truth
         _clear_caches_safely()
-        
+
         # Wrap session state modifications with session_lock to prevent race condition
         with session_lock:
             session['generating'] = False
             session['generation_id'] += 1
-        
+
         if agent_pool:
             agent_pool.reset()
         await _broadcast_state('done')
@@ -1102,7 +1069,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """Add a new API endpoint."""
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
             return JSONResponse(status_code=500, content={'message': 'No API router'})
-        
+
         from agent_cascade.api_router import APIEndpoint
         try:
             ep = APIEndpoint(
@@ -1125,7 +1092,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """Update an existing API endpoint."""
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
             return JSONResponse(status_code=500, content={'message': 'No API router'})
-        
+
         ok = agent_pool.api_router.update_endpoint(endpoint_id, data)
         if ok:
             await _broadcast_state()
@@ -1137,7 +1104,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """Delete an API endpoint."""
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
             return JSONResponse(status_code=500, content={'message': 'No API router'})
-        
+
         ok = agent_pool.api_router.remove_endpoint(endpoint_id)
         if ok:
             await _broadcast_state()
@@ -1147,12 +1114,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     @app.post('/api/endpoints/priorities')
     async def api_set_priorities(data: dict):
         """Set agent-type API endpoint priorities.
-        
+
         Body: { "agent_priorities": { "orchestrator": ["id1", "id2"], ... } }
         """
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
             return JSONResponse(status_code=500, content={'message': 'No API router'})
-        
+
         priorities = data.get('agent_priorities', {})
         for agent_type, endpoint_ids in priorities.items():
             agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
@@ -1162,12 +1129,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     @app.post('/api/endpoints/bulk')
     async def api_bulk_update_endpoints(data: dict):
         """Bulk update all endpoints and priorities (from UI save).
-        
+
         Body: { "endpoints": [...], "agent_priorities": {...} }
         """
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
             return JSONResponse(status_code=500, content={'message': 'No API router'})
-        
+
         agent_pool.api_router.from_dict(data)
         await _broadcast_state()
         return {'status': 'ok'}
@@ -1307,16 +1274,16 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             filename = data.get('filename')
             if not filename:
                 return JSONResponse(status_code=400, content={'message': 'Filename required'})
-                
+
             base_dir = Path(DEFAULT_WORKSPACE)
             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                 base_dir = agent_pool.operation_manager.base_dir
-                
+
             matches = []
-            
+
             # Simple recursive search, ignoring common large/irrelevant directories
             ignore_dirs = {'.git', 'node_modules', '__pycache__', '.pytest_cache', 'venv', 'env', '.env'}
-            
+
             def search_dir(current_dir):
                 try:
                     for item in current_dir.iterdir():
@@ -1326,9 +1293,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                             matches.append(str(item.absolute()))
                 except (PermissionError, OSError) as e:
                     logger.debug(f"Cannot access directory during search (skipping): {e}")
-                    
+
             search_dir(base_dir)
-            
+
             return {'matches': matches}
         except Exception as e:
             logger.error(f"Failed to find file: {e}")
@@ -1356,21 +1323,21 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     @app.post('/api/parse')
     async def parse_document(file: UploadFile = File(...)):
         try:
-            from agent_cascade.tools.simple_doc_parser import SimpleDocParser
             import shutil
-            import tempfile
+
+            from agent_cascade.tools.simple_doc_parser import SimpleDocParser
 
             # Create a temporary directory inside the workspace
             temp_dir = Path(DEFAULT_WORKSPACE) / 'temp_uploads'
             temp_dir.mkdir(exist_ok=True)
-            
+
             file_path = temp_dir / file.filename
             with file_path.open('wb') as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
             doc_extractor = SimpleDocParser({'structured_doc': False, 'work_dir': str(DEFAULT_WORKSPACE)})
             text = doc_extractor.call({'url': str(file_path)})
-            
+
             # Clean up the temp file
             try:
                 file_path.unlink()
@@ -1397,6 +1364,7 @@ if __name__ == '__main__':
     init_logging()
 
     import uvicorn
+
     from agent_cascade.agent_pool import AgentPool
 
     # Resolve project root: api_server.py lives inside agent_cascade/, so go up one level
@@ -1515,7 +1483,7 @@ if __name__ == '__main__':
     sys_msg_content = _extract_system_message(orch_agent)
 
     if sys_msg_content:
-        from agent_cascade.llm.schema import Message, SYSTEM
+        from agent_cascade.llm.schema import SYSTEM, Message
         maine_inst = agent_pool.get_instance('Maine')
         if maine_inst and not maine_inst.conversation:
             # PR3 migration: Use centralized API for system message append at server startup

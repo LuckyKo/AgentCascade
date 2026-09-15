@@ -28,11 +28,11 @@ from typing import List, Optional
 class SkillAdvisorResult:
     """Parsed result from the Skill Advisor."""
 
-    verdict: str = 'ambiguous'        # "approve" | "deny" | "ambiguous"
-    reason: str = ''                  # Advisor's justification
+    verdict: str = 'ambiguous'  # "approve" | "deny" | "ambiguous"
+    reason: str = ''  # Advisor's justification
     recommended_skills: List[str] = field(default_factory=list)  # Validated skill names
-    task_notes: str = ''              # Improved task notes (empty if none)
-    latency_ms: float = 0.0           # Wall-clock time for the advisor LLM call
+    task_notes: str = ''  # Improved task notes (empty if none)
+    latency_ms: float = 0.0  # Wall-clock time for the advisor LLM call
 
     @property
     def is_usable(self) -> bool:
@@ -62,8 +62,8 @@ def build_skill_advisor_prompt(
     Excludes ``self-augmentation`` from the skills list (it is always present).
     Each skill is formatted as ``- {name}: {description}``.
     """
-    from agent_cascade.prompts.dna import SKILL_ADVISOR_PROMPT
     from agent_cascade.log import logger
+    from agent_cascade.prompts.dna import SKILL_ADVISOR_PROMPT
 
     # Acquire a fresh list at run time (cache-respecting, like scan_skills/load_skill).
     try:
@@ -116,7 +116,7 @@ def parse_advisor_output(
         return SkillAdvisorResult(verdict='ambiguous', reason='no [VERDICT] marker found')
 
     verdict_line = verdict_match.group(1).strip()
-    verdict_upper = verdict_line.upper()
+    verdict_line.upper()
     # Split off the reason after the APPROVE/DENY keyword (tolerates "—", "-", ":").
     m = re.match(r'^(APPROVE|DENY)\b\s*[-–—:]?\s*(.*)$', verdict_line, re.IGNORECASE)
     if m is None:
@@ -191,16 +191,14 @@ def run_skill_advisor(
     On timeout/error: returns ``verdict="ambiguous"`` so the caller falls back to
     basic keyword matching. Never raises.
     """
-    from agent_cascade.log import logger
     from agent_cascade.advisor_runner import run_lightweight_advisor
+    from agent_cascade.log import logger
     from agent_cascade.settings import SKILL_ADVISOR_MAX_TURNS
 
     instance_name = f'Security_op_{uuid.uuid4().hex[:8]}'
 
     try:
-        prompt = build_skill_advisor_prompt(
-            skill_manager, task_text, context_text, agent_class, caller_name
-        )
+        prompt = build_skill_advisor_prompt(skill_manager, task_text, context_text, agent_class, caller_name)
     except Exception as e:  # noqa: BLE001 — prompt building must not crash the caller
         logger.error('[SKILL-ADVISOR] Failed to build advisor prompt: %s', e)
         return SkillAdvisorResult(verdict='ambiguous', reason=f"prompt build error: {e}")
@@ -212,7 +210,8 @@ def run_skill_advisor(
             instance_name=instance_name,
             task=prompt,
             caller=caller_name or 'unknown',
-            max_turns=SKILL_ADVISOR_MAX_TURNS,   # Decoupled budget: Skill Advisor uses its own turn limit (not SECURITY_AGENT_MAX_TURNS)
+            max_turns=
+            SKILL_ADVISOR_MAX_TURNS,  # Decoupled budget: Skill Advisor uses its own turn limit (not SECURITY_AGENT_MAX_TURNS)
         )
     except Exception as e:  # noqa: BLE001 — runner already catches, but be defensive
         logger.error("[SKILL-ADVISOR] run_lightweight_advisor raised for '%s': %s", instance_name, e)
@@ -228,15 +227,21 @@ def run_skill_advisor(
     if result.was_error:
         logger.error(
             "[SKILL-ADVISOR] Advisor error for '%s': %s — falling back to basic match.",
-            instance_name, result.error_msg,
+            instance_name,
+            result.error_msg,
         )
-        return SkillAdvisorResult(verdict='ambiguous', reason=f"advisor error: {result.error_msg}", latency_ms=result.latency_ms)
+        return SkillAdvisorResult(verdict='ambiguous',
+                                  reason=f"advisor error: {result.error_msg}",
+                                  latency_ms=result.latency_ms)
 
     parsed = parse_advisor_output(result.output_text, skill_manager)
     parsed.latency_ms = result.latency_ms
     logger.info(
         '[SKILL-ADVISOR] verdict=%s skills=%d notes=%d latency=%.0fms (%s)',
-        parsed.verdict, len(parsed.recommended_skills), len(parsed.task_notes),
-        result.latency_ms, instance_name,
+        parsed.verdict,
+        len(parsed.recommended_skills),
+        len(parsed.task_notes),
+        result.latency_ms,
+        instance_name,
     )
     return parsed

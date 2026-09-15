@@ -18,22 +18,18 @@ integration is complete.
 
 import asyncio
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from agent_cascade.llm.schema import (
-    ASSISTANT, FUNCTION, ROLE, USER, Message,
-)
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, ROLE, USER, Message
 from agent_cascade.log import logger
 
 from .agent_pool import AgentPool
-from .agent_instance import AgentState
 from .execution_engine import ExecutionEngine
-
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. Unified run_agent_thread Replacement
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def run_agent_thread_unified(
     pool: AgentPool,
@@ -72,15 +68,9 @@ def run_agent_thread_unified(
         )
         thread.start()
     """
-    from .api_integration import (
-        broadcast_stream_update,
-        build_stream_update_from_pool,
-        create_main_agent_instance,
-        run_agent_in_pool_with_recovery,
-        build_state_from_pool,
-        _apply_ui_config,
-        _put_stream_update,
-    )
+    from .api_integration import (_apply_ui_config, _put_stream_update, broadcast_stream_update, build_state_from_pool,
+                                  build_stream_update_from_pool, create_main_agent_instance,
+                                  run_agent_in_pool_with_recovery)
 
     try:
         # ── Initialize pool state ────────────────────────────────────────
@@ -138,16 +128,15 @@ def run_agent_thread_unified(
 
         # Shared stop-check helper (used by main loop and auto-skill)
         def is_stopped():
-            stopped = (pool.stopped or current_generation != pool._run_generation
-                    or instance_name in pool._halted_instances
-                    or pool.is_instance_terminated(instance_name))
+            stopped = (pool.stopped or current_generation != pool._run_generation or
+                       instance_name in pool._halted_instances or pool.is_instance_terminated(instance_name))
             return stopped
 
         for turn_output_raw in run_agent_in_pool_with_recovery(
-            pool=pool,
-            instance_name=instance_name,
-            max_auto_retries=max_auto_retries,
-            auto_rollback_enabled=auto_rollback_enabled,
+                pool=pool,
+                instance_name=instance_name,
+                max_auto_retries=max_auto_retries,
+                auto_rollback_enabled=auto_rollback_enabled,
         ):
 
             # Unpack (turn_output, is_streaming) signal from engine.run()
@@ -170,34 +159,35 @@ def run_agent_thread_unified(
             streaming_text = None
             if turn_output:
                 last_msg = turn_output[-1]
-                msg_role = (
-                    last_msg.get(ROLE, '') if isinstance(last_msg, dict)
-                    else getattr(last_msg, 'role', '')
-                )
-                msg_fc = last_msg.get('function_call') if isinstance(last_msg, dict) else getattr(last_msg, 'function_call', None)
+                msg_role = (last_msg.get(ROLE, '') if isinstance(last_msg, dict) else getattr(last_msg, 'role', ''))
+                msg_fc = last_msg.get('function_call') if isinstance(last_msg, dict) else getattr(
+                    last_msg, 'function_call', None)
                 has_tool_event = bool(msg_fc) or msg_role == FUNCTION
-                
+
                 # Extract streaming text for activity banner (including reasoning/tools)
                 if msg_role == ASSISTANT:
-                    content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
-                    reasoning = last_msg.get('reasoning_content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'reasoning_content', '')
-                    
+                    content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(
+                        last_msg, 'content', '')
+                    reasoning = last_msg.get('reasoning_content', '') if isinstance(last_msg, dict) else getattr(
+                        last_msg, 'reasoning_content', '')
+
                     if msg_fc:
                         # Show tool call arguments in activity banner for "live" feel
                         fc_name = msg_fc.get('name', '') if isinstance(msg_fc, dict) else getattr(msg_fc, 'name', '')
-                        fc_args = msg_fc.get('arguments', '') if isinstance(msg_fc, dict) else getattr(msg_fc, 'arguments', '')
+                        fc_args = msg_fc.get('arguments', '') if isinstance(msg_fc, dict) else getattr(
+                            msg_fc, 'arguments', '')
                         streaming_text = f"Tool {fc_name}({str(fc_args)[:100]}...)"
                     elif reasoning:
                         # Show thinking process
                         streaming_text = str(reasoning)
                     else:
-                        streaming_text = str(content)
+                        streaming_text = str(content)  # noqa: F841  (reserved for activity banner)
                 elif msg_role == FUNCTION:
                     # Tool result (FUNCTION role): show which tool completed + brief preview
                     from agent_cascade.utils.utils import format_tool_result_preview, msg_field
                     tool_name = msg_field(last_msg, 'name', '')
                     content = msg_field(last_msg, 'content', '')
-                    streaming_text = format_tool_result_preview(tool_name, content, max_len=120)
+                    format_tool_result_preview(tool_name, content, max_len=120)
 
             # ── WebSocket broadcast (shared helper handles all throttling) ──
             # Tool events are signaled via is_streaming_tick=True so the helper
@@ -218,10 +208,9 @@ def run_agent_thread_unified(
 
             # Track cumulative tool calls
             if turn_output:
-                total_tool_calls += sum(1 for m in turn_output if (
-                    m.get('role', '') == FUNCTION
-                    if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION
-                ))
+                total_tool_calls += sum(
+                    1 for m in turn_output
+                    if (m.get('role', '') == FUNCTION if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION))
 
         inst = pool.get_instance(instance_name)
         skill_manager = getattr(pool, 'skill_manager', None)
@@ -240,7 +229,7 @@ def run_agent_thread_unified(
 
             # Unified auto-skill gating: both toggles must be ON, using pool settings as single source of truth
             from agent_cascade.auto_skill_helpers import run_auto_skill_proposal
-            created_skills = run_auto_skill_proposal(
+            run_auto_skill_proposal(
                 pool=pool,
                 skill_manager=skill_manager,
                 inst=inst,
@@ -313,6 +302,7 @@ def run_agent_thread_unified(
 # ═══════════════════════════════════════════════════════════════════════
 # 3. Unified Token Counting Integration
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def get_token_stats_unified(
     pool: AgentPool,

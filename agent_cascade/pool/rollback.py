@@ -3,11 +3,15 @@ RollbackMixin — conversation snapshots and surgical rollback. Moved verbatim f
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from typing import Dict, Optional
+
+from agent_cascade.llm.schema import FUNCTION, SYSTEM, USER
 from agent_cascade.log import logger
-from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
+
+
 class RollbackMixin:
+
     def capture_snapshots(self) -> Dict[str, int]:
         """Capture current conversation lengths for all instances."""
         result = {}
@@ -27,11 +31,12 @@ class RollbackMixin:
             self._rollback_instance(
                 name,
                 target_length=target_len,
-                preserve_system_user=False,   # Allow exact length including full reset
+                preserve_system_user=False,  # Allow exact length including full reset
                 refine_function_boundary=False,  # Avoid altering the target length
                 sync_logger=True,
                 reason=f"Snapshot rollback: {reason}" if reason else 'Snapshot rollback',
             )
+
     @staticmethod
     def _msg_field(msg, field, default=''):
         """Extract a field from a message (dict or Message object)."""
@@ -82,10 +87,8 @@ class RollbackMixin:
 
         inst = self.instances.get(instance_name)
         if not inst:
-            logger.warning(
-                f"Rollback for '{instance_name}' failed — instance not found in pool"
-                + (f" ({reason})" if reason else '')
-            )
+            logger.warning(f"Rollback for '{instance_name}' failed — instance not found in pool" +
+                           (f" ({reason})" if reason else ''))
             return 0
 
         with inst._compression_lock:
@@ -150,5 +153,7 @@ class RollbackMixin:
         Uses default safety settings (preserve SYSTEM+USER, refine boundary).
         """
         return self._rollback_instance(
-            instance_name, pop_count=pop_count, reason=reason,
+            instance_name,
+            pop_count=pop_count,
+            reason=reason,
         )

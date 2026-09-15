@@ -9,18 +9,11 @@ Plus integration tests that exercise actual deadlock scenarios with real threadi
 """
 import threading
 import time
-from unittest.mock import MagicMock, patch, PropertyMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 # Must import before patches take effect
-from agent_cascade.security_handler import (
-    SecurityAdvisorHandler,
-    SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS,
-    _get_security_check_lock,
-    _get_security_execution_lock,
-)
-
+from agent_cascade.security_handler import (SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS, SecurityAdvisorHandler,
+                                            _get_security_check_lock, _get_security_execution_lock)
 
 # ── Unit tests for individual mechanisms ────────────────────────────────────
 
@@ -44,6 +37,7 @@ class TestSecurityTurnBudget:
     def test_handler_bounded_by_turns_not_wallclock(self):
         """security_handler should no longer define the removed wall-clock LLM timeout constant."""
         import inspect
+
         import agent_cascade.security_handler as sh
 
         # Runtime attribute check (robust to comments mentioning the old name).
@@ -126,6 +120,7 @@ class TestReentrantSecurityLock:
     def test_security_handler_creates_rlock_type(self):
         """Verify security_handler.py uses RLock for execution lock (not Semaphore or Lock)."""
         import inspect
+
         from agent_cascade import security_handler
 
         source = inspect.getsource(security_handler)
@@ -151,6 +146,7 @@ class TestReentrantSecurityLock:
 
         lock2 = _get_security_execution_lock(app)
         from agent_cascade.security_handler import ResettableRLock
+
         # Accept either a plain RLock or the ResettableRLock wrapper (which wraps one).
         assert isinstance(lock2, (type(threading.RLock()), ResettableRLock)), (
             '_get_security_execution_lock must return a reentrant lock (RLock or ResettableRLock)'
@@ -167,6 +163,7 @@ class TestReentrantSecurityLock:
     def test_unused_semaphore_removed_from_api_server(self):
         """api_server.py should not create security_check_semaphore anymore."""
         import inspect
+
         from agent_cascade import api_server
         source = inspect.getsource(api_server)
         assert 'security_check_semaphore' not in source, (
@@ -400,7 +397,7 @@ class TestResettableRLock:
         # emulate the dead-holder state directly via force_reset on a held lock.)
 
         # Before reset, other threads cannot get in.
-        blocked = threading.Event()
+        threading.Event()
 
         def waiter(name, results):
             ok = lock.acquire(timeout=2)
@@ -582,7 +579,7 @@ class TestConcurrentSecurityChecks:
 
         # Verify serialization: check_A should complete before check_B starts
         events = sorted(timeline, key=lambda x: x[0])
-        a_start = next(t for t, e in events if e == 'check_A_START')
+        next(t for t, e in events if e == 'check_A_START')
         a_end = next(t for t, e in events if e == 'check_A_END')
         b_start = next(t for t, e in events if e == 'check_B_START')
 
@@ -620,7 +617,7 @@ class TestNestedSecurityCheckReentrancy:
                     time.sleep(0.05)  # Simulate work
                 finally:
                     app.security_execution_lock.release()
-            except Exception as e:
+            except Exception :
                 outer_completed.set()  # Unblock outer thread
                 raise
 
@@ -636,7 +633,7 @@ class TestNestedSecurityCheckReentrancy:
                     outer_completed.set()
                 finally:
                     app.security_execution_lock.release()
-            except Exception as e:
+            except Exception :
                 deadlock_detected.set()
                 raise
 

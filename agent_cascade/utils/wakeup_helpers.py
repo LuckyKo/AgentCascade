@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from agent_cascade.log import logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from agent_cascade.agent_pool import AgentPool
+    from agent_cascade.agent_pool import AgentPool  # noqa: F401  (type-checking only)
 
 
 def _drive_instance_run(pool, instance_name: str) -> None:
@@ -63,10 +63,8 @@ def _drive_instance_run(pool, instance_name: str) -> None:
             # transition (L1 race guard) raises when a second launcher races past
             # the pre-check and loses the state race. Not an error — another run
             # owns the instance now.
-            logger.debug(
-                f"[WAKEUP_RELAUNCH] {instance_name}: concurrent wakeup, "
-                f"another run owns the instance (L1 guard): {e}"
-            )
+            logger.debug(f"[WAKEUP_RELAUNCH] {instance_name}: concurrent wakeup, "
+                         f"another run owns the instance (L1 guard): {e}")
         except Exception as e:
             logger.error(f"[WAKEUP_RELAUNCH] relaunch drive failed for '{instance_name}': {e}")
     finally:
@@ -78,7 +76,8 @@ def _drive_instance_run(pool, instance_name: str) -> None:
                 with pool._instance_threads_lock:
                     pool._instance_threads.pop(instance_name, None)
             except Exception as e:  # pragma: no cover - defensive
-                logger.debug(f"[WAKEUP_RELAUNCH] Thread registration cleanup failed for '{instance_name}' (non-critical): {e}")
+                logger.debug(
+                    f"[WAKEUP_RELAUNCH] Thread registration cleanup failed for '{instance_name}' (non-critical): {e}")
 
 
 def relaunch_idle_agent(pool, instance_name: str) -> bool:
@@ -116,9 +115,7 @@ def relaunch_idle_agent(pool, instance_name: str) -> bool:
     # revive a dead agent.
     try:
         if getattr(pool, 'stopped', False):
-            logger.debug(
-                f"[WAKEUP_RELAUNCH] Skipping relaunch of '{instance_name}': pool is stopped"
-            )
+            logger.debug(f"[WAKEUP_RELAUNCH] Skipping relaunch of '{instance_name}': pool is stopped")
             return False
     except Exception as e:  # pragma: no cover - defensive
         logger.debug(f"[WAKEUP_RELAUNCH] stopped-check failed for '{instance_name}' (non-critical): {e}")
@@ -126,9 +123,7 @@ def relaunch_idle_agent(pool, instance_name: str) -> bool:
     if hasattr(pool, 'is_instance_terminated'):
         try:
             if pool.is_instance_terminated(instance_name):
-                logger.debug(
-                    f"[WAKEUP_RELAUNCH] Skipping relaunch of '{instance_name}': instance is terminated"
-                )
+                logger.debug(f"[WAKEUP_RELAUNCH] Skipping relaunch of '{instance_name}': instance is terminated")
                 return False
         except Exception as e:  # pragma: no cover - defensive
             logger.debug(f"[WAKEUP_RELAUNCH] termination-check failed for '{instance_name}' (non-critical): {e}")

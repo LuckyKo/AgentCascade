@@ -15,8 +15,6 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agent_cascade.compression.handler import CompressionHandler
 from agent_cascade.llm.schema import Message
 
@@ -29,7 +27,7 @@ def make_instance(name='A'):
     inst._force_compress_count = 1
     inst._force_compress_fail_streak = 0
     inst._last_force_compress_fail_at = 0.0
-    inst._allocated_max_input_tokens = 0   # real int: avoids MagicMock > int in feedback formatting
+    inst._allocated_max_input_tokens = 0  # real int: avoids MagicMock > int in feedback formatting
     lock = threading.RLock()
     inst._compression_lock = lock
     return inst
@@ -37,7 +35,7 @@ def make_instance(name='A'):
 
 def make_handler():
     pool = MagicMock()
-    pool.instances = []          # no Compressor_ instances to exempt
+    pool.instances = []  # no Compressor_ instances to exempt
     pool.get_conversation.return_value = []  # real list: safe to iterate/bool-test
     handler = CompressionHandler(pool)
     engine = MagicMock()
@@ -53,14 +51,13 @@ class TestBug7BackoffGate:
         inst = make_instance()
         messages, llm_messages = [Message(role='user', content='x')], []
 
-        with patch('agent_cascade.compression.core.compress_context',
-                   side_effect=RuntimeError('boom')):
+        with patch('agent_cascade.compression.core.compress_context', side_effect=RuntimeError('boom')):
             result = handler.execute_force_compression(inst, messages, llm_messages, 96.0)
 
         assert result is False
         assert inst._force_compress_fail_streak == 1
         assert inst._last_force_compress_fail_at > 0.0
-        pool.halt_all_instances.assert_called_once()   # attempt #1 did halt normally
+        pool.halt_all_instances.assert_called_once()  # attempt #1 did halt normally
         pool.resume_all_instances.assert_called_once()
 
     def test_gate_short_circuits_before_halt_on_immediate_retry(self):
@@ -69,8 +66,7 @@ class TestBug7BackoffGate:
         inst = make_instance()
         messages, llm_messages = [Message(role='user', content='x')], []
 
-        with patch('agent_cascade.compression.core.compress_context',
-                   side_effect=RuntimeError('boom')):
+        with patch('agent_cascade.compression.core.compress_context', side_effect=RuntimeError('boom')):
             first = handler.execute_force_compression(inst, messages, llm_messages, 96.0)
 
         assert first is False
@@ -95,8 +91,7 @@ class TestBug7BackoffGate:
         inst._force_compress_fail_streak = 1
         inst._last_force_compress_fail_at = time.monotonic() - 61.0  # 60s window passed
         messages, llm_messages = [Message(role='user', content='x')], []
-        ok = MagicMock(success=True, tokens_before=100, tokens_after=10,
-                       summary_text='s', messages_discarded=5)
+        ok = MagicMock(success=True, tokens_before=100, tokens_after=10, summary_text='s', messages_discarded=5)
         engine._telemetry.return_value = None
 
         with patch('agent_cascade.compression.core.compress_context', return_value=ok), \
@@ -132,8 +127,7 @@ class TestBug7BackoffGate:
         inst._force_compress_fail_streak = 3
         inst._last_force_compress_fail_at = time.monotonic() - 700.0  # past 600s cap
         messages, llm_messages = [Message(role='user', content='x')], []
-        ok = MagicMock(success=True, tokens_before=100, tokens_after=10,
-                       summary_text='s', messages_discarded=5)
+        ok = MagicMock(success=True, tokens_before=100, tokens_after=10, summary_text='s', messages_discarded=5)
         engine._telemetry.return_value = None
 
         with patch('agent_cascade.compression.core.compress_context', return_value=ok), \

@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,14 +13,12 @@
 # limitations under the License.
 
 import copy
-from pprint import pformat
 from threading import Thread
 from typing import Dict, Iterator, List, Optional
 
 from agent_cascade.llm.base import register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
-from agent_cascade.llm.schema import ASSISTANT, Message
-from agent_cascade.llm.schema import IMAGE, AUDIO, VIDEO
+from agent_cascade.llm.schema import ASSISTANT, AUDIO, IMAGE, VIDEO, Message
 from agent_cascade.log import logger
 
 
@@ -37,6 +35,7 @@ class Transformers(BaseFnCallModel):
         }
         bot = Assistant(llm=llm_cfg, ...)
     """
+
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
 
@@ -45,16 +44,17 @@ class Transformers(BaseFnCallModel):
 
         try:
             import transformers
-            from transformers import AutoConfig, AutoTokenizer, AutoProcessor, AutoModelForCausalLM
-            from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+            from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizer, PreTrainedTokenizerFast
         except ImportError as e:
             raise ImportError('Could not import classes from transformers. '
                               'Please install it with `pip install -U transformers`') from e
-        
+
         self.hf_config = AutoConfig.from_pretrained(cfg['model'])
         arch = self.hf_config.architectures[0]
         if len(self.hf_config.architectures) > 1:
-            logger.warning(f'The config for the transformers model type contains more than one architecture, choosing the first: {arch}')
+            logger.warning(
+                f'The config for the transformers model type contains more than one architecture, choosing the first: {arch}'
+            )
 
         # try loading a processor, if got a tokenizer, regarding the model as text-only
         processor = AutoProcessor.from_pretrained(cfg['model'])
@@ -68,12 +68,13 @@ class Transformers(BaseFnCallModel):
             self._support_multimodal_input = True
 
         model_cls = getattr(transformers, arch)
-        self.hf_model = model_cls.from_pretrained(cfg['model'], config=self.hf_config, torch_dtype='auto').to(cfg.get('device', 'cpu'))
+        self.hf_model = model_cls.from_pretrained(cfg['model'], config=self.hf_config,
+                                                  torch_dtype='auto').to(cfg.get('device', 'cpu'))
 
     @property
     def support_multimodal_input(self) -> bool:
         return self._support_multimodal_input
-    
+
     @property
     def support_audio_input(self) -> bool:
         return self._support_multimodal_input
@@ -85,16 +86,19 @@ class Transformers(BaseFnCallModel):
 
     def _get_inputs(self, messages: List[Message]):
         import torch
-        
+
         messages_plain = [message.model_dump() for message in messages]
         if not self.support_multimodal_input:
-            input_ids = self.tokenizer.apply_chat_template(messages_plain, add_generation_prompt=True, return_tensors='pt')
+            input_ids = self.tokenizer.apply_chat_template(messages_plain,
+                                                           add_generation_prompt=True,
+                                                           return_tensors='pt')
             inputs = dict(input_ids=input_ids, attention_mask=torch.ones_like(input_ids))
         else:
             for message in messages_plain:
                 for content_item in message['content']:
-                    content_item['type'] = [type_ for type_ in ('text', IMAGE, AUDIO, VIDEO) if type_ in content_item][0]
-            
+                    content_item['type'] = [type_ for type_ in ('text', IMAGE, AUDIO, VIDEO) if type_ in content_item
+                                           ][0]
+
             has_vision = False
             audio_paths = []
             for message in messages_plain:
@@ -103,28 +107,29 @@ class Transformers(BaseFnCallModel):
                         has_vision = True
                     if content_item['type'] in (AUDIO,):
                         audio_paths.append(content_item[AUDIO])
-            
+
             prompt = self.processor.apply_chat_template(messages_plain, add_generation_prompt=True, tokenize=False)
             processor_kwargs = {'text': prompt}
-            
+
             if has_vision:
                 from qwen_vl_utils import process_vision_info
-                
+
                 images, videos = process_vision_info(messages_plain)
                 processor_kwargs['images'] = images
                 processor_kwargs['videos'] = videos
-            
+
             if audio_paths:
                 import librosa
 
                 audios = []
                 for path in audio_paths:
                     if path.startswith('file://'):
-                        audios.append(librosa.load(path[len('file://') :], sr=self.processor.feature_extractor.sampling_rate)[0])
+                        audios.append(
+                            librosa.load(path[len('file://'):], sr=self.processor.feature_extractor.sampling_rate)[0])
                     else:
                         audios.append(librosa.load(path, sr=self.processor.feature_extractor.sampling_rate)[0])
                 processor_kwargs['audios'] = audios
-            
+
             inputs = self.processor(**processor_kwargs, return_tensors='pt')
 
         for k, v in inputs.items():
@@ -143,11 +148,8 @@ class Transformers(BaseFnCallModel):
         streamer = self._get_streamer()
 
         generate_cfg.update(inputs)
-        generate_cfg.update(dict(
-            streamer=streamer,
-            max_new_tokens=generate_cfg.get('max_new_tokens', 8192)
-        ))
-        
+        generate_cfg.update(dict(streamer=streamer, max_new_tokens=generate_cfg.get('max_new_tokens', 8192)))
+
         if 'seed' in generate_cfg:
             from transformers import set_seed
             set_seed(generate_cfg['seed'])
@@ -175,10 +177,8 @@ class Transformers(BaseFnCallModel):
 
         inputs = self._get_inputs(messages)
         generate_cfg.update(inputs)
-        generate_cfg.update(dict(
-            max_new_tokens=generate_cfg.get('max_new_tokens', 8192)
-        ))
-        
+        generate_cfg.update(dict(max_new_tokens=generate_cfg.get('max_new_tokens', 8192)))
+
         if 'seed' in generate_cfg:
             from transformers import set_seed
             set_seed(generate_cfg['seed'])

@@ -17,14 +17,12 @@ All tests are self-contained — no LLM or API server required. Uses a lightweig
 import threading
 from unittest.mock import MagicMock
 
-import pytest
-
 from agent_cascade.tool_dispatcher import ToolDispatcher
-
 
 # ──────────────────────────────────────────────
 # Test Helpers — lightweight fakes
 # ──────────────────────────────────────────────
+
 
 def _make_mock_instance(instance_name: str, agent_class: str = 'coder'):
     """Minimal mock AgentInstance with the attributes handle_call_agent touches."""
@@ -54,7 +52,9 @@ class FakePool:
         # Template registry — the unknown-class guard calls pool.get_template()/list_agents().
         # Default to a small set of valid classes so legitimate routing tests pass the guard.
         self.templates = {
-            'coder': MagicMock(), 'orchestrator': MagicMock(), 'reviewer': MagicMock(),
+            'coder': MagicMock(),
+            'orchestrator': MagicMock(),
+            'reviewer': MagicMock(),
         }
 
     def get_template(self, name: str):
@@ -97,7 +97,11 @@ def _make_dispatcher(pool: FakePool):
 def _run(dispatcher, caller, instance_name, agent_class):
     """Drive handle_call_agent and return the result string."""
     return dispatcher.handle_call_agent(
-        args={'instance_name': instance_name, 'agent_class': agent_class, 'task': 'test'},
+        args={
+            'instance_name': instance_name,
+            'agent_class': agent_class,
+            'task': 'test'
+        },
         messages=[],
         instance=caller,
     )
@@ -106,6 +110,7 @@ def _run(dispatcher, caller, instance_name, agent_class):
 # ──────────────────────────────────────────────
 # 1. Self-call guard
 # ──────────────────────────────────────────────
+
 
 class TestSelfCallGuard:
     """An agent calling itself (case-insensitive) is rejected outright."""
@@ -164,6 +169,7 @@ class TestSelfCallGuard:
 # 2. Resurrection identity-mismatch guard
 # ──────────────────────────────────────────────
 
+
 class TestResurrectionIdentityMismatchGuard:
     """Existing instance under the resolved name with a mismatched identity is rejected."""
 
@@ -202,6 +208,7 @@ class TestResurrectionIdentityMismatchGuard:
 # ──────────────────────────────────────────────
 # 3. Legitimate cases — NOT rejected (routing reached)
 # ──────────────────────────────────────────────
+
 
 class TestLegitimateCallsNotRejected:
     """Distinct idle child re-calls and fresh names still route through."""

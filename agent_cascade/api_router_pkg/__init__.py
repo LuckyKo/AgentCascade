@@ -4,10 +4,10 @@ Sub-modules follow the dependency DAG: endpoints/scheduler/helpers are independe
 router depends on all three. Import order below is bottom-up.
 """
 
-from agent_cascade.api_router_pkg import endpoints
-from agent_cascade.api_router_pkg import scheduler
-from agent_cascade.api_router_pkg import helpers
-from agent_cascade.api_router_pkg import router
+from agent_cascade.api_router_pkg import endpoints  # noqa: F401  (import-order side effect)
+from agent_cascade.api_router_pkg import helpers  # noqa: F401  (import-order side effect)
+from agent_cascade.api_router_pkg import router  # noqa: F401  (import-order side effect)
+from agent_cascade.api_router_pkg import scheduler  # noqa: F401  (import-order side effect)
 
 __all__ = [
     'APIRouter',

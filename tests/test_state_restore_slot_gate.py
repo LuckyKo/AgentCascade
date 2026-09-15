@@ -20,20 +20,17 @@ never evict another agent — these tests pin that invariant down.
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 import agent_cascade.state_ops as state_ops
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.schema import Message
-
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
 AUTOLOADER_X = 'http://localhost:1234/v1/'  # the shared conc=0 autoloader (held)
-STALE_Y = 'http://stale-host:9123/v1/'      # stale _last_endpoint_config (NOT held)
+STALE_Y = 'http://stale-host:9123/v1/'  # stale _last_endpoint_config (NOT held)
 
 
 def make_instance(name='B', label='B'):
@@ -83,7 +80,11 @@ def wire_router_held_endpoint(pool):
         'needs_slot': True,
     }
     pool.api_router.get_endpoint_chain.return_value = [
-        {'api_base': AUTOLOADER_X, 'model': 'model-A', 'state_save_enabled': True},
+        {
+            'api_base': AUTOLOADER_X,
+            'model': 'model-A',
+            'state_save_enabled': True
+        },
     ]
 
 
@@ -106,6 +107,7 @@ def drive_setup_turn(engine, inst):
 # Change 1 — restore_instance_state(held_endpoint_cfg=...)
 # ============================================================================
 
+
 class TestRestoreTargetsHeldEndpoint:
 
     def test_held_cfg_overrides_stale_last_endpoint_config(self):
@@ -114,8 +116,11 @@ class TestRestoreTargetsHeldEndpoint:
         inst = make_instance()
         with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
-            ok = state_ops.restore_instance_state(
-                inst, held_endpoint_cfg={'api_base': AUTOLOADER_X, 'model': 'model-A'})
+            ok = state_ops.restore_instance_state(inst,
+                                                  held_endpoint_cfg={
+                                                      'api_base': AUTOLOADER_X,
+                                                      'model': 'model-A'
+                                                  })
 
         assert ok is True
         load_urls = _recorded_load_urls(post_mock)
@@ -143,8 +148,11 @@ class TestRestoreTargetsHeldEndpoint:
         """No saved label → no restore HTTP at all."""
         inst = make_instance(label=None)
         with patch.object(state_ops.httpx, 'post') as post_mock:
-            ok = state_ops.restore_instance_state(
-                inst, held_endpoint_cfg={'api_base': AUTOLOADER_X, 'model': 'model-A'})
+            ok = state_ops.restore_instance_state(inst,
+                                                  held_endpoint_cfg={
+                                                      'api_base': AUTOLOADER_X,
+                                                      'model': 'model-A'
+                                                  })
 
         assert ok is False
         post_mock.assert_not_called()
@@ -153,6 +161,7 @@ class TestRestoreTargetsHeldEndpoint:
 # ============================================================================
 # Change 2 — _setup_turn slot-ownership gate
 # ============================================================================
+
 
 class TestSetupTurnRestoreGate:
 
@@ -218,8 +227,11 @@ class TestSetupTurnRestoreGate:
 
         engine, pool = make_engine(inst)
         pool.api_router.get_effective_slot_info.return_value = {
-            'slot_key': 'pool-x', 'is_sequential': True, 'concurrency_limit': 0,
-            'api_base': AUTOLOADER_X, 'needs_slot': True,
+            'slot_key': 'pool-x',
+            'is_sequential': True,
+            'concurrency_limit': 0,
+            'api_base': AUTOLOADER_X,
+            'needs_slot': True,
         }
         pool.api_router.get_endpoint_chain.return_value = []  # empty chain
 
@@ -233,6 +245,7 @@ class TestSetupTurnRestoreGate:
 # ============================================================================
 # Compression-resume path (BUG-1 sanctioned-degrade) keeps the gate
 # ============================================================================
+
 
 class TestCompressionResumeRestoreGate:
 
@@ -289,6 +302,7 @@ class TestCompressionResumeRestoreGate:
 # Sleep-wakeup paths keep the gate
 # ============================================================================
 
+
 class TestSleepWakeupRestoreGate:
 
     def test_no_slot_held_wakeup_skips_restore(self):
@@ -310,6 +324,7 @@ class TestSleepWakeupRestoreGate:
 # ============================================================================
 # Invariant — no wrongful eviction of a sibling's resident
 # ============================================================================
+
 
 class TestNoWrongfulEviction:
 
@@ -351,7 +366,7 @@ class TestNoWrongfulEviction:
 
         with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
-            drive_setup_turn(engine, holder)   # holder → exactly one load (to X)
+            drive_setup_turn(engine, holder)  # holder → exactly one load (to X)
             # Drive the slotless agent through the same engine path.
             engine._setup_turn(other)
 

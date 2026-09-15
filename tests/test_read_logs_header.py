@@ -19,8 +19,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 
 def _write_jsonl(tmp_path: Path, name: str, entries: list) -> Path:
     p = tmp_path / name
@@ -47,6 +45,7 @@ def _read(path: Path, **params) -> str:
 
 
 class TestReadLogsHeader:
+
     def test_header_present_with_total_and_humanized_size(self):
         """(a) Header is the first line, has correct total count and a humanized size."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,14 +153,23 @@ class TestReadLogsHeader:
 
 
 class TestReadLogsHeaderSimpleFormat:
+
     def test_header_first_line_in_simple_format(self):
         """The header is also the first line for simple format, and entries follow it."""
         with tempfile.TemporaryDirectory() as tmp:
             p = _write_jsonl(
-                Path(tmp), 't.jsonl',
+                Path(tmp),
+                't.jsonl',
                 [
-                    {'role': 'user', 'content': 'hello'},
-                    {'role': 'assistant', 'timestamp': '2026-08-14T10:30:00Z', 'content': 'hi there'},
+                    {
+                        'role': 'user',
+                        'content': 'hello'
+                    },
+                    {
+                        'role': 'assistant',
+                        'timestamp': '2026-08-14T10:30:00Z',
+                        'content': 'hi there'
+                    },
                 ],
             )
             result = _read(p, format='simple')

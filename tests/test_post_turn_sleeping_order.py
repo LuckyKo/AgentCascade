@@ -19,9 +19,9 @@ so they fail if the ordering regresses. Deterministic — no sleeps.
 
 import time
 
-from agent_cascade.llm.schema import Message, ASSISTANT, USER, FUNCTION
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.execution_engine import ExecutionEngine
+from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
 
 def _make_pool(has_pending):
@@ -92,7 +92,10 @@ def _tool_call_response():
         Message(
             role=ASSISTANT,
             content='',
-            function_call={'name': 'read_file', 'arguments': '{"path": "x"}'},
+            function_call={
+                'name': 'read_file',
+                'arguments': '{"path": "x"}'
+            },
         ),
     ]
 
@@ -112,15 +115,12 @@ class TestPostTurnSleepingOrder:
         result = engine._post_turn_checks(inst, [], [], _reasoning_only_response())
 
         # The pending check won: continue (True), not a stall-break (False).
-        assert result is True, (
-            'Pending async tool must take priority over the pure-thinking break — '
-            '_post_turn_checks returned False (broke to IDLE) instead of continuing to SLEEPING'
-        )
+        assert result is True, ('Pending async tool must take priority over the pure-thinking break — '
+                                '_post_turn_checks returned False (broke to IDLE) instead of continuing to SLEEPING')
         # The pending check actually consulted the pool and transitioned the instance.
         engine.pool.has_pending.assert_called_once_with('parent')
         assert inst.state == AgentState.SLEEPING, (
-            f"instance should be SLEEPING after a pending-tool post-turn, got {inst.state}"
-        )
+            f"instance should be SLEEPING after a pending-tool post-turn, got {inst.state}")
 
     def test_reasoning_only_turn_no_pending_still_breaks(self):
         """Reasoning-only turn + NO pending tool → still breaks (returns False).
@@ -133,13 +133,9 @@ class TestPostTurnSleepingOrder:
 
         result = engine._post_turn_checks(inst, [], [], _reasoning_only_response())
 
-        assert result is False, (
-            'A reasoning-only turn with no pending async work must still break out of the loop'
-        )
+        assert result is False, ('A reasoning-only turn with no pending async work must still break out of the loop')
         # No sleep transition was taken.
-        assert inst.state == AgentState.RUNNING, (
-            f"instance should stay RUNNING (no pending work), got {inst.state}"
-        )
+        assert inst.state == AgentState.RUNNING, (f"instance should stay RUNNING (no pending work), got {inst.state}")
 
     def test_tool_call_present_continues_regardless(self):
         """Unexecuted tool call → continues via check #1 (regression guard for reordering).

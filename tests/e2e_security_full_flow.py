@@ -27,6 +27,7 @@ run_check's thread spawning, and _execute_check's yield/reacquire logic — runs
 # Isolate this standalone run's logs/telemetry from the production workspace.
 # Must be set BEFORE any agent_cascade import (instance_id reads it at call time).
 import os as _os
+
 _os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', f"e2e_{_os.getpid()}")
 
 import asyncio
@@ -39,8 +40,8 @@ import pytest
 
 from agent_cascade.security_handler import SecurityAdvisorHandler
 
-
 # ── Real component harness (no server) ───────────────────────────────────────
+
 
 def _build_real_router(cfg_dir):
     """Real APIRouter with a single conc=0 endpoint → real shared sequential SlotPool."""
@@ -57,8 +58,12 @@ def _build_real_router(cfg_dir):
         router.endpoints.clear()
         router.agent_priorities.clear()
         router._agent_types_with_priorities.clear()
-    ep = APIEndpoint(id='ep0', name='conc0', api_base=llm_cfg['api_base'],
-                     model='mock', concurrency_limit=0, enabled=True)
+    ep = APIEndpoint(id='ep0',
+                     name='conc0',
+                     api_base=llm_cfg['api_base'],
+                     model='mock',
+                     concurrency_limit=0,
+                     enabled=True)
     router.add_endpoint(ep)
     router.default_llm_cfg = ep.to_llm_cfg()
     return router
@@ -68,8 +73,12 @@ def _build_pool(router):
     """Real AgentPool wired to the real router."""
     from agent_cascade.agent_pool import AgentPool
 
-    llm_cfg = {'model': 'mock', 'api_base': 'http://127.0.0.1:9/v1',
-               'model_server': 'http://127.0.0.1:9/v1', 'api_key': 'EMPTY'}
+    llm_cfg = {
+        'model': 'mock',
+        'api_base': 'http://127.0.0.1:9/v1',
+        'model_server': 'http://127.0.0.1:9/v1',
+        'api_key': 'EMPTY'
+    }
     return AgentPool(llm_cfg, agents_dir=str(router._config_dir), api_router=router)
 
 
@@ -86,11 +95,13 @@ def _build_real_operation_manager(pool, base_dir):
 
 # ── Log capture (GOTCHA: app logger is top-level 'agent_cascade_logger') ─────
 
+
 def _capture_logs():
     records = []
     lock = threading.Lock()
 
     class _Capture(logging.Handler):
+
         def emit(self, record):
             with lock:
                 try:
@@ -123,8 +134,8 @@ def _find(records, needle):
 
 def _relevant_lines(records):
     """Filter to the log lines that matter for the deadlock diagnosis."""
-    needles = ('SECURITY_SLOT', 'SLOT_', 'endpoint slot', 'APPROVAL', 'SECURITY',
-               'waiting for', 'timed out', 'Timeout', 'timeout', 'deadlock')
+    needles = ('SECURITY_SLOT', 'SLOT_', 'endpoint slot', 'APPROVAL', 'SECURITY', 'waiting for', 'timed out', 'Timeout',
+               'timeout', 'deadlock')
     out = []
     for r in records:
         try:
@@ -171,12 +182,14 @@ def _dump_log(records, path, title):
 
 # ── Shared fixture ───────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def full_flow_harness(tmp_path, request):
     """Real router/pool/operation_manager + short timeouts. Own config dir per test (xdist-safe)."""
     import os as _os
-    import agent_cascade.slot_queue as _sq_mod
+
     import agent_cascade.api_router_pkg.scheduler as _ar_mod
+    import agent_cascade.slot_queue as _sq_mod
 
     cfg_dir = tmp_path / request.node.name.replace('/', '_')
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -207,8 +220,12 @@ def full_flow_harness(tmp_path, request):
 
     # Register a REAL Security template so _create_system_agent → lifecycle.find_or_create_instance
     # succeeds (production loads this from config; the harness has none). Uses the SAME load path.
-    llm_cfg = {'model': 'mock', 'api_base': 'http://127.0.0.1:9/v1',
-               'model_server': 'http://127.0.0.1:9/v1', 'api_key': 'EMPTY'}
+    llm_cfg = {
+        'model': 'mock',
+        'api_base': 'http://127.0.0.1:9/v1',
+        'model_server': 'http://127.0.0.1:9/v1',
+        'api_key': 'EMPTY'
+    }
     try:
         from agent_cascade.agent_factory import load_agent
         pool.templates['Security'] = load_agent(pool, 'Security', llm_cfg)
@@ -220,8 +237,14 @@ def full_flow_harness(tmp_path, request):
     handler = SecurityAdvisorHandler(pool, session, app, MagicMock(), lambda *a, **k: None)
 
     yield {
-        'router': router, 'pool': pool, 'shared': shared, 'om': om,
-        'app': app, 'session': session, 'handler': handler, 'cfg_dir': cfg_dir,
+        'router': router,
+        'pool': pool,
+        'shared': shared,
+        'om': om,
+        'app': app,
+        'session': session,
+        'handler': handler,
+        'cfg_dir': cfg_dir,
     }
 
     # Cleanup: stop the pool (unblocks any stuck approval wait) + restore constants.
@@ -236,20 +259,23 @@ def full_flow_harness(tmp_path, request):
 
 # ── Core full-flow driver ────────────────────────────────────────────────────
 
+
 def _run_full_flow(h, auto_apply):
     """Drive the REAL production flow and return (records, shared, rid, caller_result)."""
-    import agent_cascade.slot_queue as _sq_mod
-    import agent_cascade.api_router_pkg.scheduler as _ar_mod
     from agent_cascade.agent_instance import AgentInstance
 
     pool, om, shared = h['pool'], h['om'], h['shared']
     handler = h['handler']
-    rid_holder = {}
+    rid_holder = {}  # noqa: F841  (rid holder for cross-thread capture)
 
     # 1. Create the caller instance (real AgentInstance, IDLE state).
     caller = AgentInstance(
-        instance_name='coder', agent_class='coder', conversation=[],
-        created_at=time.monotonic(), last_activity=time.monotonic(), latest_marker_index=0,
+        instance_name='coder',
+        agent_class='coder',
+        conversation=[],
+        created_at=time.monotonic(),
+        last_activity=time.monotonic(),
+        latest_marker_index=0,
     )
     pool.instances['coder'] = caller
 
@@ -287,8 +313,7 @@ def _run_full_flow(h, auto_apply):
         # Do NOT exhaust the generator: the caller keeps its slot (blocked on approval).
 
     assert 'coder' in shared._running, (
-        f"Caller did not acquire the shared slot via the real path: {list(shared._running)}"
-    )
+        f"Caller did not acquire the shared slot via the real path: {list(shared._running)}")
 
     # 3. Caller calls shell_cmd → request_user_approval (BLOCKS the caller thread, holds slot).
     approval_result = {}
@@ -296,8 +321,12 @@ def _run_full_flow(h, auto_apply):
     def _caller_tool_call():
         try:
             res = om.request_user_approval(
-                agent_name='coder', tool_name='shell_cmd',
-                tool_args={'command': 'echo hi', 'justification': 'test'},
+                agent_name='coder',
+                tool_name='shell_cmd',
+                tool_args={
+                    'command': 'echo hi',
+                    'justification': 'test'
+                },
                 description='test shell command',
             )
             approval_result['value'] = res
@@ -322,7 +351,7 @@ def _run_full_flow(h, auto_apply):
     #    The Security agent's engine.run() is REAL (real slot acquisition, real turn loop),
     #    but we patch ONLY the LLM model call so it yields a mock "[YES]" verdict instead of
     #    hitting a real model. This makes the full check complete deterministically and fast.
-    from agent_cascade.llm.schema import Message, ASSISTANT
+    from agent_cascade.llm.schema import ASSISTANT, Message
 
     def _mock_llm(self, instance, llm_messages):
         # Only the Security agent reaches here (the caller's run() is separately patched).
@@ -359,6 +388,7 @@ def _run_full_flow(h, auto_apply):
 
 # ── Test 1: auto_apply=True (production default for auto-security) ───────────
 
+
 def test_full_flow_auto_apply_true(full_flow_harness):
     """FULL flow with auto_apply=True. The security check must complete (not deadlock)."""
     records, shared, rid, caller, approval_result = _run_full_flow(full_flow_harness, auto_apply=True)
@@ -374,7 +404,7 @@ def test_full_flow_auto_apply_true(full_flow_harness):
               'FULL FLOW auto_apply=True')
 
     worker_started = _find(records, 'Check worker started')
-    worker_finished = _find(records, 'Check worker finished')
+    _find(records, 'Check worker finished')
     normal_yield = _find(records, '[SECURITY_SLOT_YIELD] Releasing slot')
     leaked = _find(records, 'LEAKED PERMIT DETECTED')
     skipped = _find(records, 'SECURITY_SLOT_YIELD_SKIPPED')
@@ -385,18 +415,17 @@ def test_full_flow_auto_apply_true(full_flow_harness):
     # the caller's permit was never yielded. This is what we're hunting for.
     assert not acquire_timeout, (
         f"[DEADLOCK REPRODUCED] In the FULL flow, the Security agent timed out waiting for the "
-        f"shared sequential slot — the caller's permit was NOT freed in time.\n{report}\n\n"
-        + '\n'.join(_relevant_lines(records))
-    )
+        f"shared sequential slot — the caller's permit was NOT freed in time.\n{report}\n\n" +
+        '\n'.join(_relevant_lines(records)))
     # Exactly one yield path should fire (normal OR force-release), NOT skip.
     assert (normal_yield or leaked) and not skipped, (
         f"[BUG] In the FULL flow, neither the normal yield nor the force-release fallback fired "
-        f"(skip path fired instead) — the caller held a permit but it was never yielded.\n{report}\n\n"
-        + '\n'.join(_relevant_lines(records))
-    )
+        f"(skip path fired instead) — the caller held a permit but it was never yielded.\n{report}\n\n" +
+        '\n'.join(_relevant_lines(records)))
 
 
 # ── Test 2: auto_apply=False (manual-confirmation variant) ───────────────────
+
 
 def test_full_flow_auto_apply_false(full_flow_harness):
     """FULL flow with auto_apply=False. Same slot-yield behavior expected; the only difference
@@ -421,9 +450,7 @@ def test_full_flow_auto_apply_false(full_flow_harness):
     assert worker_started, f"[BUG] run_check did not spawn the check worker.\n{report}"
     assert not acquire_timeout, (
         f"[DEADLOCK REPRODUCED] auto_apply=False: Security agent timed out waiting for the shared "
-        f"slot — caller's permit was NOT freed.\n{report}\n\n" + '\n'.join(_relevant_lines(records))
-    )
-    assert (normal_yield or leaked) and not skipped, (
-        f"[BUG] auto_apply=False: no yield path fired (skip instead).\n{report}\n\n"
-        + '\n'.join(_relevant_lines(records))
-    )
+        f"slot — caller's permit was NOT freed.\n{report}\n\n" + '\n'.join(_relevant_lines(records)))
+    assert (normal_yield or
+            leaked) and not skipped, (f"[BUG] auto_apply=False: no yield path fired (skip instead).\n{report}\n\n" +
+                                      '\n'.join(_relevant_lines(records)))

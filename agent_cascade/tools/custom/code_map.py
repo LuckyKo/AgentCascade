@@ -1,14 +1,11 @@
-import re
-import os
 import ast
-from typing import List, Dict, Any, Optional
-from pathlib import Path
-from agent_cascade.tools.base import BaseTool, register_tool
+import re
+
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.tools.base import BaseTool, register_tool
 
 # Attempt to import Pygments for better cross-language tokenization
 try:
-    from pygments import lexers, token
     HAS_PYGMENTS = True
 except ImportError:
     HAS_PYGMENTS = False
@@ -104,7 +101,7 @@ class CodeMap(BaseTool):
         try:
             tree = ast.parse(content)
             result = ['# Python Code Map\n']
-            
+
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     result.append(f"L{node.lineno}: class {node.name}")
@@ -116,7 +113,7 @@ class CodeMap(BaseTool):
                             result.append(f"  L{item.lineno}: async def {item.name}")
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     # Check if it's a top-level function (parent is Module)
-                    # Note: ast.walk doesn't maintain hierarchy easily, 
+                    # Note: ast.walk doesn't maintain hierarchy easily,
                     # so we just check if it's in the top-level body of the module.
                     if any(node == top for top in tree.body):
                         prefix = 'async def' if isinstance(node, ast.AsyncFunctionDef) else 'def'
@@ -127,8 +124,8 @@ class CodeMap(BaseTool):
             return '\n'.join(result)
         except SyntaxError as e:
             return f"Syntax Error parsing Python file: {e.msg} (Line {e.lineno})"
-        except Exception as e:
-            return self._map_generic(content, 'python') # Fallback
+        except Exception:
+            return self._map_generic(content, 'python')  # Fallback
 
     def _map_generic(self, content: str, lang: str) -> str:
         if lang == 'markdown':
@@ -159,8 +156,10 @@ class CodeMap(BaseTool):
                 (r'^\s*(?:[\w:*&<>]+)\s+(\w+)\s*\([^)]*\)\s*(?:const|override|final)?\s*(?:[:{]|$)', 'func'),
             ],
             'csharp': [
-                (r'^\s*(?:public|protected|private|internal|partial)?\s*(?:static|abstract|sealed|partial)?\s*(?:class|interface|struct|enum|record)\s+(\w+)', 'class'),
-                (r'^\s*(?:public|protected|private|internal)?\s*(?:static|virtual|override|async|abstract|extern)?\s*(?:[\w<>[\]]+|void)\s+(\w+)\s*\(', 'method'),
+                (r'^\s*(?:public|protected|private|internal|partial)?\s*(?:static|abstract|sealed|partial)?\s*(?:class|interface|struct|enum|record)\s+(\w+)',
+                 'class'),
+                (r'^\s*(?:public|protected|private|internal)?\s*(?:static|virtual|override|async|abstract|extern)?\s*(?:[\w<>[\]]+|void)\s+(\w+)\s*\(',
+                 'method'),
             ],
             'go': [
                 (r'^\s*type\s+(\w+)\s+(?:struct|interface)', 'type'),
@@ -180,17 +179,15 @@ class CodeMap(BaseTool):
                 (r'^@media\s+([^\{]+)', 'media'),
                 (r'^([.#\w][\w\.-]+)\s*\{?', 'rule'),
             ],
-            'markdown': [
-                (r'^\s*(\#{1,6})\s+(.+)', 'heading'),
-            ]
+            'markdown': [(r'^\s*(\#{1,6})\s+(.+)', 'heading'),]
         }
 
-        active_patterns = patterns.get(lang, patterns.get('javascript')) # Use JS as fallback for many C-like
+        active_patterns = patterns.get(lang, patterns.get('javascript'))  # Use JS as fallback for many C-like
 
         # Markdown-specific state tracking (CommonMark-style fence state machine)
         in_code_block = False
         fence_char = None  # '`' or '~'
-        fence_len = 0      # length of opening fence
+        fence_len = 0  # length of opening fence
 
         # Simple line-by-line regex matching
         # Note: This is naive and will match inside strings/comments unless we use Pygments

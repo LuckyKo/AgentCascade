@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -55,6 +55,7 @@ except AttributeError:  # windows
 # just at the cost of waiting the full timeout duration before recovery.
 _windows_timer = None  # Store the Timer object so we can cancel it
 
+
 def _windows_timeout_worker(timeout: int):
     """Worker thread for Windows timeout fallback — sets a flag instead of raising."""
     global _windows_timer
@@ -81,11 +82,11 @@ class _M6CountdownTimer:
             main_mod = sys.modules.get('__main__')
             if main_mod is not None:
                 main_mod._M6_TIMEOUT_FLAG = False  # Reset flag before starting
-            
+
             # Cancel any existing timer before starting a new one
             if _windows_timer is not None and _windows_timer.is_alive():
                 _windows_timer.cancel()
-            
+
             _windows_timer = threading.Timer(timeout, _windows_timeout_worker, args=[timeout])
             _windows_timer.daemon = True
             _windows_timer.start()
@@ -104,7 +105,7 @@ class _M6CountdownTimer:
             main_mod = sys.modules.get('__main__')
             if main_mod is not None:
                 main_mod._M6_TIMEOUT_FLAG = False
-            
+
             if _windows_timer is not None and _windows_timer.is_alive():
                 _windows_timer.cancel()
 

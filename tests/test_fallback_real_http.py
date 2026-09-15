@@ -32,9 +32,7 @@ import pytest
 import requests
 
 import agent_cascade.api_router_pkg.router as router_mod
-from agent_cascade.retry_policy import RetryPolicy
 from tests.conftest import _add_endpoint  # noqa: F401 (shared helper; 'router' fixture from conftest)
-
 
 # ============================================================================
 # Local HTTP stub — counts probe GETs and chat POSTs PER BASE, with injectable
@@ -474,7 +472,7 @@ class TestWalkUntilLiveOrdering:
 
     def test_head_down_walks_to_second(self, router, stubs):
         sm = stubs(2)
-        ids = _wire(router, sm, ['head', 'second'])
+        _wire(router, sm, ['head', 'second'])
 
         # Head is DOWN at the probe level (GET /models → 503).
         sm['head_ref']['probe_status'] = 503

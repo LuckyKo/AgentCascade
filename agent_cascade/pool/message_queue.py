@@ -3,9 +3,10 @@ MessageQueueMixin — per-agent message queues and the active execution stack. M
 """
 
 from __future__ import annotations
+
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,7 @@ _mq_depth_last_warn: float = 0.0
 
 
 class MessageQueueMixin:
+
     @property
     def _state_lock(self):
         """Delegate to ParallelAgentManager's state lock.
@@ -68,7 +70,9 @@ class MessageQueueMixin:
             global _mq_depth_last_warn
             if now_mono - _mq_depth_last_warn >= 10.0:
                 suffix = f" (from '{sender}')" if sender else ''
-                logger.warning(f"[MESSAGE_QUEUE] Instance '{name}' message queue depth high: {depth} messages pending execution{suffix}")
+                logger.warning(
+                    f"[MESSAGE_QUEUE] Instance '{name}' message queue depth high: {depth} messages pending execution{suffix}"
+                )
                 _mq_depth_last_warn = now_mono
 
     def send_message(self, from_name: str, to_name: str, text: str):
@@ -155,8 +159,7 @@ class MessageQueueMixin:
 
         return False
 
-    def wait_for_message(self, instance_name: str, timeout: float = 30.0,
-                         consume_predicate=None) -> Optional[str]:
+    def wait_for_message(self, instance_name: str, timeout: float = 30.0, consume_predicate=None) -> Optional[str]:
         """Block until ANY message is available for this instance (or timeout/terminated), then
         decide whether to consume it based on the front-of-queue message.
 

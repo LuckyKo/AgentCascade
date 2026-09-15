@@ -11,6 +11,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
 import pytest
 
 
@@ -49,10 +50,8 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.llm.schema import SYSTEM, USER
-
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
 # ---------------------------------------------------------------------------
 # Local LLM Auto-Detection — session-scoped probe at test startup
@@ -85,7 +84,7 @@ _LOCAL_ENDPOINTS = [
 ]
 
 # Default lightweight models for testing (must be loaded on the server)
-_DEFAULT_TEST_MODEL = 'qwen/qwen3-4b-2507'   # fast general-purpose
+_DEFAULT_TEST_MODEL = 'qwen/qwen3-4b-2507'  # fast general-purpose
 _DEFAULT_VL_TEST_MODEL = 'qwen/qwen3-vl-4b'  # vision + text
 
 
@@ -119,8 +118,7 @@ class _LocalLLMDetector:
                     import urllib.request
                     resp = urllib.request.urlopen(url, timeout=timeout)
                     data = json.loads(resp.read())
-                    models = [m.get('id', m.get('name', ''))
-                              for m in data.get('data', [])]
+                    models = [m.get('id', m.get('name', '')) for m in data.get('data', [])]
                     if models:
                         self.available = True
                         self.api_base = f"http://{host}:{ep['port']}/v1"
@@ -149,7 +147,7 @@ def _local_tests_opted_in() -> bool:
 
 def _find_text_model():
     """Find the best text model from detected local models.
-    
+
     Priority order:
     1. Exact match for _DEFAULT_TEST_MODEL (prefer non-2507 variants if both exist)
     2. Any 'qwen3' or 'qwen2.5' model with 'vl' excluded (text-only models)
@@ -157,32 +155,32 @@ def _find_text_model():
     """
     if not _local_llm_detector.available or not _local_llm_detector.models:
         return _DEFAULT_TEST_MODEL
-    
+
     # Prefer exact match, but skip -2507 variants that are known to crash on LM Studio
     default = _DEFAULT_TEST_MODEL.replace('-2507', '')
     if default in _local_llm_detector.models:
         return default
     if _DEFAULT_TEST_MODEL in _local_llm_detector.models:
         return _DEFAULT_TEST_MODEL
-    
+
     # Fallback: any model with 'qwen3' or 'qwen2.5' in name (text models, not VL)
     for m in _local_llm_detector.models:
         ml = m.lower()
         if 'vl' not in ml and ('qwen3' in ml or 'qwen2.5' in ml):
             return m
-    
+
     # Last resort: first non-embedding model
     for m in _local_llm_detector.models:
         ml = m.lower()
         if 'embed' not in ml:
             return m
-    
+
     return _DEFAULT_TEST_MODEL
 
 
 def _find_vl_model():
     """Find the best VL model from detected local models.
-    
+
     Priority order:
     1. Exact match for _DEFAULT_VL_TEST_MODEL
     2. Any model with 'vl' in its name (case-insensitive)
@@ -238,6 +236,7 @@ def pytest_collection_modifyitems(config, items):
 # ---------------------------------------------------------------------------
 # Fixtures: local LLM configuration dicts
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope='session')
 def local_llm_available():
@@ -309,6 +308,7 @@ def local_llm_cfg_with_retry(local_llm_cfg):
 # Fixtures: tool_utils tests (lightweight cache-pool fakes)
 # ---------------------------------------------------------------------------
 
+
 class _FakeCachePool:
     """Minimal fake cache pool for testing (mimics ArgumentCachePool)."""
 
@@ -347,6 +347,7 @@ class _FakeAgentPool:
 # ---------------------------------------------------------------------------
 # Fixtures: compression tests (MockInstance, MockAgentPool)
 # ---------------------------------------------------------------------------
+
 
 class MockInstance:
     """Minimal mock of AgentInstance for compression tests."""
@@ -431,9 +432,7 @@ class MockAgentPool:
 
         return self.get_compression_target_set_from_conversation(instance_name, conv)
 
-    def get_compression_target_set_from_conversation(
-        self, instance_name: str, conv: List[Any]
-    ):
+    def get_compression_target_set_from_conversation(self, instance_name: str, conv: List[Any]):
         """Like get_compression_target_set but accepts a pre-fetched conversation snapshot.
 
         Matches production logic from agent_pool.py:2125-2142:
@@ -490,6 +489,7 @@ class MockAgentPool:
 # Fixtures: isolated config directory
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope='session', autouse=True)
 def isolated_config_dir(tmp_path_factory):
     """Set AGENT_CASCADE_TEST_CONFIG_DIR to a temp directory for the entire test session.
@@ -525,6 +525,7 @@ def isolated_instance_id():
 # Fixtures: token_cache tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def short_ttl_cache():
     """AgentTokenCache with a 1-second TTL for fast expiration tests."""
@@ -542,6 +543,7 @@ def normal_ttl_cache():
 # ---------------------------------------------------------------------------
 # Fixtures: tool_utils and streaming_tool_resolution tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def agent_pool():
@@ -561,10 +563,12 @@ def agent_pool():
 # to every test under tests/ regardless of collection order. Plain helper functions
 # (not fixtures) are still imported by name from this module in each test file.
 
-import threading as _threading  # noqa: E402
 import http.server as _http_server  # noqa: E402
+import threading as _threading  # noqa: E402
 from unittest.mock import patch as _patch  # noqa: E402
-from agent_cascade.api_router import APIRouter as _APIRouter, APIEndpoint as _APIEndpoint  # noqa: E402
+
+from agent_cascade.api_router import APIEndpoint as _APIEndpoint
+from agent_cascade.api_router import APIRouter as _APIRouter  # noqa: E402
 from agent_cascade.retry_policy import RetryPolicy as _RetryPolicy  # noqa: E402
 
 # Fast retry policy — minimal backoff so breaker tests run quickly.
@@ -592,13 +596,20 @@ def router(tmp_path_factory):
             'api_base': 'http://default-api',
             'model': 'default-model',
             'max_tokens': 2048,
-        }, policy=FAST_RETRY_POLICY)
+        },
+                       policy=FAST_RETRY_POLICY)
         r._pool = None
         yield r
 
 
-def _add_endpoint(router, name, api_base, model='test-model', enabled=True,
-                  concurrency_limit=-1, max_retries=3, rate_limit_rpm=0):
+def _add_endpoint(router,
+                  name,
+                  api_base,
+                  model='test-model',
+                  enabled=True,
+                  concurrency_limit=-1,
+                  max_retries=3,
+                  rate_limit_rpm=0):
     """Add an endpoint to the router. Returns the (possibly regenerated) endpoint ID."""
     ep = _APIEndpoint(
         id=f"ep_{name}",
@@ -631,7 +642,8 @@ class _MockLLMHandler(_http_server.BaseHTTPRequestHandler):
     busy = True
     server_ref = None  # set per-server: {'busy': bool, 'hits': {path: int}}
 
-    def log_message(self, *a): pass
+    def log_message(self, *a):
+        pass
 
     def _count(self, path):
         ref = self.server_ref or {}
@@ -668,6 +680,7 @@ class _MockLLMHandler(_http_server.BaseHTTPRequestHandler):
 def mock_servers():
     """Two local mock servers: busy (port A) + healthy (port B), per-server hit counters."""
     import socket
+
     def free_port():
         s = socket.socket()
         s.bind(('127.0.0.1', 0))
@@ -679,8 +692,10 @@ def mock_servers():
     healthy_ref = {'busy': False, 'hits': {}}
 
     def make_server(port, ref):
+
         class Handler(_MockLLMHandler):
             server_ref = ref
+
         srv = _http_server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
         # Expose the per-server ref for the test to flip busy→healthy after the window.
         srv.ref = ref
@@ -690,11 +705,13 @@ def mock_servers():
     healthy_srv = make_server(free_port(), healthy_ref)
     t1 = _threading.Thread(target=busy_srv.serve_forever, daemon=True)
     t2 = _threading.Thread(target=healthy_srv.serve_forever, daemon=True)
-    t1.start(); t2.start()
+    t1.start()
+    t2.start()
     yield {
         'busy': f'http://127.0.0.1:{busy_srv.server_address[1]}/v1',
         'healthy': f'http://127.0.0.1:{healthy_srv.server_address[1]}/v1',
         'busy_ref': busy_ref,
         'healthy_ref': healthy_ref,
     }
-    busy_srv.shutdown(); healthy_srv.shutdown()
+    busy_srv.shutdown()
+    healthy_srv.shutdown()

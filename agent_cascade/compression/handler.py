@@ -866,7 +866,6 @@ class CompressionHandler:
                 conv = self.pool.get_conversation(inst_name)
                 if conv:
                     for idx, msg in enumerate(conv):
-                        role = msg_field(msg, 'role', '')
                         c = msg_field(msg, 'content', '')
                         if isinstance(c, str) and '<context_summary>' in c:
                             instance.latest_marker_index = idx
@@ -883,8 +882,7 @@ class CompressionHandler:
                     # Validate BEFORE appending notification to avoid false recovery from notif role alternation
                     conv = self.pool.get_conversation(inst_name)
                     if not validate_message_pool(conv, inst_name):
-                        working_set_rebuilt = self._recover_or_halt(instance, conv, 'forced compression', messages,
-                                                                    llm_messages)
+                        self._recover_or_halt(instance, conv, 'forced compression', messages, llm_messages)
 
                     # Append notification after validation passes
                     notif_msg = Message(role=USER, content=notification_text)

@@ -3,9 +3,13 @@ SlotsMixin — endpoint slot acquisition, async call registration, and pause/res
 """
 
 from __future__ import annotations
+
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Optional
+
 from agent_cascade.log import logger
+
+
 class SlotsMixin:
     def _acquire_slot(
         self,
@@ -81,8 +85,8 @@ class SlotsMixin:
             Acquiring before AND inside would deadlock on Semaphore(1) (same thread,
             same semaphore). The child's engine.run() handles all concurrency control.
             """
+            from agent_cascade.child_runner import ChildAgentFailedError, run_child_core
             from agent_cascade.execution_engine import ExecutionEngine
-            from agent_cascade.child_runner import run_child_core, ChildAgentFailedError
 
             engine = ExecutionEngine(self)
             # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
@@ -128,7 +132,7 @@ class SlotsMixin:
                 return f"[Agent '{child_instance_name}' Failed]:\n{str(e)}"
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id, child_instance_name=child_instance_name)
-        
+
         # NOTE: Slot acquisition happens later when the child agent actually runs,
         # not at spawn time. Spawn just registers the async task.
         #
@@ -215,7 +219,7 @@ class SlotsMixin:
         per-instance halt; it does NOT reflect global pause. Global pause state is
         separate and queried via :meth:`is_paused`, and never affects this return value."""
         return instance_name in self._halted_instances
-    
+
     # (internal helpers used by compression handler and REST endpoints)
 
     def halt_instance(self, instance_name: str):

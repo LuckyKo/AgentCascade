@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import importlib.util
+
 import pytest
 
 # Import settings first so that relative imports in inner_loop_detect resolve.
@@ -47,17 +48,13 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 InnerLoopDetector = _mod.InnerLoopDetector
 
-
 # Shared test filler used across multiple test classes.
-_FILLER = ' '.join(
-    f"Word{i} has properties that are interesting for analysis."
-    for i in range(1, 20)
-) + '.'
-
+_FILLER = ' '.join(f"Word{i} has properties that are interesting for analysis." for i in range(1, 20)) + '.'
 
 # ---------------------------------------------------------------------------
 # Helper: build a detector tuned for fast testing (low thresholds)
 # ---------------------------------------------------------------------------
+
 
 def make_detector(**kwargs):
     """Create an InnerLoopDetector with test-friendly defaults.
@@ -66,9 +63,9 @@ def make_detector(**kwargs):
     Two-phase detector is enabled by default in tests via direct attribute access.
     """
     defaults = dict(
-        char_run_limit=130,   # Over 128 chars as requested
+        char_run_limit=130,  # Over 128 chars as requested
         min_chars=500,
-        max_chars=40000,      # high enough that tests don't hit it accidentally
+        max_chars=40000,  # high enough that tests don't hit it accidentally
     )
     defaults.update(kwargs)
     det = InnerLoopDetector(**defaults)
@@ -82,6 +79,7 @@ def make_detector(**kwargs):
 # ===================================================================
 # 1. Character run detection
 # ===================================================================
+
 
 class TestCharacterRunDetection:
     """Feed a chunk with >24 identical characters → should detect loop."""
@@ -99,7 +97,7 @@ class TestCharacterRunDetection:
         result = det.feed(_FILLER + 'x' * 131)
         assert result is not None
         assert result['loop'] is True
-    
+
     def test_run_at_limit_no_detection(self):
         """Exactly 130 identical chars (at the limit, not above) should NOT trigger."""
         det = make_detector()
@@ -107,7 +105,7 @@ class TestCharacterRunDetection:
         # Condition is `> self.char_run_limit` i.e. > 130, so 130 chars → no alert.
         result = det.feed(_FILLER + 'y' * 130)
         assert result is None
-    
+
     def test_alternating_chars_no_detection(self):
         """Alternating characters should never trigger a run."""
         det = make_detector()
@@ -119,28 +117,25 @@ class TestCharacterRunDetection:
 # 2. No loop on normal text (unchanged concept — normal text shouldn't trigger anything)
 # ===================================================================
 
+
 class TestNoLoopOnNormalText:
     """Feed varied text → should return None."""
 
     def test_normal_paragraph(self):
         det = make_detector()
-        paragraph = (
-            'Artificial intelligence is transforming the way we work and live. '
-            'Machine learning models can now understand natural language with impressive accuracy. '
-            'Researchers are constantly developing new architectures to improve performance. '
-            'The field has seen remarkable progress in recent years, driven by large datasets '
-            'and powerful computing resources that enable training on billions of parameters.'
-        )
+        paragraph = ('Artificial intelligence is transforming the way we work and live. '
+                     'Machine learning models can now understand natural language with impressive accuracy. '
+                     'Researchers are constantly developing new architectures to improve performance. '
+                     'The field has seen remarkable progress in recent years, driven by large datasets '
+                     'and powerful computing resources that enable training on billions of parameters.')
         result = det.feed(paragraph)
         assert result is None
 
     def test_normal_conversation(self):
         det = make_detector()
-        text = (
-            "Hello! How are you doing today? I'm fine, thank you for asking. "
-            'Would you like to hear about my day? Sure, tell me what happened. '
-            'Well, I went to the store and bought some groceries. The weather was nice too.'
-        )
+        text = ("Hello! How are you doing today? I'm fine, thank you for asking. "
+                'Would you like to hear about my day? Sure, tell me what happened. '
+                'Well, I went to the store and bought some groceries. The weather was nice too.')
         result = det.feed(text)
         assert result is None
 
@@ -148,6 +143,7 @@ class TestNoLoopOnNormalText:
 # ===================================================================
 # 3. Reset method
 # ===================================================================
+
 
 class TestResetMethod:
     """Feed some text, reset, feed the same text again → should work correctly."""
@@ -189,6 +185,7 @@ class TestResetMethod:
 # 4. min_chars / max_chars guards
 # ===================================================================
 
+
 class TestMaxCharsGuard:
     """Test the max_chars hard limit."""
 
@@ -216,6 +213,7 @@ class TestMaxCharsGuard:
 # 6. Multiple feed calls with state accumulation
 # ===================================================================
 
+
 class TestMultipleFeedCalls:
     """Feed in small chunks, verify state accumulates correctly across calls."""
 
@@ -231,9 +229,9 @@ class TestMultipleFeedCalls:
     def test_chars_fed_accumulates(self):
         """_chars_fed should accumulate across feed calls."""
         det = make_detector()
-        det.feed('abc')      # 3
-        det.feed('defg')     # 4
-        det.feed('hi')       # 2
+        det.feed('abc')  # 3
+        det.feed('defg')  # 4
+        det.feed('hi')  # 2
         assert det._chars_fed == 9
 
     def test_char_run_resets_on_different_char(self):
@@ -246,6 +244,7 @@ class TestMultipleFeedCalls:
 # ===================================================================
 # 7. Memory boundedness (updated for remaining structures)
 # ===================================================================
+
 
 class TestMemoryBoundedness:
     """Feed lots of text and verify remaining structures don't grow unboundedly."""
@@ -280,6 +279,7 @@ class TestMemoryBoundedness:
 # ===================================================================
 # 8. Edge cases
 # ===================================================================
+
 
 class TestEdgeCases:
     """Empty chunk, whitespace-only chunk, unicode handling."""
@@ -328,6 +328,7 @@ class TestEdgeCases:
 # Integration: combined detection scenarios
 # ===================================================================
 
+
 class TestIntegrationScenarios:
     """Realistic integration tests combining remaining signals."""
 
@@ -373,10 +374,8 @@ class TestIntegrationScenarios:
         det = make_detector()
 
         # Create a repeating block similar to two-phase tests (~200 chars)
-        block = (
-            'The system needs to validate the input parameters and ensure they are correct. '
-            'After validation, we process the request through the pipeline and generate output.'
-        )
+        block = ('The system needs to validate the input parameters and ensure they are correct. '
+                 'After validation, we process the request through the pipeline and generate output.')
 
         result = None
         for _ in range(30):  # Feed many times like two-phase tests do
@@ -390,6 +389,7 @@ class TestIntegrationScenarios:
 # ===================================================================
 # 9. Return format validation (promised by module docstring)
 # ===================================================================
+
 
 class TestReturnFormat:
     """Every detection path must return a well-formed event dict.
@@ -423,6 +423,7 @@ class TestReturnFormat:
 # 10. Integration boundary: detector ↔ llm_call.py consumer contract
 # ===================================================================
 
+
 class TestConsumerContract:
     """Verify the two-phase result passes through InnerLoopDetector and satisfies
     llm_call.py's direct-indexing access pattern (``_ev['reason']``, ``_ev['score']``).
@@ -440,10 +441,8 @@ class TestConsumerContract:
     def test_two_phase_result_satisfies_consumer_contract(self):
         """Two-phase result passed through InnerLoopDetector must be indexable by the consumer."""
         det = make_detector()
-        block = (
-            'The system needs to validate the input parameters and ensure they are correct. '
-            'After validation, we process the request through the pipeline and generate output.'
-        )
+        block = ('The system needs to validate the input parameters and ensure they are correct. '
+                 'After validation, we process the request through the pipeline and generate output.')
         result = None
         for _ in range(30):
             r = det.feed(block)
@@ -462,11 +461,12 @@ class TestConsumerContract:
         Documents WHY the contract matters — two_phase_loop_detect.py once omitted
         'score', and this KeyError was swallowed by llm_call.py's broad except.
         """
+
         class _BrokenDetector:
+
             def feed(self, chunk):
                 return {'loop': True, 'reason': 'semantic loop (fake)'}
 
         broken = _BrokenDetector().feed('anything')
         with pytest.raises(KeyError):
             self._consume(broken)
-

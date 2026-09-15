@@ -12,7 +12,6 @@ from typing import Dict, List, Tuple
 
 from agent_cascade.log import logger
 
-
 # Regex for tokenizing: alphanumeric + underscores/hyphens, case-insensitive matching
 _TOKEN_RE = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
 
@@ -95,14 +94,12 @@ class SkillMatcher:
                     scores[name] = scores.get(name, 0.0) + 1.0
 
         # Normalize by total matching keywords to avoid bias toward verbose skills
-        results = [(name, min(score / max(len(query_tokens), 1), 1.0))
-                   for name, score in scores.items() if score > 0]
+        results = [(name, min(score / max(len(query_tokens), 1), 1.0)) for name, score in scores.items() if score > 0]
 
         # Sort by relevance score descending, then by name ascending for stability
         # (deterministic output ensures KV cache prefix identity across retries)
         results.sort(key=lambda x: (-x[1], x[0]))
 
-        logger.debug("[SKILLS] Match query '%s' → %d results (top=%s)",
-                     query[:80], len(results),
+        logger.debug("[SKILLS] Match query '%s' → %d results (top=%s)", query[:80], len(results),
                      results[0][0] if results else 'none')
         return results

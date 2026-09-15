@@ -13,7 +13,7 @@ workspace directory.
 
 import os
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Optional
 
 from agent_cascade.settings import DEFAULT_WORKSPACE
 

@@ -15,15 +15,13 @@ ARCHITECTURE NOTE (documenting current state):
 """
 
 import time
-from typing import Callable, List, Optional
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.api_router import APIRouter, APIEndpoint
+import agent_cascade.api_router_pkg.router as router_mod
+from agent_cascade.api_router import APIEndpoint, APIRouter
 from agent_cascade.exceptions import CharacterRunDetected, MaxTokenExceeded
 from agent_cascade.llm.base import BaseChatModel, ModelServiceError
-import agent_cascade.api_router_pkg.router as router_mod
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +33,7 @@ def disable_sanity_probe(monkeypatch):
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: mock LLM that tracks call counts and can be configured to fail
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class MockLLM(BaseChatModel):
     """Minimal mock LLM for testing retry behavior without network calls.
@@ -52,9 +51,9 @@ class MockLLM(BaseChatModel):
             cfg['max_retries'] = 0
         super().__init__(cfg)
         self.call_count = 0
-        self.fail_count = fail_count          # Number of initial calls that should fail
-        self.fail_type = fail_type            # Exception type to raise (default: ModelServiceError)
-        self.succeed_after = succeed_after    # Optional: only succeed after this many calls
+        self.fail_count = fail_count  # Number of initial calls that should fail
+        self.fail_type = fail_type  # Exception type to raise (default: ModelServiceError)
+        self.succeed_after = succeed_after  # Optional: only succeed after this many calls
 
     def _chat_stream(self, messages, delta_stream=False, generate_cfg=None):
         """Mock streaming that can be configured to fail."""
@@ -67,7 +66,7 @@ class MockLLM(BaseChatModel):
             raise exc_class(msg) if exc_class is not ModelServiceError else exc_class(message=msg)
 
         # Success path: yield a single accumulated message batch
-        from agent_cascade.llm.schema import Message, ASSISTANT
+        from agent_cascade.llm.schema import ASSISTANT, Message
         yield [Message(role=ASSISTANT, content='mock response')]
 
     def _chat_no_stream(self, messages, generate_cfg=None):
@@ -77,7 +76,7 @@ class MockLLM(BaseChatModel):
             exc_class = self.fail_type or ModelServiceError
             msg = f"Simulated failure #{self.call_count}"
             raise exc_class(msg) if exc_class is not ModelServiceError else exc_class(message=msg)
-        from agent_cascade.llm.schema import Message, ASSISTANT
+        from agent_cascade.llm.schema import ASSISTANT, Message
         return [Message(role=ASSISTANT, content='mock response')]
 
     def _chat_with_functions(self, messages, functions, stream, delta_stream, generate_cfg, lang):
@@ -98,7 +97,7 @@ class FailingStreamLLM(BaseChatModel):
         self.fail_at_chunk = fail_at_chunk
 
     def _chat_stream(self, messages, delta_stream=False, generate_cfg=None):
-        from agent_cascade.llm.schema import Message, ASSISTANT
+        from agent_cascade.llm.schema import ASSISTANT, Message
         self.call_count += 1
         for i in range(5):
             if i == self.fail_at_chunk:
@@ -106,7 +105,7 @@ class FailingStreamLLM(BaseChatModel):
             yield [Message(role=ASSISTANT, content=f"chunk {i}")]
 
     def _chat_no_stream(self, messages, generate_cfg=None):
-        from agent_cascade.llm.schema import Message, ASSISTANT
+        from agent_cascade.llm.schema import ASSISTANT, Message
         return [Message(role=ASSISTANT, content='ok')]
 
     def _chat_with_functions(self, messages, functions, stream, delta_stream, generate_cfg, lang):
@@ -130,6 +129,7 @@ def make_router(default_llm_cfg=None):
 # ──────────────────────────────────────────────────────────────────────────────
 # Test Group 1: Single endpoint retry counts
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestSingleEndpointRetryCount:
     """Verify per-endpoint retry behavior matches documented defaults."""
@@ -190,6 +190,7 @@ class TestSingleEndpointRetryCount:
 # Test Group 2: Multi-endpoint failover
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestMultiEndpointFailover:
     """Verify failover behavior across multiple endpoints."""
 
@@ -199,12 +200,18 @@ class TestMultiEndpointFailover:
 
         # First endpoint: fails always, max_retries=1 (2 calls total)
         ep_a = APIEndpoint(
-            id='ep-a', name='A', api_base='http://localhost:9996/v1', model='a',
+            id='ep-a',
+            name='A',
+            api_base='http://localhost:9996/v1',
+            model='a',
             max_retries=1,
         )
         # Second endpoint: succeeds immediately
         ep_b = APIEndpoint(
-            id='ep-b', name='B', api_base='http://localhost:9995/v1', model='b',
+            id='ep-b',
+            name='B',
+            api_base='http://localhost:9995/v1',
+            model='b',
             max_retries=2,
         )
 
@@ -238,6 +245,7 @@ class TestMultiEndpointFailover:
 # ──────────────────────────────────────────────────────────────────────────────
 # Test Group 3: Inner-loop detection (CharacterRunDetected, MaxTokenExceeded)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestInnerLoopDetection:
     """Verify special exceptions cause endpoint advance without exhausting retries."""
@@ -274,7 +282,7 @@ class TestInnerLoopDetection:
             succeeded = True
         except RuntimeError as e:
             succeeded = False
-            error_msg = str(e)
+            str(e)
 
         # Document what actually happened:
         print(f"[OBSERVED] CharacterRunDetected test: llm_a={llm_a.call_count}, llm_b={llm_b.call_count}, "
@@ -305,7 +313,7 @@ class TestInnerLoopDetection:
         try:
             router.call_with_fallback('coder', do_call, agent_instance_name='test-inst')
             succeeded = True
-        except RuntimeError as e:
+        except RuntimeError:
             succeeded = False
 
         print(f"[OBSERVED] MaxTokenExceeded test: llm_a={llm_a.call_count}, llm_b={llm_b.call_count}, "
@@ -315,6 +323,7 @@ class TestInnerLoopDetection:
 # ──────────────────────────────────────────────────────────────────────────────
 # Test Group 4: Error type preservation (raw_chat path)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestRawChatErrorPreservation:
     """Verify error types propagate correctly through chat()/raw_chat() without L1 wrapping.
@@ -330,7 +339,9 @@ class TestRawChatErrorPreservation:
         Before Phase 2: retry_model_service_iterator caught bare Exception and re-wrapped
         as ModelServiceError, corrupting error types. Now wrappers are bypassed entirely.
         """
+
         class CustomAPIError(Exception):
+
             def __init__(self, message=None):
                 super().__init__(message or 'custom api error')
 
@@ -343,8 +354,10 @@ class TestRawChatErrorPreservation:
 
     def test_error_type_preserved_connection_error(self):
         """VERIFIED FIX: ConnectionError propagates without L1 wrapping."""
+
         # Use a ConnectionError subclass that accepts keyword args (MockLLM uses message=)
         class MockConnectionError(ConnectionError):
+
             def __init__(self, message=None):
                 super().__init__(message or 'connection failed')
 
@@ -358,6 +371,7 @@ class TestRawChatErrorPreservation:
 # ──────────────────────────────────────────────────────────────────────────────
 # Test Group 5: Sub-agent retry behavior
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestSubAgentRetryBehavior:
     """Verify sub-agent LLM calls have their own retry budget."""
@@ -400,6 +414,7 @@ class TestSubAgentRetryBehavior:
 # Test Group 6: Performance baselines
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestPerformanceBaseline:
     """Measure latency for different retry scenarios."""
 
@@ -407,8 +422,11 @@ class TestPerformanceBaseline:
         """Baseline: successful call on first attempt."""
         router = make_router()
         ep = APIEndpoint(
-            id='ep-perf', name='Perf-EP', api_base='http://localhost:9984/v1',
-            model='perf-model', max_retries=2,
+            id='ep-perf',
+            name='Perf-EP',
+            api_base='http://localhost:9984/v1',
+            model='perf-model',
+            max_retries=2,
         )
         router.add_endpoint(ep)
 
@@ -433,8 +451,11 @@ class TestPerformanceBaseline:
         """One failure then success → measure total time including backoff."""
         router = make_router()
         ep = APIEndpoint(
-            id='ep-perf2', name='Perf-EP', api_base='http://localhost:9983/v1',
-            model='perf-model', max_retries=2,
+            id='ep-perf2',
+            name='Perf-EP',
+            api_base='http://localhost:9983/v1',
+            model='perf-model',
+            max_retries=2,
         )
         router.add_endpoint(ep)
 
@@ -457,8 +478,11 @@ class TestPerformanceBaseline:
         """All retries exhausted → measure total time until failure."""
         router = make_router()
         ep = APIEndpoint(
-            id='ep-perf3', name='Perf-EP', api_base='http://localhost:9982/v1',
-            model='perf-model', max_retries=2,
+            id='ep-perf3',
+            name='Perf-EP',
+            api_base='http://localhost:9982/v1',
+            model='perf-model',
+            max_retries=2,
         )
         router.add_endpoint(ep)
         # Register endpoint in agent_priorities so it's included in the chain
@@ -484,6 +508,7 @@ class TestPerformanceBaseline:
 # ──────────────────────────────────────────────────────────────────────────────
 # Test Group 7: L1 retry behavior (BaseChatModel layer)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestLLayerRetryBehavior:
     """Verify Layer 1 (LLM base) retries are disabled after Phase 2 refactor.
@@ -514,7 +539,9 @@ class TestLLayerRetryBehavior:
         controls only L2 (API router) behavior — L1 retries are disabled.
         """
         ep = APIEndpoint(
-            name='test', api_base='http://localhost:9981/v1', model='m',
+            name='test',
+            api_base='http://localhost:9981/v1',
+            model='m',
             max_retries=3,
         )
         llm_cfg = ep.to_llm_cfg()
@@ -528,6 +555,7 @@ class TestLLayerRetryBehavior:
 # Test Group 8: Backoff timing verification
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestBackoffTiming:
     """Verify exponential backoff behavior."""
 
@@ -535,8 +563,11 @@ class TestBackoffTiming:
         """Router uses exponential backoff: base_delay * 2^attempt, capped at max_delay."""
         router = make_router()
         ep = APIEndpoint(
-            id='ep-backoff', name='Backoff-EP', api_base='http://localhost:9980/v1',
-            model='backoff-model', max_retries=3,
+            id='ep-backoff',
+            name='Backoff-EP',
+            api_base='http://localhost:9980/v1',
+            model='backoff-model',
+            max_retries=3,
         )
         router.add_endpoint(ep)
 

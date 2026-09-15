@@ -43,8 +43,8 @@ from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
-
 # ── Harness (mirrors test_auto_continue_turn_budget.py) ──────────────────────
+
 
 def _make_instance(max_turns: int) -> AgentInstance:
     """Minimal real AgentInstance with a pre-seeded conversation (so _setup_turn works)."""
@@ -76,6 +76,7 @@ def _tool_call_msg(i: int) -> Message:
 
 
 class _FakeLogger:
+
     def __init__(self):
         self.log_path = None
         self.data = {'history': []}
@@ -132,16 +133,20 @@ class _FakePool:
     def __init__(self, max_turns: int):
         # Pre-build the template with every per-turn tool name (noop_0..noop_{max-1}).
         self._template = _FakeTemplate([f"noop_{i}" for i in range(max_turns)])
-        self.settings = type('Settings', (), {
-            'auto_continue': True,
-            'tail_sync_check_enabled': False,          # keep tail-sync off the filesystem path
-            'compression_force_threshold': 96.0,
-            'compression_warning_threshold': 90.0,
-            'compression_context_reserve_tokens': 2048,
-            'auto_rollback_on_loop': False,         # disable loop-detection rollback (repetitive scripted output would trip it)
-            'max_auto_rollbacks': 5,
-            'cache_threshold_chars': 100000,        # tool-output cache threshold (large → never spillover)
-        })()
+        self.settings = type(
+            'Settings',
+            (),
+            {
+                'auto_continue': True,
+                'tail_sync_check_enabled': False,  # keep tail-sync off the filesystem path
+                'compression_force_threshold': 96.0,
+                'compression_warning_threshold': 90.0,
+                'compression_context_reserve_tokens': 2048,
+                'auto_rollback_on_loop':
+                    False,  # disable loop-detection rollback (repetitive scripted output would trip it)
+                'max_auto_rollbacks': 5,
+                'cache_threshold_chars': 100000,  # tool-output cache threshold (large → never spillover)
+            })()
         self.stopped = False
         self._run_generation = 0
         self._config_version = 0
@@ -241,6 +246,7 @@ def _run(max_turns: int):
 
 # ── Assertion helpers ────────────────────────────────────────────────────────
 
+
 def _find_warning_in_call(call_msgs: List[Message], text_fragment: str):
     """Return the distinct Message in a single LLM call whose OWN content holds the fragment.
 
@@ -264,7 +270,7 @@ def _count_in_conversation(instance: AgentInstance, text_fragment: str) -> int:
     """Count how many conversation messages contain the fragment in their own content."""
     count = 0
     for msg in instance.conversation:
-        role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+        msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
         content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
         if isinstance(content, str) and text_fragment in content:
             count += 1
@@ -276,6 +282,7 @@ def _msg_role(m) -> str:
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
+
 
 class TestTurnLimitWarningUserMessages:
     """50%/90% warnings are distinct USER-role messages, not inline-stitched."""
@@ -291,17 +298,14 @@ class TestTurnLimitWarningUserMessages:
         turns_50pct = max(3, int(max_turns * 0.5))
         halfway_call = llm.calls[max_turns - turns_50pct]
         warn = _find_warning_in_call(halfway_call, 'Halfway through your turn budget')
-        assert warn is not None, (
-            "50% 'Halfway' warning not found as a standalone message in the LLM call "
-            f"where turns_available=={turns_50pct}"
-        )
+        assert warn is not None, ("50% 'Halfway' warning not found as a standalone message in the LLM call "
+                                  f"where turns_available=={turns_50pct}")
         # It must be a USER-role message.
         assert _msg_role(warn) == USER, f"50% warning role is {_msg_role(warn)!r}, expected USER"
         # Standalone message contains ONLY the warning text (not stitched onto a prior msg).
         content = warn.content if isinstance(warn, Message) else warn.get('content', '')
         assert content.strip().startswith('[SYSTEM WARNING: Halfway'), (
-            f"50% warning is not a clean standalone message; content={content[:80]!r}"
-        )
+            f"50% warning is not a clean standalone message; content={content[:80]!r}")
 
     def test_90pct_warning_is_separate_user_message(self):
         """max_turns=6 → turns_90pct=max(2,int(0.6))=2. The 90% warning fires when
@@ -313,10 +317,8 @@ class TestTurnLimitWarningUserMessages:
         turns_90pct = max(2, int(max_turns * 0.1))
         ninety_call = llm.calls[max_turns - turns_90pct]
         warn = _find_warning_in_call(ninety_call, 'Turn limit approaching')
-        assert warn is not None, (
-            "90% 'Turn limit approaching' warning not found as a standalone message in the "
-            f"LLM call where turns_available=={turns_90pct}"
-        )
+        assert warn is not None, ("90% 'Turn limit approaching' warning not found as a standalone message in the "
+                                  f"LLM call where turns_available=={turns_90pct}")
         assert _msg_role(warn) == USER, f"90% warning role is {_msg_role(warn)!r}, expected USER"
 
     def test_no_duplication_in_conversation(self):
@@ -365,16 +367,12 @@ class TestTurnLimitWarningUserMessages:
             if role == USER and isinstance(content, str):
                 user_msgs.append(content)
 
-        expected_halfway = (
-            '[SYSTEM WARNING: Halfway through your turn budget. '
-            f"You have 3 turn(s) remaining out of {max_turns} total. "
-            'Assess your progress and plan remaining steps.]'
-        )
-        expected_ninety = (
-            '[SYSTEM WARNING: Turn limit approaching. '
-            f"You have 2 turn(s) remaining out of {max_turns} total. "
-            'Plan your remaining steps carefully.]'
-        )
+        expected_halfway = ('[SYSTEM WARNING: Halfway through your turn budget. '
+                            f"You have 3 turn(s) remaining out of {max_turns} total. "
+                            'Assess your progress and plan remaining steps.]')
+        expected_ninety = ('[SYSTEM WARNING: Turn limit approaching. '
+                           f"You have 2 turn(s) remaining out of {max_turns} total. "
+                           'Plan your remaining steps carefully.]')
         assert expected_halfway in user_msgs, 'exact 50% warning text not preserved'
         assert expected_ninety in user_msgs, 'exact 90% warning text not preserved'
 
@@ -421,5 +419,4 @@ class TestTurnLimitWarningUserMessages:
         # Object identity: the message the LLM saw IS the one stored in conversation.
         assert llm_warning is conv_warning, (
             'the 50% warning message seen by the LLM is not the same object as the one '
-            'stored in instance.conversation'
-        )
+            'stored in instance.conversation')

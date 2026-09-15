@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -35,7 +35,6 @@ from examples.qwen2vl_assistant_video import test as _qwen2vl_assistant_video_te
 from examples.react_data_analysis import test as react_data_analysis  # noqa
 from examples.visual_storytelling import test as visual_storytelling  # noqa
 
-
 # ---------------------------------------------------------------------------
 # Text-only examples — use local_llm_cfg
 # ---------------------------------------------------------------------------
@@ -43,6 +42,7 @@ from examples.visual_storytelling import test as visual_storytelling  # noqa
 # ---------------------------------------------------------------------------
 # Text-only examples — use local_llm_cfg
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
@@ -75,6 +75,7 @@ def test_parallel_function_calling(local_llm_cfg):
 # VL (vision + text) examples — use local_vl_llm_cfg
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.extra_examples
 @pytest.mark.extra_vl
 @pytest.mark.skip_if_no_local
@@ -95,6 +96,7 @@ def test_visual_storytelling(query, image, local_llm_cfg, local_vl_llm_cfg):
 # ReAct / data analysis — text LLM with code interpreter
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 @pytest.mark.parametrize(
@@ -108,6 +110,7 @@ def test_react_data_analysis(query, file, local_llm_cfg):
 # LLM riddles — text-only
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_llm_riddles(local_llm_cfg):
@@ -117,6 +120,7 @@ def test_llm_riddles(local_llm_cfg):
 # ---------------------------------------------------------------------------
 # Multi-agent router — uses both text and VL agents
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.extra_examples
 @pytest.mark.extra_vl
@@ -131,6 +135,7 @@ def test_multi_agent_router(query, image, file, local_llm_cfg, local_vl_llm_cfg)
 # ---------------------------------------------------------------------------
 # Group chat examples — text LLM
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
@@ -150,6 +155,7 @@ def test_group_chat_demo(local_llm_cfg):
 # Qwen2-VL examples — VL LLM
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.extra_examples
 @pytest.mark.extra_vl
 @pytest.mark.skip_if_no_local
@@ -160,6 +166,9 @@ def test_qwen2vl_assistant_tooluse(local_vl_llm_cfg):
 @pytest.mark.extra_examples
 @pytest.mark.extra_vl
 @pytest.mark.skip_if_no_local
-@pytest.mark.skipif(True, reason='Requires DashScope setup with video model support; unrelated UnboundLocalError in qwenvl_dashscope.py line 58')
+@pytest.mark.skipif(
+    True,
+    reason='Requires DashScope setup with video model support; unrelated UnboundLocalError in qwenvl_dashscope.py line 58'
+)
 def test_video_understanding(local_vl_llm_cfg):
     _qwen2vl_assistant_video_test(vl_llm_cfg=local_vl_llm_cfg)

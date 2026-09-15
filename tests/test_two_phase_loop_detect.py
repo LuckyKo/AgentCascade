@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import pytest
+
 from agent_cascade.two_phase_loop_detect import TwoPhaseLoopDetector
 
 
@@ -75,10 +76,8 @@ class TestBasicSuspicionConfirmationFlow:
         d = make_detector()
 
         # Create a short repeating block (~200 chars)
-        block = (
-            'The system needs to validate the input parameters and ensure they are correct. '
-            'After validation, we process the request through the pipeline and generate output.'
-        )
+        block = ('The system needs to validate the input parameters and ensure they are correct. '
+                 'After validation, we process the request through the pipeline and generate output.')
         assert 150 <= len(block) <= 250, f"Block size {len(block)} out of expected range"
 
         # Feed the block many times — should eventually trigger suspicion then confirm
@@ -97,13 +96,11 @@ class TestBasicSuspicionConfirmationFlow:
         d = make_detector()
 
         # Create a medium repeating block (~500 chars)
-        block = (
-            'To implement this feature we need to consider several factors. First, the data model '
-            'must support the new requirements without breaking existing functionality. Second, the API '
-            'interface should remain backward compatible while exposing new capabilities. Third, error '
-            'handling must be robust enough to deal with edge cases gracefully. Finally, we need to add '
-            'appropriate logging and monitoring so that issues can be detected early in production.'
-        )
+        block = ('To implement this feature we need to consider several factors. First, the data model '
+                 'must support the new requirements without breaking existing functionality. Second, the API '
+                 'interface should remain backward compatible while exposing new capabilities. Third, error '
+                 'handling must be robust enough to deal with edge cases gracefully. Finally, we need to add '
+                 'appropriate logging and monitoring so that issues can be detected early in production.')
         assert 400 <= len(block) <= 600, f"Block size {len(block)} out of expected range"
 
         for i in range(30):
@@ -373,11 +370,9 @@ class TestLoopVsNonLoopDiscrimination:
         d.feed('Beginning detailed review of each module in sequence.\n')
 
         # Phase D,D,D: Exact same block repeated (actual loop)
-        loop_block = (
-            'The read_file tool returns the contents of a specified file path. '
-            'It supports line range selection and handles both text and binary files. '
-            'For large files, content is truncated with details on how to read more.\n'
-        )
+        loop_block = ('The read_file tool returns the contents of a specified file path. '
+                      'It supports line range selection and handles both text and binary files. '
+                      'For large files, content is truncated with details on how to read more.\n')
 
         for i in range(10):
             result = d.feed(loop_block)
@@ -436,10 +431,8 @@ class TestLoopVsNonLoopDiscrimination:
         d.feed('Analyzing the codebase structure.\n')
 
         # Exact repeated block (simulating agent stuck in a loop describing same action)
-        block = (
-            'I will call read_file on tests/conftest.py to examine the test fixtures. '
-            'This file contains pytest configuration and shared fixtures for all tests.\n'
-        )
+        block = ('I will call read_file on tests/conftest.py to examine the test fixtures. '
+                 'This file contains pytest configuration and shared fixtures for all tests.\n')
 
         for i in range(15):
             result = d.feed(block)

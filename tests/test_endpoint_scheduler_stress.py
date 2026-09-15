@@ -17,10 +17,10 @@ import pytest
 
 from agent_cascade.api_router import EndpointScheduler
 
-
 # ============================================================================
 # Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def scheduler():
@@ -30,6 +30,7 @@ def scheduler():
 # ============================================================================
 # Concurrent slot acquisition/release under high load
 # ============================================================================
+
 
 class TestConcurrentSlotAcquisition:
     """Test that EndpointScheduler handles 50+ concurrent agents correctly."""
@@ -108,7 +109,7 @@ class TestConcurrentSlotAcquisition:
             time.sleep(0.01)
 
         start_event.set()  # Release all at once
-        
+
         for t in threads:
             t.join(timeout=30)
 
@@ -147,10 +148,10 @@ class TestConcurrentSlotAcquisition:
         """All concurrency=0 endpoints share the same slot — serialized globally."""
         api_base_1 = 'http://seq-api-1'
         api_base_2 = 'http://seq-api-2'
-        
+
         # Acquire on first endpoint
         release1 = scheduler.acquire(api_base_1, 0, 'agent_a', 'coder')
-        
+
         # Second sequential endpoint should BLOCK (shares the slot)
         acquired = [False]
 
@@ -168,7 +169,7 @@ class TestConcurrentSlotAcquisition:
         # Give the thread time to start and block on acquire (not yet succeeded)
         time.sleep(0.1)
         assert not acquired[0], 'Second sequential endpoint should have blocked'
-        
+
         # Release first, now second should succeed
         release1()
         t.join(timeout=5)
@@ -185,6 +186,7 @@ class TestConcurrentSlotAcquisition:
 # concurrency_limit to acquire() does NOT grow an existing pool; it is simply
 # ignored for capacity purposes (the first value seen wins). The tests below
 # lock in that real behavior.
+
 
 class TestFixedCapacitySemantics:
     """SlotPool capacity is fixed at creation; later acquires honor it strictly."""
@@ -270,6 +272,7 @@ class TestFixedCapacitySemantics:
 # Double-release protection
 # ============================================================================
 
+
 class TestDoubleReleaseProtection:
     """Test that calling release() twice is safely ignored."""
 
@@ -277,10 +280,10 @@ class TestDoubleReleaseProtection:
         """Calling release() twice should be a no-op after first call."""
         api_base = 'http://test-api'
         release = scheduler.acquire(api_base, 2, 'agent_1', 'coder')
-        
+
         release()  # First release — normal
         assert scheduler.count_active(api_base, 2) == 0
-        
+
         release()  # Second release — should be silently ignored
         assert scheduler.count_active(api_base, 2) == 0
 
@@ -288,30 +291,30 @@ class TestDoubleReleaseProtection:
         """Multiple redundant releases are all safely handled."""
         api_base = 'http://test-api'
         release = scheduler.acquire(api_base, 1, 'agent_1', 'coder')
-        
+
         for _ in range(5):
             release()  # All should be safe
-        
+
         assert scheduler.count_active(api_base, 1) == 0
 
     def test_double_release_preserves_other_slots(self, scheduler):
         """Double-releasing one slot doesn't corrupt other agents' slots."""
         api_base = 'http://test-api'
-        
+
         release1 = scheduler.acquire(api_base, 3, 'agent_1', 'coder')
         release2 = scheduler.acquire(api_base, 3, 'agent_2', 'coder')
-        
+
         assert scheduler.count_active(api_base, 3) == 2
-        
+
         release1()
         # After first release: agent_1's slot freed, agent_2 still active
         assert scheduler.count_active(api_base, 3) == 1
-        
+
         release1()  # Double-release agent_1's slot — should be no-op
-        
+
         # Agent 2's slot must still be intact; count unchanged from before double-release
         assert scheduler.count_active(api_base, 3) == 1
-        
+
         release2()
         assert scheduler.count_active(api_base, 3) == 0
 
@@ -319,6 +322,7 @@ class TestDoubleReleaseProtection:
 # ============================================================================
 # Stale schedule cleanup behavior
 # ============================================================================
+
 
 class TestStaleScheduleCleanup:
     """Test that stale schedules are cleaned up correctly."""
@@ -382,15 +386,16 @@ class TestStaleScheduleCleanup:
 # Slot holder tracking and diagnostics
 # ============================================================================
 
+
 class TestSlotHolderTracking:
     """Test slot holder tracking for debugging stuck slots."""
 
     def test_slot_holder_recorded_on_acquire(self, scheduler):
         """Acquiring a slot records the instance as holder."""
         api_base = 'http://test-api'
-        
+
         release = scheduler.acquire(api_base, 2, 'agent_1', 'coder')
-        
+
         holders = scheduler.get_slot_holders(api_base)
         assert api_base in holders
         assert len(holders[api_base]) == 1
@@ -407,24 +412,24 @@ class TestSlotHolderTracking:
     def test_slot_holder_removed_on_release(self, scheduler):
         """Releasing a slot removes the holder record."""
         api_base = 'http://test-api'
-        
+
         release = scheduler.acquire(api_base, 2, 'agent_1', 'coder')
         assert len(scheduler.get_slot_holders(api_base)[api_base]) == 1
-        
+
         release()
         assert len(scheduler.get_slot_holders(api_base).get(api_base, [])) == 0
 
     def test_detect_stuck_slots(self, scheduler):
         """Slots held longer than threshold are flagged as stuck."""
         api_base = 'http://test-api'
-        
+
         # Acquire a slot
         release = scheduler.acquire(api_base, 2, 'agent_1', 'coder')
-        
+
         # Immediately it should not be stuck (threshold 60s)
         stuck = scheduler.detect_stuck_slots(threshold_seconds=60.0)
         assert len(stuck) == 0
-        
+
         # Manually backdate the holder's granted_at to simulate a stuck slot.
         pool = scheduler._pools[api_base]
         with pool._cond:
@@ -435,23 +440,23 @@ class TestSlotHolderTracking:
         assert len(stuck) == 1
         assert stuck[0]['instance_name'] == 'agent_1'
         assert stuck[0]['held_duration'] > 60.0
-        
+
         release()
 
     def test_get_slot_holders_returns_deep_copy(self, scheduler):
         """get_slot_holders returns deep copies to prevent external mutation."""
         api_base = 'http://test-api'
-        
+
         release = scheduler.acquire(api_base, 2, 'agent_1', 'coder')
-        
+
         holders = scheduler.get_slot_holders(api_base)
         # Mutate the returned copy
         holders[api_base][0] = ('hacked', 'hacker', 0.0, 999)
-        
+
         # Internal state should be unchanged
         real = scheduler.get_slot_holders(api_base)
         assert real[api_base][0][0] == 'agent_1'
-        
+
         release()
 
 
@@ -459,13 +464,14 @@ class TestSlotHolderTracking:
 # Timeout behavior
 # ============================================================================
 
+
 class TestAcquireTimeout:
     """Test that acquire respects timeout and provides useful error messages."""
 
     def test_acquire_times_out_at_capacity(self, scheduler):
         """Acquire raises TimeoutError when at capacity and timeout expires."""
         api_base = 'http://test-api'
-        
+
         # Fill the slot
         release1 = scheduler.acquire(api_base, 1, 'agent_1', 'coder')
 
@@ -475,13 +481,13 @@ class TestAcquireTimeout:
 
         assert 'Timed out' in str(exc_info.value)
         assert 'held by' in str(exc_info.value).lower() or 'agent_1' in str(exc_info.value)
-        
+
         release1()
 
     def test_timeout_error_includes_holder_info(self, scheduler):
         """Timeout error message identifies which agent holds the slot."""
         api_base = 'http://test-api'
-        
+
         release1 = scheduler.acquire(api_base, 1, 'blocking_agent', 'coder')
 
         # Pass an explicit short timeout (honored directly by acquire()).
@@ -490,5 +496,5 @@ class TestAcquireTimeout:
 
         error_msg = str(exc_info.value)
         assert 'blocking_agent' in error_msg
-        
+
         release1()

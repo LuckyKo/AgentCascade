@@ -21,16 +21,11 @@ with endpoints — which would add noise without exercising more logic.
 No LLM or network connections required.
 """
 
-import threading
 import time
 import unittest
-from typing import List
 
-from agent_cascade.slot_queue import (
-    SlotPool,
-    SlotHolder,
-)
 from agent_cascade.api_router import EndpointScheduler
+from agent_cascade.slot_queue import SlotHolder, SlotPool
 
 
 def _acquire_immediate(pool: SlotPool, instance_name: str) -> SlotHolder:
@@ -172,7 +167,7 @@ class TestNoDoubleAcquisition(unittest.TestCase):
         An agent holding a conc>0 (per-api_base) slot falling back to a conc=0
         endpoint must still acquire the shared sequential slot.
         """
-        sched = EndpointScheduler()
+        EndpointScheduler()
         slot_key = '_shared_sequential_slot_'
 
         inst = _FakeInstance(instance_name='C', slot_key='http://other-api')
@@ -251,6 +246,7 @@ class TestExceptionBeforeGenerator(unittest.TestCase):
 # Helpers that mirror the SlotPool path in execute_with_sem (api_router.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def _slotpool_execute(release_cb, call_fn):
     """Mirror of the SlotPool branch inside execute_with_sem.
 
@@ -273,6 +269,7 @@ def _slotpool_execute(release_cb, call_fn):
                     yield from rest
                 finally:
                     _release()
+
             return slotpool_gen_wrapper(first_chunk, it)
         else:
             release_cb()

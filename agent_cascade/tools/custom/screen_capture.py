@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -71,17 +72,13 @@ def _capture_screen_mss(monitor_index: int) -> bytes:
     try:
         import mss
     except ImportError:
-        raise ImportError(
-            "Screen capture requires the 'mss' package. Install with: pip install mss"
-        )
+        raise ImportError("Screen capture requires the 'mss' package. Install with: pip install mss")
 
     with mss.mss() as sct:
         monitors = sct.monitors
         if monitor_index < 0 or monitor_index >= len(monitors):
-            raise ValueError(
-                f"Monitor index {monitor_index} is out of range. "
-                f"Available monitors: 0 (combined), {', '.join(str(i) for i in range(1, len(monitors)))}"
-            )
+            raise ValueError(f"Monitor index {monitor_index} is out of range. "
+                             f"Available monitors: 0 (combined), {', '.join(str(i) for i in range(1, len(monitors)))}")
         monitor = monitors[monitor_index]
         screenshot = sct.grab(monitor)
         img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
@@ -100,10 +97,8 @@ def capture_window_by_pid(pid: int) -> bytes:
     elif sys.platform == 'linux':
         return _capture_window_linux(pid)
     else:
-        raise RuntimeError(
-            f"Window capture is not supported on {sys.platform}. "
-            f"Supported platforms: Windows, Linux."
-        )
+        raise RuntimeError(f"Window capture is not supported on {sys.platform}. "
+                           f"Supported platforms: Windows, Linux.")
 
 
 def _capture_window_windows(pid: int) -> bytes:
@@ -119,14 +114,12 @@ def _capture_window_windows(pid: int) -> bytes:
     import ctypes
 
     try:
-        import win32gui
-        import win32ui
         import win32con
-        import win32process
+        import win32gui
+        import win32process  # noqa: F401  (availability check)
+        import win32ui
     except ImportError:
-        raise ImportError(
-            "Window capture on Windows requires 'pywin32'. Install with: pip install pywin32"
-        )
+        raise ImportError("Window capture on Windows requires 'pywin32'. Install with: pip install pywin32")
 
     hwnd = _find_window_by_pid(pid)
     if not hwnd:
@@ -151,9 +144,7 @@ def _capture_window_windows(pid: int) -> bytes:
         ctypes.windll.gdi32.SelectObject(hdc_mem, bmp_handle)
 
         # Try PrintWindow first — captures actual window content even when minimized/obscured
-        print_window_result = ctypes.windll.user32.PrintWindow(
-            hwnd, hdc_mem, PW_RENDERFULLCONTENT
-        )
+        print_window_result = ctypes.windll.user32.PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT)
 
         if not print_window_result:
             # PrintWindow failed — fall back to BitBlt (only works if window is visible/on-screen)
@@ -199,28 +190,19 @@ def _capture_window_linux(pid: int) -> bytes:
     try:
         import mss
     except ImportError:
-        raise ImportError(
-            "Screen capture requires the 'mss' package. Install with: pip install mss"
-        )
+        raise ImportError("Screen capture requires the 'mss' package. Install with: pip install mss")
 
     # Check for display server
     if not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
-        raise RuntimeError(
-            'Screen capture requires a graphical display. No display server detected '
-            '(DISPLAY and WAYLAND_DISPLAY are unset).'
-        )
+        raise RuntimeError('Screen capture requires a graphical display. No display server detected '
+                           '(DISPLAY and WAYLAND_DISPLAY are unset).')
 
     # Get window ID from PID using xdotool
     try:
-        result = subprocess.run(
-            ['xdotool', 'search', '--pid', str(pid)],
-            capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run(['xdotool', 'search', '--pid', str(pid)], capture_output=True, text=True, timeout=5)
     except FileNotFoundError:
-        raise RuntimeError(
-            "Linux window capture requires 'xdotool'. Install via your package manager "
-            '(e.g., sudo apt install xdotool).'
-        )
+        raise RuntimeError("Linux window capture requires 'xdotool'. Install via your package manager "
+                           '(e.g., sudo apt install xdotool).')
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Timeout while searching for window with PID {pid}.")
 
@@ -231,24 +213,20 @@ def _capture_window_linux(pid: int) -> bytes:
 
     # Get window geometry using xdotool
     try:
-        geom_result = subprocess.run(
-            ['xdotool', 'getwindowgeometry', '--window', window_id],
-            capture_output=True, text=True, timeout=5
-        )
+        geom_result = subprocess.run(['xdotool', 'getwindowgeometry', '--window', window_id],
+                                     capture_output=True,
+                                     text=True,
+                                     timeout=5)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Timeout while getting geometry for window {window_id}.")
 
     if geom_result.returncode != 0:
-        raise RuntimeError(
-            f"Failed to get window geometry for PID {pid}: {geom_result.stderr.strip()}"
-        )
+        raise RuntimeError(f"Failed to get window geometry for PID {pid}: {geom_result.stderr.strip()}")
 
     # Parse geometry output (e.g., "Geometry of window 0x123456: x=100, y=200, w=800, h=600")
     match = re.search(r'x=(\d+),\s*y=(\d+),\s*w=(\d+),\s*h=(\d+)', geom_result.stdout)
     if not match:
-        raise RuntimeError(
-            f"Could not parse window geometry from xdotool output: {geom_result.stdout.strip()}"
-        )
+        raise RuntimeError(f"Could not parse window geometry from xdotool output: {geom_result.stdout.strip()}")
 
     x, y, width, height = map(int, match.groups())
 
@@ -261,10 +239,8 @@ def _capture_window_linux(pid: int) -> bytes:
         try:
             screenshot = sct.grab(monitor)
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to capture window region for PID {pid}. "
-                f"This may be due to Wayland restrictions or missing permissions. Error: {e}"
-            )
+            raise RuntimeError(f"Failed to capture window region for PID {pid}. "
+                               f"This may be due to Wayland restrictions or missing permissions. Error: {e}")
 
         img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
         buf = io.BytesIO()

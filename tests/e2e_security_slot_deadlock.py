@@ -24,6 +24,7 @@ clear diagnostic report of which path fired + pool-holder state otherwise.
 # Isolate this standalone run's logs/telemetry from the production workspace.
 # Must be set BEFORE any agent_cascade import (instance_id reads it at call time).
 import os as _os
+
 _os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', f"e2e_{_os.getpid()}")
 
 import logging
@@ -34,8 +35,8 @@ import pytest
 
 from agent_cascade.security_handler import SecurityAdvisorHandler
 
-
 # ── Real slot-pool harness (no server, no LLM) ───────────────────────────────
+
 
 def _build_real_router(tmp_path):
     """Real APIRouter with a single conc=0 endpoint → real shared sequential SlotPool."""
@@ -52,8 +53,12 @@ def _build_real_router(tmp_path):
         router.endpoints.clear()
         router.agent_priorities.clear()
         router._agent_types_with_priorities.clear()
-    ep = APIEndpoint(id='ep0', name='conc0', api_base=llm_cfg['api_base'],
-                     model='mock', concurrency_limit=0, enabled=True)
+    ep = APIEndpoint(id='ep0',
+                     name='conc0',
+                     api_base=llm_cfg['api_base'],
+                     model='mock',
+                     concurrency_limit=0,
+                     enabled=True)
     router.add_endpoint(ep)
     router.default_llm_cfg = ep.to_llm_cfg()
     return router
@@ -63,8 +68,12 @@ def _build_pool(router):
     """Real AgentPool wired to the real router (real _acquire_slot / get_instance)."""
     from agent_cascade.agent_pool import AgentPool
 
-    llm_cfg = {'model': 'mock', 'api_base': 'http://127.0.0.1:9/v1',
-               'model_server': 'http://127.0.0.1:9/v1', 'api_key': 'EMPTY'}
+    llm_cfg = {
+        'model': 'mock',
+        'api_base': 'http://127.0.0.1:9/v1',
+        'model_server': 'http://127.0.0.1:9/v1',
+        'api_key': 'EMPTY'
+    }
     return AgentPool(llm_cfg, agents_dir=str(router._config_dir), api_router=router)
 
 
@@ -84,14 +93,12 @@ def _make_sec_instance(sec_name):
 
 def _run_execute_check(handler, ap, rid, caller_agent):
     """Run the REAL _execute_check with only engine.run / _create_system_agent patched."""
-    from agent_cascade.execution_engine import ExecutionEngine
 
     engine_instance = MagicMock()
     # Security "completes" immediately with an ambiguous (non-[YES]/[NO]) response.
     engine_instance.run.return_value = iter([('I will analyze this request.', False)])
     engine_instance._create_system_agent.side_effect = lambda **kw: _make_sec_instance(
-        kw.get('instance_name', 'Security')
-    )
+        kw.get('instance_name', 'Security'))
     engine_instance._telemetry.return_value = None
     engine_instance.reacquire_for.return_value = True
 
@@ -100,15 +107,21 @@ def _run_execute_check(handler, ap, rid, caller_agent):
     with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 5):
         with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
             handler._execute_check(
-                ap=ap, sec_inst=None, rid=rid, auto_apply=False,
-                instance_name='Maine', caller_agent=caller_agent,
+                ap=ap,
+                sec_inst=None,
+                rid=rid,
+                auto_apply=False,
+                instance_name='Maine',
+                caller_agent=caller_agent,
                 prompt_template='Analyze {tool_name}: {description} args={arguments}',
-                timeout_seconds=3600, warning_seconds=2400,
+                timeout_seconds=3600,
+                warning_seconds=2400,
             )
     return engine_instance
 
 
 # ── Log capture + reporting ──────────────────────────────────────────────────
+
 
 def _capture_logs():
     """Capture DEBUG+ from the relevant loggers for the duration of a check."""
@@ -116,6 +129,7 @@ def _capture_logs():
     lock = threading.Lock()
 
     class _Capture(logging.Handler):
+
         def emit(self, record):
             with lock:
                 try:
@@ -129,7 +143,7 @@ def _capture_logs():
     # "agent_cascade" package for any module-level loggers (api_router, slot_queue).
     logger_names = [
         'agent_cascade_logger',  # the real app logger (security_handler logs here)
-        'agent_cascade',         # package parent (api_router / slot_queue module loggers)
+        'agent_cascade',  # package parent (api_router / slot_queue module loggers)
     ]
     targets = []
     for name in logger_names:
@@ -184,6 +198,7 @@ def _diagnostic_report(records, shared_pool, caller_agent):
 
 # ── Shared test fixture ──────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def slot_harness(tmp_path, request):
     """Build the real router/pool, patch QUEUE_WAIT_TIMEOUT short, yield caller + permit.
@@ -192,8 +207,9 @@ def slot_harness(tmp_path, request):
     parallel workers don't overwrite each other's api_endpoints.json.
     """
     import os as _os
-    import agent_cascade.slot_queue as _sq_mod
+
     import agent_cascade.api_router_pkg.scheduler as _ar_mod
+    import agent_cascade.slot_queue as _sq_mod
 
     cfg_dir = tmp_path / request.node.name.replace('/', '_')
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -229,11 +245,16 @@ def slot_harness(tmp_path, request):
     assert shared is not None, 'Shared sequential SlotPool was not created (conc=0 not in effect?)'
 
     # Real caller instance holding the ONLY permit on the shared slot.
-    from agent_cascade.agent_instance import AgentInstance
     import time as _t
+
+    from agent_cascade.agent_instance import AgentInstance
     caller = AgentInstance(
-        instance_name='caller', agent_class='coder', conversation=[],
-        created_at=_t.monotonic(), last_activity=_t.monotonic(), latest_marker_index=0,
+        instance_name='caller',
+        agent_class='coder',
+        conversation=[],
+        created_at=_t.monotonic(),
+        last_activity=_t.monotonic(),
+        latest_marker_index=0,
     )
     pool.instances['caller'] = caller
 
@@ -250,8 +271,14 @@ def slot_harness(tmp_path, request):
     handler = SecurityAdvisorHandler(pool, session, app, MagicMock(), lambda *a, **k: None)
 
     yield {
-        'router': router, 'pool': pool, 'shared': shared, 'caller': caller,
-        'app': app, 'session': session, 'handler': handler, 'release_cb': release_cb,
+        'router': router,
+        'pool': pool,
+        'shared': shared,
+        'caller': caller,
+        'app': app,
+        'session': session,
+        'handler': handler,
+        'release_cb': release_cb,
     }
 
     # Cleanup: release the permit + restore constants.
@@ -265,14 +292,20 @@ def slot_harness(tmp_path, request):
 
 # ── Test 1: normal yield path (caller holds a live _slot_release) ────────────
 
+
 def test_normal_yield_path_completes(slot_harness):
     """Caller holds a LIVE _slot_release → the normal yield path must fire, the Security
     agent acquires the freed slot and completes, then the caller's slot is reacquired."""
     h = slot_harness
     shared, caller = h['shared'], h['caller']
     ap = {
-        'request_id': 'rid_normal', 'tool_name': 'shell_cmd',
-        'description': 'echo hi', 'tool_args': {'command': 'echo hi'}, 'agent_name': 'caller',
+        'request_id': 'rid_normal',
+        'tool_name': 'shell_cmd',
+        'description': 'echo hi',
+        'tool_args': {
+            'command': 'echo hi'
+        },
+        'agent_name': 'caller',
     }
 
     records, handler_log, targets = _capture_logs()
@@ -290,28 +323,24 @@ def test_normal_yield_path_completes(slot_harness):
     print('\n' + report)
 
     assert normal_yield, (
-        f"[NORMAL YIELD PATH NOT FIRED] Expected the caller's live _slot_release to be yielded.\n{report}"
-    )
+        f"[NORMAL YIELD PATH NOT FIRED] Expected the caller's live _slot_release to be yielded.\n{report}")
     assert not leaked, f"Force-release fallback should NOT fire when a live callback exists.\n{report}"
     assert not skipped, f"Skip path should NOT fire when a slot was yielded.\n{report}"
-    assert not acquire_timeout, (
-        f"[DEADLOCK] Security agent timed out waiting for the shared slot — normal yield did "
-        f"not free it in time.\n{report}"
-    )
+    assert not acquire_timeout, (f"[DEADLOCK] Security agent timed out waiting for the shared slot — normal yield did "
+                                 f"not free it in time.\n{report}")
     # The normal yield path fired (verified above) and the Security agent did NOT time out
     # waiting for the slot — i.e. the caller's permit was freed in time for it to proceed.
     # After the check, the finally-block RE-ACQUIRES the caller's slot, so the caller is
     # expected to hold the permit again (yield → run Security → reacquire is in-order).
     assert engine_instance.reacquire_for.called, (
-        '_yielded_slot should be True so the finally-block reacquire runs.\n' + report
-    )
+        '_yielded_slot should be True so the finally-block reacquire runs.\n' + report)
     # Reacquire must have targeted the caller.
     assert any(c.args and c.args[0] is caller for c in engine_instance.reacquire_for.call_args_list), (
-        'reacquire_for should be called with the caller instance to restore its slot.\n' + report
-    )
+        'reacquire_for should be called with the caller instance to restore its slot.\n' + report)
 
 
 # ── Test 2: force-release fallback path (leaked permit) ──────────────────────
+
 
 def test_force_release_fallback_path(slot_harness):
     """Caller's _slot_release is None (cleared without releasing — the leaked state) but the
@@ -326,8 +355,13 @@ def test_force_release_fallback_path(slot_harness):
     assert 'caller' in shared._running, f"Precondition: caller must hold the permit: {list(shared._running)}"
 
     ap = {
-        'request_id': 'rid_leak', 'tool_name': 'shell_cmd',
-        'description': 'echo hi', 'tool_args': {'command': 'echo hi'}, 'agent_name': 'caller',
+        'request_id': 'rid_leak',
+        'tool_name': 'shell_cmd',
+        'description': 'echo hi',
+        'tool_args': {
+            'command': 'echo hi'
+        },
+        'agent_name': 'caller',
     }
 
     records, handler_log, targets = _capture_logs()
@@ -338,7 +372,7 @@ def test_force_release_fallback_path(slot_harness):
 
     normal_yield = _find(records, '[SECURITY_SLOT_YIELD] Releasing slot')
     leaked = _find(records, 'LEAKED PERMIT DETECTED')
-    skipped = _find(records, 'SECURITY_SLOT_YIELD_SKIPPED')
+    _find(records, 'SECURITY_SLOT_YIELD_SKIPPED')
     acquire_timeout = _find(records, 'waiting for endpoint slot')
 
     report = _diagnostic_report(records, shared, 'caller')
@@ -349,24 +383,21 @@ def test_force_release_fallback_path(slot_harness):
     assert leaked or normal_yield, (
         f"[DEADLOCK REPRODUCED] Neither the normal yield NOR the force-release fallback fired "
         f"for a caller that still holds the shared permit. The Security agent had nothing to "
-        f"yield and blocked on _shared_sequential_slot_.\n{report}"
-    )
+        f"yield and blocked on _shared_sequential_slot_.\n{report}")
     assert not acquire_timeout, (
         f"[DEADLOCK] Security agent timed out waiting for the shared slot — the force-release "
-        f"fallback did not free the leaked permit.\n{report}\n\nFULL LOG:\n"
-        + '\n'.join(r.getMessage() for r in records if 'SECURITY_SLOT' in r.getMessage() or 'endpoint slot' in r.getMessage())
-    )
+        f"fallback did not free the leaked permit.\n{report}\n\nFULL LOG:\n" + '\n'.join(
+            r.getMessage() for r in records if 'SECURITY_SLOT' in r.getMessage() or 'endpoint slot' in r.getMessage()))
     # After a successful force-release, the caller's permit must be gone from the pool.
     assert 'caller' not in shared._running, (
-        f"Force-release fallback should remove the leaked holder from _running: {list(shared._running)}\n{report}"
-    )
+        f"Force-release fallback should remove the leaked holder from _running: {list(shared._running)}\n{report}")
     # Reacquire must run (the finally block restores the caller's slot).
     assert engine_instance.reacquire_for.called, (
-        '_yielded_slot should be True after force-release so the reacquire runs.\n' + report
-    )
+        '_yielded_slot should be True after force-release so the reacquire runs.\n' + report)
 
 
 # ── Test 3: skip path (no slot to yield at all) — diagnostic only ────────────
+
 
 def test_skip_path_logs_diagnostics(slot_harness):
     """Neither a live callback NOR a leaked permit exists. The skip path must log a clear
@@ -382,13 +413,18 @@ def test_skip_path_logs_diagnostics(slot_harness):
     assert 'caller' not in shared._running, f"Precondition: pool must be empty: {list(shared._running)}"
 
     ap = {
-        'request_id': 'rid_skip', 'tool_name': 'shell_cmd',
-        'description': 'echo hi', 'tool_args': {'command': 'echo hi'}, 'agent_name': 'caller',
+        'request_id': 'rid_skip',
+        'tool_name': 'shell_cmd',
+        'description': 'echo hi',
+        'tool_args': {
+            'command': 'echo hi'
+        },
+        'agent_name': 'caller',
     }
 
     records, handler_log, targets = _capture_logs()
     try:
-        engine_instance = _run_execute_check(h['handler'], ap, 'rid_skip', 'caller')
+        _run_execute_check(h['handler'], ap, 'rid_skip', 'caller')
     finally:
         _restore_logs(handler_log, targets)
 
@@ -397,15 +433,11 @@ def test_skip_path_logs_diagnostics(slot_harness):
     report = _diagnostic_report(records, shared, 'caller')
     print('\n' + report)
 
-    assert skipped, (
-        f"[SKIP PATH NOT FIRED] Expected a [SECURITY_SLOT_YIELD_SKIPPED] diagnostic when there "
-        f"is no slot to yield.\n{report}"
-    )
+    assert skipped, (f"[SKIP PATH NOT FIRED] Expected a [SECURITY_SLOT_YIELD_SKIPPED] diagnostic when there "
+                     f"is no slot to yield.\n{report}")
     # The skip diagnostic must include pool-holder info.
     assert any('Pool holders:' in r.getMessage() for r in skipped), (
-        f"Skip diagnostic should include pool-holder info: {[r.getMessage()[:200] for r in skipped]}"
-    )
+        f"Skip diagnostic should include pool-holder info: {[r.getMessage()[:200] for r in skipped]}")
     # Slot is free, so the Security agent should NOT deadlock.
     assert not acquire_timeout, (
-        f"[UNEXPECTED DEADLOCK] Slot was free but the Security agent still timed out.\n{report}"
-    )
+        f"[UNEXPECTED DEADLOCK] Slot was free but the Security agent still timed out.\n{report}")

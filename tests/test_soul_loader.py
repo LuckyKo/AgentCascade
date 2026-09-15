@@ -14,12 +14,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent_cascade.soul_loader import (
-    _format_value,
-    _preprocess_soul_content,
-    build_system_prompt,
-    load_soul,
-)
+from agent_cascade.soul_loader import _format_value, _preprocess_soul_content, build_system_prompt, load_soul
 
 # ---------------------------------------------------------------------------
 # Paths to the real soul files
@@ -33,10 +28,10 @@ SOUL_FILES = {
     'researcher': _AGENTS_DIR / 'researcher_soul.md',
 }
 
-
 # ===========================================================================
 # Fixtures
 # ===========================================================================
+
 
 @pytest.fixture(params=list(SOUL_FILES.keys()))
 def soul_file(request):
@@ -47,16 +42,19 @@ def soul_file(request):
 @pytest.fixture
 def temp_soul_file(tmp_path):
     """Helper to write content to a temp .md file and return its path."""
+
     def _write(content: str) -> str:
         p = tmp_path / 'test_soul.md'
         p.write_text(content, encoding='utf-8')
         return str(p)
+
     return _write
 
 
 # ===========================================================================
 # 1. Good (well-formatted) soul files
 # ===========================================================================
+
 
 class TestLoadSoulGoodFiles:
     """load_soul with the four real soul files."""
@@ -123,6 +121,7 @@ class TestBuildSystemPromptGoodFiles:
 # 2. Badly formatted soul files (temp files)
 # ===========================================================================
 
+
 class TestLoadSoulBadFiles:
     """load_soul with various malformed / edge-case inputs."""
 
@@ -133,35 +132,29 @@ class TestLoadSoulBadFiles:
         assert config['name'] == 'Tester'
 
     def test_continuation_lines(self, temp_soul_file):
-        content = (
-            'name: Tester\n'
-            'rules:\n'
-            '  - First rule\n'
-            '      continued here\n'
-        )
+        content = ('name: Tester\n'
+                   'rules:\n'
+                   '  - First rule\n'
+                   '      continued here\n')
         path = temp_soul_file(content)
         config = load_soul(path)
         assert isinstance(config['rules'], list)
 
     def test_irregular_nested_indent(self, temp_soul_file):
-        content = (
-            'name: Tester\n'
-            'rules:\n'
-            '  - Rule one\n'
-            '    - Sub one\n'
-            '        - Deep one\n'
-        )
+        content = ('name: Tester\n'
+                   'rules:\n'
+                   '  - Rule one\n'
+                   '    - Sub one\n'
+                   '        - Deep one\n')
         path = temp_soul_file(content)
         config = load_soul(path)
         # Should parse without error
         assert isinstance(config['rules'], list)
 
     def test_colons_in_list_items(self, temp_soul_file):
-        content = (
-            'name: Tester\n'
-            'rules:\n'
-            '  - Use colons: always\n'
-        )
+        content = ('name: Tester\n'
+                   'rules:\n'
+                   '  - Use colons: always\n')
         path = temp_soul_file(content)
         config = load_soul(path)
         assert isinstance(config['rules'], list)
@@ -192,6 +185,7 @@ class TestLoadSoulBadFiles:
 # ===========================================================================
 # 3. build_system_prompt edge cases
 # ===========================================================================
+
 
 class TestBuildSystemPromptEdgeCases:
 
@@ -239,6 +233,7 @@ class TestBuildSystemPromptEdgeCases:
 # 4. _preprocess_soul_content edge cases
 # ===========================================================================
 
+
 class TestPreprocessSoulContent:
 
     def test_empty_string(self):
@@ -246,11 +241,9 @@ class TestPreprocessSoulContent:
         assert result == ''
 
     def test_multi_level_nesting_preserved(self):
-        content = (
-            '- Level 1\n'
-            '  - Level 2\n'
-            '    - Level 3\n'
-        )
+        content = ('- Level 1\n'
+                   '  - Level 2\n'
+                   '    - Level 3\n')
         result = _preprocess_soul_content(content)
         lines = result.strip().split('\n')
         assert lines[0] == '- Level 1'
@@ -258,12 +251,10 @@ class TestPreprocessSoulContent:
         assert lines[2] == '    - Level 3'
 
     def test_blank_line_resets_indent_stack(self):
-        content = (
-            '- Item A\n'
-            '  - Sub A\n'
-            '\n'
-            '- Item B\n'
-        )
+        content = ('- Item A\n'
+                   '  - Sub A\n'
+                   '\n'
+                   '- Item B\n')
         result = _preprocess_soul_content(content)
         assert '- Item B' in result
 
@@ -271,6 +262,7 @@ class TestPreprocessSoulContent:
 # ===========================================================================
 # 5. _format_value edge cases
 # ===========================================================================
+
 
 class TestFormatValue:
 

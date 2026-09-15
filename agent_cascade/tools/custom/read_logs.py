@@ -2,9 +2,9 @@ import glob as _glob
 import json
 import logging
 from pathlib import Path
-from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.prompts.dna import TOOL_METADATA
 
+from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.tools.base import BaseTool, register_tool
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,7 @@ class ReadLogs(BaseTool):
         """
         try:
             from agent_cascade.operation_manager.file_operations import FileOpsMixin
+
             # Non-Path objects (e.g. test mocks) raise here and fall through to "?".
             size_bytes = file_path.stat().st_size
             return FileOpsMixin._format_size(size_bytes)
@@ -476,7 +477,6 @@ class ReadLogs(BaseTool):
         # two tools look consistent. The ({fmt}, ...) tag carries the log-specific detail.
         first = truncated_lines[0][0]
         last = truncated_lines[-1][0]
-        shown = len(truncated_lines)
 
         header = f"OK: Read {file_path} lines {first}-{last}/{total} ({fmt}, {file_size_str})"
 

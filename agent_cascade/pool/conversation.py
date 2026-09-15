@@ -3,12 +3,17 @@ ConversationMixin — conversation history, compression target sets, and slice_h
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from agent_cascade.log import logger
-from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
+
+from typing import Dict, List
+
+from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
+
 from .conversation_map import _InstanceConversationMapping
+
+
 class ConversationMixin:
+
     def clear_conversation(self, instance_name: str):
         """Clear an agent's conversation while keeping the instance alive.
 
@@ -19,12 +24,13 @@ class ConversationMixin:
         inst = self.instances.get(instance_name)
         if inst:
             inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
+
     def add_message(self, instance_name: str, message: Message):
         """Append a message (thread-safe) to an agent's conversation.
 
         Simple append operation - no version tracking. Token count cache is
         invalidated on each append. The LLM API handles prefix caching automatically.
-        
+
         This is the single point of truth for adding messages — all writes go
         directly to instances[name].conversation.
         """
@@ -90,7 +96,7 @@ class ConversationMixin:
         # With multiple compressions: [SYS][COMP1][COMP2|active_start]|U3|A3|U4|A4]
         # find_last_marker returns index of COMP2, so active_start_idx = COMP2 + 1.
         # New markers are inserted right after all existing ones (stacking behavior).
-        
+
         # active_start_idx: where the "active" (post-marker) window starts
         if latest_marker >= 0:
             active_start_idx = latest_marker + 1  # Skip past marker — markers are not part of active set
@@ -136,9 +142,8 @@ class ConversationMixin:
 
         # Find ALL marker indices to detect stacking vs unculled gaps
         marker_indices = [
-            i for i in range(len(history))
-            if isinstance(self._msg_field(history[i], 'content'), str)
-               and self._msg_field(history[i], 'content').startswith(COMPRESSION_MARKER)
+            i for i in range(len(history)) if isinstance(self._msg_field(history[i], 'content'), str) and
+            self._msg_field(history[i], 'content').startswith(COMPRESSION_MARKER)
         ]
 
         if not marker_indices:
@@ -155,10 +160,8 @@ class ConversationMixin:
         last_marker_idx = marker_indices[-1]
 
         # Check if markers are already stacked (consecutive near the start)
-        markers_stacked = (
-            first_marker_pos <= expected_start + 1
-            and last_marker_idx == first_marker_pos + len(marker_indices) - 1
-        )
+        markers_stacked = (first_marker_pos <= expected_start + 1 and
+                           last_marker_idx == first_marker_pos + len(marker_indices) - 1)
 
         # If first marker is at index expected_start+1, verify intervening msg is U0 (non-marker user)
         if markers_stacked and first_marker_pos == expected_start + 1:

@@ -52,7 +52,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent_cascade.llm.schema import Message, ASSISTANT  # noqa: E402
+from agent_cascade.llm.schema import ASSISTANT, Message  # noqa: E402
 
 INSTANCE_NAME = 'Maine'
 AGENT_CLASS = 'coder'
@@ -60,9 +60,7 @@ AGENT_CLASS = 'coder'
 # Real example session log (same format the WS 'load_session' / REST resume command
 # consumes). Used as a fallback fixture when present; the test otherwise builds an
 # equivalent synthetic JSONL so it is self-contained and deterministic in CI.
-EXAMPLE_SESSION_LOG = Path(
-    r'N:\work\WD\AgentWorkspace\logs\researcher_stream-probe-analyst_20260903_093608.jsonl'
-)
+EXAMPLE_SESSION_LOG = Path(r'N:\work\WD\AgentWorkspace\logs\researcher_stream-probe-analyst_20260903_093608.jsonl')
 
 # ── Mock LLM timing profile (deterministic, fast) ─────────────────────────────
 # Pure-reasoning phase: REASONING_DELTAS deltas spaced REASONING_GAP apart.
@@ -70,9 +68,9 @@ EXAMPLE_SESSION_LOG = Path(
 # throttle, so a healthy pipeline must coalesce to ~10 updates/s — that is exactly
 # the responsiveness we assert on. A bursty/broken path would collapse this to a
 # handful of end-of-turn events and fail hard.
-REASONING_DELTAS = 45          # ~1.8s of reasoning at 40ms spacing
-REASONING_GAP = 0.04           # 40ms between reasoning deltas (finer than the 0.1s throttle)
-CONTENT_DELTAS = 4             # short content phase
+REASONING_DELTAS = 45  # ~1.8s of reasoning at 40ms spacing
+REASONING_GAP = 0.04  # 40ms between reasoning deltas (finer than the 0.1s throttle)
+CONTENT_DELTAS = 4  # short content phase
 CONTENT_GAP = 0.04
 
 # ── Timing assertions (RESPONSIVENESS-SENSITIVE — intentionally tight) ────────
@@ -80,13 +78,13 @@ CONTENT_GAP = 0.04
 # over a ~2s generation we expect on the order of ~15+ updates. These bounds are set
 # to FAIL on any bursty/stalled behavior:
 MIN_UPDATES_DURING_GENERATION = 12  # must see a steady stream, not a single end-of-turn burst
-MAX_INTER_ARRIVAL_GAP = 0.6         # no inter-broadcast gap > 0.6s while the mock is actively emitting
-
+MAX_INTER_ARRIVAL_GAP = 0.6  # no inter-broadcast gap > 0.6s while the mock is actively emitting
 
 # ---------------------------------------------------------------------------
 # Mock LLM generator — replaces ONLY ExecutionEngine._execute_llm_call.
 # Yields List[Message] (accumulated response), matching the real contract.
 # ---------------------------------------------------------------------------
+
 
 def _make_mock_execute_llm_call(self, instance, template, messages, active_functions):
     """Generator standing in for the real LLM stream.
@@ -103,19 +101,14 @@ def _make_mock_execute_llm_call(self, instance, template, messages, active_funct
     for i in range(REASONING_DELTAS):
         time.sleep(REASONING_GAP)
         reasoning_parts.append(f"thought_{i:02d}_")
-        yield [
-            _msg(role=ASSISTANT, content='', reasoning_content=''.join(reasoning_parts))
-        ]
+        yield [_msg(role=ASSISTANT, content='', reasoning_content=''.join(reasoning_parts))]
 
     # Short content phase: reasoning frozen, content grows.
     final_reasoning = ''.join(reasoning_parts)
     for i in range(CONTENT_DELTAS):
         time.sleep(CONTENT_GAP)
         content_parts.append(f" answer_{i}")
-        yield [
-            _msg(role=ASSISTANT, content=''.join(content_parts),
-                 reasoning_content=final_reasoning)
-        ]
+        yield [_msg(role=ASSISTANT, content=''.join(content_parts), reasoning_content=final_reasoning)]
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +122,9 @@ def _make_mock_execute_llm_call(self, instance, template, messages, active_funct
 
 # Total synthetic reasoning length shared by the burst profiles (kept identical so the
 # scenarios differ ONLY in arrival cadence, not payload size).
-_BURST_REASONING_TOTAL = 45 * len('thought_00_')   # == REASONING_DELTAS deltas' worth
+_BURST_REASONING_TOTAL = 45 * len('thought_00_')  # == REASONING_DELTAS deltas' worth
 _BURST_CONTENT = ' answer' * 4
+
 
 def _full_reasoning(n_chars=_BURST_REASONING_TOTAL):
     """Deterministic reasoning string of exactly n_chars (repeated unit)."""
@@ -142,9 +136,7 @@ def _mock_all_burst(self, instance, template, messages, active_functions):
     """ALL-BURST: the ENTIRE reasoning+content response arrives as a SINGLE yield at the
     very end — no intermediate yields. The extreme burst case."""
     time.sleep(1.0)  # simulate the model 'thinking' with nothing on the wire
-    yield [
-        _msg(role=ASSISTANT, content=_BURST_CONTENT, reasoning_content=_full_reasoning())
-    ]
+    yield [_msg(role=ASSISTANT, content=_BURST_CONTENT, reasoning_content=_full_reasoning())]
 
 
 def _mock_chunked(self, instance, template, messages, active_functions):
@@ -156,13 +148,9 @@ def _mock_chunked(self, instance, template, messages, active_functions):
         time.sleep(0.6)
         # Append a big slice of the total reasoning each batch (accumulated).
         reasoning_parts.append(_full_reasoning(_BURST_REASONING_TOTAL // n_batches))
-        yield [
-            _msg(role=ASSISTANT, content='', reasoning_content=''.join(reasoning_parts))
-        ]
+        yield [_msg(role=ASSISTANT, content='', reasoning_content=''.join(reasoning_parts))]
     # Final chunk carries the content.
-    yield [
-        _msg(role=ASSISTANT, content=_BURST_CONTENT, reasoning_content=_full_reasoning())
-    ]
+    yield [_msg(role=ASSISTANT, content=_BURST_CONTENT, reasoning_content=_full_reasoning())]
 
 
 def _mock_single_reasoning_blob(self, instance, template, messages, active_functions):
@@ -175,9 +163,7 @@ def _mock_single_reasoning_blob(self, instance, template, messages, active_funct
     # Then content grows in a couple of small deltas (reasoning frozen).
     for i in range(2):
         time.sleep(0.4)
-        yield [
-            _msg(role=ASSISTANT, content=' answer' * (i + 1), reasoning_content=full_reasoning)
-        ]
+        yield [_msg(role=ASSISTANT, content=' answer' * (i + 1), reasoning_content=full_reasoning)]
 
 
 def _msg(**kwargs):
@@ -189,6 +175,7 @@ def _msg(**kwargs):
 # PRODUCTION session loader (AgentPool.load_session_from_log), the same path the
 # WS 'load_session' command and REST resume route use. Self-contained & deterministic.
 # ---------------------------------------------------------------------------
+
 
 def _build_synthetic_session_log(dest: Path) -> Path:
     """Write a minimal but format-faithful agent session JSONL to ``dest``.
@@ -225,10 +212,8 @@ def _build_synthetic_session_log(dest: Path) -> Path:
     _line(
         'assistant',
         '(prior answer)',
-        reasoning_content=(
-            'Let me think carefully about the pipeline: the LLM emits deltas, the engine '
-            'forwards them, and the broadcast loop pushes them to the UI. ' * 3
-        ),
+        reasoning_content=('Let me think carefully about the pipeline: the LLM emits deltas, the engine '
+                           'forwards them, and the broadcast loop pushes them to the UI. ' * 3),
     )
     # A compression marker so the working-set builder takes the [SYS][U0][markers][tail] branch.
     _line(
@@ -273,6 +258,7 @@ def _resolve_session_log(tmp_path: Path) -> Path:
 # Payload extraction — pull the live (partial) assistant message out of a
 # stream_update event and measure its reasoning/content length.
 # ---------------------------------------------------------------------------
+
 
 def _extract_live_assistant(event):
     """Return the last assistant message dict from an instance payload, or None.
@@ -344,23 +330,21 @@ def _measure_events(events, diag, label):
     content_lens += [_content_len(_extract_live_assistant(ev)) for ev in done_events]
     distinct_reasoning = len(set(reasoning_lens))
 
-    summary = (
-        f"\n[streaming_e2e_reasoning:{label}] measured against CURRENT backend code\n"
-        f"  stream_update events on send_queue : {len(stream_events)}\n"
-        f"  num updates during generation      : {len(arrivals)}\n"
-        f"  max inter-arrival gap              : "
-        f"{('inf (no gaps)' if not gaps else f'{max_gap:.3f}s')}\n"
-        f"  reasoning_content lengths (first/last): "
-        f"{(reasoning_lens[0] if reasoning_lens else 'n/a')}"
-        f" -> {(reasoning_lens[-1] if reasoning_lens else 'n/a')}\n"
-        f"  content lengths (first/last)         : "
-        f"{(content_lens[0] if content_lens else 'n/a')}"
-        f" -> {(content_lens[-1] if content_lens else 'n/a')}\n"
-        f"  distinct reasoning lengths seen      : {distinct_reasoning}\n"
-        f"  engine.run() ticks consumed          : {diag['ticks']} "
-        f"(streaming_ticks={diag['streaming_ticks']})\n"
-        f"  _streaming_responses reasoning lens  : {diag['sr_lens'][:5]}...{diag['sr_lens'][-3:]}\n"
-    )
+    summary = (f"\n[streaming_e2e_reasoning:{label}] measured against CURRENT backend code\n"
+               f"  stream_update events on send_queue : {len(stream_events)}\n"
+               f"  num updates during generation      : {len(arrivals)}\n"
+               f"  max inter-arrival gap              : "
+               f"{('inf (no gaps)' if not gaps else f'{max_gap:.3f}s')}\n"
+               f"  reasoning_content lengths (first/last): "
+               f"{(reasoning_lens[0] if reasoning_lens else 'n/a')}"
+               f" -> {(reasoning_lens[-1] if reasoning_lens else 'n/a')}\n"
+               f"  content lengths (first/last)         : "
+               f"{(content_lens[0] if content_lens else 'n/a')}"
+               f" -> {(content_lens[-1] if content_lens else 'n/a')}\n"
+               f"  distinct reasoning lengths seen      : {distinct_reasoning}\n"
+               f"  engine.run() ticks consumed          : {diag['ticks']} "
+               f"(streaming_ticks={diag['streaming_ticks']})\n"
+               f"  _streaming_responses reasoning lens  : {diag['sr_lens'][:5]}...{diag['sr_lens'][-3:]}\n")
 
     return {
         'label': label,
@@ -378,6 +362,7 @@ def _measure_events(events, diag, label):
 # ---------------------------------------------------------------------------
 # Pipeline driver — mirrors run_agent_unified.py L146-217.
 # ---------------------------------------------------------------------------
+
 
 def _drive_pipeline(pool, engine, instance):
     """Run the real engine.run() in a background thread and capture every
@@ -397,9 +382,9 @@ def _drive_pipeline(pool, engine, instance):
     pool._ws_loop = loop
     pool.stopped = False
 
-    events = []           # list of (arrival_time, event_dict)
+    events = []  # list of (arrival_time, event_dict)
     ev_lock = threading.Lock()
-    gen_error = {}        # {"exc": ...} if the generator raised
+    gen_error = {}  # {"exc": ...} if the generator raised
     done = asyncio.Event()  # set by the consumer when engine.run() is exhausted
     diag = {'ticks': 0, 'streaming_ticks': 0, 'sr_lens': []}
 
@@ -503,6 +488,7 @@ def _drive_pipeline(pool, engine, instance):
 # Harness fixture — real AgentPool + instance, minimal (no live router needed).
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def streaming_harness(tmp_path):
     """Build a real AgentPool, then LOAD a genuine session via the PRODUCTION loader
@@ -510,8 +496,7 @@ def streaming_harness(tmp_path):
     resume). The loaded conversation contains a prior assistant message with non-trivial
     reasoning_content (the regression trigger condition)."""
     import agent_cascade.agent_pool as ap_mod
-    from agent_cascade.agent_instance import AgentInstance
-    from agent_cascade.llm.schema import Message, USER, ASSISTANT
+    from agent_cascade.llm.schema import ASSISTANT
 
     cfg_dir = tmp_path / 'cfg'
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -570,24 +555,17 @@ def streaming_harness(tmp_path):
     assert not status.startswith('Error'), f"load_session_from_log failed: {status}"
 
     instance = pool.get_instance(INSTANCE_NAME)
-    assert instance is not None, (
-        f"No instance '{INSTANCE_NAME}' in pool after load (status={status!r}, "
-        f"log={session_log})"
-    )
+    assert instance is not None, (f"No instance '{INSTANCE_NAME}' in pool after load (status={status!r}, "
+                                  f"log={session_log})")
     # The loaded conversation must be non-trivial and contain the trigger condition:
     # a prior assistant message with non-trivial reasoning_content.
-    assert len(instance.conversation) >= 2, (
-        f"Loaded conversation too small ({len(instance.conversation)} msgs) — "
-        f"loader may have dropped history. status={status!r}"
-    )
+    assert len(instance.conversation) >= 2, (f"Loaded conversation too small ({len(instance.conversation)} msgs) — "
+                                             f"loader may have dropped history. status={status!r}")
     has_prior_reasoning = any(
         getattr(m, 'role', None) == ASSISTANT and len(getattr(m, 'reasoning_content', '') or '') > 20
-        for m in instance.conversation
-    )
-    assert has_prior_reasoning, (
-        f"Loaded conversation has no prior assistant message with reasoning_content — "
-        f"the regression trigger condition is not present. status={status!r}"
-    )
+        for m in instance.conversation)
+    assert has_prior_reasoning, (f"Loaded conversation has no prior assistant message with reasoning_content — "
+                                 f"the regression trigger condition is not present. status={status!r}")
 
     # ── Suppress the real compression path while KEEPING the heavy context ──────
     # The loaded history is large (~26k tokens). In engine.run() that would push usage_pct
@@ -619,11 +597,14 @@ def streaming_harness(tmp_path):
 # The test
 # ---------------------------------------------------------------------------
 
+
 def _async_loop_works():
     """Guard: skip cleanly if the environment can't spin up an event loop."""
     try:
+
         async def _noop():
             return 42
+
         return asyncio.run(_noop()) == 42
     except Exception as e:
         pytest.skip(f"Cannot start an asyncio event loop in this environment: {e}")
@@ -662,10 +643,9 @@ def test_streaming_e2e_reasoning_incremental(streaming_harness):
     assert stream_events, (
         f"NO stream_update events reached the send_queue (got {len(events)} total events: "
         f"{[ev.get('type') if isinstance(ev, dict) else type(ev).__name__ for _t, ev in events][:10]}). "
-        'The broadcast path never fired — check pool._ws_send_queue/_ws_loop wiring.'
-    )
+        'The broadcast path never fired — check pool._ws_send_queue/_ws_loop wiring.')
 
-    arrivals = []            # (arrival_time, reasoning_len, content_len)
+    arrivals = []  # (arrival_time, reasoning_len, content_len)
     for arrival, ev in events:
         if not (isinstance(ev, dict) and ev.get('type') == 'stream_update'):
             continue
@@ -683,50 +663,42 @@ def test_streaming_e2e_reasoning_incremental(streaming_harness):
     content_lens = [c for (_t, _r, c) in arrivals]
 
     # Diagnostic dump (visible with -v / on failure).
-    summary = (
-        f"\n[streaming_e2e_reasoning] measured against CURRENT backend code\n"
-        f"  stream_update events on send_queue : {len(stream_events)}\n"
-        f"  reasoning deltas emitted by mock   : {REASONING_DELTAS} @ {REASONING_GAP}s (~{gen_wall:.2f}s)\n"
-        f"  num updates during generation      : {len(arrivals)}\n"
-        f"  max inter-arrival gap              : {max_gap:.3f}s\n"
-        f"  reasoning_content lengths (first/last): {reasoning_lens[0]} -> {reasoning_lens[-1]}\n"
-        f"  content lengths (first/last)         : {content_lens[0]} -> {content_lens[-1]}\n"
-        f"  distinct reasoning lengths seen      : {len(set(reasoning_lens))}\n"
-        f"  engine.run() ticks consumed          : {diag['ticks']} "
-        f"(streaming_ticks={diag['streaming_ticks']})\n"
-        f"  _streaming_responses reasoning lens  : {diag['sr_lens'][:5]}...{diag['sr_lens'][-3:]}\n"
-    )
+    summary = (f"\n[streaming_e2e_reasoning] measured against CURRENT backend code\n"
+               f"  stream_update events on send_queue : {len(stream_events)}\n"
+               f"  reasoning deltas emitted by mock   : {REASONING_DELTAS} @ {REASONING_GAP}s (~{gen_wall:.2f}s)\n"
+               f"  num updates during generation      : {len(arrivals)}\n"
+               f"  max inter-arrival gap              : {max_gap:.3f}s\n"
+               f"  reasoning_content lengths (first/last): {reasoning_lens[0]} -> {reasoning_lens[-1]}\n"
+               f"  content lengths (first/last)         : {content_lens[0]} -> {content_lens[-1]}\n"
+               f"  distinct reasoning lengths seen      : {len(set(reasoning_lens))}\n"
+               f"  engine.run() ticks consumed          : {diag['ticks']} "
+               f"(streaming_ticks={diag['streaming_ticks']})\n"
+               f"  _streaming_responses reasoning lens  : {diag['sr_lens'][:5]}...{diag['sr_lens'][-3:]}\n")
     print(summary)  # always show measured numbers (visible with -s, on pass and fail)
 
     # ── ASSERTION 1: incremental cadence — many updates, not a single burst ──
     assert len(arrivals) >= MIN_UPDATES_DURING_GENERATION, (
         f"Only {len(arrivals)} stream_updates arrived during generation "
-        f"(need >= {MIN_UPDATES_DURING_GENERATION}). This is the 'burst at turn end' symptom.\n{summary}"
-    )
+        f"(need >= {MIN_UPDATES_DURING_GENERATION}). This is the 'burst at turn end' symptom.\n{summary}")
 
     # ── ASSERTION 2: no long stall while the mock is actively emitting ──
     assert max_gap < MAX_INTER_ARRIVAL_GAP, (
         f"Max inter-broadcast gap was {max_gap:.3f}s (bound {MAX_INTER_ARRIVAL_GAP}s) while the "
-        f"mock LLM was actively emitting — a stall in the backend path.\n{summary}"
-    )
+        f"mock LLM was actively emitting — a stall in the backend path.\n{summary}")
 
     # ── ASSERTION 3: reasoning surfaced incrementally (growing, not final-blob-only) ──
     distinct_reasoning = len(set(reasoning_lens))
     assert distinct_reasoning >= MIN_UPDATES_DURING_GENERATION, (
         f"reasoning_content only took {distinct_reasoning} distinct values across "
         f"{len(arrivals)} updates — partial reasoning was NOT surfaced incrementally "
-        f"(it arrived as a single blob). lengths={reasoning_lens}\n{summary}"
-    )
+        f"(it arrived as a single blob). lengths={reasoning_lens}\n{summary}")
 
     # Reasoning must have GROWN over the generation window (monotonic increase somewhere).
     assert max(reasoning_lens) > min(reasoning_lens), (
-        f"reasoning_content never grew during streaming: {reasoning_lens}\n{summary}"
-    )
+        f"reasoning_content never grew during streaming: {reasoning_lens}\n{summary}")
 
     # ── ASSERTION 4: content phase also streamed (the final answer is present) ──
-    assert max(content_lens) > 0, (
-        f"No content was ever surfaced in a stream_update: {content_lens}\n{summary}"
-    )
+    assert max(content_lens) > 0, (f"No content was ever surfaced in a stream_update: {content_lens}\n{summary}")
 
 
 # ---------------------------------------------------------------------------
@@ -738,6 +710,7 @@ def test_streaming_e2e_reasoning_incremental(streaming_harness):
 # regression is caught. If a scenario shows ZERO intermediate updates (pure end-of-turn
 # burst), the assertion makes that explicit and loud — that is a valid, important finding.
 # ---------------------------------------------------------------------------
+
 
 def _run_scenario(streaming_harness, mock_fn, label):
     """Mock ONLY the LLM generator with ``mock_fn``, drive the real pipeline, and return
@@ -775,27 +748,21 @@ def test_streaming_e2e_all_burst(streaming_harness):
     print(m['summary'])
 
     # OBSERVED: a small fixed number of end-of-turn updates (measured: 2). Lock in the ceiling.
-    assert m['n_updates'] <= 3, (
-        f"ALL-BURST produced {m['n_updates']} updates — far more than the ~2 observed "
-        f"end-of-turn ticks. The backend is now synthesizing intermediate ticks for a "
-        f"single-yield response. Re-baseline.\n{m['summary']}"
-    )
+    assert m['n_updates'] <= 3, (f"ALL-BURST produced {m['n_updates']} updates — far more than the ~2 observed "
+                                 f"end-of-turn ticks. The backend is now synthesizing intermediate ticks for a "
+                                 f"single-yield response. Re-baseline.\n{m['summary']}")
     # The final answer MUST still arrive (no data loss). If n_updates==0, WORST case — loud.
-    assert m['n_updates'] >= 1, (
-        f"ALL-BURST produced ZERO stream_updates — the user gets NOTHING (not even the final "
-        f"answer). This is a severe backend bug.\n{m['summary']}"
-    )
+    assert m['n_updates'] >= 1, (f"ALL-BURST produced ZERO stream_updates — the user gets NOTHING (not even the final "
+                                 f"answer). This is a severe backend bug.\n{m['summary']}")
     # The extreme burst must NOT be surfaced incrementally: every update carries the same
     # full blob → distinct reasoning stays 1. This is the key 'no streaming' signature.
     assert m['distinct_reasoning'] == 1, (
         f"ALL-BURST showed {m['distinct_reasoning']} distinct reasoning values — the backend "
         f"is now splitting a single-yield response into increments it doesn't have. "
-        f"Re-baseline.\n{m['summary']}"
-    )
+        f"Re-baseline.\n{m['summary']}")
     assert max(m['reasoning_lens']) > 0 and max(m['content_lens']) > 0, (
         f"ALL-BURST end-of-turn update lost reasoning/content. "
-        f"reasoning={m['reasoning_lens']} content={m['content_lens']}\n{m['summary']}"
-    )
+        f"reasoning={m['reasoning_lens']} content={m['content_lens']}\n{m['summary']}")
 
 
 def test_streaming_e2e_chunked(streaming_harness):
@@ -808,25 +775,19 @@ def test_streaming_e2e_chunked(streaming_harness):
 
     # Each of the 4 reasoning batches + 1 content batch is a distinct accumulated yield, so
     # the backend should surface several updates with GROWING reasoning (not one blob).
-    assert m['n_updates'] >= 3, (
-        f"CHUNKED produced only {m['n_updates']} updates — batches are being collapsed into "
-        f"a single end-of-turn event.\n{m['summary']}"
-    )
+    assert m['n_updates'] >= 3, (f"CHUNKED produced only {m['n_updates']} updates — batches are being collapsed into "
+                                 f"a single end-of-turn event.\n{m['summary']}")
     # Reasoning must be surfaced incrementally across the batches (more than one distinct value).
     assert m['distinct_reasoning'] >= 3, (
         f"CHUNKED reasoning only took {m['distinct_reasoning']} distinct values — partial "
-        f"reasoning is NOT surfaced between batches. lengths={m['reasoning_lens']}\n{m['summary']}"
-    )
-    assert max(m['reasoning_lens']) > min(m['reasoning_lens']), (
-        f"CHUNKED reasoning never grew across batches: {m['reasoning_lens']}\n{m['summary']}"
-    )
+        f"reasoning is NOT surfaced between batches. lengths={m['reasoning_lens']}\n{m['summary']}")
+    assert max(m['reasoning_lens']) > min(
+        m['reasoning_lens']), (f"CHUNKED reasoning never grew across batches: {m['reasoning_lens']}\n{m['summary']}")
     # Content arrives in the final batch. Under the 100ms broadcast throttle the last
     # content chunk is throttled away as a stream_update; production delivers it via the
     # trailing type='done' frame (run_agent_unified.py L256-272), which _drive_pipeline now
     # emits and _measure_events folds into content_lens. So this reads from either source.
-    assert max(m['content_lens']) > 0, (
-        f"CHUNKED content was never surfaced: {m['content_lens']}\n{m['summary']}"
-    )
+    assert max(m['content_lens']) > 0, (f"CHUNKED content was never surfaced: {m['content_lens']}\n{m['summary']}")
 
 
 def test_streaming_e2e_single_reasoning_blob(streaming_harness):
@@ -843,19 +804,14 @@ def test_streaming_e2e_single_reasoning_blob(streaming_harness):
     assert m['distinct_reasoning'] <= 1, (
         f"SINGLE-REASONING-BLOB showed {m['distinct_reasoning']} distinct reasoning values — "
         f"the backend is splitting a single-yield blob into increments it doesn't have. "
-        f"Re-baseline.\n{m['summary']}"
-    )
+        f"Re-baseline.\n{m['summary']}")
     # The final answer MUST still arrive (reasoning blob + content present at turn end).
-    assert m['n_updates'] >= 1, (
-        f"SINGLE-REASONING-BLOB produced ZERO stream_updates — user gets nothing. Severe bug."
-        f"\n{m['summary']}"
-    )
-    assert max(m['reasoning_lens']) > 0, (
-        f"SINGLE-REASONING-BLOB reasoning was lost: {m['reasoning_lens']}\n{m['summary']}"
-    )
+    assert m['n_updates'] >= 1, (f"SINGLE-REASONING-BLOB produced ZERO stream_updates — user gets nothing. Severe bug."
+                                 f"\n{m['summary']}")
+    assert max(
+        m['reasoning_lens']) > 0, (f"SINGLE-REASONING-BLOB reasoning was lost: {m['reasoning_lens']}\n{m['summary']}")
     assert max(m['content_lens']) > 0, (
-        f"SINGLE-REASONING-BLOB content was never surfaced: {m['content_lens']}\n{m['summary']}"
-    )
+        f"SINGLE-REASONING-BLOB content was never surfaced: {m['content_lens']}\n{m['summary']}")
 
 
 if __name__ == '__main__':

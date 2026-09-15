@@ -14,14 +14,14 @@ All tests are self-contained (no LLM or API server required).
 
 import os
 import tempfile
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from agent_cascade.agent_instance import PoolSettings
 from agent_cascade.api_router import APIRouter
 from agent_cascade.api_router_pkg.endpoints import APIEndpoint
-from agent_cascade.agent_instance import PoolSettings
-from agent_cascade.llm.schema import USER, Message, ContentItem
-
+from agent_cascade.llm.schema import USER, ContentItem, Message
 
 # ── Shared router helper (isolated config dir, no persistence side effects) ─────
 # NOTE: APIRouter.__init__ prefers the AGENT_CASCADE_TEST_CONFIG_DIR env var over the
@@ -30,6 +30,7 @@ from agent_cascade.llm.schema import USER, Message, ContentItem
 # add_endpoint()/_save() → _load(). We therefore override the env var with a UNIQUE dir per
 # router (same pattern as tests/test_fallback_compression.py) and restore it afterwards.
 
+
 def _make_router(pool):
     """Build a lightweight APIRouter with its own isolated config dir + a mocked pool."""
     d = tempfile.mkdtemp(prefix='imgcap_mode_')
@@ -37,7 +38,10 @@ def _make_router(pool):
     os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = d
     try:
         router = APIRouter(
-            default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+            default_llm_cfg={
+                'model': 'default-model',
+                'api_base': 'http://localhost:1234/v1'
+            },
             config_dir=d,
         )
     finally:
@@ -81,6 +85,7 @@ def _vision_endpoint(router, api_base='http://v:8080/v1', model='vision-model'):
 
 # ── 1. Mode gating in caption_images() ────────────────────────────────────────
 
+
 class TestCaptionModeGating:
     """Exercise the auto/always/off gate at the top of caption_images()."""
 
@@ -96,7 +101,7 @@ class TestCaptionModeGating:
             # chat() is a generator; return one final chunk carrying a caption string.
             fake_model.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
             mock_gcm.return_value = fake_model
-            result = router.caption_images(messages, agent_type='generalist', instance_name='inst1')
+            router.caption_images(messages, agent_type='generalist', instance_name='inst1')
 
         assert mock_gcm.called, 'always mode must fire a caption call'
         # The image item should now carry the generated caption.
@@ -111,7 +116,7 @@ class TestCaptionModeGating:
 
         messages = [_msg_with_image()]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
-            result = router.caption_images(messages, agent_type='generalist', instance_name='inst1')
+            router.caption_images(messages, agent_type='generalist', instance_name='inst1')
 
         assert not mock_gcm.called, 'auto mode must NOT caption when the active endpoint has vision'
         # Messages unchanged — no caption was added.
@@ -125,7 +130,8 @@ class TestCaptionModeGating:
         # endpoint exists in the registry for the caption call to use.
         pool = _make_pool(mode='auto', instance=_instance_with_endpoint('http://t:8080/v1', 'text-model'))
         router = _make_router(pool)
-        router.add_endpoint(APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model', vision_enabled=False))
+        router.add_endpoint(
+            APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model', vision_enabled=False))
         _vision_endpoint(router, api_base='http://v:8080/v1', model='vision-model')
 
         # msg A: image with a placeholder '[Image]' caption (should be re-captioned).
@@ -156,7 +162,7 @@ class TestCaptionModeGating:
         # No vision endpoint even — but the gate must short-circuit before that matters.
         messages = [_msg_with_image()]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
-            result = router.caption_images(messages, agent_type='generalist', instance_name='inst1')
+            router.caption_images(messages, agent_type='generalist', instance_name='inst1')
 
         assert not mock_gcm.called, 'off mode must never fire a caption call'
         img_item = messages[0].content[0]
@@ -207,8 +213,11 @@ class TestIsActiveEndpointVision:
         inst = _instance_with_endpoint('http://v:8080/v1', 'vision-model')
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
-        ep = APIEndpoint(name='vision', api_base='http://v:8080/v1', model='vision-model',
-                         vision_enabled=True, enabled=False)
+        ep = APIEndpoint(name='vision',
+                         api_base='http://v:8080/v1',
+                         model='vision-model',
+                         vision_enabled=True,
+                         enabled=False)
         with router._lock:
             router.endpoints[ep.id] = ep
         assert router._is_active_endpoint_vision('inst1') is False
@@ -224,12 +233,13 @@ class TestIsActiveEndpointVision:
         inst = _instance_with_endpoint('http://t:8080/v1', 'text-model')
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
-        router.add_endpoint(APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model',
-                                        vision_enabled=False))
+        router.add_endpoint(
+            APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model', vision_enabled=False))
         assert router._is_active_endpoint_vision('inst1') is False
 
 
 # ── 2. Token estimation for structured image items ────────────────────────────
+
 
 class TestImageTokenEstimation:
     """get_message_stats() must count every structured image content item at
@@ -258,15 +268,15 @@ class TestImageTokenEstimation:
         '[Image]' marker per image). The flat IMAGE_TOKEN_ESTIMATE is added on top by
         get_message_stats(); this isolates the text portion so we can assert the exact real
         total without hardcoding tokenizer output."""
-        from agent_cascade.utils.utils import extract_text_from_message
         from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+        from agent_cascade.utils.utils import extract_text_from_message
         return qwen_count(extract_text_from_message(msg, add_upload_info=True))
 
     def test_file_path_image_counted(self):
         """A file-path image item must be counted at IMAGE_TOKEN_ESTIMATE (plus the rendered
         placeholder text tokens) — i.e. NOT 0 as before the fix."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
+        from agent_cascade.utils.utils import get_message_stats
 
         img = 'media/a.png'
         text_only = Message(role=USER, content='hello world')
@@ -282,8 +292,8 @@ class TestImageTokenEstimation:
     def test_base64_image_item_counted(self):
         """A base64 data-URI structured item is counted via the same structured path —
         IMAGE_TOKEN_ESTIMATE + placeholder text tokens, NOT 0."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
+        from agent_cascade.utils.utils import get_message_stats
 
         b64 = self.B64_IMAGE
         text_only = Message(role=USER, content='hello world')
@@ -301,17 +311,18 @@ class TestImageTokenEstimation:
         IMAGE_TOKEN_ESTIMATE. The rendered placeholder text is ONE shared '(Uploaded ...)'
         info line plus one '[Image]' marker per image. We assert the exact real total so a
         regression (e.g. dropping to 0 for structured items, or double counting) fails loudly."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
+        from agent_cascade.utils.utils import get_message_stats
 
         img = 'media/a.png'
         b64 = self.B64_IMAGE
         text_only = Message(role=USER, content='hello world')
-        mixed = Message(role=USER, content=[
-            ContentItem(text='hello world'),
-            ContentItem(image=img),
-            ContentItem(image=b64),
-        ])
+        mixed = Message(role=USER,
+                        content=[
+                            ContentItem(text='hello world'),
+                            ContentItem(image=img),
+                            ContentItem(image=b64),
+                        ])
 
         base = get_message_stats(text_only)['tokens']
         total = get_message_stats(mixed)['tokens']
@@ -327,13 +338,15 @@ class TestImageTokenEstimation:
         cache entry — the first call's result must not be returned for the second. The
         multimodal cache key folds in the image-item count (see utils.get_message_stats), so
         the second message gets its own entry instead of reusing the first's."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
+        from agent_cascade.utils.utils import get_message_stats
 
         one_img = Message(role=USER, content=[ContentItem(text='same text'), ContentItem(image='media/a.png')])
-        two_img = Message(role=USER, content=[ContentItem(text='same text'),
-                                              ContentItem(image='media/a.png'),
-                                              ContentItem(image='media/b.png')])
+        two_img = Message(
+            role=USER,
+            content=[ContentItem(text='same text'),
+                     ContentItem(image='media/a.png'),
+                     ContentItem(image='media/b.png')])
 
         t_one = get_message_stats(one_img)['tokens']
         t_two = get_message_stats(two_img)['tokens']
@@ -351,6 +364,7 @@ class TestImageTokenEstimation:
 
 
 # ── 3. Settings plumbing ───────────────────────────────────────────────────────
+
 
 class TestSettingsPlumbing:
     """PoolSettings round-trip and config handler validation for image_caption_mode."""

@@ -1,7 +1,7 @@
 """Streaming timeout utilities for AgentCascade."""
 
 import time
-from typing import Any, Iterator, TypeVar
+from typing import Iterator, TypeVar
 
 T = TypeVar('T')
 
@@ -39,18 +39,14 @@ def watch_stream(
         if not first_item and last_item_time is not None:
             elapsed_silence = now - last_item_time
             if elapsed_silence > max_silence_seconds:
-                raise RuntimeError(
-                    f"{prefix}stream_stalled: no data for {elapsed_silence:.1f}s "
-                    f"(silence limit={max_silence_seconds:.0f}s)"
-                )
+                raise RuntimeError(f"{prefix}stream_stalled: no data for {elapsed_silence:.1f}s "
+                                   f"(silence limit={max_silence_seconds:.0f}s)")
 
         # Total timeout applies from stream start
         elapsed_total = now - stream_start
         if elapsed_total > max_total_seconds:
-            raise RuntimeError(
-                f"{prefix}stream_stalled: exceeded total limit of {elapsed_total:.1f}s "
-                f"(max={max_total_seconds:.0f}s)"
-            )
+            raise RuntimeError(f"{prefix}stream_stalled: exceeded total limit of {elapsed_total:.1f}s "
+                               f"(max={max_total_seconds:.0f}s)")
 
         first_item = False
         last_item_time = now

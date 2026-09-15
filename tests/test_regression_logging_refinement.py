@@ -8,10 +8,9 @@ Tests validate:
 """
 
 import json
-import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -41,7 +40,7 @@ class TestReadLogsAutoResolution:
         """A bare filename like 'orchestrator_Maine_20260814.jsonl' resolves against log_dir."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            log_file = self._write_test_log(
+            self._write_test_log(  # noqa: F841  (side effect: writes the test log file)
                 tmp_path,
                 'test_agent.jsonl',
                 [{'type': 'user', 'content': 'hello'}, {'type': 'assistant', 'content': 'hi'}],
@@ -229,7 +228,7 @@ class TestSendMessageRefactoring:
         from agent_cascade.tools.custom.send_message import SendMessage, logger
 
         # Should not raise any import or instantiation errors
-        tool = SendMessage()
+        SendMessage()  # noqa: F841  (side effect: verifies instantiation does not raise)
 
         # Verify logger is a logging.Logger instance (module-level)
         import logging
@@ -253,15 +252,8 @@ class TestFileOpsRefactoring:
 
     def test_file_ops_import_no_errors(self):
         """All file ops classes import without errors."""
-        from agent_cascade.tools.custom.file_ops import (
-            ReadFile,
-            WriteFile,
-            EditFile,
-            DeleteFile,
-            CopyFile,
-            ReIndent,
-            ListDir,
-        )
+        from agent_cascade.tools.custom.file_ops import (CopyFile, DeleteFile, EditFile, ListDir, ReadFile, ReIndent,
+                                                         WriteFile)
 
         # Instantiate each to verify no logger-related issues
         for cls in [ReadFile, WriteFile, EditFile, DeleteFile, CopyFile, ReIndent, ListDir]:
@@ -359,9 +351,9 @@ class TestForgetLastToolRefactoring:
 
     def test_forget_last_tool_import_no_errors(self):
         """ForgetLast imports and instantiates without errors."""
-        from agent_cascade.tools.custom.forget_last_tool import ForgetLast, logger
-
         import logging
+
+        from agent_cascade.tools.custom.forget_last_tool import ForgetLast, logger
         assert isinstance(logger, logging.Logger)
 
         tool = ForgetLast()
@@ -644,8 +636,9 @@ class TestReadLogsFormatParameter:
             )
 
             pool = self._create_mock_agent_pool(str(tmp_path))
-            from agent_cascade.tools.custom.read_logs import ReadLogs
             import jsonschema
+
+            from agent_cascade.tools.custom.read_logs import ReadLogs
 
             tool = ReadLogs(agent_pool=pool)
             # Invalid enum value is caught by jsonschema validation before custom error handling

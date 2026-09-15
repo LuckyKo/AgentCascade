@@ -38,8 +38,6 @@ def should_skip(api_base: Optional[str]) -> bool:
     if not api_base:
         return False
     try:
-        from agent_cascade.api_router_pkg.normalization import normalize_api_base
-        key = normalize_api_base(api_base)
         with _lock:
             refs = list(_routers)
         for ref in refs:

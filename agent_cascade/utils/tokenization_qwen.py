@@ -1,17 +1,16 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Tokenization classes for QWen."""
 
 import base64
@@ -227,7 +226,7 @@ class QWenTokenizer:
             ellipsis_tokens = self.tokenize('...')
             ellipsis_len = len(ellipsis_tokens)
             available = max_token - ellipsis_len
-            if available <= 0: # Degenerate case: not enough space even for "..."
+            if available <= 0:  # Degenerate case: not enough space even for "..."
                 return self.convert_tokens_to_string(token_list[:max_token])
 
             left_len = available // 2

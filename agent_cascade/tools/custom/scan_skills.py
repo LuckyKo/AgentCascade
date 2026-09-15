@@ -18,17 +18,17 @@ class ScanSkills(BaseTool):
     """Read-only tool to query available skills and their relevance scores."""
 
     name = 'scan_skills'
-    description = (
-        'Scan registered skills and return matching skills with relevance scores. '
-        'Use this to discover which skills are available before calling call_agent with load_skill. '
-        'Returns skill names, descriptions, and match scores for the given query.'
-    )
+    description = ('Scan registered skills and return matching skills with relevance scores. '
+                   'Use this to discover which skills are available before calling call_agent with load_skill. '
+                   'Returns skill names, descriptions, and match scores for the given query.')
     parameters = {
         'type': 'object',
         'properties': {
             'query': {
-                'type': 'string',
-                'description': 'Search query or task description to match against available skills. Leave empty to list all registered skills.',
+                'type':
+                    'string',
+                'description':
+                    'Search query or task description to match against available skills. Leave empty to list all registered skills.',
             },
             'all': {
                 'type': 'boolean',
@@ -81,17 +81,17 @@ class ScanSkills(BaseTool):
             for skill in all_skills:
                 source = skill.get('source', 'system')
                 version = skill.get('version', '1.0.0')
-                lines.append(f"- **{skill['name']}** [{source}] v{version}: {skill.get('description', 'No description')}")
+                lines.append(
+                    f"- **{skill['name']}** [{source}] v{version}: {skill.get('description', 'No description')}")
             return '\n'.join(lines)
 
         # Use public API to score skills against the query
         matches = skill_manager.match_skills(query)
         if not matches:
-            return (
-                f"No skills matched the query '{query}'.\n\n"
-                'Available skills:\n' +
-                '\n'.join(f"- **{s['name']}** [{s.get('source', 'system')}]: {s.get('description', '')}" for s in all_skills)
-            )
+            return (f"No skills matched the query '{query}'.\n\n"
+                    'Available skills:\n' +
+                    '\n'.join(f"- **{s['name']}** [{s.get('source', 'system')}]: {s.get('description', '')}"
+                              for s in all_skills))
 
         # Build response with scores
         lines = [f"## Skills Matching Query: '{query}'"]

@@ -10,14 +10,13 @@ See DESIGN_REWRITE.md §4.1 for design rationale.
 import copy
 import datetime
 import time
-from typing import Tuple, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.constants import NON_LLM_KEYS
-from agent_cascade.settings import DEFAULT_MAX_TURNS
-from agent_cascade.llm.schema import Message, SYSTEM, USER
+from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.log import logger
-
+from agent_cascade.settings import DEFAULT_MAX_TURNS
 
 if TYPE_CHECKING:
     from agent_cascade.agent_pool import AgentPool
@@ -95,15 +94,13 @@ class AgentLifecycleManager:
         """
         self._engine = engine
 
-    def find_or_create_instance(
-        self,
-        agent_class: str,
-        instance_name: str,
-        caller: str,
-        nest_depth: int,
-        force_fresh: bool = False,
-        log_file: Optional[str] = None
-    ) -> Tuple[AgentInstance, bool, bool]:
+    def find_or_create_instance(self,
+                                agent_class: str,
+                                instance_name: str,
+                                caller: str,
+                                nest_depth: int,
+                                force_fresh: bool = False,
+                                log_file: Optional[str] = None) -> Tuple[AgentInstance, bool, bool]:
         """Find existing inactive instance or create new one.
 
         Checks for an existing inactive (IDLE/TERMINATED) instance that can be reused.
@@ -158,10 +155,8 @@ class AgentLifecycleManager:
                 if old_parent is not None:
                     self.pool._update_child_relationship(old_parent, instance_name, add=False)
 
-                logger.debug(
-                    f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
-                    f"Conversation history will be preserved and extended."
-                )
+                logger.debug(f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
+                             f"Conversation history will be preserved and extended.")
             else:
                 # Existing instance is still active
                 # (RUNNING/SLEEPING/COMPLETING), fall through to create new one
@@ -184,18 +179,14 @@ class AgentLifecycleManager:
 
             if existing is not None:
                 # Warn about overwriting an active instance
-                logger.warning(
-                    f"[NEW INSTANCE] '{instance_name}' ({agent_class}) replacing active instance. "
-                    f"Previous instance conversation will be replaced."
-                )
+                logger.warning(f"[NEW INSTANCE] '{instance_name}' ({agent_class}) replacing active instance. "
+                               f"Previous instance conversation will be replaced.")
 
         # FIX
         if not is_reuse:
             self.pool.instances[instance_name] = inst
-            logger.debug(
-                '[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for %s',
-                instance_name
-            )
+            logger.debug('[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for %s',
+                         instance_name)
 
             # Per-instance child tracking + pool.children sync via helper (thread-safe, deduped)
             if caller is not None and caller != instance_name:
@@ -213,7 +204,10 @@ class AgentLifecycleManager:
         session_was_loaded = False
         if log_file:
             # Don't dismiss all instances — we're just loading history into an existing instance
-            status = self.pool.load_session_from_log(log_file, target_instance=instance_name, clear_sub_agents_before_load=False, caller_name=caller)
+            status = self.pool.load_session_from_log(log_file,
+                                                     target_instance=instance_name,
+                                                     clear_sub_agents_before_load=False,
+                                                     caller_name=caller)
             if status.startswith('Error'):
                 logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
             else:
@@ -225,11 +219,7 @@ class AgentLifecycleManager:
 
         return inst, is_reuse, session_was_loaded
 
-    def build_system_message(
-        self,
-        agent_class: str,
-        instance_name: str
-    ) -> Message:
+    def build_system_message(self, agent_class: str, instance_name: str) -> Message:
         """Build system message for new agent.
 
         Retrieves template and constructs system message with injected instance name.
@@ -250,8 +240,7 @@ class AgentLifecycleManager:
             logger.error('NO TEMPLATE for %s/%s', agent_class, instance_name)
             raise ValueError(f"No template for agent class {agent_class}")
 
-        sys_content = getattr(template, 'base_system_message',
-                              getattr(template, 'system_message', ''))
+        sys_content = getattr(template, 'base_system_message', getattr(template, 'system_message', ''))
         lines = sys_content.strip().split('\n') if sys_content else []
 
         # Replace identity line
@@ -260,11 +249,7 @@ class AgentLifecycleManager:
 
         return Message(role=SYSTEM, content='\n'.join(lines))
 
-    def build_task_message(
-        self,
-        args: dict,
-        caller: str
-    ) -> Message:
+    def build_task_message(self, args: dict, caller: str) -> Message:
         """Build a plain-text task message from the explicit task and context arguments.
 
         No images are automatically forwarded from the parent conversation. If the
@@ -307,15 +292,14 @@ class AgentLifecycleManager:
         return Message(role=USER, content=task_text)
 
     def initialize_conversation(  # FIX #3 (reviewer): Renamed from initialize_instance_conversation
-        self,
-        instance: AgentInstance,
-        sys_msg: Message,
-        task_msg: Message,
-        is_reuse: bool,
-        instance_name: str,
-        agent_class: str,
-        from_external_load: bool = False
-    ) -> list:
+            self,
+            instance: AgentInstance,
+            sys_msg: Message,
+            task_msg: Message,
+            is_reuse: bool,
+            instance_name: str,
+            agent_class: str,
+            from_external_load: bool = False) -> list:
         """Initialize or extend instance conversation.
 
         For reused instances: resets stale state, updates system message in-place,
@@ -351,10 +335,9 @@ class AgentLifecycleManager:
         #   The on-disk value retains the original spawner (historically accurate).
         try:
             expected_supervisor = instance.parent_instance or 'User'
-            log_inst = self.pool.get_logger(
-                instance_name, agent_class,
-                base_metadata={'supervisor': expected_supervisor}
-            )
+            log_inst = self.pool.get_logger(instance_name,
+                                            agent_class,
+                                            base_metadata={'supervisor': expected_supervisor})
             if log_inst.data['metadata'].get('supervisor') != expected_supervisor:
                 log_inst.update_supervisor(expected_supervisor)
         except (AttributeError, KeyError, OSError) as e:
@@ -383,10 +366,8 @@ class AgentLifecycleManager:
                 # Shared capture-nullify-release-log helper: atomic under _state_lock,
                 # drop-reuse line only when a live permit was actually released.
                 if getattr(instance, '_slot_release', None) is not None:
-                    logger.warning(
-                        f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
-                        f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing."
-                    )
+                    logger.warning(f"[SLOT_REUSE_RELEASE] '{instance.instance_name}' held a slot permit "
+                                   f"on reuse (unexpected — should be IDLE/TERMINATED). Releasing before clearing.")
                 from agent_cascade.slot_queue import release_slot_permit
                 _reuse_pool = None
                 try:
@@ -396,8 +377,11 @@ class AgentLifecycleManager:
                         _reuse_pool = _sched._pools.get(_held_key) if _held_key else None
                 except Exception:
                     pass
-                release_slot_permit(instance, instance.instance_name, action='drop-reuse',
-                                    context='on reuse', pool=_reuse_pool)
+                release_slot_permit(instance,
+                                    instance.instance_name,
+                                    action='drop-reuse',
+                                    context='on reuse',
+                                    pool=_reuse_pool)
 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always
@@ -430,7 +414,6 @@ class AgentLifecycleManager:
                 else:
                     # Fallback: prepend system message if conversation is empty
                     instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync
-
 
                 # Get the preserved conversation (will be extended with task
                 # below)
@@ -515,23 +498,23 @@ class AgentLifecycleManager:
         call_agent_args: dict = None,
     ) -> None:
         """Propagate settings from caller to child instance.
-        
+
         Propagates max_turns and disabled_tools from the caller agent's configuration
         to the child instance. Uses single lock scope to prevent race conditions where
         another thread reads partial state.
-        
+
         Note: max_input_tokens is NOT propagated here. It is resolved dynamically
         at call time via _resolve_max_tokens(), which consults the API Router for
         live endpoint values (enabling failover). Baking it into the override would
         freeze the value at spawn time and block router updates.
-        
+
         Args:
             instance: Child instance to configure
             caller: Parent instance name
             agent_class: Child's agent class
             call_agent_args: Optional args dict from the call_agent tool invocation.
                            If it contains 'max_turns', that value is used (capped by caller's limit).
-        
+
         Note:
             If target template has no LLM config, max_turns is still set but
             disabled_tools propagation is skipped.
@@ -552,7 +535,8 @@ class AgentLifecycleManager:
 
             # Use caller instance's override first (has user's UI settings),
             # fall back to template's generate_cfg
-            llm_cfg = getattr(caller_inst, '_generate_cfg_override', None) or getattr(caller_template.llm, 'generate_cfg', {})
+            llm_cfg = getattr(caller_inst, '_generate_cfg_override', None) or getattr(
+                caller_template.llm, 'generate_cfg', {})
 
             # Propagate max_turns from caller's instance directly.
             # Do NOT read from llm_cfg — it was stripped out of
@@ -565,7 +549,8 @@ class AgentLifecycleManager:
             # overrides via call_agent args.
             # Otherwise, all agents use the caller's max_turns limit regardless
             # of call_agent args.
-            enable_agent_budgeting = getattr(self.pool.settings, 'enable_agent_budgeting', True) if hasattr(self.pool, 'settings') else True
+            enable_agent_budgeting = getattr(self.pool.settings, 'enable_agent_budgeting', True) if hasattr(
+                self.pool, 'settings') else True
 
             # Use provided max_turns from call_agent args if specified,
             # otherwise inherit from caller.
@@ -574,7 +559,8 @@ class AgentLifecycleManager:
                 requested_max = call_agent_args['max_turns']
                 # Validate: must be a positive integer
                 if not isinstance(requested_max, int) or requested_max < 1:
-                    logger.debug(f"Invalid max_turns={requested_max} for {instance.instance_name}, using caller's limit")
+                    logger.debug(
+                        f"Invalid max_turns={requested_max} for {instance.instance_name}, using caller's limit")
                     instance.max_turns = caller_max_turns
                 else:
                     instance.max_turns = min(requested_max, caller_max_turns)
@@ -585,10 +571,8 @@ class AgentLifecycleManager:
             if not target_template or not getattr(target_template, 'llm', None):
                 # Target template has no LLM — skip settings propagation but
                 # continue execution
-                logger.warning(
-                    f"Target agent instance ({agent_class}) template has no LLM config — "
-                    f"skipping settings propagation (disabled_tools only)"
-                )
+                logger.warning(f"Target agent instance ({agent_class}) template has no LLM config — "
+                               f"skipping settings propagation (disabled_tools only)")
                 return
 
             # FIX: Do NOT bake max_input_tokens into _generate_cfg_override here.
@@ -619,11 +603,8 @@ class AgentLifecycleManager:
 
                 # Centralized disabled_tools resolution — see
                 # agent_cascade.utils.disabled_tools
-                from agent_cascade.utils.disabled_tools import (
-                    resolve_disabled_tools_for_agent,
-                    normalize_disabled_tools,
-                    merge_disabled_tools,
-                )
+                from agent_cascade.utils.disabled_tools import (merge_disabled_tools, normalize_disabled_tools,
+                                                                resolve_disabled_tools_for_agent)
 
                 # Resolve caller's full disabled set (includes class defaults
                 # via resolver)
@@ -658,9 +639,8 @@ class AgentLifecycleManager:
                 # override.
                 # Merge with any existing disabled_tools already on the child
                 # config.
-                cfg = (copy.deepcopy(instance._generate_cfg_override)
-                       if instance._generate_cfg_override
-                       else (target_template.llm.generate_cfg or {}).copy())
+                cfg = (copy.deepcopy(instance._generate_cfg_override) if instance._generate_cfg_override else
+                       (target_template.llm.generate_cfg or {}).copy())
 
                 existing_disabled = normalize_disabled_tools(cfg.get('disabled_tools'))
                 merged = merge_disabled_tools(existing_disabled, caller_disabled)

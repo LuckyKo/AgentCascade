@@ -15,8 +15,8 @@ import json
 import logging
 import threading
 import time
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional
 
 _logger = logging.getLogger('agent_cascade.telemetry')
@@ -30,11 +30,7 @@ _telemetry_lock = threading.RLock()
 MAX_ERROR_MESSAGE_LENGTH = 200
 
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
-
-from agent_cascade.settings import (
-    DEFAULT_RECENT_EVENT_COUNT,
-    MAX_EVENTS_IN_MEMORY,
-)
+from agent_cascade.settings import DEFAULT_RECENT_EVENT_COUNT, MAX_EVENTS_IN_MEMORY
 
 
 class TelemetryCollector:
@@ -411,7 +407,7 @@ class TelemetryCollector:
         details: Optional[Dict] = None,
     ):
         """Record actual token usage from LLM API response.
-        
+
         Called by the streaming layer when usage data arrives on the wire via _on_usage callback.
         Updates the active LLM call's input_tokens_est with ground-truth prompt_tokens,
         and stores completion_tokens for use in record_llm_call_end.
@@ -421,7 +417,7 @@ class TelemetryCollector:
             if not call:
                 _logger.debug('record_token_usage called without active LLM call for %s', instance_name)
                 return
-            
+
             # Update input_tokens_est with ground-truth value (was char-count estimate at call start)
             if prompt_tokens > 0:
                 call['input_tokens_est'] = prompt_tokens
@@ -470,18 +466,18 @@ class TelemetryCollector:
                     c = getattr(m, 'content', '') or ''
                     rc = getattr(m, 'reasoning_content', '') or ''
                     fc = getattr(m, 'function_call', None)
-                    
+
                     # Normalize content fields to strings
                     if isinstance(c, list):
                         c = ' '.join(str(x) for x in c if isinstance(x, str))
                     elif c:
                         c = str(c)
-                    
+
                     if isinstance(rc, list):
                         rc = ' '.join(str(x) for x in rc if isinstance(x, str))
                     elif rc:
                         rc = str(rc)
-                    
+
                     # Handle function_call (dict or object with name/arguments)
                     fc_str = ''
                     if fc:
@@ -489,9 +485,9 @@ class TelemetryCollector:
                             fc_str = str(fc.get('name', '')) + str(fc.get('arguments', ''))
                         elif hasattr(fc, 'name'):
                             fc_str = str(getattr(fc, 'name', '')) + str(getattr(fc, 'arguments', ''))
-                    
+
                     total_chars += len(c) + len(rc) + len(fc_str)
-                
+
                 actual_output = max(total_chars // 4, 1) if total_chars > 0 else 0
 
             end_time = time.perf_counter()

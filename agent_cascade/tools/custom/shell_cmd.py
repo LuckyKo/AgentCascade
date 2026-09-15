@@ -2,19 +2,15 @@ import logging
 import os
 import re
 import time
+
 from agent_cascade.async_shell import _elapsed_for_task
 from agent_cascade.operation_manager.shell import ShellMixin
-from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, AUTO_ASYNC_TIMEOUT_THRESHOLD,
+                                    DEFAULT_AUTO_ASYNC_HEARTBEAT, WAIT_CMD_DEFAULT_TIMEOUT, WAIT_CMD_MAX_TIMEOUT,
+                                    WAIT_CMD_POLL_INTERVAL)
 from agent_cascade.tool_utils import truncate_with_spillover
-from agent_cascade.settings import (
-    AUTO_ASYNC_TIMEOUT_THRESHOLD,
-    DEFAULT_AUTO_ASYNC_HEARTBEAT,
-    ASYNC_SHELL_DEFAULT_TIMEOUT,
-    WAIT_CMD_MAX_TIMEOUT,
-    WAIT_CMD_DEFAULT_TIMEOUT,
-    WAIT_CMD_POLL_INTERVAL,
-)
+from agent_cascade.tools.base import BaseTool, register_tool
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +74,8 @@ def _polling_wait(task, tool_id: int, agent_name: str, timeout: float, pool) -> 
         remaining = timeout - elapsed
         if remaining <= 0:
             task_elapsed = _elapsed_for_task(task)
-            return (
-                f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
-                f"(timeout after {timeout:.0f}s, elapsed {task_elapsed:.0f}s)."
-            )
+            return (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
+                    f"(timeout after {timeout:.0f}s, elapsed {task_elapsed:.0f}s).")
 
         # Sleep briefly before next poll (use smaller interval near timeout)
         sleep_time = min(poll_interval, remaining)
@@ -94,10 +88,8 @@ def _polling_wait(task, tool_id: int, agent_name: str, timeout: float, pool) -> 
 
         if is_completed:
             task_elapsed = _elapsed_for_task(task)
-            return (
-                f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed "
-                f"(exit code {rc}, elapsed {task_elapsed:.0f}s)."
-            )
+            return (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed "
+                    f"(exit code {rc}, elapsed {task_elapsed:.0f}s).")
 
         with task._lock:
             # Collect new output since last check
@@ -182,10 +174,12 @@ class ShellCmd(BaseTool):
         try:
             llm_cfg = getattr(agent_pool, 'llm_cfg', {}) if agent_pool else {}
             char_limit = llm_cfg.get('shell_char_limit', 2048) if isinstance(llm_cfg, dict) else 2048
-            base_dir = agent_pool.operation_manager.base_dir if agent_pool and hasattr(agent_pool, 'operation_manager') else None
+            base_dir = agent_pool.operation_manager.base_dir if agent_pool and hasattr(agent_pool,
+                                                                                       'operation_manager') else None
             if base_dir and char_limit > 0:
                 return truncate_with_spillover(
-                    text, char_limit,
+                    text,
+                    char_limit,
                     instance_name=agent_name,
                     tool_name='shell_cmd_async',
                     base_dir=base_dir,
@@ -196,8 +190,9 @@ class ShellCmd(BaseTool):
         return text
 
     def call(self, params: str, **kwargs) -> str:
-        from agent_cascade.utils.utils import json_loads
         import json
+
+        from agent_cascade.utils.utils import json_loads
 
         try:
             if isinstance(params, str):
@@ -218,7 +213,7 @@ class ShellCmd(BaseTool):
         #   auto/None/absent → async iff timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD
         #   sync             → force blocking, never auto-async (even for long timeouts)
         #   async            → force background regardless of timeout
-        mode = params.get('execution_mode') or 'auto'   # None/absent → 'auto'
+        mode = params.get('execution_mode') or 'auto'  # None/absent → 'auto'
         is_auto = (mode == 'auto')
         run_async = (mode == 'async') or (is_auto and timeout is not None and timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD)
         heartbeat_interval = float(params.get('heartbeat_interval', -1))
@@ -306,18 +301,17 @@ class ShellCmd(BaseTool):
         # Command length check uses the standard char_limit; caller should pass effective limit.
         # This method focuses on timeout validation only — command length is checked inline
         # where char_limit is available (it depends on agent_pool config).
-        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or timeout > MAX_SHELL_TIMEOUT):
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or
+                                    timeout > MAX_SHELL_TIMEOUT):
             return f"ERROR: Invalid timeout value: {timeout}. Must be a positive integer between 1 and {MAX_SHELL_TIMEOUT}."
         return None
 
     # ────────────────────────────────────────────────────────────────
-    _HEAD_TAIL_DENIAL = (
-        "DENIED: shell_cmd auto-rejects '| head' / '| tail' pipe stages — they are not "
-        'available on Windows and are redundant: AgentCascade already truncates shell '
-        "output with spillover. Remove the '| head ...' / '| tail ...' segment and run "
-        'the base command; large output is truncated automatically (use read_file/grep '
-        'for targeted extraction).'
-    )
+    _HEAD_TAIL_DENIAL = ("DENIED: shell_cmd auto-rejects '| head' / '| tail' pipe stages — they are not "
+                         'available on Windows and are redundant: AgentCascade already truncates shell '
+                         "output with spillover. Remove the '| head ...' / '| tail ...' segment and run "
+                         'the base command; large output is truncated automatically (use read_file/grep '
+                         'for targeted extraction).')
 
     @staticmethod
     def _detect_head_tail_pipe(command: str) -> str | None:
@@ -350,8 +344,13 @@ class ShellCmd(BaseTool):
 
     # ────────────────────────────────────────────────────────────────
     def _launch_async(
-        self, agent_name: str, command: str, justification: str,
-        cwd: str, timeout: int, heartbeat_interval: float,
+        self,
+        agent_name: str,
+        command: str,
+        justification: str,
+        cwd: str,
+        timeout: int,
+        heartbeat_interval: float,
     ) -> str:
         """Launch a shell command in the background and return immediately.
 
@@ -398,18 +397,21 @@ class ShellCmd(BaseTool):
         is_safe = ShellMixin._is_safe_readonly_shell_command(command)
 
         if not is_safe:
-            description = (
-                f"⚠️ **SECURITY WARNING**: This is a host shell command running in async (background) mode. "
-                f"It can potentially bypass folder restrictions!\n\n"
-                f"**CWD**: {resolved_cwd}\n"
-                f"**Execute Shell Command**:\n```bash\n{command}\n```\n"
-                f"**Justification**: {justification}"
-            )
+            description = (f"⚠️ **SECURITY WARNING**: This is a host shell command running in async (background) mode. "
+                           f"It can potentially bypass folder restrictions!\n\n"
+                           f"**CWD**: {resolved_cwd}\n"
+                           f"**Execute Shell Command**:\n```bash\n{command}\n```\n"
+                           f"**Justification**: {justification}")
 
             approved, reason = self.agent_pool.operation_manager.request_user_approval(
                 agent_name=agent_name,
                 tool_name='shell_cmd',
-                tool_args={'command': command, 'justification': justification, 'cwd': cwd, 'execution_mode': 'async'},
+                tool_args={
+                    'command': command,
+                    'justification': justification,
+                    'cwd': cwd,
+                    'execution_mode': 'async'
+                },
                 description=description,
             )
 
@@ -457,27 +459,28 @@ class ShellCmd(BaseTool):
             approval_line = 'AUTO-APPROVED\n' if is_safe else 'APPROVED\n'
             if not is_safe and justification_text:
                 approval_line += f"Security Justification: {justification_text}\n"
-            result = (
-                f"⟨shell_cmd completed⟩ Tool ID: {tool_id} | PID: {pid}\n"
-                f"{approval_line}"
-                f"Completed in {elapsed:.1f} s ({status}).\n"
-            )
+            result = (f"⟨shell_cmd completed⟩ Tool ID: {tool_id} | PID: {pid}\n"
+                      f"{approval_line}"
+                      f"Completed in {elapsed:.1f} s ({status}).\n")
             # Append early output if available (truncate if large)
             if early_output:
                 output_text = '\n'.join(early_output)
                 try:
-                    base_dir = self.agent_pool.operation_manager.base_dir if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') else None
+                    base_dir = self.agent_pool.operation_manager.base_dir if self.agent_pool and hasattr(
+                        self.agent_pool, 'operation_manager') else None
                     if base_dir:
                         char_limit = llm_cfg.get('shell_char_limit', 2048) if isinstance(llm_cfg, dict) else 2048
                         output_text = truncate_with_spillover(
-                            output_text, char_limit,
+                            output_text,
+                            char_limit,
                             instance_name=agent_name,
                             tool_name='shell_cmd',
                             base_dir=base_dir,
                             operation_mode='mid',
                         )
                 except Exception as e:
-                    logger.debug(f"[shell_cmd] truncate_with_spillover failed in early completion for {agent_name}: {e}")
+                    logger.debug(
+                        f"[shell_cmd] truncate_with_spillover failed in early completion for {agent_name}: {e}")
                 result += f"\nOutput:\n{output_text}"
             return result
 
@@ -500,18 +503,19 @@ class ShellCmd(BaseTool):
             f"  - __ctrl_c → send interrupt signal\n"
             f"  - __wait → wait until next heartbeat (similar to simply stoping as you will be woken up by the heartbeat response)\n"
             f"  - __heartbeat=N → update heartbeat interval (N seconds)\n"
-            f"  - any other text → send as stdin input to the running command"
-        )
+            f"  - any other text → send as stdin input to the running command")
 
         # Append early output if available (Case 2, truncate if large)
         if early_output:
             output_text = '\n'.join(early_output)
             try:
-                base_dir = self.agent_pool.operation_manager.base_dir if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') else None
+                base_dir = self.agent_pool.operation_manager.base_dir if self.agent_pool and hasattr(
+                    self.agent_pool, 'operation_manager') else None
                 if base_dir:
                     char_limit = llm_cfg.get('shell_char_limit', 2048) if isinstance(llm_cfg, dict) else 2048
                     output_text = truncate_with_spillover(
-                        output_text, char_limit,
+                        output_text,
+                        char_limit,
                         instance_name=agent_name,
                         tool_name='shell_cmd',
                         base_dir=base_dir,
@@ -525,7 +529,10 @@ class ShellCmd(BaseTool):
 
     # ────────────────────────────────────────────────────────────────
     def _handle_control_command(
-        self, agent_name: str, tool_id: int, command: str,
+        self,
+        agent_name: str,
+        tool_id: int,
+        command: str,
         heartbeat_interval: float,
     ) -> str:
         """Handle control commands for an existing async shell task.
@@ -563,10 +570,8 @@ class ShellCmd(BaseTool):
             if task is None:
                 # RC4 softening: a follow-up __wait can race task cleanup right before the
                 # completion USER message lands; keep the "No running shell found" substring.
-                return (
-                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found "
-                    f"(may have just completed — watch for the completion message)."
-                )
+                return (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found "
+                        f"(may have just completed — watch for the completion message).")
 
             # Read initial state under lock to avoid race with tracking thread.
             # All AsyncShellTask shared state must be accessed under task._lock
@@ -577,10 +582,8 @@ class ShellCmd(BaseTool):
 
             if is_completed:
                 elapsed = _elapsed_for_task(task)
-                return (
-                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
-                    f"(exit code {rc}, elapsed {elapsed:.0f}s)."
-                )
+                return (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
+                        f"(exit code {rc}, elapsed {elapsed:.0f}s).")
 
             with task._lock:
                 # Determine wait timeout based on the task's heartbeat_interval.
@@ -620,19 +623,15 @@ class ShellCmd(BaseTool):
                 if msg is None:
                     # Genuine timeout / terminated — empty queue. Existing string (unchanged).
                     task_elapsed = _elapsed_for_task(task)
-                    return (
-                        f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
-                        f"(timeout after {timeout:.0f}s, elapsed {task_elapsed:.0f}s)."
-                    )
+                    return (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
+                            f"(timeout after {timeout:.0f}s, elapsed {task_elapsed:.0f}s).")
                 if _is_our_shell_msg(msg):
                     # Front message was THIS tool's shell msg → already consumed by the primitive.
                     return str(msg)
                 # Front message is something else (user/system/other-tool) → it was only peeked,
                 # still queued. Return default wake-up; normal drain delivers it in sequence.
-                return (
-                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - "
-                    f"Woken by queued message (not this shell). Check your message queue."
-                )
+                return (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - "
+                        f"Woken by queued message (not this shell). Check your message queue.")
 
             # Fallback: pool lacks a real wait_for_message (e.g. MagicMock in unit tests).
             return _polling_wait(task, tool_id, agent_name, timeout, self.agent_pool)
@@ -642,8 +641,12 @@ class ShellCmd(BaseTool):
 
     # ────────────────────────────────────────────────────────────────
     def _execute_sync(
-        self, agent_name: str, command: str, justification: str,
-        cwd: str, timeout: int,
+        self,
+        agent_name: str,
+        command: str,
+        justification: str,
+        cwd: str,
+        timeout: int,
     ) -> str:
         """Execute a shell command synchronously (blocking).
 

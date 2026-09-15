@@ -2,27 +2,19 @@
 import logging
 import threading
 import time
-from agent_cascade.compression.result import CompressResult
-from agent_cascade.compression.helpers import (
-    _refine_tool_call_boundary,
-    compute_discard_count,
-    build_marker_message,
-    build_consolidation_marker_message,
-    extract_summary_from_marker,
-    get_message_role,
-    select_markers_for_consolidation,
-    _parse_marker_timestamps,
-)
+
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
-from agent_cascade.utils.utils import extract_text_from_message, strip_base64_from_images
-from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+from agent_cascade.compression.helpers import (_parse_marker_timestamps, _refine_tool_call_boundary,
+                                               build_consolidation_marker_message, build_marker_message,
+                                               compute_discard_count, extract_summary_from_marker, get_message_role,
+                                               select_markers_for_consolidation)
+from agent_cascade.compression.result import CompressResult
 from agent_cascade.llm.schema import FUNCTION, USER, Message
-from agent_cascade.settings import (
-    CHARS_PER_TOKEN_ESTIMATE,
-    COMPRESSION_DEFAULT_FRACTION,
-    COMPRESSION_MAX_CONSOLIDATION_TOKENS,
-)
 from agent_cascade.prompts.dna import COMPRESSION_MARKER, COMPRESSION_PROMPT
+from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE, COMPRESSION_DEFAULT_FRACTION,
+                                    COMPRESSION_MAX_CONSOLIDATION_TOKENS)
+from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+from agent_cascade.utils.utils import extract_text_from_message, strip_base64_from_images
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +60,7 @@ def _consolidate_markers(
     # Recursion guard: prevent re-entry for this agent
     with _consolidation_lock:
         if target_agent_name in _consolidating_agents:
-            logger.debug(
-                f"Consolidation already in progress for '{target_agent_name}' — skipping (recursion guard)"
-            )
+            logger.debug(f"Consolidation already in progress for '{target_agent_name}' — skipping (recursion guard)")
             return
         _consolidating_agents.add(target_agent_name)
 
@@ -95,20 +85,16 @@ def _consolidate_markers(
 
             # Guard: need at least threshold markers to consolidate
             if len(marker_indices) < COMPRESSION_CONSOLIDATION_THRESHOLD:
-                logger.debug(
-                    f"Consolidation skipped for '{target_agent_name}': "
-                    f"only {len(marker_indices)} markers (< {COMPRESSION_CONSOLIDATION_THRESHOLD})"
-                )
+                logger.debug(f"Consolidation skipped for '{target_agent_name}': "
+                             f"only {len(marker_indices)} markers (< {COMPRESSION_CONSOLIDATION_THRESHOLD})")
                 return
 
             # Use shared marker selection strategy
             consolidate_indices, keep_index = select_markers_for_consolidation(marker_indices)
 
             num_to_consolidate = len(consolidate_indices)
-            logger.info(
-                f"Consolidating {num_to_consolidate} markers for '{target_agent_name}' "
-                f"(indices {consolidate_indices}, keeping newest at index {keep_index})"
-            )
+            logger.info(f"Consolidating {num_to_consolidate} markers for '{target_agent_name}' "
+                        f"(indices {consolidate_indices}, keeping newest at index {keep_index})")
 
             # Extract summary texts from markers being consolidated using shared helper
             for idx in consolidate_indices:
@@ -116,26 +102,21 @@ def _consolidate_markers(
                 if summary_text:
                     summaries_to_consolidate.append(summary_text)
                 else:
-                    logger.warning(
-                        f"Could not extract valid summary from marker at index {idx} — skipping"
-                    )
+                    logger.warning(f"Could not extract valid summary from marker at index {idx} — skipping")
 
             if not summaries_to_consolidate:
                 logger.error(
                     f"No valid summaries extracted from {num_to_consolidate} markers for '{target_agent_name}' — "
-                    f"aborting consolidation to avoid data loss"
-                )
+                    f"aborting consolidation to avoid data loss")
                 return
 
             # Token size check before invoking compressor
             try:
                 total_summary_tokens = sum(qwen_count(s) for s in summaries_to_consolidate)
                 if total_summary_tokens > COMPRESSION_MAX_CONSOLIDATION_TOKENS:
-                    logger.warning(
-                        f"Consolidation input too large for '{target_agent_name}': "
-                        f"{total_summary_tokens} tokens > {COMPRESSION_MAX_CONSOLIDATION_TOKENS} limit. "
-                        f"Aborting to prevent compressor failure."
-                    )
+                    logger.warning(f"Consolidation input too large for '{target_agent_name}': "
+                                   f"{total_summary_tokens} tokens > {COMPRESSION_MAX_CONSOLIDATION_TOKENS} limit. "
+                                   f"Aborting to prevent compressor failure.")
                     return
             except Exception as e:
                 logger.debug(f"Token count check for consolidation skipped (non-fatal): {e}")
@@ -156,10 +137,8 @@ def _consolidate_markers(
             logger.error(f"Empty consolidation result for '{target_agent_name}' — aborting")
             return
 
-        logger.info(
-            f"Consolidation summary generated for '{target_agent_name}': "
-            f"{len(consolidated_summary)} chars from {len(summaries_to_consolidate)} summaries"
-        )
+        logger.info(f"Consolidation summary generated for '{target_agent_name}': "
+                    f"{len(consolidated_summary)} chars from {len(summaries_to_consolidate)} summaries")
 
         # ── Phase 3: Re-read + rebuild under lock (defensive against concurrent changes) ──
         with target_inst._compression_lock:
@@ -168,10 +147,8 @@ def _consolidate_markers(
 
             # Defensive re-check: markers may have changed since Phase 1
             if len(current_markers) < COMPRESSION_CONSOLIDATION_THRESHOLD:
-                logger.warning(
-                    f"Consolidation aborted for '{target_agent_name}': marker count dropped below threshold "
-                    f"during LLM call ({len(current_markers)} < {COMPRESSION_CONSOLIDATION_THRESHOLD})"
-                )
+                logger.warning(f"Consolidation aborted for '{target_agent_name}': marker count dropped below threshold "
+                               f"during LLM call ({len(current_markers)} < {COMPRESSION_CONSOLIDATION_THRESHOLD})")
                 return
 
             # Re-select markers to consolidate based on current state
@@ -243,12 +220,10 @@ def _consolidate_markers(
                 elif i not in current_remove_indices:
                     new_history.append(msg)
 
-            logger.info(
-                f"Consolidation pool mutation for '{target_agent_name}': "
-                f"{len(current_history)} → {len(new_history)} messages, "
-                f"removed {len(current_remove_indices)} markers (indices {sorted(current_remove_indices)}), "
-                f"replaced marker at index {current_first_idx}"
-            )
+            logger.info(f"Consolidation pool mutation for '{target_agent_name}': "
+                        f"{len(current_history)} → {len(new_history)} messages, "
+                        f"removed {len(current_remove_indices)} markers (indices {sorted(current_remove_indices)}), "
+                        f"replaced marker at index {current_first_idx}")
 
             # Atomic pool update via rebuild_conversation which holds _compression_lock (already held here)
             try:
@@ -260,14 +235,10 @@ def _consolidate_markers(
         # ── Phase 4: Sync logger (outside lock, non-fatal) ──
         try:
             log_inst = agent_pool.get_logger(target_agent_name, target_inst.agent_class)
-            success = log_inst._consolidate_markers_in_jsonl(
-                new_pool_state=new_history,
-            )
+            success = log_inst._consolidate_markers_in_jsonl(new_pool_state=new_history,)
             if not success:
-                logger.warning(
-                    f"JSONL consolidation sync failed for '{target_agent_name}' — "
-                    f"pool is authoritative; JSONL will be corrected on next compression."
-                )
+                logger.warning(f"JSONL consolidation sync failed for '{target_agent_name}' — "
+                               f"pool is authoritative; JSONL will be corrected on next compression.")
         except Exception as e:
             logger.error(f"Logger sync during consolidation failed for '{target_agent_name}': {e}")
             # Non-fatal: pool is correct
@@ -279,14 +250,14 @@ def _consolidate_markers(
 
 
 def compress_context(
-    agent_pool,
-    target_agent_name: str,        # Which agent's context to compress
-    fraction: float = COMPRESSION_DEFAULT_FRACTION,  # Fraction of active history to discard
-    mode: str = 'auto',            # "auto" (LLM generates) or "manual" (summary provided)
-    summary_text: str | None = None,  # Required when mode == "manual"
-    force: bool = False,           # Bypass validation guards (forced compression at >95%)
-    dry_run: bool = False,         # If True, generate summary but don't mutate pool
-    precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call in auto mode
+        agent_pool,
+        target_agent_name: str,  # Which agent's context to compress
+        fraction: float = COMPRESSION_DEFAULT_FRACTION,  # Fraction of active history to discard
+        mode: str = 'auto',  # "auto" (LLM generates) or "manual" (summary provided)
+        summary_text: str | None = None,  # Required when mode == "manual"
+        force: bool = False,  # Bypass validation guards (forced compression at >95%)
+        dry_run: bool = False,  # If True, generate summary but don't mutate pool
+        precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call in auto mode
 ) -> CompressResult:
     """
     Unified compression function. Handles ALL compression triggers:
@@ -341,9 +312,8 @@ def compress_context(
     # adds messages to the pool during preview/apply, so fetching fresh history
     # at step 10 would cause insert_pos to point to wrong messages (desync bug).
     history = agent_pool.get_conversation(target_agent_name)
-    active_start_idx, active_set, latest_summary_idx = (
-        agent_pool.get_compression_target_set_from_conversation(target_agent_name, history)
-    )
+    active_start_idx, active_set, latest_summary_idx = (agent_pool.get_compression_target_set_from_conversation(
+        target_agent_name, history))
 
     if not active_set:
         return CompressResult(
@@ -447,7 +417,7 @@ def compress_context(
             messages_discarded=0,
             tail_count=len(active_set),
             error=f"Active set too small ({len(active_set)} messages) for safe compression. "
-                  f"Need at least 3 to preserve ≥2 tail messages.",
+            f"Need at least 3 to preserve ≥2 tail messages.",
             mode=mode,
         )
 
@@ -480,7 +450,7 @@ def compress_context(
 
     # ── 6. Determine messages to send to the Compression Agent ──
     # Reuse `history` snapshot from step 1 (single source of truth).
-    
+
     if latest_summary_idx != -1:
         # Include the new active messages being discarded (NOT the marker — its summary
         # is already extracted separately below and passed as existing_summary).
@@ -537,11 +507,10 @@ def compress_context(
                     marker_message=None,
                     messages_discarded=0,
                     tail_count=len(active_set),
-                    error=(
-                        f"Compression payload ({target_token_count} tokens + ~{prompt_overhead_tokens} overhead = "
-                        f"~{total_estimated} total) exceeds compressor context window (~{available_for_messages} tokens). "
-                        f"Try compressing with a lower ratio or use a larger-context endpoint."
-                    ),
+                    error=
+                    (f"Compression payload ({target_token_count} tokens + ~{prompt_overhead_tokens} overhead = "
+                     f"~{total_estimated} total) exceeds compressor context window (~{available_for_messages} tokens). "
+                     f"Try compressing with a lower ratio or use a larger-context endpoint."),
                     mode=mode,
                 )
         except Exception as e:
@@ -552,15 +521,15 @@ def compress_context(
     existing_summary = None
     if latest_summary_idx != -1:
         summary_msg = history[latest_summary_idx]
-        
+
         # Use extract_text_from_message to handle both string and multi-modal list content
         if isinstance(summary_msg, dict):
             wrapped_msg = Message(**summary_msg)
         else:
             wrapped_msg = summary_msg
-        
+
         raw_content = extract_text_from_message(wrapped_msg, add_upload_info=True)
-        
+
         # Extract the summary text between <context_summary> tags
         if '<context_summary>' in raw_content:
             try:
@@ -631,8 +600,7 @@ def compress_context(
     def _is_marker(_msg):
         role = get_message_role(_msg)
         content = _msg.get('content', '') if isinstance(_msg, dict) else getattr(_msg, 'content', '')
-        return (role == USER and isinstance(content, str)
-                and content.startswith(COMPRESSION_MARKER))
+        return (role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER))
 
     try:
         # Start: first message's ts. If it happens to be a marker (whose creation-time ts
@@ -691,10 +659,8 @@ def compress_context(
 
     # ── Dry run: return early with summary but don't mutate pool ──
     if dry_run:
-        logger.info(
-            f"Dry-run compression for agent '{target_agent_name}': "
-            f"would discard {target_discard_count} messages."
-        )
+        logger.info(f"Dry-run compression for agent '{target_agent_name}': "
+                    f"would discard {target_discard_count} messages.")
         return CompressResult(
             success=True,
             summary_text=generated_summary,
@@ -710,16 +676,14 @@ def compress_context(
     # ── 10. Apply to pool: trim → insert marker (atomic mutation via copy-and-replace) ──
     # NOTE: This is single-threaded by design — forced compression halts all other agents
     # before running, so no concurrent pool mutations can occur during this block.
-    
+
     # Reuse `history` snapshot from step 1 (single source of truth).
     insert_pos = active_start_idx + target_discard_count
 
     # Safety check: insert position must be after the SYSTEM message
     if insert_pos < 1:
-        raise RuntimeError(
-            f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
-            f"pool state corrupted for agent '{target_agent_name}'"
-        )
+        raise RuntimeError(f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
+                           f"pool state corrupted for agent '{target_agent_name}'")
 
     # Safety check: verify first kept message is not a FUNCTION response (orphaned from its A).
     # This catches desync between pool and active_set snapshot taken at step 1.
@@ -734,9 +698,9 @@ def compress_context(
                 messages_discarded=0,
                 tail_count=len(active_set),
                 error=f"Compression marker would be inserted before a FUNCTION response at position "
-                      f"{insert_pos} — pool/active-set desync detected. "
-                      f"Discard count={target_discard_count}, active_start_idx={active_start_idx}, "
-                      f"history_len={len(history)}",
+                f"{insert_pos} — pool/active-set desync detected. "
+                f"Discard count={target_discard_count}, active_start_idx={active_start_idx}, "
+                f"history_len={len(history)}",
                 mode=mode,
             )
 
@@ -760,11 +724,9 @@ def compress_context(
     # Fix #5: Re-validate conversation length after mutation to detect concurrent modification
     post_mutation_conv = agent_pool.get_conversation(target_agent_name)
     if len(post_mutation_conv) != len(new_history):
-        logger.warning(
-            f"Compression aborted for '{target_agent_name}': "
-            f"conversation was modified during compression (race condition detected). "
-            f"Expected length {len(new_history)}, got {len(post_mutation_conv)}."
-        )
+        logger.warning(f"Compression aborted for '{target_agent_name}': "
+                       f"conversation was modified during compression (race condition detected). "
+                       f"Expected length {len(new_history)}, got {len(post_mutation_conv)}.")
         return CompressResult(
             success=False,
             summary_text=generated_summary,
@@ -803,11 +765,9 @@ def compress_context(
         tokens_after = total_tokens
 
     # ── 13. Log the successful compression event ──
-    logger.info(
-        f"Clean-trim compression: Discarded {target_discard_count} messages "
-        f"for agent '{target_agent_name}'. Tail count: {tail_count}. "
-        f"Tokens: {total_tokens} -> {tokens_after}."
-    )
+    logger.info(f"Clean-trim compression: Discarded {target_discard_count} messages "
+                f"for agent '{target_agent_name}'. Tail count: {tail_count}. "
+                f"Tokens: {total_tokens} -> {tokens_after}.")
 
     # ── 14. Post-compression hierarchical consolidation check ──
     if not dry_run:
@@ -819,16 +779,12 @@ def compress_context(
             marker_count = AgentPool.count_markers(post_history)
 
             if marker_count >= COMPRESSION_CONSOLIDATION_THRESHOLD:
-                logger.info(
-                    f"Triggering hierarchical consolidation for '{target_agent_name}': "
-                    f"{marker_count} markers present, will consolidate oldest {marker_count - 1}"
-                )
+                logger.info(f"Triggering hierarchical consolidation for '{target_agent_name}': "
+                            f"{marker_count} markers present, will consolidate oldest {marker_count - 1}")
                 _consolidate_markers(agent_pool, target_agent_name)
         except Exception as e:
-            logger.error(
-                f"Hierarchical consolidation failed for '{target_agent_name}' (non-fatal): {e}. "
-                f"Normal compression succeeded; markers will be consolidated on next cycle."
-            )
+            logger.error(f"Hierarchical consolidation failed for '{target_agent_name}' (non-fatal): {e}. "
+                         f"Normal compression succeeded; markers will be consolidated on next cycle.")
 
     return CompressResult(
         success=True,

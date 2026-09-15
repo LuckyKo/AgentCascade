@@ -10,18 +10,14 @@ from typing import List, Optional, Tuple
 
 # Project imports (used by ShellMixin.execute_shell_command)
 from agent_cascade.log import logger
-from agent_cascade.shell_utils import (
-    DRAIN_THREAD_JOIN_TIMEOUT,
-    drain_pipe_chunks,
-    configure_windows_utf8,
-)
+from agent_cascade.shell_utils import DRAIN_THREAD_JOIN_TIMEOUT, configure_windows_utf8, drain_pipe_chunks
 from agent_cascade.tool_utils import truncate_with_spillover
 
 # ─── Named constants (avoid magic numbers) ──────────────────────────────
-TASKKILL_RETRY_DELAY = 0.5              # Seconds between taskkill passes on timeout
-MAX_PROCESS_TREE_DEPTH = 10             # Max recursion depth when killing process descendants
-DEFAULT_SHELL_TIMEOUT = 30              # Default seconds before shell command times out
-MAX_SHELL_TIMEOUT = 3600                # Maximum allowed shell command timeout (1 hour)
+TASKKILL_RETRY_DELAY = 0.5  # Seconds between taskkill passes on timeout
+MAX_PROCESS_TREE_DEPTH = 10  # Max recursion depth when killing process descendants
+DEFAULT_SHELL_TIMEOUT = 30  # Default seconds before shell command times out
+MAX_SHELL_TIMEOUT = 3600  # Maximum allowed shell command timeout (1 hour)
 
 # Platform flag (evaluated once at import time)
 ON_WINDOWS = os.name == 'nt'
@@ -33,8 +29,8 @@ if ON_WINDOWS:
 else:
     _WIN_ENV = None  # noqa: constant used only in method below
 
-
 # ─── Module-level helper (used inside ShellMixin) ──────────────────────
+
 
 def _run_taskkill(pid: int, timeout: int = 10) -> subprocess.CompletedProcess:
     """Run taskkill to forcibly terminate a Windows process by PID.
@@ -51,12 +47,15 @@ def _run_taskkill(pid: int, timeout: int = 10) -> subprocess.CompletedProcess:
     """
     return subprocess.run(
         ['taskkill', '/F', '/PID', str(pid)],
-        capture_output=True, timeout=timeout,
-        encoding='utf-8', errors='replace',
+        capture_output=True,
+        timeout=timeout,
+        encoding='utf-8',
+        errors='replace',
     )
 
 
 # ─── Mixin: Shell methods for OperationManager ─────────────────────────
+
 
 class ShellMixin:
     """Shell execution methods. Expects self to have __init__-set attributes."""
@@ -64,14 +63,42 @@ class ShellMixin:
     # ------------------------------------------------------------------
     # Safe git sub-commands (all are read-only by nature)
     _SAFE_GIT_SUBCOMMANDS: set = {
-        'diff', 'status', 'log', 'show', 'branch', 'tag', 'remote',
-        'rev-parse', 'config', 'merge-base', 'describe', 'ls-files',
-        'ls-tree', 'stash', 'shortlog', 'blame', 'name-rev', 'hash-object',
-        'cat-file', 'for-each-ref', 'var', 'symbolic-ref',
-        'version', 'rev-list', 'reflog', 'worktree',
-        'count-objects', 'interpret-trailers',
-        'notes', 'pack-refs', 'prune', 'replace', 'rerere',
-        'verify-commit', 'verify-tag', 'verify-pack',
+        'diff',
+        'status',
+        'log',
+        'show',
+        'branch',
+        'tag',
+        'remote',
+        'rev-parse',
+        'config',
+        'merge-base',
+        'describe',
+        'ls-files',
+        'ls-tree',
+        'stash',
+        'shortlog',
+        'blame',
+        'name-rev',
+        'hash-object',
+        'cat-file',
+        'for-each-ref',
+        'var',
+        'symbolic-ref',
+        'version',
+        'rev-list',
+        'reflog',
+        'worktree',
+        'count-objects',
+        'interpret-trailers',
+        'notes',
+        'pack-refs',
+        'prune',
+        'replace',
+        'rerere',
+        'verify-commit',
+        'verify-tag',
+        'verify-pack',
         'show-ref',
     }
 
@@ -95,16 +122,45 @@ class ShellMixin:
 
     # Safe pipe/filter commands for pipelines (e.g. git diff | grep 'changed')
     _SAFE_PIPE_COMMANDS: set = {
-        'grep', 'egrep', 'fgrep', 'head', 'tail', 'sort', 'uniq',
-        'wc', 'cat', 'more', 'less', 'cut', 'tr',
-        'comm', 'diff', 'nl', 'rev', 'fold', 'findstr',
+        'grep',
+        'egrep',
+        'fgrep',
+        'head',
+        'tail',
+        'sort',
+        'uniq',
+        'wc',
+        'cat',
+        'more',
+        'less',
+        'cut',
+        'tr',
+        'comm',
+        'diff',
+        'nl',
+        'rev',
+        'fold',
+        'findstr',
     }
 
     # Safe primary commands (directory listing / file inspection)
     _SAFE_PRIMARY_COMMANDS: set = {
-        'find', 'dir', 'ls', 'tree', 'directory',
-        'vfd', 'where', 'whereis', 'locate', 'which', 'type',
-        'pwd', 'stat', 'file', 'du', 'df',
+        'find',
+        'dir',
+        'ls',
+        'tree',
+        'directory',
+        'vfd',
+        'where',
+        'whereis',
+        'locate',
+        'which',
+        'type',
+        'pwd',
+        'stat',
+        'file',
+        'du',
+        'df',
     }
 
     @staticmethod
@@ -333,14 +389,16 @@ class ShellMixin:
 
         # WMIC sweep for deeper descendants
         try:
+
             def _get_child_pids(parent_pid):
                 """Query child PIDs of a given parent via WMIC."""
                 res = subprocess.run(
-                    ['wmic', 'process', 'where',
-                     f'ParentProcessId={parent_pid}',
-                     'get', 'ProcessId'],
-                    capture_output=True, text=True, timeout=5,
-                    encoding='utf-8', errors='replace',
+                    ['wmic', 'process', 'where', f'ParentProcessId={parent_pid}', 'get', 'ProcessId'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    encoding='utf-8',
+                    errors='replace',
                 )
                 pids = []
                 for line in res.stdout.strip().split('\n'):
@@ -376,8 +434,13 @@ class ShellMixin:
 
     # ------------------------------------------------------------------
     def execute_shell_command(
-        self, command: str, justification: str, agent_name: str,
-        cwd: str = '.', char_limit: int = 2000, timeout: Optional[int] = None,
+        self,
+        command: str,
+        justification: str,
+        agent_name: str,
+        cwd: str = '.',
+        char_limit: int = 2000,
+        timeout: Optional[int] = None,
     ) -> str:
         """Execute a shell command — auto-approved for safe read-only commands."""
         try:
@@ -389,7 +452,8 @@ class ShellMixin:
         if len(command) > char_limit:
             return f"ERROR: Command exceeds maximum length of {char_limit} characters."
 
-        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or timeout > MAX_SHELL_TIMEOUT):
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or
+                                    timeout > MAX_SHELL_TIMEOUT):
             return f"ERROR: Invalid timeout value: {timeout}. Must be a positive integer between 1 and {MAX_SHELL_TIMEOUT}."
         effective_timeout = timeout if timeout is not None else DEFAULT_SHELL_TIMEOUT
 
@@ -403,13 +467,16 @@ class ShellMixin:
             description = (
                 f"⚠️ **SECURITY WARNING**: This is a host shell command. It can potentially bypass folder restrictions!\n\n"
                 f"**CWD**: {resolved_cwd}\n"
-                f"**Execute Shell Command**:\n```bash\n{command}\n```\n**Justification**: {justification}"
-            )
+                f"**Execute Shell Command**:\n```bash\n{command}\n```\n**Justification**: {justification}")
 
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='shell_cmd',
-                tool_args={'command': command, 'justification': justification, 'cwd': cwd},
+                tool_args={
+                    'command': command,
+                    'justification': justification,
+                    'cwd': cwd
+                },
                 description=description,
             )
 
@@ -448,8 +515,14 @@ class ShellMixin:
             stderr_chunks: List[str] = []
             drain_errors: List[Exception] = []
 
-            t_out = threading.Thread(target=drain_pipe_chunks, args=(proc.stdout, stdout_chunks, drain_errors), daemon=True, name='shell_stdout_reader')
-            t_err = threading.Thread(target=drain_pipe_chunks, args=(proc.stderr, stderr_chunks, drain_errors), daemon=True, name='shell_stderr_reader')
+            t_out = threading.Thread(target=drain_pipe_chunks,
+                                     args=(proc.stdout, stdout_chunks, drain_errors),
+                                     daemon=True,
+                                     name='shell_stdout_reader')
+            t_err = threading.Thread(target=drain_pipe_chunks,
+                                     args=(proc.stderr, stderr_chunks, drain_errors),
+                                     daemon=True,
+                                     name='shell_stderr_reader')
             t_out.start()
             t_err.start()
 
@@ -479,10 +552,7 @@ class ShellMixin:
                 time.sleep(0.1)  # Brief grace period for thread cleanup
 
             if drain_errors:
-                logger.warning(
-                    f"Pipe drain errors on PID {proc.pid}: "
-                    + '; '.join(str(e) for e in drain_errors)
-                )
+                logger.warning(f"Pipe drain errors on PID {proc.pid}: " + '; '.join(str(e) for e in drain_errors))
 
             stdout: str = ''.join(stdout_chunks)
             stderr: str = ''.join(stderr_chunks)
@@ -507,7 +577,8 @@ class ShellMixin:
                         output = 'No output produced.'
 
                 final_output = truncate_with_spillover(
-                    output, char_limit,
+                    output,
+                    char_limit,
                     instance_name=agent_name,
                     tool_name='shell',
                     base_dir=self.base_dir,
@@ -535,14 +606,12 @@ class ShellMixin:
                 output += f"STDERR (partial):\n{stderr}\n"
 
             elapsed = time.time() - exec_start
-            timeout_msg = (
-                f"ERROR: Command timed out after {effective_timeout} seconds "
-                f"(elapsed {elapsed:.1f}s). "
-                f"All child processes have been forcibly terminated. "
-                f"Command was: `{command[:200]}`. "
-                f"If the process is expected to take a long time, consider using a background command "
-                f"(e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."
-            )
+            timeout_msg = (f"ERROR: Command timed out after {effective_timeout} seconds "
+                           f"(elapsed {elapsed:.1f}s). "
+                           f"All child processes have been forcibly terminated. "
+                           f"Command was: `{command[:200]}`. "
+                           f"If the process is expected to take a long time, consider using a background command "
+                           f"(e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task.")
 
             # Append multi-line python hint if applicable
             if ON_WINDOWS and self._detect_multiline_python(original_command):

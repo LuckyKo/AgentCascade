@@ -22,15 +22,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent_cascade.skills.advisor import (
-    SkillAdvisorResult,
-    build_skill_advisor_prompt,
-    parse_advisor_output,
-    run_skill_advisor,
-)
-
+from agent_cascade.skills.advisor import (SkillAdvisorResult, build_skill_advisor_prompt, parse_advisor_output,
+                                          run_skill_advisor)
 
 # ── Test doubles ──────────────────────────────────────────────────────────────
+
 
 class MockSkillManager:
     """Minimal stand-in for SkillManager covering the advisor's surface."""
@@ -66,14 +62,14 @@ def _make_pool(**overrides):
 # 1. Output parsing — agent_cascade.skills.advisor.parse_advisor_output
 # ===========================================================================
 
+
 class TestParseAdvisorOutput:
+
     def test_valid_approve_with_skills_and_notes(self):
         sm = MockSkillManager(['docker-best-practices', 'httpx-connection-pooling'])
-        out = (
-            '[SKILLS] docker-best-practices, httpx-connection-pooling\n'
-            '[NOTES] Use --rm flag and pin image tags.\n'
-            '[VERDICT] APPROVE — needs both skills'
-        )
+        out = ('[SKILLS] docker-best-practices, httpx-connection-pooling\n'
+               '[NOTES] Use --rm flag and pin image tags.\n'
+               '[VERDICT] APPROVE — needs both skills')
         r = parse_advisor_output(out, sm)
         assert r.verdict == 'approve'
         assert r.recommended_skills == ['docker-best-practices', 'httpx-connection-pooling']
@@ -101,11 +97,9 @@ class TestParseAdvisorOutput:
 
     def test_case_insensitive_markers_and_names(self):
         sm = MockSkillManager(['docker-best-practices'])
-        out = (
-            '[skills] Docker-Best-Practices\n'
-            '[notes] NONE\n'
-            '[verdict] approve - looks fine'
-        )
+        out = ('[skills] Docker-Best-Practices\n'
+               '[notes] NONE\n'
+               '[verdict] approve - looks fine')
         r = parse_advisor_output(out, sm)
         assert r.verdict == 'approve'
         # Canonical (registered) name is returned, not the LLM's casing.
@@ -149,7 +143,9 @@ class TestParseAdvisorOutput:
 # 2. Prompt construction — build_skill_advisor_prompt
 # ===========================================================================
 
+
 class TestBuildSkillAdvisorPrompt:
+
     def test_excludes_self_augmentation_from_skills_list(self):
         sm = MockSkillManager(['self-augmentation', 'docker-best-practices'])
         prompt = build_skill_advisor_prompt(sm, 'Set up docker', 'ctx', 'coder', 'Maine')
@@ -173,24 +169,22 @@ class TestBuildSkillAdvisorPrompt:
     def test_braces_in_task_text_do_not_crash(self):
         """Regression: task text with {braces} must not raise KeyError from .format()."""
         sm = MockSkillManager(['a'])
-        prompt = build_skill_advisor_prompt(
-            sm, 'Create {filename}.py with {config}', 'use {var} here', 'coder', 'Maine'
-        )
+        prompt = build_skill_advisor_prompt(sm, 'Create {filename}.py with {config}', 'use {var} here', 'coder',
+                                            'Maine')
         assert '{filename}' in prompt
         assert '{config}' in prompt
         assert '{var}' in prompt
 
     def test_braces_in_context_text_do_not_crash(self):
         sm = MockSkillManager(['a'])
-        prompt = build_skill_advisor_prompt(
-            sm, 'task', 'Context with {placeholder} and }braces{', 'coder', 'Maine'
-        )
+        prompt = build_skill_advisor_prompt(sm, 'task', 'Context with {placeholder} and }braces{', 'coder', 'Maine')
         assert '{placeholder}' in prompt
 
 
 # ===========================================================================
 # 2b. Prompt freshness — build_skill_advisor_prompt acquires a fresh list at run time
 # ===========================================================================
+
 
 class TestBuildSkillAdvisorPromptFreshness:
     """build_skill_advisor_prompt must call skill_manager._ensure_discovered() (a
@@ -210,20 +204,17 @@ class TestBuildSkillAdvisorPromptFreshness:
         # Skill A: on disk so the real discover() re-scans and keeps it in the registry.
         a_dir = skills_root / 'skill-a'
         a_dir.mkdir(parents=True)
-        (a_dir / 'SKILL.md').write_text(
-            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
-        )
+        (a_dir / 'SKILL.md').write_text('---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8')
 
         sm = SkillManager()
-        sm.discover([skills_root])        # warm cache → registry has {skill-a}
+        sm.discover([skills_root])  # warm cache → registry has {skill-a}
         assert set(sm.get_skill_names()) == {'skill-a'}
 
         # Skill B: added to disk AFTER the initial scan, then invalidate so a re-scan is forced.
         b_dir = skills_root / 'skill-b'
         b_dir.mkdir()
-        (b_dir / 'SKILL.md').write_text(
-            '---\nname: skill-b\ndescription: second skill\n---\nbody B\n', encoding='utf-8'
-        )
+        (b_dir / 'SKILL.md').write_text('---\nname: skill-b\ndescription: second skill\n---\nbody B\n',
+                                        encoding='utf-8')
         sm.invalidate_cache()
 
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
@@ -241,8 +232,8 @@ class TestBuildSkillAdvisorPromptFreshness:
         never prove "no re-scan". The real signal that a scan happened is the scan body
         executing — i.e. ``parse_skill_file`` being invoked (manager.py only calls it in the
         scan loop). A warm cache short-circuits before any parsing, so we assert 0 parse calls."""
-        from agent_cascade.skills.manager import SkillManager
         import agent_cascade.skills.manager as mgr_mod
+        from agent_cascade.skills.manager import SkillManager
 
         # Scan a dedicated subdirectory so pytest's tmp_path marker file (.pytest_tmpdir,
         # created when the fixture is set up) never enters the scanned tree — otherwise it
@@ -251,12 +242,10 @@ class TestBuildSkillAdvisorPromptFreshness:
         skills_root = tmp_path / 'skills'
         a_dir = skills_root / 'skill-a'
         a_dir.mkdir(parents=True)
-        (a_dir / 'SKILL.md').write_text(
-            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
-        )
+        (a_dir / 'SKILL.md').write_text('---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8')
 
         sm = SkillManager()
-        sm.discover([skills_root])        # warm cache; _skill_paths set; TTL clock started
+        sm.discover([skills_root])  # warm cache; _skill_paths set; TTL clock started
 
         with patch.object(mgr_mod, 'parse_skill_file') as mock_parse:
             prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
@@ -273,12 +262,10 @@ class TestBuildSkillAdvisorPromptFreshness:
 
         a_dir = tmp_path / 'skill-a'
         a_dir.mkdir()
-        (a_dir / 'SKILL.md').write_text(
-            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
-        )
+        (a_dir / 'SKILL.md').write_text('---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8')
 
         sm = SkillManager()
-        sm.discover([tmp_path])           # warm cache with skill-a in the registry
+        sm.discover([tmp_path])  # warm cache with skill-a in the registry
 
         def _boom():
             raise RuntimeError('discovery blew up')
@@ -302,9 +289,7 @@ class TestBuildSkillAdvisorPromptFreshness:
         skills_root = tmp_path / 'skills'
         a_dir = skills_root / 'skill-a'
         a_dir.mkdir(parents=True)
-        (a_dir / 'SKILL.md').write_text(
-            '---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8'
-        )
+        (a_dir / 'SKILL.md').write_text('---\nname: skill-a\ndescription: first skill\n---\nbody A\n', encoding='utf-8')
 
         sm = SkillManager()
         sm.discover([skills_root])
@@ -320,6 +305,7 @@ class TestBuildSkillAdvisorPromptFreshness:
         real_lock = sm._write_lock
 
         class _SpyLock:
+
             def acquire(self, *a, **k):
                 acquires.append(1)
                 return real_lock.acquire(*a, **k)
@@ -344,16 +330,16 @@ class TestBuildSkillAdvisorPromptFreshness:
 # 3. Registry validation — recommended skill names checked against registry
 # ===========================================================================
 
+
 class TestRegistryValidation:
+
     def test_run_skill_advisor_validates_names(self):
         sm = MockSkillManager(['docker-best-practices', 'httpx-connection-pooling'])
         pool = _make_pool(skill_manager=sm)
 
-        advisor_output = (
-            '[SKILLS] docker-best-practices, bogus-skill\n'
-            '[NOTES] pin tags\n'
-            '[VERDICT] APPROVE — good'
-        )
+        advisor_output = ('[SKILLS] docker-best-practices, bogus-skill\n'
+                          '[NOTES] pin tags\n'
+                          '[VERDICT] APPROVE — good')
         fake_result = MagicMock()
         fake_result.was_timeout = False
         fake_result.was_error = False
@@ -387,7 +373,9 @@ class TestRegistryValidation:
 # 4. Fallback on timeout / error → ambiguous (caller uses basic keyword match)
 # ===========================================================================
 
+
 class TestFallbackBehavior:
+
     def test_timeout_returns_ambiguous(self):
         sm = MockSkillManager(['a'])
         pool = _make_pool(skill_manager=sm)
@@ -426,27 +414,33 @@ class TestFallbackBehavior:
             r = run_skill_advisor(pool, sm, 'task', 'ctx', 'coder', 'Maine')
         assert r.verdict == 'ambiguous'
 
+
 # ===========================================================================
 # 5. Deny path — engine returns error string, no child instance created
 # ===========================================================================
 
+
 class TestDenyPath:
+
     def test_deny_returns_error_message_and_no_instance(self):
         """Simulate the engine hook's DENY branch contract: (None, [FUNCTION msg])."""
         from agent_cascade.llm.schema import FUNCTION, Message
 
         advisor_result = SkillAdvisorResult(
-            verdict='deny', reason='trivial single-file read',
-            recommended_skills=[], task_notes='',
+            verdict='deny',
+            reason='trivial single-file read',
+            recommended_skills=[],
+            task_notes='',
         )
-        instance_name = 'worker1'
+        'worker1'
 
         # Replicate the exact return shape used by engine/core.py on DENY.
         if advisor_result.verdict == 'deny':
-            result_tuple = (None, [Message(role=FUNCTION, content=(
-                f"Error: Skill Advisor denied this delegation — {advisor_result.reason}. "
-                f"Consider handling this task yourself or rephrasing with more specific context."
-            ))])
+            result_tuple = (None, [
+                Message(role=FUNCTION,
+                        content=(f"Error: Skill Advisor denied this delegation — {advisor_result.reason}. "
+                                 f"Consider handling this task yourself or rephrasing with more specific context."))
+            ])
 
         inst, conv = result_tuple
         assert inst is None  # no child instance allocated
@@ -458,10 +452,9 @@ class TestDenyPath:
     def test_deny_error_is_not_a_system_error(self):
         """The deny message must NOT start with '[SYSTEM ERROR' (child_runner raises on that)."""
         from agent_cascade.llm.schema import FUNCTION, Message
-        msg = Message(role=FUNCTION, content=(
-            'Error: Skill Advisor denied this delegation — trivial. '
-            'Consider handling this task yourself or rephrasing with more specific context.'
-        ))
+        msg = Message(role=FUNCTION,
+                      content=('Error: Skill Advisor denied this delegation — trivial. '
+                               'Consider handling this task yourself or rephrasing with more specific context.'))
         assert not msg.content.strip().startswith('[SYSTEM ERROR')
 
     @pytest.mark.parametrize('verdict,expected', [
@@ -478,31 +471,26 @@ class TestDenyPath:
 # 6. Advisor gate condition (should_run_advisor)
 # ===========================================================================
 
+
 class TestAdvisorGateCondition:
     """Replicates the exact should_run_advisor expression from engine/core.py."""
 
     @pytest.mark.parametrize(
         'load_skill_mode,auto_skill_mode,force_fresh,log_file,n_skills,expected',
         [
-            ('AUTO', 'advanced', False, None, 0, False),   # zero skills → skip
-            ('AUTO', 'advanced', False, None, 1, True),    # all conditions met
-            ('AUTO', 'basic',    False, None, 1, False),   # basic mode never runs advisor
-            ('AUTO', 'none',     False, None, 1, False),   # none mode never runs advisor
-            ('NONE', 'advanced', False, None, 1, False),   # not AUTO mode
-            ('AUTO', 'advanced', True,  None, 1, False),   # force_fresh → skip
+            ('AUTO', 'advanced', False, None, 0, False),  # zero skills → skip
+            ('AUTO', 'advanced', False, None, 1, True),  # all conditions met
+            ('AUTO', 'basic', False, None, 1, False),  # basic mode never runs advisor
+            ('AUTO', 'none', False, None, 1, False),  # none mode never runs advisor
+            ('NONE', 'advanced', False, None, 1, False),  # not AUTO mode
+            ('AUTO', 'advanced', True, None, 1, False),  # force_fresh → skip
             ('AUTO', 'advanced', False, 'x.jsonl', 1, False),  # external load → skip
         ],
     )
     def test_should_run_advisor(self, load_skill_mode, auto_skill_mode, force_fresh, log_file, n_skills, expected):
         sm = MockSkillManager([f"s{i}" for i in range(n_skills)])
-        should_run_advisor = (
-            load_skill_mode == 'AUTO'
-            and auto_skill_mode == 'advanced'
-            and not force_fresh
-            and log_file is None
-            and sm is not None
-            and len(sm.get_skill_names()) > 0
-        )
+        should_run_advisor = (load_skill_mode == 'AUTO' and auto_skill_mode == 'advanced' and not force_fresh and
+                              log_file is None and sm is not None and len(sm.get_skill_names()) > 0)
         assert should_run_advisor is expected
 
 
@@ -510,7 +498,9 @@ class TestAdvisorGateCondition:
 # 7. Advisor runner — timeout / error capture (mocked engine, no real LLM)
 # ===========================================================================
 
+
 class TestAdvisorRunner:
+
     def _patch_engine(self, run_generator):
         """Patch ExecutionEngine + extract_instance_output to avoid a real LLM call."""
         fake_inst = MagicMock()
@@ -520,8 +510,8 @@ class TestAdvisorRunner:
         fake_engine.run.side_effect = lambda inst: iter(run_generator)
         fake_engine._telemetry.return_value = None
 
-        import agent_cascade.execution_engine as ee_mod
         import agent_cascade.compression.helpers as ch_mod
+        import agent_cascade.execution_engine as ee_mod
         return (
             patch.object(ee_mod, 'ExecutionEngine', return_value=fake_engine),
             patch.object(ch_mod, 'extract_instance_output', return_value='OUTPUT'),
@@ -529,14 +519,12 @@ class TestAdvisorRunner:
         )
 
     def test_error_capture_when_create_raises(self):
-        from agent_cascade.advisor_runner import run_lightweight_advisor
         import agent_cascade.execution_engine as ee_mod
+        from agent_cascade.advisor_runner import run_lightweight_advisor
 
         pool = _make_pool()
         with patch.object(ee_mod, 'ExecutionEngine', side_effect=RuntimeError('engine boom')):
-            result = run_lightweight_advisor(
-                pool, 'Security', 'Security_op_test1234', 'task', 'caller'
-            )
+            result = run_lightweight_advisor(pool, 'Security', 'Security_op_test1234', 'task', 'caller')
         assert result.was_error is True
         assert 'engine boom' in result.error_msg
         assert not result.ok
@@ -547,9 +535,7 @@ class TestAdvisorRunner:
         pool = _make_pool()
         p1, p2, fake_inst = self._patch_engine([['turn1']])
         with p1, p2:
-            result = run_lightweight_advisor(
-                pool, 'Security', 'Security_op_test5678', 'task', 'caller'
-            )
+            result = run_lightweight_advisor(pool, 'Security', 'Security_op_test5678', 'task', 'caller')
         assert result.was_error is False
         assert result.was_timeout is False
         assert result.output_text == 'OUTPUT'
@@ -559,7 +545,7 @@ class TestAdvisorRunner:
         """Engine loop must stop as soon as [VERDICT] appears in the last
         assistant message, even if more yields are available."""
         from agent_cascade.advisor_runner import run_lightweight_advisor
-        from agent_cascade.llm.schema import Message, ASSISTANT
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         pool = _make_pool()
         # Generator that would yield 3 turns if not stopped early.
@@ -569,8 +555,7 @@ class TestAdvisorRunner:
         def _gen(inst):
             # Turn 1: assistant produces verdict + (hypothetical) tool calls
             inst.conversation.append(
-                Message(role=ASSISTANT, content='[SKILLS] none\n[NOTES] ok\n[VERDICT] APPROVE — fine')
-            )
+                Message(role=ASSISTANT, content='[SKILLS] none\n[NOTES] ok\n[VERDICT] APPROVE — fine'))
             call_count['n'] += 1
             yield [['turn1']]
             # Turns 2-3: should NEVER be reached if early-exit works
@@ -587,13 +572,11 @@ class TestAdvisorRunner:
         fake_engine.run.side_effect = _gen
         fake_engine._telemetry.return_value = None
 
-        import agent_cascade.execution_engine as ee_mod
         import agent_cascade.compression.helpers as ch_mod
+        import agent_cascade.execution_engine as ee_mod
         with patch.object(ee_mod, 'ExecutionEngine', return_value=fake_engine), \
              patch.object(ch_mod, 'extract_instance_output', return_value='VERDICT OUTPUT'):
-            result = run_lightweight_advisor(
-                pool, 'Security', 'Security_op_early01', 'task', 'caller'
-            )
+            result = run_lightweight_advisor(pool, 'Security', 'Security_op_early01', 'task', 'caller')
         # Only 1 turn should have been consumed (early exit on verdict)
         assert call_count['n'] == 1, f"Expected 1 turn, got {call_count['n']}"
         assert result.was_error is False

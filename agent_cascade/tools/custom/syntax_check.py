@@ -1,33 +1,47 @@
-import ast
 import json
-import os
 import re
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Union
 
-from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
-
+from agent_cascade.tools.base import BaseTool, register_tool
 
 # ── Extension → language mapping ───────────────────────────────────────────────
 _EXT_LANG_MAP: Dict[str, str] = {
     # Python
-    '.py': 'python', '.pyw': 'python', '.pyi': 'python',
+    '.py': 'python',
+    '.pyw': 'python',
+    '.pyi': 'python',
     # JavaScript / TypeScript
-    '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+    '.js': 'javascript',
+    '.mjs': 'javascript',
+    '.cjs': 'javascript',
     '.jsx': 'javascript',
-    '.ts': 'typescript', '.tsx': 'typescript',
+    '.ts': 'typescript',
+    '.tsx': 'typescript',
     # Web
-    '.html': 'html', '.htm': 'html',
-    '.css': 'css', '.scss': 'css', '.less': 'css',
+    '.html': 'html',
+    '.htm': 'html',
+    '.css': 'css',
+    '.scss': 'css',
+    '.less': 'css',
     # Data / Config
     '.json': 'json',
-    '.yaml': 'yaml', '.yml': 'yaml',
+    '.yaml': 'yaml',
+    '.yml': 'yaml',
     '.toml': 'toml',
-    '.xml': 'xml', '.svg': 'xml', '.xsl': 'xml', '.xslt': 'xml',
+    '.xml': 'xml',
+    '.svg': 'xml',
+    '.xsl': 'xml',
+    '.xslt': 'xml',
     # C-family
-    '.c': 'c', '.h': 'c',
-    '.cpp': 'cpp', '.cc': 'cpp', '.cxx': 'cpp', '.hpp': 'cpp', '.hxx': 'cpp',
+    '.c': 'c',
+    '.h': 'c',
+    '.cpp': 'cpp',
+    '.cc': 'cpp',
+    '.cxx': 'cpp',
+    '.hpp': 'cpp',
+    '.hxx': 'cpp',
     '.cs': 'csharp',
     '.java': 'java',
     # Other
@@ -36,14 +50,19 @@ _EXT_LANG_MAP: Dict[str, str] = {
     '.rb': 'ruby',
     '.php': 'php',
     '.lua': 'lua',
-    '.sh': 'bash', '.bash': 'bash',
+    '.sh': 'bash',
+    '.bash': 'bash',
     '.ps1': 'powershell',
-    '.bat': 'batch', '.cmd': 'batch',
+    '.bat': 'batch',
+    '.cmd': 'batch',
     '.sql': 'sql',
-    '.r': 'r', '.R': 'r',
-    '.kt': 'kotlin', '.kts': 'kotlin',
+    '.r': 'r',
+    '.R': 'r',
+    '.kt': 'kotlin',
+    '.kts': 'kotlin',
     '.swift': 'swift',
-    '.pl': 'perl', '.pm': 'perl',
+    '.pl': 'perl',
+    '.pm': 'perl',
     '.scala': 'scala',
 }
 
@@ -55,6 +74,7 @@ def _detect_language(file_path: str) -> str:
 
 
 # ── Individual language checkers ───────────────────────────────────────────────
+
 
 def _check_python(content: str, path: str) -> str:
     """Check Python syntax using the built-in compile()."""
@@ -125,12 +145,13 @@ def _check_html(content: str, _path: str) -> str:
     errors = []
 
     class StrictHTMLParser(HTMLParser):
+
         def __init__(self):
             super().__init__()
             self._tag_stack = []
             self._void_elements = {
-                'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-                'link', 'meta', 'param', 'source', 'track', 'wbr'
+                'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track',
+                'wbr'
             }
 
         def handle_starttag(self, tag, attrs):
@@ -146,9 +167,7 @@ def _check_html(content: str, _path: str) -> str:
             elif self._tag_stack:
                 expected = self._tag_stack[-1][0]
                 line, col = self.getpos()
-                errors.append(
-                    f"Line {line}: Found closing </{tag}> but expected </{expected}>"
-                )
+                errors.append(f"Line {line}: Found closing </{tag}> but expected </{expected}>")
             else:
                 # Report unexpected closing tag with no matching open tag
                 line, col = self.getpos()
@@ -294,8 +313,8 @@ def _check_c_family(content: str, _path: str) -> str:
 
                 # Preceding chars that indicate a regex (not division).
                 # j < 0 means start-of-line after whitespace, also valid for regex.
-                if (before in ('(', ')', '[', ']', '=', '!', '&', '|', '^',
-                               ',', ';', ':', '?', '~') or i == 0 or j < 0):
+                if (before in ('(', ')', '[', ']', '=', '!', '&', '|', '^', ',', ';', ':', '?', '~') or i == 0 or
+                        j < 0):
                     # Scan forward to find the closing /
                     j = i + 1
                     while j < len(line):
@@ -317,8 +336,7 @@ def _check_c_family(content: str, _path: str) -> str:
                         elif line[j] == '/':
                             # Found closing slash, skip any flags (giu, etc.)
                             j += 1
-                            while (j < len(line) and
-                                   (line[j].isalpha() or line[j] in '_')):
+                            while (j < len(line) and (line[j].isalpha() or line[j] in '_')):
                                 j += 1
                             i = j - 1  # will be incremented at end of loop
                             break
@@ -333,15 +351,12 @@ def _check_c_family(content: str, _path: str) -> str:
                 if ch in match_map:
                     expected = match_map[ch]
                     if not stack:
-                        errors.append(
-                            f"Line {line_no}: Unexpected '{ch}' "
-                            f"with no matching '{expected}'")
+                        errors.append(f"Line {line_no}: Unexpected '{ch}' "
+                                      f"with no matching '{expected}'")
                     elif stack[-1][0] != expected:
                         opener, open_line = stack[-1]
-                        errors.append(
-                            f"Line {line_no}: '{ch}' does not match "
-                            f"'{opener}' opened at line {open_line}"
-                        )
+                        errors.append(f"Line {line_no}: '{ch}' does not match "
+                                      f"'{opener}' opened at line {open_line}")
                         stack.pop()
                     else:
                         stack.pop()
@@ -354,9 +369,7 @@ def _check_c_family(content: str, _path: str) -> str:
     # Report any unclosed brackets/braces/parens
     for opener, line_no in stack:
         close_char = {'{': '}', '(': ')', '[': ']'}[opener]
-        errors.append(
-            f"Line {line_no}: Unclosed '{opener}' (expected '{close_char}')"
-        )
+        errors.append(f"Line {line_no}: Unclosed '{opener}' (expected '{close_char}')")
 
     if errors:
         return 'Syntax Issues:\n' + '\n'.join(errors[:20])
@@ -494,10 +507,8 @@ class SyntaxCheck(BaseTool):
         lang = _detect_language(str(abs_path))
         if not lang:
             ext = abs_path.suffix
-            return (
-                f"ERROR: Unsupported file type '{ext}'. "
-                f"Supported extensions: {', '.join(sorted(_EXT_LANG_MAP.keys()))}"
-            )
+            return (f"ERROR: Unsupported file type '{ext}'. "
+                    f"Supported extensions: {', '.join(sorted(_EXT_LANG_MAP.keys()))}")
 
         # Read file content
         try:
@@ -511,10 +522,8 @@ class SyntaxCheck(BaseTool):
         # Find and run the checker
         checker = _CHECKER_MAP.get(lang)
         if not checker:
-            return (
-                f"Error: No syntax checker available for language '{lang}'. "
-                f"Supported languages: {', '.join(sorted(set(_CHECKER_MAP.keys())))}"
-            )
+            return (f"Error: No syntax checker available for language '{lang}'. "
+                    f"Supported languages: {', '.join(sorted(set(_CHECKER_MAP.keys())))}")
 
         try:
             result = checker(content, str(abs_path))

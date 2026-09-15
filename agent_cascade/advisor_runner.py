@@ -14,7 +14,7 @@ import copy
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # Pre-compiled: matches a [VERDICT] line in the advisor's structured output.
@@ -70,12 +70,11 @@ def run_lightweight_advisor(
         ``was_timeout`` so the caller can fall back gracefully. This function never
         raises — all exceptions are captured into the result.
     """
-    from agent_cascade.log import logger
-
+    from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS, NON_LLM_KEYS
     from agent_cascade.execution_engine import ExecutionEngine
-    from agent_cascade.constants import NON_LLM_KEYS, DEFAULT_SECURITY_DISABLED_TOOLS
-    from agent_cascade.utils import merge_disabled_tools_for_auto_agent
+    from agent_cascade.log import logger
     from agent_cascade.settings import SECURITY_AGENT_MAX_TURNS
+    from agent_cascade.utils import merge_disabled_tools_for_auto_agent
 
     result = AdvisorResult()
     start_time = time.perf_counter()

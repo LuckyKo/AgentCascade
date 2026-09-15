@@ -16,13 +16,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.api_router import APIRouter, APIEndpoint
+from agent_cascade.api_router import APIEndpoint, APIRouter
 from agent_cascade.tool_dispatcher import ToolDispatcher
-
 
 # ============================================================================
 # Fixtures and helpers
 # ============================================================================
+
 
 @pytest.fixture
 def router_with_endpoints(tmp_path_factory):
@@ -151,12 +151,13 @@ def _create_dispatcher(pool):
 # Test 1: Sequential child (concurrency=0) forces SYNC path
 # ============================================================================
 
+
 class TestSequentialChildForcesSync:
     """When child agent has concurrency=0, the call takes SYNC path regardless of caller state."""
 
     def test_sync_when_child_concurrency_zero_no_caller_slot(self, router_with_endpoints):
         """Child with concurrency=0 forces SYNC even when caller holds no slot.
-        
+
         This is the key Sequential Endpoint Guard behavior: conc=0 means only one agent
         can use the shared sequential slot at a time, so we must run inline to avoid
         blocking the entire pool.
@@ -174,7 +175,11 @@ class TestSequentialChildForcesSync:
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={'instance_name': 'child1', 'agent_class': 'security', 'task': 'test'},
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'security',
+                'task': 'test'
+            },
             messages=[],
             instance=caller,
         )
@@ -199,7 +204,11 @@ class TestSequentialChildForcesSync:
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={'instance_name': 'child1', 'agent_class': 'security', 'task': 'test'},
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'security',
+                'task': 'test'
+            },
             messages=[],
             instance=caller,
         )
@@ -212,6 +221,7 @@ class TestSequentialChildForcesSync:
 # ============================================================================
 # Test 2: Unlimited child always takes ASYNC path (no slot conflict possible)
 # ============================================================================
+
 
 class TestUnlimitedChildAlwaysAsync:
     """When child uses concurrency=-1 endpoint, ASYNC is safe regardless of caller's slot."""
@@ -231,7 +241,11 @@ class TestUnlimitedChildAlwaysAsync:
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={'instance_name': 'child1', 'agent_class': 'researcher', 'task': 'test'},
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'researcher',
+                'task': 'test'
+            },
             messages=[],
             instance=caller,
         )
@@ -254,8 +268,12 @@ class TestUnlimitedChildAlwaysAsync:
         pool = _make_mock_pool(router_with_endpoints, caller)
         dispatcher = _create_dispatcher(pool)
 
-        result = dispatcher.handle_call_agent(
-            args={'instance_name': 'child1', 'agent_class': 'coder', 'task': 'test'},
+        dispatcher.handle_call_agent(
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'coder',
+                'task': 'test'
+            },
             messages=[],
             instance=caller,
         )
@@ -266,6 +284,7 @@ class TestUnlimitedChildAlwaysAsync:
 # ============================================================================
 # Test 3: Different slot pools → ASYNC is safe (no collision)
 # ============================================================================
+
 
 class TestDifferentSlotPoolsAsync:
     """When caller and child use different slot pools, ASYNC avoids deadlock."""
@@ -285,7 +304,11 @@ class TestDifferentSlotPoolsAsync:
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={'instance_name': 'child1', 'agent_class': 'reviewer', 'task': 'test'},
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'reviewer',
+                'task': 'test'
+            },
             messages=[],
             instance=caller,
         )
@@ -297,6 +320,7 @@ class TestDifferentSlotPoolsAsync:
 # ============================================================================
 # Test 4: Same slot pool collision → SYNC required to avoid deadlock
 # ============================================================================
+
 
 class TestSamePoolCollisionSync:
     """When caller and child share the same limited endpoint, SYNC avoids deadlock."""
@@ -316,7 +340,11 @@ class TestSamePoolCollisionSync:
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={'instance_name': 'child1', 'agent_class': 'coder', 'task': 'test'},
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'coder',
+                'task': 'test'
+            },
             messages=[],
             instance=caller,
         )
@@ -329,6 +357,7 @@ class TestSamePoolCollisionSync:
 # ============================================================================
 # Test 5: Decision uses child's effective concurrency (not just caller state)
 # ============================================================================
+
 
 class TestEffectiveConcurrencyDecision:
     """Verify the decision logic queries and respects the child's effective concurrency."""
@@ -357,7 +386,11 @@ class TestEffectiveConcurrencyDecision:
 
         with patch.object(router_with_endpoints, 'get_effective_concurrency', side_effect=tracking_get_eff):
             dispatcher.handle_call_agent(
-                args={'instance_name': 'child1', 'agent_class': 'reviewer', 'task': 'test'},
+                args={
+                    'instance_name': 'child1',
+                    'agent_class': 'reviewer',
+                    'task': 'test'
+                },
                 messages=[],
                 instance=caller,
             )
@@ -381,7 +414,11 @@ class TestEffectiveConcurrencyDecision:
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
-            args={'instance_name': 'child1', 'agent_class': 'coder', 'task': 'test'},
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'coder',
+                'task': 'test'
+            },
             messages=[],
             instance=caller,
         )

@@ -14,14 +14,12 @@ All tests are self-contained — no LLM or API server required.
 import threading
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agent_cascade.llm.schema import SYSTEM, USER, Message
-
 
 # ──────────────────────────────────────────────
 # Test helpers
 # ──────────────────────────────────────────────
+
 
 def _make_mock_instance(instance_name='worker1', agent_class='test_agent', conversation=None):
     """Create a minimal AgentInstance mock."""
@@ -106,7 +104,9 @@ def _run(engine, load_skill):
 # 1. Recall does NOT change system message / re-inject skills
 # ──────────────────────────────────────────────
 
+
 class TestRecallPreservesSystemPrompt:
+
     def test_recall_does_not_rebuild_system_message(self):
         """On recall, build_system_message must NOT be called (no fresh rebuild)."""
         existing_sys = Message(role=SYSTEM, content='ORIGINAL SYSTEM PROMPT')
@@ -194,7 +194,9 @@ class TestRecallPreservesSystemPrompt:
 # 1b. Recall defensive fallbacks (non-system first message) + external-load edge
 # ──────────────────────────────────────────────
 
+
 class TestRecallFallbacks:
+
     def test_recall_non_system_first_message_falls_back_to_build(self):
         """Defensive: recall where conversation[0] is NOT a SYSTEM message must fall
         back to the build path rather than crash."""
@@ -237,7 +239,9 @@ class TestRecallFallbacks:
 # 2. New instance with AUTO still injects Self-Augmentation + matched skills
 # ──────────────────────────────────────────────
 
+
 class TestNewInstanceAutoInjectsSkills:
+
     def test_new_instance_auto_injects_self_augmentation(self):
         """New instance (empty conversation) with load_skill='AUTO' injects skills."""
         inst = _make_mock_instance(conversation=[])
@@ -261,7 +265,9 @@ class TestNewInstanceAutoInjectsSkills:
 # 3. New instance with per-call NONE: matched suppressed, Self-Aug kept (global ON)
 # ──────────────────────────────────────────────
 
+
 class TestNewInstancePerCallNone:
+
     def test_per_call_none_still_injects_self_augmentation_when_global_on(self):
         """CORRECTED RULE: new instance + per-call load_skill='NONE' with the GLOBAL
         'Enable skills' toggle ON must STILL inject Self-Augmentation; only matched/
@@ -304,7 +310,9 @@ class TestNewInstancePerCallNone:
 # 4. External load still injects Self-Augmentation
 # ──────────────────────────────────────────────
 
+
 class TestExternalLoadInjectsSelfAugmentation:
+
     def test_external_load_injects_self_augmentation(self):
         """session_was_loaded=True (fresh instance restored from log) builds fresh
         system message and injects skills (Self-Augmentation included)."""
@@ -327,7 +335,9 @@ class TestExternalLoadInjectsSelfAugmentation:
 # 5. Fix A — recall refreshes the '## Active Skills' block
 # ──────────────────────────────────────────────
 
+
 class TestRecallRefreshesSkills:
+
     def test_recall_reflects_edited_self_augmentation(self):
         """REGRESSION (Fix A): a skill edited since instance creation is picked up on
         recall — the '## Active Skills' block shows the CURRENT content, not the stale
@@ -335,15 +345,14 @@ class TestRecallRefreshesSkills:
         existing_sys = Message(
             role=SYSTEM,
             content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-                    '## Active Skills\n\n### Skill 1\nOLD SELF-AUG CONTENT',
+            '## Active Skills\n\n### Skill 1\nOLD SELF-AUG CONTENT',
         )
         inst = _make_mock_instance(conversation=[existing_sys])
         engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
 
         mock_pool.skill_manager = MagicMock()
         mock_pool.skill_manager._ensure_discovered = MagicMock()
-        mock_pool.skill_manager.load_full_instructions = MagicMock(
-            return_value='NEW SELF-AUG CONTENT (edited)')
+        mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='NEW SELF-AUG CONTENT (edited)')
 
         _run(engine, load_skill='AUTO')
 
@@ -386,7 +395,7 @@ class TestRecallRefreshesSkills:
         existing_sys = Message(
             role=SYSTEM,
             content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-                    '## Active Skills\n\n### Skill 1\nOLD SELF-AUG CONTENT',
+            '## Active Skills\n\n### Skill 1\nOLD SELF-AUG CONTENT',
         )
         inst = _make_mock_instance(conversation=[existing_sys])
         engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='NONE')
@@ -428,6 +437,7 @@ class TestRecallRefreshesSkills:
 # 6. BUG_0009 — skills block with internal ## headings refreshes cleanly
 # ──────────────────────────────────────────────
 
+
 class TestSkillsBlockInternalHeadings:
     """Regression for BUG_0009: skill content contains its own level-2 (##)
     markdown headings (e.g. "## WHEN TO ACT", "## TOOL REFERENCE"). The old
@@ -452,7 +462,7 @@ class TestSkillsBlockInternalHeadings:
         sys_msg = Message(
             role=SYSTEM,
             content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-                    '## Active Skills\n### Skill 1\n' + old_skill,
+            '## Active Skills\n### Skill 1\n' + old_skill,
         )
         inst = _make_mock_instance(conversation=[sys_msg])
 
@@ -486,7 +496,7 @@ class TestSkillsBlockInternalHeadings:
         sys_msg = Message(
             role=SYSTEM,
             content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-                    '## Active Skills\n### Skill 1\n' + old_skill,
+            '## Active Skills\n### Skill 1\n' + old_skill,
         )
         inst = _make_mock_instance(conversation=[sys_msg])
         pool = MagicMock()
@@ -512,11 +522,11 @@ class TestSkillsBlockInternalHeadings:
         # Variant headings that the old substring check caught — the new regex
         # must also catch all of them (guard returns False, no injection).
         variant_headings = [
-            '## Active Skills',          # canonical
-            '##  Active   Skills',       # extra whitespace
-            '## active skills',          # lowercase
-            '## ACTIVE SKILLS',          # uppercase
-            '## Active Skills: note',    # trailing text on same line
+            '## Active Skills',  # canonical
+            '##  Active   Skills',  # extra whitespace
+            '## active skills',  # lowercase
+            '## ACTIVE SKILLS',  # uppercase
+            '## Active Skills: note',  # trailing text on same line
         ]
         for heading in variant_headings:
             sys_msg = Message(
@@ -533,4 +543,3 @@ class TestSkillsBlockInternalHeadings:
         injected = _inject_skills_to_system_message(pool, sys_msg, [skill_text])
         assert injected is True
         assert '## Active Skills' in sys_msg.content
-

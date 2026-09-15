@@ -3,22 +3,17 @@
 Phase 3b pure-move refactor. Imports the SAME ``_cache_mgr`` singleton from cache.py.
 """
 
-import os
-import copy as _copy
 from typing import Any, Dict, List, Optional
 
-from agent_cascade.log import logger
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.agent_pool import AgentPool
-from agent_cascade.constants import POOL_SETTINGS_TO_BROADCAST
-from agent_cascade.llm.schema import ASSISTANT, CONTENT, NAME, REASONING_CONTENT, ROLE, SYSTEM, USER, Message
-from agent_cascade.api_integration_pkg.cache import (
-    _cache_mgr,
-    _TOKEN_STATS_CACHE_MAXSIZE,
-    _store_ui_cache,
-    _get_ui_cache,
-)
+from agent_cascade.api_integration_pkg.cache import (_TOKEN_STATS_CACHE_MAXSIZE, _cache_mgr, _get_ui_cache,
+                                                     _store_ui_cache)
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
+from agent_cascade.constants import POOL_SETTINGS_TO_BROADCAST
+from agent_cascade.llm.schema import ASSISTANT, CONTENT, NAME, REASONING_CONTENT, ROLE, Message
+from agent_cascade.log import logger
+
 
 def _msg_fingerprint(msg: Any) -> Optional[tuple]:
     """Stable fingerprint of a message object for version tracking (immune to id() memory recycling)."""
@@ -34,14 +29,13 @@ def _msg_fingerprint(msg: Any) -> Optional[tuple]:
     c = len(content) if isinstance(content, list) else str(content)[:64]
     return (role, c)
 
-from agent_cascade.settings import (
-    STREAM_DELTA_ENABLED,
-    STREAM_DELTA_TAIL_COMMITTED,
-)
+
+from agent_cascade.settings import STREAM_DELTA_ENABLED, STREAM_DELTA_TAIL_COMMITTED
 
 # Delta-streaming flags live in agent_cascade.settings (default ON, overridable via
 # AGENT_CASCADE_STREAM_DELTA). TAIL_COMMITTED is kept as the internal name used below.
 TAIL_COMMITTED = STREAM_DELTA_TAIL_COMMITTED
+
 
 def _serialize_loop_settings(ps):
     """Serialize loop detection settings from PoolSettings instance."""
@@ -57,7 +51,9 @@ def _serialize_loop_settings(ps):
         'loop_cooldown_feeds': getattr(ps, 'loop_cooldown_feeds', 50),
     }
 
-def _get_instance_messages(pool: AgentPool, instance_name: str,
+
+def _get_instance_messages(pool: AgentPool,
+                           instance_name: str,
                            responses: Optional[List[Message]] = None) -> List[Message]:
     """Get messages list from pool instance, extending with optional responses."""
     instance = pool.get_instance(instance_name)
@@ -69,20 +65,22 @@ def _get_instance_messages(pool: AgentPool, instance_name: str,
         msgs.extend(responses)
     return msgs
 
-def _calc_token_stats(pool: AgentPool, full_conversation: List[Message],
+
+def _calc_token_stats(pool: AgentPool,
+                      full_conversation: List[Message],
                       partial_responses: Optional[List[Message]] = None) -> tuple:
     """Calculate h_stats and r_stats for a message list with error handling.
-    
+
     Args:
         pool: The AgentPool (used for slice_history_for_llm).
         full_conversation: Complete conversation messages (used for h_stats via slicing).
         partial_responses: Current partial response messages from engine (for r_stats).
-        
+
     Returns:
         (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
     """
     active_h = pool.slice_history_for_llm(full_conversation) if full_conversation else full_conversation
-    
+
     try:
         from agent_cascade.utils.utils import get_history_stats
         h_stats = get_history_stats(active_h)
@@ -92,6 +90,7 @@ def _calc_token_stats(pool: AgentPool, full_conversation: List[Message],
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}
         r_stats = {'tokens': 0, 'words': 0}
     return h_stats, r_stats
+
 
 def _calc_stream_r_stats(partial_responses: Optional[List[Message]]) -> dict:
     """Compute token stats for ONLY the streaming partial (r_stats).
@@ -113,14 +112,16 @@ def _calc_stream_r_stats(partial_responses: Optional[List[Message]]) -> dict:
         logger.debug(f"Token stats calculation failed for streaming partial (using estimate): {e}")
         return {'tokens': len(partial_responses) * 4, 'words': 0}
 
-def _serialize_all_instances(pool: AgentPool, instance_snapshot: Dict[str, Any],
-                              streaming: bool = False) -> Dict[str, dict]:
+
+def _serialize_all_instances(pool: AgentPool,
+                             instance_snapshot: Dict[str, Any],
+                             streaming: bool = False) -> Dict[str, dict]:
     """Serialize all instances in a pool snapshot.
-    
+
     Args:
         pool: The AgentPool managing all instances.
         instance_snapshot: Snapshot of pool.instances for safe iteration.
-        streaming: If True, uses tail optimization within each instance's 
+        streaming: If True, uses tail optimization within each instance's
             _serialize_instance call (partial messages only).
     """
     all_instances = {}
@@ -128,18 +129,20 @@ def _serialize_all_instances(pool: AgentPool, instance_snapshot: Dict[str, Any],
         with inst._compression_lock:
             inst_streaming = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
         all_instances[name] = _serialize_instance(
-            inst, pool, include_messages=True, streaming=streaming,
+            inst,
+            pool,
+            include_messages=True,
+            streaming=streaming,
             streaming_responses=inst_streaming,
         )
     return all_instances
 
+
 def _get_session_name(instance_snapshot: Dict[str, Any], fallback: str) -> str:
     """Derive session name from root instances (first parentless instance)."""
-    root_instances = [
-        name for name, inst in instance_snapshot.items()
-        if inst.parent_instance is None
-    ]
+    root_instances = [name for name, inst in instance_snapshot.items() if inst.parent_instance is None]
     return root_instances[0] if root_instances else fallback
+
 
 def _get_current_model(pool: AgentPool, instance: AgentInstance) -> str:
     """Get the current model name from the instance's template LLM."""
@@ -147,6 +150,7 @@ def _get_current_model(pool: AgentPool, instance: AgentInstance) -> str:
     if template and hasattr(template, 'llm') and template.llm:
         return getattr(template.llm, 'model', 'Unknown')
     return 'Unknown'
+
 
 def _safe_get_telemetry(pool: AgentPool, instance_name: str) -> Optional[dict]:
     """Get telemetry summary for an instance (never blocks state building)."""
@@ -157,6 +161,7 @@ def _safe_get_telemetry(pool: AgentPool, instance_name: str) -> Optional[dict]:
             logger.debug(f"Telemetry summary fetch failed for {instance_name} (non-critical): {e}")
     return None
 
+
 def _safe_get_api_router_state(pool: AgentPool) -> dict:
     """Get API router state dict (never blocks state building)."""
     if hasattr(pool, 'api_router') and pool.api_router:
@@ -166,6 +171,7 @@ def _safe_get_api_router_state(pool: AgentPool) -> dict:
             logger.debug(f"API router state serialization failed (using empty): {e}")
     return {'endpoints': [], 'agent_priorities': {}}
 
+
 def _get_default_workspace(pool: AgentPool) -> str:
     """Get default workspace path from pool or settings."""
     from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -173,6 +179,7 @@ def _get_default_workspace(pool: AgentPool) -> str:
     if pool and hasattr(pool, 'operation_manager') and pool.operation_manager:
         default_workspace = str(pool.operation_manager.base_dir)
     return default_workspace
+
 
 def _build_active_stack(pool: AgentPool) -> list:
     """Get the active execution stack from the pool.
@@ -192,11 +199,13 @@ def _build_active_stack(pool: AgentPool) -> list:
         return list(pool._execution.active_stack)
     return []
 
+
 def _get_msg_content(m):
     """Get content from a Message object or dict."""
     if isinstance(m, dict):
         return m.get(CONTENT, '') or ''
     return getattr(m, CONTENT, '') or ''
+
 
 def _get_msg_reasoning(m):
     """Get reasoning_content from a Message object or dict."""
@@ -204,38 +213,38 @@ def _get_msg_reasoning(m):
         return m.get(REASONING_CONTENT, '') or ''
     return getattr(m, REASONING_CONTENT, '') or ''
 
+
 def _serialize_instances_incremental(
-    pool: AgentPool, instance_name: str, force_full: bool,
+    pool: AgentPool,
+    instance_name: str,
+    force_full: bool,
 ) -> Dict[str, dict]:
     """Serialize all instances with incremental version-based deduplication.
-    
+
     Only re-serializes instances whose conversation has changed since the last
-    stream_update. Version is derived from (msg_count, id_of_last_msg, 
+    stream_update. Version is derived from (msg_count, id_of_last_msg,
     streaming_response_len). During LLM streaming, the conversation
     doesn't change so most instances are skipped.
-    
+
     Every ~100 ticks (force_full=True) all instances are fully re-serialized to
     recover from sync gaps where individual stream_update messages may have been
     dropped due to queue-full conditions.
     """
     instance_snapshot_data = dict(pool.instances)
     all_instances = {}
-    
+
     for name, inst in instance_snapshot_data.items():
         with inst._compression_lock:
             current_msgs = list(inst.conversation)
-            inst_streaming_responses = (
-                list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
-            )
-        
+            inst_streaming_responses = (list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None)
+
         # Calculate content length for this instance's streaming responses (used for version tracking).
         # Include total character count so that growing streaming content invalidates the cache
         # even when message count stays at 1 (single partial response being accumulated).
         stream_content_len = sum(
             len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
-            for m in inst_streaming_responses
-        ) if inst_streaming_responses else 0
-        
+            for m in inst_streaming_responses) if inst_streaming_responses else 0
+
         current_version = (
             len(current_msgs),
             _msg_fingerprint(current_msgs[-1]) if current_msgs else None,
@@ -250,7 +259,7 @@ def _serialize_instances_incremental(
         # since RLock prevents deadlocks and worst case is a slightly stale snapshot.
         with _cache_mgr._lock:
             prev_version = _cache_mgr.stream_versions.get(name)
-            
+
             # Serialize if: active instance OR version changed OR forced full refresh
             if name == instance_name or current_version != prev_version or force_full:
                 # Prefix-shrink detection (replaces a per-instance _conv_version counter):
@@ -259,13 +268,14 @@ def _serialize_instances_incremental(
                 # longer holds a valid prefix. Same-length rewrites are an accepted gap: the
                 # 100-tick force_full self-heals within ~10s.
                 prefix_shrank = (
-                    prev_version is not None
-                    and current_version[0] < prev_version[0]  # message count decreased
+                    prev_version is not None and current_version[0] < prev_version[0]  # message count decreased
                 )
                 full_this_frame = force_full or prefix_shrank
                 all_instances[name] = _serialize_instance(
-                    inst, pool, include_messages=True,
-                    streaming=(not full_this_frame),          # False => no tail cut + is_partial from responses
+                    inst,
+                    pool,
+                    include_messages=True,
+                    streaming=(not full_this_frame),  # False => no tail cut + is_partial from responses
                     streaming_responses=inst_streaming_responses,
                 )
                 _cache_mgr.stream_versions[name] = current_version
@@ -275,14 +285,17 @@ def _serialize_instances_incremental(
                 all_instances[name] = _cache_mgr.cached_instances.get(name)
                 if all_instances[name] is None:
                     all_instances[name] = _serialize_instance(
-                        inst, pool, include_messages=True,
+                        inst,
+                        pool,
+                        include_messages=True,
                         streaming=(not force_full),
                         streaming_responses=inst_streaming_responses,
                     )
                     _cache_mgr.stream_versions[name] = current_version
                     _cache_mgr.cached_instances[name] = all_instances[name]
-    
+
     return all_instances
+
 
 def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
     """Add runtime pool settings (approval timeout, async shell console window) to pool_settings dict.
@@ -298,12 +311,13 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
     # Async shell console window toggle from pool if available
     pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', False)
 
+
 def build_state_from_pool(
-    pool: AgentPool,
-    instance_name: str,
-    responses: Optional[List[Message]] = None,
-    generating: bool = False,
-    streaming: bool = False,  # Controls tail optimization for large conversations
+        pool: AgentPool,
+        instance_name: str,
+        responses: Optional[List[Message]] = None,
+        generating: bool = False,
+        streaming: bool = False,  # Controls tail optimization for large conversations
 ) -> Optional[Dict[str, Any]]:
     """Build a full state snapshot for the frontend directly from the pool.
 
@@ -374,45 +388,75 @@ def build_state_from_pool(
         ps = pool.settings
         pool_settings.update({
             # Core pool/agent settings
-            'idle_timeout_seconds': getattr(ps, 'idle_timeout_seconds', 900.0),
-            'system_agent_idle_timeout_seconds': getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
-            'max_parallel_agents': getattr(ps, 'max_workers', 10),
-            'auto_continue': getattr(ps, 'auto_continue', True),
-            'enable_agent_budgeting': getattr(ps, 'enable_agent_budgeting', True),
-            'max_turns': getattr(ps, 'max_turns', 50),
-            'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
-            'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
+            'idle_timeout_seconds':
+                getattr(ps, 'idle_timeout_seconds', 900.0),
+            'system_agent_idle_timeout_seconds':
+                getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
+            'max_parallel_agents':
+                getattr(ps, 'max_workers', 10),
+            'auto_continue':
+                getattr(ps, 'auto_continue', True),
+            'enable_agent_budgeting':
+                getattr(ps, 'enable_agent_budgeting', True),
+            'max_turns':
+                getattr(ps, 'max_turns', 50),
+            'max_auto_rollbacks':
+                getattr(ps, 'max_auto_rollbacks', 3),
+            'auto_rollback_on_loop':
+                getattr(ps, 'auto_rollback_on_loop', True),
             # Two-tier loop detection (2026-08 redesign)
-            'loop_exact_rollback_enabled': getattr(ps, 'loop_exact_rollback_enabled', True),
-            'loop_fuzzy_warning_enabled': getattr(ps, 'loop_fuzzy_warning_enabled', True),
-            'tool_loop_fuzzy_rollback_enabled': getattr(ps, 'tool_loop_fuzzy_rollback_enabled', False),
+            'loop_exact_rollback_enabled':
+                getattr(ps, 'loop_exact_rollback_enabled', True),
+            'loop_fuzzy_warning_enabled':
+                getattr(ps, 'loop_fuzzy_warning_enabled', True),
+            'tool_loop_fuzzy_rollback_enabled':
+                getattr(ps, 'tool_loop_fuzzy_rollback_enabled', False),
             # DEPRECATED: legacy kill switch for the fuzzy tier (can disable but never enable)
-            'tool_loop_detection_enabled': getattr(ps, 'tool_loop_detection_enabled', True),
+            'tool_loop_detection_enabled':
+                getattr(ps, 'tool_loop_detection_enabled', True),
             # Inner-loop detection
-            **{'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)},
+            **{
+                'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)
+            },
             **_serialize_loop_settings(ps),
             # Skills system
-            'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
-            'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
-            'auto_skill_mode': getattr(ps, 'auto_skill_mode', 'basic'),
+            'default_load_skill_mode':
+                getattr(ps, 'default_load_skill_mode', 'AUTO'),
+            'auto_skill_enabled':
+                getattr(ps, 'auto_skill_enabled', True),
+            'auto_skill_mode':
+                getattr(ps, 'auto_skill_mode', 'basic'),
             # Retry policy settings (Phase 6)
-            'retry_max_attempts': getattr(ps, 'retry_max_attempts', 3),
-            'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),
-            'retry_base_delay': getattr(ps, 'retry_base_delay', 1.0),
-            'retry_max_delay': getattr(ps, 'retry_max_delay', 8.0),
+            'retry_max_attempts':
+                getattr(ps, 'retry_max_attempts', 3),
+            'endpoint_max_retries':
+                getattr(ps, 'endpoint_max_retries', 1),
+            'retry_base_delay':
+                getattr(ps, 'retry_base_delay', 1.0),
+            'retry_max_delay':
+                getattr(ps, 'retry_max_delay', 8.0),
             # Code interpreter
-            'ci_execution_timeout': getattr(ps, 'ci_execution_timeout', 120),
-            'ci_watchdog_timeout': getattr(ps, 'ci_watchdog_timeout', 300),
-            'ci_stale_container_ttl': getattr(ps, 'ci_stale_container_ttl', 1200),
+            'ci_execution_timeout':
+                getattr(ps, 'ci_execution_timeout', 120),
+            'ci_watchdog_timeout':
+                getattr(ps, 'ci_watchdog_timeout', 300),
+            'ci_stale_container_ttl':
+                getattr(ps, 'ci_stale_container_ttl', 1200),
             # Cache pool
-            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
-            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
-            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            'cache_pool_enabled':
+                getattr(ps, 'cache_pool_enabled', True),
+            'cache_pool_size':
+                getattr(ps, 'cache_pool_size', 64),
+            'cache_threshold_chars':
+                getattr(ps, 'cache_threshold_chars', 1000),
             # Streaming timeout settings
-            'stream_max_silence_seconds': getattr(ps, 'stream_max_silence_seconds', 120.0),
-            'stream_max_total_seconds': getattr(ps, 'stream_max_total_seconds', 900.0),
+            'stream_max_silence_seconds':
+                getattr(ps, 'stream_max_silence_seconds', 120.0),
+            'stream_max_total_seconds':
+                getattr(ps, 'stream_max_total_seconds', 900.0),
             # Image caption mode (auto/always/off)
-            'image_caption_mode': getattr(ps, 'image_caption_mode', 'auto'),
+            'image_caption_mode':
+                getattr(ps, 'image_caption_mode', 'auto'),
         })
 
     # Add tool char limits from pool.llm_cfg if available
@@ -467,6 +511,7 @@ def build_state_from_pool(
         'pool_settings': pool_settings,
     }
 
+
 def build_stream_update_from_pool(
     pool: AgentPool,
     instance_name: str,
@@ -504,7 +549,7 @@ def build_stream_update_from_pool(
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
         stream_resp_snapshot = list(instance._streaming_responses) if instance._streaming_responses else None
-    
+
     # Fix B: key token-stats caching on STABLE conversation identity only.
     # The version uses (msg_count, id_of_last_msg, streaming_response_COUNT) — deliberately
     # NOT the growing content length. During a turn's streaming the committed conversation
@@ -534,7 +579,11 @@ def build_stream_update_from_pool(
         # imports build_stream_update_from_pool from this module (state_builder).
         from agent_cascade.api_integration_pkg.streaming import _calc_stream_token_stats
         h_stats, r_stats = _calc_stream_token_stats(
-            pool, instance_name, conv_snapshot, stream_resp_snapshot, responses,
+            pool,
+            instance_name,
+            conv_snapshot,
+            stream_resp_snapshot,
+            responses,
         )
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
@@ -545,7 +594,9 @@ def build_stream_update_from_pool(
 
     # Build ALL instances snapshot with incremental serialization (Fix #3)
     all_instances = _serialize_instances_incremental(
-        pool, instance_name, force_full,
+        pool,
+        instance_name,
+        force_full,
     )
 
     # Get current model and telemetry via shared helpers
@@ -561,45 +612,75 @@ def build_stream_update_from_pool(
         ps = pool.settings
         pool_settings.update({
             # Core pool/agent settings
-            'idle_timeout_seconds': getattr(ps, 'idle_timeout_seconds', 900.0),
-            'system_agent_idle_timeout_seconds': getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
-            'max_parallel_agents': getattr(ps, 'max_workers', 10),
-            'auto_continue': getattr(ps, 'auto_continue', True),
-            'enable_agent_budgeting': getattr(ps, 'enable_agent_budgeting', True),
-            'max_turns': getattr(ps, 'max_turns', 50),
-            'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
-            'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
+            'idle_timeout_seconds':
+                getattr(ps, 'idle_timeout_seconds', 900.0),
+            'system_agent_idle_timeout_seconds':
+                getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
+            'max_parallel_agents':
+                getattr(ps, 'max_workers', 10),
+            'auto_continue':
+                getattr(ps, 'auto_continue', True),
+            'enable_agent_budgeting':
+                getattr(ps, 'enable_agent_budgeting', True),
+            'max_turns':
+                getattr(ps, 'max_turns', 50),
+            'max_auto_rollbacks':
+                getattr(ps, 'max_auto_rollbacks', 3),
+            'auto_rollback_on_loop':
+                getattr(ps, 'auto_rollback_on_loop', True),
             # Two-tier loop detection (2026-08 redesign)
-            'loop_exact_rollback_enabled': getattr(ps, 'loop_exact_rollback_enabled', True),
-            'loop_fuzzy_warning_enabled': getattr(ps, 'loop_fuzzy_warning_enabled', True),
-            'tool_loop_fuzzy_rollback_enabled': getattr(ps, 'tool_loop_fuzzy_rollback_enabled', False),
+            'loop_exact_rollback_enabled':
+                getattr(ps, 'loop_exact_rollback_enabled', True),
+            'loop_fuzzy_warning_enabled':
+                getattr(ps, 'loop_fuzzy_warning_enabled', True),
+            'tool_loop_fuzzy_rollback_enabled':
+                getattr(ps, 'tool_loop_fuzzy_rollback_enabled', False),
             # DEPRECATED: legacy kill switch for the fuzzy tier (can disable but never enable)
-            'tool_loop_detection_enabled': getattr(ps, 'tool_loop_detection_enabled', True),
+            'tool_loop_detection_enabled':
+                getattr(ps, 'tool_loop_detection_enabled', True),
             # Inner-loop detection
-            **{'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)},
+            **{
+                'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)
+            },
             **_serialize_loop_settings(ps),
             # Skills system
-            'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
-            'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
-            'auto_skill_mode': getattr(ps, 'auto_skill_mode', 'basic'),
+            'default_load_skill_mode':
+                getattr(ps, 'default_load_skill_mode', 'AUTO'),
+            'auto_skill_enabled':
+                getattr(ps, 'auto_skill_enabled', True),
+            'auto_skill_mode':
+                getattr(ps, 'auto_skill_mode', 'basic'),
             # Retry policy settings (Phase 6)
-            'retry_max_attempts': getattr(ps, 'retry_max_attempts', 3),
-            'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),
-            'retry_base_delay': getattr(ps, 'retry_base_delay', 1.0),
-            'retry_max_delay': getattr(ps, 'retry_max_delay', 8.0),
+            'retry_max_attempts':
+                getattr(ps, 'retry_max_attempts', 3),
+            'endpoint_max_retries':
+                getattr(ps, 'endpoint_max_retries', 1),
+            'retry_base_delay':
+                getattr(ps, 'retry_base_delay', 1.0),
+            'retry_max_delay':
+                getattr(ps, 'retry_max_delay', 8.0),
             # Code interpreter
-            'ci_execution_timeout': getattr(ps, 'ci_execution_timeout', 120),
-            'ci_watchdog_timeout': getattr(ps, 'ci_watchdog_timeout', 300),
-            'ci_stale_container_ttl': getattr(ps, 'ci_stale_container_ttl', 1200),
+            'ci_execution_timeout':
+                getattr(ps, 'ci_execution_timeout', 120),
+            'ci_watchdog_timeout':
+                getattr(ps, 'ci_watchdog_timeout', 300),
+            'ci_stale_container_ttl':
+                getattr(ps, 'ci_stale_container_ttl', 1200),
             # Cache pool
-            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
-            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
-            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            'cache_pool_enabled':
+                getattr(ps, 'cache_pool_enabled', True),
+            'cache_pool_size':
+                getattr(ps, 'cache_pool_size', 64),
+            'cache_threshold_chars':
+                getattr(ps, 'cache_threshold_chars', 1000),
             # Streaming timeout settings
-            'stream_max_silence_seconds': getattr(ps, 'stream_max_silence_seconds', 120.0),
-            'stream_max_total_seconds': getattr(ps, 'stream_max_total_seconds', 900.0),
+            'stream_max_silence_seconds':
+                getattr(ps, 'stream_max_silence_seconds', 120.0),
+            'stream_max_total_seconds':
+                getattr(ps, 'stream_max_total_seconds', 900.0),
             # Image caption mode (auto/always/off)
-            'image_caption_mode': getattr(ps, 'image_caption_mode', 'auto'),
+            'image_caption_mode':
+                getattr(ps, 'image_caption_mode', 'auto'),
         })
 
     # Add tool char limits from pool.llm_cfg if available
@@ -643,6 +724,7 @@ def build_stream_update_from_pool(
         'paused': pool.is_paused(),  # Pause state for frontend "Paused" indicator
         'pool_settings': pool_settings,
     }
+
 
 def _find_user_message_insertion_point(conversation: list) -> int:
     """Find the correct insertion point for a user message in the conversation.
@@ -713,6 +795,7 @@ def _find_user_message_insertion_point(conversation: list) -> int:
     # Insert at the beginning
     return 0
 
+
 def _safe_tail_start_index(msgs: list) -> int:
     """Index of the first message to include in a delta tail (R6-safe).
 
@@ -732,26 +815,27 @@ def _safe_tail_start_index(msgs: list) -> int:
     tool-call chain and would split a call/response pair.
     """
     if TAIL_COMMITTED <= 0:
-        return 0                                      # misconfig: always send full
+        return 0  # misconfig: always send full
     if not msgs or len(msgs) <= TAIL_COMMITTED:
-        return 0                                      # guard: never a negative start_idx
+        return 0  # guard: never a negative start_idx
     i = len(msgs) - 1
     while i >= 0:
         msg = msgs[i]
         role = (msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '') or '').lower()
         if role in ('tool', 'function'):
-            i -= 1                                   # tool response: walk to its call
+            i -= 1  # tool response: walk to its call
             continue
         if role == 'assistant':
             fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
             tc = msg.get('tool_calls') if isinstance(msg, dict) else getattr(msg, 'tool_calls', None)
             if (fc is not None) or (isinstance(tc, list) and len(tc) > 0):
-                i -= 1                               # assistant with calls: part of the chain
+                i -= 1  # assistant with calls: part of the chain
                 continue
-        break                                         # user / plain assistant / unknown: safe stop
-    boundary = i + 1                                  # first index of last tool chain (or after a safe msg)
-    c = len(msgs) - TAIL_COMMITTED                    # desired cut (tail of exactly T committed msgs)
-    return c if c <= boundary else boundary           # never cut inside the chain
+        break  # user / plain assistant / unknown: safe stop
+    boundary = i + 1  # first index of last tool chain (or after a safe msg)
+    c = len(msgs) - TAIL_COMMITTED  # desired cut (tail of exactly T committed msgs)
+    return c if c <= boundary else boundary  # never cut inside the chain
+
 
 def serialize_message(
     msg: Any,
@@ -896,6 +980,7 @@ def serialize_message(
 
     return d
 
+
 def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:
     """Check if an agent is waiting for an API slot (with defensive error handling)."""
     try:
@@ -984,8 +1069,10 @@ def _is_stale_prefix_of_serialized(
 
 
 def _serialize_instance(
-    inst: AgentInstance, pool: AgentPool,
-    include_messages: bool = False, streaming: bool = False,
+    inst: AgentInstance,
+    pool: AgentPool,
+    include_messages: bool = False,
+    streaming: bool = False,
     streaming_responses: Optional[List[Message]] = None,
 ) -> dict:
     """Serialize an AgentInstance for UI state display.
@@ -996,8 +1083,8 @@ def _serialize_instance(
 
     All messages are always sent — no tail optimization applied. The client merges
     partials correctly so there is no risk of losing early context during streaming.
-    
-    Streaming UI Content Update Fix (Step 3): When streaming_responses is provided, 
+
+    Streaming UI Content Update Fix (Step 3): When streaming_responses is provided,
     append partial LLM content after persisted messages with fingerprint-based dedup.
     Fingerprint includes (content, reasoning_content, function_call, name) to prevent
     duplicates when messages committed in Phase 4 also appear in _streaming_responses.
@@ -1005,12 +1092,13 @@ def _serialize_instance(
     # FIX 3: Thread-safe state read - snapshot state under lock before building result dict
     with inst._state_lock:
         current_state = inst.state  # Snapshot under lock
-    
+
     result = {
         'instance_name': inst.instance_name,
         'agent_class': inst.agent_class,
-        'active': current_state == AgentState.RUNNING,          # Maps to frontend's agentData.active (derived from state)
-        'agent_state': current_state.name,  # Send actual state name for activity indicator (RUNNING, SLEEPING, IDLE, etc.)
+        'active': current_state == AgentState.RUNNING,  # Maps to frontend's agentData.active (derived from state)
+        'agent_state':
+            current_state.name,  # Send actual state name for activity indicator (RUNNING, SLEEPING, IDLE, etc.)
         'is_halted': pool.is_instance_halted(inst.instance_name),
         'parent_instance': inst.parent_instance,
         'has_queued_messages': pool.has_messages(inst.instance_name),
@@ -1027,7 +1115,8 @@ def _serialize_instance(
         full_msgs_snapshot = list(inst.conversation)
         # Read streaming_responses under compression lock for thread safety
         # Use passed parameter if provided, otherwise read from instance (fallback for callers not passing it)
-        stream_responses = list(inst._streaming_responses) if streaming and streaming_responses is None and len(inst._streaming_responses) > 0 else streaming_responses
+        stream_responses = list(inst._streaming_responses) if streaming and streaming_responses is None and len(
+            inst._streaming_responses) > 0 else streaming_responses
 
     msgs = full_msgs_snapshot
     original_history_count = len(msgs)
@@ -1038,12 +1127,12 @@ def _serialize_instance(
     # stream is non-partial (is_partial=False), and the frontend would replace the entire
     # message list with just the tail, losing all prefix messages.
     use_delta = (
-        STREAM_DELTA_ENABLED                    # feature flag (env var, default OFF)
-        and streaming                           # not a force_full / connect-time frame
-        and original_history_count > 0          # something to cut
-        and len(stream_responses or []) > 0     # CRITICAL: only partial frames get a tail;
-                                                # a non-partial frame with just a tail would
-                                                # make the frontend replace ALL history
+        STREAM_DELTA_ENABLED  # feature flag (env var, default OFF)
+        and streaming  # not a force_full / connect-time frame
+        and original_history_count > 0  # something to cut
+        and len(stream_responses or []) > 0  # CRITICAL: only partial frames get a tail;
+        # a non-partial frame with just a tail would
+        # make the frontend replace ALL history
     )
     start_idx = _safe_tail_start_index(msgs) if use_delta else 0
 
@@ -1051,10 +1140,7 @@ def _serialize_instance(
     # `history_count - messages.length`, so a tail frame's first message must carry
     # `index == start_idx`. Passing relative indices would silently break the splice
     # AND change what serialize_message caches (it only caches index > 0).
-    serialized_msgs = [
-        serialize_message(m, i)
-        for i, m in enumerate(msgs[start_idx:], start=start_idx)
-    ]
+    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[start_idx:], start=start_idx)]
 
     # Set is_partial=True when there are active streaming responses so the frontend uses
     # the partial merge path (smart splice with history_count), which properly handles
@@ -1080,15 +1166,19 @@ def _serialize_instance(
             fingerprint = (content, reasoning, func_call, name)
             if fingerprint != ('', '', 'None', None):
                 existing_fingerprints.add(fingerprint)
-        
+
         # Append streaming responses that aren't already in serialized_msgs
         for j, stream_msg in enumerate(stream_responses):
             # Use absolute index relative to full history for streaming messages
             abs_index = original_history_count + j
-            
-            stream_content = stream_msg.get(CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, CONTENT, '') or ''
-            stream_reasoning = stream_msg.get(REASONING_CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, REASONING_CONTENT, '') or ''
-            stream_func_call = str(stream_msg.get('function_call') if isinstance(stream_msg, dict) else getattr(stream_msg, 'function_call', None))
+
+            stream_content = stream_msg.get(CONTENT, '') if isinstance(stream_msg,
+                                                                       dict) else getattr(stream_msg, CONTENT, '') or ''
+            stream_reasoning = stream_msg.get(REASONING_CONTENT, '') if isinstance(
+                stream_msg, dict) else getattr(stream_msg, REASONING_CONTENT, '') or ''
+            stream_func_call = str(
+                stream_msg.get('function_call') if isinstance(stream_msg, dict
+                                                             ) else getattr(stream_msg, 'function_call', None))
             stream_name = stream_msg.get(NAME) if isinstance(stream_msg, dict) else getattr(stream_msg, NAME, None)
             fingerprint = (stream_content, stream_reasoning, stream_func_call, stream_name)
 
@@ -1118,7 +1208,8 @@ def _serialize_instance(
     stream_resp_len = len(stream_responses) if stream_responses else 0
     # Hardening: include instance identity so two distinct instances that happen to share
     # (history_count, last_msg_fingerprint, stream_resp_len) never collide in the global token_stats cache.
-    cache_key = (inst.instance_name, original_history_count, _msg_fingerprint(msgs[-1]) if msgs else None, stream_resp_len)
+    cache_key = (inst.instance_name, original_history_count, _msg_fingerprint(msgs[-1]) if msgs else None,
+                 stream_resp_len)
 
     # Thread-safe check and read of the cached HISTORY-ONLY stats via CacheManager.
     # We cache get_history_stats(full_msgs_snapshot) — the stable committed history — NOT
@@ -1161,6 +1252,7 @@ def _serialize_instance(
 
     return result
 
+
 def _get_approvals(pool: AgentPool) -> list:
     """Get pending approvals from the operation manager (if available)."""
     if hasattr(pool, 'operation_manager') and pool.operation_manager:
@@ -1169,6 +1261,7 @@ def _get_approvals(pool: AgentPool) -> list:
         except Exception as e:
             logger.debug(f"Failed to get pending approvals (non-critical): {e}")
     return []
+
 
 def _build_agents_list(pool: AgentPool) -> list:
     """Build the agents list for UI display.
@@ -1225,6 +1318,7 @@ def _build_agents_list(pool: AgentPool) -> list:
             logger.debug(f"Failed to build agent info for template (skipping): {e}")
     return agents_list
 
+
 def _apply_ui_config(
     pool: AgentPool,
     instance_name: str,
@@ -1252,10 +1346,10 @@ def _apply_ui_config(
         return
 
     # Sanitize numeric values
-    floats = ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty',
-              'repetition_penalty', 'repeat_penalty', 'min_p']
-    ints = ['max_tokens', 'max_completion_tokens', 'top_k', 'seed',
-            'max_input_tokens', 'max_turns']
+    floats = [
+        'temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'repetition_penalty', 'repeat_penalty', 'min_p'
+    ]
+    ints = ['max_tokens', 'max_completion_tokens', 'top_k', 'seed', 'max_input_tokens', 'max_turns']
 
     sanitized = {}
     for k, v in ui_cfg.items():
@@ -1304,10 +1398,8 @@ def _apply_ui_config(
     # If the UI sent a dict (per-agent format like {"coder": [...]}), preserve it —
     # the centralized resolver at resolve_disabled_tools_for_agent() handles dict lookups.
     # If it was a flat list, validate tool names and store as list.
-    from agent_cascade.utils.disabled_tools import (
-        normalize_disabled_tools, validate_tool_names,
-    )
     from agent_cascade.tools.base import TOOL_REGISTRY
+    from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
 
     if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
         raw_dt = sanitized['disabled_tools']
@@ -1355,6 +1447,7 @@ def _apply_ui_config(
         except Exception as e:
             # Lock access should always work, but don't let it break generation
             logger.exception('Unexpected error updating pool.llm_cfg: %s', e)
+
 
 def get_agent_state_from_pool(
     pool: AgentPool,

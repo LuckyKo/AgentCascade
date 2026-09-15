@@ -17,25 +17,14 @@ stacking). Tests are self-contained — no LLM or API server required.
 """
 
 import json
-from unittest.mock import patch
 
-import pytest
-
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
-from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, FUNCTION, Message
-
-# Helpers shared with compression consistency tests
-from tests.test_compression_consistency import (
-    _msg,
-    _write_jsonl,
-    _read_jsonl_messages,
-    _is_marker,
-    rebuild_working_set_from_jsonl,
-)
-
 # MockAgentPool from conftest
 from tests.conftest import MockAgentPool
-
+# Helpers shared with compression consistency tests
+from tests.test_compression_consistency import (_is_marker, _msg, _read_jsonl_messages, _write_jsonl,
+                                                rebuild_working_set_from_jsonl)
 
 # ──────────────────────────────────────────────
 # Test data builders
@@ -337,7 +326,7 @@ class TestSessionLoadNoDuplication:
         new_assistant_msg = Message(role=ASSISTANT, content='Dictionaries map keys to values.')
 
         # Append to working set (simulating pool mutation during execution)
-        extended_ws = list(working_set) + [new_user_msg, new_assistant_msg]
+        list(working_set) + [new_user_msg, new_assistant_msg]
 
         # Now simulate the logger appending these messages to JSONL
         # (what happens in update_history / append_line path)
@@ -364,7 +353,7 @@ class TestSessionLoadNoDuplication:
         _write_jsonl(jsonl_path, [Message(**m) for m in jsonl_msgs])
 
         loaded = _read_jsonl_messages(jsonl_path)
-        working_set = rebuild_working_set_from_jsonl(loaded)
+        rebuild_working_set_from_jsonl(loaded)
 
         # Simulate several turns
         from tests.test_compression_consistency import _write_jsonl_append

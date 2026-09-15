@@ -16,8 +16,8 @@ import math
 import random
 from typing import Dict, Optional, Union
 
-from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.tools.base import BaseTool, register_tool
 
 
 @register_tool('calculate')
@@ -67,23 +67,23 @@ class Calculate(BaseTool):
     def call(self, params: Union[str, dict], **kwargs) -> str:
         params = self._verify_json_format_args(params)
         expression = params['expression']
-        
+
         # Pre-processing for common mathematical notation
         # 1. Replace ^ with ** for python compatibility
         processed_expr = expression.replace('^', '**')
-        
+
         try:
             # Restricted eval: only allowlisted math funcs + safe built-ins; __builtins__={} blocks
             # dangerous names like __import__. Attribute access (e.g. (1).__class__) can introspect
             # type objects but is NOT exploitable — no side-effect object is in scope (see tests).
             result = eval(processed_expr, {'__builtins__': {}}, self.allowed_names)
-            
+
             # Format the result to be clean
             if isinstance(result, (int, float)):
                 if isinstance(result, float) and result.is_integer():
                     return str(int(result))
                 return f"{result:.10g}"
             return str(result)
-            
+
         except Exception as e:
             return f"Error evaluating expression '{expression}': {str(e)}"

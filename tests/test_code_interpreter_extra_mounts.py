@@ -34,11 +34,12 @@ class TestExtraMounts(unittest.TestCase):
     def test_resolve_extra_folders_from_config(self):
         """_resolve_extra_folders falls back to config-set values when no operation_manager."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
-        ci = CodeInterpreter(cfg={
-            'work_dir': self.tmpdir,
-            'extra_work_folders_rw': [self.extra_rw_dir],
-            'extra_work_folders_ro': [self.extra_ro_dir],
-        })
+        ci = CodeInterpreter(
+            cfg={
+                'work_dir': self.tmpdir,
+                'extra_work_folders_rw': [self.extra_rw_dir],
+                'extra_work_folders_ro': [self.extra_ro_dir],
+            })
         extra_rw, extra_ro = ci._resolve_extra_folders()
         self.assertEqual(extra_rw, [self.extra_rw_dir])
         self.assertEqual(extra_ro, [self.extra_ro_dir])
@@ -104,12 +105,24 @@ class TestExtraMounts(unittest.TestCase):
         os.makedirs(ro2)
 
         mounted_rw = [
-            {'host': self.extra_rw_dir, 'container': '/extra_rw_0'},
-            {'host': rw2, 'container': '/extra_rw_1'},
+            {
+                'host': self.extra_rw_dir,
+                'container': '/extra_rw_0'
+            },
+            {
+                'host': rw2,
+                'container': '/extra_rw_1'
+            },
         ]
         mounted_ro = [
-            {'host': self.extra_ro_dir, 'container': '/extra_ro_0'},
-            {'host': ro2, 'container': '/extra_ro_1'},
+            {
+                'host': self.extra_ro_dir,
+                'container': '/extra_ro_0'
+            },
+            {
+                'host': ro2,
+                'container': '/extra_ro_1'
+            },
         ]
         mapping = ci._build_path_mapping('test_kernel', mounted_rw, mounted_ro)
 
@@ -152,11 +165,12 @@ class TestExtraMounts(unittest.TestCase):
         /workspace parent mount to avoid overlay filesystem stacking issues."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
 
-        ci = CodeInterpreter(cfg={
-            'work_dir': self.tmpdir,
-            'extra_work_folders_rw': [self.extra_rw_dir],
-            'extra_work_folders_ro': [self.extra_ro_dir],
-        })
+        ci = CodeInterpreter(
+            cfg={
+                'work_dir': self.tmpdir,
+                'extra_work_folders_rw': [self.extra_rw_dir],
+                'extra_work_folders_ro': [self.extra_ro_dir],
+            })
 
         # Build docker_run_cmd the same way _start_kernel does (lines 738-802)
         extra_rw, extra_ro = ci._resolve_extra_folders()
@@ -184,19 +198,19 @@ class TestExtraMounts(unittest.TestCase):
 
         # Main work_dir mount added LAST (Fix MountStacking)
         docker_run_cmd.extend([
-            '-v', f'{os.path.abspath(self.tmpdir)}:/workspace',
-            '-w', '/workspace',
+            '-v',
+            f'{os.path.abspath(self.tmpdir)}:/workspace',
+            '-w',
+            '/workspace',
         ])
 
         # Verify: all -v flags and their positions
-        v_entries = [(i, docker_run_cmd[i + 1]) for i in range(len(docker_run_cmd))
-                     if docker_run_cmd[i] == '-v']
+        v_entries = [(i, docker_run_cmd[i + 1]) for i in range(len(docker_run_cmd)) if docker_run_cmd[i] == '-v']
         self.assertEqual(len(v_entries), 3, 'Should have exactly 3 volume mounts')
 
         # The last -v should be the work_dir mount (mounting to /workspace)
         last_v_idx, last_v_vol = v_entries[-1]
-        self.assertIn('/workspace', last_v_vol,
-                      f"Last -v flag should mount to /workspace, got: {last_v_vol}")
+        self.assertIn('/workspace', last_v_vol, f"Last -v flag should mount to /workspace, got: {last_v_vol}")
 
         # The first two -v flags should be the extra mounts (mounting to /extra_* paths)
         for idx, vol in v_entries[:-1]:
@@ -257,11 +271,12 @@ class TestExtraMounts(unittest.TestCase):
         """Non-existent paths should be skipped during mount building."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
         nonexistent = os.path.join(self.tmpdir, 'does_not_exist')
-        ci = CodeInterpreter(cfg={
-            'work_dir': self.tmpdir,
-            'extra_work_folders_rw': [self.extra_rw_dir, nonexistent],
-            'extra_work_folders_ro': [self.extra_ro_dir],
-        })
+        ci = CodeInterpreter(
+            cfg={
+                'work_dir': self.tmpdir,
+                'extra_work_folders_rw': [self.extra_rw_dir, nonexistent],
+                'extra_work_folders_ro': [self.extra_ro_dir],
+            })
 
         extra_rw, extra_ro = ci._resolve_extra_folders()
         mounted_rw = []
@@ -290,11 +305,12 @@ class TestExtraMounts(unittest.TestCase):
     def test_code_interpreter_accepts_extra_paths(self):
         """CodeInterpreter.__init__ should accept and store extra path config."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
-        ci = CodeInterpreter(cfg={
-            'work_dir': self.tmpdir,
-            'extra_work_folders_rw': [self.extra_rw_dir],
-            'extra_work_folders_ro': [self.extra_ro_dir],
-        })
+        ci = CodeInterpreter(
+            cfg={
+                'work_dir': self.tmpdir,
+                'extra_work_folders_rw': [self.extra_rw_dir],
+                'extra_work_folders_ro': [self.extra_ro_dir],
+            })
         self.assertEqual(ci.extra_work_folders_rw, [self.extra_rw_dir])
         self.assertEqual(ci.extra_work_folders_ro, [self.extra_ro_dir])
 
@@ -371,6 +387,7 @@ class TestExtraMounts(unittest.TestCase):
 # Tests for Docker mount fixes documented in lessons_docker_mount_fix.md
 # ──────────────────────────────────────────────────────────────
 
+
 def _noop(*args, **kwargs):
     """No-op function for mocking methods that should be skipped during tests."""
     pass
@@ -382,6 +399,7 @@ class TestWatchdogTypeSafety(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
+
         # Save full global state for complete isolation
         self._saved_activity = dict(_KERNEL_ACTIVITY)
 
@@ -389,14 +407,16 @@ class TestWatchdogTypeSafety(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
+
         # Restore the original global state exactly
         _KERNEL_ACTIVITY.clear()
         _KERNEL_ACTIVITY.update(self._saved_activity)
 
     def test_kernel_activity_remains_dict_after_update(self):
         """After updating via the same pattern as _start_kernel (lines ~309/~765), value stays a dict."""
-        from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
         import time as _time
+
+        from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
 
         kernel_id = 'test_kernel_type_safety'
         # Simulate initial entry from _start_kernel (line 681)
@@ -419,8 +439,9 @@ class TestWatchdogTypeSafety(unittest.TestCase):
 
         This tests the isinstance() guard — while no current code path produces a corrupted entry,
         the guard protects against future bugs or mid-restart state corruption."""
-        from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
         import time as _time
+
+        from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
 
         kernel_id = 'test_kernel_corrupt'
         # Simulate corrupted entry — old code wrote a bare float here
@@ -439,8 +460,9 @@ class TestWatchdogTypeSafety(unittest.TestCase):
 
     def test_watchdog_thread_accesses_dict_safely(self):
         """The watchdog reads activity['last_active'] — verify it works with a proper dict entry."""
-        from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
         import time as _time
+
+        from agent_cascade.tools.code_interpreter import _KERNEL_ACTIVITY
 
         kernel_id = 'test_kernel_watchdog'
         # Properly structured entry (as created by the fixed code at line 681)
@@ -479,11 +501,7 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
             cmd = args[0] if args else kwargs.get('args', [])
             # Only fail on 'docker run' — let everything else proceed normally
             if isinstance(cmd, list) and len(cmd) >= 3 and cmd[0] == 'docker' and cmd[1] == 'run':
-                return type('Result', (), {
-                    'returncode': 1,
-                    'stdout': '',
-                    'stderr': 'docker error'
-                })()
+                return type('Result', (), {'returncode': 1, 'stdout': '', 'stderr': 'docker error'})()
             return subprocess.run(*args, **kwargs)
 
         with mock.patch.object(ci, '_build_docker_image', side_effect=_noop):
@@ -493,8 +511,7 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
 
         # path_mapping file should NOT exist because container failed to start
         mapping_file = os.path.join(self.tmpdir, f'path_mapping_{kernel_id}.json')
-        self.assertFalse(os.path.exists(mapping_file),
-                         'path_mapping file must not be written when Docker fails')
+        self.assertFalse(os.path.exists(mapping_file), 'path_mapping file must not be written when Docker fails')
 
     def test_path_mapping_written_on_docker_success(self):
         """If subprocess.run succeeds, path_mapping file SHOULD be created."""
@@ -508,25 +525,13 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
             cmd = args[0] if args else kwargs.get('args', [])
             # docker rm -f — clean up leftover containers (called before docker run)
             if isinstance(cmd, list) and 'docker' in cmd and 'rm' in cmd:
-                return type('Result', (), {
-                    'returncode': 0,
-                    'stdout': '',
-                    'stderr': ''
-                })()
+                return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
             # docker run — success
             elif isinstance(cmd, list) and 'docker' in cmd and 'run' in cmd:
-                return type('Result', (), {
-                    'returncode': 0,
-                    'stdout': 'abc123_container_id',
-                    'stderr': ''
-                })()
+                return type('Result', (), {'returncode': 0, 'stdout': 'abc123_container_id', 'stderr': ''})()
             # docker ps check — container is running
             elif isinstance(cmd, list) and 'docker' in cmd and 'ps' in cmd:
-                return type('Result', (), {
-                    'returncode': 0,
-                    'stdout': 'abc123_container_id',
-                    'stderr': ''
-                })()
+                return type('Result', (), {'returncode': 0, 'stdout': 'abc123_container_id', 'stderr': ''})()
             return subprocess.run(*args, **kwargs)
 
         # Mock _create_kernel_client to avoid slow ZMQ connection attempts (~27s retries).
@@ -538,8 +543,7 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
 
         # path_mapping file SHOULD exist because Docker succeeded
         mapping_file = os.path.join(self.tmpdir, f'path_mapping_{kernel_id}.json')
-        self.assertTrue(os.path.exists(mapping_file),
-                        'path_mapping file must be written after Docker success')
+        self.assertTrue(os.path.exists(mapping_file), 'path_mapping file must be written after Docker success')
         # Verify it's valid JSON
         with open(mapping_file) as f:
             mapping = json.load(f)
@@ -560,30 +564,14 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
             cmd = args[0] if args else kwargs.get('args', [])
             # docker rm -f — clean up leftover containers (called before docker run)
             if isinstance(cmd, list) and 'docker' in cmd and 'rm' in cmd:
-                return type('Result', (), {
-                    'returncode': 0,
-                    'stdout': '',
-                    'stderr': ''
-                })()
+                return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
             elif isinstance(cmd, list) and 'docker' in cmd and 'run' in cmd:
-                return type('Result', (), {
-                    'returncode': 0,
-                    'stdout': 'abc123_container_id',
-                    'stderr': ''
-                })()
+                return type('Result', (), {'returncode': 0, 'stdout': 'abc123_container_id', 'stderr': ''})()
             elif isinstance(cmd, list) and 'docker' in cmd and 'ps' in cmd:
                 # Container not found after run — docker ps returns empty
-                return type('Result', (), {
-                    'returncode': 0,
-                    'stdout': '',
-                    'stderr': ''
-                })()
+                return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
             elif isinstance(cmd, list) and 'docker' in cmd and 'logs' in cmd:
-                return type('Result', (), {
-                    'returncode': 0,
-                    'stdout': 'container logs',
-                    'stderr': ''
-                })()
+                return type('Result', (), {'returncode': 0, 'stdout': 'container logs', 'stderr': ''})()
             return subprocess.run(*args, **kwargs)
 
         with mock.patch.object(ci, '_build_docker_image', side_effect=_noop):
@@ -627,8 +615,7 @@ class TestWorkDirAttributeExists(unittest.TestCase):
         self.assertEqual(ci.work_dir, self.tmpdir)
 
         # Verify base_dir does NOT exist (it was the old broken attribute name)
-        self.assertFalse(hasattr(ci, 'base_dir'),
-                         'CodeInterpreter should not have base_dir — use work_dir instead')
+        self.assertFalse(hasattr(ci, 'base_dir'), 'CodeInterpreter should not have base_dir — use work_dir instead')
 
         # Build allowed_prefixes from ci.work_dir (as _start_kernel does at line 564)
         allowed_prefixes = [os.path.realpath(ci.work_dir)] if ci.work_dir else []
@@ -661,9 +648,7 @@ class TestWorkDirPriorityChain(unittest.TestCase):
     def test_env_var_used_when_no_config(self):
         """M6_CODE_INTERPRETER_WORK_DIR env var is used when config doesn't provide work_dir."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
-        with mock.patch.dict(os.environ, {
-            'M6_CODE_INTERPRETER_WORK_DIR': self.tmpdir
-        }):
+        with mock.patch.dict(os.environ, {'M6_CODE_INTERPRETER_WORK_DIR': self.tmpdir}):
             ci = CodeInterpreter(cfg={})  # No work_dir in config
             self.assertEqual(ci.work_dir, self.tmpdir)
 
@@ -672,9 +657,7 @@ class TestWorkDirPriorityChain(unittest.TestCase):
         from agent_cascade.tools.code_interpreter import CodeInterpreter
         override_dir = os.path.join(self.tmpdir, 'override')
         os.makedirs(override_dir)
-        with mock.patch.dict(os.environ, {
-            'M6_CODE_INTERPRETER_WORK_DIR': self.tmpdir
-        }):
+        with mock.patch.dict(os.environ, {'M6_CODE_INTERPRETER_WORK_DIR': self.tmpdir}):
             ci = CodeInterpreter(cfg={'work_dir': override_dir})
             self.assertEqual(ci.work_dir, override_dir)
 

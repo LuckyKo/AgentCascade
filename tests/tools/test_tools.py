@@ -1,18 +1,17 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import os
 
 import pytest
@@ -70,7 +69,7 @@ def test_web_search_fallback_to_ddg():
       - No exception is raised.
       - The result is non-empty.
     """
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
 
     # Ensure serper is first in priority and has an API key
     with patch('agent_cascade.tools.web_search.get_search_backend_priority', return_value=['serper', 'duckduckgo']):
@@ -79,9 +78,7 @@ def test_web_search_fallback_to_ddg():
                 # Make Serper raise an exception (e.g., connection error)
                 mock_serper.side_effect = requests.exceptions.ConnectionError('Serper unreachable')
 
-                with patch(
-                    'agent_cascade.tools.web_search.search_duckduckgo'
-                ) as mock_ddg:
+                with patch('agent_cascade.tools.web_search.search_duckduckgo') as mock_ddg:
                     mock_ddg.return_value = 'Mocked DuckDuckGo result'
 
                     tool = WebSearch()
@@ -101,9 +98,7 @@ def test_web_search_no_api_key_uses_ddg():
     # Ensure no API key via env or secrets config
     with patch.dict(os.environ, {}, clear=False):
         with patch('agent_cascade.tools.web_search.get_secret', return_value=None):
-            with patch(
-                'agent_cascade.tools.web_search.search_duckduckgo'
-            ) as mock_ddg:
+            with patch('agent_cascade.tools.web_search.search_duckduckgo') as mock_ddg:
                 mock_ddg.return_value = 'Mocked DuckDuckGo result'
 
                 tool = WebSearch()
@@ -125,9 +120,7 @@ def test_web_search_both_backends_fail_raises():
                 mock_serper.side_effect = requests.exceptions.ConnectionError('Serper unreachable')
 
                 # DDG also fails
-                with patch(
-                    'agent_cascade.tools.web_search.search_duckduckgo'
-                ) as mock_ddg:
+                with patch('agent_cascade.tools.web_search.search_duckduckgo') as mock_ddg:
                     mock_ddg.side_effect = RuntimeError('DuckDuckGo search failed: timeout')
 
                     tool = WebSearch()

@@ -10,16 +10,15 @@ Covers:
 Uses the same mocking pattern as test_agent_pool.py to avoid filesystem/LLM deps.
 """
 
-import time
 import threading
-from unittest.mock import patch, MagicMock
+import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.agent_instance import AgentInstance, AgentState, ACTIVE_STATES
-from agent_cascade.exceptions import AgentTerminatedError
+from agent_cascade.agent_instance import ACTIVE_STATES, AgentInstance, AgentState
 from agent_cascade.api_router import _check_termination, _interruptible_sleep
-
+from agent_cascade.exceptions import AgentTerminatedError
 
 # ---------------------------------------------------------------------------
 # Fixture: build a minimal AgentPool without hitting the filesystem
@@ -30,7 +29,7 @@ def agent_pool():
     """Create an AgentPool with mocked dependencies so it can be instantiated."""
     with patch('agent_cascade.operation_manager.OperationManager') as mock_op_mgr, \
          patch('agent_cascade.telemetry.TelemetryCollector') as mock_telem, \
-         patch('agent_cascade.api_router.APIRouter') as mock_router:
+         patch('agent_cascade.api_router.APIRouter') as mock_router:  # noqa: F841  (patch targets must stay bound)
 
         op_mgr = MagicMock()
         op_mgr.base_dir = MagicMock()

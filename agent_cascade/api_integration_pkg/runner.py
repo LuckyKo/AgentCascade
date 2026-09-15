@@ -6,13 +6,14 @@ Phase 3b pure-move refactor. Top of the dependency DAG — imports state_builder
 import sys
 from typing import Any, Dict, Iterator, List, Optional
 
-from agent_cascade.log import logger
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.agent_pool import AgentPool
+from agent_cascade.api_integration_pkg.state_builder import _apply_ui_config
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.execution_engine import ExecutionEngine
 from agent_cascade.llm.schema import SYSTEM, USER, Message
-from agent_cascade.api_integration_pkg.state_builder import _apply_ui_config
+from agent_cascade.log import logger
+
 
 def create_main_agent_instance(
     pool: AgentPool,
@@ -88,7 +89,7 @@ def create_main_agent_instance(
                         log_inst.log_message(msg)
                     except Exception as e:
                         logger.warning(f"Failed to log message for {instance_name}: {e}")
-            
+
             # ── Tail sync check after initial session logging (design doc §5.2 — D1 fix) ──
             try:
                 if getattr(pool.settings, 'tail_sync_check_enabled', True):
@@ -106,11 +107,11 @@ def create_main_agent_instance(
     agent_label = f"{instance_name} (Orchestrator)"
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
-    
+
     # FIX 4: Read state under _state_lock for thread safety
     with instance._state_lock:
         current_state = instance.state
-    
+
     pool.instance_state[instance_name] = {
         'active': False,
         'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
@@ -120,6 +121,7 @@ def create_main_agent_instance(
 
     logger.info(f"Created main agent instance: {instance_name}")
     return instance
+
 
 def run_agent_in_pool(
     pool: AgentPool,
@@ -160,10 +162,11 @@ def run_agent_in_pool(
     # The session_lock protecting session['generating'] read in api_server.py (L1)
     # is sufficient to prevent race conditions. This pre-check held _state_lock for
     # minutes, blocking pause/resume/terminate operations.
-    
+
     engine = ExecutionEngine(pool)
     # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
     yield from engine.run(instance)
+
 
 def run_agent_in_pool_with_recovery(
     pool: AgentPool,
@@ -210,10 +213,8 @@ def run_agent_in_pool_with_recovery(
                 if inst is not None:
                     hint = Message(
                         role=USER,
-                        content=(
-                            f"[SYSTEM]: You appear to be stuck in a loop ({e.reason}). "
-                            f"Try a different approach."
-                        ),
+                        content=(f"[SYSTEM]: You appear to be stuck in a loop ({e.reason}). "
+                                 f"Try a different approach."),
                     )
                     inst.append_message(hint)
 
@@ -223,7 +224,13 @@ def run_agent_in_pool_with_recovery(
                     # Re-check instance after rollback (it may have been evicted)
                     check = pool.get_instance(target) or pool.get_instance(instance_name)
                     if check is None:
-                        last_msgs = [Message(role=USER, content=f"[SYSTEM]: Loop detected — rollback performed but loop recovery failed for {target}: {e.reason}")]
+                        last_msgs = [
+                            Message(
+                                role=USER,
+                                content=
+                                f"[SYSTEM]: Loop detected — rollback performed but loop recovery failed for {target}: {e.reason}"
+                            )
+                        ]
                         yield last_msgs
                         return
 
@@ -231,7 +238,12 @@ def run_agent_in_pool_with_recovery(
                 continue
 
             # Exhausted retries — yield error message (single list of Messages)
-            last_msgs = [Message(role=USER, content=f"[SYSTEM]: Loop detected — rollback performed but loop recovery failed for {target}: {e.reason}")]
+            last_msgs = [
+                Message(
+                    role=USER,
+                    content=
+                    f"[SYSTEM]: Loop detected — rollback performed but loop recovery failed for {target}: {e.reason}")
+            ]
             yield last_msgs
             return
         except (KeyboardInterrupt, SystemExit):
@@ -246,6 +258,7 @@ def run_agent_in_pool_with_recovery(
 
     # Fallback: should not reach here but guard against infinite loops
     yield [Message(role=USER, content='[SYSTEM]: Loop recovery exhausted')]
+
 
 def execute_agent_turn(
     pool: AgentPool,

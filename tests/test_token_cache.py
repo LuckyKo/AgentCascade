@@ -9,10 +9,10 @@ import time
 
 from agent_cascade.utils.token_cache import AgentTokenCache
 
-
 # ===========================================================================
 # Basic operations
 # ===========================================================================
+
 
 class TestBasicOperations:
     """Test the fundamental set/get/invalidate flow."""
@@ -57,6 +57,7 @@ class TestBasicOperations:
 # TTL expiration
 # ===========================================================================
 
+
 class TestTTLExpiration:
     """Test that expired entries are treated as missing."""
 
@@ -75,7 +76,7 @@ class TestTTLExpiration:
         # size() reads under lock but does NOT expire — it just counts raw entries
         # However get() triggers lazy deletion on access
         assert short_ttl_cache.get('a') is None  # lazily removes "a"
-        assert short_ttl_cache.size() == 1       # only "b" left
+        assert short_ttl_cache.size() == 1  # only "b" left
 
     def test_fresh_entry_does_not_expire(self, short_ttl_cache):
         short_ttl_cache.set('a', 5, 500)
@@ -88,6 +89,7 @@ class TestTTLExpiration:
 # ===========================================================================
 # Invalidate and clear_all
 # ===========================================================================
+
 
 class TestInvalidateAndClear:
     """Test explicit cache invalidation."""
@@ -120,6 +122,7 @@ class TestInvalidateAndClear:
 # cleanup_expired
 # ===========================================================================
 
+
 class TestCleanupExpired:
     """Test the periodic cleanup method."""
 
@@ -146,6 +149,7 @@ class TestCleanupExpired:
 # ===========================================================================
 # Thread-safety: concurrent reads and writes
 # ===========================================================================
+
 
 class TestThreadSafety:
     """Test that concurrent access does not corrupt the cache."""
@@ -281,6 +285,7 @@ class TestThreadSafety:
 # ===========================================================================
 # Cleanup timer lifecycle
 # ===========================================================================
+
 
 class TestCleanupTimer:
     """Test that the background cleanup timer starts and can be cancelled."""

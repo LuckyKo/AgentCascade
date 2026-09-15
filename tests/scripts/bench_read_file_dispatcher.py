@@ -11,21 +11,20 @@ Key question: Does the full dispatcher path add significant latency vs. calling 
 Sleep call detection is also performed across all relevant code paths.
 """
 
-import sys
-import os
-import time
 import statistics
+import sys
+import time
 from pathlib import Path
-from typing import List, Dict
+from typing import Dict, List
 from unittest.mock import MagicMock
 
 # Ensure project root is on path for imports
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, PROJECT_ROOT)
 
-from agent_cascade.tools.custom.file_ops import ReadFile
-from agent_cascade.tool_dispatcher import ToolDispatcher
 from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.tool_dispatcher import ToolDispatcher
+from agent_cascade.tools.custom.file_ops import ReadFile
 
 # ── Constants ────────────────────────────────────────────────────────────────
 NUM_ITERATIONS = 20          # Benchmark iterations per test (reduced for faster runs)
@@ -144,7 +143,7 @@ def benchmark_standalone_readfile(tool: ReadFile, test_file: Path) -> List[float
 
     for _ in range(NUM_ITERATIONS):
         t0 = time.perf_counter()
-        result = tool.call({'path': rel, 'start_line': 1, 'limit': TEST_FILE_LINES})
+        tool.call({'path': rel, 'start_line': 1, 'limit': TEST_FILE_LINES})
         elapsed = (time.perf_counter() - t0) * 1000
         times_ms.append(elapsed)
 
@@ -165,7 +164,7 @@ def benchmark_dispatcher_execute(dispatcher: ToolDispatcher, mock_template: Magi
 
     for _ in range(NUM_ITERATIONS):
         t0 = time.perf_counter()
-        result = dispatcher.execute_tool(
+        dispatcher.execute_tool(
             instance=dispatcher.pool.get_instance('test_worker'),
             tool_name='read_file',
             tool_args=tool_args,
@@ -222,8 +221,8 @@ def benchmark_drain_methods(mock_instance: MagicMock, full_result: str) -> Dict[
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    t_start = time.perf_counter()
-    
+    time.perf_counter()
+
     print('=' * 80)
     print('  ReadFile ToolDispatcher Performance Benchmark')
     print('=' * 80)

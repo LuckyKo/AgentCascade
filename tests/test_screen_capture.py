@@ -6,12 +6,11 @@ Tests cover:
   - Platform dispatch and fallback logic in screen_capture.py
 """
 
-import io
 import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
@@ -44,10 +43,8 @@ class TestViewImageDirectiveRouting:
         mock_png_bytes = b'\x89PNG\x0d\x0a...'  # fake PNG header
         mock_temp_path = 'C:/tmp/test_capture.png'
 
-        with patch(
-            f'agent_cascade.tools.custom.screen_capture.{capture_func}',
-            return_value=mock_png_bytes
-        ) as mock_capture:
+        with patch(f'agent_cascade.tools.custom.screen_capture.{capture_func}',
+                   return_value=mock_png_bytes) as mock_capture:
             with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
                 with patch('os.close'):
                     with patch('builtins.open', mock_open()):
@@ -55,10 +52,8 @@ class TestViewImageDirectiveRouting:
                         # with which args), not image decoding. The fake PNG bytes are not a
                         # real image, so stub the media-save step to keep routing isolated
                         # from PIL's format validation (see test_temp_file_created_for_capture).
-                        with patch(
-                            'agent_cascade.tools.custom.file_ops.save_image_to_media',
-                            return_value='C:/logs/media/images/img_20260101_120000_abcd.jpg'
-                        ):
+                        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
+                                   return_value='C:/logs/media/images/img_20260101_120000_abcd.jpg'):
                             result = view_image_tool.call(json.dumps({'path': directive}))
 
                             if expected_pid is not None:
@@ -81,20 +76,16 @@ class TestViewImageDirectiveRouting:
         mock_png_bytes = b'\x89PNG\x0d\x0a...'
         mock_temp_path = 'C:/tmp/test_capture.png'
 
-        with patch(
-            'agent_cascade.tools.custom.screen_capture.capture_screen',
-            return_value=mock_png_bytes
-        ) as mock_capture:
+        with patch('agent_cascade.tools.custom.screen_capture.capture_screen',
+                   return_value=mock_png_bytes) as mock_capture:
             with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
                 with patch('os.close'):
                     with patch('builtins.open', mock_open()):
                         # Verify DIRECTIVE ROUTING (capture_screen called with the right
                         # monitor_index), not image decoding. Stub the media-save step since
                         # the fake PNG bytes are not a real image (see sibling test).
-                        with patch(
-                            'agent_cascade.tools.custom.file_ops.save_image_to_media',
-                            return_value='C:/logs/media/images/img_20260101_120000_abcd.jpg'
-                        ):
+                        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media',
+                                   return_value='C:/logs/media/images/img_20260101_120000_abcd.jpg'):
                             result = view_image_tool.call(json.dumps({'path': directive}))
 
                             mock_capture.assert_called_once_with(monitor_index=expected_monitor_index)
@@ -166,10 +157,7 @@ class TestViewImageDirectiveRouting:
         mock_png_bytes = b'\x89PNG\x0d\x0a...'
         mock_temp_path = 'C:/tmp/capture_view_xyz.png'
 
-        with patch(
-            'agent_cascade.tools.custom.screen_capture.capture_screen',
-            return_value=mock_png_bytes
-        ):
+        with patch('agent_cascade.tools.custom.screen_capture.capture_screen', return_value=mock_png_bytes):
             with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
                 with patch('os.close'):
                     m = mock_open()
@@ -177,7 +165,8 @@ class TestViewImageDirectiveRouting:
                         # After temp file write, save_image_to_media is called which opens the file via PIL
                         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
                             from agent_cascade.utils.media_utils import _get_media_root
-                            test_media_path = str((_get_media_root() / 'images' / 'img_20260101_120000_abcd.jpg')).replace('\\', '/')
+                            test_media_path = str(
+                                (_get_media_root() / 'images' / 'img_20260101_120000_abcd.jpg')).replace('\\', '/')
                             mock_save.return_value = test_media_path
                             result = view_image_tool.call(json.dumps({'path': '__screen_capture'}))
 
@@ -279,9 +268,24 @@ class TestScreenCaptureModule:
         mock_screenshot.bgra = b'\x00' * (1920 * 1080 * 4)
         # Monitor 0=combined, 1=first physical, 2=second physical
         mock_mss_instance.monitors = [
-            {'left': 0, 'top': 0, 'width': 3840, 'height': 1080},   # 0: combined
-            {'left': 0, 'top': 0, 'width': 1920, 'height': 1080},   # 1: left monitor
-            {'left': 1920, 'top': 0, 'width': 1920, 'height': 1080} # 2: right monitor
+            {
+                'left': 0,
+                'top': 0,
+                'width': 3840,
+                'height': 1080
+            },  # 0: combined
+            {
+                'left': 0,
+                'top': 0,
+                'width': 1920,
+                'height': 1080
+            },  # 1: left monitor
+            {
+                'left': 1920,
+                'top': 0,
+                'width': 1920,
+                'height': 1080
+            }  # 2: right monitor
         ]
         mock_mss_instance.grab.return_value = mock_screenshot
 
@@ -313,10 +317,17 @@ class TestScreenCaptureModule:
         mock_mss_module = MagicMock(mss=mock_mss_context)
 
         # Only 2 monitors available (0=combined, 1=physical)
-        mock_mss_instance.monitors = [
-            {'left': 0, 'top': 0, 'width': 1920, 'height': 1080},
-            {'left': 1920, 'top': 0, 'width': 1920, 'height': 1080}
-        ]
+        mock_mss_instance.monitors = [{
+            'left': 0,
+            'top': 0,
+            'width': 1920,
+            'height': 1080
+        }, {
+            'left': 1920,
+            'top': 0,
+            'width': 1920,
+            'height': 1080
+        }]
 
         with patch.dict(sys.modules, {'mss': mock_mss_module}):
             # Test out-of-range index
@@ -363,10 +374,8 @@ class TestScreenCaptureModule:
         tool = ViewImage()
 
         with patch.dict(os.environ, {'SCREEN_CAPTURE_ENABLED': 'True'}):
-            with patch(
-                'agent_cascade.tools.custom.screen_capture.capture_screen',
-                side_effect=ImportError("No module named 'PIL'")
-            ):
+            with patch('agent_cascade.tools.custom.screen_capture.capture_screen',
+                       side_effect=ImportError("No module named 'PIL'")):
                 result = tool.call(json.dumps({'path': '__screen_capture'}))
 
                 # Should return an error string, not crash

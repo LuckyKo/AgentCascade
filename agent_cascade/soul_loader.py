@@ -2,14 +2,15 @@
 Soul Loader - Load agent personality from soul.md file
 """
 
-import yaml
 from pathlib import Path
+
+import yaml
 
 
 def _preprocess_soul_content(content: str) -> str:
     """
     Pre-process soul.md content to fix common YAML formatting quirks.
-    
+
     Handles:
     - Trailing whitespace on each line
     - Indented continuation lines in list items (e.g., a list item followed
@@ -19,10 +20,10 @@ def _preprocess_soul_content(content: str) -> str:
     - Colon quoting for merged list items to prevent YAML key-value parsing
     """
     lines = content.split('\n')
-    
+
     # Strip trailing whitespace from every line
     lines = [line.rstrip() for line in lines]
-    
+
     # Merge indented continuation lines into their parent list item.
     # A continuation line is one that:
     #   - starts with more leading whitespace than the list marker
@@ -32,7 +33,7 @@ def _preprocess_soul_content(content: str) -> str:
         if not line:
             merged.append(line)
             continue
-        
+
         # Check if this is a continuation of the previous list item
         if i > 0 and merged[-1]:
             prev = merged[-1]
@@ -45,9 +46,9 @@ def _preprocess_soul_content(content: str) -> str:
                     # Append continuation text to previous line
                     merged[-1] = prev + ' ' + curr_stripped
                     continue
-        
+
         merged.append(line)
-    
+
     # Normalize nested list indentation: track indent stack so each level
     # is exactly 2 spaces deeper than its parent, preserving hierarchy.
     normalized = []
@@ -67,7 +68,7 @@ def _preprocess_soul_content(content: str) -> str:
         elif not stripped:
             indent_stack.clear()
         normalized.append(line)
-    
+
     # Quote list items containing colons to prevent YAML key-value parsing.
     # Skip quoting if the next line is a nested list item (the colon is the key).
     quoted = []
@@ -89,20 +90,20 @@ def _preprocess_soul_content(content: str) -> str:
                 item_text = item_text.replace('"', '\\"')
                 line = line[:len(line) - len(stripped)] + '- ' + '"' + item_text + '"'
         quoted.append(line)
-    
+
     return '\n'.join(quoted)
 
 
 def load_soul(soul_path: str = 'soul.md') -> dict:
     """
     Load agent configuration from a soul.md file.
-    
+
     Args:
         soul_path: Path to the soul.md configuration file
-        
+
     Returns:
         Dictionary with agent configuration
-        
+
     Raises:
         FileNotFoundError: If the soul file doesn't exist
         yaml.YAMLError: If the YAML is malformed (with helpful context)
@@ -110,13 +111,13 @@ def load_soul(soul_path: str = 'soul.md') -> dict:
     path = Path(soul_path)
     if not path.exists():
         raise FileNotFoundError(f"Soul file not found: {soul_path}")
-    
+
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
-    
+
     # Pre-process to handle common formatting quirks
     content = _preprocess_soul_content(content)
-    
+
     # Parse YAML with error handling
     try:
         config = yaml.safe_load(content)
@@ -129,17 +130,17 @@ def load_soul(soul_path: str = 'soul.md') -> dict:
         else:
             error_msg += f"  {e}"
         raise yaml.YAMLError(error_msg) from e
-    
+
     if not isinstance(config, dict):
         raise ValueError(f"Soul file must contain a YAML mapping, got {type(config).__name__}: {soul_path}")
-    
+
     return config
 
 
 def _format_value(v, indent=0):
     """
     Recursively format a value (list, dict, or scalar) into markdown text.
-    
+
     Dict-in-list items are formatted with bold key prefixes.
     Nested dicts use ### sub-headings.
     Empty dicts are skipped.
@@ -199,17 +200,17 @@ def get_tool_description(tool_name: str) -> str:
 def build_system_prompt(config: dict) -> str:
     """
     Build a system prompt from the soul configuration.
-    
+
     Args:
         config: Configuration dictionary from load_soul()
-        
+
     Returns:
         Formatted system prompt string
     """
     system_prompt = f"You are {config.get('name', 'Assistant')}.\n"
     if config.get('tagline'):
         system_prompt += f"{config.get('tagline')}\n"
-    
+
     # 1. Identity section
     identity = config.get('identity', {})
     if isinstance(identity, dict) and identity:
@@ -223,26 +224,26 @@ def build_system_prompt(config: dict) -> str:
         bg = identity.get('background')
         if isinstance(bg, str) and bg.strip():
             system_prompt += f"{bg.strip()}\n"
-        
+
         traits = identity.get('personality_traits', [])
         if isinstance(traits, list) and traits:
             system_prompt += '\nPersonality traits:\n'
             for trait in traits:
                 system_prompt += f"- {trait}\n"
-    
+
     # 2. Communication style
     comm_cfg = config.get('communication', {})
     if isinstance(comm_cfg, dict) and comm_cfg:
         system_prompt += '\n## How You Communicate\n'
         if comm_cfg.get('tone'):
             system_prompt += f"Tone: {comm_cfg.get('tone')}\n"
-        
+
         notes = comm_cfg.get('style_notes', [])
         if isinstance(notes, list) and notes:
             system_prompt += '\nStyle guidelines:\n'
             for note in notes:
                 system_prompt += f"- {note}\n"
-        
+
         principles = comm_cfg.get('principles', [])
         if isinstance(principles, list) and principles:
             system_prompt += '\nPrinciples:\n'
@@ -272,11 +273,11 @@ def build_system_prompt(config: dict) -> str:
 
     # 5. Dynamic Sections (Anything else in the YAML that isn't handled above)
     handled_keys = {'name', 'tagline', 'identity', 'communication', 'rules', 'capabilities', 'notes', 'remember'}
-    
+
     for key, value in config.items():
         if key in handled_keys:
             continue
-            
+
         # Format key to Title Case (e.g., operation_workflow -> Operation Workflow)
         section_title = key.replace('_', ' ').title()
         system_prompt += f"\n## {section_title}\n"
@@ -287,45 +288,49 @@ def build_system_prompt(config: dict) -> str:
     if isinstance(final_notes, str) and final_notes.strip():
         system_prompt += '\n## Remember\n'
         system_prompt += f"{final_notes.strip()}\n"
-    
+
     return system_prompt
 
 
-def create_agent_from_soul(llm_cfg: dict, soul_path: str = 'soul.md', agent_class=None, role_name: str = None, **agent_kwargs):
+def create_agent_from_soul(llm_cfg: dict,
+                           soul_path: str = 'soul.md',
+                           agent_class=None,
+                           role_name: str = None,
+                           **agent_kwargs):
     """
     Create an Agent from a soul.md file.
-    
+
     Args:
         llm_cfg: LLM configuration dictionary
         soul_path: Path to the soul.md file
         agent_class: Optional class to instantiate (defaults to Assistant)
         **agent_kwargs: Additional arguments to pass to the agent constructor
-        
+
     Returns:
         Configured agent instance
     """
     from agent_cascade.agents import Assistant
-    
+
     if agent_class is None:
         agent_class = Assistant
-    
+
     # Load soul configuration
     config = load_soul(soul_path)
-    
+
     # Build system prompt
     system_prompt = build_system_prompt(config)
-    
+
     # Note: Tools are added separately by the framework
     # Don't use function_list here as tools are added manually later
-    
+
     # Build formatted name: "Role Name" (e.g., "Writer Bob")
     # Avoid duplication if the role name is already part of the name (e.g. "Writer Writer")
     raw_name = config.get('name', 'Assistant')
-    
+
     # Normalize for comparison (replace underscores with spaces)
     role_norm = (role_name or '').lower().replace('_', ' ')
     name_norm = raw_name.lower().replace('_', ' ')
-    
+
     if role_name and not name_norm.startswith(role_norm):
         formatted_name = f"{role_name.replace('_', ' ').title()} {raw_name}"
     else:
@@ -338,13 +343,12 @@ def create_agent_from_soul(llm_cfg: dict, soul_path: str = 'soul.md', agent_clas
         description=config.get('tagline', 'A helpful AI assistant'),
         system_message=system_prompt,
         function_list=[],  # Empty - tools added manually by agent_orchestrator
-        **agent_kwargs
-    )
+        **agent_kwargs)
 
     # Store role info for tool filtering and logging
     if role_name:
         agent.agent_type = role_name.replace('_', ' ').title()
-    
+
     # Store config and base system message for later dynamic updates
     config_key = role_name if role_name else config.get('name', 'assistant')
     agent.agent_configs = {config_key: config}

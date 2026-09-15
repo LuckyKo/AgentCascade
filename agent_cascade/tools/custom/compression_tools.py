@@ -6,10 +6,11 @@ agent_cascade.compression.compress_context(). See core.py for full compression l
 """
 import copy
 import logging
+
+from agent_cascade.compression import compress_context, rebuild_working_set
+from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.compression import compress_context, rebuild_working_set
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,12 @@ class CompressContext(BaseTool):
                 'description': TOOL_METADATA['compress_context']['parameters']['summary_text']
             },
             'force': {
-                'type': 'boolean',
-                'default': False,
-                'description': 'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
+                'type':
+                    'boolean',
+                'default':
+                    False,
+                'description':
+                    'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
             }
         },
         'required': ['fraction'],
@@ -69,12 +73,8 @@ class CompressContext(BaseTool):
 
         # Resolve the target agent name from kwargs or fallback
         agent_obj = kwargs.get('agent_obj')
-        agent_name = (
-            kwargs.get('agent_instance_name') or
-            getattr(agent_obj, 'instance_name', None) or
-            self.agent_name or
-            'Orchestrator'
-        )
+        agent_name = (kwargs.get('agent_instance_name') or getattr(agent_obj, 'instance_name', None) or
+                      self.agent_name or 'Orchestrator')
 
         # Before compressing, ensure the pool has the current state of the conversation.
         # When a sub-agent calls compress_context mid-turn, its local 'messages' list contains
@@ -90,13 +90,13 @@ class CompressContext(BaseTool):
                         if key.lower() == pool_key.lower():
                             pool_key = key
                             break
-                
+
                 # Append only NEW messages that aren't already in the pool.
                 # The sub-agent's local 'messages' starts with a sliced working set (already in pool)
                 # plus any new tool calls/results from this turn. We must NOT replace the pool.
                 pool_list = self.agent_pool.instance_conversations.get(pool_key, [])
                 local_messages = kwargs['messages']
-                
+
                 if pool_list and local_messages:
                     # The sub-agent's local 'messages' = sliced working set (already in pool) + new tool calls/results.
                     # Build a set of (role, content) signatures from the pool, then append only messages not in it.
@@ -104,16 +104,16 @@ class CompressContext(BaseTool):
                         r = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
                         c = str(msg.get('content', '')) if isinstance(msg, dict) else str(getattr(msg, 'content', ''))
                         return (r, c)
-                    
+
                     pool_sigs = {sig for sig in map(_sig, pool_list)}
                     new_start_idx = len(local_messages)  # default: nothing is new
-                    
+
                     for i in range(len(local_messages) - 1, -1, -1):
                         if _sig(local_messages[i]) not in pool_sigs:
                             new_start_idx = i
                         else:
                             break
-                    
+
                     # Append only new messages beyond the overlap
                     if new_start_idx < len(local_messages):
                         for msg in local_messages[new_start_idx:]:
@@ -141,20 +141,19 @@ class CompressContext(BaseTool):
             # Rebuild caller's working set from pool (single source of truth)
             if 'messages' in kwargs and not dry_run:
                 rebuild_working_set(kwargs['messages'], self.agent_pool, agent_name)
-            
+
             # For dry runs, return the actual summary text so callers can use it.
             # The /compress command path depends on receiving raw summary for user approval.
             if dry_run:
                 return result.summary_text
-            
+
             from agent_cascade.compression.handler import CompressionHandler
             max_tokens = 0
             target_inst = self.agent_pool.get_instance(agent_name)
             if target_inst is not None:
                 max_tokens = getattr(target_inst, '_allocated_max_input_tokens', 0) or 0
             comp_type = 'manual' if mode == 'manual' else 'auto'
-            return CompressionHandler._format_compression_feedback(
-                comp_type, result.messages_discarded, result.tokens_after, max_tokens
-            )
+            return CompressionHandler._format_compression_feedback(comp_type, result.messages_discarded,
+                                                                   result.tokens_after, max_tokens)
         else:
             return f"ERROR: {result.error}"

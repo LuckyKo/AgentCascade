@@ -15,9 +15,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 def generate_client_keypair():
     """Generate X25519 key pair. Returns (private_key, public_key_b64)."""
     private_key = x25519.X25519PrivateKey.generate()
-    public_key_b64 = base64.b64encode(
-        private_key.public_key().public_bytes_raw()
-    ).decode('utf-8')
+    public_key_b64 = base64.b64encode(private_key.public_key().public_bytes_raw()).decode('utf-8')
     return private_key, public_key_b64
 
 

@@ -23,29 +23,20 @@ except ImportError:
     _fcntl = None  # No-op on Windows; we accept the limitation
 
 from agent_cascade.log import logger
-from agent_cascade.settings import (
-    AUTO_SKILL_AUTO_PROMOTE,
-    AUTO_SKILL_EXTRA_TURNS,
-    AUTO_SKILL_MAX_PER_SESSION,
-    AUTO_SKILL_MIN_TOOL_CALLS,
-    LOAD_SKILL_AUTO,
-    LOAD_SKILL_NONE,
-    SKILL_CACHE_TTL_SECONDS,
-    SKILL_MATCH_THRESHOLD,
-    SKILLS_DISABLED,
-)
+from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_MIN_TOOL_CALLS,
+                                    LOAD_SKILL_AUTO, LOAD_SKILL_NONE, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
+                                    SKILLS_DISABLED)
 
-from .parser import parse_skill_file
-from .matcher import SkillMatcher
-from .validator import validate_skill
 from .cache_helper import compute_scan_signature
-
+from .matcher import SkillMatcher
+from .parser import parse_skill_file
+from .validator import validate_skill
 
 # Priority levels for duplicate skill name resolution:
 # Higher number = higher priority (wins over lower)
-_PRIORITY_SYSTEM = 1       # System/global skills (agents/global/skills/)
-_PRIORITY_AGENT = 2        # Agent-specific skills (agents/*/skills/)
-_PRIORITY_USER = 3         # User-defined skills (workspace/skills/)
+_PRIORITY_SYSTEM = 1  # System/global skills (agents/global/skills/)
+_PRIORITY_AGENT = 2  # Agent-specific skills (agents/*/skills/)
+_PRIORITY_USER = 3  # User-defined skills (workspace/skills/)
 
 
 def _priority_for_root(root: Path) -> int:
@@ -122,10 +113,10 @@ class SkillManager:
         self._metrics_file = Path('agents/global/skills-metrics.json')
         self._metrics: Dict[str, Dict[str, Any]] = {}  # skill_name -> {total_loads, by_version}
         self._metrics_lock = threading.Lock()
-        self._pending_flush_count = 0       # tracks buffered increments
+        self._pending_flush_count = 0  # tracks buffered increments
         self._last_flush_time = time.monotonic()  # for timer-based flush
-        self._FLUSH_THRESHOLD = 5           # flush after N pending increments
-        self._FLUSH_INTERVAL = 30.0         # flush every N seconds (whichever comes first)
+        self._FLUSH_THRESHOLD = 5  # flush after N pending increments
+        self._FLUSH_INTERVAL = 30.0  # flush every N seconds (whichever comes first)
         self._load_metrics()  # load on startup
 
     # ── Metrics Persistence (Batched Writes) ────────────────────────────────
@@ -190,10 +181,8 @@ class SkillManager:
 
             self._pending_flush_count += 1
             now = time.monotonic()
-            should_flush = (
-                self._pending_flush_count >= self._FLUSH_THRESHOLD or
-                (now - self._last_flush_time) >= self._FLUSH_INTERVAL
-            )
+            should_flush = (self._pending_flush_count >= self._FLUSH_THRESHOLD or
+                            (now - self._last_flush_time) >= self._FLUSH_INTERVAL)
 
             if should_flush:
                 self._pending_flush_count = 0
@@ -244,13 +233,11 @@ class SkillManager:
         # Cache check: TTL first (cheap), then signature (expensive)
         now = time.monotonic()
         if (now - self._cache_timestamp) < self._cache_ttl:
-            logger.debug('[SKILLS] Cache hit — skipping discovery (age=%.1fs)',
-                         now - self._cache_timestamp)
+            logger.debug('[SKILLS] Cache hit — skipping discovery (age=%.1fs)', now - self._cache_timestamp)
             return
         current_sig = compute_scan_signature(skill_paths, frozenset(self._disabled_names))
         if current_sig == self._cache_signature:
-            logger.debug('[SKILLS] Cache hit — signature unchanged (age=%.1fs)',
-                         now - self._cache_timestamp)
+            logger.debug('[SKILLS] Cache hit — signature unchanged (age=%.1fs)', now - self._cache_timestamp)
             return
 
         logger.info('[SKILLS] Starting skill discovery across %d paths', len(skill_paths))
@@ -282,8 +269,7 @@ class SkillManager:
                     try:
                         parsed = parse_skill_file(skill_file)
                     except (FileNotFoundError, OSError) as e:
-                        logger.warning('[SKILLS] Failed to read skill file %s: %s',
-                                       skill_file, e)
+                        logger.warning('[SKILLS] Failed to read skill file %s: %s', skill_file, e)
                         skipped_count += 1
                         continue
 
@@ -296,8 +282,8 @@ class SkillManager:
                         continue
 
                     if not _skill_matches_platform(frontmatter):
-                        logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping",
-                                     name, _sys.platform)
+                        logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping", name,
+                                     _sys.platform)
                         skipped_count += 1
                         continue
 
@@ -318,7 +304,9 @@ class SkillManager:
 
         logger.info(
             '[SKILLS] Discovery complete: %d found, %d skipped, %d in registry',
-            found_count, skipped_count, len(self._skills_registry),
+            found_count,
+            skipped_count,
+            len(self._skills_registry),
         )
 
         self._cache_signature = current_sig
@@ -341,8 +329,7 @@ class SkillManager:
             try:
                 parsed = parse_skill_file(skill_file)
             except (FileNotFoundError, OSError) as e:
-                logger.warning('[SKILLS] Failed to read skill file %s: %s',
-                               skill_file, e)
+                logger.warning('[SKILLS] Failed to read skill file %s: %s', skill_file, e)
                 return
 
         frontmatter = parsed.get('frontmatter', {})
@@ -350,16 +337,14 @@ class SkillManager:
         if not name:
             # Fall back to directory name
             name = skill_file.parent.name
-            logger.debug("[SKILLS] Skill file %s has no 'name' in frontmatter, using dir: %s",
-                         skill_file, name)
+            logger.debug("[SKILLS] Skill file %s has no 'name' in frontmatter, using dir: %s", skill_file, name)
 
         # Platform & disabled checks — skip when caller already filtered
         if parsed is not None:
             pass  # discover() already checked these before calling us
         else:
             if not _skill_matches_platform(frontmatter):
-                logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping",
-                             name, _sys.platform)
+                logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping", name, _sys.platform)
                 return
 
             if name.lower() in self._disabled_names:
@@ -372,11 +357,13 @@ class SkillManager:
             if priority <= existing_priority:
                 logger.debug(
                     "[SKILLS] Duplicate skill '%s' (priority %d < %d), skipping",
-                    name, priority, existing_priority,
+                    name,
+                    priority,
+                    existing_priority,
                 )
                 return
-            logger.debug("[SKILLS] Replacing skill '%s' with higher priority (%d > %d)",
-                         name, priority, existing_priority)
+            logger.debug("[SKILLS] Replacing skill '%s' with higher priority (%d > %d)", name, priority,
+                         existing_priority)
 
         # Store parsed data in registry (Tier 1: frontmatter only; body is lazy-loaded)
         version = parsed.get('version', '1.0.0')  # Already normalized by parser
@@ -505,8 +492,8 @@ class SkillManager:
                 for key, entry in self._skills_registry.items():
                     if key.lower() == lower:
                         reg = entry
-                        logger.debug("[SKILLS] load_full_instructions: case-insensitive match '%s' -> '%s'",
-                                     skill_name, key)
+                        logger.debug("[SKILLS] load_full_instructions: case-insensitive match '%s' -> '%s'", skill_name,
+                                     key)
                         break
             if reg is None:
                 logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry (registry has %d skills)",
@@ -519,8 +506,7 @@ class SkillManager:
             parsed = reg.get('_parsed_data')
             if parsed and 'body' in parsed:
                 body = parsed['body']
-                logger.debug("[SKILLS] Loaded Tier 2 instructions for '%s' (%d chars)",
-                             skill_name, len(body))
+                logger.debug("[SKILLS] Loaded Tier 2 instructions for '%s' (%d chars)", skill_name, len(body))
                 if count_load:
                     self._increment_load_count(skill_name, version)
                 return body or None
@@ -581,7 +567,8 @@ class SkillManager:
         self._ensure_discovered()
 
         # Handle NONE / empty (case-insensitive, whitespace-tolerant)
-        if load_skill_value is None or (isinstance(load_skill_value, str) and load_skill_value.strip().upper() == LOAD_SKILL_NONE):
+        if load_skill_value is None or (isinstance(load_skill_value, str) and
+                                        load_skill_value.strip().upper() == LOAD_SKILL_NONE):
             return []
 
         # Handle explicit list of skill names — keep only those that are loadable.
@@ -755,8 +742,8 @@ class SkillManager:
                     self._skills_registry[name]['file_path'] = str(target_file)
                     logger.info("[SKILLS] Promoted skill '%s' to agents/global/skills/%s/", name, name)
                 else:
-                    logger.info("[SKILLS] Skill '%s' validated, staying in pending (auto_promote=%s)",
-                                name, auto_promote)
+                    logger.info("[SKILLS] Skill '%s' validated, staying in pending (auto_promote=%s)", name,
+                                auto_promote)
 
                 # Rebuild index
                 self._rebuild_index()
@@ -791,7 +778,7 @@ class SkillManager:
         Returns:
             Tuple of (success, error_messages).
         """
-        from agent_cascade.skills.parser import parse_skill_file, normalize_version
+        from agent_cascade.skills.parser import normalize_version, parse_skill_file
 
         with self._write_lock:
             existing = self._skills_registry.get(name)
@@ -902,8 +889,7 @@ class SkillManager:
                 return False
 
         matches = self.match_skills(task_text) if task_text else []
-        logger.debug('[AUTO-SKILL] Check: tool_count=%d, matches=%d',
-                     total_tool_calls, len(matches))
+        logger.debug('[AUTO-SKILL] Check: tool_count=%d, matches=%d', total_tool_calls, len(matches))
 
         if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS:
             return False
@@ -969,12 +955,10 @@ class SkillManager:
                             logger.debug('[AUTO-SKILL] State reset to IDLE for %s', instance_name)
                     if actual_len > snapshot_length + 1:
                         logger.warning('[AUTO-SKILL] Rollback verification failed for %s: '
-                                       'expected <=%d, got %d',
-                                       instance_name, snapshot_length, actual_len)
+                                       'expected <=%d, got %d', instance_name, snapshot_length, actual_len)
                         rollback_ok = False
                     else:
-                        logger.debug('[AUTO-SKILL] Rolled back %d messages for %s',
-                                     pop_count, instance_name)
+                        logger.debug('[AUTO-SKILL] Rolled back %d messages for %s', pop_count, instance_name)
                 elif current_len < snapshot_length:
                     logger.debug('[AUTO-SKILL] Compression removed %d messages during extra turns for %s',
                                  snapshot_length - current_len, instance_name)

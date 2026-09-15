@@ -12,16 +12,13 @@ Covers:
 All tests are self-contained — no LLM or API server required.
 """
 
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import MagicMock, patch
 
-from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, FUNCTION, Message
-from agent_cascade.compression.helpers import (
-    compute_discard_count,
-    _has_pending_tool_calls,
-)
 from agent_cascade.compression.core import compress_context
-
+from agent_cascade.compression.helpers import _has_pending_tool_calls, compute_discard_count
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, USER, Message
 
 # ──────────────────────────────────────────────
 # Fixtures — Tool-Call Aware Message Builders
@@ -518,9 +515,7 @@ class TestBruteForceRegression:
 
     def _validate_no_splits(self, active_set, discard):
         """Check no FUNCTION in tail has its ASSISTANT in the discarded range."""
-        from agent_cascade.compression.helpers import (
-            _get_function_call_ids, _get_function_result_id,
-        )
+        from agent_cascade.compression.helpers import _get_function_call_ids, _get_function_result_id
         for i in range(discard, len(active_set)):
             if active_set[i].get('role', '') == FUNCTION:  # FIX 6: use constant instead of 'function' string
                 fnid = _get_function_result_id(active_set[i])

@@ -19,18 +19,16 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-# NOTE: PropertyMock is not needed — pool.stopped is set as a plain attribute.
-
-import pytest
-
 from agent_cascade.agent_instance import AgentState
 from agent_cascade.async_tools import AsyncToolRegistry
-from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent, _drive_instance_run
+from agent_cascade.utils.wakeup_helpers import _drive_instance_run, relaunch_idle_agent
 
+# NOTE: PropertyMock is not needed — pool.stopped is set as a plain attribute.
 
 # ============================================================================
 # Fixtures and helpers
 # ============================================================================
+
 
 def make_instance(state=AgentState.IDLE):
     """Minimal duck-typed AgentInstance (state + _state_lock only)."""
@@ -88,8 +86,10 @@ class _FakeThreadFactory(MagicMock):
         self.instances = []
 
     def __call__(self, *args, **kwargs):
-        ft = _FakeThread(target=kwargs.get('target'), args=kwargs.get('args', ()),
-                         name=kwargs.get('name', ''), daemon=kwargs.get('daemon', False))
+        ft = _FakeThread(target=kwargs.get('target'),
+                         args=kwargs.get('args', ()),
+                         name=kwargs.get('name', ''),
+                         daemon=kwargs.get('daemon', False))
         self.instances.append(ft)
         return ft
 
@@ -125,6 +125,7 @@ class _FakeThread:
 # ============================================================================
 # relaunch_idle_agent — state / shutdown gates
 # ============================================================================
+
 
 class TestRelaunchGates:
     """relaunch_idle_agent must be a no-op (False, no thread) in every
@@ -187,6 +188,7 @@ class TestRelaunchGates:
 # Double-launch guard (L1 race guard RuntimeError handling in the drive thread)
 # ============================================================================
 
+
 class TestDoubleLaunchGuard:
     """The spawned thread must catch the L1-guard RuntimeError from
     run_agent_in_pool / engine.run(), log it at DEBUG, and NOT propagate."""
@@ -198,11 +200,10 @@ class TestDoubleLaunchGuard:
         ft = fake_thread.instances[0]
 
         l1_error = RuntimeError(
-            '[BUG] Maine entered engine.run() in state RUNNING — should be IDLE. L1 race guard failed!'
-        )
+            '[BUG] Maine entered engine.run() in state RUNNING — should be IDLE. L1 race guard failed!')
         with patch(
-            'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
-            side_effect=l1_error,
+                'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
+                side_effect=l1_error,
         ), patch('agent_cascade.utils.wakeup_helpers.logger') as mock_logger:
             ft.run()  # drive the target synchronously
 
@@ -219,8 +220,8 @@ class TestDoubleLaunchGuard:
         ft = fake_thread.instances[0]
 
         with patch(
-            'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
-            side_effect=RuntimeError('L1 race guard failed!'),
+                'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
+                side_effect=RuntimeError('L1 race guard failed!'),
         ):
             ft.run()
 
@@ -235,8 +236,8 @@ class TestDoubleLaunchGuard:
         ft = fake_thread.instances[0]
 
         with patch(
-            'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
-            side_effect=ValueError('boom'),
+                'agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
+                side_effect=ValueError('boom'),
         ), patch('agent_cascade.utils.wakeup_helpers.logger') as mock_logger:
             ft.run()
 
@@ -248,6 +249,7 @@ class TestDoubleLaunchGuard:
 # ============================================================================
 # Multiple results same tick -> exactly one effective run
 # ============================================================================
+
 
 class TestMultipleResultsSameTick:
     """Two async completions for the same IDLE parent in one tick must result
@@ -294,10 +296,11 @@ class TestMultipleResultsSameTick:
 
         # First run: normal drain. Second run: L1 guard RuntimeError -> DEBUG, no crash.
         gen = iter([])
-        with patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool', side_effect=[
-            lambda pool, name: iter(gen),
-            lambda pool, name: (_ for _ in ()).throw(RuntimeError('L1 race guard failed!')),
-        ]):
+        with patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool',
+                   side_effect=[
+                       lambda pool, name: iter(gen),
+                       lambda pool, name: (_ for _ in ()).throw(RuntimeError('L1 race guard failed!')),
+                   ]):
             launched[0].run()
             launched[1].run()
 
@@ -308,6 +311,7 @@ class TestMultipleResultsSameTick:
 # ============================================================================
 # Call site: async completion (AsyncToolRegistry._execute)
 # ============================================================================
+
 
 class TestAsyncCompletionWiring:
     """AsyncToolRegistry must enqueue the result FIRST, then relaunch an IDLE parent."""
@@ -379,6 +383,7 @@ class TestAsyncCompletionWiring:
 # Call site: dismiss path (LifecycleMixin.dismiss_instance)
 # ============================================================================
 
+
 class TestDismissWiring:
     """dismiss_instance must enqueue the dismissal result for an IDLE parent and
     relaunch it; SLEEPING parents keep the existing enqueue-only behavior."""
@@ -414,10 +419,9 @@ class TestDismissWiring:
         pool.remove_instance = MagicMock()
 
         mixin = LifecycleMixin.__new__(LifecycleMixin)
-        for attr in ('children', '_children_lock', 'instances', '_pool_lock',
-                     'terminated_instances', '_instance_threads', '_instance_threads_lock',
-                     'settings', 'get_instance', 'enqueue_message', 'is_instance_terminated',
-                     '_async_registry', 'api_router', 'remove_instance'):
+        for attr in ('children', '_children_lock', 'instances', '_pool_lock', 'terminated_instances',
+                     '_instance_threads', '_instance_threads_lock', 'settings', 'get_instance', 'enqueue_message',
+                     'is_instance_terminated', '_async_registry', 'api_router', 'remove_instance'):
             setattr(mixin, attr, getattr(pool, attr))
         mixin._clear_state_label = lambda inst: None
         return mixin, pool
@@ -429,8 +433,7 @@ class TestDismissWiring:
 
         # Patch ONLY the helper's thread factory so dismiss_instance itself runs
         # unpatched (its tail has no thread spawns; the relaunch is the only one).
-        with patch('agent_cascade.utils.wakeup_helpers.threading.Thread',
-                   new=_FakeThreadFactory()) as fake_thread:
+        with patch('agent_cascade.utils.wakeup_helpers.threading.Thread', new=_FakeThreadFactory()) as fake_thread:
             LifecycleMixin.dismiss_instance(mixin, 'child1')
 
         # Dismissal result enqueued for the parent...
@@ -450,8 +453,7 @@ class TestDismissWiring:
 
         mixin, pool = self._build_mixin(AgentState.SLEEPING)
 
-        with patch('agent_cascade.utils.wakeup_helpers.threading.Thread',
-                   new=_FakeThreadFactory()) as fake_thread:
+        with patch('agent_cascade.utils.wakeup_helpers.threading.Thread', new=_FakeThreadFactory()) as fake_thread:
             LifecycleMixin.dismiss_instance(mixin, 'child1')
 
         # Existing SLEEPING behavior: enqueue only, no relaunch thread.

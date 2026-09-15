@@ -24,22 +24,16 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import pytest
 
-from agent_cascade.api_router import APIRouter, EndpointScheduler, APIEndpoint
-from agent_cascade.slot_queue import (
-    SlotPool,
-    SlotQueueTimeout,
-    SlotCancelled,
-)
-
+from agent_cascade.api_router import APIEndpoint, APIRouter, EndpointScheduler
+from agent_cascade.slot_queue import SlotCancelled, SlotPool, SlotQueueTimeout
 
 # ============================================================================
 # Constants
 # ============================================================================
 
-FIFO_TEST_WAITERS = 5          # Small contended queue for FIFO tests
-STRESS_TEST_WAITERS = 20       # Larger contention for stress tests
+FIFO_TEST_WAITERS = 5  # Small contended queue for FIFO tests
+STRESS_TEST_WAITERS = 20  # Larger contention for stress tests
 PROCEDURAL_SEEDS = [42, 123, 999, 7777]
-
 
 # ============================================================================
 # Test Infrastructure — Shared Helpers
@@ -121,6 +115,7 @@ class AgentNode:
 # Pytest Fixtures
 # ============================================================================
 
+
 @pytest.fixture
 def test_pool(capacity: int = 1) -> SlotPool:
     """Create a SlotPool with automatic cleanup."""
@@ -131,17 +126,24 @@ def test_pool(capacity: int = 1) -> SlotPool:
 @pytest.fixture
 def test_router():
     """Create an isolated APIRouter with default sequential endpoint."""
-    import tempfile, os
+    import os
+    import tempfile
     from unittest.mock import patch
 
     test_dir = tempfile.mkdtemp()
     with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_dir}):
         router = APIRouter(default_llm_cfg={
-            'api_base': 'http://default', 'model': 'default-model', 'max_tokens': 2048,
+            'api_base': 'http://default',
+            'model': 'default-model',
+            'max_tokens': 2048,
         })
         ep = APIEndpoint(
-            id='ep_default', name='Default', api_base='http://default', model='default-model',
-            enabled=True, concurrency_limit=0,
+            id='ep_default',
+            name='Default',
+            api_base='http://default',
+            model='default-model',
+            enabled=True,
+            concurrency_limit=0,
         )
         router.add_endpoint(ep)
         yield router
@@ -157,32 +159,44 @@ def violation_tracker() -> ViolationRecorder:
 # Helper Functions
 # ============================================================================
 
+
 def _get_scheduler(router: APIRouter) -> EndpointScheduler:
     return router.scheduler
 
 
 def _make_test_router(conc_map: Optional[Dict[str, int]] = None) -> APIRouter:
     """Create an isolated APIRouter with configurable endpoint concurrency."""
-    import tempfile, os
+    import os
+    import tempfile
     from unittest.mock import patch
 
     test_dir = tempfile.mkdtemp()
     with patch.dict(os.environ, {'AGENT_CASCADE_TEST_CONFIG_DIR': test_dir}):
         router = APIRouter(default_llm_cfg={
-            'api_base': 'http://default', 'model': 'default-model', 'max_tokens': 2048,
+            'api_base': 'http://default',
+            'model': 'default-model',
+            'max_tokens': 2048,
         })
 
         if conc_map:
             for api_base, conc in conc_map.items():
                 ep = APIEndpoint(
-                    id=f"ep_{_new_id()}", name=f"Test-{api_base}", api_base=api_base,
-                    model='test-model', enabled=True, concurrency_limit=conc,
+                    id=f"ep_{_new_id()}",
+                    name=f"Test-{api_base}",
+                    api_base=api_base,
+                    model='test-model',
+                    enabled=True,
+                    concurrency_limit=conc,
                 )
                 router.add_endpoint(ep)
         else:
             ep = APIEndpoint(
-                id='ep_default', name='Default', api_base='http://default', model='default-model',
-                enabled=True, concurrency_limit=0,
+                id='ep_default',
+                name='Default',
+                api_base='http://default',
+                model='default-model',
+                enabled=True,
+                concurrency_limit=0,
             )
             router.add_endpoint(ep)
 
@@ -294,7 +308,8 @@ def sequential_open_gates(gates: List[threading.Event], ready_events: List[threa
         assert ready_events[i].wait(timeout=2), f"{names[i]} should have started acquiring"
 
 
-def sequential_open_gates_with_delay(gates: List[threading.Event], ready_events: List[threading.Event], names: List[str]):
+def sequential_open_gates_with_delay(gates: List[threading.Event], ready_events: List[threading.Event],
+                                     names: List[str]):
     """Like sequential_open_gates — waits for each waiter to start acquiring before opening next gate."""
     for i in range(len(names)):
         gates[i].set()
@@ -312,6 +327,7 @@ def assert_fifo_order(granted: List[str], expected: Optional[List[str]] = None):
 # ============================================================================
 # Category 1: FIFO Ordering Under Contention
 # ============================================================================
+
 
 class TestFIFOOrderingUnderContention:
     """Test strict FIFO ordering under realistic contention scenarios."""
@@ -396,6 +412,7 @@ class TestFIFOOrderingUnderContention:
 # Category 4: Cancel-on-Termination
 # ============================================================================
 
+
 class TestCancelOnTermination:
     """Test cancellation when agents terminate while waiting or holding slots."""
 
@@ -451,7 +468,7 @@ class TestCancelOnTermination:
     def test_mass_termination_active_queue_all_cleaned(self):
         """Mass termination during active queue — all tickets cleaned."""
         pool = SlotPool(key='test', capacity=1)
-        holder_a = pool.create_held_slot('A')
+        pool.create_held_slot('A')
 
         n_agents = 50
         cancelled_events = {f"agent_{i}": threading.Event() for i in range(n_agents)}
@@ -477,10 +494,8 @@ class TestCancelOnTermination:
         status_before = pool.get_status()
         assert status_before['waiting_count'] == n_agents, f"All {n_agents} agents should be waiting"
 
-        start = time.monotonic()
         for i in range(n_agents // 2):
             pool.cancel(agent_name=f"agent_{i}")
-        elapsed = time.monotonic() - start
 
         status_after = pool.get_status()
         expected_remaining = n_agents - (n_agents // 2)
@@ -496,18 +511,16 @@ class TestCancelOnTermination:
             t.join(timeout=5)
 
 
-
-
-
 # ============================================================================
 # Category 6: Stress/Soak Tests
 # ============================================================================
 
+
 class TestStressAndSoak:
     """Stress tests with many concurrent agents on shared pools."""
 
-    def _stress_agent_task(self, name: str, pool: SlotPool, tracker: ConcurrencyTracker,
-                           pool_key: str, sleep_range: Tuple[float, float]):
+    def _stress_agent_task(self, name: str, pool: SlotPool, tracker: ConcurrencyTracker, pool_key: str,
+                           sleep_range: Tuple[float, float]):
         """Common agent task for stress tests."""
         release_cb = pool.acquire(instance_name=name, agent_class='test')
         tracker.enter(pool_key, name)
@@ -591,7 +604,6 @@ class TestStressAndSoak:
                 completed[0] += 1
 
         def async_parent(name: str):
-            parent_chain = ('root', name)
             seq_release = seq_pool.acquire(instance_name=name, agent_class='test')
             tracker_seq.enter('_shared_sequential_slot_', name)
 
@@ -655,7 +667,6 @@ class TestStressAndSoak:
         lock = threading.Lock()
 
         def agent_task(name: str):
-            chain = ('root', name)
             release_cb = pool.acquire(instance_name=name, agent_class='test')
             tracker.enter('soak_test', name)
 
@@ -686,6 +697,7 @@ class TestStressAndSoak:
 # ============================================================================
 # Category 7: Procedural Generation / Brute Force
 # ============================================================================
+
 
 class TestProceduralBruteForce:
     """Randomly generated agent call graphs under contention."""
@@ -824,6 +836,7 @@ class TestProceduralBruteForce:
 # Category 8: Integration with EndpointScheduler (higher-level tests)
 # ============================================================================
 
+
 class TestEndpointSchedulerIntegration:
     """Higher-level integration tests using the real EndpointScheduler."""
 
@@ -846,7 +859,7 @@ class TestEndpointSchedulerIntegration:
         router = _make_test_router({'http://seq': 0})
         scheduler = _get_scheduler(router)
 
-        release_a = scheduler.acquire(
+        scheduler.acquire(
             api_base='http://seq',
             concurrency_limit=0,
             instance_name='A',
@@ -883,6 +896,7 @@ class TestEndpointSchedulerIntegration:
 # ============================================================================
 # Category 9: Edge Cases and Negative Tests
 # ============================================================================
+
 
 class TestEdgeCasesAndNegatives:
     """Edge cases, negative tests, and boundary conditions."""
@@ -938,6 +952,7 @@ class TestEdgeCasesAndNegatives:
         holder_a = pool.create_held_slot('A')
 
         with pool._cond:
+
             def release():
                 pool.release(holder_a)
 
@@ -950,7 +965,7 @@ class TestEdgeCasesAndNegatives:
     def test_timeout_raises_proper_exception(self):
         """Timeout should raise SlotQueueTimeout, ticket removed from queue."""
         pool = SlotPool(key='test', capacity=1)
-        holder_a = pool.create_held_slot('A')
+        pool.create_held_slot('A')
 
         with pytest.raises(SlotQueueTimeout):
             pool.acquire(instance_name='B', agent_class='test', timeout=0.5)

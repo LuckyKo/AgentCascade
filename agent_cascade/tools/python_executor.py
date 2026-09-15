@@ -15,20 +15,19 @@
 import copy
 import datetime
 import io
+import json
 import os
 import pickle
 import traceback
 from concurrent.futures import TimeoutError
 from contextlib import redirect_stdout
 from functools import partial
-import json
 from typing import Any, Dict, List, Optional, Union
 
-import json5
 import regex
 from tqdm import tqdm
 
-from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.base import BaseTool
 from agent_cascade.utils.utils import extract_code
 
 
@@ -160,11 +159,12 @@ class PythonExecutor(BaseTool):
         timeout_length=20,
         work_dir='',
     ):
-        from timeout_decorator import timeout
         import signal
+
+        from timeout_decorator import timeout
         use_timeout = hasattr(signal, 'SIGALRM')
         old_cwd = os.getcwd()
-        
+
         result = ''
         report = 'Done'
         try:

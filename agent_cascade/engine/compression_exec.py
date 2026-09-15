@@ -17,20 +17,15 @@ from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.settings import (
-    CHARS_PER_TOKEN_ESTIMATE,
-    COMPRESSION_RECOUNT_THRESHOLD,
-    DEFAULT_MAX_INPUT_TOKENS,
-)
+from agent_cascade.compression.helpers import compute_discard_count
+from agent_cascade.engine.helpers import _invalidate_token_cache
+from agent_cascade.exceptions import ContextWindowExceeded
 from agent_cascade.llm.schema import USER, Message
 from agent_cascade.log import logger
-from agent_cascade.exceptions import ContextWindowExceeded
-from agent_cascade.compression.helpers import compute_discard_count
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
-from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.settings import CHARS_PER_TOKEN_ESTIMATE, COMPRESSION_RECOUNT_THRESHOLD, DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-
-from agent_cascade.engine.helpers import _invalidate_token_cache
+from agent_cascade.utils.utils import extract_text_from_message
 
 # ── Fallback Compression Constants ───────────────────────────────────────────
 # These control the iterative "smart slice-first" compression used when an agent
@@ -202,7 +197,6 @@ class CompressionExecMixin:
         response: Optional[List[Message]] = None
     ) -> bool:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
-        inst_name = instance.instance_name
 
         # Phase 4.2: Delegate to compression_handler (pass response for
         # notification feedback)
@@ -491,4 +485,3 @@ class CompressionExecMixin:
         # Should not reach here under normal conditions.
         logger.warning('[FALLBACK_COMPRESSION] Exhausted slice attempts without finding a fit.')
         return None
-

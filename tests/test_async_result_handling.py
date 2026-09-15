@@ -17,10 +17,10 @@ import pytest
 
 from agent_cascade.async_tools import AsyncToolRegistry
 
-
 # ============================================================================
 # Fixtures and helpers
 # ============================================================================
+
 
 @pytest.fixture
 def mock_pool():
@@ -39,11 +39,13 @@ def registry(mock_pool):
 # AsyncToolRegistry integration with unified message queue
 # ============================================================================
 
+
 class TestAsyncToolRegistryIntegration:
     """Test AsyncToolRegistry properly integrates with enqueue_message (single queue)."""
 
     def test_completed_tool_result_enqueued(self, registry, mock_pool):
         """Completed tool results are enqueued via pool.enqueue_message."""
+
         def quick_tool():
             return 'tool_output'
 
@@ -61,6 +63,7 @@ class TestAsyncToolRegistryIntegration:
 
     def test_tool_error_enqueued(self, registry, mock_pool):
         """Tool errors are enqueued as formatted error messages."""
+
         def failing_tool():
             raise RuntimeError('Something broke')
 
@@ -95,6 +98,7 @@ class TestAsyncToolRegistryIntegration:
 
     def test_has_pending_false_after_completion(self, registry):
         """has_pending returns False after all tools complete."""
+
         def quick_tool():
             return 'done'
 
@@ -128,6 +132,7 @@ class TestAsyncToolRegistryIntegration:
 # Race condition: has_pending vs result availability (single queue)
 # ============================================================================
 
+
 class TestHasPendingRaceCondition:
     """Test the race condition fix between has_pending and result enqueue."""
 
@@ -158,6 +163,7 @@ class TestHasPendingRaceCondition:
 # Nested agent calls via AsyncToolRegistry
 # ============================================================================
 
+
 class TestNestedAgentCallsViaAsyncToolRegistry:
     """Test nested agent calls produce results in the parent's queue."""
 
@@ -184,6 +190,7 @@ class TestNestedAgentCallsViaAsyncToolRegistry:
 # ============================================================================
 # Multiple concurrent async tools
 # ============================================================================
+
 
 class TestMultipleConcurrentAsyncTools:
     """Test multiple concurrent async tools for the same instance."""
@@ -216,6 +223,7 @@ class TestMultipleConcurrentAsyncTools:
 # Single-queue regression: async results wake sleeping agents
 # ============================================================================
 
+
 class TestSingleQueueRegression:
     """Regression tests ensuring async results flow through unified message queue."""
 
@@ -242,12 +250,13 @@ class TestSingleQueueRegression:
 # Fix C — child failure surfacing (subagent_timeout_fix_plan.md §4/C)
 # ============================================================================
 
+
 class TestChildAgentFailedError:
     """Tests that ChildAgentFailedError is raised and propagated correctly."""
 
     def test_system_error_output_raises_child_agent_failed(self):
         """run_child_core raises ChildAgentFailedError when output starts with [SYSTEM ERROR."""
-        from agent_cascade.child_runner import run_child_core, ChildAgentFailedError
+        from agent_cascade.child_runner import ChildAgentFailedError, run_child_core
 
         # Mock engine: _create_and_run_agent returns (inst, conv)
         mock_engine = MagicMock()
@@ -277,7 +286,7 @@ class TestChildAgentFailedError:
 
     def test_terminated_child_raises_child_agent_failed(self):
         """run_child_core raises ChildAgentFailedError when the child was terminated."""
-        from agent_cascade.child_runner import run_child_core, ChildAgentFailedError
+        from agent_cascade.child_runner import ChildAgentFailedError, run_child_core
 
         mock_engine = MagicMock()
         mock_inst = MagicMock()

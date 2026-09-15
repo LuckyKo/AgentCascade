@@ -1,17 +1,16 @@
-import sys
-import os
-import json
-import platform
 import datetime
+import json
 import logging
+import os
+import platform
+import sys
 from pathlib import Path
-from typing import Dict, Any
-from agent_cascade import __version__ as AC_VERSION
-from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_TURNS
-from agent_cascade.utils.utils import get_history_stats
 
-from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade import __version__ as AC_VERSION
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.settings import DEFAULT_MAX_TURNS, DEFAULT_WORKSPACE
+from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.utils.utils import get_history_stats
 
 logger = logging.getLogger(__name__)
 
@@ -32,20 +31,22 @@ def _pct(v) -> str:
 @register_tool('system_info', allow_overwrite=True)
 class SystemInfo(BaseTool):
     """Tool to get the current system information including OS, time, date, cwd, python version, and session stats."""
-    
+
     name = 'system_info'
     description = TOOL_METADATA['system_info']['description']
     parameters = {
         'type': 'object',
         'properties': {
             'help': {
-                'type': 'string',
-                'description': "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information.",
+                'type':
+                    'string',
+                'description':
+                    "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information.",
             },
         },
         'required': [],
     }
-    
+
     def __init__(self, agent_pool=None, agent_name=None, **kwargs):
         super().__init__(**kwargs)
         self.agent_pool = agent_pool
@@ -85,24 +86,19 @@ class SystemInfo(BaseTool):
             # ── Session totals ──
             lines.append('')
             lines.append('Session:')
-            for k in ('total_turns', 'total_llm_calls', 'total_tool_calls',
-                      'total_input_tokens_est', 'total_output_tokens_est',
-                      'avg_tps', 'total_retries', 'total_compressions'):
+            for k in ('total_turns', 'total_llm_calls', 'total_tool_calls', 'total_input_tokens_est',
+                      'total_output_tokens_est', 'avg_tps', 'total_retries', 'total_compressions'):
                 if k in session:
                     lines.append(f"  {k}: {session[k]}")
 
             # Prompt cache (RFC 9211) hit/miss stats — only when LLM calls exist.
             if session.get('total_llm_calls', 0) > 0:
                 lines.append('  Prompt cache:')
-                lines.append(
-                    f"    hits={session.get('llm_cache_hits', 0)}  "
-                    f"misses={session.get('llm_cache_misses', 0)}  "
-                    f"unknown={session.get('llm_cache_unknown', 0)}"
-                )
-                lines.append(
-                    f"    hit_ratio={_pct(session.get('llm_cache_hit_ratio'))}   "
-                    f"measured={_pct(session.get('llm_cache_classified_ratio'))}"
-                )
+                lines.append(f"    hits={session.get('llm_cache_hits', 0)}  "
+                             f"misses={session.get('llm_cache_misses', 0)}  "
+                             f"unknown={session.get('llm_cache_unknown', 0)}")
+                lines.append(f"    hit_ratio={_pct(session.get('llm_cache_hit_ratio'))}   "
+                             f"measured={_pct(session.get('llm_cache_classified_ratio'))}")
 
             # llm_calls_by_model — per-model call counts
             by_model = session.get('llm_calls_by_model') or {}
@@ -121,10 +117,8 @@ class SystemInfo(BaseTool):
                     llm_calls = c.get('llm_calls', '')
                     turns = c.get('turns', '')
                     avg_tps = c.get('avg_tps', '')
-                    lines.append(
-                        f"  {fp}  model={model}  turns={turns} "
-                        f"llm_calls={llm_calls}  avg_tps={avg_tps}"
-                    )
+                    lines.append(f"  {fp}  model={model}  turns={turns} "
+                                 f"llm_calls={llm_calls}  avg_tps={avg_tps}")
 
             # ── Agent class usage ──
             if agent_classes:
@@ -134,12 +128,10 @@ class SystemInfo(BaseTool):
                     cls = a.get('agent_class', '?')
                     acc = a.get('tool_usage_accuracy')
                     acc_str = f"{acc:.1f}%" if isinstance(acc, (int, float)) else 'n/a'
-                    lines.append(
-                        f"  {cls}: turns={a.get('turns', '')} "
-                        f"time={a.get('total_time_sec', '')}s "
-                        f"tokens_gen={a.get('tokens_generated', '')} "
-                        f"tool_acc={acc_str}"
-                    )
+                    lines.append(f"  {cls}: turns={a.get('turns', '')} "
+                                 f"time={a.get('total_time_sec', '')}s "
+                                 f"tokens_gen={a.get('tokens_generated', '')} "
+                                 f"tool_acc={acc_str}")
 
             # ── Skill usage ── (get_skill_usage_summary returns a list of
             # {skill, loads, agent_classes, top_mode}, sorted by loads desc)
@@ -186,7 +178,9 @@ class SystemInfo(BaseTool):
 
             if matched_key is None:
                 lines = [f"Unknown system_info help section: '{key}'.", '']
-                lines.append('How to use: system_info(help="<section>") fetches one help section; omit `help` for normal system info.')
+                lines.append(
+                    'How to use: system_info(help="<section>") fetches one help section; omit `help` for normal system info.'
+                )
                 lines.append('')
                 lines.append('Available sections:')
                 for s in sections:
@@ -258,7 +252,8 @@ class SystemInfo(BaseTool):
     def call(self, params: str, **kwargs) -> str:
         # Optional help mode — return an editable reference section instead of system info.
         try:
-            p = params if isinstance(params, dict) else (json.loads(params) if isinstance(params, str) and params.strip() else {})
+            p = params if isinstance(
+                params, dict) else (json.loads(params) if isinstance(params, str) and params.strip() else {})
             if not isinstance(p, dict):
                 p = {}
             help_key = str(p.get('help') or '').strip()
@@ -274,21 +269,12 @@ class SystemInfo(BaseTool):
         now = datetime.datetime.now()
         os_info = f"{platform.system()} {platform.release()} ({platform.version()})"
         py_version = sys.version
-        cwd = os.getcwd()
-        try:
-            cwd_contents = os.listdir(cwd)
-            # Limit the output if there are too many files
-            if len(cwd_contents) > 20:
-                cwd_contents = cwd_contents[:20] + [f"... and {len(cwd_contents) - 20} more"]
-            cwd_str = ', '.join(cwd_contents)
-        except Exception as e:
-            cwd_str = f"Error reading directory: {str(e)}"
-            
+
         # Determine current history and agent name
         agent_name = kwargs.get('agent_instance_name') or self.agent_name or 'orchestrator'
         history = kwargs.get('messages')
         agent_obj = kwargs.get('agent_obj')
-        
+
         # Resolve instance early for cache pool, template access, and max_context detection
         inst = None
         if hasattr(self, 'agent_pool') and self.agent_pool:
@@ -296,14 +282,14 @@ class SystemInfo(BaseTool):
                 inst = self.agent_pool.get_instance(agent_name)
             except Exception as e:
                 logger.debug(f"Failed to get instance '{agent_name}': {e}")
-        
+
         # Fallback to agent pool if messages not in kwargs
         if not history and hasattr(self, 'agent_pool') and self.agent_pool:
             history = self.agent_pool.get_conversation(agent_name)
-        
+
         history = history or []
         stats_str = f"Current Agent ({agent_name}) History Length: {len(history)} messages"
-        
+
         # Max context detection
         max_context = 'Unknown'
         if agent_obj:
@@ -316,8 +302,10 @@ class SystemInfo(BaseTool):
             elif hasattr(agent_obj, 'llm') and hasattr(agent_obj.llm, 'cfg'):
                 from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
                 cfg = agent_obj.llm.cfg
-                max_context = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens') or DEFAULT_MAX_INPUT_TOKENS
-        
+                max_context = cfg.get(
+                    'generate_cfg',
+                    {}).get('max_input_tokens') or cfg.get('max_input_tokens') or DEFAULT_MAX_INPUT_TOKENS
+
         # Use centralized history stats (tokens & words)
         try:
             stats = get_history_stats(history)
@@ -326,7 +314,7 @@ class SystemInfo(BaseTool):
             stats_str += f"\nCurrent Agent Usage: ~{total_tokens} tokens, ~{total_words} words (Max Context: {max_context})"
         except Exception as e:
             logger.warning(f"Failed to calculate stats for {agent_name}: {e}")
-            
+
         if hasattr(self, 'agent_pool') and self.agent_pool:
             stats_str = f"Number of running sessions: {len(self.agent_pool.instance_conversations)}\n" + stats_str
 
@@ -345,42 +333,46 @@ class SystemInfo(BaseTool):
             if inst is not None and hasattr(self.agent_pool, 'get_template'):
                 agent_class = getattr(inst, 'agent_class', 'orchestrator')
                 template = self.agent_pool.get_template(agent_class)
-            
+
             # Fallback to agent_obj attributes if template not available
             if template and hasattr(template, 'function_map'):
                 all_tools = sorted(template.function_map.keys())
-                active_tools_schemas = template._get_active_functions(pool=self.agent_pool) if hasattr(template, '_get_active_functions') else []
+                active_tools_schemas = template._get_active_functions(
+                    pool=self.agent_pool) if hasattr(template, '_get_active_functions') else []
             elif hasattr(agent_obj, 'function_map'):
                 all_tools = sorted(agent_obj.function_map.keys())
-                active_tools_schemas = agent_obj._get_active_functions(pool=self.agent_pool) if hasattr(agent_obj, '_get_active_functions') else []
+                active_tools_schemas = agent_obj._get_active_functions(
+                    pool=self.agent_pool) if hasattr(agent_obj, '_get_active_functions') else []
             else:
                 all_tools = []
                 active_tools_schemas = []
-            
-            active_tools = sorted([t['name'] for t in active_tools_schemas]) if isinstance(active_tools_schemas, list) else []
+
+            active_tools = sorted([t['name'] for t in active_tools_schemas]) if isinstance(active_tools_schemas,
+                                                                                           list) else []
             # Show all tools and which are disabled (if any) — enabled is redundant since full schemas are provided
             disabled = set(all_tools) - set(active_tools)
             tools_str = f"Available Tools: {', '.join(all_tools)}\n"
             if disabled:
                 tools_str += f"Disabled Tools: {', '.join(sorted(disabled))}\n"
-        
+
         # Update max_context from template if still Unknown
         if max_context == 'Unknown' and template and hasattr(template, 'llm') and template.llm:
             from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
             cfg = template.llm.cfg
-            max_context = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens') or DEFAULT_MAX_INPUT_TOKENS
+            max_context = cfg.get('generate_cfg',
+                                  {}).get('max_input_tokens') or cfg.get('max_input_tokens') or DEFAULT_MAX_INPUT_TOKENS
 
         # Resolve Model and API base — primary source is template.llm (works for ExecutionEngine path too)
         model = 'Unknown'
         api_base = 'Unknown'
-        
+
         # Primary: template.llm (works for both Agent and ExecutionEngine paths)
         if template and hasattr(template, 'llm') and template.llm:
             model = getattr(template.llm, 'model', 'Unknown') or 'Unknown'
             if hasattr(template.llm, 'cfg'):
                 cfg = template.llm.cfg
                 api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or 'Unknown'
-        
+
         # Fallback: agent_obj.llm (works when agent_obj is an Agent instance)
         if model == 'Unknown' and agent_obj and hasattr(agent_obj, 'llm') and agent_obj.llm:
             model = getattr(agent_obj.llm, 'model', 'Unknown')
@@ -404,12 +396,12 @@ class SystemInfo(BaseTool):
         # Only claim Docker paths when operation_manager is available (Docker context exists)
         if has_docker_context:
             folders_info = f"Default Workspace (RW): {default_ws} → /workspace (Docker)\n"
-            
+
             # Filter and mount RW folders: validate dir exists + security check via _is_path_allowed
             allowed_prefixes = {os.path.realpath(default_ws)} if default_ws else set()
             for fp in [*rw_folders, *ro_folders]:  # include both RW and RO (mirrors code_interpreter.py:644)
                 allowed_prefixes.add(os.path.realpath(fp))
-            
+
             rw_idx = 0
             if rw_folders:
                 folders_info += 'Additional RW Folders:\n'
@@ -424,7 +416,7 @@ class SystemInfo(BaseTool):
                     docker_path = f'/extra_rw_{rw_idx}'
                     folders_info += f"  - {folder} → {docker_path} (Docker)\n"
                     rw_idx += 1
-            
+
             # Filter and mount RO folders: same validation as RW but with read-only Docker flag
             ro_idx = 0
             if ro_folders:
@@ -470,20 +462,18 @@ class SystemInfo(BaseTool):
             logger.warning(f"Failed to resolve AC server address: {e}")
             ac_server_str = 'Unknown'
 
-        info = (
-            f"--- System Information ---\n"
-            f"OS: {os_info}\n"
-            f"Current Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Python Version: {py_version}\n"
-            f"API Endpoint: {api_base}\n"
-            f"Model Used: {model}\n"
-            f"\n--- AgentCascade Server ---\n"
-            f"AgentCascade Version: {AC_VERSION}\n"
-            f"Server Address: {ac_server_str}\n"
-            f"\n--- Workspace & Permissions ---\n"
-            f"{folders_info}"
-            f"\n--- Session Stats ---\n"
-            f"{stats_str}\n"
-            f"\n--- Cache Pool State ---{cache_state}"
-        )
+        info = (f"--- System Information ---\n"
+                f"OS: {os_info}\n"
+                f"Current Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Python Version: {py_version}\n"
+                f"API Endpoint: {api_base}\n"
+                f"Model Used: {model}\n"
+                f"\n--- AgentCascade Server ---\n"
+                f"AgentCascade Version: {AC_VERSION}\n"
+                f"Server Address: {ac_server_str}\n"
+                f"\n--- Workspace & Permissions ---\n"
+                f"{folders_info}"
+                f"\n--- Session Stats ---\n"
+                f"{stats_str}\n"
+                f"\n--- Cache Pool State ---{cache_state}")
         return info

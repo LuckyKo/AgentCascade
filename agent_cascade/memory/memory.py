@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,7 +23,7 @@ from agent_cascade.llm import BaseChatModel
 from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, USER, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import (DEFAULT_MAX_REF_TOKEN, DEFAULT_PARSER_PAGE_SIZE, DEFAULT_RAG_KEYGEN_STRATEGY,
-                                 DEFAULT_RAG_SEARCHERS)
+                                    DEFAULT_RAG_SEARCHERS)
 from agent_cascade.tools import BaseTool
 from agent_cascade.tools.simple_doc_parser import PARSER_SUPPORTED_FILE_TYPES
 from agent_cascade.utils.utils import extract_files_from_messages, extract_text_from_message, get_file_type

@@ -13,30 +13,19 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# Re-export constants and module-level helpers so existing imports still work
-from .approval import (
-    OperationType,
-    PendingApproval,
-    SECURITY_ADVISOR_TIMEOUT_SECONDS,
-    SECURITY_ADVISOR_WARNING_SECONDS,
-)
-from .path_security import (
-    _path_is_contained_cached,
-    _queue_tool_warning,
-    _get_current_instance_name,
-    set_current_instance_name,
-    clear_current_instance_name,
-)
-from .grep import _compile_grep_pattern, _check_tool_availability
+from agent_cascade.settings import DEFAULT_WORKSPACE
 
 # Import mixins
-from .approval import ApprovalMixin
-from .path_security import PathSecurityMixin
+# Re-export constants and module-level helpers so existing imports still work
+from .approval import SECURITY_ADVISOR_TIMEOUT_SECONDS  # noqa: F401  (re-exported for backward compat)
+from .approval import SECURITY_ADVISOR_WARNING_SECONDS, ApprovalMixin, OperationType, PendingApproval
 from .file_operations import FileOpsMixin
-from .grep import GrepMixin
+from .grep import _check_tool_availability  # noqa: F401  (re-exported for backward compat)
+from .grep import GrepMixin, _compile_grep_pattern
+from .path_security import PathSecurityMixin  # noqa: F401  (re-exported for backward compat)
+from .path_security import (_get_current_instance_name, _path_is_contained_cached, _queue_tool_warning,
+                            clear_current_instance_name, set_current_instance_name)
 from .shell import ShellMixin
-
-from agent_cascade.settings import DEFAULT_WORKSPACE
 
 
 class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin, ShellMixin):
@@ -103,7 +92,6 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
 
     def set_extra_work_folders(self, folders_ro: List[str], folders_rw: List[str]):
         """Set extra directories that the agents can access."""
-        import re
         from agent_cascade.log import logger
 
         new_folders_ro = []
@@ -127,12 +115,13 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
                 logger.warning('Failed to resolve extra RW work folder %s: %s', folder, e)
 
         folders_changed = (frozenset(new_folders_ro) != frozenset(self.extra_work_folders_ro) or
-                          frozenset(new_folders_rw) != frozenset(self.extra_work_folders_rw))
+                           frozenset(new_folders_rw) != frozenset(self.extra_work_folders_rw))
 
         if folders_changed:
             self.extra_work_folders_ro = new_folders_ro
             self.extra_work_folders_rw = new_folders_rw
-            logger.info('[Workspace] Tiered folders updated: RO=%d, RW=%d', len(self.extra_work_folders_ro), len(self.extra_work_folders_rw))
+            logger.info('[Workspace] Tiered folders updated: RO=%d, RW=%d', len(self.extra_work_folders_ro),
+                        len(self.extra_work_folders_rw))
             if self.agent_pool:
                 self.agent_pool.notify_config_changed()
         else:
@@ -180,7 +169,8 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
         """
         prefix = os.path.normcase(str(path)) + os.sep
         with self._ownership_lock:
-            to_remove = [k for k in self.file_ownership.keys()
-                         if k == os.path.normcase(str(path)) or k.startswith(prefix)]
+            to_remove = [
+                k for k in self.file_ownership.keys() if k == os.path.normcase(str(path)) or k.startswith(prefix)
+            ]
             for key in to_remove:
                 del self.file_ownership[key]

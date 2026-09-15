@@ -1,27 +1,43 @@
 """Smoke tests for function_call/tool_calls handling in extract_text_from_message."""
-import pytest
-from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, MAX_FC_ARGS_LEN
-from agent_cascade.llm.schema import Message, FunctionCall
+from agent_cascade.llm.schema import FunctionCall, Message
+from agent_cascade.utils.utils import MAX_FC_ARGS_LEN, _format_tool_calls_for_text, extract_text_from_message
 
 
 class TestExtractTextFunctionCall:
+
     def test_legacy_function_call(self):
         msg = {
             'role': 'assistant',
             'content': '',
-            'function_call': {'name': 'search_web', 'arguments': '{"query":"python"}'}
+            'function_call': {
+                'name': 'search_web',
+                'arguments': '{"query":"python"}'
+            }
         }
         result = extract_text_from_message(msg, add_upload_info=False)
         assert result == '[TOOL CALL: search_web({"query":"python"})]'
 
     def test_modern_tool_calls_array(self):
         msg = {
-            'role': 'assistant',
-            'content': '',
-            'tool_calls': [
-                {'id': 'call_1', 'type': 'function', 'function': {'name': 'read_file', 'arguments': '{"path":"test.txt"}'}},
-                {'id': 'call_2', 'type': 'function', 'function': {'name': 'write_file', 'arguments': '{"content":"hello"}'}}
-            ]
+            'role':
+                'assistant',
+            'content':
+                '',
+            'tool_calls': [{
+                'id': 'call_1',
+                'type': 'function',
+                'function': {
+                    'name': 'read_file',
+                    'arguments': '{"path":"test.txt"}'
+                }
+            }, {
+                'id': 'call_2',
+                'type': 'function',
+                'function': {
+                    'name': 'write_file',
+                    'arguments': '{"content":"hello"}'
+                }
+            }]
         }
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[TOOL CALL: read_file(' in result
@@ -31,8 +47,18 @@ class TestExtractTextFunctionCall:
         msg = {
             'role': 'assistant',
             'content': '',
-            'function_call': {'name': 'legacy_tool', 'arguments': '{}'},
-            'tool_calls': [{'id': 'call_1', 'type': 'function', 'function': {'name': 'modern_tool', 'arguments': '{}'}}]
+            'function_call': {
+                'name': 'legacy_tool',
+                'arguments': '{}'
+            },
+            'tool_calls': [{
+                'id': 'call_1',
+                'type': 'function',
+                'function': {
+                    'name': 'modern_tool',
+                    'arguments': '{}'
+                }
+            }]
         }
         result = extract_text_from_message(msg, add_upload_info=False)
         assert result == '[TOOL CALL: legacy_tool({})]'
@@ -48,7 +74,14 @@ class TestExtractTextFunctionCall:
         assert result == ''
 
     def test_content_not_overridden(self):
-        msg = {'role': 'assistant', 'content': 'Here is the answer', 'function_call': {'name': 'tool', 'arguments': '{}'}}
+        msg = {
+            'role': 'assistant',
+            'content': 'Here is the answer',
+            'function_call': {
+                'name': 'tool',
+                'arguments': '{}'
+            }
+        }
         result = extract_text_from_message(msg, add_upload_info=False)
         assert result == 'Here is the answer'
 
@@ -57,7 +90,10 @@ class TestExtractTextFunctionCall:
         msg = {
             'role': 'assistant',
             'content': '   \n  ',
-            'function_call': {'name': 'read_file', 'arguments': '{"path":"data.csv"}'}
+            'function_call': {
+                'name': 'read_file',
+                'arguments': '{"path":"data.csv"}'
+            }
         }
         result = extract_text_from_message(msg, add_upload_info=False)
         assert result == '[TOOL CALL: read_file({"path":"data.csv"})]'
@@ -72,11 +108,7 @@ class TestExtractTextFunctionCall:
     def test_argument_truncation(self):
         """Verify large arguments are truncated to MAX_FC_ARGS_LEN (2048)."""
         big_args = '{"items": ' + ','.join([f'"item_{i}"' for i in range(100)]) + '}'
-        msg = {
-            'role': 'assistant',
-            'content': '',
-            'function_call': {'name': 'process_data', 'arguments': big_args}
-        }
+        msg = {'role': 'assistant', 'content': '', 'function_call': {'name': 'process_data', 'arguments': big_args}}
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[TOOL CALL: process_data(' in result
         assert '... [TRUNCATED]' not in result  # args are small enough
@@ -84,11 +116,7 @@ class TestExtractTextFunctionCall:
     def test_argument_truncation_with_large_payload(self):
         """Verify truncation actually fires for oversized arguments."""
         big_args = '{"data": "' + 'x' * 3000 + '"}'
-        msg = {
-            'role': 'assistant',
-            'content': '',
-            'function_call': {'name': 'analyze', 'arguments': big_args}
-        }
+        msg = {'role': 'assistant', 'content': '', 'function_call': {'name': 'analyze', 'arguments': big_args}}
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[TOOL CALL: analyze(' in result
         assert '... [TRUNCATED]' in result
@@ -97,10 +125,21 @@ class TestExtractTextFunctionCall:
 
     def test_tool_calls_on_message_object(self):
         """C1/M2: tool_calls array works when passed via Message object (not just dict)."""
-        tc_list = [
-            {'id': 'call_1', 'type': 'function', 'function': {'name': 'read_file', 'arguments': '{"path":"a.txt"}'}},
-            {'id': 'call_2', 'type': 'function', 'function': {'name': 'write_file', 'arguments': '{"content":"ok"}'}}
-        ]
+        tc_list = [{
+            'id': 'call_1',
+            'type': 'function',
+            'function': {
+                'name': 'read_file',
+                'arguments': '{"path":"a.txt"}'
+            }
+        }, {
+            'id': 'call_2',
+            'type': 'function',
+            'function': {
+                'name': 'write_file',
+                'arguments': '{"content":"ok"}'
+            }
+        }]
         msg = Message(role='assistant', content='', extra={'tool_calls': tc_list})
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[TOOL CALL: read_file(' in result
@@ -109,15 +148,22 @@ class TestExtractTextFunctionCall:
     def test_mixed_dict_object_items_in_tool_calls(self):
         """M3: tool_calls array with mixed dict and object items."""
         # First item is a plain dict, second simulates an object-like structure via nested dict
-        tc_list = [
-            {'id': 'call_1', 'type': 'function', 'function': {'name': 'tool_a', 'arguments': '{"x":1}'}},
-            {'id': 'call_2', 'type': 'function', 'function': {'name': 'tool_b', 'arguments': '{"y":2}'}}
-        ]
-        msg = {
-            'role': 'assistant',
-            'content': '',
-            'tool_calls': tc_list
-        }
+        tc_list = [{
+            'id': 'call_1',
+            'type': 'function',
+            'function': {
+                'name': 'tool_a',
+                'arguments': '{"x":1}'
+            }
+        }, {
+            'id': 'call_2',
+            'type': 'function',
+            'function': {
+                'name': 'tool_b',
+                'arguments': '{"y":2}'
+            }
+        }]
+        msg = {'role': 'assistant', 'content': '', 'tool_calls': tc_list}
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[TOOL CALL: tool_a({' in result
         assert '[TOOL CALL: tool_b({' in result
@@ -143,7 +189,11 @@ class TestExtractTextFunctionCall:
 
     def test_reasoning_content_included_with_content(self):
         """Test that reasoning_content is prepended when content also exists."""
-        msg = {'role': 'assistant', 'content': 'The answer is 42', 'reasoning_content': 'I need to calculate this carefully'}
+        msg = {
+            'role': 'assistant',
+            'content': 'The answer is 42',
+            'reasoning_content': 'I need to calculate this carefully'
+        }
         result = extract_text_from_message(msg, add_upload_info=False)
         # extract_text_from_message returns content as-is when non-empty;
         # prepending reasoning before content is handled by _format_messages_for_summary()
@@ -152,9 +202,13 @@ class TestExtractTextFunctionCall:
     def test_format_messages_prepends_reasoning(self):
         """Test that _format_messages_for_summary prepends reasoning before content."""
         from agent_cascade.compression.agent_invoker import _format_messages_for_summary
-        
+
         messages = [
-            {'role': 'assistant', 'content': 'The answer is 42', 'reasoning_content': 'I need to calculate this carefully'},
+            {
+                'role': 'assistant',
+                'content': 'The answer is 42',
+                'reasoning_content': 'I need to calculate this carefully'
+            },
         ]
         result = _format_messages_for_summary(messages)
         assert '[THOUGHT: I need to calculate this carefully]' in result
@@ -165,9 +219,13 @@ class TestExtractTextFunctionCall:
     def test_format_messages_reasoning_as_fallback(self):
         """Test that _format_messages_for_summary uses reasoning when content is empty."""
         from agent_cascade.compression.agent_invoker import _format_messages_for_summary
-        
+
         messages = [
-            {'role': 'assistant', 'content': '', 'reasoning_content': 'Let me think about this...'},
+            {
+                'role': 'assistant',
+                'content': '',
+                'reasoning_content': 'Let me think about this...'
+            },
         ]
         result = _format_messages_for_summary(messages)
         assert '[THOUGHT: Let me think about this...]' in result
@@ -184,7 +242,14 @@ class TestExtractTextFunctionCall:
             'role': 'assistant',
             'content': '',
             'reasoning_content': 'Let me reason through this',
-            'tool_calls': [{'id': 'call_1', 'type': 'function', 'function': {'name': 'search_web', 'arguments': '{}'}}]
+            'tool_calls': [{
+                'id': 'call_1',
+                'type': 'function',
+                'function': {
+                    'name': 'search_web',
+                    'arguments': '{}'
+                }
+            }]
         }
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[THOUGHT: Let me reason through this]' in result
@@ -212,10 +277,11 @@ class TestExtractTextFunctionCall:
         msg = {
             'role': 'assistant',
             'content': '',
-            'reasoning_content': [
-                {'text': 'First thought: the key'},
-                {'text': 'Second thought: combine them'}
-            ]
+            'reasoning_content': [{
+                'text': 'First thought: the key'
+            }, {
+                'text': 'Second thought: combine them'
+            }]
         }
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[THOUGHT:' in result
@@ -224,27 +290,13 @@ class TestExtractTextFunctionCall:
 
     def test_reasoning_content_list_type_via_helper(self):
         """Test that _format_tool_calls_for_text returns empty for list-type reasoning."""
-        msg = {
-            'role': 'assistant',
-            'content': '',
-            'reasoning_content': [
-                {'text': 'Step one'},
-                {'text': 'Step two'}
-            ]
-        }
+        msg = {'role': 'assistant', 'content': '', 'reasoning_content': [{'text': 'Step one'}, {'text': 'Step two'}]}
         result = _format_tool_calls_for_text(msg)
         assert result == ''
 
     def test_reasoning_content_list_empty_items(self):
         """Test that list-type reasoning with empty text items returns empty."""
-        msg = {
-            'role': 'assistant',
-            'content': '',
-            'reasoning_content': [
-                {'text': ''},
-                {'text': '  '}
-            ]
-        }
+        msg = {'role': 'assistant', 'content': '', 'reasoning_content': [{'text': ''}, {'text': '  '}]}
         result = extract_text_from_message(msg, add_upload_info=False)
         assert result == ''
 
@@ -267,16 +319,20 @@ class TestExtractTextFunctionCall:
 
     def test_reasoning_combined_with_tool_calls_on_message_object(self):
         """Test combined reasoning + tool_calls on Message object via extra dict."""
-        msg = Message(
-            role='assistant',
-            content='',
-            extra={
-                'reasoning_content': 'Let me think about this problem carefully',
-                'tool_calls': [
-                    {'id': 'call_1', 'type': 'function', 'function': {'name': 'search_web', 'arguments': '{"q":"test"}'}}
-                ]
-            }
-        )
+        msg = Message(role='assistant',
+                      content='',
+                      extra={
+                          'reasoning_content':
+                              'Let me think about this problem carefully',
+                          'tool_calls': [{
+                              'id': 'call_1',
+                              'type': 'function',
+                              'function': {
+                                  'name': 'search_web',
+                                  'arguments': '{"q":"test"}'
+                              }
+                          }]
+                      })
         result = extract_text_from_message(msg, add_upload_info=False)
         # Both reasoning and tool calls should be accessible via the helper
         assert '[THOUGHT:' in result or '[TOOL CALL:' in result
@@ -284,13 +340,7 @@ class TestExtractTextFunctionCall:
     def test_reasoning_content_list_truncation(self):
         """Test that list-type reasoning_content is also truncated via extract_text_from_message."""
         long_text = 'z' * 3000
-        msg = {
-            'role': 'assistant',
-            'content': '',
-            'reasoning_content': [
-                {'text': long_text}
-            ]
-        }
+        msg = {'role': 'assistant', 'content': '', 'reasoning_content': [{'text': long_text}]}
         result = extract_text_from_message(msg, add_upload_info=False)
         assert '[THOUGHT:' in result
         assert '... [TRUNCATED]' in result
@@ -298,17 +348,16 @@ class TestExtractTextFunctionCall:
     def test_format_messages_list_reasoning(self):
         """Test that _format_messages_for_summary handles list-type reasoning."""
         from agent_cascade.compression.agent_invoker import _format_messages_for_summary
-        
-        messages = [
-            {
-                'role': 'assistant',
-                'content': '',
-                'reasoning_content': [
-                    {'text': 'Analyzing the data'},
-                    {'text': 'Found the pattern'}
-                ]
-            }
-        ]
+
+        messages = [{
+            'role': 'assistant',
+            'content': '',
+            'reasoning_content': [{
+                'text': 'Analyzing the data'
+            }, {
+                'text': 'Found the pattern'
+            }]
+        }]
         result = _format_messages_for_summary(messages)
         assert '[THOUGHT:' in result
         assert 'Analyzing' in result
@@ -317,41 +366,47 @@ class TestExtractTextFunctionCall:
     def test_format_messages_large_reasoning_truncation(self):
         """Test that _format_messages_for_summary truncates large reasoning."""
         from agent_cascade.compression.agent_invoker import _format_messages_for_summary
-        
+
         long_thought = 'a' * 3000
-        messages = [
-            {'role': 'assistant', 'content': '', 'reasoning_content': long_thought}
-        ]
+        messages = [{'role': 'assistant', 'content': '', 'reasoning_content': long_thought}]
         result = _format_messages_for_summary(messages)
         assert '... [TRUNCATED]' in result
 
     def test_reasoning_to_text_helper_directly(self):
         """Test the _reasoning_to_text helper function directly."""
         from agent_cascade.utils.utils import _reasoning_to_text
-        
+
         # String input
         assert _reasoning_to_text('hello') == 'hello'
-        
+
         # List input with dicts
         result = _reasoning_to_text([{'text': 'a'}, {'text': 'b'}])
         assert 'a b' in result
-        
+
         # Empty list
         assert _reasoning_to_text([]) == ''
-        
+
         # None input
         assert _reasoning_to_text(None) == ''
-        
+
         # Whitespace string
         assert _reasoning_to_text('  ') == ''
 
     def test_format_messages_user_reasoning_not_leaked(self):
         """Test that user messages with reasoning_content don't leak into summary."""
         from agent_cascade.compression.agent_invoker import _format_messages_for_summary
-        
+
         msgs = [
-            {'role': 'user', 'content': '', 'reasoning_content': 'Secret user thought'},
-            {'role': 'assistant', 'content': 'Hello', 'reasoning_content': 'Assistant thought'},
+            {
+                'role': 'user',
+                'content': '',
+                'reasoning_content': 'Secret user thought'
+            },
+            {
+                'role': 'assistant',
+                'content': 'Hello',
+                'reasoning_content': 'Assistant thought'
+            },
         ]
         result = _format_messages_for_summary(msgs)
         assert 'Secret user thought' not in result
@@ -360,9 +415,15 @@ class TestExtractTextFunctionCall:
     def test_format_messages_reasoning_from_extra_dict(self):
         """Test that reasoning_content in extra dict is picked up by _format_messages_for_summary."""
         from agent_cascade.compression.agent_invoker import _format_messages_for_summary
-        
+
         msgs = [
-            {'role': 'assistant', 'content': '', 'extra': {'reasoning_content': 'Hidden thought from extra'}},
+            {
+                'role': 'assistant',
+                'content': '',
+                'extra': {
+                    'reasoning_content': 'Hidden thought from extra'
+                }
+            },
         ]
         result = _format_messages_for_summary(msgs)
         assert '[THOUGHT: Hidden thought from extra]' in result

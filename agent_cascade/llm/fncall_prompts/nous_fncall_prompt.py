@@ -23,9 +23,8 @@ import json5
 from agent_cascade.llm.fncall_prompts.base_fncall_prompt import BaseFnCallPrompt
 from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, USER, ContentItem, FunctionCall, Message
 from agent_cascade.log import logger
-from agent_cascade.utils.utils import json_loads, repair_invalid_json
-
-from agent_cascade.prompts.dna import XML_CONTENT_FIELDS, XML_MIN_LENGTH, FN_CALL_TEMPLATE, FN_CALL_TEMPLATE_WITH_CI
+from agent_cascade.prompts.dna import FN_CALL_TEMPLATE, FN_CALL_TEMPLATE_WITH_CI, XML_CONTENT_FIELDS, XML_MIN_LENGTH
+from agent_cascade.utils.utils import json_loads
 
 
 def _extract_xml_content_fields(text: str) -> Dict[str, str]:
@@ -64,9 +63,7 @@ def _build_xml_tool_call(fn_name: str, arguments: dict) -> str:
 
     if isinstance(arguments, dict):
         for k, v in arguments.items():
-            if (k in XML_CONTENT_FIELDS
-                    and isinstance(v, str)
-                    and len(v) >= XML_MIN_LENGTH):
+            if (k in XML_CONTENT_FIELDS and isinstance(v, str) and len(v) >= XML_MIN_LENGTH):
                 xml_parts.append(f'<{k}>\n{v}\n</{k}>')
             else:
                 json_args[k] = v
@@ -169,7 +166,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
         else:
             messages = [Message(role=SYSTEM, content=[ContentItem(text=tool_system)])] + messages
         return messages
-    
+
     def postprocess_fncall_messages(
         self,
         messages: List[Message],
@@ -222,6 +219,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
                     if not args_str.strip():
                         args_str = '{}'
                     return f'<tool_call>\n{{"name": "{fn_name}", "arguments": {args_str}}}\n</tool_call>'
+
                 # Support both <tool_call> and <|tool_call|> (Gemma/Qwen style)
                 text = item_text
                 text = text.replace('<|tool_call|>', '<tool_call>')
@@ -237,7 +235,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
                         p = text.find(ind)
                         if p != -1 and (tag_pos == -1 or p < tag_pos):
                             tag_pos = p
-                    
+
                     if tag_pos != -1:
                         # Auto-wrap the rest of the text as a tool call
                         text = text[:tag_pos] + '<tool_call>' + text[tag_pos:] + '</tool_call>'
@@ -343,7 +341,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
                                 fn_name_match = re.search(r'["\']?name["\']?\s*:\s*["\']([^"\']+)["\']', raw_tool_text)
                                 if fn_name_match:
                                     fn = {'name': fn_name_match.group(1), 'arguments': {}}
-                        
+
                         if fn:
                             # 1. Promote flat JSON to {name, arguments} structure if needed
                             if 'name' not in fn and 'arguments' not in fn:
@@ -353,11 +351,11 @@ class NousFnCallPrompt(BaseFnCallPrompt):
                                 # It's a dict with name but flat arguments
                                 _name = fn.pop('name')
                                 fn = {'name': _name, 'arguments': fn}
-                            
+
                             # 2. XML name overrides JSON name if both present
                             if 'name' in xml_fields:
                                 fn['name'] = xml_fields.pop('name')
-                            
+
                             # 3. Ensure arguments is a dict
                             if 'arguments' not in fn:
                                 fn['arguments'] = {}
@@ -366,7 +364,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
                                     fn['arguments'] = json_loads(fn['arguments'])
                                 except Exception:
                                     fn['arguments'] = {}
-                            
+
                             # 4. Merge remaining XML fields into arguments
                             fn['arguments'].update(xml_fields)
 
@@ -394,6 +392,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
 
 SPECIAL_CODE_MODE = os.getenv('SPECIAL_CODE_MODE', 'false').lower() == 'true'
 CODE_TOOL_PATTERN = 'code_interpreter'
+
 # Template with CI is now imported from agent_cascade.prompts.dna
 
 
@@ -412,7 +411,7 @@ def extract_fn(text: str):
     fn_name_match = re.search(r'["\']?name["\']?\s*:\s*["\']([^"\']+)["\']', text)
     if fn_name_match:
         fn_name = fn_name_match.group(1)
-        
+
     # Match "arguments": { ... } or arguments: { ... }
     fn_args_match = re.search(r'["\']?arguments["\']?\s*:\s*(\{.*\})', text, re.DOTALL)
     if fn_args_match:
@@ -424,8 +423,8 @@ def extract_fn(text: str):
         if k > 0:
             fn_args = text[k + len(fn_args_s):].strip()
             if fn_args.endswith('}'):
-                pass # keep it
+                pass  # keep it
             elif fn_args.count('{') > fn_args.count('}'):
-                fn_args += '}' # simple repair
-                
+                fn_args += '}'  # simple repair
+
     return fn_name, fn_args

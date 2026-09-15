@@ -27,7 +27,7 @@ from agent_cascade.tools.storage import KeyNotExistsError, Storage
 from agent_cascade.utils.str_processing import rm_cid, rm_continuous_placeholders, rm_hexadecimal
 from agent_cascade.utils.tokenization_qwen import count_tokens
 from agent_cascade.utils.utils import (get_file_type, hash_sha256, is_http_url, read_text_from_file,
-                                    sanitize_chrome_file_path, save_url_to_local_work_dir)
+                                       sanitize_chrome_file_path, save_url_to_local_work_dir)
 
 
 def clean_paragraph(text):
@@ -842,11 +842,11 @@ class SimpleDocParser(BaseTool):
 
         params = self._verify_json_format_args(params)
         path = params['url']
-        
+
         # Strip file:// prefix using existing utility (robust URL parsing via urllib.parse)
         if path.startswith('file://'):
             path = sanitize_chrome_file_path(path)
-        
+
         # Normalize local paths to resolve '..' segments and prevent traversal issues
         if not is_http_url(path):
             path = os.path.normpath(path)
@@ -857,7 +857,7 @@ class SimpleDocParser(BaseTool):
             # Only convert if: first segment contains a dot (domain-like), has path components, and is not a relative path marker (./ or ../)
             if not first_segment.startswith('.') and '.' in first_segment and len(segments) > 1:
                 path = 'http://' + normalized
-        
+
         # Resolve relative local paths against work_dir
         if not is_http_url(path) and not os.path.isabs(path):
             path = os.path.join(self.work_dir, path)

@@ -29,6 +29,7 @@ Runtime budget: < 60s for the whole file.
 # Isolate this run's logs/telemetry from the production workspace. Must be set BEFORE any
 # agent_cascade import (instance_id reads it at call time).
 import os as _os
+
 _os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', f"edgecase_{_os.getpid()}")
 
 import inspect  # noqa: F401  (kept for parity with the reference suite; used by static guards)
@@ -139,10 +140,10 @@ def edge_harness(tmp_path, request):
     Each test gets its OWN config dir (derived from the node id) so pytest-xdist's parallel
     workers don't overwrite each other's api_endpoints.json.
     """
-    import agent_cascade.slot_queue as _sq_mod
-    import agent_cascade.api_router_pkg.scheduler as _ar_mod
     import agent_cascade.api_router_pkg.router as _rmod
+    import agent_cascade.api_router_pkg.scheduler as _ar_mod
     import agent_cascade.engine.core as _core_mod
+    import agent_cascade.slot_queue as _sq_mod
 
     cfg_dir = tmp_path / request.node.name.replace('/', '_')
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -362,7 +363,7 @@ class TestP1SwapWhileRunning:
         """Agent holds the shared slot; a waiter is blocked. Swap priorities (same pool).
         The waiter must remain blocked until the holder releases — no premature grant."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool, _ = h['router'], h['pool'], h['shared']
 
         ep1_id = _add_endpoint(router, 'ep1', 'http://127.0.0.1:11/v1', concurrency_limit=0)
         router.set_agent_priorities('coder', ['ep0', ep1_id])
@@ -395,7 +396,7 @@ class TestP2SwapWhileWaiting:
         After the holder releases, w1 is granted first (FIFO). After w1 releases,
         w2 is granted. The capacity-1 pool enforces strict sequential ordering."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, _, _ = h['router'], h['pool'], h['shared']
 
         ep1_id = _add_endpoint(router, 'ep1', 'http://127.0.0.1:11/v1', concurrency_limit=0)
         router.set_agent_priorities('coder', ['ep0', ep1_id])
@@ -430,7 +431,7 @@ class TestP2SwapWhileWaiting:
         """Swap priorities must NOT reorder the FIFO queue. The swap only affects which
         endpoint the agent will use NEXT time it acquires — not the current queue order."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, _, _ = h['router'], h['pool'], h['shared']
 
         ep1_id = _add_endpoint(router, 'ep1', 'http://127.0.0.1:11/v1', concurrency_limit=0)
         holder_rel = router.scheduler.acquire(
@@ -613,9 +614,9 @@ class TestM3TerminateAsyncChild:
     def test_dismiss_async_child_with_perbase_slot(self, edge_harness):
         """An async child holds a per-base pool permit. Dismissing it must free the permit."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool, _ = h['router'], h['pool'], h['shared']
 
-        par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=2)
+        _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=2)
         inst = _make_instance(pool, 'm3b', 'coder')
 
         rel = router.scheduler.acquire(
@@ -644,7 +645,7 @@ class TestC1ConcurrentSwapFight:
         After A releases, B is granted first (FIFO). After B releases, C is granted.
         No deadlock."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, _, _ = h['router'], h['pool'], h['shared']
 
         ep1_id = _add_endpoint(router, 'ep1', 'http://127.0.0.1:11/v1', concurrency_limit=0)
         router.set_agent_priorities('coder', ['ep0', ep1_id])
@@ -677,7 +678,7 @@ class TestC1ConcurrentSwapFight:
         """Multiple threads swap priorities simultaneously. The router's internal state
         must remain consistent (no corruption, no crash)."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, _, _ = h['router'], h['pool'], h['shared']
 
         ep1_id = _add_endpoint(router, 'ep1', 'http://127.0.0.1:11/v1', concurrency_limit=0)
         ep2_id = _add_endpoint(router, 'ep2', 'http://127.0.0.1:12/v1', concurrency_limit=0)
@@ -716,7 +717,7 @@ class TestC2DeadlockTopology:
         """Parent holds the shared slot. Child (async) is spawned. Grandchild (sync)
         needs the same slot. Verify no deadlock: parent must yield or the chain resolves."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, _, shared = h['router'], h['pool'], h['shared']
 
         # Parent holds the slot.
         rel_parent = router.scheduler.acquire(
@@ -759,7 +760,7 @@ class TestC2DeadlockTopology:
         """Parent yields the slot to a child, then tries to re-acquire. The parent must
         re-enter FIFO at the tail (no bypass, no deadlock)."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, _, shared = h['router'], h['pool'], h['shared']
 
         rel_parent = router.scheduler.acquire(
             api_base=SEQ_BASE, concurrency_limit=0,
@@ -1023,7 +1024,7 @@ class TestST2CrossPoolHeavyLoad:
         """Multiple agents fight for the shared slot. One agent swaps to a conc>0
         endpoint (cross-pool). The swap must not deadlock the FIFO queue."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool, _ = h['router'], h['pool'], h['shared']
 
         par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=4)
         router.set_agent_priorities('coder', ['ep0', par_id])
@@ -1046,7 +1047,7 @@ class TestST2CrossPoolHeavyLoad:
         inst._slot_release = rel_holder
         inst._slot_key = SHARED_KEY
         router.sync_sticky_slot(inst, desired_key=None, origin='sticky')
-        
+
         # Release the shared slot (simulating lifecycle point).
         _release_permit(inst)
 
@@ -1130,7 +1131,7 @@ class TestST3RapidSuccessiveSwaps:
         """Rapid swaps while a waiter is blocked. The waiter must eventually be
         granted when the holder releases — no starvation."""
         h = edge_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool, _ = h['router'], h['pool'], h['shared']
 
         ep1_id = _add_endpoint(router, 'ep1', 'http://127.0.0.1:11/v1', concurrency_limit=0)
         rel_holder = router.scheduler.acquire(
@@ -1282,7 +1283,7 @@ class TestStressConcurrentRaces:
 
         errors = []
         lock = threading.Lock()
-        stop_event = threading.Event()
+        threading.Event()
 
         def agent_worker(idx):
             try:

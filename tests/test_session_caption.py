@@ -25,13 +25,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.prompts.dna import COMPRESSION_END_MARKER
 from agent_cascade.compression.agent_invoker import _parse_compression_output
-
+from agent_cascade.prompts.dna import COMPRESSION_END_MARKER
 
 # ────────────────────────────────────────────────────────────────────────────
 # 1. Compression parse/strip (the delicate part)
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestParseCompressionOutput:
     """_parse_compression_output() must split summary + caption safely."""
@@ -114,6 +114,7 @@ class TestParseCompressionOutput:
 # 2. Metadata: set_caption first-wins semantics
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestLoggerSetCaption:
     """AgentInstanceLogger.set_caption() must be first-meaningful-wins."""
 
@@ -161,6 +162,7 @@ class TestLoggerSetCaption:
 # 3. API caption helpers (line-1 metadata + first-user fallback + truncation)
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestApiSessionCaption:
     """/api/sessions caption helpers: real caption, user-message fallback, cap."""
 
@@ -191,7 +193,7 @@ class TestApiSessionCaption:
         assert _read_session_caption(path) == ''
 
     def test_truncation_caps_long_user_message(self, tmp_path):
-        from agent_cascade.api_server import _read_session_caption, _SESSION_CAPTION_MAX_LEN
+        from agent_cascade.api_server import _SESSION_CAPTION_MAX_LEN, _read_session_caption
         meta = {'metadata': {'caption': ''}}
         long_text = 'word ' * 100  # far longer than the cap
         user_msg = {'role': 'user', 'content': long_text.strip()}
@@ -263,13 +265,14 @@ class _LineSpy:
 # 4. Integration: compress_context threads the caption into the marker body check
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestCompressContextCaptionIntegration:
     """End-to-end (mocked compressor): caption must NOT leak into the marker body."""
 
     def test_caption_not_in_marker_body(self, tmp_path):
         from agent_cascade.compression.core import compress_context
-        from tests.conftest import MockAgentPool
         from agent_cascade.llm.schema import SYSTEM, USER
+        from tests.conftest import MockAgentPool
 
         # Build a small history with enough active content to compress.
         history = [Message_obj(SYSTEM, 'You are a test agent')]
@@ -286,7 +289,9 @@ class TestCompressContextCaptionIntegration:
         # against real metadata (not a MagicMock) and we can assert on it directly.
         from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
         real_logger = AgentInstanceLogger(
-            agent_class='coder', instance_name='TestAgent', log_dir=str(tmp_path),
+            agent_class='coder',
+            instance_name='TestAgent',
+            log_dir=str(tmp_path),
         )
 
         # MockAgentPool is a minimal simulation — add the two methods core.py's caption
@@ -298,10 +303,12 @@ class TestCompressContextCaptionIntegration:
         mock_comp_agent = MagicMock()
         mock_comp_agent.llm.generate_cfg = {'max_input_tokens': 128000}
         original_get_agent = pool.get_agent
+
         def patched_get_agent(name):
             if name == 'Compressor':
                 return mock_comp_agent
             return original_get_agent(name)
+
         pool.get_agent = patched_get_agent
 
         # Patch the compressor to return a summary WITH a caption.
@@ -330,6 +337,7 @@ class TestCompressContextCaptionIntegration:
 # 5. /compress command uses single-executor path (caption fix)
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestCompressCommandCaptionPath:
     """Verify handle_compress_command calls compress_context with dry_run=False
     and no precomputed_summary, so the caption is parsed and saved in one pass."""
@@ -346,7 +354,7 @@ class TestCompressCommandCaptionPath:
 
     def test_compress_command_calls_tool_without_dry_run(self):
         """The new single-pass path must NOT pass dry_run=True or precomputed_summary."""
-        from agent_cascade.llm.schema import Message, USER
+        from agent_cascade.llm.schema import USER, Message
 
         handler, engine = self._make_handler()
 
@@ -378,14 +386,10 @@ class TestCompressCommandCaptionPath:
         # THE KEY ASSERTION: compress_tool.call was invoked WITHOUT dry_run and
         # WITHOUT precomputed_summary — this means core.py reaches set_caption().
         call_kwargs = mock_tool.call.call_args.kwargs
-        assert 'dry_run' not in call_kwargs, (
-            'handle_compress_command must NOT pass dry_run=True; '
-            'the caption would be skipped by the core.py guard'
-        )
-        assert 'precomputed_summary' not in call_kwargs, (
-            'handle_compress_command must NOT pass precomputed_summary; '
-            'the LLM must run so caption is parsed and saved'
-        )
+        assert 'dry_run' not in call_kwargs, ('handle_compress_command must NOT pass dry_run=True; '
+                                              'the caption would be skipped by the core.py guard')
+        assert 'precomputed_summary' not in call_kwargs, ('handle_compress_command must NOT pass precomputed_summary; '
+                                                          'the LLM must run so caption is parsed and saved')
 
     def test_compress_command_tool_unavailable_returns_true(self):
         """When compress_context tool is missing, the command is still 'handled'."""
@@ -407,7 +411,6 @@ class TestCompressCommandCaptionPath:
 
     def test_compress_command_failure_notification(self):
         """When the tool returns a failure string, a notification is injected."""
-        from agent_cascade.llm.schema import Message, USER
 
         handler, engine = self._make_handler()
 

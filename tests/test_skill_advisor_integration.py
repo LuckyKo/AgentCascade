@@ -35,16 +35,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent_cascade.agent_instance import AgentState
 from agent_cascade.engine.core import ExecutionEngine
-from agent_cascade.llm.schema import ASSISTANT, SYSTEM, FUNCTION, Message
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, Message
 from agent_cascade.skills.advisor import SkillAdvisorResult
-
 
 # Sentinel for _run_gate(load_skill_value=...) meaning "omit the key from args"
 # so the gate falls back to pool.settings.default_load_skill_mode.
 _OMIT_LOAD_SKILL = object()
 
-
 # ── Test doubles ──────────────────────────────────────────────────────────────
+
 
 class FakeSkillManager:
     """Minimal stand-in for SkillManager covering the gate's surface.
@@ -57,9 +56,7 @@ class FakeSkillManager:
         self._names = list(names)
         # Basic keyword-match fallback — returns a distinctive body so tests can tell
         # the fallback path ran. Wrapped in MagicMock to record/inspect calls.
-        self.resolve_load_skill = MagicMock(
-            return_value=['# basic-keyword-match-skill\nresolved via basic matching']
-        )
+        self.resolve_load_skill = MagicMock(return_value=['# basic-keyword-match-skill\nresolved via basic matching'])
 
     def resolve_load_skill_names(self, load_skill_value, task_text='', context_text=''):
         # Mirrors the real SkillManager: returns the names backing resolve_load_skill's
@@ -92,6 +89,7 @@ class FakeSkillManager:
 
 
 class FakeSettings:
+
     def __init__(self, auto_skill_mode='advanced', default_load_skill_mode='AUTO'):
         self.auto_skill_mode = auto_skill_mode
         self.default_load_skill_mode = default_load_skill_mode
@@ -118,7 +116,7 @@ class FakePool:
         self.skill_manager = skill_manager
         self._execution = FakeExecutionState()
         self.instances = {}  # name → instance (for the early recall check)
-        self.order = []     # event sequence: "advisor" then "allocate"
+        self.order = []  # event sequence: "advisor" then "allocate"
 
     def is_instance_terminated(self, instance_name):
         return False
@@ -145,9 +143,7 @@ class FakeLifecycle:
 
     def __init__(self, pool):
         self.pool = pool
-        self.find_or_create_instance = MagicMock(
-            side_effect=self._find_or_create
-        )
+        self.find_or_create_instance = MagicMock(side_effect=self._find_or_create)
         self.build_system_message = MagicMock(return_value=Message(role=SYSTEM, content='SYS'))
         self.build_task_message = MagicMock(return_value=Message(role='user', content='TASK'))
         self.initialize_conversation = MagicMock(return_value=[Message(role=SYSTEM, content='SYS')])
@@ -188,9 +184,13 @@ def _build_engine(pool, lifecycle):
     return engine
 
 
-def _run_gate(advisor_result, auto_skill_mode='advanced', default_load_skill_mode='AUTO',
+def _run_gate(advisor_result,
+              auto_skill_mode='advanced',
+              default_load_skill_mode='AUTO',
               skill_names=('docker-best-practices', 'httpx-connection-pooling'),
-              pre_existing_instance=None, advisor_raises=False, load_skill_value='AUTO',
+              pre_existing_instance=None,
+              advisor_raises=False,
+              load_skill_value='AUTO',
               telemetry=None):
     """Drive the real gate block and return (engine, pool, lifecycle, result).
 
@@ -230,8 +230,12 @@ def _run_gate(advisor_result, auto_skill_mode='advanced', default_load_skill_mod
 
     with patch('agent_cascade.skills.advisor.run_skill_advisor', side_effect=_fake_advisor) as mock_advisor:
         result = engine._create_and_run_agent(
-            agent_class='coder', instance_name='worker1',
-            args=args, caller='maine', nest_depth=0, force_fresh=False,
+            agent_class='coder',
+            instance_name='worker1',
+            args=args,
+            caller='maine',
+            nest_depth=0,
+            force_fresh=False,
         )
 
     return engine, pool, lifecycle, mock_advisor, result
@@ -241,7 +245,9 @@ def _run_gate(advisor_result, auto_skill_mode='advanced', default_load_skill_mod
 # 1. Advanced mode + AUTO → advisor runs, skills injected
 # ===========================================================================
 
+
 class TestAdvisorApprove:
+
     def test_advisor_called_and_skills_injected(self):
         advisor_result = SkillAdvisorResult(
             verdict='approve',
@@ -298,7 +304,9 @@ class TestAdvisorApprove:
 # 2. Advanced mode + DENY → no instance created, error returned
 # ===========================================================================
 
+
 class TestAdvisorDeny:
+
     def test_deny_prevents_allocation(self):
         advisor_result = SkillAdvisorResult(
             verdict='deny',
@@ -331,12 +339,12 @@ class TestAdvisorDeny:
 # 3. Advanced mode + timeout/error → fallback to basic keyword match
 # ===========================================================================
 
+
 class TestAdvisorFallback:
+
     def test_exception_falls_back_to_basic_match(self):
         # run_skill_advisor raises → gate catches and treats as ambiguous.
-        _, pool, lifecycle, mock_advisor, result = _run_gate(
-            advisor_result=None, advisor_raises=True
-        )
+        _, pool, lifecycle, mock_advisor, result = _run_gate(advisor_result=None, advisor_raises=True)
 
         # Advisor was attempted (raised), so it WAS called.
         assert mock_advisor.call_count == 1
@@ -371,12 +379,12 @@ class TestAdvisorFallback:
 # 4. Basic mode → advisor never called
 # ===========================================================================
 
+
 class TestBasicModeSkipsAdvisor:
+
     def test_basic_mode_never_invokes_advisor(self):
         advisor_result = SkillAdvisorResult(verdict='approve')
-        _, pool, lifecycle, mock_advisor, result = _run_gate(
-            advisor_result, auto_skill_mode='basic'
-        )
+        _, pool, lifecycle, mock_advisor, result = _run_gate(advisor_result, auto_skill_mode='basic')
 
         # The gate condition (auto_skill_mode == "advanced") is False → no advisor.
         assert mock_advisor.call_count == 0
@@ -392,21 +400,23 @@ class TestBasicModeSkipsAdvisor:
 # 4b. None mode → no auto-matched skills; Self-Augmentation + explicit lists preserved
 # ===========================================================================
 
+
 class TestNoneMode:
     """auto_skill_mode == "none" disables system-injected auto-matched skills:
     no Basic keyword match, no Advanced advisor — while preserving the
     Self-Augmentation meta-skill (global toggle) and caller-explicit skill lists."""
 
     def _approve(self):
-        return SkillAdvisorResult(
-            verdict='approve', reason='ok', recommended_skills=['docker-best-practices'], task_notes=''
-        )
+        return SkillAdvisorResult(verdict='approve',
+                                  reason='ok',
+                                  recommended_skills=['docker-best-practices'],
+                                  task_notes='')
 
     def test_none_auto_no_matched_skills(self):
         # "none" + AUTO (default) → no auto-matched skills at all.
-        _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), auto_skill_mode='none', load_skill_value='AUTO'
-        )
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(),
+                                                        auto_skill_mode='none',
+                                                        load_skill_value='AUTO')
 
         # Advisor never runs in none mode.
         assert mock_advisor.call_count == 0
@@ -423,7 +433,8 @@ class TestNoneMode:
         # unlike the AUTO case above. The FakeSkillManager's resolve_load_skill is a
         # MagicMock returning a fixed body, so we assert it was invoked with the list.
         _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), auto_skill_mode='none',
+            self._approve(),
+            auto_skill_mode='none',
             load_skill_value=['docker-best-practices'],
         )
 
@@ -444,7 +455,8 @@ class TestNoneMode:
         # is the regression guard for the isinstance(list)-only bug: the value is a
         # str here, so only _is_explicit_skill_list() (JSON-decode check) can catch it.
         _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), auto_skill_mode='none',
+            self._approve(),
+            auto_skill_mode='none',
             load_skill_value='["docker-best-practices"]',
         )
 
@@ -465,14 +477,16 @@ class TestNoneMode:
 # 5. Recall path → advisor skipped, existing system message preserved
 # ===========================================================================
 
+
 class TestRecallSkipsAdvisor:
+
     def test_recall_of_idle_instance_skips_advisor(self):
         # Pre-existing idle instance with a valid SYSTEM conversation[0].
         existing = FakeInstance(
             agent_class='coder',
             conversation=[Message(role=SYSTEM, content='ORIGINAL SYS')],
         )
-        advisor_result = SkillAdvisorResult(verdict='approve', recommended_skills=['docker-best-practices'])
+        SkillAdvisorResult(verdict='approve', recommended_skills=['docker-best-practices'])
 
         # The early recall check looks up pool.instances BEFORE find_or_create_instance,
         # so the existing instance MUST be registered there for the advisor to be skipped.
@@ -494,9 +508,13 @@ class TestRecallSkipsAdvisor:
             return SkillAdvisorResult(verdict='approve')
 
         with patch('agent_cascade.skills.advisor.run_skill_advisor', side_effect=_record_advisor) as mock_advisor:
-            result = engine._create_and_run_agent(
-                agent_class='coder', instance_name='worker1',
-                args=args, caller='maine', nest_depth=0, force_fresh=False,
+            engine._create_and_run_agent(
+                agent_class='coder',
+                instance_name='worker1',
+                args=args,
+                caller='maine',
+                nest_depth=0,
+                force_fresh=False,
             )
 
         # Recall detected BEFORE the advisor → advisor never invoked.
@@ -517,6 +535,7 @@ class TestRecallSkipsAdvisor:
 # 6. load_skill value normalization (regression: LLM passes '["AUTO"]' string)
 # ===========================================================================
 
+
 class TestLoadSkillNormalization:
     """The gate must normalize the many shapes an LLM can emit for load_skill
     into a plain "AUTO"/"NONE" before comparing modes. The bug: a JSON-encoded
@@ -525,29 +544,21 @@ class TestLoadSkillNormalization:
     was invoked (the single observable that distinguishes AUTO vs NONE mode)."""
 
     def _approve(self):
-        return SkillAdvisorResult(
-            verdict='approve', reason='ok', recommended_skills=[], task_notes=''
-        )
+        return SkillAdvisorResult(verdict='approve', reason='ok', recommended_skills=[], task_notes='')
 
     # ── AUTO variants → advisor runs ────────────────────────────────────────
 
     def test_plain_auto_string_runs_advisor(self):
-        _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), load_skill_value='AUTO'
-        )
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(), load_skill_value='AUTO')
         assert mock_advisor.call_count == 1
 
     def test_json_encoded_auto_list_string_runs_advisor(self):
         # The actual bug: LLM emitted the JSON string '["AUTO"]'.
-        _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), load_skill_value='["AUTO"]'
-        )
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(), load_skill_value='["AUTO"]')
         assert mock_advisor.call_count == 1
 
     def test_python_auto_list_runs_advisor(self):
-        _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), load_skill_value=['AUTO']
-        )
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(), load_skill_value=['AUTO'])
         assert mock_advisor.call_count == 1
 
     def test_multi_element_explicit_skills_still_runs_advisor(self):
@@ -563,21 +574,15 @@ class TestLoadSkillNormalization:
     # ── NONE variants → advisor does NOT run ────────────────────────────────
 
     def test_plain_none_string_skips_advisor(self):
-        _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), load_skill_value='NONE'
-        )
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(), load_skill_value='NONE')
         assert mock_advisor.call_count == 0
 
     def test_json_encoded_none_list_string_skips_advisor(self):
-        _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), load_skill_value='["NONE"]'
-        )
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(), load_skill_value='["NONE"]')
         assert mock_advisor.call_count == 0
 
     def test_python_none_list_skips_advisor(self):
-        _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), load_skill_value=['NONE']
-        )
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(), load_skill_value=['NONE'])
         assert mock_advisor.call_count == 0
 
 
@@ -585,25 +590,26 @@ class TestLoadSkillNormalization:
 # 7. load_skill omitted → falls back to default_load_skill_mode
 # ===========================================================================
 
+
 class TestLoadSkillDefaultFallback:
     """When args has no 'load_skill' key, the gate uses
     pool.settings.default_load_skill_mode as the value."""
 
     def _approve(self):
-        return SkillAdvisorResult(
-            verdict='approve', reason='ok', recommended_skills=[], task_notes=''
-        )
+        return SkillAdvisorResult(verdict='approve', reason='ok', recommended_skills=[], task_notes='')
 
     def test_default_auto_runs_advisor(self):
         _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), default_load_skill_mode='AUTO',
+            self._approve(),
+            default_load_skill_mode='AUTO',
             load_skill_value=_OMIT_LOAD_SKILL,
         )
         assert mock_advisor.call_count == 1
 
     def test_default_none_skips_advisor(self):
         _, pool, lifecycle, mock_advisor, _ = _run_gate(
-            self._approve(), default_load_skill_mode='NONE',
+            self._approve(),
+            default_load_skill_mode='NONE',
             load_skill_value=_OMIT_LOAD_SKILL,
         )
         assert mock_advisor.call_count == 0
@@ -613,21 +619,22 @@ class TestLoadSkillDefaultFallback:
 # 8. Skill-usage telemetry invariants (init vs recall; no double-count)
 # ===========================================================================
 
+
 class TestSkillUsageTelemetryInvariants:
     """Guard the skill-usage recording invariants: init path records, recall does not,
     and self-augmentation is counted exactly once per instance."""
 
     def _approve(self):
-        return SkillAdvisorResult(
-            verdict='approve', reason='ok', recommended_skills=[], task_notes=''
-        )
+        return SkillAdvisorResult(verdict='approve', reason='ok', recommended_skills=[], task_notes='')
 
     def test_init_path_records_self_augmentation_once(self):
         """Fresh init: core records self-aug; the restore/runner helper does NOT re-run,
         so the instance's self-aug is counted exactly once."""
         tel = MagicMock()
         _, pool, lifecycle, _, _ = _run_gate(
-            self._approve(), load_skill_value='AUTO', telemetry=tel,
+            self._approve(),
+            load_skill_value='AUTO',
+            telemetry=tel,
         )
         # Self-augmentation recorded exactly once on the init path.
         self_aug_calls = [
@@ -657,8 +664,12 @@ class TestSkillUsageTelemetryInvariants:
         with patch('agent_cascade.skills.advisor.run_skill_advisor',
                    side_effect=lambda **kw: SkillAdvisorResult(verdict='approve')) as mock_advisor:
             engine._create_and_run_agent(
-                agent_class='coder', instance_name='worker1',
-                args=args, caller='maine', nest_depth=0, force_fresh=False,
+                agent_class='coder',
+                instance_name='worker1',
+                args=args,
+                caller='maine',
+                nest_depth=0,
+                force_fresh=False,
             )
 
         # Recall detected before the advisor → advisor never invoked.
@@ -671,6 +682,7 @@ class TestSkillUsageTelemetryInvariants:
 # 9. Gate freshness — the gate's count check uses a fresh skill list at run time
 # ===========================================================================
 
+
 class TestGateFreshness:
     """The gate must refresh the skill list (cache-respecting) BEFORE computing
     should_run_advisor, so its ``len(get_skill_names()) > 0`` "nothing to recommend"
@@ -679,9 +691,7 @@ class TestGateFreshness:
     the advisor must NOT be skipped."""
 
     def _approve(self):
-        return SkillAdvisorResult(
-            verdict='approve', reason='ok', recommended_skills=[], task_notes=''
-        )
+        return SkillAdvisorResult(verdict='approve', reason='ok', recommended_skills=[], task_notes='')
 
     def test_gate_refreshes_before_count_check(self, tmp_path):
         """Registry empty at gate time (fresh install / cleared cache) but a new skill is
@@ -692,14 +702,13 @@ class TestGateFreshness:
         # New skill exists on disk.
         b_dir = tmp_path / 'skill-b'
         b_dir.mkdir()
-        (b_dir / 'SKILL.md').write_text(
-            '---\nname: skill-b\ndescription: second skill\n---\nbody B\n', encoding='utf-8'
-        )
+        (b_dir / 'SKILL.md').write_text('---\nname: skill-b\ndescription: second skill\n---\nbody B\n',
+                                        encoding='utf-8')
 
         # Real SkillManager with an EMPTY registry at gate time, cache invalidated so a
         # re-scan is forced (simulates fresh install / cleared cache).
         sm = SkillManager()
-        sm._skill_paths = [tmp_path]   # _ensure_discovered() needs paths to scan
+        sm._skill_paths = [tmp_path]  # _ensure_discovered() needs paths to scan
         sm.invalidate_cache()
         assert sm.get_skill_names() == []  # registry is empty before the gate runs
 
@@ -711,8 +720,12 @@ class TestGateFreshness:
         with patch('agent_cascade.skills.advisor.run_skill_advisor',
                    side_effect=lambda **kw: self._approve()) as mock_advisor:
             engine._create_and_run_agent(
-                agent_class='coder', instance_name='worker1',
-                args=args, caller='maine', nest_depth=0, force_fresh=False,
+                agent_class='coder',
+                instance_name='worker1',
+                args=args,
+                caller='maine',
+                nest_depth=0,
+                force_fresh=False,
             )
 
         # The gate's refresh re-scanned disk → registry now has the fresh skill.

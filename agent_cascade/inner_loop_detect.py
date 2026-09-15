@@ -2,13 +2,12 @@ import datetime
 import json
 import os
 
-from agent_cascade.settings import (
-    InnerLoopSettings, TOKEN_ESTIMATE_CHAR_DIVISOR, DEFAULT_WORKSPACE,
-)
+from agent_cascade.settings import DEFAULT_WORKSPACE, TOKEN_ESTIMATE_CHAR_DIVISOR, InnerLoopSettings
 from agent_cascade.two_phase_loop_detect import TwoPhaseLoopDetector
 
 
 class InnerLoopDetector:
+
     def __init__(
         self,
         char_run_limit: int | None = None,
@@ -153,7 +152,8 @@ def save_loop_sample(text, reason, instance_name='', filepath=None):
         'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'instance_name': instance_name,
         'reason': reason,
-        'token_estimate': max(1, len(text) // int(TOKEN_ESTIMATE_CHAR_DIVISOR)),
+        'token_estimate': max(1,
+                              len(text) // int(TOKEN_ESTIMATE_CHAR_DIVISOR)),
         'text': text[:8000],  # Cap at ~2K tokens to keep files manageable
     }
 

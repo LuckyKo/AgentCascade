@@ -8,40 +8,41 @@ here; every consumer imports the SAME object from this module.
 import threading
 from typing import Dict
 
+
 class CacheManager:
     """Centralized performance cache management for API integration.
-    
+
     Consolidates 5 separate module-level caches (and their locks) into a single
     thread-safe structure. This eliminates cache sprawl and makes clearing/eviction
     atomic across all caches.
-    
+
     PAIRED CACHE EVICTION NOTE:
         The stream_versions and cached_instances caches are paired — they share
         the same lock in the original code. When evicting from one, the corresponding
         entry in the other is also removed to prevent orphaned data.
     """
-    
+
     def __init__(self):
         self._lock = threading.RLock()  # Single reentrant lock for all caches
-        
+
         # Token stats cache: (msg_count, last_msg_id, stream_len) -> stats dict
         self.token_stats: Dict[tuple, dict] = {}
-        
+
         # Stream version tracking: instance_name -> (msg_count, id, stream_len)
         self.stream_versions: Dict[str, tuple] = {}
-        
+
         # Cached serialized instance data: instance_name -> dict
         self.cached_instances: Dict[str, dict] = {}
-        
+
         # Stream token stats: instance_name -> (h_stats, r_stats) tuple of dicts
         self.stream_token_stats: Dict[str, tuple] = {}
-        
+
         # BUG_0005 follow-up: Separate version tracking for token-stats caching.
         # build_stream_update_from_pool uses a 3-tuple key (no stream_content_len) while
         # _serialize_instances_incremental uses a 4-tuple (with stream_content_len).
         # They must NOT share stream_versions or the mismatch causes permanent cache misses.
         self.stream_token_stats_versions: Dict[str, tuple] = {}
-    
+
     def clear_all(self) -> None:
         """Clear all caches. Called during session reset."""
         with self._lock:
@@ -50,28 +51,28 @@ class CacheManager:
             self.cached_instances.clear()
             self.stream_token_stats.clear()
             self.stream_token_stats_versions.clear()
-    
+
     def evict_if_full(self, cache_name: str, maxsize: int) -> None:
         """Evict oldest entry if cache exceeds max size (FIFO).
-        
+
         Handles paired cache eviction for stream_versions/cached_instances.
         """
         with self._lock:
             target = getattr(self, cache_name, {})
-            
+
             # Determine paired cache (stream_versions <-> cached_instances)
             paired = None
             if cache_name == 'stream_versions':
                 paired = ('cached_instances', self.cached_instances)
             elif cache_name == 'cached_instances':
                 paired = ('stream_versions', self.stream_versions)
-            
+
             while len(target) >= maxsize:
                 oldest_key = next(iter(target))
                 target.pop(oldest_key)
                 if paired and oldest_key in paired[1]:
                     paired[1].pop(oldest_key, None)
-    
+
     def evict_instance(self, instance_name: str) -> None:
         """Evict all cached data for a specific instance (paired eviction)."""
         with self._lock:
@@ -85,6 +86,7 @@ _cache_mgr = CacheManager()
 
 _TOKEN_STATS_CACHE_MAXSIZE = 5000
 _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100
+
 
 def _clear_performance_caches():
     """Clear all module-level performance caches. Called during session reset."""
@@ -117,4 +119,3 @@ def _store_ui_cache(msg: any, cached_data: dict) -> None:
             setattr(msg, '_ui_cache', data_copy)
         except (AttributeError, TypeError):
             pass
-

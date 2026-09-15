@@ -27,22 +27,22 @@ All external I/O is mocked (save_image_to_media / base64 encoding). No network c
 import io
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
 
-from agent_cascade.llm.schema import ContentItem, Message, FUNCTION
+from agent_cascade.llm.schema import FUNCTION, ContentItem, Message
 
 # Sentinel passed to TestViewImageUrl._fake_response to install a `content` property that
 # records whether it was accessed (see _fake_response docstring). Distinct from any real
 # bytes value so the recording branch is unambiguous.
 _RECORDING_CONTENT = object()
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def test_image_200x150(tmp_path):
@@ -84,7 +84,9 @@ def _guard_flags(items):
 # Existing-file branch (plain on-disk file, no crop/capture/SVG → served in place)
 # ---------------------------------------------------------------------------
 
+
 class TestViewImageExistingFileUncaptioned:
+
     def test_existing_file_served_in_place_no_copy(self, view_image_tool, test_image_200x150):
         """Viewing a PLAIN EXISTING image file (no crop/capture/SVG) is served IN PLACE: the
         tool reuses the already-resolved original path (forward-slash normalized), does NOT
@@ -133,8 +135,7 @@ class TestViewImageExistingFileUncaptioned:
         # drops the None), so it is unambiguously uncaptioned on restore.
         assert not dumped['content'][0].get('caption'), (
             'image item unexpectedly carried a caption through serialization; '
-            'this would suppress genuine vision captioning on session restore'
-        )
+            'this would suppress genuine vision captioning on session restore')
         # Re-parse the persisted form (dict items) and confirm the guard still fires.
         restored = Message(**dumped)
         assert _guard_flags(restored.content) is True
@@ -144,7 +145,9 @@ class TestViewImageExistingFileUncaptioned:
 # Base64 fallback branch (save_image_to_media raises MediaStorageError)
 # ---------------------------------------------------------------------------
 
+
 class TestViewImageBase64FallbackUncaptioned:
+
     def test_base64_fallback_leaves_image_uncaptioned(self, view_image_tool, test_image_200x150):
         """When media storage fails on a TRANSIENT insert, the base64 fallback path ALSO leaves
         the image item uncaptioned (caption=None) — so the guard fires a genuine vision caption
@@ -208,7 +211,9 @@ class TestViewImageBase64FallbackUncaptioned:
 # Crop region branch (caption includes crop info; still captioned)
 # ---------------------------------------------------------------------------
 
+
 class TestViewImageCropRegionUncaptioned:
+
     def test_crop_region_result_still_uncaptioned(self, view_image_tool, test_image_200x150, tmp_path):
         """A cropped view carries the crop region in its descriptive text item AND is left
         uncaptioned (caption=None) so the guard still fires a genuine vision caption."""
@@ -237,6 +242,7 @@ class TestViewImageCropRegionUncaptioned:
 # can assert the persistent media file survives cleanup (regression guard for the
 # v1 bug where the finally-block unlinked the temp_png that pointed at media).
 # ---------------------------------------------------------------------------
+
 
 class TestViewImageUrl:
     """Tests for view_image's http(s) URL download branch.
@@ -333,9 +339,7 @@ class TestViewImageUrl:
 
         media_path = result[0].image
         try:
-            assert Path(media_path).exists(), (
-                f"media file was deleted by cleanup (v1 regression): {media_path}"
-            )
+            assert Path(media_path).exists(), (f"media file was deleted by cleanup (v1 regression): {media_path}")
         finally:
             Path(media_path).unlink(missing_ok=True)  # clean up our test artifact
 
@@ -380,10 +384,8 @@ class TestViewImageUrl:
         # Body was never read — only the Content-Length header was inspected before
         # rejecting. If the guard regressed and the code fell through to `response.content`,
         # this property would have been accessed and the flag would be True → test fails.
-        assert resp._body_read_flag[0] is False, (
-            'Content-Length guard should reject BEFORE reading the body; '
-            'resp.content was accessed'
-        )
+        assert resp._body_read_flag[0] is False, ('Content-Length guard should reject BEFORE reading the body; '
+                                                  'resp.content was accessed')
         mock_get.assert_called_once()
 
     def test_url_no_content_length_small_image_downloads(self, view_image_tool):
@@ -416,10 +418,11 @@ class TestViewImageUrl:
 
         with patch('agent_cascade.tools.custom.file_ops.requests.get',
                    return_value=self._fake_response(self._png_bytes(200, 150))):
-            result = view_image_tool.call(json.dumps({
-                'path': 'http://example.com/crop.png',
-                'crop_region': '10,20,100,80',
-            }))
+            result = view_image_tool.call(
+                json.dumps({
+                    'path': 'http://example.com/crop.png',
+                    'crop_region': '10,20,100,80',
+                }))
 
         assert isinstance(result, list) and len(result) == 2
         media_path = result[0].image

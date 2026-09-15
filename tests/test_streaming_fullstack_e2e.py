@@ -79,13 +79,11 @@ except Exception:
 _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(_FS_E2E_CONFIG_DIR)
 
 import json
-import shutil
-import socket
 import subprocess
 import sys
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
@@ -462,11 +460,12 @@ def fullstack_server(mock_llm_server, tmp_path_factory):
     test_config = tmp_path_factory.mktemp('fs_e2e_config')
     _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(test_config)
 
-    from agent_cascade.api_server import create_app
-    from agent_cascade.agent_pool import AgentPool
-    from agent_cascade.agent_factory import load_agent
-    from agent_cascade.api_router import APIEndpoint, APIRouter
     from uvicorn import Config, Server
+
+    from agent_cascade.agent_factory import load_agent
+    from agent_cascade.agent_pool import AgentPool
+    from agent_cascade.api_router import APIEndpoint
+    from agent_cascade.api_server import create_app
 
     # Baseline: huge limit so the seed never trips compression (streaming-only focus).
     # Experiment: small limit so the root agent's pre-LLM gate fires mid-run and a

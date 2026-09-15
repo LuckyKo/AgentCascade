@@ -38,14 +38,14 @@ _spec.loader.exec_module(_mod)
 InnerLoopDetector = _mod.InnerLoopDetector
 InnerLoopSettings = _settings_mod.InnerLoopSettings
 
-
 # ---------------------------------------------------------------------------
 # Log discovery
 # ---------------------------------------------------------------------------
 
+
 def find_log_dir() -> Optional[Path]:
     """Return the first existing log directory, or None.
-    
+
     Checks multiple candidate directories to work both on the host
     (N:/work/...) and inside Docker containers (/workspace/logs).
     """
@@ -62,14 +62,14 @@ def find_log_dir() -> Optional[Path]:
 
 LOG_DIR = find_log_dir()
 
-
 # ---------------------------------------------------------------------------
 # Text extraction from logs
 # ---------------------------------------------------------------------------
 
+
 def extract_assistant_texts(log_dir: Path, min_length: int = 200) -> list[str]:
     """Extract combined reasoning_content + content from every assistant message.
-    
+
     Handles both nested format {"message": {...}} and top-level format
     {"role": "assistant", ...} found in AgentCascade log files.
     """
@@ -112,6 +112,7 @@ def extract_assistant_texts(log_dir: Path, min_length: int = 200) -> list[str]:
 # Cached text accessor for tests
 # ---------------------------------------------------------------------------
 
+
 def get_assistant_texts(min_length: int = 200) -> list[str]:
     """Return assistant texts, cached across test calls for speed."""
     if not hasattr(get_assistant_texts, '_cache'):
@@ -123,9 +124,10 @@ def get_assistant_texts(min_length: int = 200) -> list[str]:
 # Synthetic test helpers
 # ---------------------------------------------------------------------------
 
+
 def make_unique_filler(min_chars: int = 4500) -> str:
     """Generate unique non-repetitive text for synthetic tests.
-    
+
     Uses varied sentence templates with numeric suffixes so no fragments
     overlap when chunked at small sizes. Result exceeds min_chars without
     triggering any repetition detection mode.
@@ -146,22 +148,22 @@ def feed_streaming(
     base_chunk_size: int = 20,
 ) -> Optional[dict]:
     """Feed text through the detector using realistic streaming chunks.
-    
+
     Args:
         text: Full text to feed (e.g., an assistant response).
         chunk_size_strategy: "fixed" for uniform chunks, "random" for variable sizes.
         base_chunk_size: For "fixed", exact chunk size. For "random", midpoint of range.
                        Defaults to 20 but uses 50 for loop detection tests to avoid
                        word fragmentation that breaks ngram matching in two-phase detector.
-    
+
     Returns:
         Detection result dict if loop detected, None otherwise.
     """
     settings = InnerLoopSettings(
-        char_run_limit=70,             # Regression tests calibrated for this threshold
-        loop_two_phase_enabled=True,   # Two-phase detection must be on for loop regression tests
-        loop_suspicion_threshold=3,    # Lower threshold for regression test sensitivity
-        loop_confirm_required=2,       # Fewer confirmations needed in tests
+        char_run_limit=70,  # Regression tests calibrated for this threshold
+        loop_two_phase_enabled=True,  # Two-phase detection must be on for loop regression tests
+        loop_suspicion_threshold=3,  # Lower threshold for regression test sensitivity
+        loop_confirm_required=2,  # Fewer confirmations needed in tests
     )
     detector = InnerLoopDetector(settings=settings)
 
@@ -174,7 +176,7 @@ def feed_streaming(
         else:
             actual_chunk = base_chunk_size
 
-        chunk = text[pos : pos + actual_chunk]
+        chunk = text[pos:pos + actual_chunk]
         result = detector.feed(chunk)
         if result:
             return result
@@ -189,17 +191,17 @@ def feed_streaming_loop_test(
     base_chunk_size: int = 500,
 ) -> Optional[dict]:
     """Feed text through the detector with chunks large enough to preserve tokenization.
-    
+
     Uses larger chunk sizes (default 500 chars) to minimize word fragmentation that
     breaks ngram matching in the two-phase semantic loop detector. Word splitting
     at chunk boundaries causes different tokens than feeding all-at-once, so we use
     chunks much larger than typical sentences/paragraphs.
-    
+
     Args:
         text: Full text to feed.
         chunk_size_strategy: "fixed" or "random".
         base_chunk_size: Chunk size (default 500 for loop tests).
-    
+
     Returns:
         Detection result dict if loop detected, None otherwise.
     """
@@ -220,7 +222,7 @@ def feed_streaming_loop_test(
         else:
             actual_chunk = base_chunk_size
 
-        chunk = text[pos : pos + actual_chunk]
+        chunk = text[pos:pos + actual_chunk]
         result = detector.feed(chunk)
         if result:
             return result

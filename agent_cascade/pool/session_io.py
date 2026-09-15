@@ -3,16 +3,21 @@ SessionIOMixin — session loading from logs and instance state save/restore. Mo
 """
 
 from __future__ import annotations
+
 import datetime
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
+
+from agent_cascade.llm.schema import ROLE, SYSTEM, USER, Message
 from agent_cascade.log import logger
-from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
-from ..agent_instance import AgentInstance, PoolSettings, AgentState, ACTIVE_STATES
+
+from ..agent_instance import AgentInstance
+
+
 class SessionIOMixin:
     def _save_instance_state(self, names: set) -> dict:
         """Save state for a set of instance names before bulk dismissal.
@@ -143,34 +148,34 @@ class SessionIOMixin:
 
     def stop_session(self, release_slots: bool = True):
         """Minimal interrupt for "Stop" action — halts execution but preserves sessions.
-        
+
         This method is used when the user clicks "Stop" to halt all streaming and put
         agents in IDLE state WITHOUT dismissing them (unlike reset() which dismisses
         sub-agents, setting them to TERMINATED).
-        
+
         The key design principle: Stop is NON-DESTRUCTIVE. It should only interrupt
         execution — NOT clear conversations, summaries, or any user-visible session data.
         The user expects to be able to Resume exactly where they left off.
-        
+
         Order of operations:
           1. Set _stopped_event (to halt threads)
           2. Cancel all queue tickets (FIFO scheduler cleanup) — must run BEFORE slot release so a woken waiter is cancelled, not granted the freed slot
           3. Release concurrency slots for all active instances (NEW — prevents stuck API slots)
           4. Clear cached message sets / message queues / async results
           5. Clear pending approvals (unblocks any threads waiting for user approval)
-        
+
         Does NOT:
           - Dismiss sub-agents (they remain in pool with their current state)
           - Clear conversations (user expects to Resume from the same point)
           - Clear instance_summaries, terminated_instances, or any session data
           - Create a new logger session
           - Shutdown/recreate async infrastructure
-        
+
         Args:
             release_slots: If True, immediately release concurrency slots for all instances.
                          This ensures API endpoints are freed even if execution threads
                          haven't noticed the stop signal yet. Default is True.
-        
+
         See reset() for full session reset that dismisses sub-agents and clears everything.
         """
         # Step 1: Set stopped event to signal threads to halt (use property setter for side effects)
@@ -278,7 +283,7 @@ class SessionIOMixin:
             totals = {k: v['active_count'] for k, v in status.items() if v['active_count'] > 0}
             if totals:
                 slot_info = f" active_slots={totals}"
-        
+
         logger.info(
             f"Stop session done: released={released_count} slots, "
             f"cache_cleared={cache_cleared}, "

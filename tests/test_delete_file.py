@@ -26,8 +26,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def _make_om(tmpdir):
     """A real OperationManager over a temp workspace (no agent_pool)."""
@@ -76,20 +76,25 @@ def _backup_dir(om, agent='coder'):
 
 # ── Phase A: hardening ────────────────────────────────────────────────────────
 
+
 def test_auto_approved_owned_delete_no_approval():
     """Deleting an agent-owned file is auto-approved — no approval prompt fires."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        f = Path(d, 'owned.txt'); f.write_text('data')
+        f = Path(d, 'owned.txt')
+        f.write_text('data')
         om._own(f.resolve(), 'coder')
 
         # Watch for any pending approval (there must be none).
         saw_approval = []
+
         def _watcher():
             time.sleep(0.4)
             if om.list_pending_approvals():
                 saw_approval.append(True)
-        wt = threading.Thread(target=_watcher, daemon=True); wt.start()
+
+        wt = threading.Thread(target=_watcher, daemon=True)
+        wt.start()
 
         res = om.delete_file(str(f), 'coder', justification='cleanup')
         wt.join(timeout=3)
@@ -105,10 +110,10 @@ def test_non_owned_reject_leaves_file():
     """Non-owned delete → user rejects → nothing is deleted, returns REJECTED."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        f = Path(d, 'foreign.txt'); f.write_text('keep me')
+        f = Path(d, 'foreign.txt')
+        f.write_text('keep me')
 
-        rid = threading.Thread(
-            target=_resolve_approval, args=(om, 'reject', 'no thanks'), daemon=True).start()
+        threading.Thread(target=_resolve_approval, args=(om, 'reject', 'no thanks'), daemon=True).start()
         res = om.delete_file(str(f), 'coder', justification='want it gone')
 
         assert res.startswith('REJECTED'), f"Expected REJECTED, got: {res}"
@@ -123,10 +128,10 @@ def test_non_owned_approved_deletes_with_backup():
     """Non-owned delete → user approves → deleted + a backup is created."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        f = Path(d, 'foreign2.txt'); f.write_text('bye')
+        f = Path(d, 'foreign2.txt')
+        f.write_text('bye')
 
-        threading.Thread(
-            target=_resolve_approval, args=(om, 'approve', 'ok go'), daemon=True).start()
+        threading.Thread(target=_resolve_approval, args=(om, 'approve', 'ok go'), daemon=True).start()
         res = om.delete_file(str(f), 'coder', justification='cleanup')
 
         assert res.startswith('OK: Deleted'), f"Expected OK, got: {res}"
@@ -150,7 +155,8 @@ def test_backup_failure_simulation_a2(monkeypatch):
 
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        f = Path(d, 'victim.txt'); f.write_text('precious')
+        f = Path(d, 'victim.txt')
+        f.write_text('precious')
         resolved = f.resolve()
 
         def boom(*a, **k):
@@ -180,8 +186,10 @@ def test_dir_delete_clears_case_differing_child_ownership_a3():
     """Deleting a dir clears child ownership entries even stored under different case (A3)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        subdir = Path(d, 'MyDir'); subdir.mkdir()
-        child = subdir / 'child.txt'; child.write_text('c')
+        subdir = Path(d, 'MyDir')
+        subdir.mkdir()
+        child = subdir / 'child.txt'
+        child.write_text('c')
 
         # Own the dir and a child under DIFFERENT-case keys (simulating write-time casing).
         om._own(subdir.resolve(), 'coder')
@@ -203,7 +211,8 @@ def test_auto_approved_preserves_justification_a4():
     """Auto-approved delete echoes the agent's stated justification (A4)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        f = Path(d, 'own.txt'); f.write_text('x')
+        f = Path(d, 'own.txt')
+        f.write_text('x')
         om._own(f.resolve(), 'coder')
         res = om.delete_file(str(f), 'coder', justification='temp scratch file no longer needed')
         assert res.startswith('OK: Deleted'), f"Expected OK, got: {res}"
@@ -225,9 +234,13 @@ def test_concurrency_no_lost_ownership_updates_a1():
         def own_half(start):
             for i in range(start, n, 2):
                 om._own(files[i].resolve(), 'coder')
+
         t1 = threading.Thread(target=own_half, args=(0,))
         t2 = threading.Thread(target=own_half, args=(1,))
-        t1.start(); t2.start(); t1.join(); t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
         owned_count = sum(1 for fp in files if om._get_owner(fp.resolve()) == 'coder')
         assert owned_count == n, f"All {n} files should be owned, got {owned_count}"
@@ -236,9 +249,13 @@ def test_concurrency_no_lost_ownership_updates_a1():
         def delete_half(start):
             for i in range(start, n, 2):
                 om.delete_file(str(files[i]), 'coder', justification='x')
+
         d1 = threading.Thread(target=delete_half, args=(0,))
         d2 = threading.Thread(target=delete_half, args=(1,))
-        d1.start(); d2.start(); d1.join(); d2.join()
+        d1.start()
+        d2.start()
+        d1.join()
+        d2.join()
 
         remaining = [fp for fp in files if fp.exists()]
         assert not remaining, f"All files should be deleted, remaining: {remaining}"
@@ -252,7 +269,8 @@ def test_symlink_bypass_rejected_a9():
     with tempfile.TemporaryDirectory() as ws:
         with tempfile.TemporaryDirectory() as outside:
             om = _make_om(ws)
-            target = Path(outside, 'secret.txt'); target.write_text('top secret')
+            target = Path(outside, 'secret.txt')
+            target.write_text('top secret')
             link = Path(ws, 'link_to_secret.txt')
             try:
                 os.symlink(str(target), str(link))
@@ -265,11 +283,13 @@ def test_symlink_bypass_rejected_a9():
             assert res.startswith('ERROR:'), f"Expected ERROR for symlink, got: {res}"
             assert 'Symlink' in res, f"Error must mention symlink: {res}"
             assert target.exists(), 'Out-of-bounds symlink target must NOT be deleted'
-            assert link.exists() or os.path.islink(str(link)), 'The link itself should not have been followed/deleted as a normal file'
+            assert link.exists() or os.path.islink(
+                str(link)), 'The link itself should not have been followed/deleted as a normal file'
     print('[PASS] test_symlink_bypass_rejected_a9')
 
 
 # ── Phase B: feature ───────────────────────────────────────────────────────────
+
 
 def test_multi_path_delete_removes_all():
     """paths=[...] deletes every listed target (all owned → auto-approved)."""
@@ -277,7 +297,8 @@ def test_multi_path_delete_removes_all():
         om = _make_om(d)
         fs = [Path(d, f"m{i}.txt") for i in range(4)]
         for fp in fs:
-            fp.write_text(str(fp.name)); om._own(fp.resolve(), 'coder')
+            fp.write_text(str(fp.name))
+            om._own(fp.resolve(), 'coder')
 
         res = om.delete_file(None, 'coder', paths=[str(fp) for fp in fs], justification='x')
         assert res.startswith('OK: Deleted 4 of 4'), f"Expected 4/4, got: {res}"
@@ -290,9 +311,12 @@ def test_include_filter_deletes_only_matching():
     """include='*.md' deletes only matching files within the base dir (B2)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        md1 = Path(d, 'a.md'); md1.write_text('m1')
-        md2 = Path(d, 'b.md'); md2.write_text('m2')
-        txt = Path(d, 'c.txt'); txt.write_text('t')
+        md1 = Path(d, 'a.md')
+        md1.write_text('m1')
+        md2 = Path(d, 'b.md')
+        md2.write_text('m2')
+        txt = Path(d, 'c.txt')
+        txt.write_text('t')
         for fp in (md1, md2, txt):
             om._own(fp.resolve(), 'coder')
 
@@ -307,8 +331,10 @@ def test_size_and_date_filters_behave_like_list_dir():
     """min_size + modified_after filters behave like list_dir when deleting (B2)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        big = Path(d, 'big.bin'); big.write_bytes(b'x' * 5000)   # 5 KB
-        small = Path(d, 'small.txt'); small.write_text('tiny')    # ~4 B
+        big = Path(d, 'big.bin')
+        big.write_bytes(b'x' * 5000)  # 5 KB
+        small = Path(d, 'small.txt')
+        small.write_text('tiny')  # ~4 B
         for fp in (big, small):
             om._own(fp.resolve(), 'coder')
 
@@ -337,9 +363,11 @@ def test_bare_filter_matches_files_only_not_dirs():
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
         # A matching file at the root, plus a subdirectory tree that must survive.
-        big = Path(d, 'big.bin'); big.write_bytes(b'x' * 5000)      # 5 KB → matches min_size
-        subdir = Path(d, 'keepme'); subdir.mkdir()
-        (subdir / 'nested.txt').write_text('nested content')          # small, but in a dir
+        big = Path(d, 'big.bin')
+        big.write_bytes(b'x' * 5000)  # 5 KB → matches min_size
+        subdir = Path(d, 'keepme')
+        subdir.mkdir()
+        (subdir / 'nested.txt').write_text('nested content')  # small, but in a dir
         om._own(big.resolve(), 'coder')
 
         # min_size=1KB with NO include/exclude → only the root file 'big' matches.
@@ -359,14 +387,17 @@ def test_mixed_set_single_aggregate_approval_reject():
     """Mixed owned + non-owned set → ONE aggregate approval; reject leaves all intact (B3)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        owned = Path(d, 'owned.txt'); owned.write_text('o')
-        foreign = Path(d, 'foreign.txt'); foreign.write_text('f')
+        owned = Path(d, 'owned.txt')
+        owned.write_text('o')
+        foreign = Path(d, 'foreign.txt')
+        foreign.write_text('f')
         om._own(owned.resolve(), 'coder')
 
         # Count how many approval prompts fire (must be exactly 1) and snapshot the
         # tool_args of the single prompt so we can assert its compact, readable shape.
         prompt_count = {'n': 0}
         captured_tool_args = {}
+
         def _count_and_reject():
             deadline = time.time() + 10
             seen = set()
@@ -379,6 +410,7 @@ def test_mixed_set_single_aggregate_approval_reject():
                         om.user_reject(p['request_id'], 'no')
                         return
                 time.sleep(0.02)
+
         threading.Thread(target=_count_and_reject, daemon=True).start()
 
         res = om.delete_file(None, 'coder', paths=[str(owned), str(foreign)], justification='x')
@@ -411,14 +443,18 @@ def test_empty_match_no_approval_prompt_b6():
     """Empty resolved set → clear 'No files matched' with NO approval prompt (B6)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        f = Path(d, 'keep.txt'); f.write_text('x')  # not owned → would need approval if matched
+        f = Path(d, 'keep.txt')
+        f.write_text('x')  # not owned → would need approval if matched
 
         saw_approval = []
+
         def _watcher():
             time.sleep(0.4)
             if om.list_pending_approvals():
                 saw_approval.append(True)
-        wt = threading.Thread(target=_watcher, daemon=True); wt.start()
+
+        wt = threading.Thread(target=_watcher, daemon=True)
+        wt.start()
 
         res = om.delete_file('.', 'coder', include='*.nomatch', justification='x')
         wt.join(timeout=3)
@@ -431,23 +467,26 @@ def test_empty_match_no_approval_prompt_b6():
 
 def test_continue_on_error_b4():
     """One failing target does not abort the rest; summary is correct (B4)."""
-    import shutil as _shutil
-
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        good1 = Path(d, 'good1.txt'); good1.write_text('g1')
-        bad = Path(d, 'bad.txt'); bad.write_text('b')
-        good2 = Path(d, 'good2.txt'); good2.write_text('g2')
+        good1 = Path(d, 'good1.txt')
+        good1.write_text('g1')
+        bad = Path(d, 'bad.txt')
+        bad.write_text('b')
+        good2 = Path(d, 'good2.txt')
+        good2.write_text('g2')
         for fp in (good1, bad, good2):
             om._own(fp.resolve(), 'coder')
 
         # Force the 'bad' target's delete to fail by making its backup dir unwritable.
         # We patch _delete_one selectively: raise only when the path is 'bad'.
         real_delete_one = om._delete_one
+
         def flaky_delete(resolved, agent_name, justification=''):
             if resolved.name == 'bad.txt':
                 raise RuntimeError('simulated per-target failure')
             return real_delete_one(resolved, agent_name, justification)
+
         om._delete_one = flaky_delete
 
         res = om.delete_file(None, 'coder', paths=[str(good1), str(bad), str(good2)], justification='x')
@@ -466,7 +505,8 @@ def test_filter_cannot_escape_allowed_dirs_or_ro():
             om.set_extra_work_folders(folders_ro=[str(ro_folder)], folders_rw=[])
 
             # A file inside the RO extra folder.
-            ro_file = Path(ro_folder, 'ro.txt'); ro_file.write_text('ro')
+            ro_file = Path(ro_folder, 'ro.txt')
+            ro_file.write_text('ro')
 
             # Deleting by absolute path with mode="rw" must be rejected (RO folder).
             res = om.delete_file(str(ro_file), 'coder', justification='x')
@@ -474,27 +514,33 @@ def test_filter_cannot_escape_allowed_dirs_or_ro():
             assert ro_file.exists(), "RO extra-folder file must NOT be deleted via mode='rw'"
 
             # A filter over the workspace base dir cannot reach into the RO folder.
-            ws_file = Path(ws, 'ws.txt'); ws_file.write_text('w')
+            ws_file = Path(ws, 'ws.txt')
+            ws_file.write_text('w')
             om._own(ws_file.resolve(), 'coder')
-            res2 = om.delete_file('.', 'coder', include='*.txt', justification='x')
+            om.delete_file('.', 'coder', include='*.txt', justification='x')
             assert ro_file.exists(), 'Filter must not expand scope into the RO extra folder'
     print('[PASS] test_filter_cannot_escape_allowed_dirs_or_ro')
 
 
 # ── Refinement pass: closing 3 coverage gaps from the review ───────────────────
 
+
 def test_no_path_provided_clear_error():
     """Neither path nor paths given → clear ERROR, nothing deleted, no prompt (B6a)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        f = Path(d, 'keep.txt'); f.write_text('x')
+        f = Path(d, 'keep.txt')
+        f.write_text('x')
 
         saw_approval = []
+
         def _watcher():
             time.sleep(0.3)
             if om.list_pending_approvals():
                 saw_approval.append(True)
-        wt = threading.Thread(target=_watcher, daemon=True); wt.start()
+
+        wt = threading.Thread(target=_watcher, daemon=True)
+        wt.start()
 
         res = om.delete_file(None, 'coder', paths=[], justification='x')
         wt.join(timeout=3)
@@ -548,11 +594,14 @@ def test_mixed_set_single_aggregate_approval_accept():
     """
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        owned = Path(d, 'owned.txt'); owned.write_text('o')
-        foreign = Path(d, 'foreign.txt'); foreign.write_text('f')
+        owned = Path(d, 'owned.txt')
+        owned.write_text('o')
+        foreign = Path(d, 'foreign.txt')
+        foreign.write_text('f')
         om._own(owned.resolve(), 'coder')
 
         prompt_count = {'n': 0}
+
         def _count_and_approve():
             deadline = time.time() + 10
             seen = set()
@@ -564,6 +613,7 @@ def test_mixed_set_single_aggregate_approval_accept():
                         om.user_approve(p['request_id'], 'ok go')
                         return
                 time.sleep(0.02)
+
         threading.Thread(target=_count_and_approve, daemon=True).start()
 
         res = om.delete_file(None, 'coder', paths=[str(owned), str(foreign)], justification='cleanup')
@@ -592,7 +642,8 @@ def test_approval_description_marks_capped_size(monkeypatch):
 
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
-        bigdir = Path(d, 'big'); bigdir.mkdir()
+        bigdir = Path(d, 'big')
+        bigdir.mkdir()
         # 5 real files; shrink the cap to 2 so the walk trips early.
         for i in range(5):
             (bigdir / f"f{i}.txt").write_text('x' * 10)
@@ -623,6 +674,7 @@ class _StubOpManager:
 
 
 class _StubAgentPool:
+
     def __init__(self, op_manager):
         self.operation_manager = op_manager
 
@@ -657,6 +709,7 @@ class TestDeleteFileSchema:
     def test_schema_validates_string_and_list_instances(self):
         """jsonschema (used by _verify_json_format_args) accepts both forms and rejects others."""
         import jsonschema
+
         from agent_cascade.tools.custom.file_ops import DeleteFile
         schema = DeleteFile.parameters
         jsonschema.validate(instance={'path': 'a.md'}, schema=schema)
@@ -733,4 +786,3 @@ class TestDeleteFileCall:
         call = om.calls[-1]
         assert call['kwargs']['paths'] == ['a.md', 'b.md'], \
             f"non-string entries must be filtered, got {call['kwargs'].get('paths')!r}"
-

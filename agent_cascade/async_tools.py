@@ -9,11 +9,11 @@ Components:
 - AsyncToolRegistry: Manages background tool execution with ThreadPoolExecutor
 """
 
-from dataclasses import dataclass, field
-import time
 import threading
-from typing import Callable, Optional, Dict, List, Tuple
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple
 
 from agent_cascade.log import logger
 from agent_cascade.settings import AGENT_MAX_WORKERS
@@ -22,7 +22,7 @@ from agent_cascade.settings import AGENT_MAX_WORKERS
 @dataclass
 class BackgroundToolEntry:
     """Tracks a background tool execution.
-    
+
     Attributes:
         tool_call: The callable that executes the tool (takes no args, returns str)
         agent_instance_name: Which agent owns this tool
@@ -52,20 +52,20 @@ class BackgroundToolEntry:
 
 class AsyncToolRegistry:
     """Manages background tool execution across all agents.
-    
+
     Uses ThreadPoolExecutor for concurrent execution and tracks completion status
     per instance. Automatically enqueues results to the pool's message queue when complete.
-    
+
     Attributes:
         _pending: Maps instance_name to list of BackgroundToolEntry objects
         _lock: Lock protecting _pending dictionary
         pool: Reference to AgentPool for result buffering via enqueue_message
         _executor: ThreadPoolExecutor for running background tools
     """
-    
+
     def __init__(self, pool=None):
         """Initialize the async tool registry.
-        
+
         Args:
             pool: Optional reference to AgentPool instance for result buffering.
                   If provided, completed results will be automatically enqueued to
@@ -85,10 +85,7 @@ class AsyncToolRegistry:
         if not isinstance(max_workers, int) or isinstance(max_workers, bool) or max_workers < 1:
             max_workers = AGENT_MAX_WORKERS
         self._worker_count = max_workers
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix='async_tool'
-        )
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='async_tool')
 
     def resize_executor(self, max_workers: int) -> bool:
         """Thread-safely replace the executor with one sized to ``max_workers``.
@@ -113,10 +110,7 @@ class AsyncToolRegistry:
         with self._lock:
             old = self._executor
             try:
-                new = ThreadPoolExecutor(
-                    max_workers=max_workers,
-                    thread_name_prefix='async_tool'
-                )
+                new = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='async_tool')
             except Exception as e:
                 logger.error(f"[ASYNC_REGISTRY] Failed to construct executor for resize to {max_workers}: {e}")
                 return False
@@ -134,30 +128,32 @@ class AsyncToolRegistry:
         else:
             logger.debug(f"[ASYNC_REGISTRY] Resize to same size ({max_workers} workers), no-op")
         return True
-    
-    def register(self, instance_name: str, tool_call: Callable[[], str], function_id: Optional[str] = None, child_instance_name: Optional[str] = None) -> BackgroundToolEntry:
+
+    def register(self,
+                 instance_name: str,
+                 tool_call: Callable[[], str],
+                 function_id: Optional[str] = None,
+                 child_instance_name: Optional[str] = None) -> BackgroundToolEntry:
         """Register a background tool for execution.
-        
+
         Creates a BackgroundToolEntry, adds it to the pending list, and submits
         it to the thread pool for execution.
-        
+
         Args:
             instance_name: The agent instance name owning this tool call.
             tool_call: Callable that executes the tool (no args, returns str).
             function_id: The LLM's tool_call_id for this async call (optional).
             child_instance_name: Name of the child agent being run asynchronously (optional).
                                  Used to track parent-child relationship for dismissal wakeup.
-            
+
         Returns:
             BackgroundToolEntry tracking this tool's execution.
         """
         with self._lock:
-            entry = BackgroundToolEntry(
-                tool_call=tool_call,
-                agent_instance_name=instance_name,
-                function_id=function_id,
-                child_instance_name=child_instance_name
-            )
+            entry = BackgroundToolEntry(tool_call=tool_call,
+                                        agent_instance_name=instance_name,
+                                        function_id=function_id,
+                                        child_instance_name=child_instance_name)
             self._pending.setdefault(instance_name, []).append(entry)
             # Track child->parent mapping for dismissal wakeup support
             if child_instance_name and function_id:
@@ -168,19 +164,19 @@ class AsyncToolRegistry:
             # Store the future on the entry so it can be cancelled later (Fix TODO #41)
             entry.future = future
             return entry
-    
+
     def _execute(self, entry: BackgroundToolEntry):
         """Execute a background tool in a thread pool.
-        
+
         Runs the tool_call in a worker thread, captures result or error, and
         marks the entry as completed. If pool is configured, enqueues result to
         message queue via enqueue_message().
-        
-        Lock ordering note: _lock is held through BOTH marking completed AND 
+
+        Lock ordering note: _lock is held through BOTH marking completed AND
         enqueue_message() to prevent race condition where has_pending returns False (entry.completed=True)
-        but the result isn't in the buffer yet. If an exception occurs between 
+        but the result isn't in the buffer yet. If an exception occurs between
         has_pending and the safety drain, results could be lost without this fix.
-        
+
         Args:
             entry: BackgroundToolEntry to execute.
         """
@@ -188,20 +184,16 @@ class AsyncToolRegistry:
             # Check if the owning instance was terminated before starting execution.
             if self.pool and getattr(self.pool, 'is_instance_terminated', None):
                 if self.pool.is_instance_terminated(entry.agent_instance_name) is True:
-                    logger.debug(
-                        f"[AsyncToolRegistry] Skipping tool for '{entry.agent_instance_name}': "
-                        f"instance was dismissed before execution started"
-                    )
+                    logger.debug(f"[AsyncToolRegistry] Skipping tool for '{entry.agent_instance_name}': "
+                                 f"instance was dismissed before execution started")
                     from agent_cascade.exceptions import AgentTerminatedError
                     raise AgentTerminatedError(entry.agent_instance_name)
             # Also check if this is an async child agent and that child was terminated.
             # This ensures dismissal of the child instance aborts its executor worker.
             if (entry.child_instance_name and self.pool and getattr(self.pool, 'is_instance_terminated', None)):
                 if self.pool.is_instance_terminated(entry.child_instance_name) is True:
-                    logger.debug(
-                        f"[AsyncToolRegistry] Skipping async child '{entry.child_instance_name}': "
-                        f"child instance was dismissed before execution started"
-                    )
+                    logger.debug(f"[AsyncToolRegistry] Skipping async child '{entry.child_instance_name}': "
+                                 f"child instance was dismissed before execution started")
                     from agent_cascade.exceptions import AgentTerminatedError
                     raise AgentTerminatedError(entry.child_instance_name)
             entry.result = entry.tool_call()
@@ -230,8 +222,7 @@ class AsyncToolRegistry:
                         # Log but don't propagate — we want to mark entry as completed even if put fails
                         # This prevents the tool from being stuck in pending state forever
                         logger.error(
-                            f"[AsyncToolRegistry] Failed to enqueue result for {entry.agent_instance_name}: {e}"
-                        )
+                            f"[AsyncToolRegistry] Failed to enqueue result for {entry.agent_instance_name}: {e}")
             # Fix B (idle-wakeup): an IDLE parent whose run() thread already exited
             # never drains its queue — relaunch it, mirroring the user-message path.
             # Enqueue happens first (above) so the relaunched run() finds the result
@@ -243,17 +234,16 @@ class AsyncToolRegistry:
                     relaunch_idle_agent(self.pool, entry.agent_instance_name)
                 except Exception as e:
                     logger.debug(
-                        f"[AsyncToolRegistry] Idle relaunch failed for {entry.agent_instance_name} (non-critical): {e}"
-                    )
+                        f"[AsyncToolRegistry] Idle relaunch failed for {entry.agent_instance_name} (non-critical): {e}")
 
     def has_pending(self, instance_name: str) -> bool:
         """Check if any background tools are still pending for this instance.
-        
+
         Also cleans up completed entries to prevent unbounded memory growth.
-        
+
         Args:
             instance_name: The agent instance to check.
-            
+
         Returns:
             True if any BackgroundToolEntry for this instance is not completed,
             False otherwise (including if no entries exist).
@@ -261,24 +251,24 @@ class AsyncToolRegistry:
         with self._lock:
             entries = self._pending.get(instance_name, [])
             has_pending_tools = any(not e.completed for e in entries)
-            
+
             # Cleanup: remove completed-only lists to prevent unbounded growth
             if entries and all(e.completed for e in entries):
                 del self._pending[instance_name]
-            
+
             return has_pending_tools
-    
+
     def clear_pending(self, instance_name: str) -> int:
         """Remove and cancel all pending async tools for an instance (Fix TODO #41).
-        
+
         Cancels futures via their ThreadPoolExecutor Future objects. Note: cancel() only
         works for tasks not yet started — already-running threads will complete normally
         but results are discarded when the pending list is removed. Returns the count of
         cleared entries.
-        
+
         Args:
             instance_name: The agent instance to clear.
-            
+
         Returns:
             Number of pending (uncompleted) entries that were removed and cancelled.
         """
@@ -297,25 +287,24 @@ class AsyncToolRegistry:
             self._pending.pop(instance_name, None)
             # Also clean up child->parent mappings for this parent
             self._child_to_parent = {
-                child: (p, fid) for child, (p, fid) in self._child_to_parent.items()
-                if p != instance_name
+                child: (p, fid) for child, (p, fid) in self._child_to_parent.items() if p != instance_name
             }
             return cancelled
-    
+
     def get_parent_for_child(self, child_instance_name: str) -> Optional[Tuple[str, str]]:
         """Get the parent instance name and function_id waiting for a specific child.
-        
+
         Used to wake up a SLEEPING parent when its async child is dismissed.
-        
+
         Args:
             child_instance_name: The child agent instance name.
-            
+
         Returns:
             Tuple of (parent_instance_name, function_id) if found, None otherwise.
         """
         with self._lock:
             return self._child_to_parent.get(child_instance_name)
-    
+
     def remove_child_mapping(self, child_instance_name: str):
         """Remove the child->parent mapping for a dismissed/completed child."""
         with self._lock:
@@ -323,9 +312,9 @@ class AsyncToolRegistry:
 
     def shutdown(self, wait: bool = True):
         """Shutdown the executor.
-        
+
         Call during pool teardown to cleanly stop background tool execution.
-        
+
         Args:
             wait: If True, wait for all pending tasks to complete before returning.
                   If False, return immediately (useful for "quick stop" scenarios).

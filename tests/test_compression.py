@@ -9,24 +9,18 @@ Covers:
 All tests are self-contained — no LLM or API server required.
 """
 
-import copy
 import datetime
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
 
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
-from agent_cascade.llm.schema import SYSTEM, USER, Message
-from agent_cascade.compression.result import CompressResult
-from agent_cascade.compression.helpers import (
-    compute_discard_count,
-    build_marker_message,
-    rebuild_working_set,
-    _parse_marker_timestamps,
-)
-from agent_cascade.compression.core import compress_context
 from agent_cascade.agent_instance import AgentState
+from agent_cascade.compression.core import compress_context
+from agent_cascade.compression.helpers import (_parse_marker_timestamps, build_marker_message, compute_discard_count,
+                                               rebuild_working_set)
+from agent_cascade.llm.schema import SYSTEM, USER, Message
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import COMPRESSION_MAX_RETRIES
-
 # Shared mock pool from conftest — no need to redefine locally
 from tests.conftest import MockAgentPool
 
@@ -71,6 +65,7 @@ def _build_pool_with_marker(msgs_before=5, msgs_after=8):
 # ──────────────────────────────────────────────
 # 1. compute_discard_count
 # ──────────────────────────────────────────────
+
 
 class TestComputeDiscardCount:
     """Test the discard-count calculation logic."""
@@ -153,6 +148,7 @@ class TestComputeDiscardCount:
 # 2. build_marker_message
 # ──────────────────────────────────────────────
 
+
 class TestBuildMarkerMessage:
     """Test marker message construction.
 
@@ -214,6 +210,7 @@ class TestBuildMarkerMessage:
 # 2b. compress_context — marker timestamp inheritance (todo.md line 212)
 # ──────────────────────────────────────────────
 
+
 def _ts(*args):
     """Build a unix timestamp from local-time components."""
     return datetime.datetime(*args).timestamp()
@@ -272,8 +269,11 @@ class TestMarkerTimestampPositional:
         with patch('agent_cascade.compression.core.invoke_compression_agent') as mock_invoke:
             mock_invoke.return_value = ('Repeat summary', '')
             result = compress_context(
-                agent_pool=pool, target_agent_name='TestAgent',
-                fraction=0.5, mode='auto', force=False,
+                agent_pool=pool,
+                target_agent_name='TestAgent',
+                fraction=0.5,
+                mode='auto',
+                force=False,
             )
 
         assert result.success is True
@@ -292,8 +292,11 @@ class TestMarkerTimestampPositional:
         with patch('agent_cascade.compression.core.invoke_compression_agent') as mock_invoke:
             mock_invoke.return_value = ('Repeat summary', '')
             result = compress_context(
-                agent_pool=pool, target_agent_name='TestAgent',
-                fraction=0.5, mode='auto', force=False,
+                agent_pool=pool,
+                target_agent_name='TestAgent',
+                fraction=0.5,
+                mode='auto',
+                force=False,
             )
 
         assert result.success is True
@@ -316,8 +319,11 @@ class TestMarkerTimestampPositional:
         with patch('agent_cascade.compression.core.invoke_compression_agent') as mock_invoke:
             mock_invoke.return_value = ('Repeat summary', '')
             result = compress_context(
-                agent_pool=pool, target_agent_name='TestAgent',
-                fraction=0.5, mode='auto', force=False,
+                agent_pool=pool,
+                target_agent_name='TestAgent',
+                fraction=0.5,
+                mode='auto',
+                force=False,
             )
 
         assert result.success is True
@@ -332,6 +338,7 @@ class TestMarkerTimestampPositional:
 # ──────────────────────────────────────────────
 # 2c. compress_context — live-path marker ts stamping (root-cause regression)
 # ──────────────────────────────────────────────
+
 
 class TestLiveMarkerTsStamping:
     """Root-cause regression for the compression-marker timestamp bug.
@@ -350,8 +357,10 @@ class TestLiveMarkerTsStamping:
     def test_build_marker_has_no_ts_before_stamp(self):
         """build_marker_message alone leaves ts=None (the gap this fix closes)."""
         marker = build_marker_message(
-            'some summary', first_ts=_ts(2026, 9, 1, 10, 0),
-            last_ts=_ts(2026, 9, 1, 10, 30), n_messages=5,
+            'some summary',
+            first_ts=_ts(2026, 9, 1, 10, 0),
+            last_ts=_ts(2026, 9, 1, 10, 30),
+            n_messages=5,
         )
         assert marker.ts is None
 
@@ -369,8 +378,11 @@ class TestLiveMarkerTsStamping:
         with patch('agent_cascade.compression.core.invoke_compression_agent') as mock_invoke:
             mock_invoke.return_value = ('Fresh summary', '')
             result = compress_context(
-                agent_pool=pool, target_agent_name='TestAgent',
-                fraction=0.5, mode='auto', force=False,
+                agent_pool=pool,
+                target_agent_name='TestAgent',
+                fraction=0.5,
+                mode='auto',
+                force=False,
             )
 
         assert result.success is True
@@ -415,6 +427,7 @@ class TestLiveMarkerTsStamping:
 # 3. rebuild_working_set
 # ──────────────────────────────────────────────
 
+
 class TestRebuildWorkingSet:
     """Test working set rebuild from pool state."""
 
@@ -456,6 +469,7 @@ class TestRebuildWorkingSet:
 # ──────────────────────────────────────────────
 # 4. compress_context — Clean Trim
 # ──────────────────────────────────────────────
+
 
 class TestCompressContextCleanTrim:
     """Verify that clean trim actually deletes messages (not cumulative)."""
@@ -529,7 +543,7 @@ class TestCompressContextCleanTrim:
             mock_invoke.return_value = ('Summary 2', '')
 
             # Second compression on the now-smaller pool
-            result2 = compress_context(
+            compress_context(
                 agent_pool=pool,
                 target_agent_name='TestAgent',
                 fraction=0.5,
@@ -545,6 +559,7 @@ class TestCompressContextCleanTrim:
 # ──────────────────────────────────────────────
 # 4b. compress_context — Target Message Composition (Bug Fixes)
 # ──────────────────────────────────────────────
+
 
 class TestCompressContextTargetMessages:
     """Verify target_messages sent to the Compression Agent are correct for both
@@ -563,6 +578,7 @@ class TestCompressContextTargetMessages:
         pool, _ = _build_pool_with_history(num_user_msgs=5)
 
         captured_target_messages = []
+
         def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False):
             captured_target_messages.append(target_messages)
             return ('Summary', '')
@@ -580,7 +596,6 @@ class TestCompressContextTargetMessages:
 
         # Verify target_messages has exactly one more message than the active discard count.
         # Without the fix, len would equal the discard count (no prepended U0).
-        history = pool.get_conversation('TestAgent')
         # After compression, history is shorter — but we can still verify the captured call had U0
         assert len(target_msgs) > 1, 'target_messages should include U0 + discarded active msgs'
 
@@ -607,6 +622,7 @@ class TestCompressContextTargetMessages:
         pool = MockAgentPool(history)
 
         captured_target_messages = []
+
         def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False):
             captured_target_messages.append((target_messages, existing_summary))
             return ('Compound summary', '')
@@ -628,6 +644,7 @@ class TestCompressContextTargetMessages:
 # ──────────────────────────────────────────────
 # 5. compress_context — Force Mode
 # ──────────────────────────────────────────────
+
 
 class TestCompressContextForceMode:
     """Verify force mode compresses even when active_set is small."""
@@ -662,6 +679,7 @@ class TestCompressContextForceMode:
 # ──────────────────────────────────────────────
 # 6. compress_context — Manual Mode
 # ──────────────────────────────────────────────
+
 
 class TestCompressContextManualMode:
     """Verify Compression Agent is NOT invoked in manual mode."""
@@ -705,6 +723,7 @@ class TestCompressContextManualMode:
 # ──────────────────────────────────────────────
 # 7. compress_context — Dry Run
 # ──────────────────────────────────────────────
+
 
 class TestCompressContextDryRun:
     """Verify dry_run generates summary but doesn't mutate the pool."""
@@ -750,6 +769,7 @@ class TestCompressContextDryRun:
 # ──────────────────────────────────────────────
 # 8. compress_context — Failure Paths
 # ──────────────────────────────────────────────
+
 
 class TestCompressContextFailurePaths:
     """Verify graceful failure with untouched pool."""
@@ -812,6 +832,7 @@ class TestCompressContextFailurePaths:
 # ──────────────────────────────────────────────
 # 9. Fraction Validation
 # ──────────────────────────────────────────────
+
 
 class TestFractionValidation:
     """Reject fraction < 0 or > 1."""
@@ -882,6 +903,7 @@ class TestFractionValidation:
 # 10. get_compression_target_set
 # ──────────────────────────────────────────────
 
+
 class TestGetCompressionTargetSet:
     """Test the MockAgentPool.get_compression_target_set method (mirrors AgentPool)."""
 
@@ -889,9 +911,7 @@ class TestGetCompressionTargetSet:
         """Without a marker, active set starts after SYSTEM + U0 (matching production behavior)."""
         pool, _ = _build_pool_with_history(num_user_msgs=5)
 
-        active_start_idx, messages_to_compress, latest_summary_idx = (
-            pool.get_compression_target_set('TestAgent')
-        )
+        active_start_idx, messages_to_compress, latest_summary_idx = (pool.get_compression_target_set('TestAgent'))
 
         assert latest_summary_idx == -1  # No marker
         assert active_start_idx == 2  # After SYSTEM + U0 (matches production agent_pool.py)
@@ -901,9 +921,7 @@ class TestGetCompressionTargetSet:
         """With a marker, active set starts after the marker."""
         pool, _ = _build_pool_with_marker(msgs_before=3, msgs_after=4)
 
-        active_start_idx, messages_to_compress, latest_summary_idx = (
-            pool.get_compression_target_set('TestAgent')
-        )
+        active_start_idx, messages_to_compress, latest_summary_idx = (pool.get_compression_target_set('TestAgent'))
 
         assert latest_summary_idx != -1  # Has marker
         assert active_start_idx == latest_summary_idx + 1
@@ -913,9 +931,7 @@ class TestGetCompressionTargetSet:
         """Empty conversation returns None start index and empty list."""
         pool = MockAgentPool(history=[])
 
-        active_start_idx, messages_to_compress, latest_summary_idx = (
-            pool.get_compression_target_set('Nobody')
-        )
+        active_start_idx, messages_to_compress, latest_summary_idx = (pool.get_compression_target_set('Nobody'))
 
         assert active_start_idx == 0
         assert messages_to_compress == []
@@ -925,6 +941,7 @@ class TestGetCompressionTargetSet:
 # ──────────────────────────────────────────────
 # 11. find_last_marker
 # ──────────────────────────────────────────────
+
 
 class TestFindLastMarker:
     """Test the static find_last_marker method (via AgentPool and MockAgentPool)."""
@@ -1008,9 +1025,18 @@ class TestFindLastMarker:
 
         marker_content = f"{COMPRESSION_MARKER} (50%) ---\nSummary: old"
         history = [
-            {'role': SYSTEM, 'content': 'System'},
-            {'role': USER, 'content': marker_content},
-            {'role': 'assistant', 'content': 'Reply'},
+            {
+                'role': SYSTEM,
+                'content': 'System'
+            },
+            {
+                'role': USER,
+                'content': marker_content
+            },
+            {
+                'role': 'assistant',
+                'content': 'Reply'
+            },
         ]
         idx = AgentPool.find_last_marker(history)
         assert idx == 1
@@ -1036,6 +1062,7 @@ class TestFindLastMarker:
 # ──────────────────────────────────────────────
 # 12. Integration — Nested Compression Guard
 # ──────────────────────────────────────────────
+
 
 class TestNestedCompressionGuard:
     """Integration tests for nested compression guard using real orchestrator code.
@@ -1067,15 +1094,11 @@ class TestNestedCompressionGuard:
         hook_forced = False
 
         if instance_name != 'Compressor':
-            hook_forced = mock_orch._inject_compression_warning_for_agent(
-                mock_orch, instance_name, []
-            )
+            hook_forced = mock_orch._inject_compression_warning_for_agent(mock_orch, instance_name, [])
 
         assert hook_forced is False
-        assert inject_called['value'] is False, (
-            '_inject_compression_warning_for_agent should NOT be called '
-            'for Compressor — nested compression guard failed'
-        )
+        assert inject_called['value'] is False, ('_inject_compression_warning_for_agent should NOT be called '
+                                                 'for Compressor — nested compression guard failed')
 
     def test_orchestrator_calls_inject_for_other_agents(self):
         """For non-compression agents, _inject_compression_warning_for_agent IS called."""
@@ -1091,20 +1114,18 @@ class TestNestedCompressionGuard:
         mock_orch._inject_compression_warning_for_agent = track_inject
 
         instance_name = 'coder'
-        hook_forced = False
 
         if instance_name != 'Compressor':
-            hook_forced = mock_orch._inject_compression_warning_for_agent(
-                mock_orch, instance_name, []
-            )
+            mock_orch._inject_compression_warning_for_agent(mock_orch, instance_name, [])
 
         assert inject_called['value'] is True, (
-            '_inject_compression_warning_for_agent SHOULD be called for non-compression agents'
-        )
+            '_inject_compression_warning_for_agent SHOULD be called for non-compression agents')
+
 
 # ──────────────────────────────────────────────
 # 6b. compress_context — precomputed_summary (Critical: reviewer #2)
 # ──────────────────────────────────────────────
+
 
 class TestCompressContextPrecomputedSummary:
     """Verify precomputed_summary parameter bypasses LLM invocation."""
@@ -1163,6 +1184,7 @@ class TestCompressContextPrecomputedSummary:
 # 8b. compress_context — Empty generated summary (Reviewer #9)
 # ──────────────────────────────────────────────
 
+
 class TestCompressContextEmptySummary:
     """Verify empty summary from Compression Agent returns failure."""
 
@@ -1208,6 +1230,7 @@ class TestCompressContextEmptySummary:
 # 8c. compress_context — Pool mutation failure (Reviewer #8)
 # ──────────────────────────────────────────────
 
+
 class TestCompressContextPoolMutationFailure:
     """Verify pool mutation exception is handled gracefully."""
 
@@ -1217,6 +1240,7 @@ class TestCompressContextPoolMutationFailure:
 
         # Make instance_conversations raise on assignment to simulate corruption
         class FailingPool:
+
             def __init__(self, base_pool):
                 self._base = base_pool
 
@@ -1261,13 +1285,17 @@ class TestCompressContextPoolMutationFailure:
 # 4b. compress_context — Dict-style messages (Reviewer #4)
 # ──────────────────────────────────────────────
 
+
 class TestCompressContextDictMessages:
     """Verify compress_context works with dict-style messages (not just Message objects)."""
 
     def test_dict_messages_compression(self):
         """compress_context succeeds with dict-style messages in pool."""
         history = [
-            {'role': SYSTEM, 'content': 'You are a test agent'},
+            {
+                'role': SYSTEM,
+                'content': 'You are a test agent'
+            },
         ]
         for i in range(5):
             history.append({'role': USER, 'content': f"User message {i}"})
@@ -1294,6 +1322,7 @@ class TestCompressContextDictMessages:
 # 8d. Token guard dual-path tests (Reviewer #5)
 # ──────────────────────────────────────────────
 
+
 class TestTokenGuard:
     """Test the token-based 'already optimally compressed' guard."""
 
@@ -1304,9 +1333,9 @@ class TestTokenGuard:
         """
         pool = MockAgentPool(history=[
             _make_msg(SYSTEM, 'System'),
-            _make_msg(USER, 'Hi there!'),   # U0 — skipped by start_idx=2
+            _make_msg(USER, 'Hi there!'),  # U0 — skipped by start_idx=2
             _make_msg('assistant', 'Hello!'),  # Active msg 1
-            _make_msg(USER, 'Bye'),          # Active msg 2 (only 2 active → too small)
+            _make_msg(USER, 'Bye'),  # Active msg 2 (only 2 active → too small)
         ])
 
         # Patch at the source module (lazy import in core.py)
@@ -1332,10 +1361,10 @@ class TestTokenGuard:
         """
         pool = MockAgentPool(history=[
             _make_msg(SYSTEM, 'System'),
-            _make_msg(USER, 'x' * 100),      # U0 — skipped by start_idx=2
-            _make_msg('assistant', 'y' * 100),   # Active msg 1
-            _make_msg(USER, 'z' * 50),         # Active msg 2
-            _make_msg('assistant', 'w' * 50),   # Active msg 3 (≥3 active → guard passes)
+            _make_msg(USER, 'x' * 100),  # U0 — skipped by start_idx=2
+            _make_msg('assistant', 'y' * 100),  # Active msg 1
+            _make_msg(USER, 'z' * 50),  # Active msg 2
+            _make_msg('assistant', 'w' * 50),  # Active msg 3 (≥3 active → guard passes)
         ])
 
         with patch('agent_cascade.utils.tokenization_qwen.count_tokens') as mock_count:
@@ -1359,6 +1388,7 @@ class TestTokenGuard:
 # 7b. compress_context — dry_run + force combination
 # ──────────────────────────────────────────────
 
+
 class TestCompressContextDryRunWithForce:
     """Test dry_run combined with force mode."""
 
@@ -1374,8 +1404,8 @@ class TestCompressContextDryRunWithForce:
                 target_agent_name='TestAgent',
                 fraction=0.5,
                 mode='auto',
-                force=True,   # Bypass the small-set guard
-                dry_run=True, # Don't mutate pool
+                force=True,  # Bypass the small-set guard
+                dry_run=True,  # Don't mutate pool
             )
 
         assert result.success is True
@@ -1387,6 +1417,7 @@ class TestCompressContextDryRunWithForce:
 # ---------------------------------------------------------------------------
 # Tests for invoke_compression_agent retry-with-reuse behavior
 # ---------------------------------------------------------------------------
+
 
 class TestCompressionRetryReuse:
     """Verify that invoke_compression_agent reuses the same instance on retryable failures.
@@ -1432,10 +1463,8 @@ class TestCompressionRetryReuse:
         def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label='Compression'):
             executed_instances.append(comp_instance)
             # Simulate a bad response (missing end marker)
-            raise RuntimeError(
-                "Compression output missing end marker '--- END SUMMARY ---' — "
-                'compressor may have hallucinated or continued the task'
-            )
+            raise RuntimeError("Compression output missing end marker '--- END SUMMARY ---' — "
+                               'compressor may have hallucinated or continued the task')
 
         def fake_rebuild_conversation(messages):
             rebuild_calls.append(list(messages))
@@ -1446,8 +1475,14 @@ class TestCompressionRetryReuse:
         mock_instance._compression_lock.__enter__ = lambda s: None
         mock_instance._compression_lock.__exit__ = lambda s, *a: None
         mock_instance.conversation = [
-            {'role': 'system', 'content': 'You are a compressor.'},
-            {'role': 'user', 'content': 'Summarize this...'},
+            {
+                'role': 'system',
+                'content': 'You are a compressor.'
+            },
+            {
+                'role': 'user',
+                'content': 'Summarize this...'
+            },
         ]
         mock_instance.rebuild_conversation = fake_rebuild_conversation
 
@@ -1459,13 +1494,16 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 
@@ -1496,8 +1534,14 @@ class TestCompressionRetryReuse:
         mock_instance._compression_lock.__enter__ = lambda s: None
         mock_instance._compression_lock.__exit__ = lambda s, *a: None
         mock_instance.conversation = [
-            {'role': 'system', 'content': 'sys'},
-            {'role': 'user', 'content': 'task'},
+            {
+                'role': 'system',
+                'content': 'sys'
+            },
+            {
+                'role': 'user',
+                'content': 'task'
+            },
         ]
         mock_instance.rebuild_conversation = MagicMock()
 
@@ -1507,13 +1551,16 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 
@@ -1540,8 +1587,14 @@ class TestCompressionRetryReuse:
         mock_instance._compression_lock.__enter__ = lambda s: None
         mock_instance._compression_lock.__exit__ = lambda s, *a: None
         mock_instance.conversation = [
-            {'role': 'system', 'content': 'sys'},
-            {'role': 'user', 'content': 'task'},
+            {
+                'role': 'system',
+                'content': 'sys'
+            },
+            {
+                'role': 'user',
+                'content': 'task'
+            },
         ]
         mock_instance.rebuild_conversation = MagicMock()
 
@@ -1551,13 +1604,16 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(RuntimeError, match='timed out'):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 
@@ -1582,8 +1638,14 @@ class TestCompressionRetryReuse:
         mock_instance._compression_lock.__enter__ = lambda s: None
         mock_instance._compression_lock.__exit__ = lambda s, *a: None
         mock_instance.conversation = [
-            {'role': 'system', 'content': 'sys'},
-            {'role': 'user', 'content': 'task'},
+            {
+                'role': 'system',
+                'content': 'sys'
+            },
+            {
+                'role': 'user',
+                'content': 'task'
+            },
         ]
         mock_instance.rebuild_conversation = MagicMock()
 
@@ -1593,13 +1655,16 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(ValueError, match='Unexpected infrastructure error'):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 
@@ -1618,8 +1683,14 @@ class TestCompressionRetryReuse:
         mock_instance._compression_lock.__enter__ = lambda s: None
         mock_instance._compression_lock.__exit__ = lambda s, *a: None
         mock_instance.conversation = [
-            {'role': 'system', 'content': 'sys'},
-            {'role': 'user', 'content': 'task'},
+            {
+                'role': 'system',
+                'content': 'sys'
+            },
+            {
+                'role': 'user',
+                'content': 'task'
+            },
         ]
         mock_instance.rebuild_conversation = MagicMock()
 
@@ -1629,12 +1700,15 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                return_value=('Valid summary text', ''),
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    return_value=('Valid summary text', ''),
             ):
                 result = invoke_compression_agent(
                     agent_pool=pool,
-                    target_messages=[{'role': 'user', 'content': 'hello'}],
+                    target_messages=[{
+                        'role': 'user',
+                        'content': 'hello'
+                    }],
                     caller_name='TestCaller',
                 )
 
@@ -1655,15 +1729,19 @@ class TestCompressionRetryReuse:
             executed_instances.append(comp_instance)
             call_count[0] += 1
             if call_count[0] == 1:
-                raise RuntimeError(
-                    "Compression output missing end marker '--- END SUMMARY ---' — "
-                    'compressor may have hallucinated or continued the task'
-                )
+                raise RuntimeError("Compression output missing end marker '--- END SUMMARY ---' — "
+                                   'compressor may have hallucinated or continued the task')
             return ('Good summary on second try', '')
 
         initial_conv = [
-            {'role': 'system', 'content': 'sys'},
-            {'role': 'user', 'content': 'task'},
+            {
+                'role': 'system',
+                'content': 'sys'
+            },
+            {
+                'role': 'user',
+                'content': 'task'
+            },
         ]
 
         mock_instance = MagicMock()
@@ -1679,12 +1757,15 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 result = invoke_compression_agent(
                     agent_pool=pool,
-                    target_messages=[{'role': 'user', 'content': 'hello'}],
+                    target_messages=[{
+                        'role': 'user',
+                        'content': 'hello'
+                    }],
                     caller_name='TestCaller',
                 )
 
@@ -1708,8 +1789,14 @@ class TestCompressionRetryReuse:
         pool = self._make_mock_pool()
 
         initial_conv = [
-            {'role': 'system', 'content': 'You are a compressor.'},
-            {'role': 'user', 'content': 'Summarize this conversation...'},
+            {
+                'role': 'system',
+                'content': 'You are a compressor.'
+            },
+            {
+                'role': 'user',
+                'content': 'Summarize this conversation...'
+            },
         ]
 
         rebuild_args = []
@@ -1718,10 +1805,8 @@ class TestCompressionRetryReuse:
             rebuild_args.append(messages)
 
         def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label='Compression'):
-            raise RuntimeError(
-                "Compression output missing end marker '--- END SUMMARY ---' — "
-                'compressor may have hallucinated or continued the task'
-            )
+            raise RuntimeError("Compression output missing end marker '--- END SUMMARY ---' — "
+                               'compressor may have hallucinated or continued the task')
 
         mock_instance = MagicMock()
         mock_instance._compression_lock = MagicMock()
@@ -1736,13 +1821,16 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 
@@ -1769,18 +1857,22 @@ class TestCompressionRetryReuse:
 
         def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label='Compression'):
             executed_instances.append(comp_instance)
-            raise RuntimeError(
-                "Compression output missing end marker '--- END SUMMARY ---' — "
-                'compressor may have hallucinated or continued the task'
-            )
+            raise RuntimeError("Compression output missing end marker '--- END SUMMARY ---' — "
+                               'compressor may have hallucinated or continued the task')
 
         mock_instance = MagicMock()
         mock_instance._compression_lock = MagicMock()
         mock_instance._compression_lock.__enter__ = lambda s: None
         mock_instance._compression_lock.__exit__ = lambda s, *a: None
         mock_instance.conversation = [
-            {'role': 'system', 'content': 'You are a compressor.'},
-            {'role': 'user', 'content': 'Summarize this...'},
+            {
+                'role': 'system',
+                'content': 'You are a compressor.'
+            },
+            {
+                'role': 'user',
+                'content': 'Summarize this...'
+            },
         ]
         mock_instance.rebuild_conversation = MagicMock()
 
@@ -1790,13 +1882,16 @@ class TestCompressionRetryReuse:
             mock_engine._create_system_agent.return_value = mock_instance
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 
@@ -1809,6 +1904,7 @@ class TestCompressionRetryReuse:
 # ---------------------------------------------------------------------------
 # BUG_0001 regression: a loop-terminated compressor must be reset before retry
 # ---------------------------------------------------------------------------
+
 
 class TestTerminatedCompressorRetryReset:
     """BUG_0001: when the compressor's loop-detection exhausts its rollback budget it is
@@ -1852,15 +1948,20 @@ class TestTerminatedCompressorRetryReset:
         # _compression_lock must be a real context manager for the initial-conversation capture.
         inst._compression_lock = threading.Lock()
         inst.conversation = [
-            {'role': 'system', 'content': 'You are a compressor.'},
-            {'role': 'user', 'content': 'Summarize this conversation...'},
+            {
+                'role': 'system',
+                'content': 'You are a compressor.'
+            },
+            {
+                'role': 'user',
+                'content': 'Summarize this conversation...'
+            },
         ]
         inst.rebuild_conversation = MagicMock()
         return inst
 
     def test_terminated_compressor_reset_before_retry(self):
         """A TERMINATED compressor is reset to IDLE (flag cleared, removed from pool) before retry."""
-        import threading
         from agent_cascade.compression.agent_invoker import invoke_compression_agent
 
         pool = self._make_mock_pool()
@@ -1872,10 +1973,8 @@ class TestTerminatedCompressorRetryReset:
 
         def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label='Compression'):
             captured.setdefault('key', comp_state_key)
-            raise RuntimeError(
-                "Compression output missing end marker '--- END SUMMARY ---' — "
-                'compressor may have hallucinated or continued the task'
-            )
+            raise RuntimeError("Compression output missing end marker '--- END SUMMARY ---' — "
+                               'compressor may have hallucinated or continued the task')
 
         with patch('agent_cascade.execution_engine.ExecutionEngine') as mock_engine_cls:
             mock_engine = MagicMock()
@@ -1883,13 +1982,16 @@ class TestTerminatedCompressorRetryReset:
             mock_engine._create_system_agent.return_value = inst
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 
@@ -1904,7 +2006,6 @@ class TestTerminatedCompressorRetryReset:
 
     def test_reset_removes_instance_from_terminated_set(self):
         """Direct unit test: the reset helper removes the key from pool.terminated_instances."""
-        import threading
         from agent_cascade.compression.agent_invoker import _reset_terminated_compressor_for_retry
 
         pool = self._make_mock_pool()
@@ -1920,7 +2021,6 @@ class TestTerminatedCompressorRetryReset:
 
     def test_non_terminated_compressor_left_untouched(self):
         """A compressor that failed validation but was NOT terminated (still IDLE) is left as-is."""
-        import threading
         from agent_cascade.compression.agent_invoker import invoke_compression_agent
 
         pool = self._make_mock_pool()
@@ -1930,10 +2030,8 @@ class TestTerminatedCompressorRetryReset:
         inst.is_terminated = False
 
         def fake_execute(agent_pool, engine, comp_instance, comp_state_key, caller_name, timeout_label='Compression'):
-            raise RuntimeError(
-                "Compression output missing end marker '--- END SUMMARY ---' — "
-                'compressor may have hallucinated or continued the task'
-            )
+            raise RuntimeError("Compression output missing end marker '--- END SUMMARY ---' — "
+                               'compressor may have hallucinated or continued the task')
 
         with patch('agent_cascade.execution_engine.ExecutionEngine') as mock_engine_cls:
             mock_engine = MagicMock()
@@ -1941,13 +2039,16 @@ class TestTerminatedCompressorRetryReset:
             mock_engine._create_system_agent.return_value = inst
 
             with patch(
-                'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
-                side_effect=fake_execute,
+                    'agent_cascade.compression.agent_invoker._execute_compressor_and_extract_summary',
+                    side_effect=fake_execute,
             ):
                 with pytest.raises(RuntimeError, match=f"after {COMPRESSION_MAX_RETRIES} attempts"):
                     invoke_compression_agent(
                         agent_pool=pool,
-                        target_messages=[{'role': 'user', 'content': 'hello'}],
+                        target_messages=[{
+                            'role': 'user',
+                            'content': 'hello'
+                        }],
                         caller_name='TestCaller',
                     )
 

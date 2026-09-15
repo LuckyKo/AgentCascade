@@ -3,21 +3,27 @@ LifecycleMixin — instance create/dismiss/terminate/halt/resume/remove and sess
 """
 
 from __future__ import annotations
+
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import List, Optional
+
+from agent_cascade.llm.schema import Message
 from agent_cascade.log import logger
-from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
-from ..agent_instance import AgentInstance, PoolSettings, AgentState, ACTIVE_STATES
+
+from ..agent_instance import ACTIVE_STATES, AgentInstance
 from ..async_tools import AsyncToolRegistry
 
 try:
-    from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session, _AGENT_KERNELS, _KERNEL_LOCK
+    from agent_cascade.tools.code_interpreter import _AGENT_KERNELS, _KERNEL_LOCK, cleanup_kernels_for_session
 except ImportError:
     cleanup_kernels_for_session = None
     _AGENT_KERNELS = {}
     _KERNEL_LOCK = threading.Lock()
+
+
 class LifecycleMixin:
+
     def _resolve_instance_name(
         self,
         instance_name: str,
@@ -82,7 +88,7 @@ class LifecycleMixin:
         )
         # Phase 3: Give instance a reference back to the pool for queue cleanup on terminate().
         instance._pool_ref = self
-        
+
         # Register instance atomically under _pool_lock to prevent race during creation
         with self._pool_lock:
             self.instances[instance_name] = instance
@@ -116,7 +122,7 @@ class LifecycleMixin:
         # the logger key miss, leaking the cached file handle. Normalize as get_logger does.
         agent_class = (inst.agent_class or '').strip().lower() if inst else ''
         # Don't discard from terminated_instances here — keep the signal alive until
-        # the thread confirms it stopped via join in dismiss_instance(). 
+        # the thread confirms it stopped via join in dismiss_instance().
         # Memory leak prevention now handled in dismiss_instance() after join.
         with self._queue_lock:
             self.message_queues.pop(instance_name, None)
@@ -173,7 +179,9 @@ class LifecycleMixin:
                     if instance_name in parent_inst._child_instances:
                         parent_inst._child_instances.remove(instance_name)
             except Exception as e:
-                logger.debug(f"Cleanup of child reference {instance_name} from {parent_inst.instance_name} failed (non-critical): {e}")
+                logger.debug(
+                    f"Cleanup of child reference {instance_name} from {parent_inst.instance_name} failed (non-critical): {e}"
+                )
 
         # BUG31 Fix: Clean up api_integration module-level caches to prevent memory leaks
         # and stale data when instances are dismissed and re-created with same name.
@@ -186,8 +194,7 @@ class LifecycleMixin:
         # Note: _token_stats_cache is NOT cleaned here — it's keyed by conversation identity
         # (msg_count, id(last_msg)), not instance name. Entries auto-evict via FIFO at 5000 cap.
 
-    def halt_all_instances(self, except_instance: str = None,
-                           except_instances: Optional[List[str]] = None):
+    def halt_all_instances(self, except_instance: str = None, except_instances: Optional[List[str]] = None):
         """Halt all active instances except the given one(s). Used before forced compression.
 
         Tracks which instances were halted by compression (not manual) so that
@@ -359,10 +366,8 @@ class LifecycleMixin:
                         try:
                             # Enqueue the dismissal result to wake up the parent
                             self.enqueue_message(parent_name, result_msg)
-                            logger.debug(
-                                f"[ASYNC_WAKEUP] Enqueued dismissal result for child '{instance_name}' "
-                                f"to wake {parent_state.name} parent '{parent_name}'"
-                            )
+                            logger.debug(f"[ASYNC_WAKEUP] Enqueued dismissal result for child '{instance_name}' "
+                                         f"to wake {parent_state.name} parent '{parent_name}'")
                         except Exception as e:
                             logger.debug(f"Failed to enqueue dismissal result for {instance_name}: {e}")
                         # Fix B: a SLEEPING parent's live poll thread drains the queue
@@ -400,8 +405,11 @@ class LifecycleMixin:
                         _dismiss_pool = _sched._pools.get(_held_key) if _held_key else None
                 except Exception:
                     pass
-                release_slot_permit(inst, instance_name, action='drop-dismiss',
-                                    context='on dismiss', pool=_dismiss_pool)
+                release_slot_permit(inst,
+                                    instance_name,
+                                    action='drop-dismiss',
+                                    context='on dismiss',
+                                    pool=_dismiss_pool)
             except Exception as e:
                 # Non-critical: the old thread's own run()-finally release still covers it.
                 logger.warning(f"Slot release on dismiss failed for '{instance_name}' (non-critical): {e}")
@@ -419,10 +427,8 @@ class LifecycleMixin:
                 join_timeout = getattr(self.settings, 'dismiss_thread_join_timeout', 2.0)
                 thread.join(timeout=join_timeout)  # Short wait; join only waits, doesn't force-stop
                 if thread.is_alive():
-                    logger.warning(
-                        f"Thread for '{instance_name}' did not stop within {join_timeout}s timeout. "
-                        f"Termination signal kept active — agent will stop at next cooperative check."
-                    )
+                    logger.warning(f"Thread for '{instance_name}' did not stop within {join_timeout}s timeout. "
+                                   f"Termination signal kept active — agent will stop at next cooperative check.")
             except Exception as e:
                 logger.warning(f"Error joining thread for '{instance_name}': {e}")
         else:
@@ -442,7 +448,7 @@ class LifecycleMixin:
         try:
             with _KERNEL_LOCK:
                 has_kernels = instance_name in _AGENT_KERNELS and len(_AGENT_KERNELS[instance_name]) > 0
-            
+
             if has_kernels:
                 cleaned = cleanup_kernels_for_session(instance_name)
                 if cleaned > 0:
@@ -453,6 +459,7 @@ class LifecycleMixin:
 
         # Always remove the instance from the pool so its tab disappears from the UI
         self.remove_instance(instance_name)
+
     def reset(self):
         """Full reset of agent state for "New Session".
 
@@ -500,8 +507,7 @@ class LifecycleMixin:
         # dismiss_instance() recursively cascade-dismisses children first, then
         # calls remove_instance() which cleans up loggers, queues, caches.
         with self._pool_lock:
-            sub_agent_names = [name for name, inst in self.instances.items()
-                               if inst.parent_instance is not None]
+            sub_agent_names = [name for name, inst in self.instances.items() if inst.parent_instance is not None]
         for name in sub_agent_names:
             # Double-dismiss guard: instance may have been cascade-dismissed by parent
             with self._pool_lock:
@@ -575,15 +581,15 @@ class LifecycleMixin:
 
     def clear_sub_agents(self):
         """Clear all sub-agent instances from the pool, preserving root orchestrator(s).
-        
+
         This method dismisses all non-root instances (where parent_instance is not None),
-        which are typically delegated workers created during session execution. Root 
+        which are typically delegated workers created during session execution. Root
         orchestrator instances (parent_instance is None) are preserved.
-        
+
         Use case: Called before loading a saved session to remove stale sub-agents from
         previous sessions that would otherwise appear in the UI as if they belong to
         the newly loaded session.
-        
+
         Order of operations:
           1. Temporarily suppress dismissal callbacks (prevents premature broadcasts)
           2. Take snapshot of instance keys (avoids RuntimeError during iteration)
@@ -593,33 +599,32 @@ class LifecycleMixin:
           5. Clean up instance_summaries for dismissed instances
           6. Increment _instances_version to signal the change
           7. Restore dismissal callbacks
-        
+
         Does NOT:
           - Touch root orchestrator instances (parent_instance is None)
           - Clear conversations of remaining instances
           - Reset logger sessions or async infrastructure
           - Fire dismissal callbacks during clear (suppressed to prevent UX flicker)
-        
+
         See reset() for full session reset that clears everything including root instances.
         See load_session_from_log() for where this is typically called before loading.
-        
+
         Example:
             >>> # Before loading a new session, clear stale sub-agents
             >>> agent_pool.clear_sub_agents()
             >>> agent_pool.load_session_from_log(path, target_instance='Maine')
         """
-        # Issue 1 fix: Temporarily suppress dismissal callbacks to prevent premature 
+        # Issue 1 fix: Temporarily suppress dismissal callbacks to prevent premature
         # frontend broadcasts. The final state broadcast happens after load completes.
         _callbacks = self._on_dismissed_callbacks.copy()
         self._on_dismissed_callbacks = []
-        
+
         try:
             # Take a snapshot of instance keys under _pool_lock to avoid RuntimeError during iteration.
             # dismiss_instance() modifies self.instances by removing dismissed instances
             # and recursively cascade-dismisses children first.
             with self._pool_lock:
-                sub_agent_names = [name for name, inst in self.instances.items()
-                                   if inst.parent_instance is not None]
+                sub_agent_names = [name for name, inst in self.instances.items() if inst.parent_instance is not None]
             for name in sub_agent_names:
                 # Double-dismiss guard: instance may have been cascade-dismissed by parent
                 with self._pool_lock:
@@ -627,12 +632,12 @@ class LifecycleMixin:
                 if not still_exists:
                     continue
                 self.dismiss_instance(name)
-            
+
             # Clean up instance_summaries for dismissed instances (Issue 2 fix)
             for name in list(self.instance_summaries.keys()):
                 if name not in self.instances:
                     self.instance_summaries.pop(name, None)
-            
+
             # Signal that instances changed (for lazy sync compatibility)
             self._instances_version += 1
         finally:

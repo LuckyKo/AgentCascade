@@ -38,10 +38,10 @@ class ContextWindowExceeded(Exception):
 
 class FallbackCompressionRequired(Exception):
     """Raised by APIRouter when a context-exceeded error occurs during fallback.
-    
+
     Signals to the ExecutionEngine that it should iteratively compress the agent's
     conversation until it fits an available endpoint, before retrying.
-    
+
     Attributes:
         instance_name: The agent instance name that needs compression
         agent_type: The agent type (e.g., 'coder', 'researcher')

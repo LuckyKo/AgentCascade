@@ -6,14 +6,14 @@ and sender identity — all without requiring a full server or LLM.
 
 import json
 import threading
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers: build a minimal AgentPool + mock agents for send_message tests
 # ---------------------------------------------------------------------------
+
 
 def _make_mock_agent(name, state=None):
     """Create a lightweight mock agent instance with required attributes."""
@@ -32,7 +32,7 @@ def agent_pool_with_agents():
     """Create an AgentPool with two mock RUNNING agents ('agentA', 'agentB')."""
     with patch('agent_cascade.operation_manager.OperationManager') as mock_op_mgr, \
          patch('agent_cascade.telemetry.TelemetryCollector') as mock_telem, \
-         patch('agent_cascade.api_router.APIRouter') as mock_router:
+         patch('agent_cascade.api_router.APIRouter') as mock_router:  # noqa: F841  (patch targets must stay bound)
 
         op_mgr = MagicMock()
         op_mgr.base_dir = MagicMock()
@@ -77,6 +77,7 @@ def send_message_tool(agent_pool_with_agents):
 # Input validation tests
 # ---------------------------------------------------------------------------
 
+
 class TestSendMessageInputValidation:
     """Test that invalid inputs are rejected with clear error messages."""
 
@@ -117,16 +118,14 @@ class TestSendMessageInputValidation:
 # Agent-to-agent messaging tests
 # ---------------------------------------------------------------------------
 
+
 class TestSendMessageAgentToAgent:
     """Test agent-to-agent message queuing with sender tagging."""
 
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
     def test_basic_agent_to_agent_queues_message(self, mock_get_name, send_message_tool, agent_pool_with_agents):
         """Agent A sends to Agent B → message is queued with sender tag."""
-        params = json.dumps({
-            'destination': 'agentB',
-            'message': 'Hey agentB, please check this out.'
-        })
+        params = json.dumps({'destination': 'agentB', 'message': 'Hey agentB, please check this out.'})
         result = send_message_tool.call(params)
 
         assert 'sent successfully' in result.lower() and "'agentB'" in result
@@ -139,10 +138,7 @@ class TestSendMessageAgentToAgent:
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
     def test_sender_identity_is_correct(self, mock_get_name, send_message_tool, agent_pool_with_agents):
         """Verify sender is obtained via _get_current_instance_name()."""
-        params = json.dumps({
-            'destination': 'agentB',
-            'message': 'test'
-        })
+        params = json.dumps({'destination': 'agentB', 'message': 'test'})
         send_message_tool.call(params)
 
         mock_get_name.assert_called()
@@ -152,10 +148,7 @@ class TestSendMessageAgentToAgent:
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
     def test_self_message_is_rejected(self, mock_get_name, send_message_tool, agent_pool_with_agents):
         """Agent cannot send a message to itself."""
-        params = json.dumps({
-            'destination': 'agentA',
-            'message': 'hello me'
-        })
+        params = json.dumps({'destination': 'agentA', 'message': 'hello me'})
         result = send_message_tool.call(params)
 
         assert 'Failed' in result and 'yourself' in result.lower()
@@ -164,10 +157,7 @@ class TestSendMessageAgentToAgent:
 
     def test_invalid_destination_no_such_agent(self, send_message_tool):
         """Sending to a non-existent agent returns an error."""
-        params = json.dumps({
-            'destination': 'nonexistent',
-            'message': 'hello'
-        })
+        params = json.dumps({'destination': 'nonexistent', 'message': 'hello'})
         result = send_message_tool.call(params)
 
         assert 'Failed' in result and "'nonexistent'" in result and 'exists' in result.lower()
@@ -181,10 +171,7 @@ class TestSendMessageAgentToAgent:
         with agent_pool_with_agents._pool_lock:
             agent_pool_with_agents.instances['agentB'].state = AgentState.IDLE
 
-        params = json.dumps({
-            'destination': 'agentB',
-            'message': 'hello'
-        })
+        params = json.dumps({'destination': 'agentB', 'message': 'hello'})
         result = send_message_tool.call(params)
 
         assert 'Failed' in result and 'IDLE' in result
@@ -194,16 +181,14 @@ class TestSendMessageAgentToAgent:
 # Agent-to-user messaging tests
 # ---------------------------------------------------------------------------
 
+
 class TestSendMessageAgentToUser:
     """Test agent-to-user WebSocket notification path."""
 
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='worker1')
     def test_send_to_user_with_no_websocket_degrades_gracefully(self, mock_get_name, send_message_tool):
         """When pool has no WebSocket setup, returns warning but doesn't crash."""
-        params = json.dumps({
-            'destination': 'user',
-            'message': 'Task complete!'
-        })
+        params = json.dumps({'destination': 'user', 'message': 'Task complete!'})
         result = send_message_tool.call(params)
 
         # Should degrade gracefully with a warning
@@ -229,10 +214,7 @@ class TestSendMessageAgentToUser:
         agent_pool_with_agents._ws_send_queue = ws_queue
         agent_pool_with_agents._ws_loop = ws_loop
 
-        params = json.dumps({
-            'destination': 'user',
-            'message': 'Build finished successfully.'
-        })
+        params = json.dumps({'destination': 'user', 'message': 'Build finished successfully.'})
         result = send_message_tool.call(params)
 
         assert 'sent successfully' in result.lower()
@@ -259,6 +241,7 @@ class TestSendMessageAgentToUser:
 # ---------------------------------------------------------------------------
 # Edge cases and robustness tests
 # ---------------------------------------------------------------------------
+
 
 class TestSendMessageEdgeCases:
     """Test edge cases like missing params, malformed JSON, etc."""

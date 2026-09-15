@@ -6,10 +6,9 @@ All tests are self-contained — no LLM or API server required (mocked).
 Run with: pytest tests/test_unified_system.py -v
 """
 
-import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Ensure top-level imports work (same as start_api_server.py)
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
@@ -57,24 +56,22 @@ class TestImportChain:
         """Key exports are available directly from agent_cascade package."""
         # __init__.py exports: Agent, MultiAgentHub
         # Other classes live in submodules — verify they're importable there too
-        from agent_cascade import (  # noqa: F401
-            Agent, MultiAgentHub,
-        )
+        from agent_cascade import Agent, MultiAgentHub  # noqa: F401
+        from agent_cascade.agent_factory import load_agent_template, load_orchestrator_agent  # noqa: F401
         from agent_cascade.api_router import APIRouter  # noqa: F401
-        from agent_cascade.telemetry import TelemetryCollector  # noqa: F401
         from agent_cascade.operation_manager import OperationManager  # noqa: F401
-        from agent_cascade.agent_factory import load_orchestrator_agent, load_agent_template  # noqa: F401
+        from agent_cascade.telemetry import TelemetryCollector  # noqa: F401
         assert Agent is not None
 
     def test_import_agent_cascade_tools(self):
         """Core tool modules can be imported from agent_cascade.tools."""
-        from agent_cascade.tools.custom import ReadFile, WriteFile, EditFile  # noqa: F401
         from agent_cascade.tools.base import BaseTool  # noqa: F401
+        from agent_cascade.tools.custom import EditFile, ReadFile, WriteFile  # noqa: F401
         assert issubclass(ReadFile, BaseTool)
 
     def test_import_llm_schema(self):
         """LLM schema can be imported."""
-        from agent_cascade.llm.schema import Message, SYSTEM, USER, ASSISTANT  # noqa: F401
+        from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message  # noqa: F401
         assert Message is not None
 
     def test_import_agent_instance_proxy(self):
@@ -203,8 +200,8 @@ class TestExecutionEngine:
 
     def _make_pool_and_orchestrator(self):
         """Helper: create pool and orchestrator with mocked LLM."""
-        from agent_cascade.agent_pool import AgentPool
         from agent_cascade.agent_factory import load_orchestrator_agent
+        from agent_cascade.agent_pool import AgentPool
         from agent_cascade.llm.schema import Message
 
         llm_cfg = {
@@ -228,8 +225,8 @@ class TestExecutionEngine:
 
     def test_execution_engine_creation(self):
         """ExecutionEngine can be created with a pool reference."""
-        from agent_cascade.execution_engine import ExecutionEngine
         from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.execution_engine import ExecutionEngine
 
         llm_cfg = {
             'model': 'test_model',
@@ -254,20 +251,20 @@ class TestExecutionEngine:
         }
 
         pool = AgentPool(llm_cfg, agents_dir=str(PROJECT_ROOT / 'agents'))
-        
+
         # Create an instance using the pool's instance management
         instance = pool.create_instance(
             instance_name='TestOrchestrator',
             agent_class='orchestrator',
         )
-        
+
         assert instance is not None
         assert instance.instance_name == 'TestOrchestrator'
 
     def test_execution_engine_phase_methods_exist(self):
         """ExecutionEngine has all the phase methods defined in DESIGN_REWRITE."""
-        from agent_cascade.execution_engine import ExecutionEngine
         from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.execution_engine import ExecutionEngine
 
         llm_cfg = {
             'model': 'test_model',
@@ -286,9 +283,9 @@ class TestExecutionEngine:
 
     def test_execution_engine_handles_missing_template(self):
         """ExecutionEngine handles a missing agent class gracefully (loop detection fires first)."""
-        from agent_cascade.execution_engine import ExecutionEngine
         from agent_cascade.agent_pool import AgentPool
-        from agent_cascade.llm.schema import Message, USER
+        from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import USER, Message
 
         llm_cfg = {
             'model': 'test_model',
@@ -306,7 +303,7 @@ class TestExecutionEngine:
         instance.conversation.append(Message(role=USER, content='test'))
 
         engine = ExecutionEngine(pool)
-        
+
         # The missing template causes error responses which trigger loop detection.
         # What matters is the engine doesn't crash — it raises a controlled exception.
         from agent_cascade.loop_detection import LoopDetectedError
@@ -321,8 +318,8 @@ class TestAPIAppCreation:
 
     def test_create_app_with_mock_agents(self):
         """create_app should work with a minimal agent setup."""
-        from agent_cascade.api_server import create_app
         from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.api_server import create_app
 
         llm_cfg = {
             'model': 'test_model',
@@ -445,8 +442,8 @@ class TestStartApiServerIntegration:
     def test_initialize_agents_flow(self):
         """Simulate the full agent initialization flow from start_api_server.py."""
         # This mirrors the imports and setup in start_api_server.py
-        from agent_cascade.agent_pool import AgentPool
         from agent_cascade.agent_factory import load_orchestrator_agent
+        from agent_cascade.agent_pool import AgentPool
 
         llm_cfg = {
             'model': 'test_model',
@@ -492,8 +489,8 @@ class TestCLIMode:
 
     def test_load_agent_without_api_router(self):
         """CLI/testing mode: pool without api_router should load agents."""
-        from agent_cascade.agent_pool import AgentPool
         from agent_cascade.agent_factory import load_orchestrator_agent
+        from agent_cascade.agent_pool import AgentPool
 
         llm_cfg = {
             'model': 'test_model',
@@ -511,12 +508,12 @@ class TestCLIMode:
 
     def test_llm_cfg_none_raises_value_error(self):
         """Passing llm_cfg=None should cause agent loading to fail with a clear error."""
-        from agent_cascade.agent_pool import AgentPool
         from agent_cascade.agent_factory import load_agent_template
+        from agent_cascade.agent_pool import AgentPool
 
         # Pool with None LLM config — APIRouter is auto-created but has no default config
         pool = AgentPool(llm_cfg=None, agents_dir=str(PROJECT_ROOT / 'agents'))
-        
+
         # Loading a NEW agent (not pre-loaded by _discover_agents) should raise ValueError
         try:
             load_agent_template(pool, 'nonexistent_agent', llm_cfg=None)
@@ -529,8 +526,8 @@ class TestCLIMode:
 
     def test_api_router_path_when_injected(self):
         """When api_router IS provided, it should be used for LLM config."""
-        from agent_cascade.agent_pool import AgentPool
         from agent_cascade.agent_factory import load_orchestrator_agent
+        from agent_cascade.agent_pool import AgentPool
 
         llm_cfg = {
             'model': 'test_model',
@@ -550,7 +547,7 @@ class TestCLIMode:
 
         orch = load_orchestrator_agent(pool, llm_cfg)
         assert orch is not None
-        
+
         # _discover_agents calls get_llm_config for each agent during pool init.
         # Then load_orchestrator_agent calls it again. Verify orchestrator was called.
         mock_router.get_llm_config.assert_any_call('orchestrator')

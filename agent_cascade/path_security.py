@@ -4,8 +4,6 @@ import os
 from pathlib import Path
 from typing import List
 
-from agent_cascade.settings import DEFAULT_WORKSPACE
-
 # Sensitive filenames that should never be served
 _SENSITIVE_FILENAMES = {'.env', '.gitconfig', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'}
 
@@ -40,6 +38,7 @@ def _is_path_allowed(path: str) -> bool:
         True if the path is safe to serve, False otherwise.
     """
     from urllib.parse import unquote
+
     from agent_cascade.log import logger
 
     # URL-decode the path

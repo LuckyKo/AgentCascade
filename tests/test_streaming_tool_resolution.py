@@ -13,12 +13,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.conftest import _FakeInstance, _FakeCachePool
-
+from tests.conftest import _FakeInstance
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_agent_pool():
@@ -51,6 +51,7 @@ def seeded_pool(mock_agent_pool):
 # Streaming path: {USE_CACHED_ENTRY_N} resolution
 # ===========================================================================
 
+
 class TestStreamingPathResolution:
     """Test that the streaming (sub-agent) path resolves placeholders."""
 
@@ -59,9 +60,11 @@ class TestStreamingPathResolution:
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
         parsed_args = {'instance_name': '{USE_CACHED_ENTRY_1}'}
-        resolved, err = resolve_prev_arg_placeholders(
-            parsed_args, 'Maine', 'call_agent', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(parsed_args,
+                                                      'Maine',
+                                                      'call_agent',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         # N=1 cached value is a dict → JSON serialized
         cached_dict = json.loads(resolved['instance_name'])
@@ -72,9 +75,11 @@ class TestStreamingPathResolution:
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
         parsed_args = {'instance_name': '{USE_CACHED_ENTRY_1}'}
-        resolved, err = resolve_prev_arg_placeholders(
-            parsed_args, 'Maine', 'call_agent', mock_agent_pool,
-            lock=mock_agent_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(parsed_args,
+                                                      'Maine',
+                                                      'call_agent',
+                                                      mock_agent_pool,
+                                                      lock=mock_agent_pool._state_lock)
         assert err is None
         assert resolved == {'instance_name': '{USE_CACHED_ENTRY_1}'}
 
@@ -84,9 +89,11 @@ class TestStreamingPathResolution:
 
         tool_args_str = '{"task": "{USE_CACHED_ENTRY_1}"}'
         parsed_args = json.loads(tool_args_str)
-        resolved, err = resolve_prev_arg_placeholders(
-            parsed_args, 'Maine', 'call_agent', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(parsed_args,
+                                                      'Maine',
+                                                      'call_agent',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         cached_dict = json.loads(resolved['task'])
         assert cached_dict['task'] == 'Write a script'
@@ -97,9 +104,11 @@ class TestStreamingPathResolution:
 
         # N=2 contains {"common_arg": "shared_value"}
         parsed_args = {'common_arg': '{USE_CACHED_ENTRY_2}'}
-        resolved, err = resolve_prev_arg_placeholders(
-            parsed_args, 'Maine', 'call_agent', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(parsed_args,
+                                                      'Maine',
+                                                      'call_agent',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         cached_dict = json.loads(resolved['common_arg'])
         assert cached_dict['common_arg'] == 'shared_value'
@@ -109,6 +118,7 @@ class TestStreamingPathResolution:
 # Non-streaming path: resolution
 # ===========================================================================
 
+
 class TestNonStreamingPathResolution:
     """Test that the non-streaming (normal tool) path resolves placeholders."""
 
@@ -117,13 +127,14 @@ class TestNonStreamingPathResolution:
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
         # Add a write_file entry at N=3
-        seeded_pool.instance_conversations['Maine'].cache_pool.add(
-            'arg', 'write_file', {'file_path': '/tmp/out.txt'})
+        seeded_pool.instance_conversations['Maine'].cache_pool.add('arg', 'write_file', {'file_path': '/tmp/out.txt'})
 
         parsed_args = {'file_path': '{USE_CACHED_ENTRY_3}'}
-        resolved, err = resolve_prev_arg_placeholders(
-            parsed_args, 'Maine', 'write_file', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(parsed_args,
+                                                      'Maine',
+                                                      'write_file',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         cached_dict = json.loads(resolved['file_path'])
         assert cached_dict['file_path'] == '/tmp/out.txt'
@@ -132,14 +143,15 @@ class TestNonStreamingPathResolution:
         """String tool args are parsed and then resolved in the non-streaming path."""
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
-        seeded_pool.instance_conversations['Maine'].cache_pool.add(
-            'arg', 'write_file', {'file_path': '/a/b.py'})
+        seeded_pool.instance_conversations['Maine'].cache_pool.add('arg', 'write_file', {'file_path': '/a/b.py'})
 
         tool_args_str = '{"file_path": "{USE_CACHED_ENTRY_3}"}'
         parsed = json.loads(tool_args_str)
-        resolved, err = resolve_prev_arg_placeholders(
-            parsed, 'Maine', 'write_file', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(parsed,
+                                                      'Maine',
+                                                      'write_file',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         cached_dict = json.loads(resolved['file_path'])
         assert cached_dict['file_path'] == '/a/b.py'
@@ -149,9 +161,11 @@ class TestNonStreamingPathResolution:
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
         parsed_args = {'key': '{USE_CACHED_ENTRY_1}'}
-        resolved, err = resolve_prev_arg_placeholders(
-            parsed_args, 'Maine', 'some_tool', mock_agent_pool,
-            lock=mock_agent_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(parsed_args,
+                                                      'Maine',
+                                                      'some_tool',
+                                                      mock_agent_pool,
+                                                      lock=mock_agent_pool._state_lock)
         assert err is None
         assert resolved == {'key': '{USE_CACHED_ENTRY_1}'}
 
@@ -159,6 +173,7 @@ class TestNonStreamingPathResolution:
 # ===========================================================================
 # Lock protection
 # ===========================================================================
+
 
 class TestLockProtection:
     """Test that lock is properly used for thread-safe cache access."""
@@ -169,10 +184,11 @@ class TestLockProtection:
 
         assert isinstance(seeded_pool._state_lock, type(threading.Lock()))
 
-        resolved, err = resolve_prev_arg_placeholders(
-            {'instance_name': '{USE_CACHED_ENTRY_1}'},
-            'Maine', 'call_agent', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders({'instance_name': '{USE_CACHED_ENTRY_1}'},
+                                                      'Maine',
+                                                      'call_agent',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
 
     def test_concurrent_resolution_and_cache_write(self, seeded_pool):
@@ -185,10 +201,11 @@ class TestLockProtection:
         def reader():
             try:
                 for _ in range(50):
-                    resolve_prev_arg_placeholders(
-                        {'instance_name': '{USE_CACHED_ENTRY_1}'},
-                        'Maine', 'call_agent', seeded_pool,
-                        lock=seeded_pool._state_lock)
+                    resolve_prev_arg_placeholders({'instance_name': '{USE_CACHED_ENTRY_1}'},
+                                                  'Maine',
+                                                  'call_agent',
+                                                  seeded_pool,
+                                                  lock=seeded_pool._state_lock)
             except Exception as e:
                 errors.append(str(e))
 
@@ -200,9 +217,8 @@ class TestLockProtection:
             except Exception as e:
                 errors.append(str(e))
 
-        threads = [
-            threading.Thread(target=reader) for _ in range(3)
-        ] + [threading.Thread(target=writer) for _ in range(2)]
+        threads = [threading.Thread(target=reader) for _ in range(3)
+                  ] + [threading.Thread(target=writer) for _ in range(2)]
 
         for t in threads:
             t.start()
@@ -229,10 +245,11 @@ class TestLockProtection:
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
         with seeded_pool._state_lock:
-            resolved, err = resolve_prev_arg_placeholders(
-                {'instance_name': '{USE_CACHED_ENTRY_1}'},
-                'Maine', 'call_agent', seeded_pool,
-                lock=None)  # Caller holds lock, so pass None
+            resolved, err = resolve_prev_arg_placeholders({'instance_name': '{USE_CACHED_ENTRY_1}'},
+                                                          'Maine',
+                                                          'call_agent',
+                                                          seeded_pool,
+                                                          lock=None)  # Caller holds lock, so pass None
             assert err is None
             cached_dict = json.loads(resolved['instance_name'])
             assert cached_dict['instance_name'] == 'worker1'
@@ -242,6 +259,7 @@ class TestLockProtection:
 # Session scope isolation
 # ===========================================================================
 
+
 class TestSessionScopeIsolation:
     """Test that different sessions don't share cached tool args."""
 
@@ -249,10 +267,11 @@ class TestSessionScopeIsolation:
         """Session 'Maine' has entries; 'Other' does not."""
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
-        resolved, err = resolve_prev_arg_placeholders(
-            {'instance_name': '{USE_CACHED_ENTRY_1}'},
-            'Other', 'call_agent', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders({'instance_name': '{USE_CACHED_ENTRY_1}'},
+                                                      'Other',
+                                                      'call_agent',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         assert resolved == {'instance_name': '{USE_CACHED_ENTRY_1}'}
 
@@ -262,12 +281,10 @@ class TestSessionScopeIsolation:
         from tests.conftest import _FakeInstance
 
         agent_pool.instance_conversations['root'] = _FakeInstance()
-        agent_pool.instance_conversations['root'].cache_pool.add(
-            'arg', 'write_file', {'file_path': '/tmp'})
+        agent_pool.instance_conversations['root'].cache_pool.add('arg', 'write_file', {'file_path': '/tmp'})
 
-        resolved, err = resolve_prev_arg_placeholders(
-            {'file_path': '{USE_CACHED_ENTRY_1}'},
-            'root', 'write_file', agent_pool)
+        resolved, err = resolve_prev_arg_placeholders({'file_path': '{USE_CACHED_ENTRY_1}'}, 'root', 'write_file',
+                                                      agent_pool)
         assert err is None
         cached_dict = json.loads(resolved['file_path'])
         assert cached_dict['file_path'] == '/tmp'
@@ -276,6 +293,7 @@ class TestSessionScopeIsolation:
 # ===========================================================================
 # Integration: full resolution → cache write cycle
 # ===========================================================================
+
 
 class TestFullResolutionCycle:
     """Test the complete cycle: resolve → execute → cache write → resolve again."""
@@ -291,9 +309,11 @@ class TestFullResolutionCycle:
 
         # Step 2: Second call — resolve from cache
         tool_args_2 = {'file_path': '{USE_CACHED_ENTRY_%d}' % idx1}
-        resolved, err = resolve_prev_arg_placeholders(
-            tool_args_2, 'Maine', 'write_file', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(tool_args_2,
+                                                      'Maine',
+                                                      'write_file',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         cached_dict = json.loads(resolved['file_path'])
         assert cached_dict['file_path'] == '/first.py'
@@ -304,9 +324,11 @@ class TestFullResolutionCycle:
 
         # Step 4: Third call — should resolve from the NEW cache entry
         tool_args_4 = {'file_path': '{USE_CACHED_ENTRY_%d}' % idx3}
-        resolved, err = resolve_prev_arg_placeholders(
-            tool_args_4, 'Maine', 'write_file', seeded_pool,
-            lock=seeded_pool._state_lock)
+        resolved, err = resolve_prev_arg_placeholders(tool_args_4,
+                                                      'Maine',
+                                                      'write_file',
+                                                      seeded_pool,
+                                                      lock=seeded_pool._state_lock)
         assert err is None
         cached_dict = json.loads(resolved['file_path'])
         assert cached_dict['file_path'] == '/second.py'

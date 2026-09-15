@@ -10,8 +10,8 @@ Uses real process execution where possible, mocks only for internal state checks
 """
 
 import os
-import sys
 import subprocess
+import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,12 +20,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_cascade.async_shell import AsyncShellTracker, AsyncShellTask
-
+from agent_cascade.async_shell import AsyncShellTracker
 
 # ============================================================================
 # Helpers
 # ============================================================================
+
 
 def _make_pool():
     """Create a mock pool that collects messages."""
@@ -57,6 +57,7 @@ def _platform_fail_cmd():
 # ============================================================================
 # Killed/zombie process cleanup (real processes)
 # ============================================================================
+
 
 class TestKilledProcessCleanup:
     """Verify killed/zombie processes are properly cleaned up using real execution."""
@@ -150,10 +151,10 @@ class TestKilledProcessCleanup:
         time.sleep(0.5)
 
         # Verify PID is gone via tasklist
-        proc_info = subprocess.run(
-            ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
-            capture_output=True, text=True, timeout=5
-        )
+        proc_info = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                                   capture_output=True,
+                                   text=True,
+                                   timeout=5)
         assert str(pid) not in proc_info.stdout.strip(), \
             f"Process {pid} still running after kill. Output: {proc_info.stdout[:200]}"
 
@@ -161,6 +162,7 @@ class TestKilledProcessCleanup:
 # ============================================================================
 # Timeout behavior (real processes)
 # ============================================================================
+
 
 class TestTimeoutBehavior:
     """Verify timeout handling with real long-running processes."""
@@ -281,6 +283,7 @@ class TestTimeoutBehavior:
 # Stderr capture on real process failures
 # ============================================================================
 
+
 class TestStderrCapture:
     """Verify stderr is captured correctly when real processes fail."""
 
@@ -317,8 +320,8 @@ class TestStderrCapture:
                     with task._lock:
                         completed = task.completed
                         rc = task.return_code
-                        all_output = list(task.stdout_lines) + (
-                            list(task.stderr_lines) if hasattr(task, 'stderr_lines') else [])
+                        all_output = list(
+                            task.stdout_lines) + (list(task.stderr_lines) if hasattr(task, 'stderr_lines') else [])
                     if completed:
                         break
                 assert time.time() < deadline, 'Task did not complete within 10s'
@@ -364,6 +367,7 @@ class TestStderrCapture:
 # ============================================================================
 # Edge cases in kill behavior (minimal mocks for internal state)
 # ============================================================================
+
 
 class TestKillEdgeCases:
     """Test edge cases in kill behavior that are hard to exercise with real processes."""

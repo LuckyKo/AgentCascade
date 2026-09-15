@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Integration tests against a local LLM server (LM Studio / Ollama).
 
 These tests use the conftest fixtures ``local_llm_cfg`` and ``local_vl_llm_cfg``
@@ -28,10 +27,10 @@ import pytest
 from agent_cascade.llm import get_chat_model
 from agent_cascade.llm.schema import Message
 
-
 # ---------------------------------------------------------------------------
 # Basic chat — non-streaming
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skip_if_no_local
 def test_local_llm_basic(local_llm_cfg):
@@ -50,6 +49,7 @@ def test_local_llm_basic(local_llm_cfg):
 # ---------------------------------------------------------------------------
 # Streaming modes (mirror test_oai.py parameterisation)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skip_if_no_local
 @pytest.mark.parametrize('stream', [True, False])
@@ -73,6 +73,7 @@ def test_local_llm_streaming(local_llm_cfg, stream, delta_stream):
 # Vision model test (if VL fixture resolves)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.extra_vl
 @pytest.mark.skip_if_no_local
 def test_local_vl_llm_basic(local_vl_llm_cfg):
@@ -92,6 +93,7 @@ def test_local_vl_llm_basic(local_vl_llm_cfg):
 # Model availability check
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skip_if_no_local
 def test_models_available(local_llm_models):
     """Verify the detected server actually returned model IDs."""
@@ -101,6 +103,7 @@ def test_models_available(local_llm_models):
 # ---------------------------------------------------------------------------
 # Retry config fixture
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skip_if_no_local
 def test_retry_cfg(local_llm_cfg_with_retry):

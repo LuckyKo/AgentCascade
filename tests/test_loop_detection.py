@@ -26,19 +26,18 @@ grouped by area:
 Tier-2 (fuzzy) wiring lives in tests/test_tool_loop_detect.py.
 """
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
 
 from agent_cascade.exact_loop_detect import detect_exact_loop
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, USER, FunctionCall, Message
 from agent_cascade.loop_detection import LoopDetectedError
-from agent_cascade.llm.schema import (
-    SYSTEM, USER, ASSISTANT, FUNCTION, Message, FunctionCall,
-)
-
 
 # ──────────────────────────────────────────────
 # Helpers — message factory utilities
 # ──────────────────────────────────────────────
+
 
 def _msg(role: str, content: str = '', reasoning_content: str = None, function_call=None):
     """Create a Message object for testing."""
@@ -58,6 +57,7 @@ def _dict_msg(role: str, content: str = '', **kwargs):
 # ══════════════════════════════════════════════
 # PART 1 — Unit Tests: detect_exact_loop() Core Algorithm
 # ══════════════════════════════════════════════
+
 
 class TestExactTierBasicDetection:
     """Test the core pattern-matching algorithm with crafted message lists."""
@@ -112,11 +112,7 @@ class TestExactTierBasicDetection:
         assert result is not None, 'Should detect L=5 pattern repeated 2 times'
 
     def test_t4_non_repeating_conversation(self):
-        msgs = [
-            _msg(USER, f"question_{i}") for i in range(3)
-        ] + [
-            _msg(ASSISTANT, f"answer_{i}") for i in range(3)
-        ]
+        msgs = [_msg(USER, f"question_{i}") for i in range(3)] + [_msg(ASSISTANT, f"answer_{i}") for i in range(3)]
         assert detect_exact_loop(msgs) is None
 
     def test_t5_pattern_repeats_only_once(self):
@@ -134,9 +130,7 @@ class TestExactTierBasicDetection:
         assert result is None, 'Pattern repeated only 2× with L<5 should not trigger'
 
     def test_t5b_pattern_length_1_repeats_twice(self):
-        msgs = [
-            _msg(ASSISTANT, 'same') for _ in range(2)
-        ] + [_msg(USER, f"diff_{i}") for i in range(4)]  # pad to ≥6
+        msgs = [_msg(ASSISTANT, 'same') for _ in range(2)] + [_msg(USER, f"diff_{i}") for i in range(4)]  # pad to ≥6
         result = detect_exact_loop(msgs)
         assert result is None
 
@@ -146,25 +140,19 @@ class TestExactTierFalsePositiveGuards:
 
     def test_t6_single_function_pattern(self):
         # Parallel tool calls produce consecutive identical function messages.
-        msgs = [
-            _msg(FUNCTION, 'result') for _ in range(8)
-        ]
+        msgs = [_msg(FUNCTION, 'result') for _ in range(8)]
         result = detect_exact_loop(msgs)
         assert result is None, 'Single-function pattern should not trigger'
 
     def test_t7_consecutive_function_only(self):
-        msgs = [
-            _msg(FUNCTION, f"tool_result_{i % 3}") for i in range(10)
-        ]
+        msgs = [_msg(FUNCTION, f"tool_result_{i % 3}") for i in range(10)]
         result = detect_exact_loop(msgs)
         assert result is None
 
     def test_t8_identical_user_messages_detected_as_l2_pattern(self):
         # L==1 USER is guarded (single-element patterns skipped), but 8 identical
         # USER messages also match as an [USER,USER] period (L=2 < 5 → K=3 needed).
-        msgs = [
-            _msg(USER, 'same_input') for _ in range(8)
-        ]
+        msgs = [_msg(USER, 'same_input') for _ in range(8)]
         result = detect_exact_loop(msgs)
         assert result is not None, 'Should detect repeating USER pattern (L>=2)'
         reason, pop_count = result
@@ -211,8 +199,17 @@ class TestExactTierDivergenceBugs:
     def test_t10_multimodal_content(self):
         # Messages with list-style multimodal content
         pat = [
-            _dict_msg(USER, [{'type': 'text', 'text': 'hello'}, {'type': 'image', 'url': 'x'}]),
-            _dict_msg(ASSISTANT, [{'type': 'text', 'text': 'world'}]),
+            _dict_msg(USER, [{
+                'type': 'text',
+                'text': 'hello'
+            }, {
+                'type': 'image',
+                'url': 'x'
+            }]),
+            _dict_msg(ASSISTANT, [{
+                'type': 'text',
+                'text': 'world'
+            }]),
         ]
         msgs = pat * 3  # L=2 × K=3
         result = detect_exact_loop(msgs)
@@ -221,10 +218,10 @@ class TestExactTierDivergenceBugs:
     def test_t10b_multimodal_with_message_objects(self):
         # Multimodal via Message objects with ContentItem lists.
         from agent_cascade.llm.schema import ContentItem
-        
+
         text_hello = [ContentItem(text='hello')]
         text_world = [ContentItem(text='world')]
-        
+
         pat = [
             _msg(USER, content=text_hello),
             _msg(ASSISTANT, content=text_world),
@@ -275,22 +272,22 @@ class TestExactTierPopCountAccuracy:
         # [A, B] × 3: second rep starts at index 2 → pop from the end back to just
         # after the first occurrence.
         msgs = [
-            _msg(USER, 'hello'),      # 0
-            _msg(ASSISTANT, 'world'), # 1
-            _msg(USER, 'hello'),      # 2 (start of 2nd rep)
-            _msg(ASSISTANT, 'world'), # 3
-            _msg(USER, 'hello'),      # 4 (start of 3rd rep)
-            _msg(ASSISTANT, 'world'), # 5
+            _msg(USER, 'hello'),  # 0
+            _msg(ASSISTANT, 'world'),  # 1
+            _msg(USER, 'hello'),  # 2 (start of 2nd rep)
+            _msg(ASSISTANT, 'world'),  # 3
+            _msg(USER, 'hello'),  # 4 (start of 3rd rep)
+            _msg(ASSISTANT, 'world'),  # 5
         ]
         result = detect_exact_loop(msgs)
         assert result is not None
         reason, pop_count = result
-        
+
         # [USER:hello, ASSISTANT:world] × 3 = 6 messages.
         # Pattern starts at index 0, second rep starts at index 2.
         # pop_count should remove from end back to just after first occurrence → 4 msgs popped.
         assert pop_count == 4, f"Expected pop_count=4 for L=2×K=3 pattern, got {pop_count}"
-        
+
         remaining = msgs[:-pop_count] if pop_count > 0 else msgs
         assert len(remaining) >= 2, 'Should keep at least the first pattern occurrence'
         # Exactly 2 messages remain: [USER:hello, ASSISTANT:world]
@@ -310,12 +307,12 @@ class TestExactTierPopCountAccuracy:
         result = detect_exact_loop(msgs)
         assert result is not None
         reason, pop_count = result
-        
+
         # Pattern [FUNCTION:result_1, ASSISTANT:processing] × 3 = 6 loop msgs.
         # Second rep starts at index len(prefix)+2 within the feature list.
         # pop_count should be 4 (remove from end back to just after first pattern occurrence).
         assert pop_count == 4, f"Expected pop_count=4 for L=2×K=3 with prefix, got {pop_count}"
-        
+
         remaining = msgs[:-pop_count] if pop_count > 0 else msgs
         # Should still have prefix + first occurrence of pattern
         assert len(remaining) >= len(prefix) + 2
@@ -331,7 +328,7 @@ class TestExactTierPopCountAccuracy:
         for i in range(3):
             msgs.append(_msg(SYSTEM, f"system_{i}"))
             msgs.extend(pat)
-        
+
         result = detect_exact_loop(msgs)
         assert result is not None, 'Should detect loop with interleaved SYSTEM messages'
         reason, pop_count = result
@@ -341,6 +338,7 @@ class TestExactTierPopCountAccuracy:
 # ══════════════════════════════════════════════
 # PART 2 — Recovery Handler Tests
 # ══════════════════════════════════════════════
+
 
 class TestRecoveryHandler:
     """Test the recovery wrapper at api_integration.py:346-398."""
@@ -357,9 +355,9 @@ class TestRecoveryHandler:
     def test_r1_surgical_rollback_targets_specific_agent(self, mock_run):
         # LoopDetectedError with agent_name set → surgical_rollback targets that agent.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('main_agent')
-        
+
         # First call detects loop on a sub-agent named "worker1"
         def run_gen():
             yield [_msg(ASSISTANT, 'thinking')]
@@ -368,15 +366,15 @@ class TestRecoveryHandler:
                 agent_name='worker1',
                 pop_count=4,
             )
-        
+
         # Second call succeeds
         def run_gen_success():
             yield [_msg(ASSISTANT, 'done')]
-        
+
         mock_run.side_effect = [run_gen(), run_gen_success()]
-        
-        results = list(run_agent_in_pool_with_recovery(pool, 'main_agent'))
-        
+
+        list(run_agent_in_pool_with_recovery(pool, 'main_agent'))
+
         # Verify surgical_rollback was called on "worker1", not "main_agent"
         pool.surgical_rollback.assert_called_once()
         call_args = pool.surgical_rollback.call_args
@@ -387,9 +385,9 @@ class TestRecoveryHandler:
     def test_r2_fallback_to_instance_name(self, mock_run):
         # No agent_name on the error → fallback to instance_name.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('my_agent')
-        
+
         def run_gen():
             yield [_msg(ASSISTANT, 'thinking')]
             raise LoopDetectedError(
@@ -397,14 +395,14 @@ class TestRecoveryHandler:
                 agent_name=None,  # No specific agent — should fallback
                 pop_count=3,
             )
-        
+
         def run_gen_success():
             yield [_msg(ASSISTANT, 'done')]
-        
+
         mock_run.side_effect = [run_gen(), run_gen_success()]
-        
+
         list(run_agent_in_pool_with_recovery(pool, 'my_agent'))
-        
+
         # Should fallback to instance_name "my_agent"
         pool.surgical_rollback.assert_called_once()
         assert pool.surgical_rollback.call_args[0][0] == 'my_agent'
@@ -413,9 +411,9 @@ class TestRecoveryHandler:
     def test_r3_retry_limit_enforcement(self, mock_run):
         # max_auto_retries=2 → 3 attempts total (retry_count 0, 1, 2), then error yield.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('test_agent')
-        
+
         # Always loop — never succeeds
         def run_gen():
             yield [_msg(ASSISTANT, 'thinking')]
@@ -424,12 +422,12 @@ class TestRecoveryHandler:
                 agent_name='test_agent',
                 pop_count=2,
             )
-        
+
         # max_auto_retries=2 means 3 attempts total (retry_count 0, 1, 2)
         mock_run.side_effect = [run_gen(), run_gen(), run_gen()]
-        
+
         results = list(run_agent_in_pool_with_recovery(pool, 'test_agent', max_auto_retries=2))
-        
+
         assert len(results) >= 1
         # Last result should contain error message
         last_msgs = results[-1]
@@ -441,9 +439,9 @@ class TestRecoveryHandler:
     def test_r4_hint_injection(self, mock_run):
         # Loop-avoidance hint appended (USER role) to the rolled-back instance.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('test_agent')
-        
+
         def run_gen():
             yield [_msg(ASSISTANT, 'thinking')]
             raise LoopDetectedError(
@@ -451,14 +449,14 @@ class TestRecoveryHandler:
                 agent_name='test_agent',
                 pop_count=2,
             )
-        
+
         def run_gen_success():
             yield [_msg(ASSISTANT, 'done')]
-        
+
         mock_run.side_effect = [run_gen(), run_gen_success()]
-        
+
         list(run_agent_in_pool_with_recovery(pool, 'test_agent'))
-        
+
         # Verify hint was injected via append_message
         assert inst.append_message.called, 'Hint should be appended to instance'
         hint_msg = inst.append_message.call_args[0][0]
@@ -469,18 +467,17 @@ class TestRecoveryHandler:
     def test_r5_auto_rollback_disabled(self, mock_run):
         # auto_rollback_enabled=False → error yielded, no rollback / hint.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('test_agent')
-        
+
         def run_gen():
             yield [_msg(ASSISTANT, 'thinking')]
             raise LoopDetectedError(reason='loop', agent_name='test_agent', pop_count=2)
-        
+
         mock_run.side_effect = [run_gen()]
-        
-        results = list(run_agent_in_pool_with_recovery(
-            pool, 'test_agent', auto_rollback_enabled=False))
-        
+
+        results = list(run_agent_in_pool_with_recovery(pool, 'test_agent', auto_rollback_enabled=False))
+
         assert len(results) >= 1
         # Should NOT have called surgical_rollback or injected hint
         assert not pool.surgical_rollback.called, 'Should NOT rollback when disabled'
@@ -490,49 +487,47 @@ class TestRecoveryHandler:
     def test_r6_instance_not_found_after_rollback(self, mock_run):
         # get_instance returns None for the looped agent post-rollback → error yield.
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('test_agent')
-        
+
         def run_gen():
             yield [_msg(ASSISTANT, 'thinking')]
             raise LoopDetectedError(reason='loop', agent_name='worker1', pop_count=2)
-        
+
         mock_run.side_effect = [run_gen()]
-        
+
         # Make pool.get_instance return None for the looped agent after first call
         def get_instance_side_effect(name):
             if name == 'test_agent':
                 return inst
             return None  # worker1 not found
-        
+
         pool.get_instance.side_effect = get_instance_side_effect
-        
+
         results = list(run_agent_in_pool_with_recovery(pool, 'test_agent'))
-        
-        assert any(
-            'Rollback performed but loop recovery failed' in (m.content or '')
-            for m in results[-1]
-        ), 'Should yield error when instance not found after rollback'
+
+        assert any('Rollback performed but loop recovery failed' in (m.content or '')
+                   for m in results[-1]), 'Should yield error when instance not found after rollback'
 
     @patch('agent_cascade.api_integration_pkg.runner.run_agent_in_pool')
     def test_r7_unlimited_retries(self, mock_run):
         # max_auto_retries=-1 → unlimited mode (converted to 999_999 internally).
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('test_agent')
-        
+
         call_count_tracker = [0]
-        
+
         def run_gen():
             call_count_tracker[0] += 1
             yield [_msg(ASSISTANT, 'thinking')]
             raise LoopDetectedError(reason='loop', agent_name='test_agent', pop_count=2)
-        
+
         # Provide enough generators for unlimited retries (more than default limit of 5)
         mock_run.side_effect = [run_gen() for _ in range(20)]
-        
+
         results = list(run_agent_in_pool_with_recovery(pool, 'test_agent', max_auto_retries=-1))
-        
+
         assert len(results) >= 1
         # Should have consumed all provided generators (unlimited retries mode)
         assert call_count_tracker[0] == 20, f"Expected 20 calls in unlimited mode, got {call_count_tracker[0]}"
@@ -541,17 +536,17 @@ class TestRecoveryHandler:
     def test_r9_non_loop_exception(self, mock_run):
         # Non-loop exception → "SYSTEM ERROR" yield (not the loop-recovery path).
         from agent_cascade.api_integration import run_agent_in_pool_with_recovery
-        
+
         pool, inst = self._make_pool('test_agent')
-        
+
         def run_gen():
             yield [_msg(ASSISTANT, 'thinking')]
             raise RuntimeError('LLM timeout')
-        
+
         mock_run.side_effect = [run_gen()]
-        
+
         results = list(run_agent_in_pool_with_recovery(pool, 'test_agent'))
-        
+
         assert len(results) >= 1
         last_msgs = results[-1]
         assert any('SYSTEM ERROR' in (m.content or '') for m in last_msgs), \
@@ -562,89 +557,92 @@ class TestRecoveryHandler:
 # PART 3 — Integration Tests: ExecutionEngine Flow
 # ══════════════════════════════════════════════
 
+
 class TestExecutionEngineIntegration:
     """Test the full flow through ExecutionEngine."""
 
     def test_i1_main_agent_loop_detection(self):
         # Uses the canonical detect_exact_loop (same function the engine wires in).
         import_func = detect_exact_loop  # same function referenced by execution engine
-        
+
         # Simulate messages accumulating in execution engine
         msgs = []
         for i in range(3):
             msgs.append(_msg(USER, f"step_{i}"))
             msgs.append(_msg(ASSISTANT, f"result_{i}"))
-        
+
         result = import_func(msgs)
         # 6 messages with alternating unique content — no loop yet
         assert result is None
-        
+
         # Now add repeating pattern
         for _ in range(3):
             msgs.append(_msg(USER, 'repeat_q'))
             msgs.append(_msg(ASSISTANT, 'repeat_a'))
-        
+
         result = import_func(msgs)
         assert result is not None
 
     def test_i2_compression_cooldown(self):
         # The engine sets _suppress_loop_detection_next_turn=True after compression; verify
         # the flag is respected by patching detect_exact_loop where the engine imports it.
-        from agent_cascade.execution_engine import ExecutionEngine
-        
+
         # Build messages with a loop pattern
         msgs = [
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
         ]
-        
+
         # Verify the loop exists in messages
         assert detect_exact_loop(msgs) is not None
-        
+
         # Mock instance with cooldown flag set (simulates post-compression state)
         class FakeInstance:
             pass
-        
+
         inst = FakeInstance()
         inst._suppress_loop_detection_next_turn = True
-        
+
         # Patch detect_exact_loop at the module level where execution_engine imports it.
         # During cooldown, _pre_llm_checks skips calling _canonical_detect_exact_loop entirely.
         with patch('agent_cascade.engine.llm_call._detect_exact_loop', return_value=('loop', 2)) as mock_detect:
             # Simulate what _pre_llm_checks does (execution_engine.py:1200)
             if not getattr(inst, '_suppress_loop_detection_next_turn', False):
                 mock_detect(msgs)
-            
+
             assert mock_detect.call_count == 0, 'detect_exact_loop should NOT be called during cooldown'
-        
+
         # Clear the flag — next turn should run detection
         inst._suppress_loop_detection_next_turn = False
-        
+
         with patch('agent_cascade.engine.llm_call._detect_exact_loop', return_value=('loop', 2)) as mock_detect:
             if not getattr(inst, '_suppress_loop_detection_next_turn', False):
                 mock_detect(msgs)
-            
+
             assert mock_detect.call_count == 1, 'detect_exact_loop should be called after cooldown clears'
 
     def test_i3_sub_agent_loop_via_manager_ops(self):
         # manager_ops imports detect_exact_loop from the canonical module; use the same
         # import path to verify compatibility.
         from agent_cascade.exact_loop_detect import detect_exact_loop as _mgr_detect_exact_loop
-        
+
         msgs = []
         for i in range(3):
             msgs.append(_msg(ASSISTANT, f"thinking_{i}"))
             msgs.append(_msg(FUNCTION, f"tool_result_{i}"))
-        
+
         # No loop with unique content
         assert _mgr_detect_exact_loop(msgs) is None
-        
+
         # Add repeating pattern
         for _ in range(3):
             msgs.append(_msg(ASSISTANT, 'same_thought'))
             msgs.append(_msg(FUNCTION, 'same_result'))
-        
+
         result = _mgr_detect_exact_loop(msgs)
         assert result is not None
 
@@ -652,6 +650,7 @@ class TestExecutionEngineIntegration:
 # ══════════════════════════════════════════════
 # PART 4 — Edge Cases
 # ══════════════════════════════════════════════
+
 
 class TestEdgeCases:
     """Test boundary conditions and unusual inputs."""
@@ -680,12 +679,30 @@ class TestEdgeCases:
     def test_e3b_none_content_no_crash_with_dicts(self):
         # Same as E3 but with dict-style messages.
         msgs = [
-            {'role': USER, 'content': None},
-            {'role': ASSISTANT, 'content': None},
-            {'role': USER, 'content': None},
-            {'role': ASSISTANT, 'content': None},
-            {'role': USER, 'content': None},
-            {'role': ASSISTANT, 'content': None},
+            {
+                'role': USER,
+                'content': None
+            },
+            {
+                'role': ASSISTANT,
+                'content': None
+            },
+            {
+                'role': USER,
+                'content': None
+            },
+            {
+                'role': ASSISTANT,
+                'content': None
+            },
+            {
+                'role': USER,
+                'content': None
+            },
+            {
+                'role': ASSISTANT,
+                'content': None
+            },
         ]
         result = detect_exact_loop(msgs)
         assert result is not None
@@ -694,12 +711,12 @@ class TestEdgeCases:
         # 60 unique messages, then a repeating pattern at the tail (within window).
         msgs = [_msg(USER, f"unique_{i}") for i in range(30)] + \
                [_msg(ASSISTANT, f"answer_{i}") for i in range(30)]
-        
+
         # Add loop at the very end (within window)
         for _ in range(3):
             msgs.append(_msg(USER, 'loop_q'))
             msgs.append(_msg(ASSISTANT, 'loop_a'))
-        
+
         result = detect_exact_loop(msgs)
         assert result is not None
 
@@ -713,9 +730,7 @@ class TestEdgeCases:
         unique fillers = 64 msgs; last 60 = indices 4-63, which contain only
         unique fillers → no loop detected."""
         # Pattern at start + unique filler after
-        msgs = [
-            _msg(USER, 'start_q'), _msg(ASSISTANT, 'start_a')
-        ] * 3  # L=2 × K=3 loop at beginning (indices 0-5)
+        msgs = [_msg(USER, 'start_q'), _msg(ASSISTANT, 'start_a')] * 3  # L=2 × K=3 loop at beginning (indices 0-5)
 
         # Add enough unique messages to push the pattern out of the 60-message window
         for i in range(29):
@@ -740,11 +755,20 @@ class TestEdgeCases:
         # Mixed Message objects and dicts in one list.
         msgs = [
             _msg(USER, 'hello'),
-            {'role': ASSISTANT, 'content': 'world'},
+            {
+                'role': ASSISTANT,
+                'content': 'world'
+            },
             _msg(USER, 'hello'),
-            {'role': ASSISTANT, 'content': 'world'},
+            {
+                'role': ASSISTANT,
+                'content': 'world'
+            },
             _msg(USER, 'hello'),
-            {'role': ASSISTANT, 'content': 'world'},
+            {
+                'role': ASSISTANT,
+                'content': 'world'
+            },
         ]
         result = detect_exact_loop(msgs)
         assert result is not None
@@ -786,21 +810,24 @@ class TestEdgeCases:
 # PART 6 — Parametrized Tests for Pattern Lengths
 # ══════════════════════════════════════════════
 
+
 class TestParametrizedPatternLengths:
     """Use pytest.parametrize to test various pattern configurations."""
 
-    @pytest.mark.parametrize('pattern_length, repetitions, should_detect', [
-        (2, 3, True),   # L=2 < 5 → K=3 needed ✓
-        (2, 2, False),  # L=2 < 5 → only 2 reps ✗
-        (4, 3, True),   # L=4 < 5 → K=3 needed ✓
-        (5, 2, True),   # L=5 ≥ 5 → K=2 needed ✓
-        (10, 2, True),  # L=10 ≥ 5 → K=2 needed ✓
-        (5, 1, False),  # L=5 needs K=2, only 1 rep ✗
-        (4, 2, False),  # L=4 needs K=3, only 2 reps ✗
-    ])
+    @pytest.mark.parametrize(
+        'pattern_length, repetitions, should_detect',
+        [
+            (2, 3, True),  # L=2 < 5 → K=3 needed ✓
+            (2, 2, False),  # L=2 < 5 → only 2 reps ✗
+            (4, 3, True),  # L=4 < 5 → K=3 needed ✓
+            (5, 2, True),  # L=5 ≥ 5 → K=2 needed ✓
+            (10, 2, True),  # L=10 ≥ 5 → K=2 needed ✓
+            (5, 1, False),  # L=5 needs K=2, only 1 rep ✗
+            (4, 2, False),  # L=4 needs K=3, only 2 reps ✗
+        ])
     def test_various_pattern_lengths(self, pattern_length, repetitions, should_detect):
         roles_cycle = [USER, ASSISTANT, FUNCTION]
-        
+
         pat = []
         for i in range(pattern_length):
             role = roles_cycle[i % len(roles_cycle)]
@@ -808,11 +835,11 @@ class TestParametrizedPatternLengths:
             if i == 0:
                 role = USER
             pat.append(_msg(role, f"content_{i}"))
-        
+
         msgs = []
         for r in range(repetitions):
             msgs.extend(pat)
-        
+
         result = detect_exact_loop(msgs)
         if should_detect:
             assert result is not None, \
@@ -826,7 +853,7 @@ class TestParametrizedPatternLengths:
         # Identical messages also form L=2 patterns; the L==1 guard only applies when
         # the FIRST match is a single-element period. FUNCTION-only sequences are filtered.
         msgs = [_msg(role, 'same') for _ in range(6)]
-        
+
         # FUNCTION-only sequences are filtered (all-function guard), so expect no detection
         if role == FUNCTION:
             assert detect_exact_loop(msgs) is None, f"FUNCTION-only pattern should not trigger"
@@ -853,6 +880,7 @@ class TestParametrizedPatternLengths:
 # PART 7 — Feature Extraction Tests
 # ══════════════════════════════════════════════
 
+
 class TestFeatureExtraction:
     """Test the internal feature extraction logic indirectly via detect_exact_loop."""
 
@@ -877,13 +905,19 @@ class TestFeatureExtraction:
 
         # (a') Identical FC with identical NON-empty content/reasoning → real loop.
         msgs_same_prose = [
-            _msg(ASSISTANT, 'same prose', reasoning_content='same reason',
+            _msg(ASSISTANT,
+                 'same prose',
+                 reasoning_content='same reason',
                  function_call=FunctionCall('tool_a', '{"arg":"val"}')),
             _msg(FUNCTION, 'result'),
-            _msg(ASSISTANT, 'same prose', reasoning_content='same reason',
+            _msg(ASSISTANT,
+                 'same prose',
+                 reasoning_content='same reason',
                  function_call=FunctionCall('tool_a', '{"arg":"val"}')),
             _msg(FUNCTION, 'result'),
-            _msg(ASSISTANT, 'same prose', reasoning_content='same reason',
+            _msg(ASSISTANT,
+                 'same prose',
+                 reasoning_content='same reason',
                  function_call=FunctionCall('tool_a', '{"arg":"val"}')),
             _msg(FUNCTION, 'result'),
         ]
@@ -893,13 +927,19 @@ class TestFeatureExtraction:
 
         # (b) SAME FC but DIFFERENT reasoning/content each repeat → NOT a loop.
         msgs_diff = [
-            _msg(ASSISTANT, 'different_content_1', reasoning_content='reason_1',
+            _msg(ASSISTANT,
+                 'different_content_1',
+                 reasoning_content='reason_1',
                  function_call=FunctionCall('tool_a', '{"arg":"val"}')),
             _msg(FUNCTION, 'result'),
-            _msg(ASSISTANT, 'different_content_2', reasoning_content='reason_2',
+            _msg(ASSISTANT,
+                 'different_content_2',
+                 reasoning_content='reason_2',
                  function_call=FunctionCall('tool_a', '{"arg":"val"}')),
             _msg(FUNCTION, 'result'),
-            _msg(ASSISTANT, 'different_content_3', reasoning_content='reason_3',
+            _msg(ASSISTANT,
+                 'different_content_3',
+                 reasoning_content='reason_3',
                  function_call=FunctionCall('tool_a', '{"arg":"val"}')),
             _msg(FUNCTION, 'result'),
         ]
@@ -918,11 +958,13 @@ class TestFeatureExtraction:
         for i in range(4):
             expr = f"{i} + {i * 2}"
             args = '{"expression": "%s"}' % expr
-            msgs.append(_msg(
-                ASSISTANT, f"computing step {i}",
-                reasoning_content=f"unique reasoning turn {i} — different approach",
-                function_call=FunctionCall('calculate', args),
-            ))
+            msgs.append(
+                _msg(
+                    ASSISTANT,
+                    f"computing step {i}",
+                    reasoning_content=f"unique reasoning turn {i} — different approach",
+                    function_call=FunctionCall('calculate', args),
+                ))
             msgs.append(_msg(FUNCTION, f"result_{i}"))
         result = detect_exact_loop(msgs)
         assert result is None, \
@@ -990,9 +1032,9 @@ class TestFeatureExtraction:
         long_text = 'word ' * 500  # ~2500 chars per message
         msgs = []
         for i in range(3):
-            msgs.append(_msg(USER, 'q'))       # Identical USER messages
+            msgs.append(_msg(USER, 'q'))  # Identical USER messages
             msgs.append(_msg(ASSISTANT, long_text))  # Identical ASSISTANT messages
-        
+
         result = detect_exact_loop(msgs)
         assert result is not None, 'Should detect pattern with identical long content'
 
@@ -1000,6 +1042,7 @@ class TestFeatureExtraction:
 # ══════════════════════════════════════════════
 # PART 8 — Max Auto-Rollbacks Enforcement Tests
 # ══════════════════════════════════════════════
+
 
 class TestMaxAutoRollbacksEnforcement:
     """Test max_auto_rollbacks enforcement and auto_rollback_on_loop toggle in _pre_llm_checks."""
@@ -1010,7 +1053,9 @@ class TestMaxAutoRollbacksEnforcement:
         Uses a plain class instead of MagicMock to avoid auto-created attributes
         interfering with getattr(instance, '_suppress_loop_detection_next_turn', False).
         """
+
         class FakeInstance:
+
             def __init__(self, instance_name, rollback_count):
                 self.instance_name = instance_name
                 if rollback_count >= 0:
@@ -1056,9 +1101,12 @@ class TestMaxAutoRollbacksEnforcement:
 
         # Build a repeating pattern that detect_exact_loop will flag
         msgs = [
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
         ]
 
         inst = self._make_fake_instance('test_agent')
@@ -1101,9 +1149,12 @@ class TestMaxAutoRollbacksEnforcement:
         engine = self._make_engine(pool)
 
         msgs = [
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
         ]
 
         inst = self._make_fake_instance('test_agent')
@@ -1127,9 +1178,12 @@ class TestMaxAutoRollbacksEnforcement:
         engine = self._make_engine(pool)
 
         msgs = [
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
         ]
 
         inst = self._make_fake_instance('test_agent')
@@ -1150,9 +1204,12 @@ class TestMaxAutoRollbacksEnforcement:
         engine = self._make_engine(pool)
 
         msgs = [
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
         ]
 
         inst = self._make_fake_instance('test_agent')
@@ -1173,9 +1230,12 @@ class TestMaxAutoRollbacksEnforcement:
         engine = self._make_engine(pool)
 
         msgs = [
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
-            _msg(USER, 'q'), _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
+            _msg(USER, 'q'),
+            _msg(ASSISTANT, 'a'),
         ]
 
         inst = self._make_fake_instance('test_agent')

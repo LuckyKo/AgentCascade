@@ -5,10 +5,8 @@ Unifies the duplicated execution paths from tool_dispatcher.py, agent_pool.py,
 and api_integration.py (root agent recovery). See DESIGN_REWRITE.md §4.3.
 """
 
-from typing import Optional
-
-from agent_cascade.log import logger
 from agent_cascade.compression.helpers import extract_instance_output
+from agent_cascade.log import logger
 
 
 class ChildAgentFailedError(Exception):
@@ -19,6 +17,7 @@ class ChildAgentFailedError(Exception):
 
 
 # ── Helper functions ────────────────────────────────────────────────────────
+
 
 def _format_result(
     instance_name: str,
@@ -49,17 +48,16 @@ def _check_status(pool, instance_name: str) -> tuple[bool, bool]:
     stop_flag = pool.stopped
     # Only count MANUAL halt (in _halted_instances but NOT in _compression_halted)
     # as "stopped". Compression-halt is transient.
-    was_manual_halt = (instance_name in pool._halted_instances and
-                       instance_name not in pool._compression_halted)
-    
+    was_manual_halt = (instance_name in pool._halted_instances and instance_name not in pool._compression_halted)
+
     # Check both the set (authoritative while in pool) and the instance flag (durable after removal)
     was_terminated = instance_name in pool.terminated_instances
-    
+
     # Also check the instance object directly if still accessible
     inst = pool.get_instance(instance_name)
     if inst:
         was_terminated = was_terminated or inst.is_terminated
-    
+
     return (stop_flag or was_manual_halt), was_terminated
 
 
@@ -70,9 +68,10 @@ def _determine_force_fresh(agent_class: str) -> bool:
 
 # ── Core runner function ────────────────────────────────────────────────────
 
+
 def run_child_core(
-    engine,           # ExecutionEngine instance
-    pool,             # AgentPool instance
+    engine,  # ExecutionEngine instance
+    pool,  # AgentPool instance
     agent_class: str,
     instance_name: str,
     args: dict,
@@ -101,7 +100,11 @@ def run_child_core(
 
     try:
         inst, conv = engine._create_and_run_agent(
-            agent_class, instance_name, args, caller_name, child_depth,
+            agent_class,
+            instance_name,
+            args,
+            caller_name,
+            child_depth,
             force_fresh=force_fresh,
         )
     except (KeyboardInterrupt, SystemExit):
@@ -117,14 +120,10 @@ def run_child_core(
             # without creating an instance (e.g., advisor denied the delegation).
             rejection_msg = extract_instance_output(conv, instance_name) or ''
             if rejection_msg:
-                logger.warning(
-                    f"{prefix} path REJECTED - {instance_name}: {rejection_msg[:200]}"
-                )
+                logger.warning(f"{prefix} path REJECTED - {instance_name}: {rejection_msg[:200]}")
                 return f"[{prefix} '{instance_name}' Rejected]: {rejection_msg}"
-        logger.warning(
-            f"{prefix} path FAILED - {instance_name} "
-            f"creation returned inst={inst}, conv={bool(conv)}"
-        )
+        logger.warning(f"{prefix} path FAILED - {instance_name} "
+                       f"creation returned inst={inst}, conv={bool(conv)}")
         return f"[{prefix} '{instance_name}' Failed]: Internal error — agent creation returned no output."
 
     # Check stopped/terminated/halted status
@@ -137,14 +136,10 @@ def run_child_core(
     # Check the RAW output BEFORE _format_result wraps it in "[Agent 'name' Completed]:".
     # Verified: llm_call.py produces "[SYSTEM ERROR: <msg>]" for every fatal/timeout path.
     if result and result.strip().startswith('[SYSTEM ERROR'):
-        raise ChildAgentFailedError(
-            f"Sub-agent '{instance_name}' failed: {result.strip()}"
-        )
+        raise ChildAgentFailedError(f"Sub-agent '{instance_name}' failed: {result.strip()}")
     # Termination is also a failure for the parent (child didn't produce useful output)
     if was_terminated and result:
-        raise ChildAgentFailedError(
-            f"Sub-agent '{instance_name}' was terminated."
-        )
+        raise ChildAgentFailedError(f"Sub-agent '{instance_name}' was terminated.")
 
     return _format_result(
         instance_name=instance_name,

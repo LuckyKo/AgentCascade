@@ -10,9 +10,10 @@ Verifies:
 
 import os
 import sys
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 # Ensure project root is on path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -23,10 +24,9 @@ class TestAgentKernelTracking:
 
     def setup_method(self):
         """Reset global state before each test."""
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _STALE_CONTAINERS, _KERNEL_ACTIVITY
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, _STALE_CONTAINERS)
+
         # Clear tracking dicts to isolate tests
         _AGENT_KERNELS.clear()
         _KERNEL_CLIENTS.clear()
@@ -36,10 +36,8 @@ class TestAgentKernelTracking:
 
     def teardown_method(self):
         """Ensure clean state after each test."""
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _STALE_CONTAINERS, _KERNEL_ACTIVITY
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, _STALE_CONTAINERS)
         _AGENT_KERNELS.clear()
         _KERNEL_CLIENTS.clear()
         _DOCKER_CONTAINERS.clear()
@@ -48,14 +46,12 @@ class TestAgentKernelTracking:
 
     def test_cleanup_kernels_for_session_removes_tracking(self):
         """Verify cleanup_kernels_for_session removes session from _AGENT_KERNELS."""
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, cleanup_kernels_for_session
-        )
+        from agent_cascade.tools.code_interpreter import _AGENT_KERNELS, cleanup_kernels_for_session
 
         # Set up mock state
         session = 'test_session_123'
         kernel_id = f"ci_{session}_{os.getpid()}"
-        
+
         with patch('agent_cascade.tools.code_interpreter._KERNEL_LOCK', MagicMock()):
             _AGENT_KERNELS[session] = [kernel_id]
 
@@ -75,14 +71,12 @@ class TestAgentKernelTracking:
 
     def test_cleanup_kernels_for_session_handles_multiple_kernels(self):
         """Verify cleanup handles multiple kernels per session."""
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, cleanup_kernels_for_session
-        )
+        from agent_cascade.tools.code_interpreter import _AGENT_KERNELS, cleanup_kernels_for_session
 
         session = 'multi_kernel_session'
         pid = os.getpid()
         kernel_ids = [f"ci_{session}_k1_{pid}", f"ci_{session}_k2_{pid}"]
-        
+
         with patch('agent_cascade.tools.code_interpreter._KERNEL_LOCK', MagicMock()):
             _AGENT_KERNELS[session] = list(kernel_ids)
 
@@ -96,10 +90,8 @@ class TestCodeInterpreterClose:
     """Test CodeInterpreter.close() explicit cleanup method."""
 
     def setup_method(self):
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _STALE_CONTAINERS, _KERNEL_ACTIVITY
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, _STALE_CONTAINERS)
         _AGENT_KERNELS.clear()
         _KERNEL_CLIENTS.clear()
         _DOCKER_CONTAINERS.clear()
@@ -107,10 +99,8 @@ class TestCodeInterpreterClose:
         _KERNEL_ACTIVITY.clear()
 
     def teardown_method(self):
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _STALE_CONTAINERS, _KERNEL_ACTIVITY
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, _STALE_CONTAINERS)
         _AGENT_KERNELS.clear()
         _KERNEL_CLIENTS.clear()
         _DOCKER_CONTAINERS.clear()
@@ -125,13 +115,11 @@ class TestCodeInterpreterClose:
 
     def test_close_shuts_down_kernel_clients(self):
         """Verify close() calls shutdown on kernel clients."""
-        from agent_cascade.tools.code_interpreter import (
-            CodeInterpreter, _KERNEL_CLIENTS, _DOCKER_CONTAINERS
-        )
+        from agent_cascade.tools.code_interpreter import _DOCKER_CONTAINERS, _KERNEL_CLIENTS, CodeInterpreter
 
         # Create a minimal CodeInterpreter instance
         ci = CodeInterpreter(cfg={'work_dir': '/tmp/test_ci_close'})
-        
+
         pid = os.getpid()
         kernel_id = f"ci_test_{pid}"
         mock_kc = MagicMock()
@@ -145,12 +133,12 @@ class TestCodeInterpreterClose:
         _KERNEL_CLIENTS[kernel_id] = mock_kc
         _DOCKER_CONTAINERS[kernel_id] = 'fake_container_id'
 
-        with patch('subprocess.run') as mock_run:
+        with patch('subprocess.run') as mock_run:  # noqa: F841  (patch target must stay bound)
             result = ci.close()
 
         # Verify shutdown was called
         mock_kc.shutdown.assert_called_once()
-        
+
         # Verify kernel was removed from tracking
         assert kernel_id not in _KERNEL_CLIENTS, 'Kernel should be removed from _KERNEL_CLIENTS'
         assert kernel_id not in _DOCKER_CONTAINERS, 'Container should be removed from _DOCKER_CONTAINERS'
@@ -171,11 +159,11 @@ class TestDismissTriggersCleanup:
     def test_dismiss_instance_calls_cleanup_for_root_agent(self):
         """Verify dismiss_instance calls cleanup_kernels_for_session for root agents."""
         from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session
-        
+
         # Verify the function exists and is callable (integration with AgentPool.dismiss_instance
         # happens in production; this confirms the API contract)
         assert callable(cleanup_kernels_for_session)
-        
+
         # Verify it can be imported by agent_pool module context
         import inspect
         sig = inspect.signature(cleanup_kernels_for_session)
@@ -185,16 +173,14 @@ class TestDismissTriggersCleanup:
         """Verify agent_pool.py can import cleanup_kernels_for_session."""
         # This is a basic smoke test — if the import fails, this raises
         from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session
-        
+
         # Verify function signature
         assert cleanup_kernels_for_session.__code__.co_varnames[:2] == ('session_name', 'force_timeout')
 
     def test_cleanup_actually_clears_tracking_dicts(self):
         """Verify cleanup_kernels_for_session clears kernel tracking state, not just the session entry."""
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _KERNEL_ACTIVITY, cleanup_kernels_for_session
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, cleanup_kernels_for_session)
 
         session = 'test_clear_state'
         pid = os.getpid()
@@ -219,10 +205,8 @@ class TestDismissTriggersCleanup:
 
     def test_close_clears_all_kernel_state(self):
         """Verify CodeInterpreter.close() clears all tracked state for its kernels."""
-        from agent_cascade.tools.code_interpreter import (
-            CodeInterpreter, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _KERNEL_ACTIVITY, _AGENT_KERNELS
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, CodeInterpreter)
 
         ci = CodeInterpreter(cfg={'work_dir': '/tmp/test_close_clear'})
         pid = os.getpid()
@@ -236,7 +220,7 @@ class TestDismissTriggersCleanup:
             _KERNEL_ACTIVITY[kernel_id] = {'last_active': 0, 'work_dir': '/tmp/test_close_clear'}
             _AGENT_KERNELS['some_session'] = [kernel_id]
 
-        with patch('subprocess.run') as mock_run:
+        with patch('subprocess.run') as mock_run:  # noqa: F841  (patch target must stay bound)
             result = ci.close()
 
         assert kernel_id not in _KERNEL_CLIENTS
@@ -253,34 +237,36 @@ class TestNoBareExceptInCleanupPaths:
         """Verify _kill_kernels_and_containers uses specific exceptions."""
         import ast
         import inspect
+
         from agent_cascade.tools.code_interpreter import _kill_kernels_and_containers
-        
+
         source = inspect.getsource(_kill_kernels_and_containers)
         tree = ast.parse(source)
-        
+
         bare_excepts = []
         for node in ast.walk(tree):
             if isinstance(node, ast.ExceptHandler):
                 if node.type is None:
                     bare_excepts.append(node.lineno)
-        
+
         assert not bare_excepts, f"Found bare except blocks at lines: {bare_excepts}"
 
     def test_cleanup_kernels_for_session_no_bare_except(self):
         """Verify cleanup_kernels_for_session uses specific exceptions."""
         import ast
         import inspect
+
         from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session
-        
+
         source = inspect.getsource(cleanup_kernels_for_session)
         tree = ast.parse(source)
-        
+
         bare_excepts = []
         for node in ast.walk(tree):
             if isinstance(node, ast.ExceptHandler):
                 if node.type is None:
                     bare_excepts.append(node.lineno)
-        
+
         assert not bare_excepts, f"Found bare except blocks at lines: {bare_excepts}"
 
     def test_code_interpreter_del_no_bare_except(self):
@@ -288,19 +274,20 @@ class TestNoBareExceptInCleanupPaths:
         import ast
         import inspect
         import textwrap
+
         from agent_cascade.tools.code_interpreter import CodeInterpreter
-        
+
         source = inspect.getsource(CodeInterpreter.__del__)
         # Dedent to make it parseable as standalone code
         source = textwrap.dedent(source)
         tree = ast.parse(source)
-        
+
         bare_excepts = []
         for node in ast.walk(tree):
             if isinstance(node, ast.ExceptHandler):
                 if node.type is None:
                     bare_excepts.append(node.lineno)
-        
+
         assert not bare_excepts, f"Found bare except blocks at lines: {bare_excepts}"
 
 
@@ -309,15 +296,16 @@ class TestModuleLevelAPI:
 
     def test_cleanup_kernels_for_session_signature(self):
         """Verify cleanup_kernels_for_session has correct signature."""
-        from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session
         import inspect
-        
+
+        from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session
+
         sig = inspect.signature(cleanup_kernels_for_session)
         params = list(sig.parameters.keys())
-        
+
         assert 'session_name' in params, 'Should have session_name parameter'
         assert 'force_timeout' in params, 'Should have force_timeout parameter'
-        
+
         # Check default value for force_timeout
         assert sig.parameters['force_timeout'].default == 5.0
 
@@ -331,10 +319,8 @@ class TestTempFileCleanup:
     """Test that temporary kernel files are cleaned up properly."""
 
     def setup_method(self):
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _STALE_CONTAINERS, _KERNEL_ACTIVITY
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, _STALE_CONTAINERS)
         _AGENT_KERNELS.clear()
         _KERNEL_CLIENTS.clear()
         _DOCKER_CONTAINERS.clear()
@@ -342,10 +328,8 @@ class TestTempFileCleanup:
         _KERNEL_ACTIVITY.clear()
 
     def teardown_method(self):
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_CLIENTS, _DOCKER_CONTAINERS,
-            _STALE_CONTAINERS, _KERNEL_ACTIVITY
-        )
+        from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
+                                                          _KERNEL_CLIENTS, _STALE_CONTAINERS)
         _AGENT_KERNELS.clear()
         _KERNEL_CLIENTS.clear()
         _DOCKER_CONTAINERS.clear()
@@ -355,9 +339,8 @@ class TestTempFileCleanup:
     def test_cleanup_kernels_removes_temp_files(self):
         """Verify cleanup_kernels_for_session removes connection files and launch scripts."""
         import tempfile
-        from agent_cascade.tools.code_interpreter import (
-            _AGENT_KERNELS, _KERNEL_ACTIVITY, cleanup_kernels_for_session
-        )
+
+        from agent_cascade.tools.code_interpreter import _AGENT_KERNELS, _KERNEL_ACTIVITY, cleanup_kernels_for_session
 
         with tempfile.TemporaryDirectory() as tmpdir:
             session = 'temp_file_test'
@@ -389,9 +372,9 @@ class TestTempFileCleanup:
     def test_close_removes_temp_files(self):
         """Verify CodeInterpreter.close() removes connection files and launch scripts."""
         import tempfile
-        from agent_cascade.tools.code_interpreter import (
-            CodeInterpreter, _KERNEL_CLIENTS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY
-        )
+
+        from agent_cascade.tools.code_interpreter import (_DOCKER_CONTAINERS, _KERNEL_ACTIVITY, _KERNEL_CLIENTS,
+                                                          CodeInterpreter)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ci = CodeInterpreter(cfg={'work_dir': tmpdir})

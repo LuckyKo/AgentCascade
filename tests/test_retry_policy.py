@@ -9,24 +9,14 @@ Tests verify:
 Run: pytest tests/test_retry_policy.py -v
 """
 
-import random
-from dataclasses import replace
-
 import pytest
 
-from agent_cascade.retry_policy import (
-    RetryPolicy,
-    classify_error,
-    calculate_backoff,
-    is_deterministic_client_error,
-    deterministic_client_error_patterns,
-    POLICY_DEFAULT,
-    POLICY_AGGRESSIVE,
-    POLICY_CONSERVATIVE,
-)
-
+from agent_cascade.retry_policy import (POLICY_AGGRESSIVE, POLICY_CONSERVATIVE, POLICY_DEFAULT, RetryPolicy,
+                                        calculate_backoff, classify_error, deterministic_client_error_patterns,
+                                        is_deterministic_client_error)
 
 # ── RetryPolicy defaults ────────────────────────────────────────────────────
+
 
 class TestRetryPolicyDefaults:
     """Verify default policy values are reasonable."""
@@ -55,6 +45,7 @@ class TestRetryPolicyDefaults:
 
 # ── Predefined policies ─────────────────────────────────────────────────────
 
+
 class TestPredefinedPolicies:
     """Verify predefined policy constants match plan specifications."""
 
@@ -78,6 +69,7 @@ class TestPredefinedPolicies:
 
 
 # ── classify_error() ────────────────────────────────────────────────────────
+
 
 class TestClassifyErrorFatal:
     """Errors that should NOT be retried."""
@@ -203,6 +195,7 @@ class TestClassifyErrorPriority:
 
 # ── classify_error() — deterministic client errors (Fix B2) ─────────────────
 
+
 class TestClassifyErrorDeterministicClientErrors:
     """Deterministic 4xx client errors are classified as fatal (do not retry).
 
@@ -299,6 +292,7 @@ class TestIsDeterministicClientErrorHelper:
 
 
 # ── calculate_backoff() ─────────────────────────────────────────────────────
+
 
 class TestCalculateBackoffExponentialGrowth:
     """Verify exponential backoff formula without jitter interference."""
@@ -412,6 +406,7 @@ class TestCalculateBackoffIntegration:
 
 
 # ── Policy creation from settings ───────────────────────────────────────────
+
 
 class TestPolicyFromSettings:
     """Verify RetryPolicy can be constructed from PoolSettings fields."""

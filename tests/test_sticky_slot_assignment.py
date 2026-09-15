@@ -39,6 +39,7 @@ Runtime budget: < 75s for the whole file (timeouts patched small).
 # Isolate this run's logs/telemetry from the production workspace. Must be set
 # BEFORE any agent_cascade import (instance_id reads it at call time).
 import os as _os
+
 _os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', f"sticky_{_os.getpid()}")
 
 import inspect
@@ -50,11 +51,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 SHARED_KEY = '_shared_sequential_slot_'
-SEQ_BASE = 'http://127.0.0.1:9/v1'      # conc=0 endpoint (shared sequential slot)
-PAR_BASE = 'http://127.0.0.1:10/v1'     # conc>0 endpoint (per-base pool)
-
+SEQ_BASE = 'http://127.0.0.1:9/v1'  # conc=0 endpoint (shared sequential slot)
+PAR_BASE = 'http://127.0.0.1:10/v1'  # conc>0 endpoint (per-base pool)
 
 # ── Real slot-pool harness (no server, no LLM) ───────────────────────────────
+
 
 def _build_real_router(cfg_dir):
     """Real APIRouter with a single conc=0 endpoint → real shared sequential SlotPool.
@@ -76,8 +77,7 @@ def _build_real_router(cfg_dir):
         router.endpoints.clear()
         router.agent_priorities.clear()
         router._agent_types_with_priorities.clear()
-    ep = APIEndpoint(id='ep0', name='conc0', api_base=SEQ_BASE,
-                     model='mock', concurrency_limit=0, enabled=True)
+    ep = APIEndpoint(id='ep0', name='conc0', api_base=SEQ_BASE, model='mock', concurrency_limit=0, enabled=True)
     router.add_endpoint(ep)
     # Keep the default cfg in sync with the conc=0 endpoint (Tier-4 resolution).
     router.default_llm_cfg = ep.to_llm_cfg()
@@ -87,8 +87,13 @@ def _build_real_router(cfg_dir):
 def _add_endpoint(router, name, api_base, model='mock', concurrency_limit=-1, **kwargs):
     """Add an endpoint and return its id (mirrors tests/conftest.py convention)."""
     from agent_cascade.api_router import APIEndpoint
-    ep = APIEndpoint(id=f"ep_{name}", name=name, api_base=api_base, model=model,
-                     enabled=True, concurrency_limit=concurrency_limit, **kwargs)
+    ep = APIEndpoint(id=f"ep_{name}",
+                     name=name,
+                     api_base=api_base,
+                     model=model,
+                     enabled=True,
+                     concurrency_limit=concurrency_limit,
+                     **kwargs)
     return router.add_endpoint(ep)
 
 
@@ -96,8 +101,7 @@ def _build_pool(router):
     """Real AgentPool wired to the real router (real get_instance / _acquire_slot)."""
     from agent_cascade.agent_pool import AgentPool
 
-    llm_cfg = {'model': 'mock', 'api_base': SEQ_BASE,
-               'model_server': SEQ_BASE, 'api_key': 'EMPTY'}
+    llm_cfg = {'model': 'mock', 'api_base': SEQ_BASE, 'model_server': SEQ_BASE, 'api_key': 'EMPTY'}
     return AgentPool(llm_cfg, agents_dir=str(router._config_dir), api_router=router)
 
 
@@ -105,8 +109,12 @@ def _make_instance(pool, name, agent_class='coder'):
     """Real AgentInstance registered in the pool (so get_instance() finds it)."""
     from agent_cascade.agent_instance import AgentInstance
     inst = AgentInstance(
-        instance_name=name, agent_class=agent_class, conversation=[],
-        created_at=time.monotonic(), last_activity=time.monotonic(), latest_marker_index=0,
+        instance_name=name,
+        agent_class=agent_class,
+        conversation=[],
+        created_at=time.monotonic(),
+        last_activity=time.monotonic(),
+        latest_marker_index=0,
     )
     pool.instances[name] = inst
     return inst
@@ -145,8 +153,8 @@ def sticky_harness(tmp_path, request):
     Each test gets its OWN config dir (derived from the node id) so pytest-xdist's
     parallel workers don't overwrite each other's api_endpoints.json.
     """
-    import agent_cascade.slot_queue as _sq_mod
     import agent_cascade.api_router_pkg.scheduler as _ar_mod
+    import agent_cascade.slot_queue as _sq_mod
 
     # Per-test config dir (isolates api_endpoints.json across xdist workers). Must be
     # set BEFORE the router module is imported: APIRouter.__init__ reads this env var.
@@ -197,12 +205,14 @@ def _waiter_names(pool_obj):
 
 # ── Structured [SLOTPOOL] log capture (DEBUG) ────────────────────────────────
 
+
 def _capture_slotpool_logs():
     """Capture DEBUG records from the app logger + package logger into a list."""
     records = []
     lock = threading.Lock()
 
     class _Capture(logging.Handler):
+
         def emit(self, record):
             with lock:
                 try:
@@ -234,6 +244,7 @@ def _find(records, needle):
 # ============================================================================
 # N1 — Sticky hold across turns
 # ============================================================================
+
 
 class TestN1StickyHoldAcrossTurns:
     """Agent on a conc=0 endpoint makes 3 sequential LLM calls; the sticky slot key
@@ -275,8 +286,11 @@ class TestN1StickyHoldAcrossTurns:
             def second_agent():
                 try:
                     router.scheduler.acquire(
-                        api_base=SEQ_BASE, concurrency_limit=0,
-                        instance_name='agent2', agent_class='coder', timeout=5.0,
+                        api_base=SEQ_BASE,
+                        concurrency_limit=0,
+                        instance_name='agent2',
+                        agent_class='coder',
+                        timeout=5.0,
                     )
                     second_acquired.set()
                 except Exception:
@@ -313,6 +327,7 @@ class TestN1StickyHoldAcrossTurns:
 # N2 — Fallback-back drops the shared slot
 # ============================================================================
 
+
 class TestN2FallbackBackDropsSlot:
     """Agent starts on conc=0 (holds shared slot); the allocation changes so the chain
     head flips to a conc>0 endpoint; the next call must release the shared slot BEFORE
@@ -329,6 +344,7 @@ class TestN2FallbackBackDropsSlot:
         router, pool, shared = h['router'], h['pool'], h['shared']
 
         import agent_cascade.api_router_pkg.router as _rmod
+
         # Unlimited (conc=-1) primary: turn 1's in-call failover to it needs no slot.
         par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=-1)
         inst = _make_instance(pool, 'agent1', 'coder')
@@ -421,6 +437,7 @@ class TestN2FallbackBackDropsSlot:
 # N3 — Wakeup after allocation change (cursor-aware, current pool at FIFO tail)
 # ============================================================================
 
+
 class TestN3WakeupAfterAllocationChange:
     """Agent falls back to conc=0, sleeps (releases on sleep), the allocation changes
     while sleeping; on wakeup it must acquire the pool matching its CURRENT effective
@@ -430,7 +447,6 @@ class TestN3WakeupAfterAllocationChange:
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
 
-        import agent_cascade.api_router_pkg.router as _rmod
         par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=4)
         inst = _make_instance(pool, 'agent1', 'coder')
         # Chain: [conc>0 primary, conc=0 fallback] + Tier-4 default (also conc=0).
@@ -443,9 +459,10 @@ class TestN3WakeupAfterAllocationChange:
         # Cursor-aware engine: resolves the instance's CURRENT effective endpoint
         # (chain rotated by its cursor), exactly like production wakeup does.
         engine = _make_engine(router.scheduler, SEQ_BASE, 0)
-        with patch.object(engine.pool.api_router, 'get_effective_slot_info',
-                          side_effect=lambda agent_class, instance_name=None:
-                              router.get_effective_slot_info(agent_class, instance_name=instance_name)):
+        with patch.object(engine.pool.api_router,
+                          'get_effective_slot_info',
+                          side_effect=lambda agent_class, instance_name=None: router.get_effective_slot_info(
+                              agent_class, instance_name=instance_name)):
 
             # Phase 1 — agent is on the conc=0 fallback (cursor advanced) and holds
             # the shared slot. It then sleeps → lifecycle release (drop-sleep).
@@ -455,8 +472,11 @@ class TestN3WakeupAfterAllocationChange:
                 f"cursor-rotated head must be the conc=0 endpoint: {info}"
 
             release_cb = router.scheduler.acquire(
-                api_base=SEQ_BASE, concurrency_limit=0,
-                instance_name='agent1', agent_class='coder', timeout=5.0,
+                api_base=SEQ_BASE,
+                concurrency_limit=0,
+                instance_name='agent1',
+                agent_class='coder',
+                timeout=5.0,
             )
             inst._slot_release = release_cb
             inst._slot_key = SHARED_KEY
@@ -467,10 +487,13 @@ class TestN3WakeupAfterAllocationChange:
             # Phase 2 — ALLOCATION CHANGES while sleeping: another agent takes over
             # the conc=0 endpoint (it holds the shared slot); agent1's allocation
             # moves to the conc>0 primary (cursor reset, as on success/dismissal).
-            other = _make_instance(pool, 'other', 'coder')
+            _make_instance(pool, 'other', 'coder')
             other_release = router.scheduler.acquire(
-                api_base=SEQ_BASE, concurrency_limit=0,
-                instance_name='other', agent_class='coder', timeout=5.0,
+                api_base=SEQ_BASE,
+                concurrency_limit=0,
+                instance_name='other',
+                agent_class='coder',
+                timeout=5.0,
             )
             assert 'other' in shared._running, \
                 f"the conc=0 endpoint is now served by 'other': {list(shared._running)}"
@@ -541,6 +564,7 @@ class TestN3WakeupAfterAllocationChange:
 # N4 — Sync-child yield under sticky (cursor-aware reacquire lands on shared slot)
 # ============================================================================
 
+
 class TestN4SyncChildYieldUnderSticky:
     """Parent holds the shared slot, spawns a sync conc=0 child; parent releases,
     child acquires and completes, parent re-acquires at FIFO tail via cursor-aware
@@ -551,7 +575,6 @@ class TestN4SyncChildYieldUnderSticky:
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
 
-        import agent_cascade.api_router_pkg.router as _rmod
         par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=4)
         parent = _make_instance(pool, 'parent', 'coder')
         with router._lock:
@@ -565,17 +588,21 @@ class TestN4SyncChildYieldUnderSticky:
 
         # Parent holds the shared slot (lifecycle acquisition).
         parent_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='parent', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='parent',
+            agent_class='coder',
+            timeout=5.0,
         )
         parent._slot_release = parent_release
         parent._slot_key = SHARED_KEY
 
         # Cursor-aware engine: resolution goes through the REAL router (cursor-rotated).
         engine = _make_engine(router.scheduler, SEQ_BASE, 0)
-        with patch.object(engine.pool.api_router, 'get_effective_slot_info',
-                          side_effect=lambda agent_class, instance_name=None:
-                              router.get_effective_slot_info(agent_class, instance_name=instance_name)):
+        with patch.object(engine.pool.api_router,
+                          'get_effective_slot_info',
+                          side_effect=lambda agent_class, instance_name=None: router.get_effective_slot_info(
+                              agent_class, instance_name=instance_name)):
 
             # Sync conc=0 child needs the SAME shared slot.
             child_ran = threading.Event()
@@ -584,8 +611,11 @@ class TestN4SyncChildYieldUnderSticky:
 
             def sync_child():
                 release = router.scheduler.acquire(
-                    api_base=SEQ_BASE, concurrency_limit=0,
-                    instance_name='child', agent_class='coder', timeout=10.0,
+                    api_base=SEQ_BASE,
+                    concurrency_limit=0,
+                    instance_name='child',
+                    agent_class='coder',
+                    timeout=10.0,
                 )
                 try:
                     with ev_lock:
@@ -640,6 +670,7 @@ class TestN4SyncChildYieldUnderSticky:
 # N5 — Security/Compressor participation (sticky-holding caller, no deadlock)
 # ============================================================================
 
+
 class TestN5SystemAgentParticipation:
     """Reproduce the T3/T4 yield→run→reacquire pattern with a STICKY-holding caller
     (real _slot_key bound to the shared slot). System agents use the same
@@ -651,8 +682,11 @@ class TestN5SystemAgentParticipation:
 
         caller = _make_instance(pool, 'caller', 'coder')
         caller_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='caller', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='caller',
+            agent_class='coder',
+            timeout=5.0,
         )
         caller._slot_release = caller_release
         caller._slot_key = SHARED_KEY  # sticky state (the point of N5 vs T3)
@@ -663,14 +697,15 @@ class TestN5SystemAgentParticipation:
 
         def security_child():
             release = router.scheduler.acquire(
-                api_base=SEQ_BASE, concurrency_limit=0,
-                instance_name='security', agent_class='security', timeout=10.0,
+                api_base=SEQ_BASE,
+                concurrency_limit=0,
+                instance_name='security',
+                agent_class='security',
+                timeout=10.0,
             )
             try:
                 with shared._cond:
-                    child_held_during_run[0] = (
-                        'security' in shared._running and 'caller' not in shared._running
-                    )
+                    child_held_during_run[0] = ('security' in shared._running and 'caller' not in shared._running)
             finally:
                 release()
 
@@ -706,8 +741,11 @@ class TestN5SystemAgentParticipation:
 
         caller = _make_instance(pool, 'caller', 'coder')
         caller_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='caller', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='caller',
+            agent_class='coder',
+            timeout=5.0,
         )
         caller._slot_release = caller_release
         caller._slot_key = SHARED_KEY
@@ -720,8 +758,11 @@ class TestN5SystemAgentParticipation:
 
         def compressor_child():
             release = router.scheduler.acquire(
-                api_base=SEQ_BASE, concurrency_limit=0,
-                instance_name='compressor', agent_class='compressor', timeout=10.0,
+                api_base=SEQ_BASE,
+                concurrency_limit=0,
+                instance_name='compressor',
+                agent_class='compressor',
+                timeout=10.0,
             )
             try:
                 with ev_lock:
@@ -760,6 +801,7 @@ class TestN5SystemAgentParticipation:
 # N6 — Long-wait strict FIFO ordering (no preemption / bypass)
 # ============================================================================
 
+
 class TestN6LongWaitFIFOOrdering:
     """Two agents need the shared slot; first acquires, second waits. The first runs
     K turns (holding the sticky slot across them) then releases on sleep; the second
@@ -774,7 +816,7 @@ class TestN6LongWaitFIFOOrdering:
             router.agent_priorities['coder'] = ['ep0']
 
         inst_a = _make_instance(pool, 'agentA', 'coder')
-        inst_b = _make_instance(pool, 'agentB', 'coder')
+        _make_instance(pool, 'agentB', 'coder')
 
         def call_fn(llm_cfg, *a, **k):
             return 'ok'
@@ -792,8 +834,11 @@ class TestN6LongWaitFIFOOrdering:
             def agent_b():
                 try:
                     cb = router.scheduler.acquire(
-                        api_base=SEQ_BASE, concurrency_limit=0,
-                        instance_name='agentB', agent_class='coder', timeout=15.0,
+                        api_base=SEQ_BASE,
+                        concurrency_limit=0,
+                        instance_name='agentB',
+                        agent_class='coder',
+                        timeout=15.0,
                     )
                     b_release_box.append(cb)
                     b_granted.set()
@@ -838,6 +883,7 @@ class TestN6LongWaitFIFOOrdering:
 # N7 — Re-acquire same key is a no-op (fast path)
 # ============================================================================
 
+
 class TestN7SameKeyNoOp:
     """sync_sticky_slot with desired == held must take the sticky-keep fast path:
     no acquire() invoked, no stall."""
@@ -851,8 +897,11 @@ class TestN7SameKeyNoOp:
             router.agent_priorities['coder'] = ['ep0']
 
         release_cb = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='agent1', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='agent1',
+            agent_class='coder',
+            timeout=5.0,
         )
         inst._slot_release = release_cb
         inst._slot_key = SHARED_KEY
@@ -895,6 +944,7 @@ class TestN7SameKeyNoOp:
 # N8 — Slotless degraded state acquires default slot (never ungated)
 # ============================================================================
 
+
 class TestN8SlotlessNeverUngated:
     """Simulate the post-yield fast re-acquire timeout (old [SLOT_REACQUIRE_FAILED]
     condition): the instance re-enters the FIFO at the tail for the resolved default
@@ -904,17 +954,21 @@ class TestN8SlotlessNeverUngated:
 
     def test_reacquire_timeout_blocks_until_granted(self, sticky_harness, monkeypatch):
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, shared = h['router'], h['shared']
 
         import agent_cascade.engine.core as core_mod
+
         # Shrink the bounded FAST re-acquire window so the first acquire times out
         # quickly, forcing the unbounded FIFO tail re-queue path.
         monkeypatch.setattr(core_mod, 'REACQUIRE_TIMEOUT', 0.3)
 
         # A blocker holds the shared slot for the whole test.
         blocker_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='blocker', agent_class='orchestrator', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='blocker',
+            agent_class='orchestrator',
+            timeout=5.0,
         )
         assert 'blocker' in shared._running
 
@@ -974,17 +1028,15 @@ class TestN8SlotlessNeverUngated:
         call_with_fallback re-raises sticky-sync failures instead of proceeding
         ungated. Verify neither pattern survives in the source.
         """
-        import agent_cascade.engine.core as core_mod
         import agent_cascade.api_router_pkg.router as rmod
+        import agent_cascade.engine.core as core_mod
 
         # The DELETED behavior was a `return True` after the fast-window timeout —
         # continuing the turn with NO slot held (slotless degrade). That statement is
         # gone from the code; only the unbounded re-queue's error path may still
         # mention the old [SLOT_REACQUIRE_FAILED] label in a comment/log.
-        code_only = '\n'.join(
-            ln for ln in inspect.getsource(core_mod.ExecutionEngine.reacquire_for).splitlines()
-            if not ln.strip().startswith('#')
-        )
+        code_only = '\n'.join(ln for ln in inspect.getsource(core_mod.ExecutionEngine.reacquire_for).splitlines()
+                              if not ln.strip().startswith('#'))
         assert 'return True' not in code_only.split('timeout=None')[0].rsplit(
             'except (SlotQueueTimeout, TimeoutError)'), \
             "the deleted slotless-degrade 'return True' after the fast-window timeout must not be restored"
@@ -1004,6 +1056,7 @@ class TestN8SlotlessNeverUngated:
 # N9 — Terminate while holding (dismiss / terminate free the shared slot promptly)
 # ============================================================================
 
+
 class TestN9TerminateWhileHolding:
     """An agent holds the shared sequential slot and a waiter is queued behind it.
     Terminating the holder must free the slot PROMPTLY (not wait for an arbitrary
@@ -1021,8 +1074,11 @@ class TestN9TerminateWhileHolding:
         inst = _make_instance(pool, 'victim', 'coder')
         # Victim holds the shared slot (sticky state).
         victim_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='victim', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='victim',
+            agent_class='coder',
+            timeout=5.0,
         )
         inst._slot_release = victim_release
         inst._slot_key = SHARED_KEY
@@ -1035,8 +1091,11 @@ class TestN9TerminateWhileHolding:
         def waiter():
             try:
                 cb = router.scheduler.acquire(
-                    api_base=SEQ_BASE, concurrency_limit=0,
-                    instance_name='waiter', agent_class='coder', timeout=15.0,
+                    api_base=SEQ_BASE,
+                    concurrency_limit=0,
+                    instance_name='waiter',
+                    agent_class='coder',
+                    timeout=15.0,
                 )
                 release_box.append(cb)
                 granted.set()
@@ -1071,8 +1130,11 @@ class TestN9TerminateWhileHolding:
 
         inst = _make_instance(pool, 'victim2', 'coder')
         victim_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='victim2', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='victim2',
+            agent_class='coder',
+            timeout=5.0,
         )
         inst._slot_release = victim_release
         inst._slot_key = SHARED_KEY
@@ -1083,8 +1145,11 @@ class TestN9TerminateWhileHolding:
         def waiter():
             try:
                 cb = router.scheduler.acquire(
-                    api_base=SEQ_BASE, concurrency_limit=0,
-                    instance_name='waiter2', agent_class='coder', timeout=15.0,
+                    api_base=SEQ_BASE,
+                    concurrency_limit=0,
+                    instance_name='waiter2',
+                    agent_class='coder',
+                    timeout=15.0,
                 )
                 release_box.append(cb)
                 granted.set()
@@ -1117,6 +1182,7 @@ class TestN9TerminateWhileHolding:
 # N10 — Zero-change conc>0 / -1 (no shared-pool interaction at all)
 # ============================================================================
 
+
 class TestN10ZeroChangeConcGt0:
     """A mixed chain with NO conc=0 endpoint (conc=1 primary, conc=-1 secondary) must
     never touch the shared sequential pool — no tickets, no holders — while its own
@@ -1128,6 +1194,7 @@ class TestN10ZeroChangeConcGt0:
         router, pool, shared = h['router'], h['pool'], h['shared']
 
         import agent_cascade.api_router_pkg.router as _rmod
+
         # conc=1 primary + conc=-1 (unlimited) secondary — NO conc=0 endpoint in the chain.
         c1_id = _add_endpoint(router, 'c1', PAR_BASE, concurrency_limit=1)
         c_neg_id = _add_endpoint(router, 'neg', 'http://127.0.0.1:11/v1', concurrency_limit=-1)
@@ -1170,7 +1237,7 @@ class TestN10ZeroChangeConcGt0:
         """Existing capacity-N invariant on a conc=2 endpoint: at most N holders run;
         the (N+1)th waits. No shared-pool involvement anywhere."""
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, shared = h['router'], h['shared']
 
         import agent_cascade.api_router_pkg.router as _rmod
         c2_id = _add_endpoint(router, 'c2', PAR_BASE, concurrency_limit=2)
@@ -1184,12 +1251,16 @@ class TestN10ZeroChangeConcGt0:
              patch.object(_rmod, 'ENDPOINT_COOLDOWN_SECONDS', 0):
             # Two agents fill the capacity-2 pool (both granted — no shared-slot wait).
             # The first acquire lazily creates the per-base pool.
-            r1 = router.scheduler.acquire(
-                api_base=PAR_BASE, concurrency_limit=2,
-                instance_name='n1', agent_class='coder', timeout=5.0)
-            r2 = router.scheduler.acquire(
-                api_base=PAR_BASE, concurrency_limit=2,
-                instance_name='n2', agent_class='coder', timeout=5.0)
+            r1 = router.scheduler.acquire(api_base=PAR_BASE,
+                                          concurrency_limit=2,
+                                          instance_name='n1',
+                                          agent_class='coder',
+                                          timeout=5.0)
+            r2 = router.scheduler.acquire(api_base=PAR_BASE,
+                                          concurrency_limit=2,
+                                          instance_name='n2',
+                                          agent_class='coder',
+                                          timeout=5.0)
 
             c2_pool = router.scheduler._pools.get(PAR_BASE)
             assert c2_pool is not None and c2_pool.capacity == 2, \
@@ -1201,9 +1272,11 @@ class TestN10ZeroChangeConcGt0:
 
             def third():
                 try:
-                    cb = router.scheduler.acquire(
-                        api_base=PAR_BASE, concurrency_limit=2,
-                        instance_name='n3', agent_class='coder', timeout=15.0)
+                    cb = router.scheduler.acquire(api_base=PAR_BASE,
+                                                  concurrency_limit=2,
+                                                  instance_name='n3',
+                                                  agent_class='coder',
+                                                  timeout=15.0)
                     r3_box.append(cb)
                     third_granted.set()
                 except Exception:
@@ -1235,6 +1308,7 @@ class TestN10ZeroChangeConcGt0:
 # ============================================================================
 # N11 — Generator / streaming under sticky (no over-release; release at lifecycle point)
 # ============================================================================
+
 
 class TestN11GeneratorStreamingUnderSticky:
     """A streaming (generator) LLM call on a conc=0 endpoint. Under the sticky design the
@@ -1273,9 +1347,27 @@ class TestN11GeneratorStreamingUnderSticky:
                 stream_chunks.append(chunk)
 
         assert stream_chunks == [
-            {'choices': [{'delta': {'content': 'tok1'}}]},
-            {'choices': [{'delta': {'content': 'tok2'}}]},
-            {'choices': [{'delta': {'content': 'tok3'}}]},
+            {
+                'choices': [{
+                    'delta': {
+                        'content': 'tok1'
+                    }
+                }]
+            },
+            {
+                'choices': [{
+                    'delta': {
+                        'content': 'tok2'
+                    }
+                }]
+            },
+            {
+                'choices': [{
+                    'delta': {
+                        'content': 'tok3'
+                    }
+                }]
+            },
         ], f"stream chunks: {stream_chunks}"
 
         # NO over-release: the shared permit is STILL held after the stream completes.
@@ -1290,9 +1382,11 @@ class TestN11GeneratorStreamingUnderSticky:
 
         def waiter():
             try:
-                cb = router.scheduler.acquire(
-                    api_base=SEQ_BASE, concurrency_limit=0,
-                    instance_name='waiterS', agent_class='coder', timeout=15.0)
+                cb = router.scheduler.acquire(api_base=SEQ_BASE,
+                                              concurrency_limit=0,
+                                              instance_name='waiterS',
+                                              agent_class='coder',
+                                              timeout=15.0)
                 release_box.append(cb)
                 granted.set()
             except Exception:
@@ -1322,6 +1416,7 @@ class TestN11GeneratorStreamingUnderSticky:
 # N12 — All release points free a sticky permit (waiter granted after each)
 # ============================================================================
 
+
 class TestN12AllReleasePointsFreeStickyPermit:
     """Hold the shared slot with a waiter queued, then exercise EACH release path and
     assert the FIFO waiter is granted after every one. The five paths:
@@ -1338,9 +1433,11 @@ class TestN12AllReleasePointsFreeStickyPermit:
         """Give ``holder_name`` the shared slot (sticky) and queue a blocked waiter.
         Returns (inst, waiter_thread, granted_event, release_box)."""
         inst = _make_instance(pool, holder_name, 'coder')
-        rel = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name=holder_name, agent_class='coder', timeout=5.0)
+        rel = router.scheduler.acquire(api_base=SEQ_BASE,
+                                       concurrency_limit=0,
+                                       instance_name=holder_name,
+                                       agent_class='coder',
+                                       timeout=5.0)
         inst._slot_release = rel
         inst._slot_key = SHARED_KEY
         assert holder_name in shared._running
@@ -1350,9 +1447,11 @@ class TestN12AllReleasePointsFreeStickyPermit:
 
         def waiter():
             try:
-                cb = router.scheduler.acquire(
-                    api_base=SEQ_BASE, concurrency_limit=0,
-                    instance_name=waiter_name, agent_class='coder', timeout=15.0)
+                cb = router.scheduler.acquire(api_base=SEQ_BASE,
+                                              concurrency_limit=0,
+                                              instance_name=waiter_name,
+                                              agent_class='coder',
+                                              timeout=15.0)
                 release_box.append(cb)
                 granted.set()
             except Exception:
@@ -1374,8 +1473,7 @@ class TestN12AllReleasePointsFreeStickyPermit:
     def test_a_sleeping_transition(self, sticky_harness):
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
-        inst, t_w, granted, release_box = self._setup_holder_and_waiter(
-            router, pool, shared, 'sleepH', 'sleepW')
+        inst, t_w, granted, release_box = self._setup_holder_and_waiter(router, pool, shared, 'sleepH', 'sleepW')
 
         # (a) SLEEPING transition releases the sticky permit (drop-sleep). The real
         # helper also saves KV state — no-op here (non-autoloader base). It requires the
@@ -1393,8 +1491,7 @@ class TestN12AllReleasePointsFreeStickyPermit:
     def test_b_run_finally_exit(self, sticky_harness):
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
-        inst, t_w, granted, release_box = self._setup_holder_and_waiter(
-            router, pool, shared, 'exitH', 'exitW')
+        inst, t_w, granted, release_box = self._setup_holder_and_waiter(router, pool, shared, 'exitH', 'exitW')
 
         # (b) run() finally — the agent's own exit releases via drop-exit.
         engine = _make_engine(router.scheduler, SEQ_BASE, 0)
@@ -1408,24 +1505,26 @@ class TestN12AllReleasePointsFreeStickyPermit:
     def test_c_instance_reuse(self, sticky_harness):
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
-        inst, t_w, granted, release_box = self._setup_holder_and_waiter(
-            router, pool, shared, 'reuseH', 'reuseW')
+        inst, t_w, granted, release_box = self._setup_holder_and_waiter(router, pool, shared, 'reuseH', 'reuseW')
 
         # (c) Instance reuse: a stale permit held on an IDLE/TERMINATED instance is
         # released before clearing in lifecycle_manager.initialize_conversation. The real
         # method needs sys/task messages — build minimal ones (metadata injection is
         # best-effort and never raises).
         from agent_cascade.lifecycle_manager import AgentLifecycleManager
-        from agent_cascade.llm.schema import Message, USER
+        from agent_cascade.llm.schema import USER, Message
         mgr = AgentLifecycleManager(pool)
         sys_msg = Message(role='system', content='sys')
         task_msg = Message(role=USER, content='task')
         # Reuse path requires the instance to be IDLE or TERMINATED.
         from agent_cascade.agent_instance import AgentState
         inst.state = AgentState.IDLE
-        mgr.initialize_conversation(
-            instance=inst, sys_msg=sys_msg, task_msg=task_msg,
-            is_reuse=True, instance_name='reuseH', agent_class='coder')
+        mgr.initialize_conversation(instance=inst,
+                                    sys_msg=sys_msg,
+                                    task_msg=task_msg,
+                                    is_reuse=True,
+                                    instance_name='reuseH',
+                                    agent_class='coder')
 
         assert inst._slot_key is None and inst._slot_release is None, \
             'reuse must release the stale sticky permit before clearing'
@@ -1436,8 +1535,7 @@ class TestN12AllReleasePointsFreeStickyPermit:
     def test_d_stop_session(self, sticky_harness):
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
-        inst, t_w, granted, release_box = self._setup_holder_and_waiter(
-            router, pool, shared, 'stopH', 'stopW')
+        inst, t_w, granted, release_box = self._setup_holder_and_waiter(router, pool, shared, 'stopH', 'stopW')
 
         # (d) stop_session releases all held instance slots (drop-stop) and cancels
         # pending tickets. NOTE: it also cancels the queued waiter's ticket (step 2.5),
@@ -1460,8 +1558,7 @@ class TestN12AllReleasePointsFreeStickyPermit:
     def test_e_dismiss(self, sticky_harness):
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
-        inst, t_w, granted, release_box = self._setup_holder_and_waiter(
-            router, pool, shared, 'disH', 'disW')
+        inst, t_w, granted, release_box = self._setup_holder_and_waiter(router, pool, shared, 'disH', 'disW')
 
         # (e) dismiss releases the held permit at the dismiss site (drop-dismiss).
         pool.dismiss_instance('disH')
@@ -1476,6 +1573,7 @@ class TestN12AllReleasePointsFreeStickyPermit:
 # N14 — Unbounded re-queue after fast re-acquire timeout (no degrade, no bypass)
 # ============================================================================
 
+
 class TestN14UnboundedRequeueAfterFastTimeout:
     """Parent yields the shared slot to a sync child; the holder runs LONGER than the
     (patched-small) REACQUIRE_TIMEOUT fast window. The parent's post-yield reacquire must
@@ -1487,6 +1585,7 @@ class TestN14UnboundedRequeueAfterFastTimeout:
         router, pool, shared = h['router'], h['pool'], h['shared']
 
         import agent_cascade.engine.core as core_mod
+
         # Shrink the bounded FAST re-acquire window so the first (fast) acquire times out
         # quickly and forces the unbounded FIFO-tail re-queue path. The holder runs well
         # beyond this window (1s hold >> 0.3s fast window).
@@ -1497,8 +1596,11 @@ class TestN14UnboundedRequeueAfterFastTimeout:
 
         # Parent holds the shared slot (lifecycle acquisition), then YIELDS it.
         parent_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='parent', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='parent',
+            agent_class='coder',
+            timeout=5.0,
         )
         inst._slot_release = parent_release
         inst._slot_key = SHARED_KEY
@@ -1508,8 +1610,11 @@ class TestN14UnboundedRequeueAfterFastTimeout:
 
         def sync_child():
             release = router.scheduler.acquire(
-                api_base=SEQ_BASE, concurrency_limit=0,
-                instance_name='child', agent_class='coder', timeout=15.0,
+                api_base=SEQ_BASE,
+                concurrency_limit=0,
+                instance_name='child',
+                agent_class='coder',
+                timeout=15.0,
             )
             try:
                 time.sleep(1.0)  # holder runs > REACQUIRE_TIMEOUT (0.3s)
@@ -1575,9 +1680,10 @@ class TestN14UnboundedRequeueAfterFastTimeout:
 # N15 — Caption with a held sticky slot → no swap (sticky-keep, zero acquire/release)
 # ============================================================================
 
+
 def _make_caption_messages():
     """A message list containing one uncaptioned image (drives the caption path)."""
-    from agent_cascade.llm.schema import Message, ContentItem
+    from agent_cascade.llm.schema import ContentItem, Message
     return [Message(role='user', content=[ContentItem(image='data:image/png;base64,AAAA')])]
 
 
@@ -1607,16 +1713,20 @@ class TestVisionEndpointPrefersCurrentInstanceEndpoint:
         router, pool = h['router'], h['pool']
 
         # Two vision-capable endpoints. The instance is currently on the launcher (ep_launch).
-        _add_endpoint(router, 'launch', SEQ_BASE, model='launch-model',
-                      concurrency_limit=0, vision_enabled=True)
-        _add_endpoint(router, 'other', 'http://127.0.0.1:99/v1', model='other-model',
-                      concurrency_limit=5, vision_enabled=True)
+        _add_endpoint(router, 'launch', SEQ_BASE, model='launch-model', concurrency_limit=0, vision_enabled=True)
+        _add_endpoint(router,
+                      'other',
+                      'http://127.0.0.1:99/v1',
+                      model='other-model',
+                      concurrency_limit=5,
+                      vision_enabled=True)
 
         inst = _make_instance(pool, 'agent1', 'coder')
         # Simulate the instance having last used the launcher endpoint (vision).
         with inst._state_lock:
             inst._last_endpoint_config = {
-                'api_base': SEQ_BASE, 'model': 'launch-model',
+                'api_base': SEQ_BASE,
+                'model': 'launch-model',
                 'state_save_enabled': False,
             }
 
@@ -1631,15 +1741,19 @@ class TestVisionEndpointPrefersCurrentInstanceEndpoint:
 
         # Launcher is text-only; a separate vision endpoint exists. Captioning must
         # fall through to the chain and pick the vision-capable one (no regression).
-        _add_endpoint(router, 'launch', SEQ_BASE, model='launch-model',
-                      concurrency_limit=0, vision_enabled=False)
-        id_v = _add_endpoint(router, 'vision', 'http://127.0.0.1:99/v1', model='v-model',
-                             concurrency_limit=5, vision_enabled=True)
+        _add_endpoint(router, 'launch', SEQ_BASE, model='launch-model', concurrency_limit=0, vision_enabled=False)
+        _add_endpoint(router,
+                      'vision',
+                      'http://127.0.0.1:99/v1',
+                      model='v-model',
+                      concurrency_limit=5,
+                      vision_enabled=True)
 
         inst = _make_instance(pool, 'agent1', 'coder')
         with inst._state_lock:
             inst._last_endpoint_config = {
-                'api_base': SEQ_BASE, 'model': 'launch-model',
+                'api_base': SEQ_BASE,
+                'model': 'launch-model',
                 'state_save_enabled': False,
             }
 
@@ -1660,15 +1774,17 @@ class TestN15CaptionWithHeldSlotNoSwap:
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
 
-        import agent_cascade.api_router_pkg.router as _rmod
         inst = _make_instance(pool, 'agent1', 'coder')
         with router._lock:
             router.agent_priorities['coder'] = ['ep0']  # vision resolves to the conc=0 ep0
 
         # Agent holds the shared slot (sticky state).
         release_cb = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='agent1', agent_class='coder', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='agent1',
+            agent_class='coder',
+            timeout=5.0,
         )
         inst._slot_release = release_cb
         inst._slot_key = SHARED_KEY
@@ -1705,14 +1821,12 @@ class TestN15CaptionWithHeldSlotNoSwap:
                  patch.object(_sq_mod, '_grant', side_effect=spy_grant), \
                  patch.object(_sq_mod.SlotPool, 'release', spy_release), \
                  patch('agent_cascade.llm.get_chat_model', return_value=_mock_caption_chat_model()):
-                router.caption_images(
-                    _make_caption_messages(), agent_type='coder', instance_name='agent1')
+                router.caption_images(_make_caption_messages(), agent_type='coder', instance_name='agent1')
         finally:
             _restore_logs(handler, targets)
 
         # Exactly one sticky-keep line for this instance with the sidecall origin.
-        keeps = [r for r in records if 'action=sticky-keep' in r.getMessage()
-                 and 'instance=agent1' in r.getMessage()]
+        keeps = [r for r in records if 'action=sticky-keep' in r.getMessage() and 'instance=agent1' in r.getMessage()]
         assert len(keeps) == 1, \
             f"expected exactly one sticky-keep line: {[r.getMessage() for r in keeps]}"
         assert any('origin=sidecall:caption' in r.getMessage() for r in keeps), \
@@ -1746,6 +1860,7 @@ class TestN15CaptionWithHeldSlotNoSwap:
 # N16 — Caption without a slot → acquires at FIFO tail BEFORE HTTP; never drops
 # ============================================================================
 
+
 class TestN16CaptionWithoutSlotAcquiresAtTailNeverDrops:
     """Agent holds NO slot; the vision endpoint is conc=0. caption_images must acquire the
     shared slot at the FIFO tail BEFORE the first caption HTTP fires (no ungated window),
@@ -1756,7 +1871,6 @@ class TestN16CaptionWithoutSlotAcquiresAtTailNeverDrops:
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
 
-        import agent_cascade.api_router_pkg.router as _rmod
         inst = _make_instance(pool, 'agent1', 'coder')
         with router._lock:
             router.agent_priorities['coder'] = ['ep0']  # vision resolves to the conc=0 ep0
@@ -1769,8 +1883,11 @@ class TestN16CaptionWithoutSlotAcquiresAtTailNeverDrops:
         # ungated call would not need to wait). The blocker releases once the caption has
         # enqueued its ticket, so the grant becomes observable and the test cannot hang.
         blocker_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='blocker', agent_class='orchestrator', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='blocker',
+            agent_class='orchestrator',
+            timeout=5.0,
         )
         assert 'blocker' in shared._running
 
@@ -1795,8 +1912,7 @@ class TestN16CaptionWithoutSlotAcquiresAtTailNeverDrops:
         def run_caption():
             try:
                 with patch('agent_cascade.llm.get_chat_model', return_value=cm):
-                    router.caption_images(
-                        _make_caption_messages(), agent_type='coder', instance_name='agent1')
+                    router.caption_images(_make_caption_messages(), agent_type='coder', instance_name='agent1')
             except Exception as e:  # noqa: BLE001 — surface any unexpected abort
                 caption_errors.append(repr(e))
             finally:
@@ -1848,8 +1964,7 @@ class TestN16CaptionWithoutSlotAcquiresAtTailNeverDrops:
             f"no duplicate waiter tickets for agent1: {waiters}"
 
         # No drop event with a sidecall origin (side-calls never drop).
-        drops = [r for r in records if 'action=drop-' in r.getMessage()
-                 and 'origin=sidecall:' in r.getMessage()]
+        drops = [r for r in records if 'action=drop-' in r.getMessage() and 'origin=sidecall:' in r.getMessage()]
         assert drops == [], \
             f"a side-call must NEVER emit a drop event: {[r.getMessage() for r in drops]}"
 
@@ -1863,6 +1978,7 @@ class TestN16CaptionWithoutSlotAcquiresAtTailNeverDrops:
 # N21 — Side-call with a DIFFERENT pool: cross-pool swap (plan §3.10 D1-2)
 # ============================================================================
 
+
 class TestN21SideCallDifferentPoolCrossSwap:
     """Agent holds a conc=0 SHARED permit; its caption side-call targets a conc>0
     per-base endpoint (the first vision-capable cfg in the chain). The side-call must
@@ -1875,15 +1991,13 @@ class TestN21SideCallDifferentPoolCrossSwap:
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
 
-        import agent_cascade.api_router_pkg.router as _rmod
         from agent_cascade.api_router_pkg.normalization import normalize_api_base
 
         # Chain: [par (conc=4 per-base pool), ep0 (conc=0 shared)] — the agent's main
         # endpoint is the conc>0 primary; its VISION side-call resolves to ep0 (first
         # vision-capable cfg in the chain, since par has vision_enabled=False) → a
         # cross-pool caption target (shared pool while holding per-base permit).
-        par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=4,
-                               vision_enabled=False)
+        par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=4, vision_enabled=False)
         router.set_agent_priorities('coder', [par_id, 'ep0'])
         router.default_llm_cfg = None  # chain stays exactly [par, ep0]
 
@@ -1896,8 +2010,11 @@ class TestN21SideCallDifferentPoolCrossSwap:
         # which is conc>0). The caption side-call targets ep0 (conc=0 shared pool) —
         # a cross-pool swap: release per-base, acquire shared at FIFO tail.
         par_release = router.scheduler.acquire(
-            api_base=PAR_BASE, concurrency_limit=4,
-            instance_name='agent1', agent_class='coder', timeout=5.0,
+            api_base=PAR_BASE,
+            concurrency_limit=4,
+            instance_name='agent1',
+            agent_class='coder',
+            timeout=5.0,
         )
         inst._slot_release = par_release
         inst._slot_key = par_pool.key
@@ -1909,8 +2026,11 @@ class TestN21SideCallDifferentPoolCrossSwap:
         # ungated call would not need to wait). The blocker releases once the ticket is
         # enqueued, so the grant becomes observable and the test cannot hang.
         blocker_release = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name='blocker', agent_class='orchestrator', timeout=5.0,
+            api_base=SEQ_BASE,
+            concurrency_limit=0,
+            instance_name='blocker',
+            agent_class='orchestrator',
+            timeout=5.0,
         )
         assert 'blocker' in shared._running
 
@@ -1930,13 +2050,12 @@ class TestN21SideCallDifferentPoolCrossSwap:
         try:
             # ── Phase 1: the cross-pool caption side-call (in a worker thread — its
             # acquire blocks behind the blocker until released below). ──
-            caption_done = threading.Event()
+            caption_done = threading.Event()  # noqa: F841  (threading.Event() kept as statement)
             caption_errors = []
 
             def run_caption():
                 with patch('agent_cascade.llm.get_chat_model', return_value=cm):
-                    router.caption_images(
-                        _make_caption_messages(), agent_type='coder', instance_name='agent1')
+                    router.caption_images(_make_caption_messages(), agent_type='coder', instance_name='agent1')
 
             t = threading.Thread(target=run_caption)
             t.start()
@@ -1973,16 +2092,18 @@ class TestN21SideCallDifferentPoolCrossSwap:
 
             # Structured events: drop-fallback (per-base) + acquire-grant (shared),
             # both carrying the sidecall origin.
-            drops = [r for r in records if 'action=drop-fallback' in r.getMessage()
-                     and 'instance=agent1 ' in r.getMessage()]
+            drops = [
+                r for r in records if 'action=drop-fallback' in r.getMessage() and 'instance=agent1 ' in r.getMessage()
+            ]
             assert len(drops) == 1, f"exactly one drop-fallback: {[r.getMessage() for r in drops]}"
             assert 'origin=sidecall:caption' in drops[0].getMessage(), \
                 f"drop-fallback must carry the sidecall origin: {drops[0].getMessage()!r}"
             # The router-level acquire-grant carries the sidecall origin; the
             # scheduler-level one (emitted inside scheduler.acquire) does not.
-            grants = [r for r in records if 'action=acquire-grant' in r.getMessage()
-                      and 'instance=agent1 ' in r.getMessage()
-                      and 'origin=sidecall:caption' in r.getMessage()]
+            grants = [
+                r for r in records if 'action=acquire-grant' in r.getMessage() and
+                'instance=agent1 ' in r.getMessage() and 'origin=sidecall:caption' in r.getMessage()
+            ]
             assert len(grants) == 1, f"exactly one sidecall-origin acquire-grant: {[r.getMessage() for r in grants]}"
 
             # ── Phase 2: round-trip — the main call re-syncs to its per-base pool.
@@ -2008,6 +2129,7 @@ class TestN21SideCallDifferentPoolCrossSwap:
 # N17 — Autoloader KV guard around caption (save before HTTP, restore after loop)
 # ============================================================================
 
+
 class TestN17AutoloaderKVGuardAroundCaption:
     """Vision endpoint is an autoloader with state_save_enabled and the agent has a saved
     _state_label. caption_images must save_instance_state BEFORE the first caption HTTP and
@@ -2016,13 +2138,12 @@ class TestN17AutoloaderKVGuardAroundCaption:
 
     def test_kv_save_before_http_restore_after_loop(self, sticky_harness):
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool = h['router'], h['pool']
 
         import agent_cascade.state_ops as state_ops
 
         AUTOLOADER_BASE = 'http://127.0.0.1:1234/v1'  # is_autoloader_endpoint() → True
-        al_id = _add_endpoint(router, 'auto', AUTOLOADER_BASE, concurrency_limit=0,
-                              model='autovision')
+        al_id = _add_endpoint(router, 'auto', AUTOLOADER_BASE, concurrency_limit=0, model='autovision')
         with router._lock:
             router.endpoints[al_id].state_save_enabled = True
             router.agent_priorities['coder'] = [al_id]
@@ -2032,7 +2153,8 @@ class TestN17AutoloaderKVGuardAroundCaption:
         with inst._state_lock:
             inst._state_label = 'agent1'
             inst._last_endpoint_config = {
-                'api_base': AUTOLOADER_BASE, 'model': 'autovision',
+                'api_base': AUTOLOADER_BASE,
+                'model': 'autovision',
                 'state_save_enabled': True,
             }
 
@@ -2067,8 +2189,7 @@ class TestN17AutoloaderKVGuardAroundCaption:
         with patch.object(state_ops, 'save_state', side_effect=fake_save_state), \
              patch.object(state_ops, 'restore_state', side_effect=fake_restore_state), \
              patch('agent_cascade.llm.get_chat_model', return_value=cm):
-            router.caption_images(
-                _make_caption_messages(), agent_type='coder', instance_name='agent1')
+            router.caption_images(_make_caption_messages(), agent_type='coder', instance_name='agent1')
 
         # save_instance_state ran before the first caption HTTP; restore ran after.
         assert save_calls == ['agent1'], f"save_instance_state must run: {save_calls}"
@@ -2085,13 +2206,12 @@ class TestN17AutoloaderKVGuardAroundCaption:
 
     def test_kv_restore_still_runs_when_caption_raises(self, sticky_harness):
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool = h['router'], h['pool']
 
         import agent_cascade.state_ops as state_ops
 
         AUTOLOADER_BASE = 'http://127.0.0.1:1234/v1'
-        al_id = _add_endpoint(router, 'auto', AUTOLOADER_BASE, concurrency_limit=0,
-                              model='autovision')
+        al_id = _add_endpoint(router, 'auto', AUTOLOADER_BASE, concurrency_limit=0, model='autovision')
         with router._lock:
             router.endpoints[al_id].state_save_enabled = True
             router.agent_priorities['coder'] = [al_id]
@@ -2100,7 +2220,8 @@ class TestN17AutoloaderKVGuardAroundCaption:
         with inst._state_lock:
             inst._state_label = 'agent1'
             inst._last_endpoint_config = {
-                'api_base': AUTOLOADER_BASE, 'model': 'autovision',
+                'api_base': AUTOLOADER_BASE,
+                'model': 'autovision',
                 'state_save_enabled': True,
             }
 
@@ -2125,8 +2246,7 @@ class TestN17AutoloaderKVGuardAroundCaption:
         with patch.object(state_ops, 'save_state', side_effect=fake_save_state), \
              patch.object(state_ops, 'restore_state', side_effect=fake_restore_state), \
              patch('agent_cascade.llm.get_chat_model', return_value=cm):
-            router.caption_images(
-                _make_caption_messages(), agent_type='coder', instance_name='agent1')
+            router.caption_images(_make_caption_messages(), agent_type='coder', instance_name='agent1')
 
         # Save ran before the (failing) HTTP; restore STILL ran in the finally.
         assert save_calls == ['agent1'], f"save_instance_state must run: {save_calls}"
@@ -2142,6 +2262,7 @@ class TestN17AutoloaderKVGuardAroundCaption:
 # ============================================================================
 # N13 — Structured [SLOTPOOL] event-log coverage (full vocabulary sweep)
 # ============================================================================
+
 
 class TestN13StructuredEventLogCoverage:
     """caplog @ DEBUG: every acquire/drop transition emits exactly ONE structured
@@ -2161,9 +2282,15 @@ class TestN13StructuredEventLogCoverage:
     # Note: "acquire-queued" is still emitted by engine/core.py (post-yield re-acquire)
     # but not by slot_queue.py's wait loop (now a WARNING without structured action=).
     VOCAB = {
-        'acquire-grant', 'sticky-keep',
-        'drop-fallback', 'drop-sleep', 'drop-exit',
-        'drop-handoff', 'drop-reuse', 'drop-stop', 'drop-dismiss',
+        'acquire-grant',
+        'sticky-keep',
+        'drop-fallback',
+        'drop-sleep',
+        'drop-exit',
+        'drop-handoff',
+        'drop-reuse',
+        'drop-stop',
+        'drop-dismiss',
     }
 
     # ── Helpers ────────────────────────────────────────────────────────────
@@ -2202,9 +2329,11 @@ class TestN13StructuredEventLogCoverage:
     def _acquire_holder(router, pool, name):
         """Give ``name`` the shared sticky permit (N12 setup pattern)."""
         inst = _make_instance(pool, name, 'coder')
-        rel = router.scheduler.acquire(
-            api_base=SEQ_BASE, concurrency_limit=0,
-            instance_name=name, agent_class='coder', timeout=5.0)
+        rel = router.scheduler.acquire(api_base=SEQ_BASE,
+                                       concurrency_limit=0,
+                                       instance_name=name,
+                                       agent_class='coder',
+                                       timeout=5.0)
         inst._slot_release = rel
         inst._slot_key = SHARED_KEY
         return inst
@@ -2219,9 +2348,11 @@ class TestN13StructuredEventLogCoverage:
 
         def waiter():
             try:
-                rel = router.scheduler.acquire(
-                    api_base=SEQ_BASE, concurrency_limit=0,
-                    instance_name=name, agent_class='coder', timeout=15.0)
+                rel = router.scheduler.acquire(api_base=SEQ_BASE,
+                                               concurrency_limit=0,
+                                               instance_name=name,
+                                               agent_class='coder',
+                                               timeout=15.0)
                 inst._slot_release = rel
                 inst._slot_key = SHARED_KEY
                 granted.set()
@@ -2274,7 +2405,7 @@ class TestN13StructuredEventLogCoverage:
     def test_a_acquire_grant_and_drop_exit(self, sticky_harness):
         """Initial acquire → scheduler.acquire-grant; run() finally → drop-exit."""
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool = h['router'], h['pool']
         records, handler, targets = _capture_slotpool_logs()
         try:
             inst = self._acquire_holder(router, pool, 'n13a')
@@ -2299,7 +2430,7 @@ class TestN13StructuredEventLogCoverage:
     def test_b_acquire_queued_then_grant(self, sticky_harness):
         """Blocked FIFO enqueue → slot contention warning; grant on release."""
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool = h['router'], h['pool']
         records, handler, targets = _capture_slotpool_logs()
         try:
             self._acquire_holder(router, pool, 'n13bh')
@@ -2307,9 +2438,7 @@ class TestN13StructuredEventLogCoverage:
 
             # Verify the slot contention WARNING was emitted for the queued agent.
             all_msgs = [r.getMessage() if hasattr(r, 'getMessage') else str(r) for r in records]
-            contention_lines = [m for m in all_msgs
-                                if '[SLOTPOOL]' in m and 'Slot contention' in m
-                                and 'n13bq' in m]
+            contention_lines = [m for m in all_msgs if '[SLOTPOOL]' in m and 'Slot contention' in m and 'n13bq' in m]
             assert len(contention_lines) == 1, \
                 f"exactly one slot contention warning expected: {contention_lines}"
             queued_line = contention_lines[0]
@@ -2332,7 +2461,7 @@ class TestN13StructuredEventLogCoverage:
         records, handler, targets = _capture_slotpool_logs()
         try:
             par_id = _add_endpoint(router, 'par', PAR_BASE, concurrency_limit=4)
-            inst = self._acquire_holder(router, pool, 'n13c')
+            inst = self._acquire_holder(router, pool, 'n13c')  # noqa: F841  (_acquire_holder has side effects)
             with router._lock:
                 router.agent_priorities['coder'] = ['ep0', par_id]
             # Drop the Tier-4 default so the chain is exactly [ep0, par] (N2 pattern).
@@ -2346,8 +2475,8 @@ class TestN13StructuredEventLogCoverage:
                 router.call_with_fallback('coder', call_fn, agent_instance_name='n13c')
                 acts = self._actions(records, 'n13c')
                 assert acts.count('sticky-keep') == 1, f"exactly one sticky-keep: {acts}"
-                keep_line = next(l for l in self._slotpool_lines(records)
-                                 if 'instance=n13c ' in l and 'action=sticky-keep' in l)
+                keep_line = next(
+                    l for l in self._slotpool_lines(records) if 'instance=n13c ' in l and 'action=sticky-keep' in l)
                 self._assert_line_shape(keep_line, 'n13c', 'sticky-keep')
                 assert f"pool={SHARED_KEY} " in keep_line, \
                     f"sticky-keep must name the shared pool: {keep_line!r}"
@@ -2361,8 +2490,8 @@ class TestN13StructuredEventLogCoverage:
 
             acts = self._actions(records, 'n13c')
             assert acts.count('drop-fallback') == 1, f"exactly one drop-fallback: {acts}"
-            fb_line = next(l for l in self._slotpool_lines(records)
-                           if 'instance=n13c ' in l and 'action=drop-fallback' in l)
+            fb_line = next(
+                l for l in self._slotpool_lines(records) if 'instance=n13c ' in l and 'action=drop-fallback' in l)
             self._assert_line_shape(fb_line, 'n13c', 'drop-fallback')
             assert f"pool={SHARED_KEY} " in fb_line, \
                 f"drop-fallback must name the dropped shared pool: {fb_line!r}"
@@ -2375,7 +2504,7 @@ class TestN13StructuredEventLogCoverage:
     def test_d_drop_sleep(self, sticky_harness):
         """RUNNING instance with held permit → engine._transition_to_sleeping (drop-sleep)."""
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool = h['router'], h['pool']
         records, handler, targets = _capture_slotpool_logs()
         try:
             inst = self._acquire_holder(router, pool, 'n13d')
@@ -2387,8 +2516,8 @@ class TestN13StructuredEventLogCoverage:
 
             acts = self._actions(records, 'n13d')
             assert acts.count('drop-sleep') == 1, f"exactly one drop-sleep: {acts}"
-            sl_line = next(l for l in self._slotpool_lines(records)
-                           if 'instance=n13d ' in l and 'action=drop-sleep' in l)
+            sl_line = next(
+                l for l in self._slotpool_lines(records) if 'instance=n13d ' in l and 'action=drop-sleep' in l)
             self._assert_line_shape(sl_line, 'n13d', 'drop-sleep')
             assert f"pool={SHARED_KEY} " in sl_line, \
                 f"drop-sleep must name the shared pool: {sl_line!r}"
@@ -2399,7 +2528,7 @@ class TestN13StructuredEventLogCoverage:
     def test_e_drop_handoff(self, sticky_harness):
         """Held permit → engine._release_slot(action='drop-handoff') (sync-child handoff site)."""
         h = sticky_harness
-        router, pool, shared = h['router'], h['pool'], h['shared']
+        router, pool = h['router'], h['pool']
         records, handler, targets = _capture_slotpool_logs()
         try:
             inst = self._acquire_holder(router, pool, 'n13e')
@@ -2409,8 +2538,8 @@ class TestN13StructuredEventLogCoverage:
 
             acts = self._actions(records, 'n13e')
             assert acts.count('drop-handoff') == 1, f"exactly one drop-handoff: {acts}"
-            ho_line = next(l for l in self._slotpool_lines(records)
-                           if 'instance=n13e ' in l and 'action=drop-handoff' in l)
+            ho_line = next(
+                l for l in self._slotpool_lines(records) if 'instance=n13e ' in l and 'action=drop-handoff' in l)
             self._assert_line_shape(ho_line, 'n13e', 'drop-handoff')
             assert f"pool={SHARED_KEY} " in ho_line, \
                 f"drop-handoff must name the shared pool: {ho_line!r}"
@@ -2425,7 +2554,7 @@ class TestN13StructuredEventLogCoverage:
         router, pool, shared = h['router'], h['pool'], h['shared']
         from agent_cascade.agent_instance import AgentState
         from agent_cascade.lifecycle_manager import AgentLifecycleManager
-        from agent_cascade.llm.schema import Message, USER
+        from agent_cascade.llm.schema import USER, Message
 
         records, handler, targets = _capture_slotpool_logs()
         try:
@@ -2434,14 +2563,16 @@ class TestN13StructuredEventLogCoverage:
             t_r, g_r, w_r = self._queue_waiter(router, pool, 'n13frw')
             inst_r.state = AgentState.IDLE
             mgr = AgentLifecycleManager(pool)
-            mgr.initialize_conversation(
-                instance=inst_r, sys_msg=Message(role='system', content='sys'),
-                task_msg=Message(role=USER, content='task'),
-                is_reuse=True, instance_name='n13fr', agent_class='coder')
+            mgr.initialize_conversation(instance=inst_r,
+                                        sys_msg=Message(role='system', content='sys'),
+                                        task_msg=Message(role=USER, content='task'),
+                                        is_reuse=True,
+                                        instance_name='n13fr',
+                                        agent_class='coder')
             acts = self._actions(records, 'n13fr')
             assert acts.count('drop-reuse') == 1, f"exactly one drop-reuse: {acts}"
-            ru_line = next(l for l in self._slotpool_lines(records)
-                           if 'instance=n13fr ' in l and 'action=drop-reuse' in l)
+            ru_line = next(
+                l for l in self._slotpool_lines(records) if 'instance=n13fr ' in l and 'action=drop-reuse' in l)
             self._assert_line_shape(ru_line, 'n13fr', 'drop-reuse')
             assert f"pool={SHARED_KEY} " in ru_line, \
                 f"drop-reuse must name the shared pool: {ru_line!r}"
@@ -2457,8 +2588,8 @@ class TestN13StructuredEventLogCoverage:
             pool.stop_session(release_slots=True)
             acts = self._actions(records, 'n13fs')
             assert acts.count('drop-stop') == 1, f"exactly one drop-stop: {acts}"
-            st_line = next(l for l in self._slotpool_lines(records)
-                           if 'instance=n13fs ' in l and 'action=drop-stop' in l)
+            st_line = next(
+                l for l in self._slotpool_lines(records) if 'instance=n13fs ' in l and 'action=drop-stop' in l)
             self._assert_line_shape(st_line, 'n13fs', 'drop-stop')
             assert f"pool={SHARED_KEY} " in st_line, \
                 f"drop-stop must name the shared pool: {st_line!r}"
@@ -2490,8 +2621,8 @@ class TestN13StructuredEventLogCoverage:
             pool.dismiss_instance('n13fd')
             acts = self._actions(records, 'n13fd')
             assert acts.count('drop-dismiss') == 1, f"exactly one drop-dismiss: {acts}"
-            di_line = next(l for l in self._slotpool_lines(records)
-                           if 'instance=n13fd ' in l and 'action=drop-dismiss' in l)
+            di_line = next(
+                l for l in self._slotpool_lines(records) if 'instance=n13fd ' in l and 'action=drop-dismiss' in l)
             self._assert_line_shape(di_line, 'n13fd', 'drop-dismiss')
             assert f"pool={SHARED_KEY} " in di_line, \
                 f"drop-dismiss must name the shared pool: {di_line!r}"

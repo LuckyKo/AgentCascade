@@ -23,14 +23,12 @@ with template support (get_template / list_agents).
 import threading
 from unittest.mock import MagicMock
 
-import pytest
-
 from agent_cascade.tool_dispatcher import ToolDispatcher
-
 
 # ──────────────────────────────────────────────
 # Test Helpers — lightweight fakes
 # ──────────────────────────────────────────────
+
 
 def _make_mock_instance(instance_name: str, agent_class: str = 'coder'):
     """Minimal mock AgentInstance with the attributes handle_call_agent touches."""
@@ -62,9 +60,11 @@ class FakePool:
         self.settings = MagicMock()
         self.settings.max_nesting_depth = 10
         # Template registry: class name (as registered) -> Assistant template.
-        self.templates = dict(templates if templates is not None else
-                              {'coder': MagicMock(), 'orchestrator': MagicMock(),
-                               'reviewer': MagicMock()})
+        self.templates = dict(templates if templates is not None else {
+            'coder': MagicMock(),
+            'orchestrator': MagicMock(),
+            'reviewer': MagicMock()
+        })
 
     def get_template(self, name: str):
         """Case-insensitive fallback mirroring pool/config_persist.py: exact → lowercase → titlecase."""
@@ -106,7 +106,11 @@ def _make_dispatcher(pool: FakePool):
 def _run(dispatcher, caller, instance_name, agent_class):
     """Drive handle_call_agent and return the result string."""
     return dispatcher.handle_call_agent(
-        args={'instance_name': instance_name, 'agent_class': agent_class, 'task': 'test'},
+        args={
+            'instance_name': instance_name,
+            'agent_class': agent_class,
+            'task': 'test'
+        },
         messages=[],
         instance=caller,
     )
@@ -115,6 +119,7 @@ def _run(dispatcher, caller, instance_name, agent_class):
 # ──────────────────────────────────────────────
 # 1. Unknown class on a fresh name is rejected
 # ──────────────────────────────────────────────
+
 
 class TestUnknownClassRejected:
     """An agent_class with no registered template is rejected early."""
@@ -157,6 +162,7 @@ class TestUnknownClassRejected:
 # 2. Valid / case-insensitive classes route through
 # ──────────────────────────────────────────────
 
+
 class TestValidClassRoutesThrough:
     """A registered class (exact or via case fallback) passes the guard and routes."""
 
@@ -178,7 +184,10 @@ class TestValidClassRoutesThrough:
         caller = _make_mock_instance('Maine', 'orchestrator')
         pool = FakePool(
             instances={'Maine': caller},
-            templates={'Coder': MagicMock(), 'Orchestrator': MagicMock()},
+            templates={
+                'Coder': MagicMock(),
+                'Orchestrator': MagicMock()
+            },
         )
         dispatcher = _make_dispatcher(pool)
 
@@ -192,6 +201,7 @@ class TestValidClassRoutesThrough:
 # ──────────────────────────────────────────────
 # 3. Error message lists ALL available classes
 # ──────────────────────────────────────────────
+
 
 class TestErrorMessageListsAllClasses:
     """The rejection error enumerates every registered class, sorted."""
@@ -219,6 +229,7 @@ class TestErrorMessageListsAllClasses:
 # ──────────────────────────────────────────────
 # 4. Empty templates edge case
 # ──────────────────────────────────────────────
+
 
 class TestEmptyTemplatesEdgeCase:
     """No registered templates → generic fallback message (no class list)."""

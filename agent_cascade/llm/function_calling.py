@@ -34,7 +34,6 @@ class BaseFnCallModel(BaseChatModel, ABC):
             # The model returns structured `tool_calls` in the response, parsed by the SDK.
             # No prompt injection, no XML parsing — same mechanism qwen-code uses.
             self.native_fncall = True
-            from agent_cascade.log import logger as _logger
             # _logger.info('Using native function calling mode (tools passed via API parameter)')
         elif fncall_prompt_type == 'qwen':
             from agent_cascade.llm.fncall_prompts.qwen_fncall_prompt import FN_STOP_WORDS, QwenFnCallPrompt
@@ -174,7 +173,8 @@ class BaseFnCallModel(BaseChatModel, ABC):
                     if matching:
                         generate_cfg['tool_choice'] = {'type': 'function', 'function': {'name': fn_choice}}
                     else:
-                        logger.warning(f'function_choice="{fn_choice}" does not match any available tool; defaulting to auto')
+                        logger.warning(
+                            f'function_choice="{fn_choice}" does not match any available tool; defaulting to auto')
                         generate_cfg['tool_choice'] = 'auto'
 
                 # Pass tools as structured API parameter.

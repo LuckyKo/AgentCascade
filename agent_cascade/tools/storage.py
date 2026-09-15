@@ -27,7 +27,7 @@ class KeyNotExistsError(ValueError):
 @register_tool('storage')
 class Storage(BaseTool):
     """
-    A tool for persistent data storage and retrieval. 
+    A tool for persistent data storage and retrieval.
     Allows agents to save, read, delete, and scan information using key-value pairs.
     """
     description = 'A tool for storing and retrieving data.'
@@ -35,13 +35,18 @@ class Storage(BaseTool):
         'type': 'object',
         'properties': {
             'operate': {
-                'description': 'The type of data operation: "put" (save data), "get" (read data), "delete" (remove data), or "scan" (list/read multiple items).',
-                'type': 'string',
+                'description':
+                    'The type of data operation: "put" (save data), "get" (read data), "delete" (remove data), or "scan" (list/read multiple items).',
+                'type':
+                    'string',
             },
             'key': {
-                'description': 'The unique identifier (path-like) for the data. Use "/" as the default root. Design clear and unique paths (e.g., "/notes/summary").',
-                'type': 'string',
-                'default': '/'
+                'description':
+                    'The unique identifier (path-like) for the data. Use "/" as the default root. Design clear and unique paths (e.g., "/notes/summary").',
+                'type':
+                    'string',
+                'default':
+                    '/'
             },
             'value': {
                 'description': 'The content to be stored. Required only for the "put" operation.',

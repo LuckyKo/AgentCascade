@@ -20,16 +20,14 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.schema import Message
 
-
 # ============================================================================
 # Helpers
 # ============================================================================
+
 
 def make_instance(name='A', parent='Main'):
     """Real AgentInstance (dataclass-slots) — needed for _transition validation."""
@@ -83,6 +81,7 @@ def resume(pool, name='A'):
 # ============================================================================
 # BUG-1 — slot released while suspended / re-acquired on resume
 # ============================================================================
+
 
 class TestBug1SlotReleaseOnHalt:
 
@@ -207,6 +206,7 @@ class TestBug1SlotReleaseOnHalt:
 # BUG-6 — sleep tick instead of global-event spin
 # ============================================================================
 
+
 class TestBug6WaitLoopSleeps:
 
     def test_sleep_ticks_instead_of_wait_if_paused(self):
@@ -251,8 +251,8 @@ class TestBug6WaitLoopSleeps:
 # BUG-4/8 — suspension-aware exit finally
 # ============================================================================
 
-def drive_run_to_exit(engine, instance, pool, *, suspended=False, outstanding=False,
-                      terminate=False):
+
+def drive_run_to_exit(engine, instance, pool, *, suspended=False, outstanding=False, terminate=False):
     """Drive engine.run() minimally to reach the exit finally.
 
     _setup_turn returns empty messages → run() takes the early-exit path which
@@ -305,8 +305,7 @@ class TestBug48SuspensionAwareExit:
         pool._async_registry.clear_pending.assert_not_called()
         assert inst.state == AgentState.SLEEPING
         assert inst.sleeping_since is not None
-        exit_logs = [str(c) for c in log_mock.debug.call_args_list
-                     if 'EXIT -' in str(c)]
+        exit_logs = [str(c) for c in log_mock.debug.call_args_list if 'EXIT -' in str(c)]
         assert any('[suspension-preserved]' in s for s in exit_logs)
 
     def test_normal_exit_still_clears_and_goes_idle(self):
@@ -341,8 +340,7 @@ class TestBug48SuspensionAwareExit:
         engine, pool = make_engine(inst)
         pool.settings.tail_sync_check_enabled = False
 
-        drive_run_to_exit(engine, inst, pool, suspended=True, outstanding=True,
-                          terminate=True)
+        drive_run_to_exit(engine, inst, pool, suspended=True, outstanding=True, terminate=True)
 
         # Terminal guard fires BEFORE _setup_turn → no early-exit safety drain;
         # the finally cleanup drain still runs (preserve=False).
@@ -384,9 +382,7 @@ class TestBug48SuspensionAwareExit:
         pool._execution.active_stack = []
         pool.is_instance_halted.return_value = False
         inst.last_activity = time.monotonic() - 10_000.0
-        settings = MagicMock(idle_timeout_seconds=60.0,
-                             system_agent_idle_timeout_seconds=60.0)
+        settings = MagicMock(idle_timeout_seconds=60.0, system_agent_idle_timeout_seconds=60.0)
         pool.settings = settings
-        with patch('agent_cascade.pool.idle_manager.IdleManager._is_system_agent',
-                   return_value=False):
+        with patch('agent_cascade.pool.idle_manager.IdleManager._is_system_agent', return_value=False):
             assert manager._is_idle('A') is True

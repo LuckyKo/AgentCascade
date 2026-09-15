@@ -12,13 +12,11 @@ priority order defined in api_integration._resolve_max_tokens():
 All tests are self-contained — no LLM or API server required.
 """
 
-import pytest
-
-
 # ──────────────────────────────────────────────
 # Lightweight stubs instead of MagicMock to avoid
 # hasattr() always returning True for any attribute.
 # ──────────────────────────────────────────────
+
 
 class _InstanceStub:
     """Minimal agent instance stub with explicit attributes only."""
@@ -90,6 +88,7 @@ class _PoolStub:
 # ──────────────────────────────────────────────
 # Test Cases
 # ──────────────────────────────────────────────
+
 
 class TestResolveMaxTokensRouterReturnsValue:
     """Test that the API Router value is returned when available (Step 2)."""
@@ -179,7 +178,8 @@ class TestResolveMaxTokensRouterException:
         pool = _PoolStub(static_limit=48000)
         pool.api_router = _RouterStub(80000)
         # Replace with a stub that raises
-        pool.api_router.get_effective_max_tokens = lambda cls: (_ for _ in ()).throw(RuntimeError('endpoint down'))  # noqa
+        pool.api_router.get_effective_max_tokens = lambda cls: (_ for _ in
+                                                                ()).throw(RuntimeError('endpoint down'))  # noqa
 
         inst = _InstanceStub()
 

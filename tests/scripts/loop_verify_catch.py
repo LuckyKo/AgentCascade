@@ -1,8 +1,8 @@
 """Verify that today's loop samples ACTUALLY trigger the detector (they should, since they were caught in production).
 
 This confirms the detector is working — if these DON'T trigger, we've made the detector too loose."""
-from pathlib import Path
 import json
+from pathlib import Path
 
 # Resolve project root relative to this test file (tests/ → project_root)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -34,11 +34,11 @@ for idx, sample in enumerate(samples):
     text = sample['text']
     instance = sample['instance_name']
     orig_reason = sample['reason'][:55]
-    
+
     detector = InnerLoopDetector()
     # Feed the entire text at once (simulating one large chunk)
     result = detector.feed(text)
-    
+
     if result is not None:
         caught += 1
         results.append({
@@ -75,18 +75,18 @@ missed_chunked = 0
 for idx, sample in enumerate(samples):
     text = sample['text']
     detector = InnerLoopDetector()
-    
+
     pos = 0
     detected = False
     while pos < len(text):
-        chunk = text[pos : pos + 50]
+        chunk = text[pos:pos + 50]
         result = detector.feed(chunk)
         if result is not None:
             caught_chunked += 1
             detected = True
             break
         pos += 50
-    
+
     if not detected:
         missed_chunked += 1
 

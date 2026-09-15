@@ -1,15 +1,15 @@
 """Approval subsystem — types, constants, and mixin for user-approval operations."""
 
-import uuid
 import threading
 import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from dataclasses import dataclass, field
-from typing import Dict, List, Any, Tuple
-
+from typing import Any, Dict, List, Tuple
 
 # ─── Types ────────────────────────────────────────────────────────────────
+
 
 class OperationType(Enum):
     """Types of operations that can require user approval."""
@@ -44,11 +44,11 @@ class PendingApproval:
 
 # Timeout for security advisor checks (seconds). If the security advisor takes longer
 # than this, it is terminated and the operation is auto-rejected to prevent AFK rejection cascades.
-SECURITY_ADVISOR_TIMEOUT_SECONDS = 180   # 3 minutes — gives slow models breathing room
-SECURITY_ADVISOR_WARNING_SECONDS = 120   # Warn at 2 minutes — agent gets a nudge via message queue
-
+SECURITY_ADVISOR_TIMEOUT_SECONDS = 180  # 3 minutes — gives slow models breathing room
+SECURITY_ADVISOR_WARNING_SECONDS = 120  # Warn at 2 minutes — agent gets a nudge via message queue
 
 # ─── Mixin: Approval methods for OperationManager ────────────────────────
+
 
 class ApprovalMixin:
     """Approval-related instance methods. Expects self to have __init__-set attributes."""
@@ -180,15 +180,12 @@ class ApprovalMixin:
     def list_pending_approvals(self) -> List[dict]:
         """List all currently pending approvals (for the WebUI to poll)."""
         with self._lock:
-            return [
-                {
-                    'request_id': a.request_id,
-                    'agent_name': a.agent_name,
-                    'tool_name': a.tool_name,
-                    'tool_args': a.tool_args,
-                    'description': a.description,
-                    'justification': getattr(a, 'justification', ''),
-                    'timestamp': a.timestamp,
-                }
-                for a in self.pending.values()
-            ]
+            return [{
+                'request_id': a.request_id,
+                'agent_name': a.agent_name,
+                'tool_name': a.tool_name,
+                'tool_args': a.tool_args,
+                'description': a.description,
+                'justification': getattr(a, 'justification', ''),
+                'timestamp': a.timestamp,
+            } for a in self.pending.values()]

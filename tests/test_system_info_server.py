@@ -8,7 +8,6 @@ The fake pool is injected the same way SystemInfo resolves it: via the
 constructor `agent_pool` parameter, which is stored as self.agent_pool.
 No real server is started.
 """
-import pytest
 
 from agent_cascade.tools.custom import system_info as system_info_module
 from agent_cascade.tools.custom.system_info import SystemInfo
@@ -33,6 +32,7 @@ def _run(server_info, monkeypatch=None):
 
 
 class TestSystemInfoServer:
+
     def test_server_info_tuple_reported(self):
         """A valid (host, port) tuple is rendered as http://host:port."""
         out = _run(('0.0.0.0', 9999))
@@ -132,7 +132,10 @@ class _FakeTelemetry:
             'avg_tps': 42.5,
             'total_retries': 1,
             'total_compressions': 0,
-            'llm_calls_by_model': {'qwen3.8-27b': 5, 'gemma-4-31b-it': 2},
+            'llm_calls_by_model': {
+                'qwen3.8-27b': 5,
+                'gemma-4-31b-it': 2
+            },
             # RFC 9211 prompt-cache counters + derived ratios (0..1).
             'llm_cache_hits': 6,
             'llm_cache_misses': 1,
@@ -144,7 +147,10 @@ class _FakeTelemetry:
     def get_config_comparison(self):
         return [{
             'config_fingerprint': 'abc123def456',
-            'config_description': {'model': 'qwen3.8-27b', 'api_base': 'http://x'},
+            'config_description': {
+                'model': 'qwen3.8-27b',
+                'api_base': 'http://x'
+            },
             'turns': 3,
             'llm_calls': 7,
             'avg_tps': 42.5,
@@ -212,36 +218,50 @@ class TestSystemInfoTelemetryDump:
 
     def test_empty_telemetry_still_headers(self):
         """Telemetry present but all getters return empty -> headers + export only."""
+
         class _Empty:
+
             def get_session_summary(self):
                 return {}
+
             def get_config_comparison(self):
                 return []
+
             def get_agent_class_summary(self):
                 return []
+
             def get_skill_usage_summary(self):
                 return []
+
         out = self._tool_with(_Empty()).call('{"help": "telemetry"}')
         assert 'AC Telemetry Dump' in out
         assert '/api/telemetry/export' in out
 
     def test_getter_exception_degrades_gracefully(self):
         """A getter raising is caught -> error string, does not propagate."""
+
         class _Boom:
+
             def get_session_summary(self):
                 raise RuntimeError('boom')
+
             def get_config_comparison(self):
                 return []
+
             def get_agent_class_summary(self):
                 return []
+
             def get_skill_usage_summary(self):
                 return []
+
         out = self._tool_with(_Boom()).call('{"help": "telemetry"}')
         assert 'unavailable' in out
 
     def test_prompt_cache_block_present_when_llm_calls(self):
         """Cache stats + total_llm_calls>0 -> block with % ratios."""
+
         class _WithCache:
+
             def get_session_summary(self):
                 return {
                     'total_llm_calls': 4,
@@ -251,9 +271,16 @@ class TestSystemInfoTelemetryDump:
                     'llm_cache_hit_ratio': 0.75,
                     'llm_cache_classified_ratio': 0.5,
                 }
-            def get_config_comparison(self): return []
-            def get_agent_class_summary(self): return []
-            def get_skill_usage_summary(self): return []
+
+            def get_config_comparison(self):
+                return []
+
+            def get_agent_class_summary(self):
+                return []
+
+            def get_skill_usage_summary(self):
+                return []
+
         out = self._tool_with(_WithCache()).call('{"help": "telemetry"}')
         assert 'Prompt cache:' in out
         assert 'hits=3  misses=1  unknown=0' in out
@@ -262,7 +289,9 @@ class TestSystemInfoTelemetryDump:
 
     def test_prompt_cache_block_absent_when_no_llm_calls(self):
         """total_llm_calls==0 -> block is NOT printed (no noise on fresh sessions)."""
+
         class _NoCalls:
+
             def get_session_summary(self):
                 return {
                     'total_turns': 1,
@@ -273,15 +302,24 @@ class TestSystemInfoTelemetryDump:
                     'llm_cache_hit_ratio': None,
                     'llm_cache_classified_ratio': None,
                 }
-            def get_config_comparison(self): return []
-            def get_agent_class_summary(self): return []
-            def get_skill_usage_summary(self): return []
+
+            def get_config_comparison(self):
+                return []
+
+            def get_agent_class_summary(self):
+                return []
+
+            def get_skill_usage_summary(self):
+                return []
+
         out = self._tool_with(_NoCalls()).call('{"help": "telemetry"}')
         assert 'Prompt cache:' not in out
 
     def test_prompt_cache_none_ratios_render_na(self):
         """Ratios None (but calls>0) -> 'n/a' instead of crashing."""
+
         class _NoneRatio:
+
             def get_session_summary(self):
                 return {
                     'total_llm_calls': 2,
@@ -291,9 +329,16 @@ class TestSystemInfoTelemetryDump:
                     'llm_cache_hit_ratio': None,
                     'llm_cache_classified_ratio': None,
                 }
-            def get_config_comparison(self): return []
-            def get_agent_class_summary(self): return []
-            def get_skill_usage_summary(self): return []
+
+            def get_config_comparison(self):
+                return []
+
+            def get_agent_class_summary(self):
+                return []
+
+            def get_skill_usage_summary(self):
+                return []
+
         out = self._tool_with(_NoneRatio()).call('{"help": "telemetry"}')
         assert 'Prompt cache:' in out
         assert 'hit_ratio=n/a' in out

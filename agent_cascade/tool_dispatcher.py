@@ -20,42 +20,43 @@ if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.agent_instance import AgentInstance
 
-from agent_cascade.log import logger
 from agent_cascade.exceptions import AgentTerminatedError
+from agent_cascade.log import logger
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
+
 class ToolDispatcher:
     """Dispatches tool calls to appropriate handlers.
-    
+
     This class handles:
     - Tool execution routing (execute_tool -> _handle_* methods)
     - call_agent sync/async paths (_run_child_sync, _run_child_async)
     - dismiss_agent logic
     - compress_context delegation to CompressionHandler
-    
+
     Usage:
         dispatcher = ToolDispatcher(pool)
         engine.tool_dispatcher.set_engine(engine)  # Two-phase init
         result = dispatcher.execute_tool(instance, tool_name, args, ...)
     """
-    
+
     def __init__(self, pool):
         """Initialize with pool reference only (lazy engine initialization).
-        
+
         Args:
             pool: AgentPool for template lookup and agent management
         """
         self.pool = pool
         self._engine = None  # Lazy initialization
-    
+
     @property
     def engine(self) -> 'ExecutionEngine':
         """Get engine reference, raising RuntimeError if not set."""
         if self._engine is None:
             raise RuntimeError('ToolDispatcher._engine not set — call set_engine() first')
         return self._engine
-    
+
     def set_engine(self, engine: 'ExecutionEngine') -> None:
         """Set engine reference after all handlers constructed (two-phase init)."""
         self._engine = engine
@@ -65,12 +66,11 @@ class ToolDispatcher:
     def _save_parent_state_before_delegation(self, instance: 'AgentInstance') -> bool:
         """Save parent's state before delegating via call_agent. Returns True if saved."""
         from agent_cascade.state_ops import save_instance_state
-        
+
         try:
             return save_instance_state(instance)
         except Exception as e:
-            logger.warning('[STATE_SAVE] Exception saving state for %s: %s', 
-                          instance.instance_name, e)
+            logger.warning('[STATE_SAVE] Exception saving state for %s: %s', instance.instance_name, e)
             return False
 
     # ── Session Name Resolution ───────────────────────────────────────────────
@@ -96,13 +96,13 @@ class ToolDispatcher:
 
     def _compute_slot_key(self, agent_class: str) -> str:
         """Compute the slot key for an agent class.
-        
+
         Extracted from inline computations in handle_call_agent to avoid
         duplication. Same logic as EndpointScheduler.acquire().
-        
+
         Args:
             agent_class: The agent class name
-            
+
         Returns:
             Slot key string: '_shared_sequential_slot_' for sequential agents,
             otherwise the api_base/model_server value.
@@ -110,41 +110,39 @@ class ToolDispatcher:
         router = self.pool.api_router
         if not router:
             return 'unknown'
-        
+
         concurrency = router.get_effective_concurrency(agent_class)
         llm_cfg = router.get_llm_config(agent_class)
         api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
-        
+
         is_sequential = (concurrency == 0)
         return '_shared_sequential_slot_' if is_sequential else api_base
 
     # ── Main Tool Execution Entry Point ──────────────────────────────────────
-    
-    def execute_tool(
-        self,
-        instance: 'AgentInstance',
-        tool_name: str,
-        tool_args: Any,
-        llm_messages: List[Any],
-        function_id: Optional[str] = None
-    ) -> str:
+
+    def execute_tool(self,
+                     instance: 'AgentInstance',
+                     tool_name: str,
+                     tool_args: Any,
+                     llm_messages: List[Any],
+                     function_id: Optional[str] = None) -> str:
         """Execute a tool by name.
-        
+
         Extracted from ExecutionEngine._execute_tool() - Phase 4.3
-        
+
         This is the main routing method that dispatches to appropriate handlers:
         - call_agent → handle_call_agent()
         - dismiss_agent → handle_dismiss_agent()
         - compress_context → CompressionHandler.handle_compress_tool()
         - Generic tools → template._call_tool()
-        
+
         Args:
             instance: The agent calling the tool
             tool_name: Name of the tool to execute
             tool_args: Arguments for the tool (str or dict)
             llm_messages: Current conversation messages
             function_id: The LLM's tool_call_id for this tool call (optional)
-            
+
         Returns:
             Tool execution result as a string
         """
@@ -177,7 +175,8 @@ class ToolDispatcher:
                 return f"Error: Invalid JSON arguments for tool '{tool_name}'."
 
             result = template._call_tool(
-                tool_name, resolved,
+                tool_name,
+                resolved,
                 agent_instance_name=instance.instance_name,
                 agent_obj=self.engine,
                 messages=llm_messages,
@@ -187,36 +186,34 @@ class ToolDispatcher:
             return result
 
     # ── call_agent Handlers ──────────────────────────────────────────────────
-    
-    def handle_call_agent(
-        self,
-        args: Any,
-        messages: List[Any],
-        instance: 'AgentInstance',
-        function_id: Optional[str] = None
-    ) -> str:
+
+    def handle_call_agent(self,
+                          args: Any,
+                          messages: List[Any],
+                          instance: 'AgentInstance',
+                          function_id: Optional[str] = None) -> str:
         """Handle call_agent tool call.
-        
+
         Extracted from ExecutionEngine._handle_call_agent() - Phase 4.3
-        
+
         This method orchestrates the entire call_agent flow:
         1. Validates arguments via _validate_call_agent_args()
         2. Rejects self-calls (case-insensitive) and identity-mismatched resurrections
         3. Clones stacked non-self duplicate names; checks class mismatch on existing instances
         4. Checks nesting depth via _check_nesting_depth()
         5. Routes to sync or async path based on slot collision detection
-        
+
         Args:
             args: Tool arguments (instance_name, agent_class, task)
             messages: Caller's conversation messages
             instance: The calling agent instance
             function_id: The LLM's tool_call_id for this async call (optional)
-            
+
         Returns:
             Result string from the called agent or error message
         """
         caller_name = instance.instance_name
-        
+
         # Extracted to _validate_call_agent_args() - Phase 4.3
         instance_name, agent_class, error = self._validate_call_agent_args(args, caller_name)
         if error:
@@ -231,8 +228,7 @@ class ToolDispatcher:
         # This is a hallucination/misuse, so reject outright (unconditional — even if
         # the caller is currently active/stacked). Replaces the old P2 self-clone.
         if target_canonical.lower() == caller_ci:
-            logger.warning("Self-call guard rejected: %s tried to call itself as '%s'",
-                           caller_name, instance_name)
+            logger.warning("Self-call guard rejected: %s tried to call itself as '%s'", caller_name, instance_name)
             return (f"Error: Cannot call_agent yourself ('{caller_name}'). "
                     f"Use a different instance name.")
 
@@ -262,12 +258,11 @@ class ToolDispatcher:
             orig_req_name = (args.get('instance_name') or '').strip()
             have_class_ci = (getattr(existing, 'agent_class', '') or '').strip().lower()
             req_class_ci = agent_class.strip().lower()
-            name_variant = (orig_req_name != target_canonical
-                            and orig_req_name.lower() == target_canonical.lower())
+            name_variant = (orig_req_name != target_canonical and orig_req_name.lower() == target_canonical.lower())
             class_mismatch = bool(have_class_ci and req_class_ci and have_class_ci != req_class_ci)
             if name_variant or class_mismatch:
-                logger.warning("Resurrection guard rejected: %s requested '%s'/%s but '%s' exists as '%s'",
-                               caller_name, instance_name, agent_class, target_canonical, have_class_ci)
+                logger.warning("Resurrection guard rejected: %s requested '%s'/%s but '%s' exists as '%s'", caller_name,
+                               instance_name, agent_class, target_canonical, have_class_ci)
                 return (f"Error: Agent '{target_canonical}' already exists as '{have_class_ci or 'unknown class'}'. "
                         f"Requested identity ('{orig_req_name}' / '{agent_class}') does not match. "
                         f"Use a different instance name.")
@@ -279,8 +274,8 @@ class ToolDispatcher:
         # bare "No template for agent class" error. Surface the valid classes instead.
         if self.pool.get_template(agent_class) is None:
             available = sorted(self.pool.list_agents())
-            logger.warning("Unknown agent_class rejected: %s requested '%s'; available=%s",
-                           caller_name, agent_class, available)
+            logger.warning("Unknown agent_class rejected: %s requested '%s'; available=%s", caller_name, agent_class,
+                           available)
             if not available:
                 return f"Error: Unknown agent_class '{agent_class}'. No agent classes are registered."
             return (f"Error: Unknown agent_class '{agent_class}'. "
@@ -292,7 +287,7 @@ class ToolDispatcher:
         if caller_inst := self.pool.get_instance(instance.instance_name):
             caller_depth = getattr(caller_inst, '_nest_depth', 0)
         child_depth = caller_depth + 1
-        
+
         depth_error = self._check_nesting_depth(instance, child_depth)
         if depth_error:
             return depth_error
@@ -311,22 +306,19 @@ class ToolDispatcher:
         # with the same name → logger collision → corrupted logs with duplicate system messages.
         # Catch this early and reject with guidance to use a different instance name.
         from .agent_instance import ACTIVE_STATES
-        
+
         target_inst = self.pool.get_instance(instance_name)
         if target_inst is not None:
             with target_inst._state_lock:
                 target_state = target_inst.state
-            
+
             if target_state in ACTIVE_STATES:
-                logger.debug(
-                    'Active instance guard rejected: %s trying to call active instance %s (state=%s)',
-                    caller_name, instance_name, target_state.name
-                )
+                logger.debug('Active instance guard rejected: %s trying to call active instance %s (state=%s)',
+                             caller_name, instance_name, target_state.name)
                 return (
                     f"Error: Agent instance '{instance_name}' is already actively executing (state={target_state.name}). "
                     f"Cannot create a second instance with the same name. Use a different instance name like "
-                    f"'{instance_name}_child' or wait for '{instance_name}' to complete."
-                )
+                    f"'{instance_name}_child' or wait for '{instance_name}' to complete.")
 
         # ── Slot Collision Detection (Target Architecture) ────────────────
         # Determine whether A calling B requires sync or async execution based on
@@ -393,24 +385,20 @@ class ToolDispatcher:
         else:
             return self._run_child_async(caller_name, function_id, agent_class, instance_name, args, child_depth)
 
-    def handle_dismiss_agent(
-        self,
-        args: Any,
-        instance: 'AgentInstance'
-    ) -> str:
+    def handle_dismiss_agent(self, args: Any, instance: 'AgentInstance') -> str:
         """Handle dismiss_agent tool call.
-        
+
         Extracted from ExecutionEngine._handle_dismiss_agent() - Phase 4.3
-        
+
         Removes another agent from the pool. Prevents dismissing self or supervisor.
-        You can only dismiss your own children, or if you are a root orchestrator (no parent), 
+        You can only dismiss your own children, or if you are a root orchestrator (no parent),
         you can dismiss any agent.
         Supports both single-instance dismissal and bulk dismissal of all idle agents.
-        
+
         Args:
             args: Tool arguments (instance_name, all_idle)
             instance: The calling agent instance
-            
+
         Returns:
             Human-readable string with embedded [status=...] tag, agent info, and optional log path
         """
@@ -512,15 +500,8 @@ class ToolDispatcher:
 
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
 
-    def _run_child_sync(
-        self,
-        agent_class: str,
-        instance_name: str,
-        args: Any,
-        caller_slot_holder: 'AgentInstance',
-        caller_name: str,
-        child_depth: int
-    ) -> str:
+    def _run_child_sync(self, agent_class: str, instance_name: str, args: Any, caller_slot_holder: 'AgentInstance',
+                        caller_name: str, child_depth: int) -> str:
         """Run child agent synchronously (caller holds slot).
 
         Thin wrapper around child_runner.run_child_core() that handles
@@ -543,16 +524,14 @@ class ToolDispatcher:
         sync_path_start = time.monotonic()
 
         # Release caller's slot so the child can acquire it inside engine.run()
-        if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
+        if caller_slot_holder and hasattr(caller_slot_holder,
+                                          '_slot_release') and caller_slot_holder._slot_release is not None:
             logger.debug(
-                f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'"
-            )
+                f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'")
             # Structured drop-handoff event (sticky slot plan change #10): parent yields its
             # slot so the sync child can acquire at FIFO tail; parent re-acquires at tail after.
             self.engine._release_slot(caller_slot_holder, caller_name, 'sync child', action='drop-handoff')
-            logger.debug(
-                f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
-            )
+            logger.debug(f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire")
 
         try:
             # Unified core execution — handles loop detection, status checks, formatting
@@ -594,14 +573,11 @@ class ToolDispatcher:
 
         finally:
             # FIX 3: Always re-acquire caller's slot, even on early exit due to stop
-            logger.debug(
-                f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child"
-            )
+            logger.debug(f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child")
             if not self._reacquire_caller_slot(caller_slot_holder, caller_name, 'sync child'):
                 logger.warning(
                     f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
-                    f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"
-                )
+                    f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
                 # Clear saved state label to prevent orphaned state accumulation.
                 # restore_instance_state() normally clears this on success/failure, but we skipped it here.
                 try:
@@ -623,33 +599,24 @@ class ToolDispatcher:
                 except Exception as e:
                     logger.debug('Failed to restore caller state for %s: %s', caller_name, e)
 
-                logger.debug(
-                    f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
-                    f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"
-                )
+                logger.debug(f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
+                             f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
 
-    def _run_child_async(
-        self,
-        caller_name: str,
-        function_id: Optional[str],
-        agent_class: str,
-        instance_name: str,
-        args: dict,
-        child_depth: int
-    ) -> str:
+    def _run_child_async(self, caller_name: str, function_id: Optional[str], agent_class: str, instance_name: str,
+                         args: dict, child_depth: int) -> str:
         """Run child agent asynchronously via register_async_call.
-        
+
         Extracted from ExecutionEngine._handle_call_agent() - Phase 4.3
-        
+
         Args:
             caller_name, function_id, agent_class, instance_name, args, child_depth
-            
+
         Returns:
             Async confirmation message
         """
-        logger.debug('Taking ASYNC path - %s calls %s/%s at depth %d', 
-                    caller_name, instance_name, agent_class, child_depth)
-        
+        logger.debug('Taking ASYNC path - %s calls %s/%s at depth %d', caller_name, instance_name, agent_class,
+                     child_depth)
+
         # Register and launch agent asynchronously via AsyncToolRegistry.
         self.pool.register_async_call(
             instance_name=caller_name,
@@ -662,7 +629,7 @@ class ToolDispatcher:
         )
 
         logger.debug('ASYNC - %s launched by %s', instance_name, caller_name)
-        
+
         # Get the logger to include filename in the response
         try:
             child_logger = self.pool.get_logger(instance_name, agent_class)
@@ -672,31 +639,23 @@ class ToolDispatcher:
             logger.error(f"Failed to get logger for async agent {instance_name}: {e}")
             return f"Agent '{instance_name}' launched asynchronously. You can continue working or stop, you will be woken up when the result is available."
 
-    def _reacquire_caller_slot(
-        self,
-        slot_holder: 'AgentInstance',
-        slot_holder_name: str,
-        context_label: str
-    ) -> bool:
+    def _reacquire_caller_slot(self, slot_holder: 'AgentInstance', slot_holder_name: str, context_label: str) -> bool:
         """Re-acquire caller's concurrency slot after a sync child completes.
-        
+
         Delegates to ExecutionEngine.reacquire_for() for the actual FIFO acquire.
         """
         return self.engine.reacquire_for(slot_holder, slot_holder_name, context_label)
 
-    def _validate_call_agent_args(
-        self,
-        args: Any,
-        caller_name: str
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def _validate_call_agent_args(self, args: Any,
+                                  caller_name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Validate call_agent tool arguments.
-        
+
         Extracted from ExecutionEngine._handle_call_agent() - Phase 4.3
-        
+
         Args:
             args: Tool arguments dictionary
             caller_name: Caller instance name for error messages
-            
+
         Returns:
             Tuple of (instance_name, agent_class, error_message)
             error_message is None if validation passed
@@ -709,25 +668,21 @@ class ToolDispatcher:
         agent_class = (args.get('agent_class') or '').strip().lower()
 
         if not instance_name or not agent_class:
-            logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", 
-                          caller_name, instance_name, agent_class)
+            logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", caller_name,
+                           instance_name, agent_class)
             return instance_name, agent_class, 'Error: call_agent requires instance_name and agent_class.'
 
         return instance_name, agent_class, None
 
-    def _check_nesting_depth(
-        self,
-        instance: 'AgentInstance',
-        child_depth: int
-    ) -> Optional[str]:
+    def _check_nesting_depth(self, instance: 'AgentInstance', child_depth: int) -> Optional[str]:
         """Check if nesting depth limit exceeded.
-        
+
         Extracted from ExecutionEngine._handle_call_agent() - Phase 4.3
-        
+
         Args:
             instance: Caller agent instance
             child_depth: Proposed depth for child
-            
+
         Returns:
             Error message if depth exceeded, None otherwise
         """
@@ -735,18 +690,19 @@ class ToolDispatcher:
         caller_name = instance.instance_name
         logger.debug('call_agent nesting - %s depth=%d/%d', caller_name, child_depth, max_depth)
         if child_depth > max_depth:
-            logger.warning('call_agent depth exceeded - %s at depth %d (max=%d)', 
-                          caller_name, child_depth, max_depth)
+            logger.warning('call_agent depth exceeded - %s at depth %d (max=%d)', caller_name, child_depth, max_depth)
             return (f"Error: Nesting depth limit ({max_depth}) exceeded. "
                     f"The caller '{instance.instance_name}' is at depth {child_depth - 1}. "
                     f"Cannot create agent at depth {child_depth}.")
         return None
 
     # ── Tool Result Truncation ───────────────────────────────────────────────
-    
+
     # Note: truncate_tool_result and _write_spillover_file removed -
     # tools already handle their own truncation for wild reads.
 
-    # Note: LLM call helper methods (_classify_llm_error, _make_retrying_message, 
-# _make_error_message) remain in ExecutionEngine as they are used by 
+    # Note: LLM call helper methods (_classify_llm_error, _make_retrying_message,
+
+
+# _make_error_message) remain in ExecutionEngine as they are used by
 # _execute_llm_call_with_retry() which is still owned by ExecutionEngine.

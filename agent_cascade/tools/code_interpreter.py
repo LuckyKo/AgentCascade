@@ -22,13 +22,12 @@ import queue
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 import uuid
-import socket
-
 from pathlib import Path
 
 # Optional ZMQ import for explicit error handling on kernel shutdown
@@ -38,17 +37,15 @@ except ImportError:
     zmq = None
 from typing import Dict, List, Optional, Union
 
-import json5
-
 import jsonschema
 
 from agent_cascade.log import logger
-from agent_cascade.tools.base import BaseToolWithFileAccess, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tool_utils import truncate_with_spillover
-from agent_cascade.utils.utils import append_signal_handler, extract_code, has_chinese_chars, json_loads, print_traceback
-from agent_cascade.utils.code_path_resolver import resolve_code_paths, build_path_resolution_notice, set_active_mappings
-
+from agent_cascade.tools.base import BaseToolWithFileAccess, register_tool
+from agent_cascade.utils.code_path_resolver import build_path_resolution_notice, resolve_code_paths, set_active_mappings
+from agent_cascade.utils.utils import (append_signal_handler, extract_code, has_chinese_chars, json_loads,
+                                       print_traceback)
 
 # --- Timeout Configuration ---
 # Per-execution timeout: max seconds a single code cell can run before being killed.
@@ -124,10 +121,12 @@ def _check_container_healthy(container_id: str) -> bool:
     Returns True if the container is in 'running' state, False otherwise.
     """
     try:
-        result = subprocess.run(
-            ['docker', 'inspect', '--format', '{{.State.Status}}', container_id],
-            timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
-        )
+        result = subprocess.run(['docker', 'inspect', '--format', '{{.State.Status}}', container_id],
+                                timeout=5,
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace')
         return result.stdout.strip() == 'running'
     except Exception as e:
         logger.debug(f"Container health check failed for {container_id}: {e}")
@@ -142,8 +141,11 @@ def _find_running_container(container_name: str) -> Optional[str]:
     try:
         result = subprocess.run(
             ['docker', 'ps', '-q', '--filter', f'name={container_name}', '--filter', 'status=running'],
-            timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
-        )
+            timeout=5,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace')
         cid = result.stdout.strip()
         return cid if cid else None
     except Exception as e:
@@ -275,8 +277,16 @@ def _kill_kernels_and_containers(_sig_num=None, _frame=None):
     # Kill containers outside lock (docker ops can be slow)
     for k, container_id in container_pairs:
         try:
-            subprocess.run(['docker', 'stop', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-            subprocess.run(['docker', 'rm', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+            subprocess.run(['docker', 'stop', container_id],
+                           timeout=10,
+                           capture_output=True,
+                           encoding='utf-8',
+                           errors='replace')
+            subprocess.run(['docker', 'rm', container_id],
+                           timeout=10,
+                           capture_output=True,
+                           encoding='utf-8',
+                           errors='replace')
         except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
             logger.warning(f"Failed to stop and remove Docker container {container_id} during global cleanup: {e}")
 
@@ -291,6 +301,7 @@ if threading.current_thread() is threading.main_thread():
 
 # --- Watchdog Thread: Monitors kernel responsiveness ---
 _WATCHDOG_TERMINATE = threading.Event()
+
 
 def _kernel_watchdog():
     """Background thread that kills unresponsive kernels.
@@ -310,54 +321,54 @@ def _kernel_watchdog():
                     stale_kernels.append((kernel_id, wd_timeout))
 
         for kernel_id, wd_timeout in stale_kernels:
-            logger.warning(
-                f"Code interpreter watchdog: Kernel {kernel_id} inactive for "
-                f"{wd_timeout}s. Killing container."
-            )
-            
+            logger.warning(f"Code interpreter watchdog: Kernel {kernel_id} inactive for "
+                           f"{wd_timeout}s. Killing container.")
+
             # Mark as watchdog-killed and remove from client/container tracking atomically
             kc_to_shutdown = None
             container_id_to_kill = None
             with _KERNEL_LOCK:
                 _WATCHDOG_KILLED.add(kernel_id)
-                
+
                 # Pop kernel client for shutdown outside lock
                 if kernel_id in _KERNEL_CLIENTS:
                     kc_to_shutdown = _KERNEL_CLIENTS.pop(kernel_id, None)
-                
+
                 # Record container for killing (docker ops are slow, do outside lock)
                 if kernel_id in _DOCKER_CONTAINERS:
                     container_id_to_kill = _DOCKER_CONTAINERS[kernel_id]
                     del _DOCKER_CONTAINERS[kernel_id]
-                
+
                 # Clean up activity tracking
                 work_dir_base = _KERNEL_ACTIVITY.get(kernel_id, {}).get('work_dir', '.')
                 if kernel_id in _KERNEL_ACTIVITY:
                     del _KERNEL_ACTIVITY[kernel_id]
-                
+
                 # Remove from agent kernel tracking
                 for session_list in _AGENT_KERNELS.values():
                     if kernel_id in session_list:
                         session_list.remove(kernel_id)
-            
+
             # Shut down kernel client outside lock
             if kc_to_shutdown is not None:
                 _shutdown_kernel_client(kc_to_shutdown, kernel_id)
-            
+
             # Kill the container outside lock (docker ops can be slow)
             if container_id_to_kill is not None:
                 try:
-                    subprocess.run(
-                        ['docker', 'stop', container_id_to_kill], timeout=10,
-                        capture_output=True, encoding='utf-8', errors='replace'
-                    )
-                    subprocess.run(
-                        ['docker', 'rm', container_id_to_kill], timeout=10,
-                        capture_output=True, encoding='utf-8', errors='replace'
-                    )
+                    subprocess.run(['docker', 'stop', container_id_to_kill],
+                                   timeout=10,
+                                   capture_output=True,
+                                   encoding='utf-8',
+                                   errors='replace')
+                    subprocess.run(['docker', 'rm', container_id_to_kill],
+                                   timeout=10,
+                                   capture_output=True,
+                                   encoding='utf-8',
+                                   errors='replace')
                 except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
                     logger.warning(f"Failed to clean up stale container {container_id_to_kill}: {e}")
-            
+
             # Clean up connection files, launch script, and path mapping — use the work_dir stored at kernel start
             for suffix in ['_host.json', '_container.json']:
                 conn_file = os.path.join(work_dir_base, f'kernel_connection_file_{kernel_id}{suffix}')
@@ -366,14 +377,14 @@ def _kernel_watchdog():
                         os.remove(conn_file)
                 except OSError as e:
                     logger.warning(f"Failed to remove connection file {conn_file}: {e}")
-            
+
             launch_script = os.path.join(work_dir_base, f'launch_kernel_{kernel_id}.py')
             try:
                 if os.path.exists(launch_script):
                     os.remove(launch_script)
             except OSError as e:
                 logger.warning(f"Failed to remove launch script {launch_script}: {e}")
-            
+
             # Clean up path mapping file for this kernel
             mapping_file = os.path.join(work_dir_base, f'path_mapping_{kernel_id}.json')
             try:
@@ -409,10 +420,11 @@ def _cleanup_stale_containers(now: float):
     removed_ids = set()
     for kernel_id, cid in expired_stale:
         try:
-            subprocess.run(
-                ['docker', 'rm', '-f', cid], timeout=10,
-                capture_output=True, encoding='utf-8', errors='replace'
-            )
+            subprocess.run(['docker', 'rm', '-f', cid],
+                           timeout=10,
+                           capture_output=True,
+                           encoding='utf-8',
+                           errors='replace')
             removed_ids.add(kernel_id)
         except Exception as e:
             logger.debug(f"Failed to remove expired stale container {cid}: {e}")
@@ -482,22 +494,21 @@ def cleanup_kernels_for_session(session_name: str, force_timeout: float = 5.0) -
         if cid is None:
             continue
         try:
-            subprocess.run(
-                ['docker', 'stop', '-t', str(int(force_timeout)), cid],
-                timeout=force_timeout + 5, capture_output=True, encoding='utf-8', errors='replace'
-            )
-            subprocess.run(
-                ['docker', 'rm', cid],
-                timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-            )
+            subprocess.run(['docker', 'stop', '-t', str(int(force_timeout)), cid],
+                           timeout=force_timeout + 5,
+                           capture_output=True,
+                           encoding='utf-8',
+                           errors='replace')
+            subprocess.run(['docker', 'rm', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
         except (subprocess.SubprocessError, OSError) as e:
             # Force remove if graceful stop fails
             logger.warning(f"Graceful container stop failed for {cid}, forcing removal: {e}")
             try:
-                subprocess.run(
-                    ['docker', 'rm', '-f', cid],
-                    timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                )
+                subprocess.run(['docker', 'rm', '-f', cid],
+                               timeout=10,
+                               capture_output=True,
+                               encoding='utf-8',
+                               errors='replace')
             except (subprocess.SubprocessError, OSError) as force_err:
                 logger.error(f"Force container removal failed for {cid}: {force_err}")
 
@@ -508,10 +519,11 @@ def cleanup_kernels_for_session(session_name: str, force_timeout: float = 5.0) -
         cid = info.get('container_id')
         if cid:
             try:
-                subprocess.run(
-                    ['docker', 'rm', '-f', cid],
-                    timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                )
+                subprocess.run(['docker', 'rm', '-f', cid],
+                               timeout=10,
+                               capture_output=True,
+                               encoding='utf-8',
+                               errors='replace')
             except (subprocess.SubprocessError, OSError) as e:
                 logger.debug(f"Failed to remove stale container {cid}: {e}")
 
@@ -556,21 +568,20 @@ def _cleanup_single_kernel(kernel_id: str, work_dir: str, force_timeout: float =
     cid = _DOCKER_CONTAINERS.pop(kernel_id, None)
     if cid is not None:
         try:
-            subprocess.run(
-                ['docker', 'stop', '-t', str(int(force_timeout)), cid],
-                timeout=force_timeout + 5, capture_output=True, encoding='utf-8', errors='replace'
-            )
-            subprocess.run(
-                ['docker', 'rm', cid],
-                timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-            )
+            subprocess.run(['docker', 'stop', '-t', str(int(force_timeout)), cid],
+                           timeout=force_timeout + 5,
+                           capture_output=True,
+                           encoding='utf-8',
+                           errors='replace')
+            subprocess.run(['docker', 'rm', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
         except (subprocess.SubprocessError, OSError) as e:
             logger.warning(f"Graceful container stop failed for {cid}, forcing removal: {e}")
             try:
-                subprocess.run(
-                    ['docker', 'rm', '-f', cid],
-                    timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                )
+                subprocess.run(['docker', 'rm', '-f', cid],
+                               timeout=10,
+                               capture_output=True,
+                               encoding='utf-8',
+                               errors='replace')
             except (subprocess.SubprocessError, OSError) as force_err:
                 logger.error(f"Force container removal failed for {cid}: {force_err}")
 
@@ -580,10 +591,11 @@ def _cleanup_single_kernel(kernel_id: str, work_dir: str, force_timeout: float =
         stale_cid = stale_info.get('container_id')
         if stale_cid:
             try:
-                subprocess.run(
-                    ['docker', 'rm', '-f', stale_cid],
-                    timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                )
+                subprocess.run(['docker', 'rm', '-f', stale_cid],
+                               timeout=10,
+                               capture_output=True,
+                               encoding='utf-8',
+                               errors='replace')
             except (subprocess.SubprocessError, OSError) as e:
                 logger.debug(f"Failed to remove stale container {stale_cid}: {e}")
 
@@ -628,9 +640,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 'type': 'string',
             },
             'fix_paths': {
-                'description': 'Auto-translate Windows host paths (e.g. N:\\work\\...) to Docker container paths (/workspace/...). Set to false to disable.',
-                'type': 'boolean',
-                'default': True,
+                'description':
+                    'Auto-translate Windows host paths (e.g. N:\\work\\...) to Docker container paths (/workspace/...). Set to false to disable.',
+                'type':
+                    'boolean',
+                'default':
+                    True,
             },
             'fresh': {
                 'description': 'Force a fresh kernel with a new container (discard existing state). Default is false.',
@@ -677,7 +692,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
         try:
             validated_params = self._verify_json_format_args(params)
             code = validated_params.get('code', '')
-        except (ValueError, jsonschema.ValidationError):  # _verify_json_format_args can raise ValueError or jsonschema.ValidationError on failure
+        except (ValueError, jsonschema.ValidationError
+               ):  # _verify_json_format_args can raise ValueError or jsonschema.ValidationError on failure
             # Fallback: try lenient parsing, then extract raw code blocks
             if isinstance(params, dict):
                 code = params.get('code', '')
@@ -865,22 +881,28 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     kc, container_id = self._warm_restart_kernel(kernel_id, found_cid)
                 else:
                     kc, container_id = self._start_kernel(kernel_id)
-            except Exception as e:
+            except Exception:
                 # Clean up state on failure so next call starts fresh; notify waiters
                 with _KERNEL_READY:
                     _KERNEL_CLIENTS.pop(kernel_id, None)
                     _KERNEL_READY.notify_all()
-                
+
                 # Cleanup any container that might have been created during startup
                 try:
                     if 'container_id' in locals() and container_id:
-                        subprocess.run(['docker', 'stop', container_id], timeout=10,
-                                        capture_output=True, encoding='utf-8', errors='replace')
-                        subprocess.run(['docker', 'rm', '-f', container_id], timeout=10,
-                                        capture_output=True, encoding='utf-8', errors='replace')
+                        subprocess.run(['docker', 'stop', container_id],
+                                       timeout=10,
+                                       capture_output=True,
+                                       encoding='utf-8',
+                                       errors='replace')
+                        subprocess.run(['docker', 'rm', '-f', container_id],
+                                       timeout=10,
+                                       capture_output=True,
+                                       encoding='utf-8',
+                                       errors='replace')
                 except Exception:
                     pass  # Don't mask original exception
-                
+
                 raise
 
             # Register kernel state and notify any waiting threads
@@ -914,14 +936,16 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     if kernel_id in _DOCKER_CONTAINERS:
                         container_id = _DOCKER_CONTAINERS[kernel_id]
                         try:
-                            subprocess.run(
-                                ['docker', 'stop', container_id],
-                                timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                            )
-                            subprocess.run(
-                                ['docker', 'rm', container_id],
-                                timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                            )
+                            subprocess.run(['docker', 'stop', container_id],
+                                           timeout=10,
+                                           capture_output=True,
+                                           encoding='utf-8',
+                                           errors='replace')
+                            subprocess.run(['docker', 'rm', container_id],
+                                           timeout=10,
+                                           capture_output=True,
+                                           encoding='utf-8',
+                                           errors='replace')
                         except (subprocess.SubprocessError, OSError) as cleanup_err:
                             logger.warning(f"Container stop/rm failed during init error cleanup: {cleanup_err}")
                         del _DOCKER_CONTAINERS[kernel_id]
@@ -955,15 +979,15 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 fixed_code.append('plt.rcParams["font.family"] = _m6_font_prop.get_name()')
         fixed_code = '\n'.join(fixed_code)
         fixed_code += '\n\n'  # Prevent code not executing in notebook due to no line breaks at the end
-        
+
         try:
             result = self._execute_code(kc, fixed_code, timeout=exec_timeout, kernel_id=kernel_id)
         except TimeoutError as e:
             # On timeout, escalate through 3 tiers to recover the kernel
             logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), escalating...")
-            
+
             interrupted = False
-            
+
             # Collect any partial output accumulated before the timeout
             # The TimeoutError carries partial_output in its args if available
             partial_result = ''
@@ -971,8 +995,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 partial_result = e.args[0].get('partial_output', '')
 
             # Drain constants: prevent resource exhaustion from runaway IOPub message streams
-            DRAIN_TOTAL_TIMEOUT = 5.0       # Max seconds spent draining IOPub messages per call
-            DRAIN_MAX_MESSAGES = 100        # Max IOPub messages to read per drain cycle
+            DRAIN_TOTAL_TIMEOUT = 5.0  # Max seconds spent draining IOPub messages per call
+            DRAIN_MAX_MESSAGES = 100  # Max IOPub messages to read per drain cycle
             DRAIN_MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10 MB cap on accumulated output
 
             # Tier 1: Jupyter-level interrupt via control channel + poll for idle status,
@@ -990,7 +1014,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
                     # Drain ALL messages that arrived during the sleep window, not just one
                     interrupted_flag, output = self._drain_iopub(
-                        kc, kernel_id, msg_timeout=1.0,
+                        kc,
+                        kernel_id,
+                        msg_timeout=1.0,
                         drain_total_timeout=DRAIN_TOTAL_TIMEOUT,
                         drain_max_messages=DRAIN_MAX_MESSAGES,
                         drain_max_output_bytes=DRAIN_MAX_OUTPUT_BYTES,
@@ -1008,15 +1034,18 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
                 if container_id:
                     try:
-                        subprocess.run(
-                            ['docker', 'exec', container_id, 'kill', '-INT', '1'],
-                            timeout=5, capture_output=True, encoding='utf-8', errors='replace'
-                        )
+                        subprocess.run(['docker', 'exec', container_id, 'kill', '-INT', '1'],
+                                       timeout=5,
+                                       capture_output=True,
+                                       encoding='utf-8',
+                                       errors='replace')
                         time.sleep(2)
 
                         # Drain ALL remaining messages after SIGINT, not just one
                         interrupted_flag, output = self._drain_iopub(
-                            kc, kernel_id, msg_timeout=2.0,
+                            kc,
+                            kernel_id,
+                            msg_timeout=2.0,
                             drain_total_timeout=DRAIN_TOTAL_TIMEOUT,
                             drain_max_messages=DRAIN_MAX_MESSAGES,
                             drain_max_output_bytes=DRAIN_MAX_OUTPUT_BYTES,
@@ -1026,7 +1055,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         partial_result += output
                     except Exception as sigint_err:
                         logger.warning(f"Tier 2 docker SIGINT failed: {sigint_err}")
-            
+
             # Tier 3: Kill the container entirely if still unresponsive.
             # Instead of fully removing it, keep a stale record for warm restart (reduces ~7s overhead).
             if not interrupted:
@@ -1035,10 +1064,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
                 if container_id:
                     try:
-                        subprocess.run(
-                            ['docker', 'kill', '-s', 'KILL', container_id],
-                            timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                        )
+                        subprocess.run(['docker', 'kill', '-s', 'KILL', container_id],
+                                       timeout=10,
+                                       capture_output=True,
+                                       encoding='utf-8',
+                                       errors='replace')
                         # Don't remove the container — keep it for warm restart on next call.
                         # Record as stale with timestamp for TTL-based cleanup (prevents accumulation).
                         with _KERNEL_LOCK:
@@ -1069,7 +1099,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         'watchdog_timeout': getattr(self, '_wd_timeout', CONTAINER_WATCHDOG_TIMEOUT),
                         'stale_ttl': getattr(self, '_stale_ttl', STALE_CONTAINER_TTL),
                     }
-            
+
             # Return timeout message along with any partial output collected
             if exec_timeout and isinstance(e, TimeoutError):
                 timeout_msg = f'Timeout: Code execution exceeded the {exec_timeout}-second time limit.'
@@ -1082,17 +1112,13 @@ class CodeInterpreter(BaseToolWithFileAccess):
             with _KERNEL_LOCK:
                 was_killed = kernel_id in _WATCHDOG_KILLED
             if was_killed:
-                logger.warning(
-                    f"Code interpreter execution failed because the kernel was killed "
-                    f"by the watchdog (inactive for {CONTAINER_WATCHDOG_TIMEOUT}s). "
-                    f"Original error: {e}"
-                )
-                return (
-                    f'ERROR: Code interpreter kernel was terminated due to inactivity '
-                    f'(no response for {CONTAINER_WATCHDOG_TIMEOUT} seconds). '
-                    f'The next code_interpreter call will start a fresh kernel. '
-                    f'Please try again.'
-                )
+                logger.warning(f"Code interpreter execution failed because the kernel was killed "
+                               f"by the watchdog (inactive for {CONTAINER_WATCHDOG_TIMEOUT}s). "
+                               f"Original error: {e}")
+                return (f'ERROR: Code interpreter kernel was terminated due to inactivity '
+                        f'(no response for {CONTAINER_WATCHDOG_TIMEOUT} seconds). '
+                        f'The next code_interpreter call will start a fresh kernel. '
+                        f'Please try again.')
             # Re-raise any other exceptions
             raise
 
@@ -1109,7 +1135,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         # Add path resolution feedback if paths were auto-resolved
         path_notice = build_path_resolution_notice(path_resolve_count)
-        
+
         if not result.strip():
             if path_notice:
                 return f'Finished execution.\n\n{path_notice}'
@@ -1119,7 +1145,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         char_limit = 2000
         agent_obj = kwargs.get('agent_obj')
         agent_pool = getattr(agent_obj, 'agent_pool', None)
-        
+
         if agent_pool:
             llm_cfg = getattr(agent_pool, 'llm_cfg', {})
             char_limit = llm_cfg.get('code_char_limit', char_limit)
@@ -1150,7 +1176,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
     @staticmethod
     def _drain_iopub(
-        kc, kernel_id: str, msg_timeout: float = 1.0,
+        kc,
+        kernel_id: str,
+        msg_timeout: float = 1.0,
         drain_total_timeout: float = 5.0,
         drain_max_messages: int = 100,
         drain_max_output_bytes: int = 10 * 1024 * 1024,
@@ -1223,24 +1251,22 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 if text:
                     stderr_buf.append(text)
             else:
-                logger.debug(
-                    f"IOPub drain: ignoring unknown msg type '{mtype}' "
-                    f"for kernel {kernel_id}"
-                )
+                logger.debug(f"IOPub drain: ignoring unknown msg type '{mtype}' "
+                             f"for kernel {kernel_id}")
 
         # Consolidate stdout/stderr into single blocks (fix output splitting bug)
         parts = []
         if stdout_buf:
-            parts.append(f'\n\nstdout:\n```\n{''.join(stdout_buf)}\n```')
+            _stdout_joined = ''.join(stdout_buf)
+            parts.append(f'\n\nstdout:\n```\n{_stdout_joined}\n```')
         if stderr_buf:
-            parts.append(f'\n\nstderr:\n```\n{''.join(stderr_buf)}\n```')
+            _stderr_joined = ''.join(stderr_buf)
+            parts.append(f'\n\nstderr:\n```\n{_stderr_joined}\n```')
         partial_output = ''.join(parts) if parts else ''
         if len(partial_output) > drain_max_output_bytes:
             kept = partial_output[:drain_max_output_bytes - 50]
-            partial_output = (
-                f'{kept}\n\n[OUTPUT TRUNCATED — exceeded '
-                f'{drain_max_output_bytes // (1024*1024)}MB limit]'
-            )
+            partial_output = (f'{kept}\n\n[OUTPUT TRUNCATED — exceeded '
+                              f'{drain_max_output_bytes // (1024*1024)}MB limit]')
 
         return interrupted, partial_output
 
@@ -1322,7 +1348,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
     def _is_path_allowed(self, abs_path: str, allowed_prefixes: List[str]) -> bool:
         """Check if a path is within an allowed directory using proper containment check.
-        
+
         Uses os.path.commonpath() instead of .startswith() to prevent sibling-directory escape.
         E.g., /workspace_extra would pass .startswith('/workspace') but fails commonpath check.
         """
@@ -1337,7 +1363,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
     def _resolve_extra_folders(self):
         """Resolve extra work folders, reading from operation_manager if available for dynamic config.
-        
+
         Falls back to stored defaults if no operation_manager is set (e.g., standalone use).
         Returns:
             Tuple of (extra_rw_list, extra_ro_list) as lists of strings.
@@ -1354,9 +1380,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             extra_ro = list(self.extra_work_folders_ro)
         return extra_rw, extra_ro
 
-    def _process_extra_folders(
-        self, folders: List[str], allowed_prefixes: set, is_ro: bool
-    ) -> List[dict]:
+    def _process_extra_folders(self, folders: List[str], allowed_prefixes: set, is_ro: bool) -> List[dict]:
         """Validate and resolve extra work folders into mount entries.
 
         Each folder is resolved via realpath (symlink-safe), checked for existence,
@@ -1380,9 +1404,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 logger.warning('Extra %s mount path does not exist, skipping: %s', label, resolved)
                 continue
             if not self._is_path_allowed(resolved, allowed_prefixes):
-                logger.warning(
-                    'Extra %s mount path %s is outside allowed directories, skipping', label, resolved
-                )
+                logger.warning('Extra %s mount path %s is outside allowed directories, skipping', label, resolved)
                 continue
             # Normalize host path for Docker (Windows backslash → forward slash)
             docker_host = _normalize_path_for_docker(resolved)
@@ -1393,7 +1415,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
     def _build_path_mapping(self, kernel_id: str, mounted_rw: List[dict], mounted_ro: List[dict]) -> dict:
         """Build the path mapping dict for a kernel.
-        
+
         Args:
             kernel_id: The kernel identifier.
             mounted_rw: List of {'host': ..., 'container': ...} dicts for RW mounts.
@@ -1408,23 +1430,21 @@ class CodeInterpreter(BaseToolWithFileAccess):
         }
         path_mapping['host_to_container'] = {}
         # Use realpath consistently (matches validation path resolution) and normalize for Docker
-        work_host = _normalize_path_for_docker(
-            os.path.realpath(self.work_dir) if self.work_dir else ''
-        )
+        work_host = _normalize_path_for_docker(os.path.realpath(self.work_dir) if self.work_dir else '')
         path_mapping['host_to_container']['work_dir'] = {
             'host': work_host,
             'container': self.container_work_dir,
         }
         # Mapping keys strip the leading '/' from mount points (e.g., '/extra_rw_0' → 'extra_rw_0')
         for i, m in enumerate(mounted_rw):
-            key = f'{EXTRA_RW_MOUNT_PREFIX.strip('/')}{i}'
+            key = f'{EXTRA_RW_MOUNT_PREFIX.strip(' / ')}{i}'
             path_mapping['host_to_container'][key] = {
                 'host': m['host'],
                 'container': m['container'],
                 'access': 'read-write',
             }
         for i, m in enumerate(mounted_ro):
-            key = f'{EXTRA_RO_MOUNT_PREFIX.strip('/')}{i}'
+            key = f'{EXTRA_RO_MOUNT_PREFIX.strip(' / ')}{i}'
             path_mapping['host_to_container'][key] = {
                 'host': m['host'],
                 'container': m['container'],
@@ -1435,32 +1455,29 @@ class CodeInterpreter(BaseToolWithFileAccess):
     def _build_docker_image(self):
         """Build Docker image from Dockerfile if not exists"""
         # Check if image already exists
-        result = subprocess.run(
-            ['docker', 'images', '-q', self.docker_image_name],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
-        )
-        
+        result = subprocess.run(['docker', 'images', '-q', self.docker_image_name],
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace')
+
         if result.stdout.strip():
             logger.info(f'Docker image {self.docker_image_name} already exists')
             return
-                
+
         logger.info(f'Building Docker image {self.docker_image_name} from {DOCKER_IMAGE_FILE}')
         dockerfile_dir = os.path.dirname(os.path.abspath(DOCKER_IMAGE_FILE))
-        
+
         build_process = subprocess.run(
             ['docker', 'build', '-t', self.docker_image_name, '-f', DOCKER_IMAGE_FILE, dockerfile_dir],
             capture_output=True,
             text=True,
             encoding='utf-8',
-            errors='replace'
-        )
-        
+            errors='replace')
+
         if build_process.returncode != 0:
             raise RuntimeError(f'Failed to build Docker image: {build_process.stderr}')
-        
+
         logger.info(f'Successfully built Docker image {self.docker_image_name}')
 
     def _get_free_ports(self, n=5):
@@ -1508,19 +1525,16 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.warning(
-                        f"Kernel not ready (attempt {attempt + 1}/{max_retries}, "
-                        f"timeout={timeouts[attempt]}s), retrying with timeout={timeouts[attempt+1]}s..."
-                    )
+                    logger.warning(f"Kernel not ready (attempt {attempt + 1}/{max_retries}, "
+                                   f"timeout={timeouts[attempt]}s), retrying with timeout={timeouts[attempt+1]}s...")
                     time.sleep(2)
                 else:
-                    logs = subprocess.run(
-                        ['docker', 'logs', container_id],
-                        capture_output=True, text=True, encoding='utf-8', errors='replace'
-                    )
-                    raise RuntimeError(
-                        f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}'
-                    )
+                    logs = subprocess.run(['docker', 'logs', container_id],
+                                          capture_output=True,
+                                          text=True,
+                                          encoding='utf-8',
+                                          errors='replace')
+                    raise RuntimeError(f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
 
         return kc
 
@@ -1585,15 +1599,20 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         # Remove any leftover container with the same name from a previous crash
         container_name = f'code_interpreter_{kernel_id}'
-        subprocess.run(
-            ['docker', 'rm', '-f', container_name],
-            capture_output=True, text=True, timeout=10, encoding='utf-8', errors='replace'
-        )
+        subprocess.run(['docker', 'rm', '-f', container_name],
+                       capture_output=True,
+                       text=True,
+                       timeout=10,
+                       encoding='utf-8',
+                       errors='replace')
 
         # prepare Docker launch cmd
         docker_run_cmd = [
-            'docker', 'run', '-d',
-            '--name', container_name,
+            'docker',
+            'run',
+            '-d',
+            '--name',
+            container_name,
             # Drop all Linux capabilities and prevent privilege escalation
             '--cap-drop=ALL',
             '--security-opt=no-new-privileges',
@@ -1614,8 +1633,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Mount main work directory AFTER extra mounts so specific subdirectory mounts take precedence.
         # Use realpath (consistent with validation) and normalize for Docker on Windows.
         docker_run_cmd.extend([
-            '-v', f'{_normalize_path_for_docker(os.path.realpath(self.work_dir))}:{self.container_work_dir}',
-            '-w', self.container_work_dir,
+            '-v',
+            f'{_normalize_path_for_docker(os.path.realpath(self.work_dir))}:{self.container_work_dir}',
+            '-w',
+            self.container_work_dir,
         ])
 
         # Bind forwarded ports to 127.0.0.1 only (not all interfaces, for security)
@@ -1624,7 +1645,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         docker_run_cmd.extend([
             self.docker_image_name,
-            'python', f'{self.container_work_dir}/{os.path.basename(launch_kernel_script)}',
+            'python',
+            f'{self.container_work_dir}/{os.path.basename(launch_kernel_script)}',
             '--IPKernelApp.connection_file',
             f'{self.container_work_dir}/{os.path.basename(container_connection_file)}',
             '--KernelApp.allow_remote_access=False',
@@ -1739,8 +1761,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 fout.write(LAUNCH_KERNEL_PY)
 
         exec_cmd = [
-            'docker', 'exec', '-i', container_id,
-            'python', f'{self.container_work_dir}/{os.path.basename(launch_script)}',
+            'docker',
+            'exec',
+            '-i',
+            container_id,
+            'python',
+            f'{self.container_work_dir}/{os.path.basename(launch_script)}',
             '--IPKernelApp.connection_file',
             f'{self.container_work_dir}/{os.path.basename(container_connection_file)}',
             '--KernelApp.allow_remote_access=False',
@@ -1769,7 +1795,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
     def _execute_code(self, kc, code: str, timeout: Optional[int] = None, kernel_id: Optional[str] = None) -> str:
         """Execute code in the Jupyter kernel with a message-level timeout.
-        
+
         Args:
             kc: The kernel client connection.
             code: Python code to execute.
@@ -1777,10 +1803,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     Set to None to disable timeout (not recommended).
             kernel_id: Kernel identifier for watchdog tracking (passed from caller).
                       Defaults to self.instance_id_pid if not provided.
-        
+
         Returns:
             Formatted string with stdout, stderr, execution results, and images.
-        
+
         Raises:
             TimeoutError: If code execution exceeds the time limit.
         """
@@ -1794,24 +1820,24 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Drain any leftover messages from the probe execute before sending real code
         try:
             while True:
-                m = kc.get_iopub_msg(timeout=0.5)
+                kc.get_iopub_msg(timeout=0.5)
         except (zmq.ZMQError, queue.Empty):
             pass
-        
+
         kc.execute(code)
 
         # Mark execution start as "active" so watchdog doesn't kill during CPU-bound computation
         with _KERNEL_LOCK:
             if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
                 _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
-        
+
         result = ''
         image_idx = 0
-        
+
         # Buffers to consolidate stdout/stderr into single blocks (fix output splitting bug)
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []
-        
+
         # OVERALL wall-clock budget: prevents runaway execution when the kernel
         # keeps producing output (e.g. rglob scanning thousands of files). Each
         # individual message still has a per-message timeout to catch kernel hangs.
@@ -1824,19 +1850,20 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 was_killed = kernel_id in _WATCHDOG_KILLED
             if was_killed:
                 result = ''  # Discard partial output — it's stale/unreliable
-                text = (
-                    f'ERROR: The code interpreter kernel was terminated due to '
-                    f'inactivity (no response for {CONTAINER_WATCHDOG_TIMEOUT} seconds). '
-                    f'The next call will start a fresh kernel.'
-                )
+                text = (f'ERROR: The code interpreter kernel was terminated due to '
+                        f'inactivity (no response for {CONTAINER_WATCHDOG_TIMEOUT} seconds). '
+                        f'The next call will start a fresh kernel.')
                 finished = True
                 break
-            
+
             # Check overall wall-clock budget at the top of each iteration
             # Raise TimeoutError so the caller's except block can interrupt the kernel
             if time.time() - start_time > timeout:
-                raise TimeoutError({'partial_output': result, 'message': f'Code execution exceeded the {timeout}-second time limit.'})
-            
+                raise TimeoutError({
+                    'partial_output': result,
+                    'message': f'Code execution exceeded the {timeout}-second time limit.'
+                })
+
             text = ''
             image = ''
             finished = False
@@ -1844,21 +1871,19 @@ class CodeInterpreter(BaseToolWithFileAccess):
             try:
                 # Per-message timeout catches kernel hangs (no output at all)
                 msg = kc.get_iopub_msg(timeout=per_message_timeout)
-                
+
                 # C2 fix: check for watchdog kill immediately after get_iopub_msg returns,
                 # before processing the message — a kill could happen during the blocking call
                 with _KERNEL_LOCK:
                     was_killed = kernel_id in _WATCHDOG_KILLED
                 if was_killed:
                     result = ''  # Discard partial output
-                    text = (
-                        f'ERROR: The code interpreter kernel was terminated due to '
-                        f'inactivity (no response for {CONTAINER_WATCHDOG_TIMEOUT} seconds). '
-                        f'The next call will start a fresh kernel.'
-                    )
+                    text = (f'ERROR: The code interpreter kernel was terminated due to '
+                            f'inactivity (no response for {CONTAINER_WATCHDOG_TIMEOUT} seconds). '
+                            f'The next call will start a fresh kernel.')
                     finished = True
                     break
-                
+
                 msg_type = msg['msg_type']
                 if msg_type == 'status':
                     if msg['content'].get('execution_state') == 'idle':
@@ -1895,13 +1920,16 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         text = ''  # Prevent duplicate output via direct append below
             except queue.Empty:
                 # Raised by get_iopub_msg() when the per-message timeout expires
-                raise TimeoutError({'partial_output': result, 'message': f'Code execution exceeded the {timeout}-second time limit.'})
+                raise TimeoutError({
+                    'partial_output': result,
+                    'message': f'Code execution exceeded the {timeout}-second time limit.'
+                })
             except Exception as e:
                 logger.debug(f"Unexpected IOPub error during execution for kernel {kernel_id}: {e}")
                 text = 'The code interpreter encountered an unexpected error.'
                 print_traceback()
                 finished = True
-            
+
             # Update kernel activity timestamp for watchdog (thread-safe)
             with _KERNEL_LOCK:
                 # Preserve the dict structure (watchdog reads _KERNEL_ACTIVITY[kernel_id].get('work_dir'))
@@ -1921,7 +1949,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 result += f'\n\n{image}'
             if finished:
                 break
-        
+
         # Flush consolidated stdout/stderr buffers as single blocks (fix output splitting bug)
         if stdout_buf:
             combined_stdout = ''.join(stdout_buf)
@@ -1929,7 +1957,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if stderr_buf:
             combined_stderr = ''.join(stderr_buf)
             result += f'\n\nstderr:\n```\n{combined_stderr}\n```'
-        
+
         result = result.lstrip('\n')
         return result
 
@@ -1952,28 +1980,24 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
 def _check_docker_availability():
     try:
-        result = subprocess.run(
-            ['docker', '--version'],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            encoding='utf-8',
-            errors='replace'
-        )
+        result = subprocess.run(['docker', '--version'],
+                                capture_output=True,
+                                text=True,
+                                timeout=5,
+                                encoding='utf-8',
+                                errors='replace')
         if result.returncode != 0:
             raise RuntimeError('Docker is not available')
-        
-        result = subprocess.run(
-            ['docker', 'info'],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            encoding='utf-8',
-            errors='replace'
-        )
+
+        result = subprocess.run(['docker', 'info'],
+                                capture_output=True,
+                                text=True,
+                                timeout=5,
+                                encoding='utf-8',
+                                errors='replace')
         if result.returncode != 0:
             raise RuntimeError('Docker daemon is not running')
-        
+
         logger.info('Docker is available and running')
     except FileNotFoundError:
         raise RuntimeError('Docker is not installed. Please install Docker first.')
@@ -1986,8 +2010,8 @@ def _check_docker_availability():
 def _check_host_deps():
     """Check if host has required dependencies to connect to Docker container kernel"""
     try:
-        from jupyter_client import BlockingKernelClient  # noqa
         import PIL.Image  # noqa
+        from jupyter_client import BlockingKernelClient  # noqa
     except ImportError as e:
         raise ImportError(
             'The dependencies for Code Interpreter support are not installed. '

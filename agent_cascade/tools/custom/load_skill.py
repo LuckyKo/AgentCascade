@@ -10,7 +10,6 @@ import json
 import logging
 import re
 
-from agent_cascade.llm.schema import Message, USER
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
@@ -22,26 +21,23 @@ class LoadSkill(BaseTool):
     """Tool to load skill instructions into the current agent's context at runtime."""
 
     name = 'load_skill'
-    description = (
-        'Load registered skill instructions into your current context at runtime. '
-        'Use this when you need specialized expertise for your task. '
-        'Takes one or more skill names and injects their full instructions as guidelines.'
-    )
+    description = ('Load registered skill instructions into your current context at runtime. '
+                   'Use this when you need specialized expertise for your task. '
+                   'Takes one or more skill names and injects their full instructions as guidelines.')
     parameters = {
         'type': 'object',
         'properties': {
             'skill_names': {
-                'oneOf': [
-                    {
-                        'type': 'string',
-                        'description': 'A single skill name to load.',
+                'oneOf': [{
+                    'type': 'string',
+                    'description': 'A single skill name to load.',
+                }, {
+                    'type': 'array',
+                    'items': {
+                        'type': 'string'
                     },
-                    {
-                        'type': 'array',
-                        'items': {'type': 'string'},
-                        'description': 'List of skill names to load (e.g., ["code-review", "docker-best-practices"]).',
-                    }
-                ],
+                    'description': 'List of skill names to load (e.g., ["code-review", "docker-best-practices"]).',
+                }],
                 'description': 'Skill name(s) to load into your context.',
             },
         },
@@ -132,7 +128,9 @@ class LoadSkill(BaseTool):
                 failed.append(raw_name)
                 continue
             if not VALID_SKILL_NAME_RE.match(name):
-                logger.warning("[SKILLS] Runtime load: invalid skill name '%s' (must be alphanumeric with hyphens/underscores)", raw_name)
+                logger.warning(
+                    "[SKILLS] Runtime load: invalid skill name '%s' (must be alphanumeric with hyphens/underscores)",
+                    raw_name)
                 failed.append(raw_name)
                 continue
 

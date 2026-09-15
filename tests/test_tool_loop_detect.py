@@ -22,11 +22,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_cascade.exact_loop_detect import detect_exact_loop
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, USER, FunctionCall, Message
 from agent_cascade.tool_loop_detect import detect_tool_loop
-from agent_cascade.llm.schema import (
-    SYSTEM, USER, ASSISTANT, FUNCTION, Message, FunctionCall,
-)
-
 
 # ──────────────────────────────────────────────
 # Helpers — message factories & fixture loading
@@ -39,7 +36,8 @@ SAMPLES_DIR = Path(__file__).resolve().parents[1].parent / 'loop_failure_samples
 def _fc_msg(tool: str, args: dict):
     # Assistant message carrying a function_call.
     return Message(
-        role=ASSISTANT, content='',
+        role=ASSISTANT,
+        content='',
         function_call=FunctionCall(name=tool, arguments=json.dumps(args)),
     )
 
@@ -63,7 +61,11 @@ PYTEST_CMD = 'python -m pytest tests/test_x.py::test_y -x 2>&1 | findstr /n "INF
 def _poll_pair(justification='Check progress'):
     # Sample-1-style __status poll pair (FC + terminal-error output).
     return [
-        _fc_msg('shell_cmd', {'command': '__status', 'tool_id': '1', 'justification': justification}),
+        _fc_msg('shell_cmd', {
+            'command': '__status',
+            'tool_id': '1',
+            'justification': justification
+        }),
         _fn_msg('shell_cmd', POLL_OUTPUT),
     ]
 
@@ -129,6 +131,7 @@ def _load_raw_sample(name: str):
 # PART 1 — Fixture regression tests
 # ══════════════════════════════════════════════
 
+
 class TestFixtures:
     # Regression fixtures trimmed from the two real failure samples.
 
@@ -191,7 +194,7 @@ class TestFixtures:
         trimmed = msgs[:len(msgs) - pop_count]
         # After trimming, the trailing run must be shorter than the threshold (5),
         # i.e. only the first pair of the run remains.
-        pairs_after = len([m for m in trimmed if isinstance(m, dict) and m.get('function_call')])
+        len([m for m in trimmed if isinstance(m, dict) and m.get('function_call')])
         assert pop_count > 0
         assert len(msgs) - pop_count < len(msgs)
 
@@ -217,13 +220,17 @@ class TestFixtures:
         assert len(fc_left) == 1, f"expected exactly 1 FC after rollback, got {len(fc_left)}"
         assert len(fn_left) == 1, f"expected exactly 1 FUNCTION output after rollback, got {len(fn_left)}"
         # The remaining pair is the FIRST iteration of the run.
-        assert fc_left[0].function_call.arguments == _fc_msg('shell_cmd', {'command': '__status', 'tool_id': '1'}).function_call.arguments
+        assert fc_left[0].function_call.arguments == _fc_msg('shell_cmd', {
+            'command': '__status',
+            'tool_id': '1'
+        }).function_call.arguments
         assert fn_left[0].content == out
 
 
 # ══════════════════════════════════════════════
 # PART 2 — Legacy detector pin
 # ══════════════════════════════════════════════
+
 
 class TestExactTierSampleBehavior:
     # Tier-1 (exact matcher) behavior on the raw failure samples. REWRITTEN for the
@@ -251,6 +258,7 @@ class TestExactTierSampleBehavior:
 # ══════════════════════════════════════════════
 # PART 3 — False-positive battery
 # ══════════════════════════════════════════════
+
 
 class TestFalsePositiveBattery:
     # Legitimate tool usage patterns must NOT be flagged.
@@ -310,10 +318,12 @@ class TestFalsePositiveBattery:
             msgs.append(_fn_msg('read_file', "def main():\n    print('hello')"))
         assert detect_tool_loop(msgs) is None
 
-    @pytest.mark.parametrize('n_pairs, expected', [
-        (4, None),   # below Layer 1 threshold (5)
-        (5, True),   # at Layer 1 threshold
-    ])
+    @pytest.mark.parametrize(
+        'n_pairs, expected',
+        [
+            (4, None),  # below Layer 1 threshold (5)
+            (5, True),  # at Layer 1 threshold
+        ])
     def test_layer1_fires_at_threshold_of_5_pairs(self, n_pairs, expected):
         msgs = failing_poll_pairs(n_pairs)
         result = detect_tool_loop(msgs)
@@ -322,10 +332,12 @@ class TestFalsePositiveBattery:
         else:
             assert result is not None
 
-    @pytest.mark.parametrize('n_pairs, expected', [
-        (5, None),   # below Layer 2 threshold (6)
-        (6, True),   # at Layer 2 threshold
-    ])
+    @pytest.mark.parametrize(
+        'n_pairs, expected',
+        [
+            (5, None),  # below Layer 2 threshold (6)
+            (6, True),  # at Layer 2 threshold
+        ])
     def test_layer2_fires_at_threshold_of_6_pairs(self, n_pairs, expected):
         # Genuinely varying outputs isolate Layer 2 — wrapper-only churn is
         # normalized away and would let Layer 1 fire at its own threshold (5).
@@ -361,8 +373,7 @@ class TestFalsePositiveBattery:
         # ~4-char unique tail per command → pairwise sim ≈ 0.98 > 0.85
         suffixes = [f"-t{chr(97 + i)}" for i in range(6)]
         cmds = [base + ' ' + sfx for sfx in suffixes]
-        min_sim = min(SequenceMatcher(None, a, b).ratio()
-                      for i, a in enumerate(cmds) for b in cmds[i + 1:])
+        min_sim = min(SequenceMatcher(None, a, b).ratio() for i, a in enumerate(cmds) for b in cmds[i + 1:])
         assert min_sim > 0.85, f"fixture premise broken: min pairwise sim {min_sim:.4f} ≤ 0.85"
         out = 'APPROVED: Command exited with return code 1. (elapsed 11.3s)'
         msgs = [Message(role=USER, content='run')]
@@ -431,6 +442,7 @@ class TestFalsePositiveBattery:
 # PART 4 — Robustness
 # ══════════════════════════════════════════════
 
+
 class TestRobustness:
     # Edge cases and malformed input handling.
 
@@ -469,8 +481,10 @@ class TestRobustness:
             for m in msgs:
                 d = m.model_dump()
                 if d.get('function_call') is not None:
-                    d['function_call'] = {'name': d['function_call']['name'],
-                                          'arguments': d['function_call']['arguments']}
+                    d['function_call'] = {
+                        'name': d['function_call']['name'],
+                        'arguments': d['function_call']['arguments']
+                    }
                 out.append(d)
             return out
 
@@ -486,8 +500,7 @@ class TestRobustness:
         msgs = failing_poll_pairs(6)
         # Replace last output with a multimodal list carrying the same terminal text
         from agent_cascade.llm.schema import ContentItem
-        msgs[-1] = Message(role=FUNCTION, name='shell_cmd',
-                           content=[ContentItem(text=POLL_OUTPUT)])
+        msgs[-1] = Message(role=FUNCTION, name='shell_cmd', content=[ContentItem(text=POLL_OUTPUT)])
         assert detect_tool_loop(msgs) is not None
 
     def test_system_messages_ignored(self):
@@ -503,6 +516,7 @@ class TestRobustness:
 # PART 4b — FUNCTION output normalization
 # ══════════════════════════════════════════════
 
+
 class TestOutputNormalization:
     # Known wrapper formats are stripped; genuine output differences survive.
 
@@ -512,12 +526,10 @@ class TestOutputNormalization:
         base = 'Command exited with return code 1.\nConnection refused (host api.internal:8080)'
         msgs = [Message(role=USER, content='poll')]
         for i in range(6):
-            out = (
-                f"APPROVED: {base} (elapsed {10 + i * 2}.{i}s)\n"
-                f"Security Justification: Auto-generated prose variant {i} — "
-                f"different wording every call, mentions step {i * 7}.\n"
-                f"2026-08-25T13:{i:02d}:44.123456"
-            )
+            out = (f"APPROVED: {base} (elapsed {10 + i * 2}.{i}s)\n"
+                   f"Security Justification: Auto-generated prose variant {i} — "
+                   f"different wording every call, mentions step {i * 7}.\n"
+                   f"2026-08-25T13:{i:02d}:44.123456")
             msgs.append(_fc_msg('shell_cmd', {'command': '__status', 'tool_id': '9'}))
             msgs.append(_fn_msg('shell_cmd', out))
         result = detect_tool_loop(msgs)
@@ -550,7 +562,7 @@ class TestOutputNormalization:
     def test_fail_class_survives_normalization(self):
         # Failure-class extraction on wrapped outputs: exit code, no-output and FAILED
         # banner each survive normalization.
-        from agent_cascade.tool_loop_detect import _normalize_output, _fail_class
+        from agent_cascade.tool_loop_detect import _fail_class, _normalize_output
 
         # EXIT:1 — the verdict prose is stripped but the exit-code sentence survives.
         out_exit = ('APPROVED: Command exited with return code 1. (elapsed 11.3s)\n'
@@ -589,10 +601,13 @@ class TestOutputNormalization:
         from agent_cascade.tool_loop_detect import _normalize_output
 
         body = 'AssertionError: expected 4, got 1'
-        t1 = (body + '\n\n[TRUNCATED — showing 200 of 5000 lines '
-                '(4996 chars total). Full output saved to: logs/spillover/impl_phase1_D_fixup_shell_20260824_125626_155333.txt]')
-        t2 = (body + '\n\n[TRUNCATED — showing 200 of 5000 lines '
-                '(9876 chars total). Full output saved to: logs/spillover/other_agent_tool_cmd_20260825_010101_999999.txt]')
+        t1 = (
+            body + '\n\n[TRUNCATED — showing 200 of 5000 lines '
+            '(4996 chars total). Full output saved to: logs/spillover/impl_phase1_D_fixup_shell_20260824_125626_155333.txt]'
+        )
+        t2 = (
+            body + '\n\n[TRUNCATED — showing 200 of 5000 lines '
+            '(9876 chars total). Full output saved to: logs/spillover/other_agent_tool_cmd_20260825_010101_999999.txt]')
         assert _normalize_output(t1) == _normalize_output(t2)
 
     def test_elapsed_and_timestamp_stripped_everywhere(self):
@@ -623,6 +638,7 @@ class TestOutputNormalization:
 # PART 5 — Integration through _pre_llm_checks
 # ══════════════════════════════════════════════
 
+
 class TestPreLlmChecksIntegration:
     # _pre_llm_checks wiring for the fuzzy (Tier 2) detector — warning-first + optional
     # escalation (two-tier redesign, plan §5.2; fake-engine pattern). State machine under
@@ -632,7 +648,9 @@ class TestPreLlmChecksIntegration:
     # the toggle off, warnings re-issue per cooldown and NEVER roll back.
 
     def _make_fake_instance(self, name='test_agent'):
+
         class FakeInstance:
+
             def __init__(self, instance_name):
                 self.instance_name = instance_name
                 # Fuzzy state machine fields (defaults mirror AgentInstance)
@@ -642,10 +660,14 @@ class TestPreLlmChecksIntegration:
                 self._suppress_loop_detection_next_turn = False
                 self._loop_rollback_count = 0
                 self._current_turn = 0
+
         return FakeInstance(name)
 
-    def _make_fake_pool(self, max_auto_rollbacks=3, auto_rollback_on_loop=True,
-                        loop_fuzzy_warning_enabled=True, tool_loop_detection_enabled=True,
+    def _make_fake_pool(self,
+                        max_auto_rollbacks=3,
+                        auto_rollback_on_loop=True,
+                        loop_fuzzy_warning_enabled=True,
+                        tool_loop_detection_enabled=True,
                         tool_loop_fuzzy_rollback_enabled=False):
         pool = MagicMock()
         pool.settings = MagicMock()
@@ -992,16 +1014,19 @@ class TestPreLlmChecksIntegration:
         # ever let Tier 2 run after an exact hit, this test would fail on the
         # rollback/telemetry assertions, not silently pass.
         pool = self._make_fake_pool(
-            tool_loop_fuzzy_rollback_enabled=True,          # escalation armed
-            loop_fuzzy_warning_enabled=True,                # Tier-2 gate ON
-            tool_loop_detection_enabled=True,               # legacy kill switch ON
+            tool_loop_fuzzy_rollback_enabled=True,  # escalation armed
+            loop_fuzzy_warning_enabled=True,  # Tier-2 gate ON
+            tool_loop_detection_enabled=True,  # legacy kill switch ON
         )
         engine = self._make_engine(pool)
         inst = self._make_fake_instance()
         msgs = [
-            Message(role=USER, content='q'), Message(role=ASSISTANT, content='a'),
-            Message(role=USER, content='q'), Message(role=ASSISTANT, content='a'),
-            Message(role=USER, content='q'), Message(role=ASSISTANT, content='a'),
+            Message(role=USER, content='q'),
+            Message(role=ASSISTANT, content='a'),
+            Message(role=USER, content='q'),
+            Message(role=ASSISTANT, content='a'),
+            Message(role=USER, content='q'),
+            Message(role=ASSISTANT, content='a'),
         ]
 
         with patch('agent_cascade.engine.llm_call._detect_exact_loop', return_value=('repeat', 2)), \

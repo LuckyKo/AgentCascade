@@ -5,8 +5,8 @@ confirmation, fixing bugs where kill returned but heartbeats continued.
 """
 
 import os
-import sys
 import subprocess
+import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from agent_cascade.async_shell import AsyncShellTracker, AsyncShellTask, KILL_WAIT_TIMEOUT
+from agent_cascade.async_shell import AsyncShellTask, AsyncShellTracker
 from agent_cascade.log import logger
 
 
@@ -81,7 +81,7 @@ class TestKillTaskWithMockedProcess:
         _setup_task(tracker, task)
 
         with patch.object(tracker, '_kill_process_tree') as mock_kill:
-            result = tracker.kill_task('test_agent', 1)
+            tracker.kill_task('test_agent', 1)
 
             mock_kill.assert_called_once()
             assert mock_kill.call_args[0][0] is proc_mock
@@ -239,7 +239,7 @@ class TestKillTaskWithRealProcess:
         # Record time before kill
         start = time.time()
         result = tracker.kill_task('test_agent', tool_id)
-        elapsed = time.time() - start
+        time.time() - start
 
         assert 'Shell killed' in result, f"Kill failed: {result}"
 
@@ -303,7 +303,7 @@ class TestPowerShellNoProfile:
         # Mock subprocess.Popen to capture the actual command used
         captured_cmd = []
 
-        original_popen = subprocess.Popen
+        original_popen = subprocess.Popen  # noqa: F841  (save original Popen for restore)
 
         def mock_popen(cmd, **kwargs):
             if isinstance(cmd, str):

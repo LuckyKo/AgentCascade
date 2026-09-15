@@ -12,16 +12,14 @@ All tests are self-contained — no LLM or API server required.
 import os
 import shutil
 import tempfile
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-from agent_cascade.exceptions import (
-    FallbackCompressionRequired,
-    ContextWindowExceeded,
-)
-from agent_cascade.llm.base import ModelServiceError, BaseChatModel
-from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
+import pytest
+
 from agent_cascade.api_router import APIRouter
+from agent_cascade.exceptions import ContextWindowExceeded, FallbackCompressionRequired
+from agent_cascade.llm.base import BaseChatModel, ModelServiceError
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +61,7 @@ def _disable_sanity_probe():
 # ──────────────────────────────────────────────
 # 1. Exception tests
 # ──────────────────────────────────────────────
+
 
 class TestFallbackCompressionRequired:
     """Test FallbackCompressionRequired exception behavior."""
@@ -110,6 +109,7 @@ class TestFallbackCompressionRequired:
 # 2. Silent truncation removal (llm/base.py) — REAL CODE PATHS
 # ──────────────────────────────────────────────
 
+
 class TestSilentTruncationRemoval:
     """Verify overflow guard in base.py raises ContextWindowExceeded instead of silently truncating."""
 
@@ -121,6 +121,7 @@ class TestSilentTruncationRemoval:
         from agent_cascade.llm.base import BaseChatModel
 
         class TestModel(BaseChatModel):
+
             @property
             def support_multimodal_input(self):
                 return False
@@ -193,12 +194,13 @@ class TestSilentTruncationRemoval:
 # 3. API Router fallback behavior (api_router.py) — REAL CODE PATHS
 # ──────────────────────────────────────────────
 
+
 class TestAPIRouterFallbackBehavior:
     """Test context-exceeded handling in call_with_fallback using real APIRouter."""
 
     def _make_pool_and_router(self):
         """Create a minimal mock pool and real APIRouter instance with proper setup."""
-        from agent_cascade.api_router import APIRouter, APIEndpoint
+        from agent_cascade.api_router import APIEndpoint, APIRouter
 
         # Always use a fresh isolated dir per router instance to prevent cross-test
         # contamination: the session-level conftest fixture shares ONE config dir across
@@ -217,7 +219,10 @@ class TestAPIRouterFallbackBehavior:
             pool.is_instance_terminated.return_value = False
 
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
 
@@ -326,6 +331,7 @@ class TestAPIRouterFallbackBehavior:
 #     payload that fit the configured window; see reports/fallback-compression-misclass-and-stop-cascade.md)
 # ──────────────────────────────────────────────
 
+
 def _make_payload_messages(n_words=50):
     """Build a small deterministic Message list (system + user)."""
     return [
@@ -340,7 +346,7 @@ class TestContextExceededLimitGate:
 
     def _make_router_with_limit(self, max_input_tokens):
         """Real APIRouter with one coder endpoint carrying an explicit max_input_tokens."""
-        from agent_cascade.api_router import APIRouter, APIEndpoint
+        from agent_cascade.api_router import APIEndpoint, APIRouter
 
         test_config_dir = tempfile.mkdtemp(prefix='ac_test_gate_')
         _orig_env = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
@@ -351,7 +357,10 @@ class TestContextExceededLimitGate:
             pool.is_instance_terminated.return_value = False
 
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
             router._pool = pool
@@ -417,7 +426,7 @@ class TestContextExceededLimitGate:
     def test_unknown_limit_context_error_falls_through(self):
         """(3) Context-exceeded 400 with unknown/missing configured limit →
         never compress off an unknown limit; falls through to exhaustion."""
-        from agent_cascade.api_router import APIRouter, APIEndpoint
+        from agent_cascade.api_router import APIEndpoint, APIRouter
 
         test_config_dir = tempfile.mkdtemp(prefix='ac_test_gate_')
         _orig_env = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
@@ -429,7 +438,10 @@ class TestContextExceededLimitGate:
 
             # Default cfg WITHOUT max_input_tokens; general limit 0 → injected value is 0 (unknown)
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
             router._pool = pool
@@ -507,6 +519,7 @@ class TestContextExceededLimitGate:
 # 3c. A3 — _is_context_exceeded_error hardening: free-text patterns only trusted on 400
 # ──────────────────────────────────────────────
 
+
 class TestIsContextExceededErrorHardened:
     """A3: generic free-text patterns must not fire on non-400 status codes."""
 
@@ -518,7 +531,10 @@ class TestIsContextExceededErrorHardened:
         os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = test_config_dir
         try:
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
             return router
@@ -558,6 +574,7 @@ class TestIsContextExceededErrorHardened:
 # 3d. A4 — get_endpoint_chain must guarantee max_input_tokens on every returned cfg
 # ──────────────────────────────────────────────
 
+
 class TestEndpointChainMaxInputTokensGuarantee:
     """A4: the Tier-4 default cfg (and every chain cfg) must carry an int
     max_input_tokens so base.py's pre-check can never silently cap at
@@ -573,7 +590,10 @@ class TestEndpointChainMaxInputTokensGuarantee:
         try:
             # Default cfg WITHOUT max_input_tokens, general limit 0 → injected value must be 0 (explicit)
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
             chain = router.get_endpoint_chain('Coder')
@@ -585,9 +605,11 @@ class TestEndpointChainMaxInputTokensGuarantee:
 
             # General limit > 0 → injected as the explicit limit (never left keyless)
             router2 = APIRouter(
-                default_llm_cfg={'model': 'default-model',
-                                 'api_base': 'http://localhost:1234/v1',
-                                 'max_input_tokens': 128_000},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1',
+                    'max_input_tokens': 128_000
+                },
                 config_dir=test_config_dir,
             )
             chain2 = router2.get_endpoint_chain('Coder')
@@ -595,9 +617,11 @@ class TestEndpointChainMaxInputTokensGuarantee:
 
             # Existing explicit limit is never clobbered by the injection
             router3 = APIRouter(
-                default_llm_cfg={'model': 'default-model',
-                                 'api_base': 'http://localhost:1234/v1',
-                                 'max_input_tokens': 90_000},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1',
+                    'max_input_tokens': 90_000
+                },
                 config_dir=test_config_dir,
             )
             chain3 = router3.get_endpoint_chain('Coder')
@@ -617,9 +641,10 @@ class TestEndpointChainMaxInputTokensGuarantee:
 #                overflow and raise FallbackCompressionRequired.
 # ──────────────────────────────────────────────
 
+
 def _make_two_endpoint_router(limit_a, limit_b):
     """Real APIRouter with two Coder endpoints (A at priority 0 = chain head, B at 1)."""
-    from agent_cascade.api_router import APIRouter, APIEndpoint
+    from agent_cascade.api_router import APIEndpoint, APIRouter
 
     test_config_dir = tempfile.mkdtemp(prefix='ac_test_misclass_')
     _orig_env = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
@@ -630,17 +655,26 @@ def _make_two_endpoint_router(limit_a, limit_b):
         pool.is_instance_terminated.return_value = False
 
         router = APIRouter(
-            default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+            default_llm_cfg={
+                'model': 'default-model',
+                'api_base': 'http://localhost:1234/v1'
+            },
             config_dir=test_config_dir,
         )
         router._pool = pool
         ep_a = APIEndpoint(
-            name='ep-a', api_base='http://a:8080/v1', model='model-a',
-            max_retries=0, max_input_tokens=limit_a,
+            name='ep-a',
+            api_base='http://a:8080/v1',
+            model='model-a',
+            max_retries=0,
+            max_input_tokens=limit_a,
         )
         ep_b = APIEndpoint(
-            name='ep-b', api_base='http://b:8080/v1', model='model-b',
-            max_retries=0, max_input_tokens=limit_b,
+            name='ep-b',
+            api_base='http://b:8080/v1',
+            model='model-b',
+            max_retries=0,
+            max_input_tokens=limit_b,
         )
         router.add_endpoint(ep_a)
         router.add_endpoint(ep_b)
@@ -720,6 +754,7 @@ class TestGateClassifiesGenuineOverflowOnAssignedEndpoint:
 # 4. Execution engine iterative compression (execution_engine.py) — REAL CODE PATHS
 # ──────────────────────────────────────────────
 
+
 class TestExecutionEngineIterativeCompression:
     """Test the FallbackCompressionRequired handler using real ExecutionEngine."""
 
@@ -735,9 +770,9 @@ class TestExecutionEngineIterativeCompression:
         instance._compression_lock = compression_lock
         instance._streaming_responses = []
         instance.instance_name = 'test-agent'
-        instance._force_compress_count = 0      # Real int for check_overfeeding comparison
-        instance.compression_summary = None     # Set by handler after successful compression
-        instance.latest_marker_index = -1       # Set by handler after successful compression
+        instance._force_compress_count = 0  # Real int for check_overfeeding comparison
+        instance.compression_summary = None  # Set by handler after successful compression
+        instance.latest_marker_index = -1  # Set by handler after successful compression
 
         # _is_terminal_stop() (execution_engine.py:1839) reads self.pool.stopped,
         # self._my_generation, self.pool._run_generation and
@@ -760,7 +795,11 @@ class TestExecutionEngineIterativeCompression:
         # Mock compressor window lookup
         comp_chain = [{'max_input_tokens': 32768}]
         pool.api_router = MagicMock()
-        pool.api_router.get_endpoint_chain.side_effect = lambda agent_type, **kw: comp_chain if agent_type == 'Compressor' else [{'max_input_tokens': 10000}]
+        pool.api_router.get_endpoint_chain.side_effect = lambda agent_type, **kw: comp_chain if agent_type == 'Compressor' else [
+            {
+                'max_input_tokens': 10000
+            }
+        ]
 
         # Mock compressor agent for system prompt estimation
         comp_agent = MagicMock()
@@ -770,7 +809,7 @@ class TestExecutionEngineIterativeCompression:
         # CRITICAL: settings must be a real object with proper attributes, not mocks.
         # Using a simple namespace to avoid MagicMock comparison issues in backoff calculation.
         class Settings:
-            retry_max_attempts = 2       # Keep low for fast tests
+            retry_max_attempts = 2  # Keep low for fast tests
             retry_base_delay = 0.1
             retry_max_delay = 1.0
             loop_min_chars = 4000
@@ -795,8 +834,8 @@ class TestExecutionEngineIterativeCompression:
 
     def test_handler_calls_find_compression_slice(self):
         """FallbackCompressionRequired handler calls real _find_compression_slice."""
-        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
         from agent_cascade.compression.result import CompressResult
+        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
 
         engine, pool, instance, history = self._make_pool_and_engine()
 
@@ -815,7 +854,6 @@ class TestExecutionEngineIterativeCompression:
 
         # Track calls to _find_compression_slice via wrapping
         slice_calls = []
-        original_find = engine._find_compression_slice
 
         def tracking_find(*args, **kwargs):
             slice_calls.append((args, kwargs))
@@ -842,7 +880,7 @@ class TestExecutionEngineIterativeCompression:
                 template.llm = MagicMock()
                 template.llm.generate_cfg = {}
 
-                result = list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')], template, []))
+                list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')], template, []))
 
         assert len(slice_calls) >= 1, '_find_compression_slice should be called by handler'
         assert call_count == 2, f"Expected 2 calls (FCR then success), got {call_count}"
@@ -881,8 +919,8 @@ class TestExecutionEngineIterativeCompression:
 
     def test_max_rounds_exceeded_raises_context_window_exceeded(self):
         """Compression loop exhausts all rounds → raises ContextWindowExceeded via real handler."""
-        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_MAX_ROUNDS
         from agent_cascade.compression.result import CompressResult
+        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_MAX_ROUNDS
 
         engine, pool, instance, history = self._make_pool_and_engine()
 
@@ -920,7 +958,7 @@ class TestExecutionEngineIterativeCompression:
                 template.llm.generate_cfg = {}
 
                 gen = engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')], template, [])
-                with pytest.raises(ContextWindowExceeded) as exc_info:
+                with pytest.raises(ContextWindowExceeded):
                     list(gen)
 
         # Verify compression was attempted multiple times (up to max rounds)
@@ -981,7 +1019,7 @@ class TestExecutionEngineIterativeCompression:
                 template.llm = MagicMock()
                 template.llm.generate_cfg = {}
 
-                result = list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')], template, []))
+                list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')], template, []))
 
         # Compression was retried until success
         assert attempt >= 3, f"Expected at least 3 compression attempts (fail, fail, succeed), got {attempt}"
@@ -990,6 +1028,7 @@ class TestExecutionEngineIterativeCompression:
 # ──────────────────────────────────────────────
 # 5. Smart slice algorithm (_find_compression_slice) — REAL CODE PATHS
 # ──────────────────────────────────────────────
+
 
 class TestSmartSliceAlgorithm:
     """Test the real _find_compression_slice method in ExecutionEngine."""
@@ -1034,7 +1073,8 @@ class TestSmartSliceAlgorithm:
 
     def test_halves_fraction_iteratively_until_fit(self):
         """Real _find_compression_slice halves fraction iteratively; track decreasing values."""
-        history = [Message(role=SYSTEM, content='sys')] + [Message(role=USER, content=f"msg{i} " * 10) for i in range(50)]
+        history = [Message(role=SYSTEM, content='sys')
+                  ] + [Message(role=USER, content=f"msg{i} " * 10) for i in range(50)]
         engine, pool = self._make_engine_with_pool(history)
 
         active_start_idx, active_set, latest_summary_idx = (2, history[2:], -1)
@@ -1064,7 +1104,8 @@ class TestSmartSliceAlgorithm:
             )
 
         # Verify fractions were iteratively halved (each < previous)
-        assert len(fractions_used) > 1, f"Expected multiple fraction attempts, got {len(fractions_used)}: {fractions_used}"
+        assert len(
+            fractions_used) > 1, f"Expected multiple fraction attempts, got {len(fractions_used)}: {fractions_used}"
         for i in range(1, len(fractions_used)):
             assert fractions_used[i] < fractions_used[i - 1], \
                 f"Fractions should decrease: {fractions_used[i-1]} -> {fractions_used[i]}"
@@ -1142,12 +1183,13 @@ class TestSmartSliceAlgorithm:
 # 6. Integration tests — REAL CODE PATHS
 # ──────────────────────────────────────────────
 
+
 class TestFallbackCompressionIntegration:
     """Higher-level integration tests exercising real production code."""
 
     def test_full_flow_non_compressor_agent(self):
         """End-to-end flow using real APIRouter: context-exceeded → FallbackCompressionRequired."""
-        from agent_cascade.api_router import APIRouter, APIEndpoint
+        from agent_cascade.api_router import APIEndpoint, APIRouter
 
         # Always use a fresh isolated dir per router instance (see _make_pool_and_router note).
         # Override the env var too — APIRouter.__init__ prioritizes it over config_dir.
@@ -1159,7 +1201,10 @@ class TestFallbackCompressionIntegration:
             pool.terminated_instances = set()
 
             router = APIRouter(
-                default_llm_cfg={'model': 'default', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
             # Positive general limit so the A1/A2 gate classifies the TYPED
@@ -1167,8 +1212,11 @@ class TestFallbackCompressionIntegration:
             router.default_llm_cfg['max_input_tokens'] = 128_000
             router._pool = pool
 
-            ep = APIEndpoint(name='test', api_base='http://test:8080/v1', model='test-model',
-                             max_retries=0, max_input_tokens=128_000)
+            ep = APIEndpoint(name='test',
+                             api_base='http://test:8080/v1',
+                             model='test-model',
+                             max_retries=0,
+                             max_input_tokens=128_000)
             router.add_endpoint(ep)
 
             def failing_call(llm_cfg, *args, **kwargs):
@@ -1225,7 +1273,10 @@ class TestFallbackCompressionIntegration:
         os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = test_config_dir
         try:
             router = APIRouter(
-                default_llm_cfg={'model': 'default', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
 
@@ -1255,6 +1306,7 @@ class TestFallbackCompressionIntegration:
 # exceeded re-fired next turn → infinite loop. The two triggers: (a) endpoint reorder corrupts the
 # positional cursor; (b) no endpoint assigned → post-compression "fits" check sees limit=0 and
 # assumes fit without verifying against the real server limit.
+
 
 class TestFallbackCompressionLoggerSyncAndFitsCheck:
     """Regression tests for the compression infinite-loop bug (todo.md line 123)."""
@@ -1295,9 +1347,10 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         # Compressor window lookup: generous so _find_compression_slice uses the initial fraction.
         comp_chain = [{'max_input_tokens': 32768}]
         pool.api_router = MagicMock()
-        pool.api_router.get_endpoint_chain.side_effect = (
-            lambda agent_type, **kw: comp_chain if agent_type == 'Compressor' else [{'max_input_tokens': next_limit}]
-        )
+        pool.api_router.get_endpoint_chain.side_effect = (lambda agent_type, **kw: comp_chain
+                                                          if agent_type == 'Compressor' else [{
+                                                              'max_input_tokens': next_limit
+                                                          }])
 
         comp_agent = MagicMock()
         comp_agent.system_message = 'You are a compressor.'
@@ -1344,7 +1397,8 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         )
 
         # Force a single deterministic slice so the round succeeds immediately.
-        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10, [Message(role=USER, content='x')])
+        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10,
+                                                          [Message(role=USER, content='x')])
 
         call_count = [0]
 
@@ -1414,7 +1468,8 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         engine.compression_handler._sync_logger_after_compression = sync_spy
 
         # Force a deterministic slice so BOTH rounds succeed (no "too small" break / give-up).
-        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10, [Message(role=USER, content='x')])
+        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10,
+                                                          [Message(role=USER, content='x')])
 
         # Large working set so the post-compression estimate EXCEEDS next_limit=1000.
         big = 'word ' * 400
@@ -1436,9 +1491,15 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         def stateful_compress(*a, **k):
             compress_calls[0] += 1
             return CompressResult(
-                success=True, summary_text='compressed', marker_message=None,
-                messages_discarded=10, tail_count=5, error=None, mode='auto',
-                tokens_before=5000, tokens_after=2000,
+                success=True,
+                summary_text='compressed',
+                marker_message=None,
+                messages_discarded=10,
+                tail_count=5,
+                error=None,
+                mode='auto',
+                tokens_before=5000,
+                tokens_after=2000,
             )
 
         call_count = [0]
@@ -1460,13 +1521,10 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
 
         # Two successful rounds → compress_context ran twice and sync fired once per round.
         assert call_count[0] == 2, f"Expected FCR-then-success (2 LLM calls), got {call_count[0]}"
-        assert compress_calls[0] == 2, (
-            f"Expected 2 successful compression rounds, got {compress_calls[0]}"
-        )
+        assert compress_calls[0] == 2, (f"Expected 2 successful compression rounds, got {compress_calls[0]}")
         assert sync_spy.call_count == 2, (
             f"Expected _sync_logger_after_compression once per round (2 rounds → 2 calls), "
-            f"got {sync_spy.call_count}"
-        )
+            f"got {sync_spy.call_count}")
         # Each call uses the correct positional signature.
         for c in sync_spy.call_args_list:
             a = c.args
@@ -1484,6 +1542,7 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         asserted here is that the warning fires (not just "no exception").
         """
         import logging
+
         from agent_cascade.log import logger as ac_logger
 
         engine, pool, instance, history = self._make_pool_and_engine(next_limit=10000)
@@ -1502,12 +1561,9 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
 
         # The sync-failure warning must fire and name the out-of-sync / re-inflation risk.
         joined = '\n'.join(r.getMessage() for r in caplog.records)
-        assert 'Logger sync after compression FAILED' in joined, (
-            f"Expected a sync-failure log line; logs:\n{joined}"
-        )
+        assert 'Logger sync after compression FAILED' in joined, (f"Expected a sync-failure log line; logs:\n{joined}")
         assert 'out of sync' in joined and 're-inflate' in joined, (
-            f"Expected the warning to name the out-of-sync / re-inflation risk; logs:\n{joined}"
-        )
+            f"Expected the warning to name the out-of-sync / re-inflation risk; logs:\n{joined}")
 
     def test_fits_check_uses_llm_instance_limit_when_router_limit_zero(self, caplog):
         """When the router chain reports max_input_tokens=0, the fits-check falls back to the
@@ -1518,6 +1574,7 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         verifying against the real server limit.
         """
         import logging
+
         from agent_cascade.log import logger as ac_logger
 
         engine, pool, instance, history = self._make_pool_and_engine(next_limit=0)
@@ -1536,11 +1593,9 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         # configured and no detected limit"), which must NOT appear.
         joined = '\n'.join(r.getMessage() for r in caplog.records)
         assert 'using LLM-instance detected limit 4096' in joined, (
-            f"Expected the fits-check to use the LLM-instance detected limit; logs:\n{joined}"
-        )
+            f"Expected the fits-check to use the LLM-instance detected limit; logs:\n{joined}")
         assert 'no detected limit on the LLM instance' not in joined, (
-            "The blind 'assume fits' branch must NOT be taken when a detected limit is available."
-        )
+            "The blind 'assume fits' branch must NOT be taken when a detected limit is available.")
 
     def test_fits_check_does_not_assume_fit_when_no_limit_anywhere(self, caplog):
         """When BOTH the router chain and the LLM instance report no limit, the code must NOT
@@ -1555,6 +1610,7 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         terminates cleanly after 2 LLM calls (silent assume-fit); post-fix it raises.
         """
         import logging
+
         from agent_cascade.log import logger as ac_logger
 
         engine, pool, instance, history = self._make_pool_and_engine(next_limit=0)
@@ -1569,12 +1625,10 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         joined = '\n'.join(r.getMessage() for r in caplog.records)
         # The new no-limit branch must log a WARNING that it is NOT assuming fit.
         assert 'NOT assuming it fits' in joined, (
-            f"Expected the no-limit branch to warn that it is NOT assuming fit; logs:\n{joined}"
-        )
+            f"Expected the no-limit branch to warn that it is NOT assuming fit; logs:\n{joined}")
         # The old silent assume-fit debug message must be gone entirely.
         assert 'Assuming compressed payload fits' not in joined, (
-            "The silent 'assume fits' escape hatch must no longer exist."
-        )
+            "The silent 'assume fits' escape hatch must no longer exist.")
 
     def test_cursor_reset_on_error_path_after_fallback_compression(self):
         """After a fallback-compression cycle where the resumed turn ERRORS (no successful
@@ -1604,11 +1658,18 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
 
         success_result = CompressResult(
-            success=True, summary_text='compressed', marker_message=None,
-            messages_discarded=10, tail_count=5, error=None, mode='auto',
-            tokens_before=5000, tokens_after=2000,
+            success=True,
+            summary_text='compressed',
+            marker_message=None,
+            messages_discarded=10,
+            tail_count=5,
+            error=None,
+            mode='auto',
+            tokens_before=5000,
+            tokens_after=2000,
         )
-        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10, [Message(role=USER, content='x')])
+        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10,
+                                                          [Message(role=USER, content='x')])
 
         call_count = [0]
 
@@ -1631,12 +1692,10 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         # The turn ended in error (no successful last_output), but the cursor MUST still be reset.
         assert reset_spy.call_count >= 1, (
             f"Expected reset_instance_endpoint to fire at the turn boundary even on error path, "
-            f"got {reset_spy.call_count} calls. Pre-fix code only reset on successful completion."
-        )
+            f"got {reset_spy.call_count} calls. Pre-fix code only reset on successful completion.")
         args, kwargs = reset_spy.call_args_list[-1]
         assert (args and args[0] == 'test-agent') or (kwargs.get('instance_name') == 'test-agent'), (
-            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[-1]}"
-        )
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[-1]}")
 
     def test_cursor_reset_on_timeout_error_after_fallback_compression(self):
         """After a fallback-compression cycle where the resumed turn hits a timeout error
@@ -1663,11 +1722,18 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
 
         success_result = CompressResult(
-            success=True, summary_text='compressed', marker_message=None,
-            messages_discarded=10, tail_count=5, error=None, mode='auto',
-            tokens_before=5000, tokens_after=2000,
+            success=True,
+            summary_text='compressed',
+            marker_message=None,
+            messages_discarded=10,
+            tail_count=5,
+            error=None,
+            mode='auto',
+            tokens_before=5000,
+            tokens_after=2000,
         )
-        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10, [Message(role=USER, content='x')])
+        engine._find_compression_slice = lambda *a, **k: (FALLBACK_COMPRESSION_INITIAL_FRACTION, 10,
+                                                          [Message(role=USER, content='x')])
 
         call_count = [0]
 
@@ -1690,12 +1756,10 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         # The turn ended in timeout (no successful last_output), but the cursor MUST still be reset.
         assert reset_spy.call_count >= 1, (
             f"Expected reset_instance_endpoint to fire at the turn boundary even on timeout path, "
-            f"got {reset_spy.call_count} calls."
-        )
+            f"got {reset_spy.call_count} calls.")
         args, kwargs = reset_spy.call_args_list[-1]
         assert (args and args[0] == 'test-agent') or (kwargs.get('instance_name') == 'test-agent'), (
-            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[-1]}"
-        )
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[-1]}")
 
     def test_inner_loop_retry_preserves_cursor_within_turn(self):
         """The turn-boundary reset fires AFTER the retry loop exits, not between retries.
@@ -1746,12 +1810,10 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
         # If the reset were per-retry (fired after each successful call), we'd see it here
         # but NOT in a multi-failure scenario. Exactly one call = end-of-turn scope.
         assert reset_spy.call_count == 1, (
-            f"Expected exactly one reset at the turn boundary, got {reset_spy.call_count}"
-        )
+            f"Expected exactly one reset at the turn boundary, got {reset_spy.call_count}")
         args, kwargs = reset_spy.call_args_list[0]
         assert (args and args[0] == 'test-agent') or (kwargs.get('instance_name') == 'test-agent'), (
-            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[0]}"
-        )
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[0]}")
 
     def test_cursor_reset_on_generator_early_close(self):
         """The cursor is reset even when the generator is closed early via gen.close().
@@ -1794,27 +1856,22 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
             template.llm = MagicMock()
             template.llm.generate_cfg = {}
 
-            gen = engine._execute_llm_call_with_retry(
-                instance, [Message(role=USER, content='test')], template, []
-            )
+            gen = engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')], template, [])
             # Pull one item to advance the generator past the initial setup and into
             # the streaming phase. The generator is now suspended at a yield point.
-            first = next(gen)
+            next(gen)
 
             # Simulate the consumer's early-close (core.py:691-692 finally: gen.close()).
             # This raises GeneratorExit inside the generator, which triggers the finally: block.
             gen.close()
 
         # The reset MUST have fired despite the early close.
-        assert reset_spy.call_count == 1, (
-            f"Expected reset_instance_endpoint to fire exactly once on generator close, "
-            f"got {reset_spy.call_count} calls. Without a finally: block, GeneratorExit "
-            f"skips code after the yield point and the cursor stays stuck."
-        )
+        assert reset_spy.call_count == 1, (f"Expected reset_instance_endpoint to fire exactly once on generator close, "
+                                           f"got {reset_spy.call_count} calls. Without a finally: block, GeneratorExit "
+                                           f"skips code after the yield point and the cursor stays stuck.")
         args, kwargs = reset_spy.call_args_list[0]
         assert (args and args[0] == 'test-agent') or (kwargs.get('instance_name') == 'test-agent'), (
-            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[0]}"
-        )
+            f"Expected reset_instance_endpoint('test-agent'), got: {reset_spy.call_args_list[0]}")
 
     def test_cursor_reset_fires_exactly_once_on_normal_exhaustion(self):
         """Sanity check: on normal generator exhaustion (list(gen)), the reset fires exactly once.
@@ -1844,21 +1901,18 @@ class TestFallbackCompressionLoggerSyncAndFitsCheck:
             template.llm = MagicMock()
             template.llm.generate_cfg = {}
             # Fully exhaust the generator (normal completion path).
-            results = list(engine._execute_llm_call_with_retry(
-                instance, [Message(role=USER, content='test')], template, []
-            ))
+            list(engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')], template, []))
 
         # Exactly one reset on normal exhaustion.
-        assert reset_spy.call_count == 1, (
-            f"Expected exactly one reset on normal generator exhaustion, "
-            f"got {reset_spy.call_count} calls."
-        )
+        assert reset_spy.call_count == 1, (f"Expected exactly one reset on normal generator exhaustion, "
+                                           f"got {reset_spy.call_count} calls.")
 
 
 # ──────────────────────────────────────────────
 # 5b. Part 2 — pre-send forced-compression guard is endpoint-truthful
 #     (reports/fallback-compression-misclass-investigation.md §5.2)
 # ──────────────────────────────────────────────
+
 
 class TestPreSendCompressionEndpointTruthful:
     """The regular forced-compression guard must size against the limit of the endpoint
@@ -1908,9 +1962,11 @@ class TestPreSendCompressionEndpointTruthful:
             messages = [Message(role=USER, content='payload')]
             llm_messages = list(messages)
             with patch.object(engine, '_force_compression', return_value=True) as mock_force:
-                triggered = engine._check_and_trigger_compression(
-                    instance, messages, llm_messages, None, assigned_max_tokens=assigned_max_tokens
-                )
+                triggered = engine._check_and_trigger_compression(instance,
+                                                                  messages,
+                                                                  llm_messages,
+                                                                  None,
+                                                                  assigned_max_tokens=assigned_max_tokens)
         return triggered, mock_force
 
     def test_triggers_against_assigned_endpoint_limit(self):
@@ -1921,9 +1977,7 @@ class TestPreSendCompressionEndpointTruthful:
         # 105k vs effective_limit(90k - 3k reserve) = 87k → ~120% usage > 96% threshold.
         triggered, mock_force = self._run_guard(engine, instance, assigned_max_tokens=90_000)
 
-        assert triggered is True, (
-            "Guard must compress pre-send against the assigned endpoint's true limit"
-        )
+        assert triggered is True, ("Guard must compress pre-send against the assigned endpoint's true limit")
         mock_force.assert_called_once()
 
     def test_no_trigger_when_assigned_limit_is_larger(self):
@@ -1933,9 +1987,7 @@ class TestPreSendCompressionEndpointTruthful:
         # 105k vs effective_limit(165.5k - 3k) = 162.5k → ~65% usage < 96% threshold.
         triggered, mock_force = self._run_guard(engine, instance, assigned_max_tokens=165_500)
 
-        assert triggered is False, (
-            "Payload fits the assigned endpoint's limit — no pre-send compression"
-        )
+        assert triggered is False, ("Payload fits the assigned endpoint's limit — no pre-send compression")
         mock_force.assert_not_called()
 
     def test_falls_back_to_first_priority_when_assigned_none(self):
@@ -1973,13 +2025,13 @@ class TestPreSendCompressionEndpointTruthful:
         assert mock_guard.call_count == 1
         _, kwargs = mock_guard.call_args
         assert kwargs.get('assigned_max_tokens') is None, (
-            'On resolution failure the guard must fall back to first-priority (assigned_max_tokens=None)'
-        )
+            'On resolution failure the guard must fall back to first-priority (assigned_max_tokens=None)')
 
 
 # ──────────────────────────────────────────────
 # 3f. get_assigned_max_tokens helper edge cases
 # ──────────────────────────────────────────────
+
 
 class TestGetAssignedMaxTokens:
     """APIRouter.get_assigned_max_tokens returns the chain head's TRUE limit, or None
@@ -2029,6 +2081,7 @@ class TestGetAssignedMaxTokens:
 #      service error because the estimator (~95.7k) fit under the configured limit;
 #      see reports/gate-nprompt-tokens-fix-plan.md)
 # ──────────────────────────────────────────────
+
 
 def _make_400(n_prompt=None, n_ctx=None, code='400', body_override=None):
     """Build a ModelServiceError shaped like the real llama.cpp 400 flow:
@@ -2088,7 +2141,7 @@ class TestServerReportedTokenCounts:
     only a fallback when the server fields are absent."""
 
     def _router(self, max_input_tokens):
-        from agent_cascade.api_router import APIRouter, APIEndpoint
+        from agent_cascade.api_router import APIEndpoint, APIRouter
 
         test_config_dir = tempfile.mkdtemp(prefix='ac_test_np_')
         _orig_env = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
@@ -2099,7 +2152,10 @@ class TestServerReportedTokenCounts:
             pool.is_instance_terminated.return_value = False
 
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
             router._pool = pool
@@ -2257,9 +2313,17 @@ class TestServerReportedTokenCounts:
 
         def failing_call(llm_cfg, *args, **kwargs):
             raise _make_400(
-                n_prompt=None, n_ctx=None, code='500',
-                body_override={'error': {'code': 500, 'message': 'exceed_context_size_error',
-                                         'n_prompt_tokens': 999_999, 'n_ctx': 1}},
+                n_prompt=None,
+                n_ctx=None,
+                code='500',
+                body_override={
+                    'error': {
+                        'code': 500,
+                        'message': 'exceed_context_size_error',
+                        'n_prompt_tokens': 999_999,
+                        'n_ctx': 1
+                    }
+                },
             )
 
         with pytest.raises(RuntimeError) as exc_info:
@@ -2359,7 +2423,10 @@ class TestExtractServerTokenCounts:
         os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = test_config_dir
         try:
             return APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
         finally:
@@ -2411,18 +2478,27 @@ class TestExtractServerTokenCounts:
 # 3h. Part 2 — tool-schema token accounting in the shared estimator + client pre-check
 # ──────────────────────────────────────────────
 
+
 def _big_function_schema():
     """A realistic-ish function schema dict (the shape tools/base.py `function` yields)."""
     return {
         'name': 'grep',
-        'description': ('Search for a text pattern in files. Supports Python regex syntax. '
-                        * 10),
+        'description': ('Search for a text pattern in files. Supports Python regex syntax. ' * 10),
         'parameters': {
             'type': 'object',
             'properties': {
-                'pattern': {'type': 'string', 'description': 'Text or regex pattern to search for.'},
-                'path': {'type': 'string', 'description': 'Directory to search in.'},
-                'include': {'type': 'string', 'description': 'File glob pattern to include.'},
+                'pattern': {
+                    'type': 'string',
+                    'description': 'Text or regex pattern to search for.'
+                },
+                'path': {
+                    'type': 'string',
+                    'description': 'Directory to search in.'
+                },
+                'include': {
+                    'type': 'string',
+                    'description': 'File glob pattern to include.'
+                },
             },
             'required': ['pattern'],
         },
@@ -2444,7 +2520,10 @@ class TestToolSchemaTokenAccounting:
         os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = test_config_dir
         try:
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
         finally:
@@ -2478,7 +2557,10 @@ class TestToolSchemaTokenAccounting:
         os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = test_config_dir
         try:
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
         finally:
@@ -2499,6 +2581,7 @@ class TestToolSchemaTokenAccounting:
         from agent_cascade.api_router import APIRouter
 
         class _Undumpable:
+
             def __str__(self):
                 raise RuntimeError('boom')
 
@@ -2507,7 +2590,10 @@ class TestToolSchemaTokenAccounting:
         os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = test_config_dir
         try:
             router = APIRouter(
-                default_llm_cfg={'model': 'default-model', 'api_base': 'http://localhost:1234/v1'},
+                default_llm_cfg={
+                    'model': 'default-model',
+                    'api_base': 'http://localhost:1234/v1'
+                },
                 config_dir=test_config_dir,
             )
         finally:
@@ -2519,9 +2605,7 @@ class TestToolSchemaTokenAccounting:
 
         messages = _make_payload_messages(n_words=100)
         base = router._estimate_payload_tokens(messages)
-        result = router._estimate_payload_tokens(
-            messages, functions=[{'name': 'x', 'description': _Undumpable()}]
-        )
+        result = router._estimate_payload_tokens(messages, functions=[{'name': 'x', 'description': _Undumpable()}])
         assert result == base
 
     def test_client_precheck_counts_functions(self):
@@ -2529,6 +2613,7 @@ class TestToolSchemaTokenAccounting:
         tool schemas pushing over → ContextWindowExceeded raised before any API call."""
 
         class _StubModel(BaseChatModel):
+
             @property
             def support_multimodal_input(self):
                 return False
@@ -2540,8 +2625,7 @@ class TestToolSchemaTokenAccounting:
             def _chat(self, messages, stream, delta_stream, generate_cfg):
                 raise AssertionError('must not reach the API call')
 
-            def _chat_with_functions(self, messages, functions, stream, delta_stream,
-                                     generate_cfg, lang):
+            def _chat_with_functions(self, messages, functions, stream, delta_stream, generate_cfg, lang):
                 raise AssertionError('must not reach the API call')
 
             def _chat_stream(self, messages, delta_stream, generate_cfg):
@@ -2613,9 +2697,11 @@ class TestToolSchemaTokenAccounting:
         router = MagicMock()
         router.get_effective_max_tokens.return_value = 100_000
         router.get_agent_priorities.return_value = []
+
         # call_with_fallback returns a generator (simulating streaming)
         def _fake_gen():
             yield [Message(role=ASSISTANT, content='ok')]
+
         router.call_with_fallback.return_value = _fake_gen()
         engine.pool.api_router = router
 
@@ -2659,7 +2745,8 @@ class TestTokenEstimatorUndercountFixes:
 
         base = Message(role=ASSISTANT, content='The answer is 42.')
         with_rc = Message(
-            role=ASSISTANT, content='The answer is 42.',
+            role=ASSISTANT,
+            content='The answer is 42.',
             reasoning_content=('Let me work through this carefully. First I consider the '
                                'constraints, then I eliminate each candidate solution until '
                                'only one remains, and finally I verify it against the original problem.'),
@@ -2672,8 +2759,8 @@ class TestTokenEstimatorUndercountFixes:
     def test_reasoning_content_counted_in_function_call_path(self):
         """The function_call early-return path (dict + Message) must also count
         reasoning_content, which is shipped alongside the tool call."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.llm.schema import FunctionCall
+        from agent_cascade.utils.utils import get_message_stats
 
         fc = {'name': 'grep', 'arguments': '{"pattern": "x"}'}
         d_base = dict({'role': ASSISTANT, 'function_call': fc})
@@ -2687,7 +2774,9 @@ class TestTokenEstimatorUndercountFixes:
 
         # Message-object variant of the same early-return path
         m_base = Message(role=ASSISTANT, content='', function_call=FunctionCall('grep', '{"pattern": "x"}'))
-        m_rc = Message(role=ASSISTANT, content='', function_call=FunctionCall('grep', '{"pattern": "x"}'),
+        m_rc = Message(role=ASSISTANT,
+                       content='',
+                       function_call=FunctionCall('grep', '{"pattern": "x"}'),
                        reasoning_content='I need to search the codebase for this symbol before editing it.')
         mb = get_message_stats(m_base)['tokens']
         mr = get_message_stats(m_rc)['tokens']
@@ -2700,7 +2789,8 @@ class TestTokenEstimatorUndercountFixes:
         from agent_cascade.utils.utils import get_message_stats
 
         m1 = Message(role=ASSISTANT, content='same visible content')
-        m2 = Message(role=ASSISTANT, content='same visible content',
+        m2 = Message(role=ASSISTANT,
+                     content='same visible content',
                      reasoning_content='entirely different hidden reasoning that changes the token count')
         assert get_message_stats(m1)['tokens'] != get_message_stats(m2)['tokens'], \
             'cache key must distinguish messages by reasoning_content'
@@ -2725,8 +2815,8 @@ class TestTokenEstimatorUndercountFixes:
     def test_tool_calls_no_double_count_empty_content(self):
         """Same invariant for tool_calls: an empty-content assistant message with a
         tool_call must not exceed a non-empty-content message carrying the same call."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.llm.schema import FunctionCall
+        from agent_cascade.utils.utils import get_message_stats
 
         tc = FunctionCall('grep', '{"pattern": "x", "path": "src"}')
         empty_tc = Message(role=ASSISTANT, content='', function_call=tc)
@@ -2746,11 +2836,18 @@ class TestTokenEstimatorUndercountFixes:
 
         plain = Message(role=ASSISTANT, content='ok')
         tc_msg = Message(
-            role=ASSISTANT, content='ok',
-            extra={'tool_calls': [
-                {'id': '1', 'type': 'function',
-                 'function': {'name': 'grep', 'arguments': '{"pattern": "x", "path": "src"}'}},
-            ]},
+            role=ASSISTANT,
+            content='ok',
+            extra={
+                'tool_calls': [{
+                    'id': '1',
+                    'type': 'function',
+                    'function': {
+                        'name': 'grep',
+                        'arguments': '{"pattern": "x", "path": "src"}'
+                    }
+                },]
+            },
         )
         p = get_message_stats(plain)['tokens']
         t = get_message_stats(tc_msg)['tokens']
@@ -2759,8 +2856,8 @@ class TestTokenEstimatorUndercountFixes:
     def test_function_call_serialized_as_json_not_repr(self):
         """The wire-format helper must emit JSON (the on-the-wire shape), not a Python
         repr. Verify against the exact dict structure base.py ships."""
-        from agent_cascade.utils.utils import _tool_calls_wire_json
         from agent_cascade.llm.schema import FunctionCall
+        from agent_cascade.utils.utils import _tool_calls_wire_json
 
         msg = Message(role=ASSISTANT, content='', function_call=FunctionCall('grep', '{"pattern": "x"}'))
         wire = _tool_calls_wire_json(msg)
@@ -2778,13 +2875,24 @@ class TestTokenEstimatorUndercountFixes:
         """_count_history_tokens must add estimate_functions_tokens(functions) to the
         message total when functions are provided, and be unchanged when they are not."""
         from types import SimpleNamespace
+
         from agent_cascade.engine.core import ExecutionEngine
-        from agent_cascade.utils.utils import get_message_stats, estimate_functions_tokens
+        from agent_cascade.utils.utils import estimate_functions_tokens, get_message_stats
 
         engine = object.__new__(ExecutionEngine)  # bare instance; method uses no __init__ state
         messages = [Message(role=USER, content='hello world this is a test message')]
-        schemas = [{'name': 'grep', 'description': 'd' * 50,
-                    'parameters': {'type': 'object', 'properties': {'p': {'type': 'string'}}}}]
+        schemas = [{
+            'name': 'grep',
+            'description': 'd' * 50,
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'p': {
+                        'type': 'string'
+                    }
+                }
+            }
+        }]
 
         def _inst():
             return SimpleNamespace(_last_token_count_conversation_length=-1, _cached_token_count=0)
@@ -2803,6 +2911,7 @@ class TestTokenEstimatorUndercountFixes:
         """Omitting the new `functions` argument (all pre-existing call sites) must keep
         working and equal the message-only total."""
         from types import SimpleNamespace
+
         from agent_cascade.engine.core import ExecutionEngine
         from agent_cascade.utils.utils import get_message_stats
 
@@ -2817,8 +2926,8 @@ class TestTokenEstimatorUndercountFixes:
     def test_function_call_with_content_counts_both(self):
         """A malformed assistant message carrying BOTH function_call AND non-empty content must
         count the content tokens too — the early-return path must not silently drop them."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.llm.schema import FunctionCall
+        from agent_cascade.utils.utils import get_message_stats
 
         fc = {'name': 'grep', 'arguments': '{"pattern": "x"}'}
         d_fc_only = dict({'role': ASSISTANT, 'function_call': fc})
@@ -2847,14 +2956,14 @@ class TestTokenEstimatorUndercountFixes:
         therefore count reasoning_content exactly ONCE via the content-present guard — not zero
         and not twice. A literal str(list)-truthy check would double-count; a text-only check
         would drop it entirely."""
-        from agent_cascade.utils.utils import get_message_stats
         from agent_cascade.llm.schema import ContentItem
         from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+        from agent_cascade.utils.utils import get_message_stats
 
         img = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
         rc = 'Let me reason about this carefully for a while.'
-        with_rc = get_message_stats(
-            Message(role=ASSISTANT, content=[ContentItem(image=img)], reasoning_content=rc))['tokens']
+        with_rc = get_message_stats(Message(role=ASSISTANT, content=[ContentItem(image=img)],
+                                            reasoning_content=rc))['tokens']
         no_rc = get_message_stats(Message(role=ASSISTANT, content=[ContentItem(image=img)]))['tokens']
 
         diff = with_rc - no_rc
@@ -2866,11 +2975,15 @@ class TestTokenEstimatorUndercountFixes:
     def test_malformed_tool_calls_missing_function_key_does_not_crash(self):
         """A tool_calls entry missing the 'function' key (malformed wire data) must not crash
         _tool_calls_wire_json or get_message_stats — it should serialize fail-soft."""
-        from agent_cascade.utils.utils import get_message_stats, _tool_calls_wire_json
+        from agent_cascade.utils.utils import _tool_calls_wire_json, get_message_stats
 
         malformed = Message(
-            role=ASSISTANT, content='ok',
-            extra={'tool_calls': [{'id': '1', 'type': 'function'}]},  # no 'function' key
+            role=ASSISTANT,
+            content='ok',
+            extra={'tool_calls': [{
+                'id': '1',
+                'type': 'function'
+            }]},  # no 'function' key
         )
         wire = _tool_calls_wire_json(malformed)  # must not raise
         import json as _json

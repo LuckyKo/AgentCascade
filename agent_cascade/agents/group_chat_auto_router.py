@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,7 +17,7 @@ from typing import Dict, Iterator, List, Optional, Union
 
 from agent_cascade import Agent
 from agent_cascade.llm import BaseChatModel
-from agent_cascade.llm.schema import Message, SYSTEM
+from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.tools import BaseTool
 from agent_cascade.utils.utils import has_chinese_chars
 
@@ -70,7 +70,7 @@ Only return the role name from [{agent_names}] or '[STOP]'. Do not reply any oth
                          **kwargs)
 
     def _run(self, messages: List[Message], lang: str = 'en', **kwargs) -> Iterator[List[Message]]:
-        dialogue = [] # convert existing messages into a prompt
+        dialogue = []  # convert existing messages into a prompt
         for msg in messages:
             if msg.role == SYSTEM:
                 continue

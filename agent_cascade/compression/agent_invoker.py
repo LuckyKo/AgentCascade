@@ -9,20 +9,20 @@ import re
 import threading
 import time as _time
 from typing import Any, List, Tuple
-from agent_cascade.prompts.dna import COMPRESSION_PROMPT, CONSOLIDATION_PROMPT, COMPRESSION_END_MARKER
-from agent_cascade.settings import COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS
-from agent_cascade.exceptions import AgentTerminatedError
-from agent_cascade.agent_instance import AgentState
-from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
-from agent_cascade.utils.thinking_block import strip_thinking_blocks
-from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text, _msg_field_or_extra
 
+from agent_cascade.agent_instance import AgentState
 # Import shared broadcast helper (replaces duplicated inline broadcast loops)
 from agent_cascade.api_integration import broadcast_stream_update
-
+from agent_cascade.exceptions import AgentTerminatedError
+from agent_cascade.llm.schema import ASSISTANT
+from agent_cascade.prompts.dna import COMPRESSION_END_MARKER, COMPRESSION_PROMPT, CONSOLIDATION_PROMPT
+from agent_cascade.settings import COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS
 # Shared slot-yield helper (three-path yield + pool-holder diagnostic), deduplicated
 # from security_handler.py. Depends only on stdlib+logging — no circular import.
 from agent_cascade.slot_yield_utils import yield_caller_slot
+from agent_cascade.utils.thinking_block import strip_thinking_blocks
+from agent_cascade.utils.utils import (_format_tool_calls_for_text, _msg_field_or_extra, _reasoning_to_text,
+                                       extract_text_from_message)
 
 # Lazy import of ExecutionEngine to break circular dependency chain:
 # execution_engine.py → compression/handler.py → core.py → agent_invoker.py (→ ExecutionEngine would loop back)
@@ -592,7 +592,7 @@ def invoke_compression_agent(
         )
 
     # Build the end instruction: marker always, caption only when requested.
-    from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION, CAPTION_INSTRUCTION
+    from agent_cascade.prompts.dna import CAPTION_INSTRUCTION, END_MARKER_INSTRUCTION
     end_instruction = ' ' + END_MARKER_INSTRUCTION + (CAPTION_INSTRUCTION if want_caption else '')
 
     summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text, end_instruction=end_instruction)

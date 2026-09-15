@@ -3,31 +3,33 @@ AgentPool — thin coordinator for all agent state. Composes the Phase-2 mixins 
 """
 
 from __future__ import annotations
-import threading
-import time
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from agent_cascade.log import logger
-from agent_cascade.agents import Assistant
-from agent_cascade.instance_id import get_instance_id, make_instance_dir
-from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
-from ..agent_instance import AgentInstance, PoolSettings, AgentState, ACTIVE_STATES
-from ..async_tools import AsyncToolRegistry
 
-from .conversation_map import _InstanceConversationMapping
-from .parallel_manager import ParallelAgentManager
-from .logger_mgr import LoggerManager
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from agent_cascade.agents import Assistant
+from agent_cascade.instance_id import get_instance_id
+from agent_cascade.llm.schema import USER, Message
+from agent_cascade.log import logger
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
+
+from ..agent_instance import AgentInstance, PoolSettings
+from ..async_tools import AsyncToolRegistry
+from .config_persist import ConfigPersistMixin
+from .conversation import ConversationMixin
 from .idle_manager import IdleManager
 from .lifecycle import LifecycleMixin
-from .conversation import ConversationMixin
+from .logger_mgr import LoggerManager
 from .message_queue import MessageQueueMixin
-from .slots import SlotsMixin
-from .config_persist import ConfigPersistMixin
+from .parallel_manager import ParallelAgentManager
 from .rollback import RollbackMixin
 from .session_io import SessionIOMixin
-class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
-                  SlotsMixin, ConfigPersistMixin, RollbackMixin, SessionIOMixin):
+from .slots import SlotsMixin
+
+
+class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin, ConfigPersistMixin, RollbackMixin,
+                SessionIOMixin):
     """
     Thin coordinator for all agent state. Delegates to focused managers
     rather than holding 25+ unrelated attributes.
@@ -66,15 +68,13 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
             self.api_router = api_router
         else:
             from agent_cascade.api_router import APIRouter
+
             # API config lives in the project root config/ dir, not workspace.
             # This file lives in pool/ (one level deeper than the original
             # agent_pool.py), so it needs an extra .parent to reach project root.
             project_root = Path(__file__).resolve().parent.parent.parent
             config_dir = str(project_root / 'config')
-            self.api_router = APIRouter(
-                default_llm_cfg=llm_cfg,
-                config_dir=config_dir
-            )
+            self.api_router = APIRouter(default_llm_cfg=llm_cfg, config_dir=config_dir)
             # Back-reference so api_router can check terminated_instances during retries
             self.api_router._pool = self
         self.telemetry = telemetry
@@ -82,11 +82,11 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
 
         # ── Core registries (owned directly) ─────────────────────────────────
         self.instances: Dict[str, AgentInstance] = {}  # instance_name → AgentInstance
-        self.templates: Dict[str, Assistant] = {}      # agent_class → template
+        self.templates: Dict[str, Assistant] = {}  # agent_class → template
 
         # ── Configuration ───────────────────────────────────────────────────
-        self.llm_cfg = llm_cfg                          # fallback LLM config when no api_router
-        self.settings = PoolSettings()                  # configurable thresholds and timeouts
+        self.llm_cfg = llm_cfg  # fallback LLM config when no api_router
+        self.settings = PoolSettings()  # configurable thresholds and timeouts
 
         # ── Defaults for attributes that can be overridden by persisted settings ──
         self._enable_async_shell_console_window = False  # default OFF; _load_pool_settings may override
@@ -97,31 +97,32 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
             self._pool_settings_path = self.api_router._config_dir / f"pool_settings_{instance_id}.json"
         else:
             self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
-        self._settings_save_lock = threading.Lock()     # guards concurrent save operations
-        self._loaded_auto_security = None               # persisted auto-security toggle (None = not loaded)
-        self._load_pool_settings()                      # load persisted values, overriding defaults
-        self._apply_pending_config()                    # apply work folders/workspace that need operation_manager
+        self._settings_save_lock = threading.Lock()  # guards concurrent save operations
+        self._loaded_auto_security = None  # persisted auto-security toggle (None = not loaded)
+        self._load_pool_settings()  # load persisted values, overriding defaults
+        self._apply_pending_config()  # apply work folders/workspace that need operation_manager
 
         # ── Focused managers (delegation targets) ───────────────────────────
         # Only LoggerManager and IdleManager get their own files — they have
         # distinct lifecycles (file I/O, background thread). Halt state and
         # message routing are simple data structures that belong on the pool.
-        self._execution = ParallelAgentManager(self)       # parallel execution + active_stack
+        self._execution = ParallelAgentManager(self)  # parallel execution + active_stack
         self._logger = LoggerManager(self, workspace_dir)  # logger lifecycle + recovery
-        self._idle = IdleManager(self)                      # idle detection + auto-dismissal
+        self._idle = IdleManager(self)  # idle detection + auto-dismissal
 
         # ── Simple state (owned directly by pool, no separate manager) ───────
-        self._paused = threading.Event()                   # global pause flag; set=resumed, clear=paused
-        self._paused.set()                                  # start in resumed state
-        self.server_info = None                            # set by launcher: (host, port) tuple of the AC API server
-        self._halted_instances: set = set()                # per-instance halt state (legacy, kept for compat)
-        self._compression_halted: set = set()              # halted by forced compression (not manual)
-        self.terminated_instances: set = set()             # marked for immediate termination
-        self._instance_threads: Dict[str, threading.Thread] = {}  # instance_name -> execution thread (join on dismissal)
-        self._instance_threads_lock = threading.Lock()            # guards _instance_threads access
-        self._pool_lock = threading.RLock()                  # guards instances dict + terminated_instances set
-        self.children: Dict[str, List[str]] = {}           # parent_name -> [child_names] for cascade termination
-        self._children_lock = threading.RLock()            # guards pool.children + _child_instances
+        self._paused = threading.Event()  # global pause flag; set=resumed, clear=paused
+        self._paused.set()  # start in resumed state
+        self.server_info = None  # set by launcher: (host, port) tuple of the AC API server
+        self._halted_instances: set = set()  # per-instance halt state (legacy, kept for compat)
+        self._compression_halted: set = set()  # halted by forced compression (not manual)
+        self.terminated_instances: set = set()  # marked for immediate termination
+        self._instance_threads: Dict[str,
+                                     threading.Thread] = {}  # instance_name -> execution thread (join on dismissal)
+        self._instance_threads_lock = threading.Lock()  # guards _instance_threads access
+        self._pool_lock = threading.RLock()  # guards instances dict + terminated_instances set
+        self.children: Dict[str, List[str]] = {}  # parent_name -> [child_names] for cascade termination
+        self._children_lock = threading.RLock()  # guards pool.children + _child_instances
 
         # Lock hierarchy (for future reference — never nest locks in reverse order):
         #   _pool_lock → _state_lock → _instance_threads_lock / _children_lock
@@ -131,18 +132,18 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         # ── Run generation counter (prevents resume race condition) ───────────
         # Each time a new execution thread starts, this is incremented. Old threads
         # check their captured generation value to detect they've been superseded.
-        self._run_generation = 0                           # monotonically increasing run ID
+        self._run_generation = 0  # monotonically increasing run ID
 
         # ── Attributes required by api_server.py and agent_invoker.py ──
         # These bridge the new unified model with existing call patterns.
-        self.instance_summaries: Dict[str, str] = {}         # per-instance compression summaries
-        self._ws_loop = None                                 # asyncio event loop ref (set by api_server at runtime)
+        self.instance_summaries: Dict[str, str] = {}  # per-instance compression summaries
+        self._ws_loop = None  # asyncio event loop ref (set by api_server at runtime)
 
         # instance_state bridges the old WebUI state pattern with the new unified model.
         # Maintained for agent_invoker.py and session rename patterns.
         self.instance_state: Dict[str, dict] = {}
-        self.message_queues: Dict[str, List[str]] = {}     # per-agent message queues
-        self._queue_lock = threading.Lock()                # Protects message_queues mutations
+        self.message_queues: Dict[str, List[str]] = {}  # per-agent message queues
+        self._queue_lock = threading.Lock()  # Protects message_queues mutations
         self._message_condition = threading.Condition(self._queue_lock)  # For __wait blocking support
 
         # ── Async Tools Infrastructure (SLEEPING state support) ─────────────
@@ -155,11 +156,11 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         self._async_shell_tracker = AsyncShellTracker(pool=self)
 
         # ── Global state ─────────────────────────────────────────────────────
-        self._stopped_event = threading.Event()         # M3 fix: stopped flag for emergency shutdown
+        self._stopped_event = threading.Event()  # M3 fix: stopped flag for emergency shutdown
 
         # ── Version counter for lazy sync of instance_conversations (Fix #3) ──
-        self._instances_version = 0                        # increments on create/remove/dismiss/reset
-        self._mapping_synced_to_version = -1              # tracks last version instance_conversations was synced to
+        self._instances_version = 0  # increments on create/remove/dismiss/reset
+        self._mapping_synced_to_version = -1  # tracks last version instance_conversations was synced to
 
         # ── Configuration Version (Fix LLM Reprocessing) ─────────────────────
         # Incremented when global config changes (workspace dir, extra folders, refresh_agents).
@@ -206,6 +207,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
 
         # ── Agent discovery ──────────────────────────────────────────────────
         self._discover_agents(agents_dir)
+
     def start(self):
         """Start background services (idle checker, etc.). Call after pool initialization."""
         self._idle.start()
@@ -243,20 +245,20 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
             # Restart async registry executor via the thread-safe resize path.
             # This recreates a fresh executor sized from settings (old one drains).
             try:
-                if self._async_registry is not None and self._async_registry.resize_executor(
-                        self.settings.max_workers):
+                if self._async_registry is not None and self._async_registry.resize_executor(self.settings.max_workers):
                     logger.debug('Async registry executor resized on resume')
                 else:
                     logger.debug('Async registry resize skipped (missing or failed, non-critical)')
             except Exception as e:
                 logger.debug(f"Async registry restart (non-critical): {e}")
             logger.debug('Stopped flag cleared — ready for new execution')
+
     def _update_child_relationship(self, parent_name: str, child_name: str, add: bool = True) -> None:
         """Update both pool.children and parent's _child_instances.
-        
+
         Uses _children_lock for pool.children dict and _state_lock for instance._child_instances list.
         Locks are acquired separately (not nested) to avoid deadlock.
-        
+
         Args:
             parent_name: Name of the parent instance.
             child_name: Name of the child instance.
@@ -286,6 +288,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
                             parent_inst._child_instances.remove(child_name)
             except Exception as e:
                 logger.debug(f"Updating _child_instances for {parent_name} failed (non-critical): {e}")
+
     def get_agent(self, name: str):
         """Get an agent template by name. Returns None if not found."""
         return self.get_template(name)
@@ -298,8 +301,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         if cached is not None:
             return cached
 
-        llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {})
-                   if self.api_router else {})
+        llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {}) if self.api_router else {})
         try:
             template = load_agent_template(self, name, llm_cfg)
             self.templates[name] = template
@@ -323,6 +325,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
                 cb(instance_name, log_path)
             except Exception as e:
                 logger.error(f"Error in on_dismissed callback for {instance_name}: {e}")
+
     @property
     def instance_classes(self) -> Dict[str, str]:
         """Mapping of instance_name → agent_class (derived from instances dict)."""
@@ -338,9 +341,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
     def agents(self) -> Dict[str, Assistant]:
         """Alias for templates — old api_server code accesses pool.agents."""
         return self.templates
+
     def get_logger(self, instance_name: str, agent_class: str, base_metadata: Optional[Dict] = None):
         """Get or create a logger for an instance.
-        
+
         Passes base_metadata through to LoggerManager.get_logger for supervisor tracking.
         """
         return self._logger.get_logger(instance_name, agent_class, base_metadata=base_metadata)
@@ -364,13 +368,13 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
             agent_name = soul_file.name.replace('_soul.md', '')
             try:
                 # Need llm_cfg from api_router or fall back to empty dict
-                llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {})
-                           if self.api_router else {})
+                llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {}) if self.api_router else {})
                 template = load_agent_template(self, agent_name, llm_cfg)
                 self.templates[agent_name] = template
                 logger.info('[OK] Loaded agent: %s', agent_name)
             except Exception as e:
                 logger.error('[ERROR] Failed to load agent %s: %s', agent_name, e)
+
     def _clear_all_state_dicts(self):
         """Clear all per-instance state dictionaries."""
         self.instance_state.clear()
@@ -423,9 +427,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         for msg in history:
             role = AgentPool._msg_field(msg, 'role')
             content = AgentPool._msg_field(msg, 'content')
-            if (role == USER and isinstance(content, str)
-                    and content.startswith(COMPRESSION_MARKER)
-                    and '<context_summary>' in content):
+            if (role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER) and
+                    '<context_summary>' in content):
                 count += 1
         return count
 
@@ -454,9 +457,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin,
         for i, msg in enumerate(history):
             role = AgentPool._msg_field(msg, 'role')
             content = AgentPool._msg_field(msg, 'content')
-            if (role == USER and isinstance(content, str)
-                    and content.startswith(COMPRESSION_MARKER)
-                    and '<context_summary>' in content):
+            if (role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER) and
+                    '<context_summary>' in content):
                 indices.append(i)
         return indices
-

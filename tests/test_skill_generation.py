@@ -10,7 +10,6 @@ Covers:
   - Integration: hot-reload (new skill discoverable after registration)
 """
 
-import os
 import sys
 import time
 import uuid
@@ -25,20 +24,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent_cascade.skills.parser import parse_frontmatter
-from agent_cascade.skills.matcher import SkillMatcher
+from agent_cascade.settings import AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_MIN_TOOL_CALLS, AUTO_SKILL_PROMOTION_THRESHOLD
 from agent_cascade.skills.manager import SkillManager
+from agent_cascade.skills.matcher import SkillMatcher
+from agent_cascade.skills.parser import parse_frontmatter
 from agent_cascade.skills.validator import validate_skill
-from agent_cascade.settings import (
-    AUTO_SKILL_PROMOTION_THRESHOLD,
-    AUTO_SKILL_MAX_PER_SESSION,
-    AUTO_SKILL_MIN_TOOL_CALLS,
-)
-
 
 # ===========================================================================
 # Helpers — skill content factory
 # ===========================================================================
+
 
 def _uid():
     """Generate a short unique suffix for parallel test isolation."""
@@ -58,12 +53,10 @@ def _make_skill_content(
     if triggers is None:
         triggers = ['test', 'skill']
     if body is None:
-        body = (
-            '## Instructions\n\n'
-            'Follow these steps carefully to complete the task. '
-            'This body has enough characters to pass validation.\n\n'
-            '1. Step one\n2. Step two\n3. Step three\n'
-        )
+        body = ('## Instructions\n\n'
+                'Follow these steps carefully to complete the task. '
+                'This body has enough characters to pass validation.\n\n'
+                '1. Step one\n2. Step two\n3. Step three\n')
     fm = {
         'name': name,
         'description': description,
@@ -87,12 +80,8 @@ def _cleanup_test_artifacts():
     """
 
     def _is_test_skill(name: str) -> bool:
-        return (
-            name.startswith('test-')
-            or name.startswith('tmp-')
-            or '-test-skill-' in name
-            or name.endswith('-testing')
-        )
+        return (name.startswith('test-') or name.startswith('tmp-') or '-test-skill-' in name or
+                name.endswith('-testing'))
 
     def _remove_empty_dir(entry: Path) -> None:
         """Remove a skill directory if empty after deleting its SKILL.md.
@@ -137,6 +126,7 @@ def _cleanup_test_artifacts():
 # Shared fixture: fresh SkillManager with guaranteed cleanup
 # ===========================================================================
 
+
 @pytest.fixture(autouse=True)
 def fresh_manager():
     """Create a fresh SkillManager and clean up test artifacts after each test."""
@@ -150,6 +140,7 @@ def fresh_manager():
 # 1. Unit: Validation — agent_cascade.skills.validator
 # ===========================================================================
 
+
 class TestValidation:
     """Tier 1 structural validation and Tier 2 self-match."""
 
@@ -159,12 +150,8 @@ class TestValidation:
         assert passed, f"Expected pass, got errors: {errors}"
 
     def test_valid_skill_with_task_text_passes(self):
-        content = _make_skill_content(
-            generated_from_task='Write a test skill for validation'
-        )
-        passed, errors = validate_skill(
-            content, 'test-skill', set(), task_text='Write a test skill'
-        )
+        content = _make_skill_content(generated_from_task='Write a test skill for validation')
+        passed, errors = validate_skill(content, 'test-skill', set(), task_text='Write a test skill')
         assert passed, f"Expected pass, got errors: {errors}"
 
     def test_invalid_name_uppercase(self):
@@ -204,16 +191,14 @@ class TestValidation:
         assert len(errors) > 0
 
     def test_missing_triggers(self):
-        raw = (
-            '---\n'
-            'name: test-skill\n'
-            'description: A skill for testing purposes with enough characters\n'
-            '---\n\n'
-            '## Instructions\n\n'
-            'Follow these steps carefully to complete the task. '
-            'This body has enough characters to pass validation.\n\n'
-            '1. Step one\n2. Step two\n3. Step three\n'
-        )
+        raw = ('---\n'
+               'name: test-skill\n'
+               'description: A skill for testing purposes with enough characters\n'
+               '---\n\n'
+               '## Instructions\n\n'
+               'Follow these steps carefully to complete the task. '
+               'This body has enough characters to pass validation.\n\n'
+               '1. Step one\n2. Step two\n3. Step three\n')
         passed, errors = validate_skill(raw, 'test-skill', set())
         assert not passed
         assert len(errors) > 0
@@ -240,6 +225,7 @@ class TestValidation:
 # ===========================================================================
 # 2. Unit: Registration — SkillManager.register_skill_from_content
 # ===========================================================================
+
 
 class TestRegistration:
     """Test dynamic skill registration from content."""
@@ -284,6 +270,7 @@ class TestRegistration:
 # 3. Unit: Self-Match — Tier 2 validation via SkillMatcher
 # ===========================================================================
 
+
 class TestSelfMatch:
     """Validate that self-match scoring works correctly."""
 
@@ -294,10 +281,10 @@ class TestSelfMatch:
             triggers=['pytest', 'unit test', 'test fixture', 'mock'],
             generated_from_task='Write pytest unit tests for the parser',
         )
-        passed, errors = validate_skill(
-            content, 'pytest-testing', set(),
-            task_text='Write pytest unit tests for the parser module'
-        )
+        passed, errors = validate_skill(content,
+                                        'pytest-testing',
+                                        set(),
+                                        task_text='Write pytest unit tests for the parser module')
         assert passed, f"Self-match should pass: {errors}"
 
     def test_non_matching_skill_scores_below_threshold(self):
@@ -307,10 +294,10 @@ class TestSelfMatch:
             triggers=['docker', 'container', 'kubernetes', 'pod'],
             generated_from_task='Write pytest unit tests for the parser',
         )
-        passed, errors = validate_skill(
-            content, 'docker-containers', set(),
-            task_text='Write pytest unit tests for the parser module'
-        )
+        passed, errors = validate_skill(content,
+                                        'docker-containers',
+                                        set(),
+                                        task_text='Write pytest unit tests for the parser module')
         assert not passed
         assert len(errors) > 0
 
@@ -321,6 +308,7 @@ class TestSelfMatch:
 # ===========================================================================
 # 4. Unit: Matcher trigger indexing
 # ===========================================================================
+
 
 class TestMatcherTriggerIndexing:
     """Verify that triggers are tokenized and indexed by SkillMatcher."""
@@ -371,6 +359,7 @@ class TestMatcherTriggerIndexing:
 # ===========================================================================
 # 5. Integration: Full propose → validate → promote flow
 # ===========================================================================
+
 
 class TestProposeValidatePromote:
     """End-to-end flow: create skill content → register → validate → promote."""
@@ -450,6 +439,7 @@ class TestProposeValidatePromote:
 # 6. Integration: Rate limiting
 # ===========================================================================
 
+
 class TestRateLimiting:
     """Rate limiting: second proposal in same session rejected."""
 
@@ -470,14 +460,10 @@ class TestRateLimiting:
             generated_from_task='Create second skill',
         )
 
-        success1, _ = fresh_manager.register_skill_from_content(
-            content1, task_text='Create first skill'
-        )
+        success1, _ = fresh_manager.register_skill_from_content(content1, task_text='Create first skill')
         assert success1
 
-        success2, _ = fresh_manager.register_skill_from_content(
-            content2, task_text='Create second skill'
-        )
+        success2, _ = fresh_manager.register_skill_from_content(content2, task_text='Create second skill')
         assert success2
 
         assert name1 in fresh_manager._skills_registry
@@ -520,6 +506,7 @@ class TestRateLimiting:
 # ===========================================================================
 # 7. Integration: Hot-reload
 # ===========================================================================
+
 
 class TestHotReload:
     """New skill discoverable after registration without restart."""
@@ -589,6 +576,7 @@ class TestHotReload:
 # 8. Integration: call_agent return path — rollback + notice injection
 # ===========================================================================
 
+
 class TestCallAgentReturn:
     """Verify that auto-skill rollback and notice injection work correctly
     on the call_agent return path (execution_engine._create_and_run_agent)."""
@@ -599,10 +587,7 @@ class TestCallAgentReturn:
 
     def _make_conversation(self, length: int):
         """Build a conversation list of *length* dict messages."""
-        return [
-            {'role': 'assistant' if i % 2 else 'user', 'content': f"msg {i}"}
-            for i in range(length)
-        ]
+        return [{'role': 'assistant' if i % 2 else 'user', 'content': f"msg {i}"} for i in range(length)]
 
     def _make_inst(self, fresh_manager, conv_len: int = 5):
         """Create a mock instance and preload skill-creator in the manager."""
@@ -614,12 +599,13 @@ class TestCallAgentReturn:
         fresh_manager._skills_registry['skill-creator'] = {
             'name': 'skill-creator',
             'file_path': 'agents/global/skills/skill-creator/SKILL.md',
-            '_parsed_data': {'body': 'Create a reusable skill.'},
+            '_parsed_data': {
+                'body': 'Create a reusable skill.'
+            },
         }
         return inst
 
-    def _trigger(self, inst, fresh_manager, total_tool_calls=10,
-                 check_result=None, state_idle=True):
+    def _trigger(self, inst, fresh_manager, total_tool_calls=10, check_result=None, state_idle=True):
         """Run auto-skill reflection with snapshot-based rollback.
 
         Uses the new two-function API: check_and_inject → simulate turns → finalize.
@@ -639,8 +625,10 @@ class TestCallAgentReturn:
             total_tool_calls=total_tool_calls,
             task_text='Write a test',
             instance_name='worker',
-            append_fn=lambda msg: inst.conversation.append(
-                {'role': 'user', 'content': msg}),
+            append_fn=lambda msg: inst.conversation.append({
+                'role': 'user',
+                'content': msg
+            }),
         )
 
         if not injected:
@@ -687,8 +675,7 @@ class TestCallAgentReturn:
     def test_returns_empty_when_tool_count_below_threshold(self, fresh_manager):
         """Tool count below AUTO_SKILL_MIN_TOOL_CALLS → returns []."""
         inst = self._make_inst(fresh_manager)
-        created = self._trigger(inst, fresh_manager,
-                                total_tool_calls=AUTO_SKILL_MIN_TOOL_CALLS - 1)
+        created = self._trigger(inst, fresh_manager, total_tool_calls=AUTO_SKILL_MIN_TOOL_CALLS - 1)
         assert created == []
 
     def test_returns_empty_when_skill_matches_found(self, fresh_manager):
@@ -700,8 +687,7 @@ class TestCallAgentReturn:
             'file_path': 'agents/global/skills/test-writing/SKILL.md',
             'triggers': ['test', 'write'],
         }
-        fresh_manager._matcher.build_index(
-            list(fresh_manager._skills_registry.values()))
+        fresh_manager._matcher.build_index(list(fresh_manager._skills_registry.values()))
         created = self._trigger(inst, fresh_manager)
         assert created == []
 
@@ -742,6 +728,7 @@ class TestCallAgentReturn:
             captured_counts.append(pop_count)
             if pop_count > 0:
                 del inst.conversation[-pop_count:]
+
         snapshot_length = len(inst.conversation)
 
         fresh_manager.check_and_inject_auto_skill_prompt(
@@ -749,8 +736,10 @@ class TestCallAgentReturn:
             total_tool_calls=10,
             task_text='Write a test',
             instance_name='worker',
-            append_fn=lambda msg: inst.conversation.append(
-                {'role': 'user', 'content': msg}),
+            append_fn=lambda msg: inst.conversation.append({
+                'role': 'user',
+                'content': msg
+            }),
         )
         # Simulate turns
         for _ in range(3):
@@ -774,7 +763,7 @@ class TestCallAgentReturn:
 
     def test_notice_injected_into_last_message_after_rollback(self, fresh_manager):
         """Full return path: trigger → rollback → notice → returned conv.
-        
+
         Covers:
         - Notice appended to last message content
         - No new message added (length preserved)
@@ -820,8 +809,6 @@ class TestCallAgentReturn:
     def test_rollback_survives_compression_during_extra_turns(self, fresh_manager):
         """When compression removes messages during extra turns, rollback still
         restores the original conversation length using the marker approach."""
-        from agent_cascade.settings import AUTO_SKILL_EXTRA_TURNS
-
         inst = self._make_inst(fresh_manager, conv_len=20)
         original_len = len(inst.conversation)
 
@@ -864,6 +851,7 @@ class TestCallAgentReturn:
 # Rollback Tail Sync — pool/JSONL consistency after rollback
 # ===========================================================================
 
+
 class TestRollbackTailSync:
     """Verify that _rollback_instance keeps pool conversation and JSONL logger
     in sync — both in the simple case and after compression markers exist.
@@ -881,7 +869,7 @@ class TestRollbackTailSync:
 
     def _build_conv(self, n: int):
         """Build a conversation with SYSTEM + n alternating USER/ASSISTANT pairs."""
-        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+        from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 
         conv = [Message(role=SYSTEM, content='You are a test agent')]
         for i in range(n):
@@ -893,14 +881,15 @@ class TestRollbackTailSync:
         """Write a JSONL file with metadata header + message lines."""
         import json
         with open(path, 'w', encoding='utf-8') as f:
-            f.write(json.dumps({
-                'metadata': {
-                    'agent_class': 'coder',
-                    'instance_name': 'test-sync',
-                    'start_timestamp': '2026-01-01T00:00:00',
-                    'current_log_path': path,
-                }
-            }) + '\n')
+            f.write(
+                json.dumps({
+                    'metadata': {
+                        'agent_class': 'coder',
+                        'instance_name': 'test-sync',
+                        'start_timestamp': '2026-01-01T00:00:00',
+                        'current_log_path': path,
+                    }
+                }) + '\n')
             for m in messages:
                 d = m.model_dump() if hasattr(m, 'model_dump') else dict(role=m.role, content=m.content)
                 f.write(json.dumps(d, ensure_ascii=False) + '\n')
@@ -949,7 +938,7 @@ class TestRollbackTailSync:
           4. Verify JSONL message count == pool conversation count
         """
         from agent_cascade.agent_pool import AgentPool
-        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+        from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
         # Step 1: Build initial conversation (SYS + 4 pairs = 9 messages)
         conv = self._build_conv(4)  # 9 messages
@@ -1008,9 +997,7 @@ class TestRollbackTailSync:
 
         # Step 6: Verify tail sync holds
         from agent_cascade.logger.tail_sync_check import check_tail_sync
-        in_sync, pool_tail, jsonl_tail = check_tail_sync(
-            'test-sync', inst.conversation, test_jsonl
-        )
+        in_sync, pool_tail, jsonl_tail = check_tail_sync('test-sync', inst.conversation, test_jsonl)
         assert in_sync, f"Tail sync failed: pool_tail={pool_tail}, jsonl_tail={jsonl_tail}"
 
     def test_rollback_tail_sync_after_compression(self, tmp_path):
@@ -1023,7 +1010,7 @@ class TestRollbackTailSync:
           4. Verify pool tail == JSONL tail (both count messages after marker)
         """
         from agent_cascade.agent_pool import AgentPool
-        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+        from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
         from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
         jsonl_path = str(tmp_path / 'test_rollback_comp.jsonl')
@@ -1085,9 +1072,7 @@ class TestRollbackTailSync:
         jsonl_msgs = self._read_jsonl_messages(test_jsonl)
         assert len(jsonl_msgs) == 8, f"JSONL has {len(jsonl_msgs)}, expected 8"
         marker_present = any(
-            isinstance(m.get('content', ''), str) and m['content'].startswith(COMPRESSION_MARKER)
-            for m in jsonl_msgs
-        )
+            isinstance(m.get('content', ''), str) and m['content'].startswith(COMPRESSION_MARKER) for m in jsonl_msgs)
         assert marker_present, 'Compression marker missing from JSONL after rollback'
 
         # Step 5: Verify tail counts match (both should be 6 = 8 - 1 marker - 1 SYS)
@@ -1098,9 +1083,7 @@ class TestRollbackTailSync:
 
         # Step 6: Tail sync check passes
         from agent_cascade.logger.tail_sync_check import check_tail_sync
-        in_sync, pt, jt = check_tail_sync(
-            'test-sync-comp', inst.conversation, test_jsonl
-        )
+        in_sync, pt, jt = check_tail_sync('test-sync-comp', inst.conversation, test_jsonl)
         assert in_sync, f"Tail sync failed: pool_tail={pt}, jsonl_tail={jt}"
 
     def test_notice_injection_preserves_tail_sync(self, tmp_path):
@@ -1114,7 +1097,7 @@ class TestRollbackTailSync:
           5. Verify tail sync still holds
         """
         from agent_cascade.agent_pool import AgentPool
-        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+        from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
         # Step 1: Build conversation (SYS + 3 pairs = 7 messages)
         conv = self._build_conv(3)  # 7 messages
@@ -1159,9 +1142,7 @@ class TestRollbackTailSync:
 
         # Verify tail sync before notice injection
         from agent_cascade.logger.tail_sync_check import check_tail_sync
-        in_sync_before, pt_before, jt_before = check_tail_sync(
-            'test-sync-notice', inst.conversation, test_jsonl
-        )
+        in_sync_before, pt_before, jt_before = check_tail_sync('test-sync-notice', inst.conversation, test_jsonl)
         assert in_sync_before, \
             f"Tail sync failed before notice: pool_tail={pt_before}, jsonl_tail={jt_before}"
 
@@ -1178,9 +1159,7 @@ class TestRollbackTailSync:
             f"JSONL has {len(jsonl_after_notice)} messages after notice, expected {snapshot_len}"
 
         # Step 6: Verify tail sync still holds (no new messages added)
-        in_sync_after, pt_after, jt_after = check_tail_sync(
-            'test-sync-notice', inst.conversation, test_jsonl
-        )
+        in_sync_after, pt_after, jt_after = check_tail_sync('test-sync-notice', inst.conversation, test_jsonl)
         assert in_sync_after, \
             f"Tail sync failed after notice injection: pool_tail={pt_after}, jsonl_tail={jt_after}"
 

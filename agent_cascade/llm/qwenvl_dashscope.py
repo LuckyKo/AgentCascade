@@ -16,14 +16,13 @@ import copy
 import json
 import os
 import re
-import time
 from http import HTTPStatus
 from pprint import pformat
 from typing import Dict, Iterator, List, Optional
 
 import dashscope
 
-from agent_cascade.llm.base import ModelServiceError, register_llm, _fire_usage_callback
+from agent_cascade.llm.base import ModelServiceError, _fire_usage_callback, register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.oai import _extract_usage
 from agent_cascade.llm.qwen_dashscope import initialize_dashscope
@@ -91,10 +90,10 @@ class QwenVLChatAtDS(BaseFnCallModel):
         last_usage = {}
 
         for chunk in watch_stream(
-            response,
-            STREAM_MAX_SILENCE_SECONDS,
-            STREAM_MAX_TOTAL_SECONDS,
-            error_message_prefix='DashScope',
+                response,
+                STREAM_MAX_SILENCE_SECONDS,
+                STREAM_MAX_TOTAL_SECONDS,
+                error_message_prefix='DashScope',
         ):
             # print(chunk)
             if chunk.status_code == HTTPStatus.OK:
@@ -102,7 +101,7 @@ class QwenVLChatAtDS(BaseFnCallModel):
                 extracted = _extract_usage(getattr(chunk, 'usage', None))
                 if extracted:
                     last_usage = extracted
-                    
+
                     # Fire usage callback (set by base.py chat() via thread-local)
                     _fire_usage_callback(extracted)
                 if chunk.output.choices:
@@ -127,12 +126,13 @@ class QwenVLChatAtDS(BaseFnCallModel):
                     if tool_calls:
                         # Track which positions were matched in this chunk to handle parallel tool calls sharing same index
                         _chunk_matched = set()
-                        _initial_len = len(full_tool_calls)  # Prevent merging distinct new calls created within this chunk
+                        _initial_len = len(
+                            full_tool_calls)  # Prevent merging distinct new calls created within this chunk
                         for tc in tool_calls:
                             tc_id = tc.get('id')
                             tc_name = tc['function'].get('name', '')
                             tc_args = tc['function'].get('arguments', '')
-                            
+
                             # Find existing tool call to append to (by ID, then fallback)
                             matched = None
                             matched_idx = -1
@@ -155,7 +155,7 @@ class QwenVLChatAtDS(BaseFnCallModel):
                                 if matched is None and _initial_len > 0 and (tc_name or tc_args):
                                     matched = full_tool_calls[-1]
                                     matched_idx = len(full_tool_calls) - 1
-                            
+
                             if matched:
                                 if tc_name:
                                     matched.function_call['name'] += tc_name
@@ -168,8 +168,7 @@ class QwenVLChatAtDS(BaseFnCallModel):
                                 full_tool_calls.append(
                                     Message(role=ASSISTANT,
                                             content='',
-                                            function_call=FunctionCall(name=tc_name,
-                                                                       arguments=tc_args),
+                                            function_call=FunctionCall(name=tc_name, arguments=tc_args),
                                             extra={
                                                 'model_service_info': json.loads(str(chunk)),
                                                 'model': self.model,
@@ -179,8 +178,7 @@ class QwenVLChatAtDS(BaseFnCallModel):
                                 _chunk_matched.add(new_idx)
                     res = []
                     if full_reasoning_content:
-                        msg_extra = {'model_service_info': json.loads(str(chunk)),
-                                    'model': self.model}
+                        msg_extra = {'model_service_info': json.loads(str(chunk)), 'model': self.model}
                         if last_usage:
                             msg_extra['usage'] = last_usage
                         res.append(
@@ -189,15 +187,10 @@ class QwenVLChatAtDS(BaseFnCallModel):
                                     reasoning_content=full_reasoning_content,
                                     extra=msg_extra))
                     if full_content:
-                        msg_extra = {'model_service_info': json.loads(str(chunk)),
-                                    'model': self.model}
+                        msg_extra = {'model_service_info': json.loads(str(chunk)), 'model': self.model}
                         if last_usage:
                             msg_extra['usage'] = last_usage
-                        res.append(
-                            Message(role=ASSISTANT,
-                                    content=full_content,
-                                    reasoning_content='',
-                                    extra=msg_extra))
+                        res.append(Message(role=ASSISTANT, content=full_content, reasoning_content='', extra=msg_extra))
                     if full_tool_calls:
                         res += full_tool_calls
                     yield res
@@ -212,15 +205,11 @@ class QwenVLChatAtDS(BaseFnCallModel):
             # Only return audio at the end
             res = []
             if full_reasoning_content:
-                msg_extra = {'model_service_info': json.loads(str(chunk)),
-                            'model': self.model}
+                msg_extra = {'model_service_info': json.loads(str(chunk)), 'model': self.model}
                 if last_usage:
                     msg_extra['usage'] = last_usage
                 res.append(
-                    Message(role=ASSISTANT,
-                            content=[],
-                            reasoning_content=full_reasoning_content,
-                            extra=msg_extra))
+                    Message(role=ASSISTANT, content=[], reasoning_content=full_reasoning_content, extra=msg_extra))
 
             if os.getenv('AGENT_CASCADE_OMNI_RESPONSE_SAVE_AUDIO', 'false').lower() == 'true':
                 work_dir = os.path.join(DEFAULT_WORKSPACE, 'llms')
@@ -233,15 +222,10 @@ class QwenVLChatAtDS(BaseFnCallModel):
                 audio_content = f'data:audio/wav;base64,{full_audio}'
             full_content.append(ContentItem(audio=audio_content))
             if full_content:
-                msg_extra = {'model_service_info': json.loads(str(chunk)),
-                            'model': self.model}
+                msg_extra = {'model_service_info': json.loads(str(chunk)), 'model': self.model}
                 if last_usage:
                     msg_extra['usage'] = last_usage
-                res.append(
-                    Message(role=ASSISTANT,
-                            content=full_content,
-                            reasoning_content='',
-                            extra=msg_extra))
+                res.append(Message(role=ASSISTANT, content=full_content, reasoning_content='', extra=msg_extra))
             if full_tool_calls:
                 res += full_tool_calls
             yield res
@@ -268,10 +252,10 @@ class QwenVLChatAtDS(BaseFnCallModel):
         if response.status_code == HTTPStatus.OK:
             # Extract usage info from DashScope VL response (includes completion_tokens_details if available)
             resp_usage = _extract_usage(getattr(response, 'usage', None))
-            
+
             # Fire callback for non-streaming usage data
             _fire_usage_callback(resp_usage)
-        
+
             full_content = response.output.choices[0].message.content[0]['text']
             msg_extra = {'model_service_info': response}
             if resp_usage:
@@ -285,11 +269,7 @@ class QwenVLChatAtDS(BaseFnCallModel):
                             extra=msg_extra)
                 ]
             else:
-                return [
-                    Message(role=ASSISTANT,
-                            content=[ContentItem(text=full_content)],
-                            extra=msg_extra)
-                ]
+                return [Message(role=ASSISTANT, content=[ContentItem(text=full_content)], extra=msg_extra)]
         else:
             raise ModelServiceError(code=response.code,
                                     message=response.message,

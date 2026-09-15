@@ -3,10 +3,11 @@
 Phase 3b pure-move refactor.
 """
 
-from agent_cascade.log import logger
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.llm.schema import CONTENT, REASONING_CONTENT
+from agent_cascade.log import logger
+
 
 def _resolve_max_tokens(pool, instance=None):
     """Resolve effective max_input_tokens using unified priority order.
@@ -81,10 +82,7 @@ def _resolve_max_tokens(pool, instance=None):
 
                 # Step 3: Template static config (from settings, via llm.cfg dict)
                 cfg = getattr(llm, 'cfg', {})
-                agent_max = (
-                    (cfg.get('generate_cfg') or {}).get('max_input_tokens') or
-                    cfg.get('max_input_tokens')
-                )
+                agent_max = ((cfg.get('generate_cfg') or {}).get('max_input_tokens') or cfg.get('max_input_tokens'))
                 if agent_max:
                     static_llm_limit = int(agent_max)
 
@@ -99,32 +97,33 @@ def _resolve_max_tokens(pool, instance=None):
 
     # ── Priority Resolution — router always wins over cached values ──
     if router_limit > 0:
-        return router_limit       # Live API Router limit (authoritative)
+        return router_limit  # Live API Router limit (authoritative)
     if static_llm_limit > 0:
-        return static_llm_limit   # Template's original config from settings
+        return static_llm_limit  # Template's original config from settings
     if allocated > 0:
-        return allocated          # Per-instance cache from last LLM call (can be stale)
+        return allocated  # Per-instance cache from last LLM call (can be stale)
     if runtime_max:
-        return runtime_max        # Shared template generate_cfg (last resort, can be polluted)
+        return runtime_max  # Shared template generate_cfg (last resort, can be polluted)
 
-    return DEFAULT_MAX_INPUT_TOKENS   # User-configured default from settings (final fallback)
+    return DEFAULT_MAX_INPUT_TOKENS  # User-configured default from settings (final fallback)
+
 
 def _streaming_content_length(messages: list) -> int:
     """Calculate total content length of streaming messages for streaming dedup cache.
-    
+
     This helper extracts the pattern used in 3 places to calculate content length
-    for cache invalidation during streaming updates. It handles both dict and 
+    for cache invalidation during streaming updates. It handles both dict and
     Message object types.
-    
+
     Args:
         messages: List of message dicts or Message objects from _streaming_responses.
-        
+
     Returns:
         Total character count across content, reasoning_content, and function_call fields.
     """
     if not messages:
         return 0
-    
+
     total_length = 0
     for m in messages:
         # Handle dict, Message object, and unexpected list types
@@ -139,8 +138,9 @@ def _streaming_content_length(messages: list) -> int:
             total_length += len(getattr(m, CONTENT, '') or '')
             total_length += len(getattr(m, REASONING_CONTENT, '') or '')
             total_length += len(str(getattr(m, 'function_call', None) or ''))
-    
+
     return total_length
+
 
 def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> int:
     """Get the effective max_input_tokens for an agent instance.

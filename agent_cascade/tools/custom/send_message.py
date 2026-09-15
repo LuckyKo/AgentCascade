@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 from agent_cascade.tools.base import BaseTool, register_tool
 
 logger = logging.getLogger(__name__)
-from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.operation_manager.path_security import _get_current_instance_name
+from agent_cascade.prompts.dna import TOOL_METADATA
 
 if TYPE_CHECKING:
     from agent_cascade.agent_pool import AgentPool
@@ -24,8 +24,10 @@ class SendMessage(BaseTool):
         'type': 'object',
         'properties': {
             'destination': {
-                'type': 'string',
-                'description': "Target of the message. Use 'user' to send to the human user, or an exact agent instance name (e.g., 'worker1') to send to another agent."
+                'type':
+                    'string',
+                'description':
+                    "Target of the message. Use 'user' to send to the human user, or an exact agent instance name (e.g., 'worker1') to send to another agent."
             },
             'message': {
                 'type': 'string',
@@ -73,22 +75,15 @@ class SendMessage(BaseTool):
             ws_loop = getattr(pool, '_ws_loop', None)
 
             if not (ws_queue and ws_loop and not ws_loop.is_closed()):
-                logger.warning(f"WebSocket unavailable, message to user not delivered via notification: [{sender}] {message}")
+                logger.warning(
+                    f"WebSocket unavailable, message to user not delivered via notification: [{sender}] {message}")
                 return 'Warning: User notification sent but WebSocket unavailable. Message logged.'
 
-            event = {
-                'type': 'agent_message_to_user',
-                'sender': sender,
-                'message': message,
-                'timestamp': time.time()
-            }
+            event = {'type': 'agent_message_to_user', 'sender': sender, 'message': message, 'timestamp': time.time()}
 
-            asyncio.run_coroutine_threadsafe(
-                _put_stream_update(ws_queue, event),
-                ws_loop
-            )
+            asyncio.run_coroutine_threadsafe(_put_stream_update(ws_queue, event), ws_loop)
             return 'Message sent successfully to the user. They will see it in their notifications.'
-        except Exception as e:
+        except Exception:
             # Log full traceback, don't expose details to caller
             logger.exception('Failed to send message to user via WebSocket')
             return 'Warning: Message queued but notification may not be delivered immediately.'
@@ -116,7 +111,7 @@ class SendMessage(BaseTool):
 
         # Tag message with sender for agent-to-agent context
         tagged_message = f"[MESSAGE from {sender}]: {message}"
-        
+
         # Enqueue outside the pool lock (enqueue_message has its own queue lock)
         pool.enqueue_message(destination, tagged_message)
 

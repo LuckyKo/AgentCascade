@@ -17,7 +17,7 @@ Run: pytest tests/test_reasoning_only_continue_retry.py -v
 """
 
 import time
-from typing import List, Optional
+from typing import List
 
 import pytest
 
@@ -25,13 +25,10 @@ from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.engine.helpers import _is_incomplete_state
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
-from agent_cascade.settings import (
-    MAX_AUTO_CONTINUE_ATTEMPTS,
-    REASONING_ONLY_CONTINUE_ATTEMPTS,
-)
-
+from agent_cascade.settings import MAX_AUTO_CONTINUE_ATTEMPTS, REASONING_ONLY_CONTINUE_ATTEMPTS
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
 
 def _make_instance() -> AgentInstance:
     """Construct a minimal real AgentInstance for engine-method tests."""
@@ -68,11 +65,15 @@ def _broken_json_msg() -> dict:
     return {
         'role': ASSISTANT,
         'content': '',
-        'function_call': {'name': 'some_tool', 'arguments': '{"a": 1'},
+        'function_call': {
+            'name': 'some_tool',
+            'arguments': '{"a": 1'
+        },
     }
 
 
 class _FakeLogger:
+
     def __init__(self):
         self.log_path = None
 
@@ -161,18 +162,23 @@ class _Appender:
         instance.conversation.append(msg)
 
 
-def _run(engine: _Engine, instance: AgentInstance, turn_output: List[Message],
-         is_truncated: bool = False) -> bool:
+def _run(engine: _Engine, instance: AgentInstance, turn_output: List[Message], is_truncated: bool = False) -> bool:
     messages: List[Message] = []
     llm_messages: List[Message] = []
     response: List[Message] = list(turn_output)  # _process_response does response.extend(turn_output)
     return engine._check_and_handle_truncation(
-        is_truncated, turn_output, instance, instance.instance_name,
-        messages, llm_messages, response,
+        is_truncated,
+        turn_output,
+        instance,
+        instance.instance_name,
+        messages,
+        llm_messages,
+        response,
     )
 
 
 # ── Unit regression: _is_incomplete_state ───────────────────────────────────
+
 
 class TestIsIncompleteStateRegression:
     """The detection helper must keep classifying the right shapes."""
@@ -201,6 +207,7 @@ class TestIsIncompleteStateRegression:
 
 
 # ── Default pure-resend path (nudge OFF) ────────────────────────────────────
+
 
 class TestPureResendDefault:
     """With SOFT_CONTINUE_NUDGE_ENABLED=False, soft continues append nothing and roll back nothing."""
@@ -247,7 +254,9 @@ class TestPureResendDefault:
 
 # ── N3 — soft path stays closed after full retry ────────────────────────────
 
+
 class TestSoftPathStaysClosedAfterFullRetry:
+
     def _engine(self):
         return _Engine(_FakePool(nudge_enabled=False))
 
@@ -255,10 +264,7 @@ class TestSoftPathStaysClosedAfterFullRetry:
         engine = self._engine()
         instance = _make_instance()
         # One episode: N=2 soft continues, then full retries until the cap is hit.
-        results = [
-            _run(engine, instance, [_reasoning_only_msg()])
-            for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)
-        ]
+        results = [_run(engine, instance, [_reasoning_only_msg()]) for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)]
 
         # The cap uses `>= MAX_AUTO_CONTINUE_ATTEMPTS`, so it fires on attempt #5:
         # attempts 1-2 soft (True), attempts 3-4 full retries (True), attempt 5 hits cap → False.
@@ -281,10 +287,7 @@ class TestSoftPathStaysClosedAfterFullRetry:
         """
         engine = self._engine()
         instance = _make_instance()
-        results = [
-            _run(engine, instance, [_reasoning_only_msg()])
-            for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)
-        ]
+        results = [_run(engine, instance, [_reasoning_only_msg()]) for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)]
         # Exactly (cap - 1) continue attempts succeeded; the cap-th attempt gave up.
         assert results.count(True) == MAX_AUTO_CONTINUE_ATTEMPTS - 1
         assert results[-1] is False
@@ -296,7 +299,9 @@ class TestSoftPathStaysClosedAfterFullRetry:
 
 # ── N1 — no over-pop across consecutive full retries ────────────────────────
 
+
 class TestNoOverPop:
+
     def test_consecutive_full_retries_pop_exactly_turn_output(self):
         engine = _Engine(_FakePool(nudge_enabled=False))
         instance = _make_instance()
@@ -311,7 +316,9 @@ class TestNoOverPop:
 
 # ── Normal completion resets counters ───────────────────────────────────────
 
+
 class TestNormalCompletionResets:
+
     def test_clean_turn_resets_both_counters(self):
         engine = _Engine(_FakePool(nudge_enabled=False))
         instance = _make_instance()
@@ -332,7 +339,9 @@ class TestNormalCompletionResets:
 
 # ── auto_continue=False regression guard ────────────────────────────────────
 
+
 class TestAutoContinueDisabled:
+
     def test_reasoning_only_left_untouched(self):
         engine = _Engine(_FakePool(auto_continue=False))
         instance = _make_instance()
@@ -348,7 +357,9 @@ class TestAutoContinueDisabled:
 
 # ── Other malformed cases unchanged (N2) ────────────────────────────────────
 
+
 class TestOtherMalformedCasesUnchanged:
+
     def test_empty_output_is_immediate_full_retry(self):
         engine = _Engine(_FakePool(nudge_enabled=False))
         instance = _make_instance()
@@ -383,6 +394,7 @@ class TestOtherMalformedCasesUnchanged:
 
 # ── Nudge-ON path (deferred feature behind the flag) ────────────────────────
 
+
 class TestNudgeOnPath:
     """With SOFT_CONTINUE_NUDGE_ENABLED=True, soft continues append an escalating USER nudge.
 
@@ -393,6 +405,7 @@ class TestNudgeOnPath:
     @pytest.fixture(autouse=True)
     def _enable_nudge(self, monkeypatch):
         import agent_cascade.engine.core as core_mod
+
         # Enable the nudge flag AND raise N to 3 so the soft→full transition is reachable under
         # cap=5 (with the default N=2 the cap fires on attempt 3 before any full retry occurs).
         monkeypatch.setattr(core_mod, 'SOFT_CONTINUE_NUDGE_ENABLED', True)
@@ -460,10 +473,7 @@ class TestNudgeOnPath:
         """
         engine = self._engine()
         instance = _make_instance()
-        results = [
-            _run(engine, instance, [_reasoning_only_msg()])
-            for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)
-        ]
+        results = [_run(engine, instance, [_reasoning_only_msg()]) for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)]
         # 3 soft (True), the single full retry (True, pops 1+3=4), attempt 5 hits cap → False.
         assert results == [True, True, True, True, False]
         # The one full retry popped turn_output + all N nudges — and nothing more (no over-pop).
@@ -477,14 +487,12 @@ class TestNudgeOnPath:
         are zeroed by the cap-hit reset. This matches the plan's documented behavior — do not 'fix'
         it into a behavior change."""
         import agent_cascade.engine.core as core_mod
+
         # Restore default N (the autouse fixture set it to 3 above).
         core_mod.REASONING_ONLY_CONTINUE_ATTEMPTS = REASONING_ONLY_CONTINUE_ATTEMPTS
         engine = self._engine()
         instance = _make_instance()
-        results = [
-            _run(engine, instance, [_reasoning_only_msg()])
-            for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)
-        ]
+        results = [_run(engine, instance, [_reasoning_only_msg()]) for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)]
 
         # Attempts 1-2 soft (nudges appended), attempts 3-4 full retries, attempt 5 hits cap → False.
         assert results == [True, True, True, True, False]
@@ -499,7 +507,9 @@ class TestNudgeOnPath:
 
 # ── Deterministic nudge text (F4) ───────────────────────────────────────────
 
+
 class TestReasoningOnlyContinueText:
+
     def test_attempt_one_text(self):
         text = ExecutionEngine._reasoning_only_continue_text(1)
         assert 'continue' in text.lower()

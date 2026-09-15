@@ -24,16 +24,15 @@ from collections import defaultdict
 from pprint import pformat
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
-from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, SYSTEM, USER, ContentItem, Message
-from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS, COMPRESSION_OVERFLOW_TOLERANCE_PCT
 from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.exceptions import ContextWindowExceeded
+from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, SYSTEM, USER, Message
+from agent_cascade.log import logger
+from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import tokenizer
-from agent_cascade.utils.utils import (extract_text_from_message, estimate_functions_tokens,
-                                    format_as_multimodal_message, format_as_text_message,
-                                    get_message_stats, has_chinese_messages, json_dumps_compact, json_loads,
-                                    merge_generate_cfgs, print_traceback)
+from agent_cascade.utils.utils import (estimate_functions_tokens, format_as_multimodal_message, format_as_text_message,
+                                       get_message_stats, has_chinese_messages, json_dumps_compact, json_loads,
+                                       merge_generate_cfgs, print_traceback)
 
 LLM_REGISTRY = {}
 
@@ -54,20 +53,20 @@ def _set_on_usage_cb(cb):
 
 def _fire_usage_callback(usage_data: Optional[Dict]) -> None:
     """Fire the usage callback if registered, passing extracted token counts from API response.
-    
+
     Called by streaming backends when usage data arrives on the wire.
     Thread-safe via thread-local storage; never raises (telemetry must not break streaming).
-    
+
     Args:
         usage_data: Dict with prompt_tokens, completion_tokens, optional details breakdowns
     """
     if not usage_data or not isinstance(usage_data, dict):
         return
-    
+
     _on_usage_cb = _get_on_usage_cb()
     if not callable(_on_usage_cb):
         return
-    
+
     try:
         pt = usage_data.get('prompt_tokens', 0)
         ct = usage_data.get('completion_tokens', 0)
@@ -130,8 +129,6 @@ class BaseChatModel(ABC):
         return False
 
     def __init__(self, cfg: Optional[Dict] = None):
-        import hashlib
-        
         cfg = cfg or {}
         self.cfg = cfg
         self.model = cfg.get('model', '').strip()
@@ -139,7 +136,7 @@ class BaseChatModel(ABC):
         # Support max_input_tokens at the top level of cfg
         if 'max_input_tokens' in cfg and 'max_input_tokens' not in generate_cfg:
             generate_cfg['max_input_tokens'] = cfg['max_input_tokens']
-        
+
         cache_dir = cfg.get('cache_dir', generate_cfg.pop('cache_dir', None))
         # L1 retries are disabled (Phase 2 refactor). Retries handled by L2 (API router) and L3 (execution engine).
         # max_retries=0 is defensive — wrappers have been bypassed in chat()/raw_chat() anyway.
@@ -147,7 +144,7 @@ class BaseChatModel(ABC):
         self.max_retries = 0
         self.generate_cfg = generate_cfg
         self.model_type = cfg.get('model_type', '')
-        
+
         # ── Preprocessing Cache (Feature 019: Prompt Reprocessing Optimization) ──
         # Cache preprocessed messages to avoid redundant work when same messages are sent multiple times
         # LRU-style cache with bounded size to prevent memory growth
@@ -178,19 +175,22 @@ class BaseChatModel(ABC):
         else:
             self.cache = None
 
-    def _get_message_hash(self, messages: List[Message], functions: Optional[List[Dict]] = None, 
-                          generate_cfg: Optional[Dict] = None, lang: str = 'en') -> str:
+    def _get_message_hash(self,
+                          messages: List[Message],
+                          functions: Optional[List[Dict]] = None,
+                          generate_cfg: Optional[Dict] = None,
+                          lang: str = 'en') -> str:
         """Generate a hash for a list of messages to use as cache key.
-        
+
         Includes message roles, content, function schemas, and relevant config in the hash
         to ensure cache validity when any of these change.
-        
+
         Args:
             messages: List of Message objects to hash.
             functions: Optional list of function schemas (for fncall mode).
             generate_cfg: Optional generation config dict (keys that affect preprocessing).
             lang: Language code ('en' or 'zh') affecting multimodal upload info.
-            
+
         Returns:
             MD5 hex digest string for use as cache key.
         """
@@ -200,10 +200,10 @@ class BaseChatModel(ABC):
         except Exception:
             # Defensive: handle complex multimodal objects with broken __str__
             msg_repr = repr([(m.role, getattr(m, 'content', '<err>')) for m in messages])
-        
+
         # Include functions in hash if present (affects preprocessing)
         fn_repr = str(sorted([f.get('name', '') for f in functions])) if functions else ''
-        
+
         # Include generate_cfg keys that affect preprocessing behavior
         if generate_cfg:
             relevant_keys = ['incremental_output', 'max_input_tokens', 'max_images_for_llm']
@@ -211,13 +211,13 @@ class BaseChatModel(ABC):
             gen_repr = str(cfg_items)
         else:
             gen_repr = ''
-        
+
         combined = f"{msg_repr}|||{fn_repr}|||{gen_repr}|||{lang}"
         return hashlib.md5(combined.encode()).hexdigest()
-    
+
     def _clear_preprocess_cache(self):
         """Clear the preprocessing cache.
-        
+
         Called when model state changes (e.g., after compression rebuild) to ensure
         fresh preprocessing on next call.
         """
@@ -251,7 +251,7 @@ class BaseChatModel(ABC):
 
         Returns:
             the generated message list response by llm.
-            
+
         Note: Usage information from LLM API responses is stored in Message.extra['usage']
         dict with keys: prompt_tokens, completion_tokens, total_tokens (when available).
         See Feature 006 for ground-truth token tracking implementation details.
@@ -278,7 +278,8 @@ class BaseChatModel(ABC):
                 elif isinstance(msg, list):
                     logger.debug(f"BaseChatModel.chat: filtering out unexpected list item in messages list")
                 else:
-                    logger.debug(f"BaseChatModel.chat: filtering out unexpected type {type(msg).__name__} in messages list")
+                    logger.debug(
+                        f"BaseChatModel.chat: filtering out unexpected type {type(msg).__name__} in messages list")
                 continue  # Explicit: skip this item from new_messages
         messages = new_messages
 
@@ -321,17 +322,26 @@ class BaseChatModel(ABC):
         # Not precise. It's hard to estimate tokens related with function calling and multimodal items.
         max_input_tokens = generate_cfg.get('max_input_tokens', DEFAULT_MAX_INPUT_TOKENS)
 
-        # Feature 006: Extract token count callback BEFORE agent_settings loop
-        on_token_count_cb = generate_cfg.pop('_on_token_count', None)
+        # Feature 006: Extract (pop) token count callback BEFORE agent_settings loop.
+        # The value is not used here; the pop() mutates generate_cfg so it must stay as a bare statement.
+        generate_cfg.pop('_on_token_count', None)
 
         # Extract usage callback (for response token tracking at streaming layer) and store in thread-local
         on_usage_cb = generate_cfg.pop('_on_usage', None)
         _set_on_usage_cb(on_usage_cb)
 
         agent_settings = [
-            'disabled_tools', 'max_turns', 'auto_continue', 'auto_rollback_on_loop',
-            'read_file_limit', 'mcpServers', 'work_access_folders',
-            'grep_char_limit', 'shell_char_limit', 'code_char_limit', 'seed',
+            'disabled_tools',
+            'max_turns',
+            'auto_continue',
+            'auto_rollback_on_loop',
+            'read_file_limit',
+            'mcpServers',
+            'work_access_folders',
+            'grep_char_limit',
+            'shell_char_limit',
+            'code_char_limit',
+            'seed',
             '_on_token_count',  # Safety net: also pop here in case it wasn't extracted above
             '_use_custom_sampling',  # Internal routing flag — not an LLM parameter
         ]
@@ -352,22 +362,19 @@ class BaseChatModel(ABC):
                     + estimate_functions_tokens(functions)
             except Exception:
                 # If counting fails, log warning and continue — let the API handle it.
-                logger.warning(
-                    f"[{agent_name}] Token estimation failed, skipping overflow check. "
-                    f"API may reject with context-exceeded error."
-                )
+                logger.warning(f"[{agent_name}] Token estimation failed, skipping overflow check. "
+                               f"API may reject with context-exceeded error.")
                 estimated_tokens = None
 
             if estimated_tokens is not None:
-                logger.info(f'Agent [{agent_name}] - ALL tokens: {estimated_tokens}, Available tokens: {max_input_tokens}')
+                logger.info(
+                    f'Agent [{agent_name}] - ALL tokens: {estimated_tokens}, Available tokens: {max_input_tokens}')
 
             if estimated_tokens is not None and estimated_tokens > max_input_tokens:
                 # Raise immediately — no truncation. Upstream (execution engine) will compress.
-                raise ContextWindowExceeded(
-                    f"Context window exceeded [{agent_name}]: "
-                    f"~{estimated_tokens} tokens vs {max_input_tokens} limit. "
-                    f"Compression required before retry."
-                )
+                raise ContextWindowExceeded(f"Context window exceeded [{agent_name}]: "
+                                            f"~{estimated_tokens} tokens vs {max_input_tokens} limit. "
+                                            f"Compression required before retry.")
 
         if functions:
             fncall_mode = True
@@ -389,7 +396,7 @@ class BaseChatModel(ABC):
                                              generate_cfg=generate_cfg,
                                              functions=functions,
                                              use_raw_api=self.use_raw_api)
-        
+
         # Convert images to text descriptions when routing to a non-vision endpoint.
         # The model class property (self.support_multimodal_input) reflects the template LLM,
         # not the actual endpoint being called — so we must also check the endpoint's vision_enabled flag.
@@ -404,7 +411,11 @@ class BaseChatModel(ABC):
         if self.use_raw_api:
             logger.debug('`use_raw_api` takes effect.')
             assert stream and (not delta_stream), '`use_raw_api` only support full stream!!!'
-            return self.raw_chat(messages=messages, functions=functions, stream=stream, generate_cfg=generate_cfg, _return_message_type=_return_message_type)
+            return self.raw_chat(messages=messages,
+                                 functions=functions,
+                                 stream=stream,
+                                 generate_cfg=generate_cfg,
+                                 _return_message_type=_return_message_type)
 
         if not fncall_mode:
             for k in ['parallel_function_calls', 'function_choice', 'thought_in_content']:
@@ -550,14 +561,14 @@ class BaseChatModel(ABC):
         cache_key = self._get_message_hash(messages, functions, generate_cfg, lang)
         if cache_key in self._preprocess_cache:
             return copy.deepcopy(self._preprocess_cache[cache_key])
-        
+
         # Evict oldest entries if cache is full (FIFO-style eviction)
         if len(self._preprocess_cache) >= self._max_preprocess_cache_size:
             # Remove first 20% of entries to make room
             keys_to_remove = list(self._preprocess_cache.keys())[:int(self._max_preprocess_cache_size * 0.2)]
             for key in keys_to_remove:
                 self._preprocess_cache.pop(key, None)
-        
+
         # ── Actual Preprocessing ────────────────────────────────────────────────
         add_multimodel_upload_info = False
         if functions or (not self.support_multimodal_input):
@@ -572,10 +583,10 @@ class BaseChatModel(ABC):
                                          add_audio_upload_info=add_audio_upload_info,
                                          lang=lang) for msg in messages
         ]
-        
+
         # Cache the result (store reference, will be deep-copied on retrieval)
         self._preprocess_cache[cache_key] = preprocessed
-        
+
         return copy.deepcopy(preprocessed)
 
     def _postprocess_messages(
@@ -633,22 +644,20 @@ class BaseChatModel(ABC):
             functions = [{'type': 'function', 'function': f} for f in functions]
         if functions:
             generate_cfg['tools'] = functions
-        
+
         # Apply postprocessing to each message batch, matching the non-raw path
         def _postprocess_batch(msg_batch):
             processed = self._postprocess_messages(msg_batch, fncall_mode=bool(functions), generate_cfg=generate_cfg)
             if not self.support_multimodal_output:
                 processed = _format_as_text_messages(processed)
             return processed
-        
+
         if stream:
             # Direct call — no L1 retry wrapper. Retries are handled by L2 (API router) and L3 (execution engine).
             output_iter = self._chat_stream(messages=messages, delta_stream=False, generate_cfg=generate_cfg)
             postprocessed_iter = (_postprocess_batch(batch) for batch in output_iter)
-            
-            return self._convert_messages_iterator_to_target_type(
-                postprocessed_iter, _return_message_type
-            )
+
+            return self._convert_messages_iterator_to_target_type(postprocessed_iter, _return_message_type)
         else:
             # Non-streaming: collect all batches and return the last one as a list
             final_batch = None
@@ -674,7 +683,8 @@ class BaseChatModel(ABC):
             try:
                 return json.dumps(fn_args, ensure_ascii=False)
             except (TypeError, ValueError):
-                logger.warning('Tool call arguments dict was not JSON-serializable (%s); defaulting to "{}"', repr(fn_args))
+                logger.warning('Tool call arguments dict was not JSON-serializable (%s); defaulting to "{}"',
+                               repr(fn_args))
                 return '{}'
         if not isinstance(fn_args, str) or not fn_args.strip():
             # Empty args are normal during streaming (name arrives before arguments fill in) — only debug-level
@@ -685,11 +695,13 @@ class BaseChatModel(ABC):
             parsed = json_loads(fn_args)
             if isinstance(parsed, dict):
                 return fn_args
-            logger.warning('Tool call arguments parsed but were not a JSON object (got %s); defaulting to "{}". Original: %s',
-                          type(parsed).__name__, repr(fn_args[:200]))
+            logger.warning(
+                'Tool call arguments parsed but were not a JSON object (got %s); defaulting to "{}". Original: %s',
+                type(parsed).__name__, repr(fn_args[:200]))
             return '{}'
         except (ValueError, TypeError):
-            logger.warning('Tool call arguments were not valid JSON; defaulting to "{}". Original: %s', repr(fn_args[:200]))
+            logger.warning('Tool call arguments were not valid JSON; defaulting to "{}". Original: %s',
+                           repr(fn_args[:200]))
             return '{}'
 
     @staticmethod
@@ -738,10 +750,9 @@ class BaseChatModel(ABC):
                     # Check if there are any multimodal items (image_url, video_url, input_audio).
                     # If so, preserve the full list so vision models receive actual image data.
                     has_multimodal = any(
-                        (hasattr(item, 'type') and item.type in ('image_url', 'video_url', 'input_audio'))
-                        or (isinstance(item, dict) and item.get('type') in ('image_url', 'video_url', 'input_audio'))
-                        for item in content
-                    )
+                        (hasattr(item, 'type') and item.type in ('image_url', 'video_url', 'input_audio')) or
+                        (isinstance(item, dict) and item.get('type') in ('image_url', 'video_url', 'input_audio'))
+                        for item in content)
                     if has_multimodal:
                         # Already in proper format from convert_messages_to_dicts; pass through.
                         pass
@@ -921,7 +932,10 @@ def _truncate_at_stop_word(text: str, stop: List[str]):
     return truncated, text
 
 
-def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, agent_name: str = 'Unknown', on_token_count_cb=None) -> List[Message]:
+def _truncate_input_messages_roughly(messages: List[Message],
+                                     max_tokens: int,
+                                     agent_name: str = 'Unknown',
+                                     on_token_count_cb=None) -> List[Message]:
     if len([m for m in messages if m.role == SYSTEM]) >= 2:
         raise ModelServiceError(
             code='400',
@@ -1102,21 +1116,23 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, a
     all_tokens = sum([x for x in message_tokens.values()])
     # Log stats with agent name to avoid confusion in multi-agent logs
     logger.info(f'Agent [{agent_name}] - ALL tokens: {all_tokens}, Available tokens: {available_token}')
-    
+
     # Feature 006: Invoke token count callback if registered (for compression tracking)
     if on_token_count_cb is not None and callable(on_token_count_cb):
         try:
             on_token_count_cb(all_tokens, available_token, max_tokens)
         except Exception as e:
             logger.debug(f"Token count callback failed for agent {agent_name}: {e}")
-    
+
     if all_tokens <= available_token:
         return messages
-    
+
     # Even if system message consumed all budget, still try to truncate user content.
     # Clamp available_token to at least 1 so truncation has a non-zero budget.
     if available_token <= 0:
-        logger.debug(f'Agent [{agent_name}] - System message consumed all tokens ({max_tokens}), clamping available to 1 for truncation')
+        logger.debug(
+            f'Agent [{agent_name}] - System message consumed all tokens ({max_tokens}), clamping available to 1 for truncation'
+        )
         available_token = 1
 
     exceedance = all_tokens - available_token  # make exceedance <= 0 -> ok
@@ -1141,6 +1157,7 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, a
 # These functions are no longer called by chat()/raw_chat() — wrappers have been
 # bypassed to preserve original exception types for _classify_llm_error().
 # Retained here only for backwards compatibility; scheduled for removal.
+
 
 def retry_model_service(
     fn,
@@ -1174,14 +1191,11 @@ def retry_model_service_iterator(
             num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
 
         except Exception as e:
-            logger.warning(
-                f'Streaming error (retry {num_retries + 1}/{max_retries}) - '
-                f'{type(e).__name__}: {e}'
-            )
+            logger.warning(f'Streaming error (retry {num_retries + 1}/{max_retries}) - '
+                           f'{type(e).__name__}: {e}')
             if num_retries >= max_retries:
                 raise ModelServiceError(
-                    exception=Exception(f'Maximum number of retries ({max_retries}) exceeded.')
-                ) from None
+                    exception=Exception(f'Maximum number of retries ({max_retries}) exceeded.')) from None
 
             num_retries += 1
             jitter = 1.0 + random.random()

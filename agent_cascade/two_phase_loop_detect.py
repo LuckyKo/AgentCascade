@@ -83,12 +83,15 @@ class TwoPhaseLoopDetector:
     is suppressed for cooldown_duration feeds to prevent noisy re-triggering.
     """
 
-    def __init__(self, suspicion_threshold=None, confirmed_matches_required=None, cooldown_duration=None, enabled=None) -> None:
+    def __init__(self,
+                 suspicion_threshold=None,
+                 confirmed_matches_required=None,
+                 cooldown_duration=None,
+                 enabled=None) -> None:
         # Suspicion phase parameters
         self.ngram_window_size = 64  # Token window size (same as current ngram mode)
         self.suspicion_threshold = suspicion_threshold or int(
-            os.environ.get('AGENT_CASCADE_LOOP_SUSPICION_THRESHOLD', '7')
-        )
+            os.environ.get('AGENT_CASCADE_LOOP_SUSPICION_THRESHOLD', '7'))
         self.max_counter_entries = 200  # Prune threshold for counter
 
         # Streaming tokenizer — buffers partial words across chunks for consistent tokenization
@@ -108,15 +111,12 @@ class TwoPhaseLoopDetector:
 
         # Confirmation phase parameters
         self.confirmed_matches_required = confirmed_matches_required or int(
-            os.environ.get('AGENT_CASCADE_LOOP_CONFIRM_REQUIRED', '3')
-        )
+            os.environ.get('AGENT_CASCADE_LOOP_CONFIRM_REQUIRED', '3'))
 
         # Cooldown state
         self.cooldown_active = False
         self.cooldown_remaining_feeds = 0
-        self.cooldown_duration = cooldown_duration or int(
-            os.environ.get('AGENT_CASCADE_LOOP_COOLDOWN_FEEDS', '50')
-        )
+        self.cooldown_duration = cooldown_duration or int(os.environ.get('AGENT_CASCADE_LOOP_COOLDOWN_FEEDS', '50'))
 
         # Tail buffer for exact comparison — no truncation needed (detector is per-response, max_chars limits total)
         self.tail_buffer: str = ''
@@ -243,7 +243,7 @@ class TwoPhaseLoopDetector:
         start_scan = max(0, first_new_token_idx - self.ngram_window_size)
 
         for i in range(start_scan, len(self.token_buffer) - self.ngram_window_size + 1):
-            window = tuple(self.token_buffer[i : i + self.ngram_window_size])
+            window = tuple(self.token_buffer[i:i + self.ngram_window_size])
             if len(window) < self.ngram_window_size:
                 continue
 
@@ -318,12 +318,9 @@ class TwoPhaseLoopDetector:
         # Search radius: allow ±15% tolerance for interval estimation error from token mapping
         search_radius = max(8, estimated_interval // 6)
         best_count = 0
-        best_interval = estimated_interval
 
-        for interval in range(
-            max(1, estimated_interval - search_radius),
-            min(max_interval, estimated_interval + search_radius) + 1
-        ):
+        for interval in range(max(1, estimated_interval - search_radius),
+                              min(max_interval, estimated_interval + search_radius) + 1):
             min_tail_needed = interval * self.confirmed_matches_required
             if len(self.tail_buffer) < min_tail_needed:
                 continue
@@ -333,7 +330,7 @@ class TwoPhaseLoopDetector:
             pos = len(self.tail_buffer) - interval
 
             while pos >= interval:
-                prev_segment = self.tail_buffer[pos - interval : pos]
+                prev_segment = self.tail_buffer[pos - interval:pos]
                 if prev_segment == candidate_segment:
                     confirmed_count += 1
                     pos -= interval
@@ -342,7 +339,6 @@ class TwoPhaseLoopDetector:
 
             if confirmed_count > best_count:
                 best_count = confirmed_count
-                best_interval = interval
 
         return best_count
 

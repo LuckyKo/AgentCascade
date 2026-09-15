@@ -12,70 +12,103 @@ from collections import deque as Deque
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from agent_cascade.settings import (
-    CI_MIN_EXECUTION_TIMEOUT, CI_MIN_WATCHDOG_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL,
-)
 from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
+from agent_cascade.settings import CI_MIN_EXECUTION_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL, CI_MIN_WATCHDOG_TIMEOUT
 
 # ── LLM config key set (defined locally to avoid circular import with api_server) ────
 LLM_CONFIG_KEYS = frozenset({
-    'model', 'api_base', 'api_key', 'temperature', 'max_tokens',
-    'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
-    'presence_penalty', 'stop', 'timeout', 'model_type'
+    'model', 'api_base', 'api_key', 'temperature', 'max_tokens', 'max_input_tokens', 'max_output_tokens', 'top_p',
+    'frequency_penalty', 'presence_penalty', 'stop', 'timeout', 'model_type'
 })
 
 # ── PoolSettings keys — used by ws_handlers.py to trigger centralized save ────
 # Includes ALL non-cosmetic settings that should persist to pool_settings.json.
 POOL_SETTINGS_KEYS = frozenset({
     # Core pool/agent settings
-    'idle_timeout_seconds', 'system_agent_idle_timeout_seconds', 'max_parallel_agents', 'max_workers',
-    'auto_continue', 'enable_agent_budgeting', 'max_turns', 'max_auto_rollbacks',
+    'idle_timeout_seconds',
+    'system_agent_idle_timeout_seconds',
+    'max_parallel_agents',
+    'max_workers',
+    'auto_continue',
+    'enable_agent_budgeting',
+    'max_turns',
+    'max_auto_rollbacks',
     'auto_rollback_on_loop',
     # Two-tier loop detection (2026-08 redesign)
-    'loop_exact_rollback_enabled', 'loop_fuzzy_warning_enabled',
-    'tool_loop_fuzzy_rollback_enabled', 'tool_loop_detection_enabled',
+    'loop_exact_rollback_enabled',
+    'loop_fuzzy_warning_enabled',
+    'tool_loop_fuzzy_rollback_enabled',
+    'tool_loop_detection_enabled',
     # Inner-loop detection
-    'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars',
-    'loop_char_run_enabled', 'loop_char_run_limit', 'loop_max_chars_enabled',
-    'loop_two_phase_enabled', 'loop_suspicion_threshold',
-    'loop_confirm_required', 'loop_cooldown_feeds',
+    'inner_loop_detect_enabled',
+    'loop_min_chars',
+    'loop_max_chars',
+    'loop_char_run_enabled',
+    'loop_char_run_limit',
+    'loop_max_chars_enabled',
+    'loop_two_phase_enabled',
+    'loop_suspicion_threshold',
+    'loop_confirm_required',
+    'loop_cooldown_feeds',
     # Skills system
-    'default_load_skill_mode', 'auto_skill_enabled', 'auto_skill_mode',
+    'default_load_skill_mode',
+    'auto_skill_enabled',
+    'auto_skill_mode',
     # Retry policy
-    'retry_max_attempts', 'endpoint_max_retries', 'retry_base_delay', 'retry_max_delay',
+    'retry_max_attempts',
+    'endpoint_max_retries',
+    'retry_base_delay',
+    'retry_max_delay',
     # Code interpreter
-    'ci_execution_timeout', 'ci_watchdog_timeout', 'ci_stale_container_ttl',
+    'ci_execution_timeout',
+    'ci_watchdog_timeout',
+    'ci_stale_container_ttl',
     # Cache pool
-    'cache_pool_enabled', 'cache_pool_size', 'cache_threshold_chars',
+    'cache_pool_enabled',
+    'cache_pool_size',
+    'cache_threshold_chars',
     # Tool char limits (stored in pool.llm_cfg but persisted via pool_settings.json)
-    'tool_result_max_chars', 'wild_read_truncation_chars', 'grep_char_limit', 'grep_spillover',
-    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
+    'tool_result_max_chars',
+    'wild_read_truncation_chars',
+    'grep_char_limit',
+    'grep_spillover',
+    'shell_char_limit',
+    'code_char_limit',
+    'list_dir_char_limit',
     # Image base64 management
     'max_images_for_llm',
     # Image caption mode (auto/always/off)
     'image_caption_mode',
     # Approval timeout settings
-    'approval_timeout_seconds', 'enable_approval_timeout',
+    'approval_timeout_seconds',
+    'enable_approval_timeout',
     # Async shell console window toggle
     'enable_async_shell_console_window',
     # Work folders (persisted alongside PoolSettings fields)
-    'work_access_folders_ro', 'work_access_folders_rw',
+    'work_access_folders_ro',
+    'work_access_folders_rw',
     # Default workspace
     'default_workspace',
     # Idle management
     'idle_check_interval',
     # Compression settings
-    'compression_force_threshold', 'compression_warning_threshold',
-    'compression_timeout', 'compression_force_cooldown', 'compression_max_attempts',
-    'compression_proactive_threshold', 'compression_context_reserve_tokens',
+    'compression_force_threshold',
+    'compression_warning_threshold',
+    'compression_timeout',
+    'compression_force_cooldown',
+    'compression_max_attempts',
+    'compression_proactive_threshold',
+    'compression_context_reserve_tokens',
     # Security
     'security_check_timeout',
     # Nesting/sleeping limits
-    'max_nesting_depth', 'sleeping_wakeup_interval',
+    'max_nesting_depth',
+    'sleeping_wakeup_interval',
     # Sync checks
     'tail_sync_check_enabled',
     # Streaming timeout settings
-    'stream_max_silence_seconds', 'stream_max_total_seconds',
+    'stream_max_silence_seconds',
+    'stream_max_total_seconds',
     # Dismiss thread join timeout
     'dismiss_thread_join_timeout',
 })
@@ -83,7 +116,7 @@ POOL_SETTINGS_KEYS = frozenset({
 # ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
 EXTRA_PERSIST_KEYS = frozenset({
     'disabled_tools',  # Per-agent-class tool assignments from UI settings panel
-    'auto_security',   # Auto-Ask security mode toggle state
+    'auto_security',  # Auto-Ask security mode toggle state
     'compression_fraction',  # Compression ratio as percentage (maps to COMPRESSION_DEFAULT_FRACTION)
 })
 
@@ -93,13 +126,16 @@ CONFIG_HANDLERS: Dict[str, Callable] = {}
 
 def register_config_handler(key: str) -> Callable:
     """Decorator to register a handler for a specific config key."""
+
     def decorator(func: Callable) -> Callable:
         CONFIG_HANDLERS[key] = func
         return func
+
     return decorator
 
 
 # ── Individual config handlers (preserving exact original behavior) ───────
+
 
 @register_config_handler('mcpServers')
 def _handle_mcp_servers(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
@@ -227,9 +263,7 @@ def _handle_approval_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: li
     from agent_cascade.log import logger as _logger
     if agent_pool is not None:
         try:
-            agent_pool.operation_manager.set_approval_timeout(
-                int(ui_cfg['approval_timeout_seconds'])
-            )
+            agent_pool.operation_manager.set_approval_timeout(int(ui_cfg['approval_timeout_seconds']))
         except Exception as e:
             _logger.warning(f"Failed to set approval timeout: {e}")
 
@@ -240,9 +274,7 @@ def _handle_enable_approval_timeout(ui_cfg: dict, agent_pool: Optional[Any], age
     from agent_cascade.log import logger as _logger
     if agent_pool is not None:
         try:
-            agent_pool.operation_manager.set_enable_timeout(
-                bool(ui_cfg['enable_approval_timeout'])
-            )
+            agent_pool.operation_manager.set_enable_timeout(bool(ui_cfg['enable_approval_timeout']))
         except Exception as e:
             _logger.warning(f"Failed to set approval timeout toggle: {e}")
 
@@ -369,10 +401,8 @@ def _handle_auto_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
     "none" disables system-injected auto-matched skills while preserving
     Self-Augmentation and caller-explicit load_skill lists.
     """
-    from agent_cascade.settings import (
-        DEFAULT_AUTO_SKILL_MODE, AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED,
-        AUTO_SKILL_MODE_NONE,
-    )
+    from agent_cascade.settings import (AUTO_SKILL_MODE_ADVANCED, AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_NONE,
+                                        DEFAULT_AUTO_SKILL_MODE)
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = str(ui_cfg.get('auto_skill_mode', DEFAULT_AUTO_SKILL_MODE)).strip().lower()
         if val not in (AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED, AUTO_SKILL_MODE_NONE):
@@ -412,6 +442,7 @@ def _handle_loop_char_run_limit(ui_cfg: dict, agent_pool: Optional[Any], agents:
 
 
 # Retry policy settings handlers (Phase 1 of retry refactoring)
+
 
 @register_config_handler('retry_max_attempts')
 def _handle_retry_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
@@ -457,22 +488,22 @@ def _handle_retry_max_delay(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.ci_execution_timeout = max(
-            CI_MIN_EXECUTION_TIMEOUT, int(ui_cfg['ci_execution_timeout']))
+        agent_pool.settings.ci_execution_timeout = max(CI_MIN_EXECUTION_TIMEOUT, int(ui_cfg['ci_execution_timeout']))
+
 
 @register_config_handler('ci_watchdog_timeout')
 def _handle_ci_watchdog_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter watchdog timeout."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.ci_watchdog_timeout = max(
-            CI_MIN_WATCHDOG_TIMEOUT, int(ui_cfg['ci_watchdog_timeout']))
+        agent_pool.settings.ci_watchdog_timeout = max(CI_MIN_WATCHDOG_TIMEOUT, int(ui_cfg['ci_watchdog_timeout']))
+
 
 @register_config_handler('ci_stale_container_ttl')
 def _handle_ci_stale_container_ttl(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter stale container TTL."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.ci_stale_container_ttl = max(
-            CI_MIN_STALE_CONTAINER_TTL, int(ui_cfg['ci_stale_container_ttl']))
+        agent_pool.settings.ci_stale_container_ttl = max(CI_MIN_STALE_CONTAINER_TTL,
+                                                         int(ui_cfg['ci_stale_container_ttl']))
 
 
 @register_config_handler('stream_max_silence_seconds')
@@ -547,7 +578,8 @@ def _handle_loop_fuzzy_warning_enabled(ui_cfg: dict, agent_pool: Optional[Any], 
 def _handle_tool_loop_fuzzy_rollback_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Tier 2 escalation toggle: full rollback when a fuzzy loop persists FUZZY_ESCALATION_TURNS after the warning (default False)."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.tool_loop_fuzzy_rollback_enabled = bool(ui_cfg.get('tool_loop_fuzzy_rollback_enabled', False))
+        agent_pool.settings.tool_loop_fuzzy_rollback_enabled = bool(
+            ui_cfg.get('tool_loop_fuzzy_rollback_enabled', False))
 
 
 @register_config_handler('tool_loop_detection_enabled')
@@ -570,9 +602,8 @@ def _handle_tool_result_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agent
         agent_pool.llm_cfg['tool_result_max_chars'] = new_threshold
         # Clamp target to not exceed new threshold
         if 'wild_read_truncation_chars' in agent_pool.llm_cfg:
-            agent_pool.llm_cfg['wild_read_truncation_chars'] = min(
-                agent_pool.llm_cfg['wild_read_truncation_chars'], new_threshold
-            )
+            agent_pool.llm_cfg['wild_read_truncation_chars'] = min(agent_pool.llm_cfg['wild_read_truncation_chars'],
+                                                                   new_threshold)
 
 
 @register_config_handler('wild_read_truncation_chars')
@@ -664,7 +695,7 @@ def _handle_disabled_tools(ui_cfg: dict, agent_pool: Optional[Any], agents: list
 
     from agent_cascade.log import logger as _logger
     from agent_cascade.tools.base import TOOL_REGISTRY
-    from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
+    from agent_cascade.utils.disabled_tools import normalize_disabled_tools
 
     raw_dt = ui_cfg['disabled_tools']
     if not raw_dt:
@@ -702,6 +733,7 @@ def _handle_disabled_tools(ui_cfg: dict, agent_pool: Optional[Any], agents: list
 
 
 # ── PoolSettings handlers for fields without special logic ───────────────
+
 
 @register_config_handler('compression_force_threshold')
 def _handle_compression_force_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
@@ -823,6 +855,7 @@ def _handle_tail_sync_check_enabled(ui_cfg: dict, agent_pool: Optional[Any], age
 # LLM config keys — all share one handler (defense-in-depth optimization).
 # Registered under each key so any LLM key present triggers the check.
 
+
 def _handle_llm_config(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update default LLM config if changed (defense-in-depth optimization)."""
     from agent_cascade.log import logger as _logger
@@ -834,15 +867,18 @@ def _handle_llm_config(ui_cfg: dict, agent_pool: Optional[Any], agents: list) ->
         else:
             _logger.debug('[update_config] LLM config unchanged')
 
+
 # Each key is bound at decoration time (register_config_handler(_llm_key)), so there is
 # no late-binding closure issue — every registered handler routes to _handle_llm_config.
 for _llm_key in LLM_CONFIG_KEYS:
+
     @register_config_handler(_llm_key)
     def _handler(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
         _handle_llm_config(ui_cfg, agent_pool, agents)
 
 
 # ── Cache pool config handlers ──────────────────────────────────────────
+
 
 @register_config_handler('cache_pool_enabled')
 def _handle_cache_pool_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
@@ -884,6 +920,7 @@ def _handle_cache_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
 
 
 # ── Router class ─────────────────────────────────────────────────────────
+
 
 class ConfigUpdateRouter:
     """Routes config key updates to their respective handler functions.

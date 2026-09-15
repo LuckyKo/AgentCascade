@@ -10,27 +10,20 @@ All unit tests are self-contained — no LLM or API server required.
 Integration tests use mocked LLM calls to avoid external dependencies.
 """
 
-import copy
 import json
 import os
-import tempfile
 import threading
-from pathlib import Path
 from typing import Any, List
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.prompts.dna import COMPRESSION_MARKER, COMPRESSION_BASELINE_TEMPLATE
-from agent_cascade.llm.schema import SYSTEM, USER, Message
-from agent_cascade.compression.helpers import (
-    select_markers_for_consolidation,
-    extract_summary_from_marker,
-    build_consolidation_marker_message,
-    _parse_marker_timestamps,
-    build_marker_message,
-)
 from agent_cascade.agent_pool import AgentPool
+from agent_cascade.compression.helpers import (_parse_marker_timestamps, build_consolidation_marker_message,
+                                               build_marker_message, extract_summary_from_marker,
+                                               select_markers_for_consolidation)
+from agent_cascade.llm.schema import SYSTEM, USER, Message
+from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
 
 # ── Helper factories ────────────────────────────────────────────────────────
 
@@ -496,7 +489,7 @@ class TestConsolidateMarkersUnit:
 
         num_markers = 8
         history = _build_history_with_markers(num_markers=num_markers, msgs_between=2)
-        marker_indices = [i for i, m in enumerate(history) if _is_compression_marker(m)]
+        [i for i, m in enumerate(history) if _is_compression_marker(m)]
 
         mock_inst = MagicMock()
         mock_inst.conversation = history
@@ -846,7 +839,6 @@ class TestConsolidationIntegration:
     def test_end_to_end_consolidation_flow(self, pool_with_many_markers):
         """Trigger consolidation and verify marker count reduced, raw segments preserved."""
         from agent_cascade.compression.core import _consolidate_markers
-        from tests.conftest import MockAgentPool
 
         pool, original_history = pool_with_many_markers
 
@@ -888,8 +880,9 @@ class TestConsolidationIntegration:
 
     def test_tail_sync_invariant(self, pool_with_many_markers):
         """After consolidation, tail past last marker has same count in pool and JSONL."""
-        from agent_cascade.compression.core import _consolidate_markers
         import tempfile
+
+        from agent_cascade.compression.core import _consolidate_markers
 
         pool, original_history = pool_with_many_markers
 
@@ -1085,7 +1078,7 @@ class TestCompressContextConsolidationTrigger:
 
     def test_consolidation_triggered_after_compression_when_threshold_met(self):
         """compress_context should call _consolidate_markers if post-compression marker count >= threshold."""
-        from agent_cascade.compression.core import compress_context, _consolidate_markers
+        from agent_cascade.compression.core import compress_context
         from tests.conftest import MockAgentPool
 
         # Build pool with many existing markers + fresh messages to compress after last marker
@@ -1193,7 +1186,7 @@ class TestCompressContextConsolidationTrigger:
         This test asserts the 2nd marker's start/end match the first/last message of the new
         batch (~base+100h), NOT marker1's creation-time ts or its header text (base+10h).
         """
-        from agent_cascade.compression.core import compress_context, _consolidate_markers
+        from agent_cascade.compression.core import compress_context
         from tests.conftest import MockAgentPool
 
         hour = 3600.0
@@ -1576,7 +1569,7 @@ class TestConsolidateMarkersFailureModes:
         from agent_cascade.compression.core import _consolidate_markers
 
         history = _build_history_with_markers(num_markers=8, msgs_between=2)
-        original_history_len = len(history)
+        len(history)
 
         mock_inst = MagicMock()
         mock_inst.conversation = list(history)
@@ -1899,7 +1892,7 @@ class TestConsolidationJsonlSyncRegression:
         all_marker_indices = AgentPool.find_all_marker_indices(history)
         assert len(all_marker_indices) == original_marker_count
         m6_idx = all_marker_indices[-2]   # second-newest marker (M6)
-        m7_idx = all_marker_indices[-1]   # newest marker (M7), NOT yet in the file
+        all_marker_indices[-1]   # newest marker (M7), NOT yet in the file
 
         # Messages that will be written to the JSONL: SYSTEM + M0..M6 + their raw
         # segments, but excluding M7 and any messages after it.
@@ -2062,4 +2055,3 @@ class TestConsolidationJsonlSyncRegression:
 
         # The file is NOT a fresh empty file — it still holds the retained history.
         assert len(post_msgs) > 0, 'The JSONL file was emptied (wrong logger targeted)'
-

@@ -15,7 +15,6 @@
 import copy
 import logging
 import os
-from pprint import pformat
 from typing import List
 
 from agent_cascade.llm import ModelServiceError
@@ -23,12 +22,8 @@ from agent_cascade.llm.base import register_llm
 from agent_cascade.llm.oai import TextChatAtOAI
 from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.log import logger
-from agent_cascade.utils.utils import (
-    encode_audio_as_base64,
-    encode_image_as_base64,
-    encode_video_as_base64,
-    sanitize_chrome_file_path,
-)
+from agent_cascade.utils.utils import (encode_audio_as_base64, encode_image_as_base64, encode_video_as_base64,
+                                       sanitize_chrome_file_path)
 
 
 @register_llm('qwenvl_oai')
@@ -63,7 +58,7 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                             v = new_v
                         if isinstance(v, dict):
                             v['data'] = conv_multimodel_value(t, v['data'])
-    
+
                         if t == 'image':
                             new_content.append({'type': 'image_url', 'image_url': {'url': v}})
                         elif t == 'video':
@@ -84,14 +79,19 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                         err_msg = str(e)
                         logger.warning(f'Multimodal item error: {err_msg}')
                         # Provide feedback to the agent about the missing file
-                        new_content.append({'type': 'text', 'text': f'\n[System Error: {err_msg} - This multimodal item was skipped and is invisible to the LLM]\n'})
+                        new_content.append({
+                            'type':
+                                'text',
+                            'text':
+                                f'\n[System Error: {err_msg} - This multimodal item was skipped and is invisible to the LLM]\n'
+                        })
                         continue
 
             new_msg = msg.model_dump()
             new_msg['content'] = new_content
             new_messages.append(new_msg)
         new_messages = self._conv_agent_cascade_messages_to_oai(new_messages)
-        
+
         # Log vision payload summary for debugging
         image_count = 0
         for msg in new_messages:
@@ -99,8 +99,6 @@ class QwenVLChatAtOAI(TextChatAtOAI):
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get('type') == 'image_url':
-                        url = item.get('image_url', {}).get('url', '')
-                        has_base64 = url.startswith('data:')
                         image_count += 1
                         # logger.debug(f'Vision payload: role={msg.get("role")}, image_url starts with data:={has_base64}, url_prefix={url[:50]}...')
         if image_count > 0 and logger.isEnabledFor(logging.DEBUG):
@@ -135,7 +133,7 @@ def conv_multimodel_value(t, v):
         if not v_exists and os.name == 'nt' and v.startswith('/') and len(v) > 2 and v[2] == ':':
             v = v[1:]
             v_exists = os.path.exists(v)
-            
+
         if v_exists:
             if t == 'image':
                 v = encode_image_as_base64(v, max_short_side_length=1080)

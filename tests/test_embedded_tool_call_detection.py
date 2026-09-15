@@ -4,7 +4,6 @@ Covers the _extract_tool_calls_from_text helper and the updated
 _detect_tool / _check_for_tool_calls_in_output methods.
 """
 
-import pytest
 from agent_cascade.engine.helpers import _extract_tool_calls_from_text
 
 
@@ -19,10 +18,8 @@ class TestExtractToolCallsQwenFormat:
         assert 'print(1)' in result[0][1]
 
     def test_multiple_tool_calls(self):
-        text = (
-            "✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'foo.py'}\n"
-            "✿FUNCTION✿: grep_search\n✿ARGS✿: {'pattern': 'def main'}"
-        )
+        text = ("✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'foo.py'}\n"
+                "✿FUNCTION✿: grep_search\n✿ARGS✿: {'pattern': 'def main'}")
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 2
         assert result[0][0] == 'read_file'
@@ -64,21 +61,17 @@ class TestExtractToolCallsPegFormat:
         assert 'foo.py' in result[0][1]
 
     def test_multiple_function_tags(self):
-        text = (
-            '<function=shell_cmd><parameter>git status</parameter></function>'
-            "<function=read_file><parameter>{'path': 'x'}</parameter></function>"
-        )
+        text = ('<function=shell_cmd><parameter>git status</parameter></function>'
+                "<function=read_file><parameter>{'path': 'x'}</parameter></function>")
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 2
         assert result[0][0] == 'shell_cmd'
         assert result[1][0] == 'read_file'
 
     def test_nested_in_reasoning(self):
-        text = (
-            'Let me check the file first...\n'
-            "<function=read_file><parameter>{'path': 'todo.md'}</parameter></function>\n"
-            'That should give us the content we need.'
-        )
+        text = ('Let me check the file first...\n'
+                "<function=read_file><parameter>{'path': 'todo.md'}</parameter></function>\n"
+                'That should give us the content we need.')
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'read_file'
@@ -104,10 +97,8 @@ class TestExtractToolCallsEdgeCases:
 
     def test_qwen_takes_priority_over_peg(self):
         """Qwen format should be detected first if both exist."""
-        text = (
-            "✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'a'}\n"
-            '<function=shell_cmd><parameter>ls</parameter></function>'
-        )
+        text = ("✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'a'}\n"
+                '<function=shell_cmd><parameter>ls</parameter></function>')
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'read_file'
@@ -159,10 +150,8 @@ class TestExtractToolCallsEdgeCases:
         """Verify _detect_tool uses only the first match from multiple calls."""
         # _detect_tool is an instance method but doesn't use self.pool,
         # so we test the logic via _extract_tool_calls_from_text directly.
-        text = (
-            "✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'first'}\n"
-            '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls'
-        )
+        text = ("✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'first'}\n"
+                '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls')
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 2
         # _detect_tool uses calls[0], so first match wins
@@ -171,10 +160,8 @@ class TestExtractToolCallsEdgeCases:
 
     def test_multiple_peg_calls_first_used_by_detect_tool(self):
         """Verify _detect_tool uses only the first match from peg-native calls."""
-        text = (
-            "<function=read_file><parameter>{'path': 'first'}</parameter></function>"
-            '<function=shell_cmd><parameter>ls</parameter></function>'
-        )
+        text = ("<function=read_file><parameter>{'path': 'first'}</parameter></function>"
+                '<function=shell_cmd><parameter>ls</parameter></function>')
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 2
         # _detect_tool uses calls[0], so first match wins
@@ -200,11 +187,12 @@ class TestCheckForToolCallsInOutput:
     """Tests for ExecutionEngine._check_for_tool_calls_in_output."""
 
     def test_no_tool_calls(self):
-        from agent_cascade.llm.schema import Message, ASSISTANT, USER
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         response = [
@@ -214,16 +202,22 @@ class TestCheckForToolCallsInOutput:
         assert not engine._check_for_tool_calls_in_output(None, response)
 
     def test_with_executed_tool_calls(self):
-        from agent_cascade.llm.schema import Message, ASSISTANT, FUNCTION
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FUNCTION, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         # Standard tool call that was executed:
         response = [
-            Message(role=ASSISTANT, content='Let me run shell status.', function_call={'name': 'shell_status', 'arguments': ''}),
+            Message(role=ASSISTANT,
+                    content='Let me run shell status.',
+                    function_call={
+                        'name': 'shell_status',
+                        'arguments': ''
+                    }),
             Message(role=FUNCTION, name='shell_status', content='All systems green'),
             Message(role=ASSISTANT, content='The status is all systems green.')
         ]
@@ -232,11 +226,12 @@ class TestCheckForToolCallsInOutput:
         assert not engine._check_for_tool_calls_in_output(None, response)
 
     def test_with_executed_embedded_tool_call(self):
-        from agent_cascade.llm.schema import Message, ASSISTANT, FUNCTION
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FUNCTION, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         # Embedded Qwen format tool call that was executed:
@@ -248,26 +243,26 @@ class TestCheckForToolCallsInOutput:
         assert not engine._check_for_tool_calls_in_output(None, response)
 
     def test_with_unexecuted_embedded_tool_call(self):
-        from agent_cascade.llm.schema import Message, ASSISTANT
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         # Embedded Qwen format tool call that has NOT been executed:
-        response = [
-            Message(role=ASSISTANT, content='✿FUNCTION✿: shell_status\n✿ARGS✿: {}')
-        ]
+        response = [Message(role=ASSISTANT, content='✿FUNCTION✿: shell_status\n✿ARGS✿: {}')]
         assert engine._check_for_tool_calls_in_output(None, response)
 
     def test_case_insensitive_tool_matching(self):
         """Tool executed as 'shell_cmd' should match detection of 'Shell_Cmd'."""
-        from agent_cascade.llm.schema import Message, ASSISTANT, FUNCTION
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FUNCTION, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         # Tool executed as lowercase, but content has mixed case
@@ -281,11 +276,12 @@ class TestCheckForToolCallsInOutput:
 
     def test_case_insensitive_tool_matching_peg(self):
         """PEG format: tool executed as 'read_file' should match 'Read_File'."""
-        from agent_cascade.llm.schema import Message, ASSISTANT, FUNCTION
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FUNCTION, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         response = [
@@ -306,62 +302,57 @@ class TestReasoningBlockIgnored:
 
     def test_detect_tool_ignores_qwen_in_reasoning(self):
         """_detect_tool must not treat Qwen tool syntax in reasoning as a real call."""
-        from agent_cascade.llm.schema import Message, ASSISTANT
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
-        msg = Message(
-            role=ASSISTANT,
-            content='Here is my answer.',
-            reasoning_content="✿FUNCTION✿: code_interpreter\n✿ARGS✿: {'code': 'print(1)'}"
-        )
+        msg = Message(role=ASSISTANT,
+                      content='Here is my answer.',
+                      reasoning_content="✿FUNCTION✿: code_interpreter\n✿ARGS✿: {'code': 'print(1)'}")
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
         assert not use_tool, 'Tool call in reasoning_content should be ignored'
         assert tool_name is None
 
     def test_detect_tool_ignores_peg_in_reasoning(self):
         """_detect_tool must not treat PEG tool syntax in reasoning as a real call."""
-        from agent_cascade.llm.schema import Message, ASSISTANT
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         # Reproduces the exact bug from todo.md — LLM puts <function=code_interpreter>
         # inside a reasoning block
-        msg = Message(
-            role=ASSISTANT,
-            content='',
-            reasoning_content=(
-                'Let me fix the code and run it properly:\n'
-                '<function=code_interpreter>\n'
-                '<parameter=code>\n'
-                "print('hello')\n"
-                '</parameter>\n'
-                '</function>'
-            )
-        )
+        msg = Message(role=ASSISTANT,
+                      content='',
+                      reasoning_content=('Let me fix the code and run it properly:\n'
+                                         '<function=code_interpreter>\n'
+                                         '<parameter=code>\n'
+                                         "print('hello')\n"
+                                         '</parameter>\n'
+                                         '</function>'))
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
         assert not use_tool, 'Tool call in reasoning_content should be ignored'
 
     def test_detect_tool_ignores_reasoning_but_finds_content(self):
         """If both reasoning and content have tool calls, only content is detected."""
-        from agent_cascade.llm.schema import Message, ASSISTANT
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
-        msg = Message(
-            role=ASSISTANT,
-            content='✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la',
-            reasoning_content="✿FUNCTION✿: code_interpreter\n✿ARGS✿: {'code': 'print(1)'}"
-        )
+        msg = Message(role=ASSISTANT,
+                      content='✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la',
+                      reasoning_content="✿FUNCTION✿: code_interpreter\n✿ARGS✿: {'code': 'print(1)'}")
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
         assert use_tool
         assert tool_name == 'shell_cmd', 'Should detect the content tool call, not the reasoning one'
@@ -369,46 +360,43 @@ class TestReasoningBlockIgnored:
     def test_check_output_ignores_reasoning_only_tool_calls(self):
         """_check_for_tool_calls_in_output must return False when tool calls
         exist ONLY in reasoning_content with no real tool calls anywhere."""
-        from agent_cascade.llm.schema import Message, ASSISTANT
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
         response = [
-            Message(
-                role=ASSISTANT,
-                content="I've analyzed the situation.",
-                reasoning_content=(
-                    '<function=code_interpreter>'
-                    "<parameter>dangerous_variants = {'stash': ['pop']}</parameter>"
-                    '</function>'
-                )
-            )
+            Message(role=ASSISTANT,
+                    content="I've analyzed the situation.",
+                    reasoning_content=('<function=code_interpreter>'
+                                       "<parameter>dangerous_variants = {'stash': ['pop']}</parameter>"
+                                       '</function>'))
         ]
         result = engine._check_for_tool_calls_in_output(None, response)
-        assert not result, (
-            '_check_for_tool_calls_in_output should return False when tool calls '
-            'are only in reasoning_content — this was the infinite loop bug'
-        )
+        assert not result, ('_check_for_tool_calls_in_output should return False when tool calls '
+                            'are only in reasoning_content — this was the infinite loop bug')
 
     def test_real_function_call_still_detected_with_reasoning_noise(self):
         """A proper function_call attribute must still be detected even when
         reasoning_content also contains tool call syntax."""
-        from agent_cascade.llm.schema import Message, ASSISTANT
         from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         class MockPool:
             settings = None
+
         engine = ExecutionEngine(MockPool())
 
-        msg = Message(
-            role=ASSISTANT,
-            content='Running the command.',
-            reasoning_content='<function=code_interpreter><parameter>x</parameter></function>',
-            function_call={'name': 'shell_cmd', 'arguments': 'git status'}
-        )
+        msg = Message(role=ASSISTANT,
+                      content='Running the command.',
+                      reasoning_content='<function=code_interpreter><parameter>x</parameter></function>',
+                      function_call={
+                          'name': 'shell_cmd',
+                          'arguments': 'git status'
+                      })
         use_tool, tool_name, tool_args, text = engine._detect_tool(msg)
         assert use_tool
         assert tool_name == 'shell_cmd'
@@ -420,11 +408,9 @@ class TestMixedFormat:
 
     def test_qwen_args_dont_capture_peg_tags(self):
         """Qwen args should stop at <function= tags, not consume PEG content."""
-        text = (
-            "✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'a'}\n"
-            '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls\n'
-            "<function=code_interpreter><parameter>{'code': 'print(1)'}</parameter></function>"
-        )
+        text = ("✿FUNCTION✿: read_file\n✿ARGS✿: {'path': 'a'}\n"
+                '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls\n'
+                "<function=code_interpreter><parameter>{'code': 'print(1)'}</parameter></function>")
         result = _extract_tool_calls_from_text(text)
         # Qwen format found first; should return both Qwen calls
         assert len(result) == 2
@@ -433,10 +419,8 @@ class TestMixedFormat:
 
     def test_qwen_args_stop_at_peg_function_tag(self):
         """Qwen args should stop at <function= in the same text block."""
-        text = (
-            '✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la\n'
-            "<function=read_file><parameter>{'path': 'x'}</parameter></function>"
-        )
+        text = ('✿FUNCTION✿: shell_cmd\n✿ARGS✿: ls -la\n'
+                "<function=read_file><parameter>{'path': 'x'}</parameter></function>")
         result = _extract_tool_calls_from_text(text)
         assert len(result) == 1
         assert result[0][0] == 'shell_cmd'
@@ -445,11 +429,9 @@ class TestMixedFormat:
 
     def test_peg_args_contain_function_string(self):
         """PEG arguments containing '<function=' string in JSON should work."""
-        text = (
-            '<function=read_file>'
-            "<parameter>{'path': 'src/main.py', 'filter': '<function=main>'}</parameter>"
-            '</function>'
-        )
+        text = ('<function=read_file>'
+                "<parameter>{'path': 'src/main.py', 'filter': '<function=main>'}</parameter>"
+                '</function>')
         result = _extract_tool_calls_from_text(text)
         # Nested <function= in args is filtered, so expect empty result
         assert len(result) == 0

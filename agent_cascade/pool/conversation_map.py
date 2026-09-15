@@ -3,11 +3,14 @@ _InstanceConversationMapping — bridges writes to instance_conversations with i
 """
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
-from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
+
+from typing import TYPE_CHECKING, List
+
+from agent_cascade.llm.schema import Message
 
 if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids circular import of core.py
     from .core import AgentPool
+
 
 class _InstanceConversationMapping(dict):
     """Custom dict that bridges writes to instance_conversations with instances[name].conversation.
@@ -98,7 +101,7 @@ class _InstanceConversationMapping(dict):
         # Copy conversation data BEFORE clearing — prevents both data loss and races
         with inst._compression_lock:
             value = list(inst.conversation)
-        
+
         # Use centralized API for cache sync (PR3 migration)
         inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
 

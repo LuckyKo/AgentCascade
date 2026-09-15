@@ -14,17 +14,17 @@ is fast and deterministic with no LLM calls.
 """
 
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
 
-
 # ---------------------------------------------------------------------------
 # Fixture: build a minimal AgentPool without hitting the filesystem/LLM
 # (same pattern as test_dismiss_termination.py)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def agent_pool(tmp_path):
@@ -34,7 +34,7 @@ def agent_pool(tmp_path):
     directory and open a real file handle (no LLM involved).
     """
     with patch('agent_cascade.operation_manager.OperationManager') as mock_op_mgr, \
-         patch('agent_cascade.telemetry.TelemetryCollector') as mock_telem, \
+         patch('agent_cascade.telemetry.TelemetryCollector') , \
          patch('agent_cascade.api_router.APIRouter') as mock_router:
 
         op_mgr = MagicMock()
@@ -102,6 +102,7 @@ def _handle_is_closed(log_inst) -> bool:
 # remove_instance() closes the logger's file handle / removes the entry
 # ===========================================================================
 
+
 class TestRemoveInstanceClosesLogger:
     """remove_instance() must close the cached file handle and drop the logger entry."""
 
@@ -149,6 +150,7 @@ class TestRemoveInstanceClosesLogger:
 # Full dismiss_instance() path (routes through remove_instance)
 # ===========================================================================
 
+
 class TestDismissInstanceClosesLogger:
     """dismiss_instance() must also close the logger handle via remove_instance()."""
 
@@ -167,6 +169,7 @@ class TestDismissInstanceClosesLogger:
 # ===========================================================================
 # The stale-logger hazard: re-creating the same name must NOT reuse a leaked handle
 # ===========================================================================
+
 
 class TestRecreateAfterDismiss:
     """After dismissal, re-creating the same instance name must get a FRESH logger."""

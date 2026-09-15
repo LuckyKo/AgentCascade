@@ -16,11 +16,10 @@ from typing import Dict, Optional, Union
 
 import json5
 
+from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import DEFAULT_MAX_REF_TOKEN, DEFAULT_PARSER_PAGE_SIZE, DEFAULT_RAG_SEARCHERS
 from agent_cascade.tools.base import TOOL_REGISTRY, BaseTool, register_tool
-from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.doc_parser import DocParser, Record
-from agent_cascade.tools.simple_doc_parser import PARSER_SUPPORTED_FILE_TYPES
 
 
 def _check_deps_for_rag():
@@ -35,8 +34,9 @@ def _check_deps_for_rag():
         from docx import Document  # noqa
         from pptx import Presentation  # noqa
     except ImportError as e:
-        raise ImportError('The dependencies for RAG support are not installed. '
-                          'Please install the required dependencies by running: pip install "agent-cascade[rag]"') from e
+        raise ImportError(
+            'The dependencies for RAG support are not installed. '
+            'Please install the required dependencies by running: pip install "agent-cascade[rag]"') from e
 
 
 @register_tool('retrieval')

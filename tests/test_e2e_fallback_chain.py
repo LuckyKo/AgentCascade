@@ -18,20 +18,16 @@ Only the actual HTTP call (call_fn) is mocked — router internals are exercised
 The lazy sanity probe is disabled so fake endpoints are not pruned by a real GET /models.
 """
 
-import os
 import time
 from unittest.mock import patch
 
 import pytest
 
-from agent_cascade.api_router import APIRouter, APIEndpoint
+from agent_cascade.api_router import APIEndpoint
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.llm.base import ModelServiceError
-from agent_cascade.settings import (
-    ENDPOINT_COOLDOWN_SECONDS,
-    ENDPOINT_BLACKLIST_SECONDS,
-)
-
+from agent_cascade.settings import ENDPOINT_BLACKLIST_SECONDS  # noqa: F401  (re-exported for tests)
+from agent_cascade.settings import ENDPOINT_COOLDOWN_SECONDS
 # Reuse the shared router fixture + helpers from conftest (isolated config dir, FAST policy).
 from tests.conftest import _add_endpoint  # noqa: E402
 
@@ -61,7 +57,11 @@ def _det_error():
 def _ep_dict(name, api_base, model):
     """Build an APIEndpoint dict for from_dict() payloads (stable id = ep_<name>)."""
     return APIEndpoint(
-        id=f"ep_{name}", name=name, api_base=api_base, model=model, enabled=True,
+        id=f"ep_{name}",
+        name=name,
+        api_base=api_base,
+        model=model,
+        enabled=True,
     ).to_dict()
 
 
@@ -69,7 +69,9 @@ def _ep_dict(name, api_base, model):
 # Baseline: happy path + failure fallback + full exhaustion → Tier-4
 # ============================================================================
 
+
 class TestFallbackChainBasics:
+
     def test_happy_path_priority_order_no_tier4(self, router):
         """Agent with 2 assigned endpoints → chain is [ep1, ep2] in priority order.
 
@@ -148,7 +150,9 @@ class TestFallbackChainBasics:
 # Fix 1 — from_dict clears health state (blacklist + failure counters)
 # ============================================================================
 
+
 class TestFromDictClearsHealthState:
+
     def test_blacklisted_endpoint_eligible_after_from_dict(self, router):
         """A blacklisted endpoint is eligible again immediately after a from_dict() config change.
 
@@ -179,7 +183,9 @@ class TestFromDictClearsHealthState:
         # User "fixes" the endpoint via a UI config change (from_dict).
         router.from_dict({
             'endpoints': [_ep_dict('a', 'http://a-api', 'model-a')],
-            'agent_priorities': {'coder': ['ep_a']},
+            'agent_priorities': {
+                'coder': ['ep_a']
+            },
         })
 
         # Blacklist + failure counters are now empty.
@@ -212,7 +218,9 @@ class TestFromDictClearsHealthState:
 
         router.from_dict({
             'endpoints': [_ep_dict('a', 'http://a-api', 'model-a')],
-            'agent_priorities': {'coder': ['ep_a']},
+            'agent_priorities': {
+                'coder': ['ep_a']
+            },
         })
 
         with router._lock:
@@ -232,14 +240,17 @@ class TestFromDictClearsHealthState:
         # Simulate a prior success on endpoint A (this is what call_with_fallback records).
         with router._lock:
             router._last_successful_endpoint_cfg = {
-                'api_base': 'http://a-api', 'model': 'model-a',
+                'api_base': 'http://a-api',
+                'model': 'model-a',
             }
         assert router._last_successful_endpoint_cfg is not None
 
         # User changes the config (e.g. renames the model) via from_dict.
         router.from_dict({
             'endpoints': [_ep_dict('a', 'http://a-api', 'model-NEW')],
-            'agent_priorities': {'coder': ['ep_a']},
+            'agent_priorities': {
+                'coder': ['ep_a']
+            },
         })
 
         # The stale Tier-3 cfg must be gone so it is not offered against the new config.
@@ -251,19 +262,20 @@ class TestFromDictClearsHealthState:
 # Fix 2 — Tier-4 global-default usage is logged explicitly (once per call attempt)
 # ============================================================================
 
+
 class TestTier4Logging:
+
     def test_tier4_only_logs_info(self, router, caplog):
         """Agent with NO effective endpoints → INFO log fires exactly once per call."""
         # 'security' has no assigned endpoints → chain is only the Tier-4 default.
         import logging
         with caplog.at_level(logging.INFO, logger='agent_cascade.api_router_pkg.router'):
-            result = router.call_with_fallback(
-                'security', lambda cfg, *a, **k: 'ok-default'
-            )
+            result = router.call_with_fallback('security', lambda cfg, *a, **k: 'ok-default')
 
         assert result == 'ok-default'
-        matches = [r for r in caplog.records
-                   if r.levelno == logging.INFO and 'no effective endpoints' in r.getMessage()]
+        matches = [
+            r for r in caplog.records if r.levelno == logging.INFO and 'no effective endpoints' in r.getMessage()
+        ]
         assert len(matches) == 1, \
             f"expected exactly one Tier-4 INFO log per call attempt, got {len(matches)}: {[r.getMessage() for r in matches]}"
         msg = matches[0].getMessage()
@@ -281,8 +293,9 @@ class TestTier4Logging:
             result = router.call_with_fallback('coder', lambda cfg, *a, **k: 'ok')
 
         assert result == 'ok'
-        matches = [r for r in caplog.records
-                   if r.levelno == logging.INFO and 'no effective endpoints' in r.getMessage()]
+        matches = [
+            r for r in caplog.records if r.levelno == logging.INFO and 'no effective endpoints' in r.getMessage()
+        ]
         assert matches == [], \
             f"Tier-4 as last-resort in a multi-endpoint chain must NOT log, got {[r.getMessage() for r in matches]}"
 
@@ -295,6 +308,7 @@ class TestTier4Logging:
         fire exactly once and name the default.
         """
         import logging
+
         import agent_cascade.api_router_pkg.router as router_mod
 
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', max_retries=0)
@@ -319,16 +333,15 @@ class TestTier4Logging:
         try:
             with caplog.at_level(logging.INFO, logger='agent_cascade.api_router_pkg.router'):
                 with patch.object(router, '_sanity_probe', side_effect=_fake_probe):
-                    result = router.call_with_fallback(
-                        'coder', lambda cfg, *a, **k: 'ok-default'
-                    )
+                    result = router.call_with_fallback('coder', lambda cfg, *a, **k: 'ok-default')
         finally:
             router_mod.SANITY_PROBE_ENABLED = orig_probe
 
         # The Tier-1 endpoint was pruned by the failed probe; the call fell through to Tier-4.
         assert result == 'ok-default'
-        matches = [r for r in caplog.records
-                   if r.levelno == logging.INFO and 'no effective endpoints' in r.getMessage()]
+        matches = [
+            r for r in caplog.records if r.levelno == logging.INFO and 'no effective endpoints' in r.getMessage()
+        ]
         # Exactly ONE log (case 2), not double-logged with the early check.
         assert len(matches) == 1, \
             f"expected exactly one Tier-4 INFO log after probe failure, got {len(matches)}: {[r.getMessage() for r in matches]}"
@@ -347,13 +360,14 @@ class TestTier4Logging:
 # further exhaust socket buffers. Different-base endpoints are still probed normally.
 # ============================================================================
 
+
 class TestProbeDedupPerHost:
+
     def test_connection_error_skips_same_base_probes(self, router):
         """First endpoint's probe fails with a CONNECTION error → same-base endpoints skip
         their probes (no _sanity_probe call), different-base endpoints are still probed.
         The chain falls through to the working different-base endpoint instead of raising
         'All API endpoints exhausted'."""
-        import logging
         import agent_cascade.api_router_pkg.router as router_mod
 
         # 3 endpoints on the same base + 1 on a different (working) base.
@@ -378,9 +392,7 @@ class TestProbeDedupPerHost:
 
         try:
             with patch.object(router, '_sanity_probe', side_effect=_fake_probe):
-                result = router.call_with_fallback(
-                    'coder', lambda cfg, *a, **k: f"ok-{cfg.get('model')}"
-                )
+                result = router.call_with_fallback('coder', lambda cfg, *a, **k: f"ok-{cfg.get('model')}")
         finally:
             router_mod.SANITY_PROBE_ENABLED = orig_probe
 
@@ -430,7 +442,9 @@ class TestProbeDedupPerHost:
 # Fix 3 — set_agent_priorities warns (not INFO) when ALL IDs are invalid
 # ============================================================================
 
+
 class TestPriorityDropWarning:
+
     def test_all_invalid_ids_logs_warning(self, router, caplog):
         """set_agent_priorities with all-invalid IDs → WARNING log + priorities removed."""
         _add_endpoint(router, 'a', 'http://a-api', model='model-a')
@@ -444,8 +458,9 @@ class TestPriorityDropWarning:
         # Priorities were removed (all IDs invalid).
         assert router.get_agent_priorities('coder') == []
 
-        warnings = [r for r in caplog.records
-                    if r.levelno == logging.WARNING and 'ALL endpoint IDs invalid' in r.getMessage()]
+        warnings = [
+            r for r in caplog.records if r.levelno == logging.WARNING and 'ALL endpoint IDs invalid' in r.getMessage()
+        ]
         assert len(warnings) == 1, \
             f"expected exactly one WARNING for all-invalid IDs, got {len(warnings)}: {[r.getMessage() for r in warnings]}"
         msg = warnings[0].getMessage()
@@ -464,7 +479,9 @@ class TestPriorityDropWarning:
 # by a UI reload), it degrades gracefully to Tier-4.
 # ============================================================================
 
+
 class TestLastActiveEndpointFallback:
+
     def test_unassigned_agent_with_last_active_endpoint_uses_it_first(self, router):
         """Unassigned agent + global last-active endpoint → chain = [last-active cfg, Tier-4].
 
@@ -480,7 +497,8 @@ class TestLastActiveEndpointFallback:
         # Key format mirrors call_with_fallback: (normalize_api_base(base), model).
         with router._lock:
             router._last_active_endpoint = (
-                normalize_api_base('http://c-api'), 'model-c',
+                normalize_api_base('http://c-api'),
+                'model-c',
             )
 
         # Works whether or not an instance_name is passed.
@@ -501,7 +519,8 @@ class TestLastActiveEndpointFallback:
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
         with router._lock:
             router._last_active_endpoint = (
-                normalize_api_base('http://c-api'), 'model-c',
+                normalize_api_base('http://c-api'),
+                'model-c',
             )
 
         # Sanity: before the reload, the last-active tier resolves to the endpoint.
@@ -532,7 +551,8 @@ class TestLastActiveEndpointFallback:
         # A last-active key is set; we call WITHOUT instance_name.
         with router._lock:
             router._last_active_endpoint = (
-                normalize_api_base('http://c-api'), 'model-c',
+                normalize_api_base('http://c-api'),
+                'model-c',
             )
 
         chain = router.get_endpoint_chain('security')  # instance_name defaults to None

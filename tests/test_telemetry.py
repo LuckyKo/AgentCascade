@@ -28,7 +28,9 @@ def collector(tmp_path):
 # A. Session summary defaults
 # ---------------------------------------------------------------------------
 
+
 class TestSessionSummaryDefaults:
+
     def test_fresh_collector_all_zero_defaults(self, collector):
         s = collector.get_session_summary()
         assert s['total_turns'] == 0
@@ -60,13 +62,28 @@ class TestSessionSummaryDefaults:
     def test_all_expected_keys_present(self, collector):
         """Guard against a summary field being dropped from the returned dict."""
         expected_keys = {
-            'session_id', 'total_turns', 'total_llm_calls', 'total_tool_calls',
-            'total_input_tokens_est', 'total_output_tokens_est', 'total_tokens',
-            'avg_tps', 'avg_llm_latency_ms', 'avg_tool_latency_ms',
-            'call_agent_count', 'call_agent_latency_ms', 'total_loops_detected',
-            'loops_outer', 'loops_inner', 'total_auto_continues', 'total_retries',
-            'total_compressions', 'write_failures', 'agent_instance_calls',
-            'llm_calls_by_model', 'tool_effectiveness',
+            'session_id',
+            'total_turns',
+            'total_llm_calls',
+            'total_tool_calls',
+            'total_input_tokens_est',
+            'total_output_tokens_est',
+            'total_tokens',
+            'avg_tps',
+            'avg_llm_latency_ms',
+            'avg_tool_latency_ms',
+            'call_agent_count',
+            'call_agent_latency_ms',
+            'total_loops_detected',
+            'loops_outer',
+            'loops_inner',
+            'total_auto_continues',
+            'total_retries',
+            'total_compressions',
+            'write_failures',
+            'agent_instance_calls',
+            'llm_calls_by_model',
+            'tool_effectiveness',
         }
         s = collector.get_session_summary()
         missing = expected_keys - set(s.keys())
@@ -83,7 +100,9 @@ class TestSessionSummaryDefaults:
 # B. Loop detection — loop_type breakdown (the key new feature)
 # ---------------------------------------------------------------------------
 
+
 class TestLoopDetection:
+
     def test_outer_loop_counts(self, collector):
         for _ in range(3):
             collector.record_loop_detected('inst', 'repeat tool call', loop_type='outer')
@@ -133,9 +152,7 @@ class TestLoopDetection:
         """A rolled-back loop inside an active turn bumps per-turn retries, which
         roll up into the session total_retries on turn_end."""
         collector.record_turn_start('inst')
-        collector.record_loop_detected(
-            'inst', 'stuck', auto_rolled_back=True, pop_count=2, loop_type='outer'
-        )
+        collector.record_loop_detected('inst', 'stuck', auto_rolled_back=True, pop_count=2, loop_type='outer')
         collector.record_turn_end('inst')
         s = collector.get_session_summary()
         assert s['total_retries'] == 1
@@ -151,7 +168,9 @@ class TestLoopDetection:
 # C. Auto-continue ("Malformed")
 # ---------------------------------------------------------------------------
 
+
 class TestAutoContinue:
+
     def test_counts_accumulate(self, collector):
         for _ in range(4):
             collector.record_auto_continue('inst', 'malformed output')
@@ -178,7 +197,9 @@ class TestAutoContinue:
 # D. Compression
 # ---------------------------------------------------------------------------
 
+
 class TestCompression:
+
     def test_increments_total_compressions(self, collector):
         for _ in range(3):
             collector.record_compression('inst', 0.5)
@@ -205,7 +226,9 @@ class TestCompression:
 # E. Turn lifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestTurnLifecycle:
+
     def test_start_then_end_increments_total_turns(self, collector):
         collector.record_turn_start('inst')
         collector.record_turn_end('inst')
@@ -239,7 +262,9 @@ class TestTurnLifecycle:
 # F. LLM call lifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestLLMCallLifecycle:
+
     def test_full_lifecycle(self, collector):
         collector.record_llm_call_start('inst', input_tokens_est=100, model='qwen3-4b')
         collector.record_llm_first_token('inst')
@@ -319,7 +344,9 @@ class TestCacheClassificationFromUsage:
     def test_usage_hit_increments_hits_counter(self, collector):
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
         collector.record_token_usage(
-            'inst', prompt_tokens=1000, completion_tokens=5,
+            'inst',
+            prompt_tokens=1000,
+            completion_tokens=5,
             details={'cached_tokens': 80},
         )
         collector.record_llm_call_end('inst')
@@ -331,7 +358,9 @@ class TestCacheClassificationFromUsage:
     def test_usage_miss_increments_misses_counter(self, collector):
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
         collector.record_token_usage(
-            'inst', prompt_tokens=1000, completion_tokens=5,
+            'inst',
+            prompt_tokens=1000,
+            completion_tokens=5,
             details={'cached_tokens': 0},
         )
         collector.record_llm_call_end('inst')
@@ -343,7 +372,10 @@ class TestCacheClassificationFromUsage:
         # Usage present (prompt_tokens > 0) but no cached_tokens → treated as 0 → miss.
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
         collector.record_token_usage(
-            'inst', prompt_tokens=1000, completion_tokens=5, details=None,
+            'inst',
+            prompt_tokens=1000,
+            completion_tokens=5,
+            details=None,
         )
         collector.record_llm_call_end('inst')
         s = collector.get_session_summary()
@@ -371,7 +403,10 @@ class TestCacheClassificationFromUsage:
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
         # prompt_tokens=0 → classify returns None → no counter change.
         collector.record_token_usage(
-            'inst', prompt_tokens=0, completion_tokens=5, details={'cached_tokens': 80},
+            'inst',
+            prompt_tokens=0,
+            completion_tokens=5,
+            details={'cached_tokens': 80},
         )
         assert 'cache_classified' not in collector._active_llm_calls['inst']
         collector.record_llm_call_end('inst')
@@ -392,13 +427,17 @@ class TestCacheClassificationFromUsage:
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
         # First usage classifies a hit and marks the call classified.
         collector.record_token_usage(
-            'inst', prompt_tokens=1000, completion_tokens=5,
+            'inst',
+            prompt_tokens=1000,
+            completion_tokens=5,
             details={'cached_tokens': 80},
         )
         assert collector._active_llm_calls['inst'].get('cache_classified') is True
         # A second usage for the same call must not increment a counter again.
         collector.record_token_usage(
-            'inst', prompt_tokens=1000, completion_tokens=5,
+            'inst',
+            prompt_tokens=1000,
+            completion_tokens=5,
             details={'cached_tokens': 80},
         )
         collector.record_llm_call_end('inst')
@@ -411,19 +450,19 @@ class TestCacheClassificationFromUsage:
         # 4 calls: 1 hit (usage), 2 misses (usage / no cached field), 1 unmeasured
         # (no usage callback at all — a non-supporting backend).
         collector.record_llm_call_start('inst0', input_tokens_est=10, model='m')
-        collector.record_token_usage('inst0', 1000, 5, {'cached_tokens': 80})   # hit
+        collector.record_token_usage('inst0', 1000, 5, {'cached_tokens': 80})  # hit
         collector.record_llm_call_end('inst0')
 
         collector.record_llm_call_start('inst1', input_tokens_est=10, model='m')
-        collector.record_token_usage('inst1', 1000, 5, {'cached_tokens': 0})    # miss
+        collector.record_token_usage('inst1', 1000, 5, {'cached_tokens': 0})  # miss
         collector.record_llm_call_end('inst1')
 
         collector.record_llm_call_start('inst2', input_tokens_est=10, model='m')
-        collector.record_token_usage('inst2', 1000, 5, None)                    # miss (no cached field)
+        collector.record_token_usage('inst2', 1000, 5, None)  # miss (no cached field)
         collector.record_llm_call_end('inst2')
 
         collector.record_llm_call_start('inst3', input_tokens_est=10, model='m')
-        collector.record_llm_call_end('inst3')                                  # unmeasured (no usage)
+        collector.record_llm_call_end('inst3')  # unmeasured (no usage)
 
         s = collector.get_session_summary()
         assert s['total_llm_calls'] == 4
@@ -439,7 +478,9 @@ class TestCacheClassificationFromUsage:
 # G. Tool call lifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestToolCallLifecycle:
+
     def test_successful_tool_call(self, collector):
         collector.record_tool_call_start('a', 'read_file')
         collector.record_tool_call_end('a', 'read_file', success=True)
@@ -465,9 +506,7 @@ class TestToolCallLifecycle:
     def test_call_agent_routing(self, collector):
         """is_call_agent=True routes latency separately and is counted via call_agent_count."""
         collector.record_tool_call_start('a', 'call_agent')
-        collector.record_tool_call_end(
-            'a', 'call_agent', success=True, is_call_agent=True
-        )
+        collector.record_tool_call_end('a', 'call_agent', success=True, is_call_agent=True)
         s = collector.get_session_summary()
         # Count is driven by the is_call_agent flag (single source of truth),
         # so it always agrees with call_agent_latency_ms.
@@ -479,9 +518,7 @@ class TestToolCallLifecycle:
         """Regression: a tool merely NAMED 'call_agent' with the flag off must NOT
         be counted as an agent delegation — count and latency share one source."""
         collector.record_tool_call_start('a', 'call_agent')
-        collector.record_tool_call_end(
-            'a', 'call_agent', success=True, is_call_agent=False
-        )
+        collector.record_tool_call_end('a', 'call_agent', success=True, is_call_agent=False)
         s = collector.get_session_summary()
         assert s['call_agent_count'] == 0
         # It still counts as a regular tool call and its latency goes to the
@@ -499,7 +536,9 @@ class TestToolCallLifecycle:
 # H. Agent instance call
 # ---------------------------------------------------------------------------
 
+
 class TestAgentInstanceCall:
+
     def test_increments_agent_instance_calls(self, collector):
         collector.record_agent_instance_call('inst', 'coder', 'orchestrator', latency_ms=123.0)
         assert collector.get_session_summary()['agent_instance_calls'] == 1
@@ -514,7 +553,9 @@ class TestAgentInstanceCall:
 # I. Config comparison
 # ---------------------------------------------------------------------------
 
+
 class TestConfigComparison:
+
     def test_fingerprint_appears_with_turns(self, collector):
         fp = 'fp_abc123'
         collector.record_turn_start('inst', config_fingerprint=fp)
@@ -552,13 +593,18 @@ class TestConfigComparison:
 # I-bis. Config fingerprint is model-only (no prompt print)
 # ---------------------------------------------------------------------------
 
+
 class TestFingerprintModelOnly:
+
     def test_same_model_different_configs_same_fingerprint(self):
         """Same model but different prompts/params/tools/api_base -> SAME fingerprint."""
         base = TelemetryCollector.fingerprint_config(model='qwen3-4b')
         varied = TelemetryCollector.fingerprint_config(
             model='qwen3-4b',
-            generate_cfg={'temperature': 0.9, 'max_tokens': 8192},
+            generate_cfg={
+                'temperature': 0.9,
+                'max_tokens': 8192
+            },
             system_prompt='You are a totally different agent.',
             tools=['read_file', 'write_file'],
             api_base='http://localhost:1234/v1',
@@ -580,9 +626,7 @@ class TestFingerprintModelOnly:
 
     def test_fingerprint_ignores_system_prompt_arg(self):
         """system_prompt no longer influences the fingerprint (prompt print removed)."""
-        with_prompt = TelemetryCollector.fingerprint_config(
-            model='m', system_prompt='You are Security_op_091f048b.'
-        )
+        with_prompt = TelemetryCollector.fingerprint_config(model='m', system_prompt='You are Security_op_091f048b.')
         without_prompt = TelemetryCollector.fingerprint_config(model='m')
         assert with_prompt == without_prompt
 
@@ -591,7 +635,9 @@ class TestFingerprintModelOnly:
 # I-ter. Agent class usage summary
 # ---------------------------------------------------------------------------
 
+
 class TestAgentClassSummary:
+
     def test_empty_when_no_agent_class_turns(self, collector):
         # A turn without agent_class does not create an entry.
         collector.record_turn_start('inst')
@@ -745,6 +791,7 @@ class TestAgentClassSummary:
 # (turn_start / llm_call_end / tool_call_end / loop_detected / compression) instead of
 # being flushed once in record_turn_end. These tests prove the values are visible BEFORE
 # turn_end AND that turn_end does NOT re-add them (a MOVE, not a copy — no double count).
+
 
 class TestLivePerConfigClassAggregation:
     FP = 'fp_live'
@@ -921,7 +968,9 @@ class TestLivePerConfigClassAggregation:
 # I2. Skill usage summary (per-skill accumulator)
 # ---------------------------------------------------------------------------
 
+
 class TestSkillUsageSummary:
+
     def test_empty_when_nothing_recorded(self, collector):
         assert collector.get_skill_usage_summary() == []
 
@@ -1001,7 +1050,9 @@ class TestSkillAdvisorCountersInSummary:
 # J. Event log
 # ---------------------------------------------------------------------------
 
+
 class TestEventLog:
+
     def test_recent_events_have_type_and_timestamp(self, collector):
         collector.record_turn_start('inst')
         collector.record_loop_detected('inst', 'stuck', loop_type='inner')
@@ -1031,6 +1082,7 @@ class TestEventLog:
 # K. User-turn counting (total_user_turns)
 # ---------------------------------------------------------------------------
 
+
 class TestUserTurnCounting:
     """``total_user_turns`` counts fresh agent runs/budgets, independently of the
     run-cycle counter ``total_turns``."""
@@ -1059,8 +1111,10 @@ class TestUserTurnCounting:
 # L. Engine-level first-turn semantics (_consume_turn)
 # ---------------------------------------------------------------------------
 
+
 class _FakeInstance:
     """Minimal stand-in exposing only what ``_consume_turn`` touches."""
+
     def __init__(self, name='inst'):
         self.instance_name = name
         self._turn_consumed = False
@@ -1071,6 +1125,7 @@ def _make_engine_with_telemetry(collector):
 
     class _Pool:
         telemetry = collector
+
     return ExecutionEngine(_Pool())
 
 
@@ -1107,7 +1162,7 @@ class TestConsumeTurnFirstTurnSemantics:
         Models an early-exit path (e.g. terminal stop) where _consume_turn is never
         called: the flag stays False and total_user_turns stays 0.
         """
-        engine = _make_engine_with_telemetry(collector)
+        _make_engine_with_telemetry(collector)
         inst = _FakeInstance()
         # No budget consumption occurs (early exit before the turn loop).
         assert getattr(inst, '_turn_consumed', False) is False
@@ -1143,6 +1198,7 @@ class TestConsumeTurnFirstTurnSemantics:
 
         class _NoTelPool:
             pass  # no `telemetry` attribute → _telemetry() returns None
+
         engine = ExecutionEngine(_NoTelPool())
         inst = _FakeInstance()
         assert engine._consume_turn(inst, 5) == 4

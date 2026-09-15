@@ -19,13 +19,13 @@ test_state_builder.py. The feature flag is toggled by patching the module-level 
 import threading
 from unittest.mock import MagicMock, patch
 
-from agent_cascade.api_integration_pkg import state_builder as sb
 from agent_cascade.agent_instance import AgentState
-
+from agent_cascade.api_integration_pkg import state_builder as sb
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
+
 
 def _msg(role, content='', **kw):
     """Build a plain-dict message (serialize_message handles dicts natively)."""
@@ -64,7 +64,10 @@ def _serialize(inst, pool, streaming=True, responses=None):
     try:
         sb.STREAM_DELTA_ENABLED = True  # default ON for these tests; individual tests flip it
         return sb._serialize_instance(
-            inst, pool, include_messages=True, streaming=streaming,
+            inst,
+            pool,
+            include_messages=True,
+            streaming=streaming,
             streaming_responses=responses if responses is not None else inst._streaming_responses,
         )
     finally:
@@ -74,6 +77,7 @@ def _serialize(inst, pool, streaming=True, responses=None):
 # ---------------------------------------------------------------------------
 # 1. _safe_tail_start_index — tool-pair integrity table (pins the rule)
 # ---------------------------------------------------------------------------
+
 
 def test_safe_tail_plain_end():
     # [..., user, assistant] plain end -> cut to last TAIL_COMMITTED(1) msg
@@ -85,7 +89,10 @@ def test_safe_tail_pair_at_end():
     # [..., user, assistant(tool_calls), tool] -> widen to whole last chain
     msgs = [
         _msg('user', 'q'),
-        _msg('assistant', '', tool_calls=[{'id': '1', 'function': {}}]),
+        _msg('assistant', '', tool_calls=[{
+            'id': '1',
+            'function': {}
+        }]),
         _msg('tool', 'result'),
     ]
     assert sb._safe_tail_start_index(msgs) == 1
@@ -95,9 +102,13 @@ def test_safe_tail_chain_of_four():
     # [..., user, asst(tc), tool, asst(tc), tool] (chain of 4 after a user) -> whole chain
     msgs = [
         _msg('user', 'q'),
-        _msg('assistant', '', tool_calls=[{'id': '1'}]),
+        _msg('assistant', '', tool_calls=[{
+            'id': '1'
+        }]),
         _msg('tool', 'r1'),
-        _msg('assistant', '', tool_calls=[{'id': '2'}]),
+        _msg('assistant', '', tool_calls=[{
+            'id': '2'
+        }]),
         _msg('tool', 'r2'),
     ]
     assert sb._safe_tail_start_index(msgs) == 1
@@ -112,7 +123,9 @@ def test_safe_tail_plain_then_chain():
     msgs = [
         _msg('assistant', 'a0'),
         _msg('user', 'q'),
-        _msg('assistant', '', tool_calls=[{'id': '1'}]),
+        _msg('assistant', '', tool_calls=[{
+            'id': '1'
+        }]),
         _msg('tool', 'r1'),
     ]
     assert sb._safe_tail_start_index(msgs) == 2
@@ -136,7 +149,10 @@ def test_safe_tail_legacy_function_call():
     # legacy function_call + function response -> widen to whole chain
     msgs = [
         _msg('user', 'q'),
-        _msg('assistant', '', function_call={'name': 'f', 'arguments': '{}'}),
+        _msg('assistant', '', function_call={
+            'name': 'f',
+            'arguments': '{}'
+        }),
         _msg('function', 'result'),
     ]
     assert sb._safe_tail_start_index(msgs) == 1
@@ -152,6 +168,7 @@ def test_safe_tail_empty_and_misconfig():
 # ---------------------------------------------------------------------------
 # 2. Tail cut on: flag ON -> bounded tail + absolute indices + history_count
 # ---------------------------------------------------------------------------
+
 
 def test_tail_cut_flag_on():
     committed = [_msg('user' if i % 2 == 0 else 'assistant', f"m{i}") for i in range(50)]
@@ -175,6 +192,7 @@ def test_tail_cut_flag_on():
 # 3. Flag OFF -> full send (regression guard, byte-identical to legacy)
 # ---------------------------------------------------------------------------
 
+
 def test_flag_off_full_send():
     committed = [_msg('user' if i % 2 == 0 else 'assistant', f"m{i}") for i in range(50)]
     partial = _msg('assistant', 'streaming...')
@@ -185,7 +203,10 @@ def test_flag_off_full_send():
     try:
         sb.STREAM_DELTA_ENABLED = False
         result = sb._serialize_instance(
-            inst, pool, include_messages=True, streaming=True,
+            inst,
+            pool,
+            include_messages=True,
+            streaming=True,
             streaming_responses=inst._streaming_responses,
         )
     finally:
@@ -200,6 +221,7 @@ def test_flag_off_full_send():
 # ---------------------------------------------------------------------------
 # 4. streaming=False (force_full / connect-time) -> full send regardless of flag
 # ---------------------------------------------------------------------------
+
 
 def test_streaming_false_full_send_flag_on():
     committed = [_msg('user' if i % 2 == 0 else 'assistant', f"m{i}") for i in range(50)]
@@ -221,11 +243,21 @@ def test_streaming_false_full_send_flag_on():
 # 5. history_count invariant + absolute indices across all shapes
 # ---------------------------------------------------------------------------
 
+
 def test_history_count_invariant_and_absolute_indices():
     shapes = [
         [_msg('user', 'q'), _msg('assistant', 'a')],
-        [_msg('user', 'q'), _msg('assistant', '', tool_calls=[{'id': '1'}]), _msg('tool', 'r')],
-        [_msg('assistant', 'a0'), _msg('user', 'q'), _msg('assistant', '', tool_calls=[{'id': '1'}]), _msg('tool', 'r')],
+        [_msg('user', 'q'), _msg('assistant', '', tool_calls=[{
+            'id': '1'
+        }]), _msg('tool', 'r')],
+        [
+            _msg('assistant', 'a0'),
+            _msg('user', 'q'),
+            _msg('assistant', '', tool_calls=[{
+                'id': '1'
+            }]),
+            _msg('tool', 'r')
+        ],
     ]
     for committed in shapes:
         partial = _msg('assistant', 'streaming...')
@@ -249,6 +281,7 @@ def test_history_count_invariant_and_absolute_indices():
 #    (relies on the last committed message being inside the tail — documented in §1.4)
 # ---------------------------------------------------------------------------
 
+
 def test_dedup_partial_matches_last_committed():
     # last committed assistant message has content "DONE"; the in-flight partial equals it
     committed = [_msg('user', 'q'), _msg('assistant', 'DONE')]
@@ -267,11 +300,11 @@ def test_dedup_partial_matches_last_committed():
 # 7. prefix_shrank detection in _serialize_instances_incremental
 # ---------------------------------------------------------------------------
 
+
 def test_prefix_shrink_forces_full_frame():
     """When the conversation shrinks (compression/rollback), the frame is forced full."""
     # Two committed messages; a streaming partial in flight.
-    inst = _make_inst([_msg('user', 'q'), _msg('assistant', 'a')],
-                      streaming_responses=[_msg('assistant', 'partial')])
+    inst = _make_inst([_msg('user', 'q'), _msg('assistant', 'a')], streaming_responses=[_msg('assistant', 'partial')])
     pool = MagicMock()
     pool.instances = {'Maine': inst}
     pool.is_instance_halted.return_value = False
@@ -325,7 +358,7 @@ def test_prefix_shrink_noop_when_growing():
             sb._cache_mgr.stream_versions.clear()
             sb.STREAM_DELTA_ENABLED = True
 
-            r1 = sb._serialize_instances_incremental(pool, 'Maine', force_full=False)
+            sb._serialize_instances_incremental(pool, 'Maine', force_full=False)
 
             # Grow the conversation (new committed message) — not a shrink.
             with inst._compression_lock:
@@ -360,7 +393,9 @@ def test_streaming_true_no_responses_sends_full():
     try:
         with patch.object(sb, 'STREAM_DELTA_ENABLED', True):
             result = sb._serialize_instance(
-                inst, pool, include_messages=True,
+                inst,
+                pool,
+                include_messages=True,
                 streaming=True,  # not force_full
                 streaming_responses=[],  # but no active stream!
             )

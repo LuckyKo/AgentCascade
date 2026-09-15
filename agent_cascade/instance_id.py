@@ -32,13 +32,10 @@ def validate_instance_id(instance_id: str) -> str:
 
     if not _INSTANCE_ID_PATTERN.match(normalized):
         raise ValueError(
-            'Invalid instance ID: must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _)'
-        )
+            'Invalid instance ID: must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _)')
 
     if len(normalized) > _MAX_INSTANCE_ID_LENGTH:
-        raise ValueError(
-            f"Instance ID exceeds maximum length of {_MAX_INSTANCE_ID_LENGTH} characters"
-        )
+        raise ValueError(f"Instance ID exceeds maximum length of {_MAX_INSTANCE_ID_LENGTH} characters")
 
     return normalized
 

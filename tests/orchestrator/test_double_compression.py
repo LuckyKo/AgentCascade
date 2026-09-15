@@ -61,8 +61,7 @@ def test_inject_compression_does_not_double_trigger():
         msg.name = 'TestAgent'
         msg.function_call = None
         msg.get.return_value = msg.role if hasattr(msg, 'role') else ''
-        msg.__getitem__ = lambda self, k: {'content': self.content, 'role': self.role,
-                                            'name': self.name}.get(k)
+        msg.__getitem__ = lambda self, k: {'content': self.content, 'role': self.role, 'name': self.name}.get(k)
         type(msg).reasoning_content = PropertyMock(return_value=None)
         old_messages.append(msg)
 

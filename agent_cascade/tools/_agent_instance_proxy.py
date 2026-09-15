@@ -64,10 +64,8 @@ class _AgentInstanceFunctionProxy(BaseTool):
         if tool_name not in self._schema_cache:
             meta_entry = TOOL_METADATA.get(tool_name)
             if meta_entry is None:
-                raise ValueError(
-                    f"Tool '{tool_name}' not found in TOOL_METADATA. "
-                    f"Add it to agent_cascade/prompts/dna.py."
-                )
+                raise ValueError(f"Tool '{tool_name}' not found in TOOL_METADATA. "
+                                 f"Add it to agent_cascade/prompts/dna.py.")
             self._schema_cache[tool_name] = _build_schema_from_metadata(tool_name, meta_entry)
 
         schema = self._schema_cache[tool_name]
@@ -78,6 +76,4 @@ class _AgentInstanceFunctionProxy(BaseTool):
 
     def call(self, params=None, **kwargs):
         # Should never be reached — intercepted in ExecutionEngine._process_response
-        raise RuntimeError(
-            f"Proxy '{self.name}' called directly (should be intercepted by ExecutionEngine)."
-        )
+        raise RuntimeError(f"Proxy '{self.name}' called directly (should be intercepted by ExecutionEngine).")

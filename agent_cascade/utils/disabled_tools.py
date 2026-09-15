@@ -13,22 +13,17 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union, Dict, List, Set
 import logging
+from typing import Dict, List, Optional, Set, Union
 
 logger = logging.getLogger(__name__)
 
 # Import from constants — DO NOT duplicate these defaults here.
 # They are the authoritative source and enforced by this module automatically.
-from agent_cascade.constants import (
-    DEFAULT_SECURITY_DISABLED_TOOLS,
-    DEFAULT_COMPRESSOR_DISABLED_TOOLS,
-    DEFAULT_GENERALIST_DISABLED_TOOLS,
-    DEFAULT_ORCHESTRATOR_DISABLED_TOOLS,
-    DEFAULT_REVIEWER_DISABLED_TOOLS,
-    DEFAULT_WRITER_DISABLED_TOOLS,
-    DEFAULT_NEW_AGENT_DISABLED_TOOLS,
-)
+from agent_cascade.constants import (DEFAULT_COMPRESSOR_DISABLED_TOOLS, DEFAULT_GENERALIST_DISABLED_TOOLS,
+                                     DEFAULT_NEW_AGENT_DISABLED_TOOLS, DEFAULT_ORCHESTRATOR_DISABLED_TOOLS,
+                                     DEFAULT_REVIEWER_DISABLED_TOOLS, DEFAULT_SECURITY_DISABLED_TOOLS,
+                                     DEFAULT_WRITER_DISABLED_TOOLS)
 
 
 def normalize_disabled_tools(raw: Optional[Union[Dict, List, Set, tuple]]) -> Set[str]:
@@ -151,14 +146,16 @@ def resolve_disabled_tools_for_agent(
     #   - No explicit disabled_tools was set by Layers 1-2 (has_explicit_config is False)
     #   - Agent is not orchestrator/security/compressor/generalist/reviewer/writer (core system agents excluded;
     #     they have Layer 3 defaults or need full coordination)
-    if not has_explicit_config and atype_lower not in ('orchestrator', 'security', 'compressor', 'generalist', 'reviewer', 'writer'):
+    if not has_explicit_config and atype_lower not in ('orchestrator', 'security', 'compressor', 'generalist',
+                                                       'reviewer', 'writer'):
         disabled |= DEFAULT_NEW_AGENT_DISABLED_TOOLS
 
     return disabled
 
 
 def validate_tool_names(
-    tool_names: Set[str], known_tools: Optional[Set[str]] = None,
+    tool_names: Set[str],
+    known_tools: Optional[Set[str]] = None,
 ) -> Set[str]:
     """Validate tool names against the registry. Warns on unknown names.
 

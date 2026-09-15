@@ -15,19 +15,17 @@
 import json
 import os
 import random
+import socket
 import time
-from typing import Dict, List, Optional, OrderedDict, Tuple, Union
-import requests
+from typing import Dict, OrderedDict, Tuple, Union
 
+import requests
 from pydantic import BaseModel, Field
 
-import socket
-import requests.packages.urllib3.util.connection as connection
-from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.log import logger
-from agent_cascade.llm.schema import Message, ContentItem
+from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.utils.utils import extract_images_from_messages
-
 
 SERPAPI_IMAGE_SEARCH_KEY = os.getenv('SERPAPI_IMAGE_SEARCH_KEY', '')
 QWEN_IMAGE_SEARCH_MAX_RETRY_TIMES = int(os.getenv('QWEN_IMAGE_SEARCH_MAX_RETRY_TIMES', '3'))
@@ -35,11 +33,14 @@ SERPAPI_URL = 'https://serpapi.com/search.json'
 
 _orig_getaddrinfo = socket.getaddrinfo
 
+
 def _new_getaddrinfo(*args, **kwargs):
     responses = _orig_getaddrinfo(*args, **kwargs)
     return [r for r in responses if r[0] == socket.AF_INET]
 
+
 socket.getaddrinfo = _new_getaddrinfo
+
 
 class ImageResult(BaseModel):
     """
@@ -73,7 +74,9 @@ class ImageResult(BaseModel):
         setattr(self, key, value)
 
 
-def serper_search(image_url: str, check_accessibility: bool = True, max_retry: int = QWEN_IMAGE_SEARCH_MAX_RETRY_TIMES) -> dict:
+def serper_search(image_url: str,
+                  check_accessibility: bool = True,
+                  max_retry: int = QWEN_IMAGE_SEARCH_MAX_RETRY_TIMES) -> dict:
     """
     Image Search with SerpApi
     """
@@ -83,26 +86,26 @@ def serper_search(image_url: str, check_accessibility: bool = True, max_retry: i
         )
 
     payload = {
-        'engine': 'google_reverse_image',  
-        'image_url': image_url,   
+        'engine': 'google_reverse_image',
+        'image_url': image_url,
         'api_key': SERPAPI_IMAGE_SEARCH_KEY,
-        'hl': 'zh-CN', 
-        'gl': 'cn',  
+        'hl': 'zh-CN',
+        'gl': 'cn',
     }
 
     for _ in range(max_retry):
-        success = False
+        success = False  # noqa: F841  (loop-flag set in retry loop)
         start_time = time.perf_counter()
         response = None
         try:
             response = requests.get(SERPAPI_URL, params=payload)
-            response.raise_for_status() 
+            response.raise_for_status()
             json_response = response.json()
             items_data = json_response.get('image_results', []) + json_response.get('inline_images', [])
             results: Dict[str, ImageResult] = OrderedDict()
             for item_data in items_data:
                 try:
-                    image_direct_url = item_data.get('original', item_data.get('thumbnail')) 
+                    image_direct_url = item_data.get('original', item_data.get('thumbnail'))
                     source_page_url = item_data.get('link', '')
                     if not image_direct_url:
                         continue
@@ -122,18 +125,19 @@ def serper_search(image_url: str, check_accessibility: bool = True, max_retry: i
                                 results[image.imgurl] = image
                         else:
                             results[image.imgurl] = image
-                    success = True
+                    True
                 except Exception as e:
                     logger.warning(f"Failed to parse image item: {e}")
                     continue
             return [x for x in results.values()]
         except Exception as e:
-            response_text = response.text if response and response.text else None
+            response_text = response.text if response and response.text else None  # noqa: F841  (error-handling diagnostic value)
             logger.error(f'image_search_fail, Error: {e}')
             time.sleep(random.uniform(0.1, 1))
         finally:
-            cost_time = int((time.perf_counter() - start_time) * 1000)
+            cost_time = int((time.perf_counter() - start_time) * 1000)  # noqa: F841  (perf timing measurement)
     return []
+
 
 @register_tool('image_search', allow_overwrite=True)
 class ImageSearch(BaseTool):
@@ -153,7 +157,7 @@ class ImageSearch(BaseTool):
     def call(self, params: Union[str, dict], **kwargs) -> str:
         params = self._verify_json_format_args(params)
         image_id = int(params['img_idx'])
-        images =  extract_images_from_messages(kwargs.get('messages', []))
+        images = extract_images_from_messages(kwargs.get('messages', []))
         if not images:
             return 'Error: no images found in the messages.'
         if image_id >= len(images):
@@ -206,7 +210,7 @@ if __name__ == '__main__':
                 content=[
                     ContentItem(
                         image=
-                        'https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20241022/emyrja/dog_and_girl.jpeg')
+                        'https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20241022/emyrja/dog_and_girl.jpeg'
+                    )
                 ])
         ]))
-

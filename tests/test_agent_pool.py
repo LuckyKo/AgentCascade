@@ -5,21 +5,21 @@ We patch OperationManager / TelemetryCollector to avoid disk I/O side-effects.
 """
 
 import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixture: build a minimal AgentPool without hitting the filesystem
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def agent_pool():
     """Create an AgentPool with mocked dependencies so it can be instantiated."""
     # OperationManager is imported inside __init__, TelemetryCollector and APIRouter at module level
     with patch('agent_cascade.operation_manager.OperationManager') as mock_op_mgr, \
-         patch('agent_cascade.telemetry.TelemetryCollector') as mock_telem, \
+         patch('agent_cascade.telemetry.TelemetryCollector'), \
          patch('agent_cascade.api_router.APIRouter') as mock_router:
 
         # Set up OperationManager mock
@@ -54,6 +54,7 @@ def agent_pool():
 # ===========================================================================
 # Message queue: enqueue / drain / dedup
 # ===========================================================================
+
 
 class TestMessageQueue:
     """Test per-agent message queue enqueue/drain/dedup logic."""
@@ -94,14 +95,16 @@ class TestMessageQueue:
 # Agent dismissal
 # ===========================================================================
 
+
 class TestDismissal:
     """Test that dismissing agents cleans up state correctly."""
 
     def test_dismiss_inactive_agent_clears_conversation(self, agent_pool):
         """Dismissing an inactive agent should clear its conversation."""
+        import time
+
         from agent_cascade.agent_instance import AgentInstance
         from agent_cascade.llm.schema import Message
-        import time
         inst = AgentInstance(
             instance_name='ghost',
             agent_class='researcher',
@@ -120,8 +123,9 @@ class TestDismissal:
 
     def test_dismiss_active_agent_sets_stop_flag(self, agent_pool):
         """Dismissing an active agent should remove it from the pool (Bug5 Fix #1: no global stop flag)."""
-        from agent_cascade.agent_instance import AgentInstance, AgentState
         import time
+
+        from agent_cascade.agent_instance import AgentInstance, AgentState
         inst = AgentInstance(
             instance_name='busy_agent',
             agent_class='researcher',
@@ -143,8 +147,9 @@ class TestDismissal:
 
     def test_terminate_instance_sets_stop_when_active(self, agent_pool):
         """Terminating an active instance should set the stopped flag."""
-        from agent_cascade.agent_instance import AgentInstance, AgentState
         import time
+
+        from agent_cascade.agent_instance import AgentInstance, AgentState
         inst = AgentInstance(
             instance_name='term_agent',
             agent_class='researcher',
@@ -173,6 +178,7 @@ class TestDismissal:
 # Halt / resume lifecycle
 # ===========================================================================
 
+
 class TestHaltLifecycle:
     """Test per-instance halt/resume for forced compression."""
 
@@ -184,8 +190,10 @@ class TestHaltLifecycle:
 
     def test_halt_all_except_one(self, agent_pool):
         """halt_all_instances halts all instances except the one specified."""
-        from agent_cascade.agent_instance import AgentInstance
         import time
+
+        from agent_cascade.agent_instance import AgentInstance
+
         # Create actual instances so halt_all_instances can find them
         for name in ('a', 'b'):
             inst = AgentInstance(
@@ -212,8 +220,9 @@ class TestHaltLifecycle:
         # Manually halt "a" (not via compression)
         agent_pool.halt_instance('a')
         # Halt "b" via compression path
-        from agent_cascade.agent_instance import AgentInstance
         import time
+
+        from agent_cascade.agent_instance import AgentInstance
         for name in ('b',):
             inst = AgentInstance(
                 instance_name=name,
@@ -230,7 +239,7 @@ class TestHaltLifecycle:
         agent_pool.halt_all_instances(except_instance='c_nonexistent')
         # Now resume all — only "b" should be resumed (was compression-halted)
         agent_pool.resume_all_instances()
-        assert agent_pool.is_instance_halted('a') is True   # still halted (manual)
+        assert agent_pool.is_instance_halted('a') is True  # still halted (manual)
         assert agent_pool.is_instance_halted('b') is False  # resumed
 
     def test_state_lock_protection(self, agent_pool):
@@ -274,14 +283,20 @@ class TestPauseHaltDecoupling:
 
     def test_global_pause_does_not_set_is_halted(self, agent_pool):
         """After pause(), every (running) instance reports is_instance_halted False."""
-        from agent_cascade.agent_instance import AgentInstance
         import time
+
+        from agent_cascade.agent_instance import AgentInstance
         for name in ('w1', 'w2'):
             inst = AgentInstance(
-                instance_name=name, agent_class='researcher', conversation=[],
-                max_turns=None, parent_instance=None,
-                created_at=time.monotonic(), last_activity=time.monotonic(),
-                compression_summary=None, latest_marker_index=-1,
+                instance_name=name,
+                agent_class='researcher',
+                conversation=[],
+                max_turns=None,
+                parent_instance=None,
+                created_at=time.monotonic(),
+                last_activity=time.monotonic(),
+                compression_summary=None,
+                latest_marker_index=-1,
             )
             agent_pool.instances[name] = inst
 
@@ -294,15 +309,21 @@ class TestPauseHaltDecoupling:
 
     def test_genuine_halt_still_freezes_stream_path(self, agent_pool):
         """Invariant pin: a genuine halt serializes is_halted=True (UI stream gate breaks)."""
-        from agent_cascade.agent_instance import AgentInstance
-        from agent_cascade.api_integration_pkg.state_builder import _serialize_instance
         import time
 
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.api_integration_pkg.state_builder import _serialize_instance
+
         inst = AgentInstance(
-            instance_name='w1', agent_class='researcher', conversation=[],
-            max_turns=None, parent_instance=None,
-            created_at=time.monotonic(), last_activity=time.monotonic(),
-            compression_summary=None, latest_marker_index=-1,
+            instance_name='w1',
+            agent_class='researcher',
+            conversation=[],
+            max_turns=None,
+            parent_instance=None,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
         )
         agent_pool.instances['w1'] = inst
 
@@ -327,15 +348,21 @@ class TestPauseHaltDecoupling:
         invalidation added to SlotsMixin.pause()/resume() via
         _invalidate_stream_cache_on_pause_change().
         """
-        from agent_cascade.agent_instance import AgentInstance
-        from agent_cascade.api_integration_pkg.cache import _cache_mgr
         import time
 
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.api_integration_pkg.cache import _cache_mgr
+
         inst = AgentInstance(
-            instance_name='w1', agent_class='researcher', conversation=[],
-            max_turns=None, parent_instance=None,
-            created_at=time.monotonic(), last_activity=time.monotonic(),
-            compression_summary=None, latest_marker_index=-1,
+            instance_name='w1',
+            agent_class='researcher',
+            conversation=[],
+            max_turns=None,
+            parent_instance=None,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
         )
         agent_pool.instances['w1'] = inst
 
@@ -367,15 +394,21 @@ class TestPauseHaltDecoupling:
         per-instance stream-serialization cache — otherwise a stale is_halted could linger for
         up to ~100 ticks after a Stop. This pins the invalidation added at session_io.stop_session().
         """
-        from agent_cascade.agent_instance import AgentInstance
-        from agent_cascade.api_integration_pkg.cache import _cache_mgr
         import time
 
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.api_integration_pkg.cache import _cache_mgr
+
         inst = AgentInstance(
-            instance_name='w1', agent_class='researcher', conversation=[],
-            max_turns=None, parent_instance=None,
-            created_at=time.monotonic(), last_activity=time.monotonic(),
-            compression_summary=None, latest_marker_index=-1,
+            instance_name='w1',
+            agent_class='researcher',
+            conversation=[],
+            max_turns=None,
+            parent_instance=None,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
         )
         agent_pool.instances['w1'] = inst
 
@@ -397,13 +430,16 @@ class TestPauseHaltDecoupling:
 # Conversation snapshots and rollback
 # ===========================================================================
 
+
 class TestSnapshots:
     """Test capture_snapshots / rollback_to_snapshots."""
 
     def test_capture_and_rollback(self, agent_pool):
+        import time
+
         from agent_cascade.agent_instance import AgentInstance
         from agent_cascade.llm.schema import Message
-        import time
+
         # Create an actual instance with a conversation
         inst = AgentInstance(
             instance_name='w1',
@@ -438,6 +474,7 @@ class TestSnapshots:
 # ===========================================================================
 # Thread-safety of state mutations
 # ===========================================================================
+
 
 class TestThreadSafety:
     """Test that concurrent state mutations don't corrupt AgentPool."""
@@ -499,6 +536,7 @@ class TestThreadSafety:
 # ===========================================================================
 # instance_conversations initialization
 # ===========================================================================
+
 
 class TestInstanceConversations:
     """Test that instance_conversations is properly initialized and accessible."""

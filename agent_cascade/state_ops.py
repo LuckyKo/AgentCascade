@@ -7,9 +7,10 @@ Per-instance state limits are obsolete: we use stable labels (instance_name) and
 autoloader's per-model max-5 LRU eviction to manage disk usage.
 """
 
-import httpx
 import logging
 from typing import Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,11 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
     try:
         with instance._state_lock:
             endpoint_cfg = instance._last_endpoint_config
-        
+
         if not endpoint_cfg or not isinstance(endpoint_cfg, dict):
             logger.debug('No cached endpoint config for %s', instance.instance_name)
             return False
-        
+
         if not endpoint_cfg.get('state_save_enabled'):
             logger.debug('State save not enabled for %s (%s)', instance.instance_name, instance.agent_class)
             return False
@@ -71,8 +72,7 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
         return False
 
 
-def restore_instance_state(instance: 'AgentInstance',
-                           held_endpoint_cfg: Optional[dict] = None) -> bool:
+def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optional[dict] = None) -> bool:
     """Restore KV cache state for an instance.
 
     Reads the label and endpoint config from the instance under lock, uses cached
@@ -125,8 +125,7 @@ def restore_instance_state(instance: 'AgentInstance',
             # Restore failed — clear the label to avoid retrying stale state
             with instance._state_lock:
                 instance._state_label = None
-            logger.warning('State restore failed for %s (label=%s), cleared label', 
-                          instance.instance_name, label)
+            logger.warning('State restore failed for %s (label=%s), cleared label', instance.instance_name, label)
             return False
 
         # Clear the label after successful restore to prevent double-restore.

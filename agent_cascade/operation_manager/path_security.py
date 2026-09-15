@@ -10,13 +10,13 @@ from typing import Optional
 # Set by execution_engine before each tool call so _resolve_path can queue warnings.
 _thread_locals = threading.local()
 
-
 # ─── Module-level cached helpers ──────────────────────────────────────────
+
 
 @lru_cache(maxsize=512)
 def _path_is_contained_cached(path_str: str, container_str: str) -> bool:
     """Cached path containment check using os.path.commonpath().
-    
+
     Prevents sibling-directory escape. Case-insensitive on all platforms.
     Cached to avoid repeated commonpath() calls during file operations.
     """
@@ -29,6 +29,7 @@ def _path_is_contained_cached(path_str: str, container_str: str) -> bool:
 
 
 # ─── Thread-local instance name helpers ───────────────────────────────────
+
 
 def _queue_tool_warning(pool, instance_name: Optional[str], warning_text: str) -> None:
     """Queue a tool warning for the given agent instance.
@@ -89,6 +90,7 @@ def set_current_instance_name(name: str) -> None:
 
 # ─── Mixin: Path resolution methods for OperationManager ──────────────────
 
+
 class PathSecurityMixin:
     """Path resolution and security methods. Expects self to have __init__-set attributes."""
 
@@ -136,10 +138,8 @@ class PathSecurityMixin:
             raise ValueError(f"Path '{path}' contains an invalid index for {prefix_label} prefix")
 
         if idx < 0 or idx >= len(folders):
-            raise ValueError(
-                f"Path '{path}' uses {prefix_label.strip('/_')} index {idx}, but only "
-                f"{len(folders)} extra {'RW' if 'rw' in prefix_label else 'RO'} folder(s) are configured"
-            )
+            raise ValueError(f"Path '{path}' uses {prefix_label.strip('/_')} index {idx}, but only "
+                             f"{len(folders)} extra {'RW' if 'rw' in prefix_label else 'RO'} folder(s) are configured")
 
         # Strip leading separators from remaining to prevent absolute path escape
         while remaining and remaining[0] in ('/', '\\'):
@@ -169,12 +169,8 @@ class PathSecurityMixin:
         # Virtual prefixes (/workspace/, /extra_rw_N, /extra_ro_N) and relative paths
         # that resolve outside base_dir get a warning, even if they start with "/".
         # Must use precise prefix checks to avoid false positives like "/workspace_extra".
-        is_virtual_prefix = (
-            path == '/workspace' or
-            path.startswith('/workspace/') or
-            path.startswith('/extra_rw_') or
-            path.startswith('/extra_ro_')
-        )
+        is_virtual_prefix = (path == '/workspace' or path.startswith('/workspace/') or path.startswith('/extra_rw_') or
+                             path.startswith('/extra_ro_'))
         direct_absolute = Path(path).is_absolute() and not is_virtual_prefix
 
         # Handle virtual /workspace/ prefix and Docker extra path prefixes (/extra_rw_N, /extra_ro_N)
@@ -195,10 +191,8 @@ class PathSecurityMixin:
         elif clean_path.startswith('/extra_ro_'):
             # Map /extra_ro_N → extra_work_folders_ro[N]
             if mode != 'ro':
-                raise ValueError(
-                    f"Path '{path}' refers to a read-only extra folder but was requested with mode='rw'. "
-                    f"Use mode='ro' for paths under /extra_ro_*"
-                )
+                raise ValueError(f"Path '{path}' refers to a read-only extra folder but was requested with mode='rw'. "
+                                 f"Use mode='ro' for paths under /extra_ro_*")
             suffix = clean_path[len('/extra_ro_'):]
             extra_folder, clean_path = self._parse_extra_prefix(path, suffix, '/extra_ro_', self.extra_work_folders_ro)
             extra_prefix_resolved = extra_folder
@@ -238,7 +232,8 @@ class PathSecurityMixin:
         for extra in self.extra_work_folders_rw:
             if self._path_is_contained(resolved, extra):
                 if not direct_absolute:
-                    _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RW folder: {resolved}")
+                    _queue_tool_warning(self.agent_pool, instance_name,
+                                        f"Path '{path}' resolved to extra RW folder: {resolved}")
                 return resolved
 
         # 3. Check extra RO folders (allowed only if mode is "ro")
@@ -246,7 +241,8 @@ class PathSecurityMixin:
             for extra in self.extra_work_folders_ro:
                 if self._path_is_contained(resolved, extra):
                     if not direct_absolute:
-                        _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RO folder: {resolved}")
+                        _queue_tool_warning(self.agent_pool, instance_name,
+                                            f"Path '{path}' resolved to extra RO folder: {resolved}")
                     return resolved
 
         raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")

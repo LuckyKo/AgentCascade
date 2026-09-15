@@ -8,8 +8,8 @@ The difference should be within 5% tolerance after the CHAT_TEMPLATE_TOKEN_OVERH
 """
 
 import json
-import sys
 import os
+import sys
 from typing import List
 
 # Path mapping for different environments
@@ -19,79 +19,81 @@ for p in ['/extra_rw_0', '/workspace']:
         break
 
 from agent_cascade.llm.schema import Message
-from agent_cascade.utils.utils import get_message_stats
-from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.settings import CHAT_TEMPLATE_TOKEN_OVERHEAD
+from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+from agent_cascade.utils.utils import get_message_stats
 
 
 def build_realistic_conversation() -> List[Message]:
     """Build a realistic multi-turn conversation similar to AC workload."""
     return [
-        Message(role='system', content=(
-            'You are a practical senior software engineer. '
-            'Tone: Direct, practical, concise. Prefer solutions over explanations.'
-        )),
-        Message(role='user', content="Need to validate that token estimation fix actually makes AC's counts match llama.cpp within acceptable tolerance."),
-        Message(role='assistant', content=(
-            "I'll create and run a token estimation validation test. "
-            'Let me start by checking the existing codebase structure.'
-        )),
-        Message(role='user', content='Can you also check if the overhead constant is configurable via environment variable?'),
-        Message(role='assistant', content=(
-            'Yes, CHAT_TEMPLATE_TOKEN_OVERHEAD defaults to 5 and can be overridden with:\n'
-            'AGENT_CASCADE_CHAT_TEMPLATE_TOKEN_OVERHEAD=<value>\n\n'
-            'This accounts for llama.cpp chat template wrapper tokens per message.'
-        )),
-        Message(role='user', content='Write a test that compares our count vs what llama.cpp actually reports in usage.prompt_tokens'),
-        Message(role='assistant', content=(
-            "Here's the approach:\n"
-            '1. Build a conversation with ~25 messages\n'
-            "2. Sum get_message_stats() for each message to get AC's estimate\n"
-            '3. Send to llama.cpp API and read usage.prompt_tokens\n'
-            '4. Assert difference < 5%\n\n'
-            'Writing test script now...'
-        )),
-        Message(role='user', content='Also include a fallback that works without llama.cpp running, using the Qwen tokenizer with chat template applied.'),
-        Message(role='assistant', content=(
-            'Good idea. The fallback will:\n'
-            "- Apply Qwen's chat template format manually\n"
-            '- Count tokens on the templated output\n'
-            "- Compare against AC's estimate\n\n"
-            'This gives us a deterministic check without needing the server.'
-        )),
+        Message(role='system',
+                content=('You are a practical senior software engineer. '
+                         'Tone: Direct, practical, concise. Prefer solutions over explanations.')),
+        Message(
+            role='user',
+            content=
+            "Need to validate that token estimation fix actually makes AC's counts match llama.cpp within acceptable tolerance."
+        ),
+        Message(role='assistant',
+                content=("I'll create and run a token estimation validation test. "
+                         'Let me start by checking the existing codebase structure.')),
+        Message(role='user',
+                content='Can you also check if the overhead constant is configurable via environment variable?'),
+        Message(role='assistant',
+                content=('Yes, CHAT_TEMPLATE_TOKEN_OVERHEAD defaults to 5 and can be overridden with:\n'
+                         'AGENT_CASCADE_CHAT_TEMPLATE_TOKEN_OVERHEAD=<value>\n\n'
+                         'This accounts for llama.cpp chat template wrapper tokens per message.')),
+        Message(
+            role='user',
+            content='Write a test that compares our count vs what llama.cpp actually reports in usage.prompt_tokens'),
+        Message(role='assistant',
+                content=("Here's the approach:\n"
+                         '1. Build a conversation with ~25 messages\n'
+                         "2. Sum get_message_stats() for each message to get AC's estimate\n"
+                         '3. Send to llama.cpp API and read usage.prompt_tokens\n'
+                         '4. Assert difference < 5%\n\n'
+                         'Writing test script now...')),
+        Message(
+            role='user',
+            content=
+            'Also include a fallback that works without llama.cpp running, using the Qwen tokenizer with chat template applied.'
+        ),
+        Message(role='assistant',
+                content=('Good idea. The fallback will:\n'
+                         "- Apply Qwen's chat template format manually\n"
+                         '- Count tokens on the templated output\n'
+                         "- Compare against AC's estimate\n\n"
+                         'This gives us a deterministic check without needing the server.')),
         Message(role='user', content='Make sure to handle edge cases like empty messages and function calls.'),
-        Message(role='assistant', content=(
-            'Will include:\n'
-            '- Empty message test\n'
-            '- Function call message test\n'
-            '- Mixed length messages (short + long)\n'
-            '- Verify each path adds CHAT_TEMPLATE_TOKEN_OVERHEAD correctly.'
-        )),
+        Message(role='assistant',
+                content=('Will include:\n'
+                         '- Empty message test\n'
+                         '- Function call message test\n'
+                         '- Mixed length messages (short + long)\n'
+                         '- Verify each path adds CHAT_TEMPLATE_TOKEN_OVERHEAD correctly.')),
         Message(role='user', content='Run it and report the actual numbers.'),
         Message(role='assistant', content='Running now...'),
         Message(role='user', content="What's the error rate before vs after the fix?"),
-        Message(role='assistant', content=(
-            'Before fix: ~37% underestimation (raw tokens only)\n'
-            'After fix: ~4% error with CHAT_TEMPLATE_TOKEN_OVERHEAD=5\n\n'
-            'The overhead accounts for role tags, newlines, and template markers.'
-        )),
+        Message(role='assistant',
+                content=('Before fix: ~37% underestimation (raw tokens only)\n'
+                         'After fix: ~4% error with CHAT_TEMPLATE_TOKEN_OVERHEAD=5\n\n'
+                         'The overhead accounts for role tags, newlines, and template markers.')),
         Message(role='user', content='Can we tune the constant further to get closer?'),
-        Message(role='assistant', content=(
-            "Yes, but it's model-dependent. For Qwen3 models with llama.cpp:\n"
-            "- Each message gets: '▌{role}\\n{content}▌\\n'\n"
-            "- That's roughly 4-6 tokens of overhead per message\n"
-            '- Value of 5 is a good average.\n\n'
-            'We can adjust if systematic bias appears in production.'
-        )),
+        Message(role='assistant',
+                content=("Yes, but it's model-dependent. For Qwen3 models with llama.cpp:\n"
+                         "- Each message gets: '▌{role}\\n{content}▌\\n'\n"
+                         "- That's roughly 4-6 tokens of overhead per message\n"
+                         '- Value of 5 is a good average.\n\n'
+                         'We can adjust if systematic bias appears in production.')),
         Message(role='user', content='Show me the final comparison table.'),
-        Message(role='assistant', content=(
-            '| Method                    | Tokens   | Error vs llama.cpp |\n'
-            '|---------------------------|----------|--------------------|\n'
-            '| Raw content only          | ~850     | ~37% under         |\n'
-            '| With overhead (+5/msg)    | ~945     | ~4%                |\n'
-            '| llama.cpp actual          | 985      | baseline           |\n\n'
-            'Within acceptable tolerance for context window budgeting.'
-        )),
+        Message(role='assistant',
+                content=('| Method                    | Tokens   | Error vs llama.cpp |\n'
+                         '|---------------------------|----------|--------------------|\n'
+                         '| Raw content only          | ~850     | ~37% under         |\n'
+                         '| With overhead (+5/msg)    | ~945     | ~4%                |\n'
+                         '| llama.cpp actual          | 985      | baseline           |\n\n'
+                         'Within acceptable tolerance for context window budgeting.')),
         Message(role='user', content='Good enough. Ship it.'),
         Message(role='assistant', content='Done. Test script created at tests/test_token_estimation.py'),
     ]
@@ -117,8 +119,8 @@ def count_tokens_templated(messages: List[Message]) -> int:
 
 def count_tokens_llama_cpp(messages: List[Message], api_base: str, model: str) -> int:
     """Send conversation to llama.cpp API and return reported usage.prompt_tokens."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     # Convert messages to OpenAI-compatible format
     openai_messages = [{'role': m.role, 'content': m.content} for m in messages]

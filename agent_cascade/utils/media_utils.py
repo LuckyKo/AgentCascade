@@ -152,8 +152,7 @@ def save_image_to_media(
         file_size_mb = len(encoded_data) / (1024 * 1024)
         if file_size_mb > max_file_size_mb:
             raise MediaStorageError(
-                f"Encoded image too large ({file_size_mb:.1f} MB > {max_file_size_mb:.1f} MB limit)"
-            )
+                f"Encoded image too large ({file_size_mb:.1f} MB > {max_file_size_mb:.1f} MB limit)")
 
         # Write to disk
         dest_path.write_bytes(encoded_data)
@@ -247,10 +246,8 @@ def _cleanup_worker(max_age_days: int, interval_hours: float):
             result = cleanup_old_media(max_age_days=max_age_days)
             if result['files_removed'] > 0:
                 from agent_cascade.log import logger
-                logger.info(
-                    f"Media cleanup: removed {result['files_removed']} files, "
-                    f"freed {result['bytes_freed'] / (1024*1024):.1f} MB"
-                )
+                logger.info(f"Media cleanup: removed {result['files_removed']} files, "
+                            f"freed {result['bytes_freed'] / (1024*1024):.1f} MB")
             if result['errors']:
                 from agent_cascade.log import logger
                 for err in result['errors']:

@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +19,7 @@ import shutil
 import sys
 import threading
 from pathlib import Path
+
 
 # Lazy import of get_instance_id to avoid circular dependency:
 # __init__.py → agent.py → log.py → instance_id.py would deadlock when
@@ -94,6 +95,7 @@ class _CapturingStream:
     A per-instance threading.RLock allows re-entrant calls (e.g., when logging
     system writes error messages back to stderr during handler failures).
     """
+
     def __init__(self, stream_type, original_stream):
         self._stream_type = stream_type  # 'stdout' or 'stderr'
         self._original = original_stream
@@ -224,7 +226,6 @@ def _logging_excepthook(exc_type, exc_value, exc_tb):
         logger.error('Uncaught exception', exc_info=(exc_type, exc_value, exc_tb))
     except Exception:
         # During interpreter shutdown logger may be unavailable; fall back to sys.__excepthook__
-        import traceback
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
 
@@ -239,10 +240,7 @@ def _threading_excepthook(args):
             tb = args.exc_tb
         else:
             tb = None
-        logger.error(
-            'Uncaught exception in thread %s', thread_name,
-            exc_info=(args.exc_type, args.exc_value, tb)
-        )
+        logger.error('Uncaught exception in thread %s', thread_name, exc_info=(args.exc_type, args.exc_value, tb))
         if tb is None:
             logger.warning('Uncaught exception in thread %s — no traceback available', thread_name)
     except Exception:
@@ -310,7 +308,7 @@ def reset_logging() -> None:
     # Uninstall exception hooks only if they are our custom ones
     if hasattr(sys, '__excepthook__') and sys.excepthook is _logging_excepthook:
         sys.excepthook = sys.__excepthook__
-    
+
     try:
         if hasattr(threading, 'excepthook') and threading.excepthook is _threading_excepthook:
             # Python 3.8+: restore default excepthook

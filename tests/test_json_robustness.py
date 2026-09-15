@@ -1,16 +1,15 @@
-import json
-import re
-import sys
 import os
+import sys
 
 # Add the project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agent_cascade.utils.utils import json_loads
 
+
 def test_json_robustness():
     print('Running JSON Robustness Tests...')
-    
+
     # Test Case 1: Standard Thinking Block at Start (Should be stripped and parsed)
     text1 = "<think>\nSome reasoning here\n</think>\n{\"key\": \"value\"}"
     res1 = json_loads(text1)
@@ -21,7 +20,7 @@ def test_json_robustness():
     # Test Case 2: Thinking Block in the Middle (Should NOT be stripped, parsing should fallback to raw string)
     text2 = "{\"code\": \"<think>Inside Code</think>\"}"
     res2 = json_loads(text2)
-    # With the new fix, anchored regex won't strip it. 
+    # With the new fix, anchored regex won't strip it.
     # json5.loads should handle the literal <think> tags inside a string fine.
     assert isinstance(res2, dict), 'Test 2 Failed: Expected dict'
     assert '<think>Inside Code</think>' in res2.get('code'), 'Test 2 Failed: Content corrupted'
@@ -31,8 +30,8 @@ def test_json_robustness():
     # If unanchored, _THINK_BLOCK_RE would match <think>...</think> across the JSON structure
     text3 = "{\"part1\": \"val1\", \"poison\": \"<think>Content</think>\", \"part2\": \"val2\"}"
     res3 = json_loads(text3)
-    # Anchored regex won't touch this. 
-    # If it's a dict, verify content wasn't stripped. 
+    # Anchored regex won't touch this.
+    # If it's a dict, verify content wasn't stripped.
     # If it fell back to string, that's also acceptable protection against corruption.
     if isinstance(res3, dict):
         assert '<think>Content</think>' in res3.get('poison'), 'Test 3 Failed: Tag content stripped from middle'
@@ -60,7 +59,7 @@ def test_json_robustness():
     res6 = json_loads(text6)
     # If it fails parsing and falls back to string, that's fine too as long as it's not corrupted.
     if isinstance(res6, dict):
-         assert '<think>' in str(res6), 'Test 6 Failed: Tag stripped from middle of valid JSON'
+        assert '<think>' in str(res6), 'Test 6 Failed: Tag stripped from middle of valid JSON'
     print('Test 6 Passed: Nested JSON Robustness')
 
     # Test Case 7: Multiple tags at start
@@ -77,6 +76,7 @@ def test_json_robustness():
     assert isinstance(res8, dict), f"Test 8 Failed: Expected dict (recovered by extraction), got {type(res8)}"
     assert res8.get('b') == 2, 'Test 8 Failed: Value incorrect'
     print('Test 8 Passed: Unclosed tag at start (Recovered by extraction)')
+
 
 if __name__ == '__main__':
     try:

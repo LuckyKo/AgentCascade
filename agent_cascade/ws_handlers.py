@@ -40,16 +40,16 @@ class WsMessageHandler:
 
     # ── Constructor ───────────────────────────────────────────────────────
     def __init__(
-        self,
-        session: Dict[str, Any],
-        agent_pool,          # AgentPool instance
-        agents: list,        # List of agent objects
-        send_queue,          # asyncio.Queue
-        broadcast_fn: Callable,  # async broadcast(data) -> None
-        build_state_fn: Callable,  # build_state(responses=None, generating=None) -> dict
-        start_gen_fn: Callable,  # Thread entry point for run_agent_thread
-        session_lock: threading.Lock,
-        app,                 # FastAPI app object (holds security_check_semaphore, current_auto_security)
+            self,
+            session: Dict[str, Any],
+            agent_pool,  # AgentPool instance
+            agents: list,  # List of agent objects
+            send_queue,  # asyncio.Queue
+            broadcast_fn: Callable,  # async broadcast(data) -> None
+            build_state_fn: Callable,  # build_state(responses=None, generating=None) -> dict
+            start_gen_fn: Callable,  # Thread entry point for run_agent_thread
+            session_lock: threading.Lock,
+            app,  # FastAPI app object (holds security_check_semaphore, current_auto_security)
     ):
         self.session = session
         self.agent_pool = agent_pool
@@ -122,11 +122,10 @@ class WsMessageHandler:
         it through the shared send queue. The frame is broadcast to all clients but only
         the requesting client's UI panel will render it (instance-scoped rendering).
         """
-        from agent_cascade.log import logger
         from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
-        from agent_cascade.api_integration_pkg.streaming import (
-            _put_stream_update, _last_force_full, _last_force_full_lock,
-        )
+        from agent_cascade.api_integration_pkg.streaming import (_last_force_full, _last_force_full_lock,
+                                                                 _put_stream_update)
+        from agent_cascade.log import logger
 
         instance_name = data.get('instance') or self.session['session_name']
         if not self.agent_pool:
@@ -266,7 +265,7 @@ class WsMessageHandler:
 
         self._apply_session_cfg(data)
 
-        from agent_cascade.api_server import _parse_multimodal_content, _extract_system_message
+        from agent_cascade.api_server import _extract_system_message, _parse_multimodal_content
         parsed_content = _parse_multimodal_content(text)
         instance_name = self._resolve_instance_name(data)
 
@@ -287,7 +286,8 @@ class WsMessageHandler:
                 with inst._compression_lock:
                     if inst._continue_saved_msg is not None:
                         from agent_cascade.log import logger
-                        logger.debug(f"[CONTINUE_FIX] Cleared stale _continue_saved_msg for {instance_name} on new message")
+                        logger.debug(
+                            f"[CONTINUE_FIX] Cleared stale _continue_saved_msg for {instance_name} on new message")
                         inst._continue_saved_msg = None
 
             self.agent_pool.enqueue_message(instance_name, parsed_content)
@@ -362,14 +362,13 @@ class WsMessageHandler:
                 status = sched.get_status()
                 stuck = {k: v for k, v in status.items() if v['active_count'] > 0}
                 if stuck:
-                    logger.warning(
-                        f"Stuck slots detected after stop_session: "
-                        f"{stuck}"
-                    )
+                    logger.warning(f"Stuck slots detected after stop_session: "
+                                   f"{stuck}")
                 else:
                     logger.debug('All slots released cleanly after stop_session')
 
-            logger.debug(f"Transitioned {transitioned} agent(s) to IDLE, generation now={self.agent_pool._run_generation}")
+            logger.debug(
+                f"Transitioned {transitioned} agent(s) to IDLE, generation now={self.agent_pool._run_generation}")
 
         # Clean up active stack and halted state after stop_session()
         if self.agent_pool:
@@ -381,12 +380,14 @@ class WsMessageHandler:
                         original_len = len(self.agent_pool._execution.active_stack)
                         # Mutate in place instead of replacing the list
                         self.agent_pool._execution.active_stack[:] = [
-                            (name, depth) for name, depth in self.agent_pool._execution.active_stack
+                            (name, depth)
+                            for name, depth in self.agent_pool._execution.active_stack
                             if name not in self.agent_pool.terminated_instances
                         ]
                         removed_count = original_len - len(self.agent_pool._execution.active_stack)
                         if removed_count > 0:
-                            logger.debug(f"[STOP_STACK_CLEANUP] Removed {removed_count} terminated entries from active_stack")
+                            logger.debug(
+                                f"[STOP_STACK_CLEANUP] Removed {removed_count} terminated entries from active_stack")
 
                 # Clear _halted_instances to prevent stale pause state after stop
                 if hasattr(self.agent_pool, '_halted_instances'):
@@ -448,9 +449,9 @@ class WsMessageHandler:
                     self.agent_pool.stopped = False
 
                     # ── Fix 3: Restore agent instance conversations from JSONL logs if corrupted ──
-                    from agent_cascade.utils.pool_validation import validate_message_pool
                     from agent_cascade.log import logger as _logger
                     from agent_cascade.settings import DEFAULT_WORKSPACE
+                    from agent_cascade.utils.pool_validation import validate_message_pool
 
                     for sa_name, agent_class in list(self.agent_pool.instance_classes.items()):
                         if sa_name == self.session['session_name']:
@@ -498,18 +499,14 @@ class WsMessageHandler:
 
                             # Only overwrite pool if recovered data is valid
                             if recov and validate_message_pool(recov, sa_name):
-                                _logger.info(
-                                    f"Restoring agent instance {sa_name} conversation from log during resume "
-                                    f"({len(recov)} messages)"
-                                )
+                                _logger.info(f"Restoring agent instance {sa_name} conversation from log during resume "
+                                             f"({len(recov)} messages)")
                                 sa_inst = self.agent_pool.get_instance(sa_name)
                                 if sa_inst is not None:
                                     sa_inst.rebuild_conversation(recov)
                             else:
-                                _logger.warning(
-                                    f"Could not restore agent instance {sa_name} pool — "
-                                    f"no valid recovery data found in logs"
-                                )
+                                _logger.warning(f"Could not restore agent instance {sa_name} pool — "
+                                                f"no valid recovery data found in logs")
                         except Exception as _e:
                             _logger.warning(f"Failed to restore agent instance {sa_name} pool: {_e}")
 
@@ -532,19 +529,19 @@ class WsMessageHandler:
 
     async def handle_terminate(self, data: dict) -> None:
         """Handle 'terminate_agent_instance' / 'terminate_sub_agent'."""
-        is_generating = self._is_generating()
-
         instance_name = data.get('instance_name')
         if instance_name and self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
-            from agent_cascade.log import logger
             from agent_cascade.agent_instance import ACTIVE_STATES, AgentState
+            from agent_cascade.log import logger
 
             # SAFEGUARD: Never allow terminating the root orchestrator
             is_root = (inst is not None and inst.parent_instance is None)
 
             if is_root:
-                logger.warning(f"Terminate requested for root orchestrator '{instance_name}' — blocked. Transitioning to IDLE instead.")
+                logger.warning(
+                    f"Terminate requested for root orchestrator '{instance_name}' — blocked. Transitioning to IDLE instead."
+                )
                 with self._session_lock:
                     self.session['stop_requested'] = True
                     self.session['generating'] = False
@@ -583,9 +580,7 @@ class WsMessageHandler:
 
         # 1. Rollback all agents to start of last turn
         if self.agent_pool and self.session.get('last_turn_snapshots'):
-            self.agent_pool.rollback_to_snapshots(
-                self.session['last_turn_snapshots'], reason='User retry'
-            )
+            self.agent_pool.rollback_to_snapshots(self.session['last_turn_snapshots'], reason='User retry')
             self._sync_sub_agent_states()
 
         # 2. Trim only trailing ASSISTANT/FUNCTION messages (leave user message in place)
@@ -631,9 +626,7 @@ class WsMessageHandler:
             if inst is not None:
                 inst.reset_conversation()
                 try:
-                    self.agent_pool._logger.create_new_session(
-                        self.session['session_name'], inst.agent_class
-                    )
+                    self.agent_pool._logger.create_new_session(self.session['session_name'], inst.agent_class)
                 except Exception as e:
                     from agent_cascade.log import logger
                     logger.debug(f"Logger reset during stop failed (non-critical): {e}")
@@ -649,32 +642,32 @@ class WsMessageHandler:
 
     def _do_refresh_agents(self) -> list:
         """Perform agent template refresh. Returns list of agent names after refresh.
-        
+
         Shared by handle_refresh_souls and handle_refresh_agents to avoid duplication.
         Updates self.agents in-place (clear/extend required because closures in
         create_app() hold references to this exact list object).
         """
         if not self.agent_pool:
             return []
-        
+
         # Reload templates from disk
         self.agent_pool.refresh_agents()
-        
+
         # Get new agent list
         agent_names = self.agent_pool.list_agents()
         if not agent_names:
             from agent_cascade.log import logger
             logger.warning('No agents found after refresh')
             return []
-        
+
         # Filter out None values in case get_agent fails for some template
         new_agents = [a for a in (self.agent_pool.get_agent(name) for name in agent_names) if a is not None]
-        
+
         # Ensure orchestrator is at index 0 if present
         if 'orchestrator' in self.agent_pool.agents:
             orch = self.agent_pool.agents['orchestrator']
             new_agents = [orch] + [a for a in new_agents if a != orch]
-        
+
         # Mutate agents list in-place under lock. clear()/extend() is REQUIRED here
         # because closures in api_server.py create_app() reference this exact list
         # object (used by /api/agents, build_state model lookups, etc.). Direct
@@ -682,7 +675,7 @@ class WsMessageHandler:
         with self._session_lock:
             self.agents.clear()
             self.agents.extend(new_agents)
-        
+
         return agent_names
 
     async def handle_refresh_souls(self, data: dict) -> None:
@@ -694,12 +687,12 @@ class WsMessageHandler:
             logger.error(f"Agent refresh failed: {e}")
             await self.broadcast_fn({'type': 'error', 'message': f'Agent refresh failed: {e}'})
             return
-        
+
         await self._broadcast()
 
     async def handle_refresh_agents(self, data: dict) -> None:
         """Handle 'refresh_agents' — reload templates and return agent list.
-        
+
         Unlike refresh_souls (broadcast-only), this returns the discovered agent
         names via send_queue so callers (including agents invoking via tool calls)
         can programmatically determine what's loaded after refresh.
@@ -716,13 +709,13 @@ class WsMessageHandler:
             })
             await self.broadcast_fn({'type': 'error', 'message': f'Agent refresh failed: {e}'})
             return
-        
+
         # Return result to caller for programmatic use
         await self.send_queue.put({
             'type': 'refresh_agents_result',
             'agents': agent_names,
         })
-        
+
         # Also broadcast full state update (consistent with handle_refresh_souls)
         await self._broadcast()
 
@@ -741,8 +734,8 @@ class WsMessageHandler:
         to all active instances immediately so tool assignment changes take effect in real time.
         Persists ALL non-cosmetic settings to pool_settings.json (including disabled_tools).
         """
-        from agent_cascade.config_handlers import ConfigUpdateRouter, POOL_SETTINGS_KEYS, EXTRA_PERSIST_KEYS
         from agent_cascade.api_integration import _apply_ui_config
+        from agent_cascade.config_handlers import EXTRA_PERSIST_KEYS, POOL_SETTINGS_KEYS, ConfigUpdateRouter
 
         if 'generate_cfg' in data:
             self.session['generate_cfg'] = data['generate_cfg']
@@ -803,7 +796,8 @@ class WsMessageHandler:
             from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
 
             with self.agent_pool._ui_disabled_tools_lock:
-                ui_disabled_tools = dict(self.agent_pool._ui_disabled_tools) if self.agent_pool._ui_disabled_tools else {}
+                ui_disabled_tools = dict(
+                    self.agent_pool._ui_disabled_tools) if self.agent_pool._ui_disabled_tools else {}
 
             # Snapshot templates to avoid concurrent modification during iteration.
             # Templates are only modified during reload (rare), so this is low-risk but good practice.
@@ -866,8 +860,8 @@ class WsMessageHandler:
 
         try:
             # Apply via update_config — this routes each key to its handler which validates types
-            from agent_cascade.config_handlers import ConfigUpdateRouter, POOL_SETTINGS_KEYS, EXTRA_PERSIST_KEYS
             from agent_cascade.api_integration import _apply_ui_config
+            from agent_cascade.config_handlers import EXTRA_PERSIST_KEYS, POOL_SETTINGS_KEYS, ConfigUpdateRouter
 
             # Filter to known keys only (silently skip unknown fields)
             known_keys = POOL_SETTINGS_KEYS | EXTRA_PERSIST_KEYS
@@ -893,7 +887,10 @@ class WsMessageHandler:
             if 'auto_security' in settings_json:
                 if hasattr(self.app, 'current_auto_security'):
                     self.app.current_auto_security = bool(settings_json['auto_security'])
-                    await self.broadcast_fn({'type': 'info', 'message': f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"})
+                    await self.broadcast_fn({
+                        'type': 'info',
+                        'message': f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"
+                    })
                 else:
                     logger.warning('App missing current_auto_security attribute during import')
 
@@ -918,7 +915,8 @@ class WsMessageHandler:
         resolution and error handling with the rest of the codebase.
         """
         from agent_cascade.log import logger as _logger
-        if self.agent_pool is None or not hasattr(self.agent_pool, 'operation_manager') or self.agent_pool.operation_manager is None:
+        if self.agent_pool is None or not hasattr(self.agent_pool,
+                                                  'operation_manager') or self.agent_pool.operation_manager is None:
             return
 
         om = self.agent_pool.operation_manager
@@ -1016,8 +1014,11 @@ class WsMessageHandler:
         # Fix 2 — pass correct args matching constructor signature:
         #   __init__(self, agent_pool, session, app_state, send_queue, broadcast_fn)
         sec = SecurityAdvisorHandler(
-            self.agent_pool, self.session, self.app,
-            self.send_queue, self.broadcast_fn,
+            self.agent_pool,
+            self.session,
+            self.app,
+            self.send_queue,
+            self.broadcast_fn,
         )
         await sec.run_check(data)
 
@@ -1054,9 +1055,9 @@ class WsMessageHandler:
                 with inst._compression_lock:
                     history = list(inst.conversation)
 
-        from agent_cascade.api_server import _parse_multimodal_content, COMPRESSION_MARKER, _CONTEXT_SUMMARY_RE
-        from agent_cascade.utils.utils import msg_field
+        from agent_cascade.api_server import _CONTEXT_SUMMARY_RE, COMPRESSION_MARKER, _parse_multimodal_content
         from agent_cascade.llm.schema import CONTENT
+        from agent_cascade.utils.utils import msg_field
 
         if idx is not None and 0 <= idx < len(history):
             msg = history[idx]
@@ -1092,9 +1093,7 @@ class WsMessageHandler:
                     inst.rebuild_conversation(history)
 
                     logger_inst = self.agent_pool.get_logger(
-                        target_name,
-                        'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
-                    )
+                        target_name, 'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent')
 
                     # Rewrite the FULL on-disk history with the edit applied by identity, so
                     # pre-marker raw messages are preserved (design §5.2). Shrink guard stays
@@ -1121,18 +1120,14 @@ class WsMessageHandler:
                     # what the UI claims; aborting instead would lose the edit entirely.
                     if full_history and not applied:
                         from agent_cascade.log import logger as _edit_logger
-                        _edit_logger.error(
-                            f"[ws_edit] Edit target not found in full on-disk history for "
-                            f"'{target_name}' (identity drift). Falling back to pool working set "
-                            f"so the edit is persisted rather than silently lost."
-                        )
+                        _edit_logger.error(f"[ws_edit] Edit target not found in full on-disk history for "
+                                           f"'{target_name}' (identity drift). Falling back to pool working set "
+                                           f"so the edit is persisted rather than silently lost.")
                         logger_inst.rewrite_log_with_history(history, caller='ws_edit')
                     else:
                         # File empty/unreadable → fall back to the (already-edited) pool;
                         # otherwise write the full history with the edit applied in place.
-                        logger_inst.rewrite_log_with_history(
-                            edited_full if full_history else history, caller='ws_edit'
-                        )
+                        logger_inst.rewrite_log_with_history(edited_full if full_history else history, caller='ws_edit')
 
                 # Sync instance_state so build_state() sees the edit
                     self.agent_pool.instance_state[target_name]['messages'] = list(history)
@@ -1171,9 +1166,7 @@ class WsMessageHandler:
         logger_inst = None
         if self.agent_pool:
             logger_inst = self.agent_pool.get_logger(
-                target_name,
-                'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
-            )
+                target_name, 'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent')
 
         full_history = logger_inst.get_full_history() if logger_inst is not None else []
 
@@ -1195,10 +1188,8 @@ class WsMessageHandler:
         # surface the desync so it's visible instead of silently dropped.
         if remaining_keys:
             from agent_cascade.log import logger as _del_logger
-            _del_logger.warning(
-                f"[ws_delete] {len(remaining_keys)} requested deletion(s) for '{target_name}' "
-                f"were not found in the on-disk history (pool/file identity drift)."
-            )
+            _del_logger.warning(f"[ws_delete] {len(remaining_keys)} requested deletion(s) for '{target_name}' "
+                                f"were not found in the on-disk history (pool/file identity drift).")
 
         # Keep the trimmed pool working set in sync: drop the same message(s) by identity.
         new_pool = [m for m in history if _msg_identity(m) not in target_keys]
@@ -1264,18 +1255,12 @@ class WsMessageHandler:
             # Single root is auto-loaded on restart and should be replaced cleanly.
             caller_name = self.session.get('session_name')
             root_count = sum(1 for inst in self.agent_pool.instances.values() if inst.parent_instance is None)
-            exclude_caller = (
-                root_count > 1
-                and caller_name is not None
-                and caller_name != instance_name
-                and caller_name in self.agent_pool.instances
-            )
-            status = self.agent_pool.load_session_from_log(
-                path,
-                target_instance=instance_name,
-                clear_sub_agents_before_load=True,
-                caller_name=caller_name if exclude_caller else None
-            )
+            exclude_caller = (root_count > 1 and caller_name is not None and caller_name != instance_name and
+                              caller_name in self.agent_pool.instances)
+            status = self.agent_pool.load_session_from_log(path,
+                                                           target_instance=instance_name,
+                                                           clear_sub_agents_before_load=True,
+                                                           caller_name=caller_name if exclude_caller else None)
         if status.startswith('Error'):
             await self.broadcast_fn({'type': 'error', 'message': status})
             return

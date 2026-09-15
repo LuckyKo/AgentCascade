@@ -9,19 +9,12 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
 from enum import Enum, auto
+from typing import Any, List, Optional
 
-from agent_cascade.agent_instance import ArgumentCachePool
-from agent_cascade.settings import (
-    AUTO_SKILL_ENABLED,
-    AUTO_SKILL_EXTRA_TURNS,
-    CHARS_PER_TOKEN_ESTIMATE,
-    DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE, LOAD_SKILL_AUTO,
-)
-from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, USER, Message
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, Message
 from agent_cascade.log import logger
+from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE
 from agent_cascade.utils.utils import msg_field, msg_set
 
 # ── Constants (shared engine constants; true home is this module) ──────────────
@@ -29,15 +22,16 @@ from agent_cascade.utils.utils import msg_field, msg_set
 # the helper functions below (_normalize_thinking_blocks, _is_incomplete_state),
 # so their natural home is here. core.py re-imports them from this module (core
 # already imports helpers, so no circular import is introduced).
-MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000    # Threshold to skip expensive regex ops
-MIN_OUTPUT_LENGTH = 200                  # Minimum output length for broken-json detection
+MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000  # Threshold to skip expensive regex ops
+MIN_OUTPUT_LENGTH = 200  # Minimum output length for broken-json detection
+
 
 # ── SleepAction Enum (Phase 3.1)
 # ───────────────────────────────────────────────
 class SleepAction(Enum):
     """Actions returned by _handle_sleeping_state() to control the main loop."""
     CONTINUE_LOOP = auto()  # Re-enter while loop (with possible yield)
-    BREAK_LOOP = auto()     # Transitioned to COMPLETING/TERMINATED, exit while loop
+    BREAK_LOOP = auto()  # Transitioned to COMPLETING/TERMINATED, exit while loop
 
 
 def _get_active_functions_from_template(template, instance=None, pool=None) -> list:
@@ -68,18 +62,12 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
     inst_name = getattr(instance, 'instance_name', 'UNKNOWN') if instance else 'NO_INSTANCE'
 
     # Gather inputs for the centralized resolver
-    instance_override = (getattr(instance, '_generate_cfg_override', None)
-                        if instance is not None else None)
+    instance_override = (getattr(instance, '_generate_cfg_override', None) if instance is not None else None)
     template_cfg = (getattr(template.llm, 'generate_cfg', None) or {}
                     if getattr(template, 'llm', None) is not None else {})
 
     # Extract disabled_tools value for logging to avoid complex f-string
     # expressions
-    disabled_tools_value = None
-    if isinstance(instance_override, dict) and instance_override:
-        disabled_tools_value = instance_override.get('disabled_tools')
-    elif instance_override is not None:
-        disabled_tools_value = instance_override
 
     agent_name = getattr(template, 'name', '') or ''
     agent_type = getattr(template, 'agent_type', '') or ''
@@ -123,6 +111,7 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
 
 def _make_token_count_callback(instance):
     """Create a callback for capturing token counts from llm/base.py (Force Compression Fix)."""
+
     def _on_token_count(all_tokens: int, available_token: int, max_tokens: int):
         """Callback invoked by llm/base.py after computing token counts."""
         instance._last_actual_token_count = all_tokens
@@ -130,16 +119,18 @@ def _make_token_count_callback(instance):
         # ground truth
         if max_tokens > 0:  # Defensive validation
             instance._allocated_max_input_tokens = max_tokens
+
     return _on_token_count
 
 
 def _make_usage_callback(instance, telemetry_collector):
     """Create a callback for capturing response token usage from LLM streaming layer."""
+
     def _on_usage(prompt_tokens: int, completion_tokens: int, details=None):
         """Called by streaming layer when usage data arrives from API."""
         # Update compression tracking with ground-truth prompt tokens
         instance._last_actual_token_count = prompt_tokens
-        
+
         # Record in telemetry (non-blocking) — use same defensive pattern as _telemetry() helper
         if telemetry_collector is not None:
             try:
@@ -148,6 +139,7 @@ def _make_usage_callback(instance, telemetry_collector):
             except Exception as e:
                 from agent_cascade.log import logger
                 logger.debug('Telemetry usage callback error for %s: %s', instance.instance_name, e)
+
     return _on_usage
 
 
@@ -176,7 +168,11 @@ def _normalize_gemma_thought_tags(msg):
         match = re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<\|channel>|$)', content, re.IGNORECASE)
         if match:
             reasoning_text = match.group(1).strip()
-            cleaned_content = re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<\|channel>|$)', '', content, count=1, flags=re.IGNORECASE).strip()
+            cleaned_content = re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<\|channel>|$)',
+                                     '',
+                                     content,
+                                     count=1,
+                                     flags=re.IGNORECASE).strip()
             msg_set(msg, 'reasoning_content', reasoning_text)
             msg_set(msg, 'content', cleaned_content)
 
@@ -218,20 +214,12 @@ def _normalize_thinking_blocks(text):
 # Lookahead stops at next Qwen markers, PEG <function= tags, and </function>
 _EMBEDDED_TOOL_QWEN_RE = re.compile(
     r'✿FUNCTION✿\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\n?\s*'
-    r'✿ARGS✿\s*:\s*([\s\S]*?)(?=\s*✿FUNCTION✿|\s*✿RETURN✿|\s*<function=|\s*$)',
-    re.IGNORECASE
-)
+    r'✿ARGS✿\s*:\s*([\s\S]*?)(?=\s*✿FUNCTION✿|\s*✿RETURN✿|\s*<function=|\s*$)', re.IGNORECASE)
 
 # PEG-native format: <function=name>...<parameter>args</parameter>...</function>
-_EMBEDDED_TOOL_PEG_RE = re.compile(
-    r'<function=(\w+)>([\s\S]*?)</function>',
-    re.IGNORECASE
-)
+_EMBEDDED_TOOL_PEG_RE = re.compile(r'<function=(\w+)>([\s\S]*?)</function>', re.IGNORECASE)
 
-_EMBEDDED_TOOL_PEG_PARAM_RE = re.compile(
-    r'<parameter>([\s\S]*?)</parameter>',
-    re.IGNORECASE
-)
+_EMBEDDED_TOOL_PEG_PARAM_RE = re.compile(r'<parameter>([\s\S]*?)</parameter>', re.IGNORECASE)
 
 
 def _extract_tool_calls_from_text(text):
@@ -311,8 +299,7 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
             continue
 
         # Check reasoning/thinking content
-        reasoning = (msg_field(msg, 'reasoning_content') or
-                     msg_field(msg, 'thought') or '')
+        reasoning = (msg_field(msg, 'reasoning_content') or msg_field(msg, 'thought') or '')
         has_reasoning = isinstance(reasoning, str) and len(reasoning.strip()) > 1
 
         # Check tool calls
@@ -322,8 +309,9 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
         # Check text content
         content = msg_field(msg, 'content', '') or ''
         if isinstance(content, list):
-            text_parts = [item.get('text', '') for item in content
-                         if isinstance(item, dict) and item.get('type') == 'text']
+            text_parts = [
+                item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text'
+            ]
             content = ' '.join(text_parts).strip()
         elif not isinstance(content, str):
             content = str(content).strip()
@@ -441,8 +429,8 @@ def _build_skills_block(loaded_skills: list) -> str:
     for idx, instructions in enumerate(loaded_skills, 1):
         parts.append(f"\n### Skill {idx}\n{instructions}")
 
-    logger.debug('[SKILLS] Built skills block with %d skill(s), total ~%d chars',
-                 len(loaded_skills), sum(len(s) for s in loaded_skills))
+    logger.debug('[SKILLS] Built skills block with %d skill(s), total ~%d chars', len(loaded_skills),
+                 sum(len(s) for s in loaded_skills))
     return '\n'.join(parts)
 
 
@@ -484,9 +472,7 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
     # into a session's system message, its content doesn't change, so re-injection is redundant.
     # Tolerates heading variants (case/whitespace/trailing text) so a malformed or
     # user-edited heading can't bypass the guard and cause duplicate injection.
-    if (sys_msg.role != SYSTEM
-            or re.search(r'^##\s+Active\s+Skills', sys_msg.content,
-                         re.MULTILINE | re.IGNORECASE)):
+    if (sys_msg.role != SYSTEM or re.search(r'^##\s+Active\s+Skills', sys_msg.content, re.MULTILINE | re.IGNORECASE)):
         return False
 
     skills_block = _build_skills_block(skills_to_inject)
@@ -509,7 +495,9 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
 
     # Log with appropriate identifier
     if isinstance(instance_or_sysmsg, AgentInstance):
-        logger.info(f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into instance '{instance_or_sysmsg.instance_name}' system message")
+        logger.info(
+            f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into instance '{instance_or_sysmsg.instance_name}' system message"
+        )
     else:
         logger.info(f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into system message")
 
@@ -548,7 +536,8 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
         logger.debug('[SKILLS] _inject_self_augmentation_skill: no skill_manager on pool, skipping')
         return False
     if load_skill_value_upper == LOAD_SKILL_NONE:
-        logger.debug('[SKILLS] _inject_self_augmentation_skill: default_load_skill_mode is NONE (skills disabled), skipping')
+        logger.debug(
+            '[SKILLS] _inject_self_augmentation_skill: default_load_skill_mode is NONE (skills disabled), skipping')
         return False
 
     # Self-augmentation is injected for any enabled mode (AUTO or explicit list).

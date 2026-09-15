@@ -12,31 +12,20 @@ All external I/O is mocked. No network calls, no real cairosvg rendering.
 """
 
 import json
-import time
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
 from agent_cascade.llm.schema import ContentItem
-from agent_cascade.tools.image_gen import (
-    ImageGen,
-    _is_svg_code,
-    _load_workflow,
-    _list_workflows,
-    _inject_params,
-    _comfyui_generate,
-    _get_image_gen_config,
-    _invalidate_image_gen_config,
-    _image_gen_config_path,
-    _svg_dimensions,
-)
-
+from agent_cascade.tools.image_gen import (ImageGen, _comfyui_generate, _get_image_gen_config, _inject_params,
+                                           _invalidate_image_gen_config, _is_svg_code, _list_workflows, _load_workflow,
+                                           _svg_dimensions)
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _bust_config_cache():
@@ -60,18 +49,22 @@ def fake_config_path(tmp_path):
 # 1. SVG detection
 # ---------------------------------------------------------------------------
 
+
 class TestIsSvgCode:
-    @pytest.mark.parametrize('text,expected', [
-        ('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>', True),
-        ('<?xml version="1.0" encoding="UTF-8"?><svg><circle r="5"/></svg>', True),
-        ('  \n\t<svg width="10"><path d="M0 0"/></svg>', True),
-        ('hello world', False),
-        ('<svg>', False),
-        ('', False),
-        (None, False),  # type: ignore[arg-type]
-        ('<?xml version="1.0"?><html></html>', False),
-        ('<SVG><rect/></SVG>', False),  # uppercase not matched
-    ])
+
+    @pytest.mark.parametrize(
+        'text,expected',
+        [
+            ('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>', True),
+            ('<?xml version="1.0" encoding="UTF-8"?><svg><circle r="5"/></svg>', True),
+            ('  \n\t<svg width="10"><path d="M0 0"/></svg>', True),
+            ('hello world', False),
+            ('<svg>', False),
+            ('', False),
+            (None, False),  # type: ignore[arg-type]
+            ('<?xml version="1.0"?><html></html>', False),
+            ('<SVG><rect/></SVG>', False),  # uppercase not matched
+        ])
     def test_detection(self, text, expected):
         assert _is_svg_code(text) is expected
 
@@ -80,7 +73,9 @@ class TestIsSvgCode:
 # 1b. SVG dimensions extraction
 # ---------------------------------------------------------------------------
 
+
 class TestSvgDimensions:
+
     def test_extracts_width_height(self):
         svg = '<svg width="800" height="600"><rect/></svg>'
         assert _svg_dimensions(svg) == (800, 600)
@@ -106,7 +101,9 @@ class TestSvgDimensions:
 # 2. Workflow loading
 # ---------------------------------------------------------------------------
 
+
 class TestLoadWorkflow:
+
     def test_valid_json_returns_dict(self, tmp_path):
         wf = {'1': {'class_type': 'CLIPTextEncode', 'inputs': {'text': 'hi'}}}
         p = tmp_path / 'wf.json'
@@ -137,7 +134,9 @@ class TestLoadWorkflow:
 # 2b. Workflow listing
 # ---------------------------------------------------------------------------
 
+
 class TestListWorkflows:
+
     def test_missing_dir_returns_empty(self, tmp_path):
         assert _list_workflows(str(tmp_path / 'nonexistent')) == []
 
@@ -167,39 +166,81 @@ class TestListWorkflows:
 # 3. Parameter injection
 # ---------------------------------------------------------------------------
 
+
 def _zimg_workflow():
     """Minimal zimg-style workflow: two CLIPTextEncode + KSampler with direct int dims."""
     return {
-        '6': {'class_type': 'CLIPTextEncode', 'inputs': {'text': 'positive prompt here'}},
-        '7': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}},
-        '8': {'class_type': 'KSampler', 'inputs': {
-            'width': 1024, 'height': 1024, 'seed': 12345, 'steps': 20,
-        }},
+        '6': {
+            'class_type': 'CLIPTextEncode',
+            'inputs': {
+                'text': 'positive prompt here'
+            }
+        },
+        '7': {
+            'class_type': 'CLIPTextEncode',
+            'inputs': {
+                'text': ''
+            }
+        },
+        '8': {
+            'class_type': 'KSampler',
+            'inputs': {
+                'width': 1024,
+                'height': 1024,
+                'seed': 12345,
+                'steps': 20,
+            }
+        },
     }
 
 
 def _flux2_workflow():
     """Minimal flux2-style workflow: PrimitiveStringMultiline + node-ref dims via PrimitiveInt."""
     return {
-        '10': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'old prompt'}},
-        '75:68': {'class_type': 'PrimitiveInt', 'inputs': {'value': 512}},
-        '75:69': {'class_type': 'PrimitiveInt', 'inputs': {'value': 512}},
-        '11': {'class_type': 'KSampler', 'inputs': {
-            'width': ['75:68', 0], 'height': ['75:69', 0], 'seed': 999,
-        }},
+        '10': {
+            'class_type': 'PrimitiveStringMultiline',
+            'inputs': {
+                'value': 'old prompt'
+            }
+        },
+        '75:68': {
+            'class_type': 'PrimitiveInt',
+            'inputs': {
+                'value': 512
+            }
+        },
+        '75:69': {
+            'class_type': 'PrimitiveInt',
+            'inputs': {
+                'value': 512
+            }
+        },
+        '11': {
+            'class_type': 'KSampler',
+            'inputs': {
+                'width': ['75:68', 0],
+                'height': ['75:69', 0],
+                'seed': 999,
+            }
+        },
     }
 
 
 def _zimg_workflow_with_aspect():
     """zimg + CR Aspect Ratio node."""
     wf = _zimg_workflow()
-    wf['9'] = {'class_type': 'CR Aspect Ratio', 'inputs': {
-        'aspect_ratio': '16:9', 'swap_dimensions': 'On',
-    }}
+    wf['9'] = {
+        'class_type': 'CR Aspect Ratio',
+        'inputs': {
+            'aspect_ratio': '16:9',
+            'swap_dimensions': 'On',
+        }
+    }
     return wf
 
 
 class TestInjectParamsZimg:
+
     def test_prompt_injected_into_positive_node(self):
         wf = _zimg_workflow()
         _, report = _inject_params(wf, prompt='a red fox', seed=42)
@@ -239,6 +280,7 @@ class TestInjectParamsZimg:
 
 
 class TestInjectParamsFlux2:
+
     def test_prompt_injected_into_primitive(self):
         wf = _flux2_workflow()
         _, report = _inject_params(wf, prompt='a blue whale', seed=7)
@@ -258,11 +300,22 @@ class TestInjectParamsFlux2:
 
 
 class TestInjectParamsEdgeCases:
+
     def test_all_empty_clip_nodes_first_becomes_positive(self):
         """When all CLIPTextEncode nodes have empty text, the first is used for positive."""
         wf = {
-            '1': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}},
-            '2': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}},
+            '1': {
+                'class_type': 'CLIPTextEncode',
+                'inputs': {
+                    'text': ''
+                }
+            },
+            '2': {
+                'class_type': 'CLIPTextEncode',
+                'inputs': {
+                    'text': ''
+                }
+            },
         }
         _, report = _inject_params(wf, prompt='test', negative_prompt='bad', seed=1)
         # First node (document order) gets the positive prompt
@@ -281,9 +334,26 @@ class TestInjectParamsEdgeCases:
     def test_multiple_seed_nodes_all_updated(self):
         """Every node with a seed or noise_seed input gets the same seed."""
         wf = {
-            '1': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}},
-            '2': {'class_type': 'KSampler', 'inputs': {'seed': 0, 'width': 512, 'height': 512}},
-            '3': {'class_type': 'SomeOtherNode', 'inputs': {'noise_seed': 999}},
+            '1': {
+                'class_type': 'CLIPTextEncode',
+                'inputs': {
+                    'text': ''
+                }
+            },
+            '2': {
+                'class_type': 'KSampler',
+                'inputs': {
+                    'seed': 0,
+                    'width': 512,
+                    'height': 512
+                }
+            },
+            '3': {
+                'class_type': 'SomeOtherNode',
+                'inputs': {
+                    'noise_seed': 999
+                }
+            },
         }
         _, report = _inject_params(wf, prompt='x', seed=777)
         assert wf['2']['inputs']['seed'] == 777
@@ -291,6 +361,7 @@ class TestInjectParamsEdgeCases:
 
 
 class TestInjectParamsErrors:
+
     def test_no_text_nodes_raises_value_error(self):
         wf = {'1': {'class_type': 'KSampler', 'inputs': {'seed': 1}}}
         with pytest.raises(ValueError, match='Could not inject prompt'):
@@ -333,14 +404,18 @@ def _make_comfyui_transport(complete_after_polls=1, status_str='success', includ
 
             outputs = {}
             if include_image and status_str != 'error':
-                outputs = {'3': {'images': [
-                    {'filename': 'gen_00001.png', 'subfolder': '', 'type': 'output'},
-                ]}}
+                outputs = {'3': {'images': [{'filename': 'gen_00001.png', 'subfolder': '', 'type': 'output'},]}}
 
-            return httpx.Response(200, json={PROMPT_ID: {
-                'status': {'status_str': status_str, 'completed': status_str != 'error'},
-                'outputs': outputs,
-            }})
+            return httpx.Response(200,
+                                  json={
+                                      PROMPT_ID: {
+                                          'status': {
+                                              'status_str': status_str,
+                                              'completed': status_str != 'error'
+                                          },
+                                          'outputs': outputs,
+                                      }
+                                  })
 
         # GET /view?filename=... → download image bytes
         if request.method == 'GET' and request.url.path == '/view':
@@ -352,21 +427,21 @@ def _make_comfyui_transport(complete_after_polls=1, status_str='success', includ
 
 
 class TestComfyUIGenerate:
+
     def test_success_flow(self):
         transport = _make_comfyui_transport(complete_after_polls=1)
         client = httpx.Client(transport=transport)
         wf = {'8': {'class_type': 'KSampler', 'inputs': {'seed': 42}}}
 
         with patch('agent_cascade.tools.image_gen.time.sleep'):  # skip real sleeps
-            image_bytes, meta = _comfyui_generate(
-                'http://localhost:8188', wf, timeout=30, client=client
-            )
+            image_bytes, meta = _comfyui_generate('http://localhost:8188', wf, timeout=30, client=client)
 
         assert image_bytes == FAKE_IMAGE_BYTES
         assert meta == {'seed': 42}
 
     def test_server_unreachable_raises_runtime_error(self):
         """Simulate ConnectError by using a transport that raises."""
+
         def failing_handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError('Connection refused')
 
@@ -378,6 +453,7 @@ class TestComfyUIGenerate:
 
     def test_timeout_when_never_completes(self):
         """Polling never returns a completed entry → TimeoutError."""
+
         # POST /prompt succeeds (returns prompt_id), but /history always returns {}
         # (no entry for the prompt_id) so the loop never sees completion.
         def handler(request: httpx.Request) -> httpx.Response:
@@ -425,9 +501,7 @@ class TestComfyUIGenerate:
 
     def test_submit_non_200_raises(self):
         """POST /prompt returns 500 → RuntimeError."""
-        transport = httpx.MockTransport(
-            lambda req: httpx.Response(500, text='Internal Server Error')
-        )
+        transport = httpx.MockTransport(lambda req: httpx.Response(500, text='Internal Server Error'))
         client = httpx.Client(transport=transport)
         wf = {'8': {'class_type': 'KSampler', 'inputs': {'seed': 1}}}
 
@@ -446,12 +520,24 @@ class TestComfyUIGenerate:
                 if state['poll_count'] == 1:
                     raise httpx.RequestError('Transient network hiccup')
                 # Second poll succeeds with completion
-                return httpx.Response(200, json={PROMPT_ID: {
-                    'status': {'status_str': 'success', 'completed': True},
-                    'outputs': {'3': {'images': [
-                        {'filename': 'out.png', 'subfolder': '', 'type': 'output'},
-                    ]}},
-                }})
+                return httpx.Response(200,
+                                      json={
+                                          PROMPT_ID: {
+                                              'status': {
+                                                  'status_str': 'success',
+                                                  'completed': True
+                                              },
+                                              'outputs': {
+                                                  '3': {
+                                                      'images': [{
+                                                          'filename': 'out.png',
+                                                          'subfolder': '',
+                                                          'type': 'output'
+                                                      },]
+                                                  }
+                                              },
+                                          }
+                                      })
             if request.method == 'GET' and request.url.path == '/view':
                 return httpx.Response(200, content=FAKE_IMAGE_BYTES)
             return httpx.Response(404)
@@ -460,9 +546,7 @@ class TestComfyUIGenerate:
         wf = {'8': {'class_type': 'KSampler', 'inputs': {'seed': 1}}}
 
         with patch('agent_cascade.tools.image_gen.time.sleep'):
-            image_bytes, meta = _comfyui_generate(
-                'http://localhost:8188', wf, timeout=30, client=client
-            )
+            image_bytes, meta = _comfyui_generate('http://localhost:8188', wf, timeout=30, client=client)
 
         assert image_bytes == FAKE_IMAGE_BYTES
 
@@ -471,7 +555,9 @@ class TestComfyUIGenerate:
 # 5. Config access
 # ---------------------------------------------------------------------------
 
+
 class TestImageGenConfig:
+
     def test_no_config_file_returns_empty(self, fake_config_path):
         """When the config file doesn't exist, _get_image_gen_config returns {}."""
         assert not fake_config_path.exists()
@@ -514,7 +600,9 @@ class TestImageGenConfig:
 # 6. Return format (end-to-end via mocked SVG path)
 # ---------------------------------------------------------------------------
 
+
 class TestReturnFormat:
+
     def test_svg_path_returns_content_items(self):
         """SVG prompt → [ContentItem(image=...), ContentItem(text=caption)]."""
         tool = ImageGen()
@@ -566,7 +654,7 @@ class TestReturnFormat:
 
         # Wrap the tool result in a FUNCTION message (as _assemble_tool_result does) and
         # confirm the guard STILL flags it as needing captioning (return path will caption).
-        from agent_cascade.llm.schema import Message, FUNCTION
+        from agent_cascade.llm.schema import FUNCTION, Message
         fn_msg = Message(role=FUNCTION, name='image_gen', content=list(result))
         assert APIRouter._has_uncaptioned_images([fn_msg]) is True
 
@@ -575,7 +663,7 @@ class TestReturnFormat:
         available, descriptive line as fallback), so _has_uncaptioned_images is False in
         BOTH cases — no redundant re-caption even when vision captioning fails."""
         from agent_cascade.api_router_pkg.router import APIRouter
-        from agent_cascade.llm.schema import Message, FUNCTION
+        from agent_cascade.llm.schema import FUNCTION, Message
 
         for caption_return in ('A cat sitting on a mat.', None):
             tool = ImageGen()
@@ -611,8 +699,7 @@ class TestReturnFormat:
         """Native library failure → OSError caught and returned as error message."""
         tool = ImageGen()
         svg = '<svg width="10" height="10"><rect/></svg>'
-        with patch('agent_cascade.tools.image_gen._render_svg_to_png_bytes',
-                   side_effect=OSError('GTK3 not found')):
+        with patch('agent_cascade.tools.image_gen._render_svg_to_png_bytes', side_effect=OSError('GTK3 not found')):
             result = tool.call({'prompt': svg})
         assert len(result) == 1
         assert 'ERROR' in result[0].text
@@ -621,8 +708,7 @@ class TestReturnFormat:
         """Malformed SVG → generic exception caught and returned as error."""
         tool = ImageGen()
         svg = '<svg width="10" height="10"><rect/></svg>'
-        with patch('agent_cascade.tools.image_gen._render_svg_to_png_bytes',
-                   side_effect=ValueError('Invalid SVG')):
+        with patch('agent_cascade.tools.image_gen._render_svg_to_png_bytes', side_effect=ValueError('Invalid SVG')):
             result = tool.call({'prompt': svg})
         assert len(result) == 1
         assert 'ERROR' in result[0].text
@@ -678,12 +764,12 @@ class TestReturnFormat:
 
         # Mock the ComfyUI client and media save
         transport = _make_comfyui_transport(complete_after_polls=1)
-        mock_client = httpx.Client(transport=transport)
+        mock_client = httpx.Client(transport=transport)  # noqa: F841  (httpx.Client kept as statement)
 
         with patch('agent_cascade.tools.image_gen._comfyui_generate',
                    return_value=(b'fake_bytes', {'seed': 42})) as mock_gen, \
-             patch('agent_cascade.tools.image_gen.save_image_to_media',
-                   return_value='/tmp/media/imggen_comfy.png') as mock_save:
+             patch('agent_cascade.tools.image_gen.save_image_to_media', \
+                   return_value='/tmp/media/imggen_comfy.png') as mock_save:  # noqa: F841  (patch targets must stay bound)
 
             result = tool.call({'prompt': 'a cat', 'width': 512, 'height': 512})
 
@@ -721,8 +807,7 @@ class TestReturnFormat:
         (the system renders it and skips re-captioning). The text feedback must NOT
         duplicate it with its own 'Caption:' line — that would show up twice."""
         tool = ImageGen()
-        result = self._run_text_prompt_with_caption(
-            tool, 'A cat sitting on a mat.')
+        result = self._run_text_prompt_with_caption(tool, 'A cat sitting on a mat.')
 
         assert len(result) == 2
         # Text feedback is just the generated-image line (no Caption: line).

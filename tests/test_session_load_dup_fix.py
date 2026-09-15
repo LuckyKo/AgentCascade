@@ -10,15 +10,10 @@ Runs against real AgentPool + AgentInstanceLogger — no LLM calls needed.
 """
 
 import json
-import os
-import tempfile
 from datetime import datetime
 
-import pytest
-
-from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
-
 
 # ──────────────────────────────────────────────
 # Fixtures & helpers
@@ -37,10 +32,7 @@ def build_large_session(num_pairs=32):
     msgs = [Message(role=SYSTEM, content='You are a helpful coding assistant.')]
     for i in range(num_pairs):
         msgs.append(Message(role=USER, content=f"Question {i}: What is Python feature {i}?"))
-        msgs.append(
-            Message(role=ASSISTANT,
-                    content=f"Answer {i}: Python feature {i} is powerful. Details: {'x' * 50}")
-        )
+        msgs.append(Message(role=ASSISTANT, content=f"Answer {i}: Python feature {i} is powerful. Details: {'x' * 50}"))
     return msgs
 
 
@@ -124,6 +116,7 @@ def check_duplicates(msgs):
 # Test 1: Large session load (65 msgs), verify no dups
 # ──────────────────────────────────────────────
 
+
 class TestLargeSessionLoad:
     """Verify loading a large session via AgentPool produces no duplicates."""
 
@@ -156,6 +149,7 @@ class TestLargeSessionLoad:
 # ──────────────────────────────────────────────
 # Test 2: Compressed session load + append via log_message()
 # ──────────────────────────────────────────────
+
 
 class TestCompressedSessionAppend:
     """Verify no duplicates after loading compressed session and appending."""
@@ -206,6 +200,7 @@ class TestCompressedSessionAppend:
 # Test 3: Reused instance path simulation
 # ──────────────────────────────────────────────
 
+
 class TestReusedInstancePath:
     """Simulate lifecycle_manager.py reused instance flow."""
 
@@ -255,6 +250,7 @@ class TestReusedInstancePath:
 # Test 4: Multiple reloads (stress test)
 # ──────────────────────────────────────────────
 
+
 class TestMultipleReloads:
     """Reload the same session multiple times to catch accumulation bugs."""
 
@@ -285,6 +281,7 @@ class TestMultipleReloads:
 # ──────────────────────────────────────────────
 # Test 5: File sync flag verification
 # ──────────────────────────────────────────────
+
 
 class TestFileSyncFlag:
     """Verify rewrite_log_with_history sets _file_history_synced correctly."""

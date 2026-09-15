@@ -8,40 +8,27 @@ KILL_WAIT_TIMEOUT`` takes effect at call time. All other timing constants are im
 by name (they are never patched by tests).
 """
 
+import csv
+import io
 import os
-import signal
 import subprocess
 import threading
 import time
-import csv
-import io
 from typing import Dict, List, Optional, Tuple
 
-from agent_cascade.log import logger
-from agent_cascade.tool_utils import truncate_with_spillover
-from agent_cascade.settings import (
-    MAX_ASYNC_SHELL_PER_AGENT,
-    ASYNC_SHELL_DEFAULT_TIMEOUT,
-    HEARTBEAT_CHECK_INTERVAL,
-    EARLY_OUTPUT_CHECK_TIMEOUT,
-)
-from agent_cascade.shell_utils import (
-    DRAIN_THREAD_JOIN_TIMEOUT,
-    drain_pipe_lines,
-    configure_windows_utf8,
-)
-from agent_cascade.async_shell_pkg.task import AsyncShellTask, _elapsed_for_task
-from agent_cascade.async_shell_pkg.windows import ON_WINDOWS, _WIN_ENV, _send_windows_ctrl_c
 from agent_cascade.async_shell_pkg import constants
 # Bare-name timing constants (never patched by tests). KILL_WAIT_TIMEOUT is deliberately
 # NOT imported here — it is read via `constants.KILL_WAIT_TIMEOUT` so test patches take effect.
-from agent_cascade.async_shell_pkg.constants import (  # noqa: F401
-    PROCESS_KILL_SETTLE_DELAY,
-    DRAIN_THREAD_FLUSH_DELAY,
-    LAUNCH_POLL_INTERVAL,
-    VIEWER_EXIT_WAIT_TIMEOUT,
-    SPAWN_PUBLISH_TIMEOUT,
-)
+from agent_cascade.async_shell_pkg.constants import LAUNCH_POLL_INTERVAL  # noqa: F401
+from agent_cascade.async_shell_pkg.constants import (DRAIN_THREAD_FLUSH_DELAY, PROCESS_KILL_SETTLE_DELAY,
+                                                     SPAWN_PUBLISH_TIMEOUT, VIEWER_EXIT_WAIT_TIMEOUT)
+from agent_cascade.async_shell_pkg.task import AsyncShellTask, _elapsed_for_task
+from agent_cascade.async_shell_pkg.windows import _WIN_ENV, ON_WINDOWS, _send_windows_ctrl_c
+from agent_cascade.log import logger
+from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, EARLY_OUTPUT_CHECK_TIMEOUT, HEARTBEAT_CHECK_INTERVAL,
+                                    MAX_ASYNC_SHELL_PER_AGENT)
+from agent_cascade.shell_utils import DRAIN_THREAD_JOIN_TIMEOUT, configure_windows_utf8, drain_pipe_lines
+from agent_cascade.tool_utils import truncate_with_spillover
 
 
 class _PendingSpawn:
@@ -80,12 +67,10 @@ def _dead_shell_message(agent_name: str, tool_id: int) -> str:
     in a loop (see reports/async_shell_polling_bug_status.md). The leading
     "No running shell found" substring is asserted by tests and must be kept.
     """
-    return (
-        f"No running shell found for agent '{agent_name}' with tool_id {tool_id} — "
-        f"TERMINAL: this shell has completed or crashed and its record was cleaned up. "
-        f"Do NOT poll again; the result is unobtainable from here (any completion message "
-        f"was already queued). Continue without it."
-    )
+    return (f"No running shell found for agent '{agent_name}' with tool_id {tool_id} — "
+            f"TERMINAL: this shell has completed or crashed and its record was cleaned up. "
+            f"Do NOT poll again; the result is unobtainable from here (any completion message "
+            f"was already queued). Continue without it.")
 
 
 class AsyncShellTracker:
@@ -154,10 +139,10 @@ class AsyncShellTracker:
     # ────────────────────────────────────────────────────────────────
     def has_active_tasks(self, agent_name: str) -> bool:
         """Check if there are active (non-completed) async shell tasks for an agent.
-        
+
         Used by AgentPool.has_pending() to determine if an agent should SLEEP
         while waiting for background shell commands to complete.
-        
+
         Thread safety: self._lock protects _tasks dict structure only.
         Individual task state (task.completed) is protected by task._lock.
         We snapshot the task dict reference under self._lock, then iterate
@@ -208,22 +193,19 @@ class AsyncShellTracker:
         """
         # Enforce per-agent concurrency limit
         if self._active_count(agent_name) >= MAX_ASYNC_SHELL_PER_AGENT:
-            raise ValueError(
-                f"Agent '{agent_name}' already has {MAX_ASYNC_SHELL_PER_AGENT} "
-                f"async shell commands running. Wait for one to finish or kill it first."
-            )
+            raise ValueError(f"Agent '{agent_name}' already has {MAX_ASYNC_SHELL_PER_AGENT} "
+                             f"async shell commands running. Wait for one to finish or kill it first.")
 
         # Clamp invalid heartbeat intervals to -1 (completion-only mode)
         if heartbeat_interval < -1:
-            logger.debug(
-                f"[AsyncShell] Invalid heartbeat_interval={heartbeat_interval} for "
-                f"{agent_name}, clamping to -1 (completion only)"
-            )
+            logger.debug(f"[AsyncShell] Invalid heartbeat_interval={heartbeat_interval} for "
+                         f"{agent_name}, clamping to -1 (completion only)")
             heartbeat_interval = -1
 
         # Opt-out override (e.g. test harnesses): force no console window regardless of caller state.
         # Does NOT change production defaults — only takes effect when this env var is set truthy.
-        if console_window and os.getenv('AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW', '').strip() not in ('', '0', 'false', 'False'):
+        if console_window and os.getenv('AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW',
+                                        '').strip() not in ('', '0', 'false', 'False'):
             console_window = False
 
         tool_id = self._next_id(agent_name)
@@ -257,8 +239,7 @@ class AsyncShellTracker:
         # sending any messages (heartbeats, output, completion).
         try:
             pid, early_output, completed_early, return_code = self._get_launch_result(
-                agent_name, tool_id, timeout=EARLY_OUTPUT_CHECK_TIMEOUT
-            )
+                agent_name, tool_id, timeout=EARLY_OUTPUT_CHECK_TIMEOUT)
         finally:
             # Always signal tracking thread that launch check is complete, even on exception.
             # This prevents deadlock if _get_launch_result raises unexpectedly.
@@ -268,8 +249,10 @@ class AsyncShellTracker:
 
     # ────────────────────────────────────────────────────────────────
     def _get_launch_result(
-        self, agent_name: str, tool_id: int, timeout: float = EARLY_OUTPUT_CHECK_TIMEOUT
-    ) -> Tuple[int, Optional[List[str]], bool, Optional[int]]:
+            self,
+            agent_name: str,
+            tool_id: int,
+            timeout: float = EARLY_OUTPUT_CHECK_TIMEOUT) -> Tuple[int, Optional[List[str]], bool, Optional[int]]:
         """Briefly poll after launch for early output or completion.
 
         After spawning the tracking thread, waits up to `timeout` seconds checking
@@ -293,10 +276,8 @@ class AsyncShellTracker:
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
-            logger.warning(
-                f"[AsyncShell] Task not found during launch result check: "
-                f"{agent_name} tool_id={tool_id}"
-            )
+            logger.warning(f"[AsyncShell] Task not found during launch result check: "
+                           f"{agent_name} tool_id={tool_id}")
             return 0, None, False, None
 
         start_wait = time.time()
@@ -336,10 +317,8 @@ class AsyncShellTracker:
             # completion is detected (for fast commands like echo). Only return with
             # early_output if timeout is about to expire without completion.
             if completed_early:
-                logger.info(
-                    f"[AsyncShell] Early completion detected for {agent_name} "
-                    f"tool_id={tool_id}, PID={pid}, rc={return_code}"
-                )
+                logger.info(f"[AsyncShell] Early completion detected for {agent_name} "
+                            f"tool_id={tool_id}, PID={pid}, rc={return_code}")
                 return pid, early_output, completed_early, return_code
 
             # Process started but not yet completed — continue polling briefly.
@@ -440,7 +419,7 @@ class AsyncShellTracker:
                     command,
                     cwd=str(cwd) if cwd else None,
                     shell=True,
-                    stdin=subprocess.PIPE,      # Enable stdin for interactive input via send_input()
+                    stdin=subprocess.PIPE,  # Enable stdin for interactive input via send_input()
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -455,7 +434,9 @@ class AsyncShellTracker:
                 spawn_result['error'] = e
 
         spawn_thread = threading.Thread(
-            target=_do_spawn, daemon=True, name=f'async_shell_spawn_{tool_id}',
+            target=_do_spawn,
+            daemon=True,
+            name=f'async_shell_spawn_{tool_id}',
         )
         spawn_thread.start()
 
@@ -475,20 +456,14 @@ class AsyncShellTracker:
                     try:
                         self._kill_process_tree(orphan_proc, agent_name, tool_id)
                     except Exception as kill_err:
-                        logger.warning(
-                            f"[AsyncShell] Failed to kill orphaned spawn process "
-                            f"for {agent_name} tool_id={tool_id}: {kill_err}"
-                        )
+                        logger.warning(f"[AsyncShell] Failed to kill orphaned spawn process "
+                                       f"for {agent_name} tool_id={tool_id}: {kill_err}")
                 elif spawn_thread.is_alive():
-                    logger.warning(
-                        f"[AsyncShell] Spawn thread for {agent_name} tool_id={tool_id} "
-                        f"did not finish after timeout — daemon thread will be abandoned "
-                        f"(it dies at interpreter exit)"
-                    )
-                raise RuntimeError(
-                    f"Subprocess spawn did not complete within {SPAWN_PUBLISH_TIMEOUT:.0f}s "
-                    f"for {agent_name} tool_id={tool_id}"
-                )
+                    logger.warning(f"[AsyncShell] Spawn thread for {agent_name} tool_id={tool_id} "
+                                   f"did not finish after timeout — daemon thread will be abandoned "
+                                   f"(it dies at interpreter exit)")
+                raise RuntimeError(f"Subprocess spawn did not complete within {SPAWN_PUBLISH_TIMEOUT:.0f}s "
+                                   f"for {agent_name} tool_id={tool_id}")
             time.sleep(0.05)
 
         if 'error' in spawn_result:
@@ -504,10 +479,8 @@ class AsyncShellTracker:
                 try:
                     self._kill_process_tree(orphan_proc, agent_name, tool_id)
                 except Exception as kill_err:
-                    logger.warning(
-                        f"[AsyncShell] Failed to kill orphaned spawn process "
-                        f"for {agent_name} tool_id={tool_id}: {kill_err}"
-                    )
+                    logger.warning(f"[AsyncShell] Failed to kill orphaned spawn process "
+                                   f"for {agent_name} tool_id={tool_id}: {kill_err}")
             raise spawn_result['error']
         proc = spawn_result['proc']
 
@@ -516,10 +489,8 @@ class AsyncShellTracker:
             task.pid = proc.pid
             task.process = proc
 
-        logger.debug(
-            f"[AsyncShell] Launched tool_id={tool_id} for {agent_name}, "
-            f"PID={proc.pid}, cmd='{original_command[:80]}'"
-        )
+        logger.debug(f"[AsyncShell] Launched tool_id={tool_id} for {agent_name}, "
+                     f"PID={proc.pid}, cmd='{original_command[:80]}'")
 
         # ── Spawn viewer process for visible console window on Windows ───
         # When console_window=True and stdout/stderr are piped, Windows doesn't show
@@ -538,33 +509,34 @@ class AsyncShellTracker:
                 viewer = subprocess.Popen(
                     ['cmd.exe', '/c', viewer_cmd],
                     cwd=str(cwd) if cwd else None,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+                    creationflags=subprocess.CREATE_NEW_CONSOLE |
+                    subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
                     env=env,
                     # No stdout/stderr args → inherit from parent so it shows in its own window
                 )
                 with task._lock:
                     task.viewer_process = viewer
-                logger.debug(
-                    f"[AsyncShell] Viewer process spawned for tool_id={tool_id}, "
-                    f"PID={viewer.pid}"
-                )
+                logger.debug(f"[AsyncShell] Viewer process spawned for tool_id={tool_id}, "
+                             f"PID={viewer.pid}")
             except Exception as e:
                 # Viewer failure affects user-facing behavior (no visible window); log at warning level
-                logger.warning(
-                    f"[AsyncShell] Failed to spawn viewer for tool_id={tool_id}: {e}"
-                )
+                logger.warning(f"[AsyncShell] Failed to spawn viewer for tool_id={tool_id}: {e}")
 
         # ── Pipe draining threads (use shared drain_pipe_lines) ─────
         stdout_lock = threading.Lock()
         stderr_lock = threading.Lock()
 
         t_out = threading.Thread(
-            target=drain_pipe_lines, args=(proc.stdout, task.stdout_lines, stdout_lock),
-            daemon=True, name=f'shell_stdout_{tool_id}',
+            target=drain_pipe_lines,
+            args=(proc.stdout, task.stdout_lines, stdout_lock),
+            daemon=True,
+            name=f'shell_stdout_{tool_id}',
         )
         t_err = threading.Thread(
-            target=drain_pipe_lines, args=(proc.stderr, task.stderr_lines, stderr_lock),
-            daemon=True, name=f'shell_stderr_{tool_id}',
+            target=drain_pipe_lines,
+            args=(proc.stderr, task.stderr_lines, stderr_lock),
+            daemon=True,
+            name=f'shell_stderr_{tool_id}',
         )
         t_out.start()
         t_err.start()
@@ -579,7 +551,8 @@ class AsyncShellTracker:
         return task
 
     # ────────────────────────────────────────────────────────────────
-    def _poll_loop(self, agent_name: str, tool_id: int, proc: subprocess.Popen, task: 'AsyncShellTask', t_out: threading.Thread, t_err: threading.Thread) -> bool:
+    def _poll_loop(self, agent_name: str, tool_id: int, proc: subprocess.Popen, task: 'AsyncShellTask',
+                   t_out: threading.Thread, t_err: threading.Thread) -> bool:
         """Main heartbeat/timeout polling loop.
 
         Args:
@@ -664,7 +637,9 @@ class AsyncShellTracker:
                     if ON_WINDOWS:
                         subprocess.run(
                             ['taskkill', '/F', '/T', '/PID', str(viewer.pid)],
-                            capture_output=True, timeout=5, text=True,
+                            capture_output=True,
+                            timeout=5,
+                            text=True,
                         )
                     else:
                         viewer.kill()
@@ -697,10 +672,10 @@ class AsyncShellTracker:
             return
 
         t_out, t_err = None, None  # Track drain threads for join in finally
-        timed_out = False          # Ensure defined even if exception occurs before _poll_loop
+        timed_out = False  # Ensure defined even if exception occurs before _poll_loop
 
         try:
-            original_command = command
+            command
 
             # ── Spawn process and pipe drain threads ────────────────
             self._spawn_process(agent_name, tool_id, command, cwd)
@@ -709,10 +684,7 @@ class AsyncShellTracker:
             # These are set atomically in _spawn_process under the same lock.
             with task._lock:
                 proc = task.process
-                t_out, t_err, stdout_lock, stderr_lock = (
-                    task._drain_t_out, task._drain_t_err,
-                    task._stdout_lock, task._stderr_lock,
-                )
+                t_out, t_err = task._drain_t_out, task._drain_t_err
 
             # ── Poll loop: start immediately to detect fast completions ───
             timed_out = self._poll_loop(agent_name, tool_id, proc, task, t_out, t_err)
@@ -777,10 +749,8 @@ class AsyncShellTracker:
                 done_at_launch = task.completed_at_launch
 
             if done_at_launch:
-                logger.debug(
-                    f"[AsyncShell] Task completed at launch for {agent_name} "
-                    f"tool_id={tool_id}, skipping all messages"
-                )
+                logger.debug(f"[AsyncShell] Task completed at launch for {agent_name} "
+                             f"tool_id={tool_id}, skipping all messages")
             else:
                 # Build a SINGLE merged completion message containing status + elapsed
                 # time + any remaining output. Previously this was two separate messages
@@ -799,9 +769,7 @@ class AsyncShellTracker:
                 self._enqueue(agent_name, msg)
 
         except Exception as e:
-            logger.warning(
-                f"[AsyncShell] Track error for {agent_name} tool_id={tool_id}: {e}"
-            )
+            logger.warning(f"[AsyncShell] Track error for {agent_name} tool_id={tool_id}: {e}")
             # Clean up processes if they exist to avoid orphans.
             # Skip the placeholder (spawn never produced a real process).
             with task._lock:
@@ -810,10 +778,13 @@ class AsyncShellTracker:
                 try:
                     self._kill_process_tree(proc, agent_name, tool_id)
                 except Exception as kill_err:
-                    logger.warning(f"[AsyncShell] Kill on track error failed for {agent_name} tool_id={tool_id}: {kill_err}")
+                    logger.warning(
+                        f"[AsyncShell] Kill on track error failed for {agent_name} tool_id={tool_id}: {kill_err}")
             self._send_completion_message(
-                agent_name, tool_id,
-                timed_out=False, error=str(e),
+                agent_name,
+                tool_id,
+                timed_out=False,
+                error=str(e),
             )
             with task._lock:
                 task.completed = True
@@ -852,7 +823,9 @@ class AsyncShellTracker:
                 if ON_WINDOWS:
                     subprocess.run(
                         ['taskkill', '/F', '/T', '/PID', str(viewer.pid)],
-                        capture_output=True, timeout=5, text=True,
+                        capture_output=True,
+                        timeout=5,
+                        text=True,
                     )
                 else:
                     viewer.kill()
@@ -876,17 +849,16 @@ class AsyncShellTracker:
         """
         try:
             # Query all processes with their PPIDs using PowerShell/CIM
-            ps_cmd = (
-                'Get-CimInstance Win32_Process | '
-                'Select-Object ProcessId, ParentProcessId | '
-                'ConvertTo-Csv -NoTypeInformation'
-            )
-            result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=10
-            )
+            ps_cmd = ('Get-CimInstance Win32_Process | '
+                      'Select-Object ProcessId, ParentProcessId | '
+                      'ConvertTo-Csv -NoTypeInformation')
+            result = subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10)
             if result.returncode != 0:
-                logger.debug(f"[AsyncShell] PowerShell CIM query failed (rc={result.returncode}): {result.stderr.strip()}")
+                logger.debug(
+                    f"[AsyncShell] PowerShell CIM query failed (rc={result.returncode}): {result.stderr.strip()}")
                 return []
             if not result.stdout.strip():
                 return []
@@ -945,14 +917,12 @@ class AsyncShellTracker:
         try:
             # Build comma-separated list for PowerShell filter
             pid_list = ','.join(str(p) for p in pids)
-            ps_cmd = (
-                f'Get-CimInstance Win32_Process -Filter "ProcessId IN ({pid_list})" | '
-                'Select-Object -ExpandProperty ProcessId'
-            )
-            result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=10
-            )
+            ps_cmd = (f'Get-CimInstance Win32_Process -Filter "ProcessId IN ({pid_list})" | '
+                      'Select-Object -ExpandProperty ProcessId')
+            result = subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 target_set = set(pids)
                 for line in result.stdout.strip().splitlines():
@@ -1004,19 +974,25 @@ class AsyncShellTracker:
             descendant_pids = self._get_windows_descendant_pids(pid)
             all_target_pids = [pid] + descendant_pids
             if descendant_pids:
-                logger.debug(f"[AsyncShell] Captured {len(descendant_pids)} descendant PID(s) for tool_id={tool_id}: {descendant_pids}")
+                logger.debug(
+                    f"[AsyncShell] Captured {len(descendant_pids)} descendant PID(s) for tool_id={tool_id}: {descendant_pids}"
+                )
 
             try:
                 # First pass: taskkill with tree flag (main process)
                 result = subprocess.run(
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
-                    capture_output=True, timeout=10, text=True,
+                    capture_output=True,
+                    timeout=10,
+                    text=True,
                 )
                 time.sleep(PROCESS_KILL_SETTLE_DELAY)
                 if result.returncode == 0:
                     logger.debug(f"[AsyncShell] Successfully killed PID {pid} (taskkill succeeded)")
                 else:
-                    logger.warning(f"[AsyncShell] taskkill for PID {pid} failed with rc={result.returncode}: {result.stderr.strip()}")
+                    logger.warning(
+                        f"[AsyncShell] taskkill for PID {pid} failed with rc={result.returncode}: {result.stderr.strip()}"
+                    )
             except Exception as e:
                 logger.warning(f"[AsyncShell] taskkill for PID {pid}: {e}")
 
@@ -1025,10 +1001,8 @@ class AsyncShellTracker:
                 time.sleep(0.3)  # Allow process table to update after kill
                 survivors = self._check_windows_pids_alive(all_target_pids)
                 if survivors:
-                    logger.warning(
-                        f"[AsyncShell] __kill: {len(survivors)} process(es) survived tree kill "
-                        f"for tool_id={tool_id}: {survivors}. They will be orphaned."
-                    )
+                    logger.warning(f"[AsyncShell] __kill: {len(survivors)} process(es) survived tree kill "
+                                   f"for tool_id={tool_id}: {survivors}. They will be orphaned.")
 
         else:
             try:
@@ -1092,14 +1066,13 @@ class AsyncShellTracker:
         if not new_lines:
             # Still running with no new output — send minimal heartbeat so sleeping
             # agents wake up and know the process hasn't died.
-            logger.debug('[async_shell] heartbeat(no output) agent=%s tool_id=%s beat=%s',
-                         agent_name, tool_id, beat)
+            logger.debug('[async_shell] heartbeat(no output) agent=%s tool_id=%s beat=%s', agent_name, tool_id, beat)
             msg = f"⟨shell_cmd heartbeat⟩ Beat {beat} ({elapsed:.0f}s), Tool ID: {tool_id} | No new output (still running)"
             self._enqueue(agent_name, msg)
             return
 
-        logger.debug('[async_shell] heartbeat with output agent=%s tool_id=%s lines=%d',
-                     agent_name, tool_id, len(new_lines))
+        logger.debug('[async_shell] heartbeat with output agent=%s tool_id=%s lines=%d', agent_name, tool_id,
+                     len(new_lines))
         output_text = self._format_output_text(new_lines)
         if not output_text:
             return
@@ -1111,10 +1084,12 @@ class AsyncShellTracker:
         char_limit = self._get_shell_char_limit()
         if char_limit > 0:
             try:
-                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None
+                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
+                    self._pool, 'operation_manager') else None
                 if base_dir:
                     output_text = truncate_with_spillover(
-                        output_text, char_limit,
+                        output_text,
+                        char_limit,
                         instance_name=agent_name,
                         tool_name='shell_cmd_async',
                         base_dir=base_dir,
@@ -1123,11 +1098,9 @@ class AsyncShellTracker:
             except Exception as e:
                 logger.debug(f"[AsyncShell] truncate_with_spillover failed in heartbeat for {agent_name}: {e}")
 
-        msg = (
-            f"⟨shell_cmd heartbeat⟩ Beat {beat} ({elapsed:.0f}s), Tool ID: {tool_id} | "
-            f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
-            f"{output_text}"
-        )
+        msg = (f"⟨shell_cmd heartbeat⟩ Beat {beat} ({elapsed:.0f}s), Tool ID: {tool_id} | "
+               f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
+               f"{output_text}")
         # Send heartbeat via message queue (wakes sleeping agents)
         self._enqueue(agent_name, msg)
 
@@ -1160,10 +1133,12 @@ class AsyncShellTracker:
         char_limit = self._get_shell_char_limit()
         if char_limit > 0:
             try:
-                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None
+                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
+                    self._pool, 'operation_manager') else None
                 if base_dir:
                     output_text = truncate_with_spillover(
-                        output_text, char_limit,
+                        output_text,
+                        char_limit,
                         instance_name=agent_name,
                         tool_name='shell_cmd_async',
                         base_dir=base_dir,
@@ -1176,8 +1151,11 @@ class AsyncShellTracker:
 
     # ────────────────────────────────────────────────────────────────
     def _build_completion_header(
-        self, tool_id: int, task: Optional['AsyncShellTask'],
-        timed_out: bool = False, error: Optional[str] = None,
+        self,
+        tool_id: int,
+        task: Optional['AsyncShellTask'],
+        timed_out: bool = False,
+        error: Optional[str] = None,
     ) -> str:
         """Build the two-line completion header (no output) for a finished shell.
 
@@ -1194,16 +1172,12 @@ class AsyncShellTracker:
 
         if timed_out and not error:
             timeout_val = task.timeout if task else '?'
-            return (
-                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Timed out after {timeout_val}s ({elapsed:.1f}s total). "
-                f"All child processes terminated."
-            )
+            return (f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
+                    f"Timed out after {timeout_val}s ({elapsed:.1f}s total). "
+                    f"All child processes terminated.")
         elif error:
-            return (
-                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Error: {error} ({elapsed:.1f}s elapsed)."
-            )
+            return (f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
+                    f"Error: {error} ({elapsed:.1f}s elapsed).")
         else:
             rc = task.return_code if task and task.return_code is not None else 0
             if rc == -1:
@@ -1212,15 +1186,16 @@ class AsyncShellTracker:
                 status = 'success'
             else:
                 status = f"exit code {rc}"
-            return (
-                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Completed in {elapsed:.1f} s ({status})."
-            )
+            return (f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
+                    f"Completed in {elapsed:.1f} s ({status}).")
 
     # ────────────────────────────────────────────────────────────────
     def _send_completion_message(
-        self, agent_name: str, tool_id: int,
-        timed_out: bool = False, error: Optional[str] = None,
+        self,
+        agent_name: str,
+        tool_id: int,
+        timed_out: bool = False,
+        error: Optional[str] = None,
     ):
         """Send the final completion message to the agent.
 
@@ -1447,14 +1422,12 @@ class AsyncShellTracker:
             status_label = f"completed (exit code {rc}, {elapsed:.0f}s)"
         else:
             status_label = f"running ({elapsed:.0f}s elapsed)"
-        
-        msg = (
-            f"⟨shell_cmd status⟩ Tool ID: {tool_id}\n"
-            f"Status: {status_label}\n"
-            f"PID: {pid}\n"
-            f"Heartbeat interval: {heartbeat}s\n"
-            f"Command: `{task.command[:200]}`\n"
-        )
+
+        msg = (f"⟨shell_cmd status⟩ Tool ID: {tool_id}\n"
+               f"Status: {status_label}\n"
+               f"PID: {pid}\n"
+               f"Heartbeat interval: {heartbeat}s\n"
+               f"Command: `{task.command[:200]}`\n")
 
         # Append consumed output if any
         if consumed_lines:
@@ -1464,10 +1437,12 @@ class AsyncShellTracker:
             char_limit = self._get_shell_char_limit()
             if char_limit > 0:
                 try:
-                    base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None
+                    base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
+                        self._pool, 'operation_manager') else None
                     if base_dir:
                         output_text = truncate_with_spillover(
-                            output_text, char_limit,
+                            output_text,
+                            char_limit,
                             instance_name=agent_name,
                             tool_name='shell_cmd_async',
                             base_dir=base_dir,
@@ -1517,9 +1492,7 @@ class AsyncShellTracker:
                         task.killed = True
                     count += 1
             except Exception as e:
-                logger.debug(
-                    f"[AsyncShell] Kill-all error for {agent_name} tool_id={tool_id}: {e}"
-                )
+                logger.debug(f"[AsyncShell] Kill-all error for {agent_name} tool_id={tool_id}: {e}")
 
         # Wait briefly so tracking threads can propagate the kill and flush output.
         if count > 0:

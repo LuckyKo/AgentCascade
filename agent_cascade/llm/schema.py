@@ -1,11 +1,11 @@
 # Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,7 +16,7 @@ from typing import List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from agent_cascade.prompts.dna import DEFAULT_SYSTEM_MESSAGE
+from agent_cascade.prompts.dna import DEFAULT_SYSTEM_MESSAGE  # noqa: F401 (re-export)
 
 ROLE = 'role'
 CONTENT = 'content'
@@ -36,12 +36,12 @@ VIDEO = 'video'
 
 class BaseModelCompatibleDict(BaseModel):
     """Base model that allows dynamic attributes like timestamp via extra='allow'.
-    
+
     SECURITY NOTE: This class is only instantiated internally by the framework
     with trusted values. Dynamic attributes are NOT validated — do not use
     extra='allow' on models constructed from untrusted user input.
     """
-    
+
     model_config = ConfigDict(extra='allow')
 
     def __getitem__(self, item):
@@ -178,5 +178,5 @@ class Message(BaseModelCompatibleDict):
     @field_validator('role')
     def role_checker(cls, value: str) -> str:
         if value not in [USER, ASSISTANT, SYSTEM, FUNCTION]:
-            raise ValueError(f'{value} must be one of {','.join([USER, ASSISTANT, SYSTEM, FUNCTION])}')
+            raise ValueError(f'{value} must be one of {', '.join([USER, ASSISTANT, SYSTEM, FUNCTION])}')
         return value

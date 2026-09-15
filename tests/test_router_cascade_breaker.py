@@ -19,48 +19,34 @@ Covers the approved fix for the single-GPU model-swap storm:
 No real LLM/GPU/network required: HTTP is mocked or a local mock server is used.
 """
 
-import os
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_cascade.api_router import APIRouter, APIEndpoint
-from agent_cascade.retry_policy import RetryPolicy, is_deterministic_client_error
-from agent_cascade.exceptions import ServerBusyError, FallbackCompressionRequired
+from agent_cascade.api_router_pkg.normalization import normalize_api_base
+from agent_cascade.exceptions import FallbackCompressionRequired, ServerBusyError
 from agent_cascade.llm.base import ModelServiceError
-from agent_cascade.api_router_pkg.normalization import (
-    normalize_api_base,
-)
-from agent_cascade.settings import (
-    BREAKER_BASE_WINDOW_SECONDS,
-    SERVER_BUSY_WAIT_CAP_SECONDS,
-    ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD,
-    ENDPOINT_BLACKLIST_SECONDS,
-)
-from agent_cascade.llm.oai import _breaker_blocks_base
-
+from agent_cascade.retry_policy import is_deterministic_client_error
+from agent_cascade.settings import (BREAKER_BASE_WINDOW_SECONDS, ENDPOINT_BLACKLIST_SECONDS,
+                                    ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD)
 # Shared fixtures + helpers now live in tests/conftest.py so they are auto-available
 # to BOTH this file and the opt-in stress file (test_router_cascade_breaker_stress.py)
 # regardless of collection order — the canonical cross-module fixture-sharing pattern.
 # The `router` / `mock_servers` fixtures come from conftest automatically (no local
 # definition needed). Plain helper functions are re-exported below so any external
 # importer keeps working and there is a single source of truth in conftest.py.
-from tests.conftest import (  # noqa: E402,F401
-    FAST_RETRY_POLICY,
-    BUSY_ERR_TEXT,
-    _busy_error,
-    _add_endpoint,
-    _set_max_retries,
-)
-
+from tests.conftest import _busy_error  # noqa: E402,F401
+from tests.conftest import BUSY_ERR_TEXT, FAST_RETRY_POLICY, _add_endpoint, _set_max_retries
 
 # ============================================================================
 # Change A — normalization
 # ============================================================================
 
+
 class TestNormalizeApiBase:
+
     def test_basic_identity(self):
         assert normalize_api_base('http://127.0.0.1:1234/v1') == 'http://127.0.0.1:1234/v1'
 
@@ -99,7 +85,8 @@ class TestNormalizeApiBase:
 
     def test_path_case_preserved(self):
         # Path is NOT lowercased — only scheme and host are.
-        assert normalize_api_base('HTTP://LOCALHOST:1234/V1') == 'http://localhost:1234/V1'.replace('localhost', '127.0.0.1')
+        assert normalize_api_base('HTTP://LOCALHOST:1234/V1') == 'http://localhost:1234/V1'.replace(
+            'localhost', '127.0.0.1')
 
     def test_distinct_servers_stay_distinct(self):
         assert normalize_api_base('http://127.0.0.1:1234/v1') != \
@@ -109,6 +96,7 @@ class TestNormalizeApiBase:
 
 
 class TestSchedulerPoolKeying:
+
     def test_conc_gt_0_pools_share_normalized_key(self, router):
         """conc>0 pools for localhost vs 127.0.0.1 (same physical server) share one pool."""
         sched = router.scheduler
@@ -118,8 +106,10 @@ class TestSchedulerPoolKeying:
         with sched._lock:
             keys = [k for k in sched._pools.keys() if '1234' in k]
             assert len(keys) == 1, f"expected one shared pool, got {keys}"
-        if r1: r1()
-        if r2: r2()
+        if r1:
+            r1()
+        if r2:
+            r2()
 
     def test_conc_0_uses_shared_sequential_slot(self, router):
         sched = router.scheduler
@@ -134,7 +124,9 @@ class TestSchedulerPoolKeying:
 # Change B — breaker state machine + probe guard
 # ============================================================================
 
+
 class TestBreakerStateMachine:
+
     def test_closed_by_default(self, router):
         assert not router._breaker_should_skip('http://127.0.0.1:1234/v1')
         assert not router._breaker_is_open('http://127.0.0.1:1234/v1')
@@ -207,6 +199,7 @@ class TestBreakerStateMachine:
 
 
 class TestAtomicProbeClaim:
+
     def test_exactly_one_winner_under_concurrency(self, router):
         base = 'http://127.0.0.1:1234/v1'
         router._record_server_busy(base, _busy_error())
@@ -225,8 +218,10 @@ class TestAtomicProbeClaim:
                 results.append(won)
 
         threads = [threading.Thread(target=worker) for _ in range(n_threads)]
-        for t in threads: t.start()
-        for t in threads: t.join(timeout=10)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
         assert sum(results) == 1, f"expected exactly one probe claim, got {sum(results)}"
 
 
@@ -234,7 +229,9 @@ class TestAtomicProbeClaim:
 # Change C — per-(base,model) cooldown independence
 # ============================================================================
 
+
 class TestPerModelCooldownIndependence:
+
     def test_shared_base_different_models_independent(self, router):
         base = 'http://127.0.0.1:1234/v1'
         id_m1 = _add_endpoint(router, 'm1', base, model='model-a')
@@ -257,7 +254,8 @@ class TestPerModelCooldownIndependence:
         router.set_agent_priorities('coder', [id_s1, id_s2])
 
         with router._lock:
-            router._endpoint_failure_times[(normalize_api_base('http://127.0.0.1:1234/v1'), 'shared-model')] = time.time()
+            router._endpoint_failure_times[(normalize_api_base('http://127.0.0.1:1234/v1'),
+                                            'shared-model')] = time.time()
 
         chain = router.get_endpoint_chain('coder')
         bases = [c['api_base'] for c in chain]
@@ -269,20 +267,24 @@ class TestPerModelCooldownIndependence:
 # Change B/D — consult-before-fire chain filtering (incl. Tier-4 default)
 # ============================================================================
 
+
 class TestChainFilteringWithBreaker:
+
     def test_tier4_default_skipped_when_breaker_open(self, router):
         """The default endpoint (Tier 4) is gated too — REVIEW M4."""
         import agent_cascade.api_router_pkg.router as router_mod
+
         # Hold the breaker open far past the per-call wait cap so D1 degrades fast.
         router._record_server_busy('http://default-api', _busy_error())
         with router._lock:
             router._server_breakers[normalize_api_base('http://default-api')]['window'] = 3600.0
 
         orig_cap = router_mod.SERVER_BUSY_WAIT_CAP_SECONDS
-        orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
-        router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 1.0   # module global, read at call time
+        orig_max_retries = _set_max_retries(router, 1)  # fast retries (frozen dataclass)
+        router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 1.0  # module global, read at call time
         try:
             calls = []
+
             def fn(cfg, *a, **k):
                 calls.append(cfg.get('api_base'))
                 return 'ok'
@@ -301,7 +303,7 @@ class TestChainFilteringWithBreaker:
         # Busy base = the default's base.
         router._record_server_busy('http://default-api', _busy_error())
 
-        orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
+        orig_max_retries = _set_max_retries(router, 1)  # fast retries (frozen dataclass)
         orig_probe_enabled = router_mod.SANITY_PROBE_ENABLED
         # Disable the Fix D pre-allocation sanity probe: this test asserts an EXACT call list
         # (calls == [healthy]). The probe fires on the first call for the healthy endpoint
@@ -310,6 +312,7 @@ class TestChainFilteringWithBreaker:
         # tests/test_sanity_probe.py.
         router_mod.SANITY_PROBE_ENABLED = False
         calls = []
+
         def fn(cfg, *a, **k):
             calls.append(cfg.get('api_base'))
             if cfg.get('api_base') == 'http://default-api':
@@ -329,7 +332,9 @@ class TestChainFilteringWithBreaker:
 # Change D (D1) — bounded fail-fast wait + clean degradation
 # ============================================================================
 
+
 class TestD1FailFast:
+
     def test_zero_http_and_clean_degradation(self, router):
         """Breaker held open past the cap → ServerBusyError, zero HTTP, no compression path."""
         # Hold the breaker open far past the per-call wait cap.
@@ -341,10 +346,11 @@ class TestD1FailFast:
         # Shrink the cap for a fast test (module global is read at call time).
         import agent_cascade.api_router_pkg.router as router_mod
         orig_cap = router_mod.SERVER_BUSY_WAIT_CAP_SECONDS
-        orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
+        orig_max_retries = _set_max_retries(router, 1)  # fast retries (frozen dataclass)
         router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 1.0
         try:
             calls = []
+
             def fn(cfg, *a, **k):
                 calls.append(1)
                 raise _busy_error()
@@ -371,23 +377,31 @@ class TestD1FailFast:
             router._server_breakers[key]['window'] = 3600.0
 
         class FakePool:
-            def __init__(self): self.term = threading.Event()
-            def is_instance_terminated(self, name): return self.term.is_set()
+
+            def __init__(self):
+                self.term = threading.Event()
+
+            def is_instance_terminated(self, name):
+                return self.term.is_set()
+
         pool = FakePool()
         router._pool = pool
 
         import agent_cascade.api_router_pkg.router as router_mod
         orig_cap = router_mod.SERVER_BUSY_WAIT_CAP_SECONDS
-        orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
+        orig_max_retries = _set_max_retries(router, 1)  # fast retries (frozen dataclass)
         router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 10.0
         result = {}
+
         def worker():
             try:
-                router.call_with_fallback('coder', lambda cfg, *a, **k: (_ for _ in ()).throw(_busy_error()),
+                router.call_with_fallback('coder',
+                                          lambda cfg, *a, **k: (_ for _ in ()).throw(_busy_error()),
                                           agent_instance_name='w1')
                 result['err'] = None
             except Exception as e:
                 result['err'] = e
+
         th = threading.Thread(target=worker)
         try:
             t0 = time.monotonic()
@@ -407,8 +421,8 @@ class TestD1FailFast:
         import agent_cascade.api_router_pkg.router as router_mod
         orig_window = router_mod.BREAKER_BASE_WINDOW_SECONDS
         orig_probe_enabled = router_mod.SANITY_PROBE_ENABLED
-        orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
-        router_mod.BREAKER_BASE_WINDOW_SECONDS = 0.5   # module global, read at trip time
+        orig_max_retries = _set_max_retries(router, 1)  # fast retries (frozen dataclass)
+        router_mod.BREAKER_BASE_WINDOW_SECONDS = 0.5  # module global, read at trip time
         # Disable the Fix D lazy sanity probe: this test verifies the BREAKER's
         # single-probe recovery with exact call semantics on a fake endpoint
         # (http://default-api — unresolvable). The lazy probe would fire a REAL
@@ -419,10 +433,11 @@ class TestD1FailFast:
         router_mod.SANITY_PROBE_ENABLED = False
         try:
             calls = []
+
             def fn(cfg, *a, **k):
                 calls.append(1)
                 if len(calls) == 1:
-                    raise _busy_error()   # first call trips the breaker
+                    raise _busy_error()  # first call trips the breaker
                 return 'recovered'
 
             result = router.call_with_fallback('coder', fn)
@@ -438,7 +453,9 @@ class TestD1FailFast:
 # Change E — bypass gates
 # ============================================================================
 
+
 class TestBypassGates:
+
     @pytest.fixture(autouse=True)
     def _isolate_breaker_gate(self):
         """The breaker_gate registry is module-level (weakrefs to ALL live routers).
@@ -479,7 +496,7 @@ class TestBypassGates:
         router.set_agent_priorities('coder', [id_v])
         router._record_server_busy('http://busy-vision:9/v1', _busy_error())
 
-        from agent_cascade.llm.schema import Message, ContentItem
+        from agent_cascade.llm.schema import ContentItem, Message
         msgs = [Message(role='user', content=[ContentItem(image='data:image/png;base64,AAAA')])]
         with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
             router.caption_images(msgs, agent_type='coder')
@@ -494,15 +511,16 @@ class TestBypassGates:
 # Concurrency (M5) — different slot pools, same base, half_open → ONE probe
 # ============================================================================
 
+
 class TestM5SingleProbeAcrossSlotPools:
+
     def test_exactly_one_probe_two_pools(self, router):
         """Agent A (conc=0 shared sequential pool) and Agent B (conc>0 per-base pool)
         both target the same normalized base during half_open → exactly one probe."""
-        import agent_cascade.api_router_pkg.router as router_mod
         base = 'http://127.0.0.1:1234/v1'
         sched = router.scheduler
 
-        orig_max_retries = _set_max_retries(router, 1)   # no backoff sleeps (frozen dataclass)
+        orig_max_retries = _set_max_retries(router, 1)  # no backoff sleeps (frozen dataclass)
 
         # Trip then elapse the window so the breaker is half_open.
         router._record_server_busy(base, _busy_error())
@@ -510,7 +528,7 @@ class TestM5SingleProbeAcrossSlotPools:
             router._server_breakers[normalize_api_base(base)]['opened_at'] -= (BREAKER_BASE_WINDOW_SECONDS + 1)
 
         # Both agents acquire slots from DIFFERENT pools on the same base.
-        release_a = sched.acquire('http://localhost:1234/v1', 0, instance_name='agentA')   # shared sequential pool
+        release_a = sched.acquire('http://localhost:1234/v1', 0, instance_name='agentA')  # shared sequential pool
         release_b = sched.acquire('http://127.0.0.1:1234/v1/', 2, instance_name='agentB')  # conc>0 normalized pool
         assert release_a is not None and release_b is not None
 
@@ -525,15 +543,17 @@ class TestM5SingleProbeAcrossSlotPools:
             if router._breaker_should_skip(base):
                 return  # loser — skip/fail fast, no HTTP
             with probe_lock:
-                probes_fired.append(name)   # this thread won the single-probe claim
+                probes_fired.append(name)  # this thread won the single-probe claim
             # Probe HTTP would go here (no lock held). Simulate outcome:
             time.sleep(0.1)
             router._breaker_on_success(base)
             router._breaker_release_probe(base)
 
         threads = [threading.Thread(target=agent, args=('A',)), threading.Thread(target=agent, args=('B',))]
-        for t in threads: t.start()
-        for t in threads: t.join(timeout=10)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
 
         assert len(probes_fired) == 1, f"expected exactly ONE probe, got {probes_fired}"
         release_a()
@@ -549,7 +569,9 @@ class TestM5SingleProbeAcrossSlotPools:
 # (shared with the opt-in stress file). `mock_servers` is auto-available as a conftest
 # fixture; no local definition is needed here.
 
+
 class TestIntegrationMockServers:
+
     def test_no_hammering_failover_single_probe_recovery(self, router, mock_servers):
         """Full D1+B integration: N models on the busy base + healthy different base.
 
@@ -567,6 +589,7 @@ class TestIntegrationMockServers:
 
         # Monkeypatch execute_api_call's underlying call_fn to hit the mock servers.
         import requests as real_requests
+
         def fake_call(cfg, *a, **k):
             base = cfg.get('api_base')
             r = real_requests.post(f"{base}/chat/completions", json={'model': cfg['model'], 'messages': []}, timeout=5)
@@ -582,8 +605,8 @@ class TestIntegrationMockServers:
         orig_window = router_mod.BREAKER_BASE_WINDOW_SECONDS
         orig_cap = router_mod.SERVER_BUSY_WAIT_CAP_SECONDS
         orig_probe_enabled = router_mod.SANITY_PROBE_ENABLED
-        orig_max_retries = _set_max_retries(router, 1)   # one attempt per endpoint (frozen dataclass)
-        router_mod.BREAKER_BASE_WINDOW_SECONDS = 1.0   # short window for the test
+        orig_max_retries = _set_max_retries(router, 1)  # one attempt per endpoint (frozen dataclass)
+        router_mod.BREAKER_BASE_WINDOW_SECONDS = 1.0  # short window for the test
         router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 2.0
         # Disable the Fix D pre-allocation sanity probe: this test verifies breaker/D1 hit
         # counts with exact bounds (≤4 busy hits, exactly 1 recovery probe). The probe fires
@@ -592,9 +615,7 @@ class TestIntegrationMockServers:
         # tests/test_sanity_probe.py; it is orthogonal to what this test verifies.
         router_mod.SANITY_PROBE_ENABLED = False
         try:
-            t0 = time.monotonic()
             result = router.call_with_fallback('coder', fake_call)
-            elapsed = time.monotonic() - t0
         finally:
             router_mod.BREAKER_BASE_WINDOW_SECONDS = orig_window
             router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = orig_cap
@@ -617,7 +638,7 @@ class TestIntegrationMockServers:
             assert br is not None, 'breaker must still be open after the first call'
             # Elapse the window so the next consult transitions to half_open.
             br['opened_at'] -= (br['window'] + 1)
-        mock_servers['busy_ref']['busy'] = False   # server recovered
+        mock_servers['busy_ref']['busy'] = False  # server recovered
 
         # ── Reset stale state left by the first call so the recovery phase exercises a clean
         # single-probe path. The first call's busy 503s: (a) claimed THE single probe slot on
@@ -629,7 +650,7 @@ class TestIntegrationMockServers:
         with router._lock:
             br = router._server_breakers.get(normalize_api_base(busy_base))
             if br:
-                br['probing'] = False   # release the held probe slot from the first call
+                br['probing'] = False  # release the held probe slot from the first call
             for key in list(router._endpoint_failure_times):
                 if normalize_api_base(key[0]) == normalize_api_base(busy_base):
                     del router._endpoint_failure_times[key]
@@ -644,6 +665,7 @@ class TestIntegrationMockServers:
             router._last_successful_endpoint_cfg = None
 
         calls2 = []
+
         def fake_call2(cfg, *a, **k):
             calls2.append(cfg.get('api_base'))
             return fake_call(cfg, *a, **k)
@@ -682,15 +704,17 @@ class TestIntegrationMockServers:
         """
         busy_base = mock_servers['busy']
         router.default_llm_cfg = {
-            'api_base': busy_base, 'model': 'default-model', 'max_tokens': 2048,
+            'api_base': busy_base,
+            'model': 'default-model',
+            'max_tokens': 2048,
         }
         id_b = _add_endpoint(router, 'busy_m0', busy_base, model='model-0')
         router.set_agent_priorities('coder', [id_b])
 
         import agent_cascade.api_router_pkg.router as router_mod
         orig_cap = router_mod.SERVER_BUSY_WAIT_CAP_SECONDS
-        orig_max_retries = _set_max_retries(router, 1)   # fast retries (frozen dataclass)
-        router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 1.0   # module global, read at call time
+        orig_max_retries = _set_max_retries(router, 1)  # fast retries (frozen dataclass)
+        router_mod.SERVER_BUSY_WAIT_CAP_SECONDS = 1.0  # module global, read at call time
         try:
             # Hold the breaker open far past the cap (never recovers).
             router._record_server_busy(busy_base, _busy_error())
@@ -716,12 +740,14 @@ class TestIntegrationMockServers:
 # (subagent_timeout_fix_plan.md §3/B1, v3)
 # ============================================================================
 
+
 def _det_error():
     """A deterministic client error: carries a 4xx code recognized by is_deterministic_client_error."""
     return ModelServiceError(code='400', message='Function tools with reasoning_effort are not supported')
 
 
 class TestEndpointBlacklist:
+
     def test_blacklist_after_threshold_deterministic_failures(self, router):
         """3 consecutive deterministic failures to one endpoint → blacklisted for ENDPOINT_BLACKLIST_SECONDS."""
         base = 'http://127.0.0.1:1234/v1'

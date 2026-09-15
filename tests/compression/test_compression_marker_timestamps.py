@@ -15,12 +15,9 @@ import re
 
 import pytest
 
+from agent_cascade.compression.helpers import (_format_timestamp_interval, build_consolidation_marker_message,
+                                               build_marker_message)
 from agent_cascade.llm.schema import USER, Message
-from agent_cascade.compression.helpers import (
-    _format_timestamp_interval,
-    build_marker_message,
-    build_consolidation_marker_message,
-)
 
 
 def _ts(*args):
@@ -30,7 +27,9 @@ def _ts(*args):
 
 # ── Header format: full date+time + arrow ───────────────────────────────────
 
+
 class TestHeaderFormat:
+
     def test_full_datetime_and_arrow(self):
         start = _ts(2026, 9, 6, 10, 14)
         end = _ts(2026, 9, 7, 8, 30)
@@ -57,7 +56,9 @@ class TestHeaderFormat:
 
 # ── Adaptive duration buckets ───────────────────────────────────────────────
 
+
 class TestDurationBuckets:
+
     def test_seconds_under_60(self):
         start = _ts(2026, 9, 6, 10, 14)
         out = _format_timestamp_interval(start, start + 45, n_messages=3)
@@ -107,7 +108,9 @@ class TestDurationBuckets:
 
 # ── Fallback when no timestamps ────────────────────────────────────────────
 
+
 class TestNoTimestampFallback:
+
     def test_both_none(self):
         out = _format_timestamp_interval(None, None, n_messages=7)
         assert out == '7 messages summarized'
@@ -133,6 +136,7 @@ class TestNoTimestampFallback:
 
 # ── Dict messages with "ts" key (extraction logic mirrors core.py) ─────────
 
+
 def _extract_ts_list(messages):
     """Mirror of the extraction loop in core.compress_context()."""
     ts_list = []
@@ -144,13 +148,26 @@ def _extract_ts_list(messages):
 
 
 class TestDictMessageTsExtraction:
+
     def test_dicts_with_ts(self):
         start = _ts(2026, 9, 6, 10, 14)
         end = _ts(2026, 9, 7, 8, 30)
         messages = [
-            {'role': USER, 'content': 'a', 'ts': start},
-            {'role': USER, 'content': 'b', 'ts': None},
-            {'role': USER, 'content': 'c', 'ts': end},
+            {
+                'role': USER,
+                'content': 'a',
+                'ts': start
+            },
+            {
+                'role': USER,
+                'content': 'b',
+                'ts': None
+            },
+            {
+                'role': USER,
+                'content': 'c',
+                'ts': end
+            },
         ]
         first_ts, last_ts = _extract_ts_list(messages)
         out = _format_timestamp_interval(first_ts, last_ts, n_messages=len(messages))
@@ -158,8 +175,14 @@ class TestDictMessageTsExtraction:
 
     def test_dicts_without_ts_key(self):
         messages = [
-            {'role': USER, 'content': 'a'},
-            {'role': USER, 'content': 'b'},
+            {
+                'role': USER,
+                'content': 'a'
+            },
+            {
+                'role': USER,
+                'content': 'b'
+            },
         ]
         first_ts, last_ts = _extract_ts_list(messages)
         assert first_ts is None and last_ts is None
@@ -173,7 +196,11 @@ class TestDictMessageTsExtraction:
         obj_msg.ts = start
         messages = [
             obj_msg,
-            {'role': USER, 'content': 'dict', 'ts': end},
+            {
+                'role': USER,
+                'content': 'dict',
+                'ts': end
+            },
         ]
         first_ts, last_ts = _extract_ts_list(messages)
         assert first_ts == start
@@ -185,9 +212,21 @@ class TestDictMessageTsExtraction:
         late = _ts(2026, 9, 8, 23, 59)
         mid = _ts(2026, 9, 6, 12, 0)
         messages = [
-            {'role': USER, 'content': 'x', 'ts': late},
-            {'role': USER, 'content': 'y', 'ts': early},
-            {'role': USER, 'content': 'z', 'ts': mid},
+            {
+                'role': USER,
+                'content': 'x',
+                'ts': late
+            },
+            {
+                'role': USER,
+                'content': 'y',
+                'ts': early
+            },
+            {
+                'role': USER,
+                'content': 'z',
+                'ts': mid
+            },
         ]
         first_ts, last_ts = _extract_ts_list(messages)
         assert first_ts == early
@@ -195,6 +234,7 @@ class TestDictMessageTsExtraction:
 
 
 # ── L2 consolidation marker: positional span rendering (todo.md line 212) ──
+
 
 class TestConsolidationMarkerRange:
     """L2 header rendering for the positional-span design (todo.md line 212).
@@ -211,14 +251,13 @@ class TestConsolidationMarkerRange:
 
     def test_l2_start_is_first_consolidated_not_kept_marker(self):
         # M1 (oldest, to be consolidated): 09-06 → 09-07
-        m1 = build_marker_message('s1', first_ts=_ts(2026, 9, 6, 10, 14),
-                                  last_ts=_ts(2026, 9, 7, 8, 30), n_messages=5)
+        build_marker_message('s1', first_ts=_ts(2026, 9, 6, 10, 14), last_ts=_ts(2026, 9, 7, 8, 30), n_messages=5)
         # M2 (newest L1, KEPT — not consolidated): 09-08 → 09-09
-        m2 = build_marker_message('s2', first_ts=_ts(2026, 9, 8, 9, 0),
-                                  last_ts=_ts(2026, 9, 9, 12, 0), n_messages=4)
+        build_marker_message('s2', first_ts=_ts(2026, 9, 8, 9, 0), last_ts=_ts(2026, 9, 9, 12, 0), n_messages=4)
 
         # Consolidate M1 only (as _consolidate_markers does: all markers except the newest).
-        l2 = build_consolidation_marker_message('consolidated', 1,
+        l2 = build_consolidation_marker_message('consolidated',
+                                                1,
                                                 first_ts=_ts(2026, 9, 6, 10, 14),
                                                 last_ts=_ts(2026, 9, 7, 8, 30))
 
@@ -233,8 +272,8 @@ class TestConsolidationMarkerRange:
 
     def test_l2_multi_marker_span_first_start_last_end(self):
         # Two consolidated markers: L2 span = first marker's start → last marker's end.
-        s1, e1 = _ts(2026, 9, 6, 10, 14), _ts(2026, 9, 7, 8, 30)
-        s2, e2 = _ts(2026, 9, 7, 9, 0), _ts(2026, 9, 8, 10, 0)
+        s1, _ = _ts(2026, 9, 6, 10, 14), _ts(2026, 9, 7, 8, 30)
+        _, e2 = _ts(2026, 9, 7, 9, 0), _ts(2026, 9, 8, 10, 0)
         l2 = build_consolidation_marker_message('consolidated', 2, first_ts=s1, last_ts=e2)
         assert '2026-09-06 10:14 → 2026-09-08 10:00' in l2.content
 

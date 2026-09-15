@@ -27,8 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from agent_cascade.agent_instance import AgentInstance
-
+    from agent_cascade.agent_instance import AgentInstance  # noqa: F401  (type-checking only)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration constants (configurable via environment variables)
@@ -37,10 +36,10 @@ if TYPE_CHECKING:
 QUEUE_WAIT_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_SLOT_QUEUE_TIMEOUT', 300))
 """Default timeout for waiting in the slot queue. Configurable via AGENT_CASCADE_SLOT_QUEUE_TIMEOUT."""
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Exceptions
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class SlotQueueTimeout(TimeoutError):
     """Raised when a waiter times out waiting for a slot.
@@ -49,18 +48,20 @@ class SlotQueueTimeout(TimeoutError):
     Subclasses TimeoutError so callers (e.g., EndpointScheduler.acquire) can catch it
     with a plain `except TimeoutError` and wrap it in a holder-aware message.
     """
+
     def __init__(self, ticket: 'QueueTicket', message: Optional[str] = None):
         self.ticket = ticket
         super().__init__(message or f"Slot queue timeout for ticket {ticket.ticket_id} "
-                                     f"(agent={ticket.agent_name}, instance={ticket.instance_name})")
+                         f"(agent={ticket.agent_name}, instance={ticket.instance_name})")
 
 
 class SlotCancelled(Exception):
     """Raised when a waiter's ticket is cancelled (e.g., agent terminated/dismissed).
-    
+
     This is NOT an error — it's a clean abort signal. Callers should catch this
     and return early without retrying or logging as a failure.
     """
+
     def __init__(self, ticket: Optional['QueueTicket'] = None, message: Optional[str] = None):
         self.ticket = ticket
         super().__init__(message or f"Slot queue cancelled for ticket {ticket.ticket_id if ticket else 'unknown'}")
@@ -77,7 +78,7 @@ _ticket_counter = itertools.count()
 @dataclass
 class QueueTicket:
     """A ticket representing a waiter in the slot queue.
-    
+
     Each agent waiting for a slot gets exactly one ticket. Tickets are ordered by
     insertion into the pool's OrderedDict (FIFO). The ticket carries cancellation
     and grant signaling events.
@@ -98,7 +99,7 @@ class QueueTicket:
 @dataclass
 class SlotHolder:
     """Represents a running agent that currently holds a slot permit.
-    
+
     One entry per active instance in _running[instance_name]. The acquisition_id
     enables idempotent release — stale releases with wrong IDs are ignored.
     """
@@ -112,34 +113,37 @@ class SlotHolder:
 # Core Class
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class SlotPool:
     """FIFO slot pool.
-    
+
     Manages a queue of waiters for a specific slot key (e.g., '_shared_sequential_slot_'
     or an api_base). Provides strict FIFO ordering and thread-safe acquire/release/cancel.
-    
+
     Thread-safety: ALL mutations to _waiters and _running occur under
     the single threading.Condition (_cond).
     """
-    
-    __slots__ = ('key', 'capacity', '_waiters', '_running', 
-                 '_cond', '_seq_counter', '_acquisition_counter')
-    
+
+    __slots__ = ('key', 'capacity', '_waiters', '_running', '_cond', '_seq_counter', '_acquisition_counter')
+
     def __init__(self, key: str, capacity: int):
         self.key = key
         self.capacity = capacity if capacity > 0 else float('inf')
-        
+
         self._waiters: OrderedDict[int, QueueTicket] = OrderedDict()
         self._running: Dict[str, SlotHolder] = {}
-        
+
         self._cond = threading.Condition(threading.RLock())
         self._seq_counter = itertools.count()
         self._acquisition_counter = itertools.count()
 
-    def acquire(self, instance_name: str, agent_class: str,
-                timeout: Optional[float] = None, **kwargs) -> Callable[[], None]:
+    def acquire(self,
+                instance_name: str,
+                agent_class: str,
+                timeout: Optional[float] = None,
+                **kwargs) -> Callable[[], None]:
         """Acquire a slot permit from this pool, waiting in FIFO order if necessary.
-        
+
         Algorithm (all under _cond):
         1. Fast path: if capacity free → grant immediately.
         2. Slow path: enqueue ticket, wait with 1s ticks for interruptibility.
@@ -150,16 +154,16 @@ class SlotPool:
         """
         if self.capacity == float('inf'):
             return lambda: None
-        
+
         if timeout is None:
             timeout = QUEUE_WAIT_TIMEOUT
-        
+
         with self._cond:
             # Fast path: capacity available
             if len(self._running) < self.capacity:
                 holder = _grant(self, instance_name, agent_class)
                 return _make_release_cb(self, holder)
-            
+
             # Slow path: enqueue as waiter
             ticket = QueueTicket(
                 seq=next(self._seq_counter),
@@ -170,84 +174,71 @@ class SlotPool:
                 created_at=time.monotonic(),
                 deadline=time.monotonic() + timeout,
             )
-            
+
             self._waiters[ticket.ticket_id] = ticket
 
             # BUG-11: once-per-enqueue lifecycle trace (never per-tick — logged
             # BEFORE the poll loop starts).
-            logger.debug(
-                f"[SLOTPOOL] Queued on '{self.key}': agent={instance_name} ({agent_class}) "
-                f"ticket={ticket.ticket_id} position={len(self._waiters)} "
-                f"waiters={len(self._waiters)} holders={[h.instance_name for h in self._running.values()]} "
-                f"timeout={timeout:.0f}s"
-            )
-            logger.warning(
-                f"[SLOTPOOL] Slot contention on '{self.key}': agent='{instance_name}' ({agent_class}) "
-                f"queued (position={len(self._waiters)}, waiters={len(self._waiters)}, "
-                f"running={len(self._running)}/{self.capacity}, "
-                f"holders={[h.instance_name for h in self._running.values()]}, timeout={timeout:.0f}s)"
-            )
+            logger.debug(f"[SLOTPOOL] Queued on '{self.key}': agent={instance_name} ({agent_class}) "
+                         f"ticket={ticket.ticket_id} position={len(self._waiters)} "
+                         f"waiters={len(self._waiters)} holders={[h.instance_name for h in self._running.values()]} "
+                         f"timeout={timeout:.0f}s")
+            logger.warning(f"[SLOTPOOL] Slot contention on '{self.key}': agent='{instance_name}' ({agent_class}) "
+                           f"queued (position={len(self._waiters)}, waiters={len(self._waiters)}, "
+                           f"running={len(self._running)}/{self.capacity}, "
+                           f"holders={[h.instance_name for h in self._running.values()]}, timeout={timeout:.0f}s)")
 
             deadline = ticket.deadline
             last_wait_warn = ticket.created_at
-            
+
             while not ticket.cancelled.is_set():
                 now_mono = time.monotonic()
                 if now_mono - last_wait_warn >= 15.0:
                     elapsed = now_mono - ticket.created_at
-                    logger.warning(
-                        f"[SLOTPOOL] Agent '{instance_name}' still waiting for slot on '{self.key}' "
-                        f"after {elapsed:.0f}s (waiters={len(self._waiters)}, "
-                        f"running={len(self._running)}/{self.capacity}, "
-                        f"holders={[h.instance_name for h in self._running.values()]})"
-                    )
+                    logger.warning(f"[SLOTPOOL] Agent '{instance_name}' still waiting for slot on '{self.key}' "
+                                   f"after {elapsed:.0f}s (waiters={len(self._waiters)}, "
+                                   f"running={len(self._running)}/{self.capacity}, "
+                                   f"holders={[h.instance_name for h in self._running.values()]})")
                     last_wait_warn = now_mono
 
                 remaining = deadline - now_mono
-                
+
                 if remaining <= 0:
                     _remove_ticket(self, ticket)
                     _log_acquire_timeout(self, ticket)
                     raise SlotQueueTimeout(ticket)
-                
+
                 # Wait until predicate is true: capacity free + we are head.
-                granted = self._cond.wait_for(
-                    lambda: (_is_head(self, ticket.ticket_id) and len(self._running) < self.capacity),
-                    timeout=min(remaining, 1.0)
-                )
-                
+                granted = self._cond.wait_for(lambda:
+                                              (_is_head(self, ticket.ticket_id) and len(self._running) < self.capacity),
+                                              timeout=min(remaining, 1.0))
+
                 if not granted:
                     continue
-                
+
                 if ticket.cancelled.is_set():
                     # BUG-11: lifecycle trace for the silent SlotCancelled abort.
-                    logger.debug(
-                        f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
-                        f"agent={ticket.instance_name} ticket={ticket.ticket_id}"
-                    )
+                    logger.debug(f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
+                                 f"agent={ticket.instance_name} ticket={ticket.ticket_id}")
                     _remove_ticket(self, ticket)
                     raise SlotCancelled(ticket)
-                
+
                 if _is_head(self, ticket.ticket_id):
                     self._waiters.pop(ticket.ticket_id)
                     holder = _grant(self, instance_name, agent_class, ticket=ticket)
                     ticket.granted.set()
                     wait_dur = time.monotonic() - ticket.created_at
                     if wait_dur >= 1.0:
-                        logger.info(
-                            f"[SLOTPOOL] Agent '{instance_name}' acquired slot on '{self.key}' "
-                            f"after {wait_dur:.1f}s wait in queue."
-                        )
+                        logger.info(f"[SLOTPOOL] Agent '{instance_name}' acquired slot on '{self.key}' "
+                                    f"after {wait_dur:.1f}s wait in queue.")
                     return _make_release_cb(self, holder)
-                
+
                 continue
-            
+
             # BUG-11: lifecycle trace for cancellation detected outside the
             # wait loop (ticket.cancelled set between iterations).
-            logger.debug(
-                f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
-                f"agent={ticket.instance_name} ticket={ticket.ticket_id}"
-            )
+            logger.debug(f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
+                         f"agent={ticket.instance_name} ticket={ticket.ticket_id}")
             _remove_ticket(self, ticket)
             raise SlotCancelled(ticket)
 
@@ -264,10 +255,8 @@ class SlotPool:
             # (held_duration is only computable here — the scheduler layer never
             # sees the SlotHolder).
             held = time.monotonic() - holder.granted_at
-            logger.debug(
-                f"[SLOTPOOL] Released '{self.key}': agent={holder.instance_name} "
-                f"held={held:.1f}s running={len(self._running)}/{self.capacity}"
-            )
+            logger.debug(f"[SLOTPOOL] Released '{self.key}': agent={holder.instance_name} "
+                         f"held={held:.1f}s running={len(self._running)}/{self.capacity}")
             self._cond.notify_all()
 
     def create_held_slot(self, agent_name: str, instance_name: Optional[str] = None) -> SlotHolder:
@@ -291,30 +280,23 @@ class SlotPool:
             if ticket_id is not None and ticket_id in self._waiters:
                 ticket = self._waiters[ticket_id]
                 # BUG-11: lifecycle trace for single-ticket cancel.
-                logger.debug(
-                    f"[SLOTPOOL] Cancelled on '{self.key}': agent={ticket.instance_name} "
-                    f"ticket={ticket.ticket_id}"
-                )
+                logger.debug(f"[SLOTPOOL] Cancelled on '{self.key}': agent={ticket.instance_name} "
+                             f"ticket={ticket.ticket_id}")
                 ticket.cancelled.set()
                 self._waiters.pop(ticket_id)
                 self._cond.notify_all()
                 return True
 
             elif agent_name is not None:
-                cancelled_ids = [
-                    tid for tid, t in self._waiters.items()
-                    if t.instance_name == agent_name
-                ]
+                cancelled_ids = [tid for tid, t in self._waiters.items() if t.instance_name == agent_name]
                 for tid in cancelled_ids:
                     self._waiters[tid].cancelled.set()
                     self._waiters.pop(tid)
 
                 if cancelled_ids:
                     # BUG-11: lifecycle trace for agent-scoped cancel.
-                    logger.debug(
-                        f"[SLOTPOOL] Cancelled on '{self.key}': agent={agent_name} "
-                        f"tickets={cancelled_ids}"
-                    )
+                    logger.debug(f"[SLOTPOOL] Cancelled on '{self.key}': agent={agent_name} "
+                                 f"tickets={cancelled_ids}")
                     self._cond.notify_all()
                 return len(cancelled_ids) > 0
 
@@ -323,20 +305,15 @@ class SlotPool:
     def terminate_for_agent(self, agent_name: str) -> Tuple[int, int]:
         """Full cleanup for a terminated agent: cancel tickets."""
         with self._cond:
-            cancelled_ids = [
-                tid for tid, t in self._waiters.items()
-                if t.instance_name == agent_name
-            ]
+            cancelled_ids = [tid for tid, t in self._waiters.items() if t.instance_name == agent_name]
             for tid in cancelled_ids:
                 self._waiters[tid].cancelled.set()
                 self._waiters.pop(tid)
 
             if cancelled_ids:
                 # BUG-11: lifecycle trace for termination cleanup.
-                logger.debug(
-                    f"[SLOTPOOL] Terminated on '{self.key}': agent={agent_name} "
-                    f"tickets={cancelled_ids}"
-                )
+                logger.debug(f"[SLOTPOOL] Terminated on '{self.key}': agent={agent_name} "
+                             f"tickets={cancelled_ids}")
                 self._cond.notify_all()
 
             return len(cancelled_ids), 0
@@ -346,36 +323,35 @@ class SlotPool:
         now = time.monotonic()
         with self._cond:
             return {
-                'key': self.key,
-                'capacity': self.capacity if self.capacity != float('inf') else -1,
-                'running_count': len(self._running),
-                'waiting_count': len(self._waiters),
-                'waiters': [
-                    {
-                        'ticket_id': t.ticket_id,
-                        'seq': t.seq,
-                        'instance_name': t.instance_name,
-                        'agent_class': t.agent_class,
-                        'wait_time': round(now - t.created_at, 2),
-                        'remaining_timeout': max(0, round(t.deadline - now, 2)),
-                    }
-                    for t in self._waiters.values()
-                ],
-                'holders': [
-                    {
-                        'instance_name': h.instance_name,
-                        'agent_name': h.agent_name,
-                        'acquisition_id': h.acquisition_id,
-                        'held_duration': round(now - h.granted_at, 2),
-                    }
-                    for h in self._running.values()
-                ],
+                'key':
+                    self.key,
+                'capacity':
+                    self.capacity if self.capacity != float('inf') else -1,
+                'running_count':
+                    len(self._running),
+                'waiting_count':
+                    len(self._waiters),
+                'waiters': [{
+                    'ticket_id': t.ticket_id,
+                    'seq': t.seq,
+                    'instance_name': t.instance_name,
+                    'agent_class': t.agent_class,
+                    'wait_time': round(now - t.created_at, 2),
+                    'remaining_timeout': max(0, round(t.deadline - now, 2)),
+                } for t in self._waiters.values()],
+                'holders': [{
+                    'instance_name': h.instance_name,
+                    'agent_name': h.agent_name,
+                    'acquisition_id': h.acquisition_id,
+                    'held_duration': round(now - h.granted_at, 2),
+                } for h in self._running.values()],
             }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Shared slot-release helper (capture-nullify-release-log)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def release_slot_permit(
     holder: Any,
@@ -478,10 +454,8 @@ def release_slot_permit(
                     _waiters = len(_pool._waiters)
         except Exception:
             pass
-        logger.debug(
-            f"[SLOTPOOL] instance={holder_name} pool={slot_key} "
-            f"action={action} waiters={_waiters}"
-        )
+        logger.debug(f"[SLOTPOOL] instance={holder_name} pool={slot_key} "
+                     f"action={action} waiters={_waiters}")
     return True
 
 
@@ -489,8 +463,8 @@ def release_slot_permit(
 # Internal helpers (called only under pool._cond)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _grant(pool: SlotPool, instance_name: str, agent_class: str,
-           ticket: Optional[QueueTicket] = None) -> SlotHolder:
+
+def _grant(pool: SlotPool, instance_name: str, agent_class: str, ticket: Optional[QueueTicket] = None) -> SlotHolder:
     """Grant a permit to the requesting agent. Must be called under pool._cond.
 
     BUG-11: single DEBUG choke point for BOTH grant paths — the uncontended
@@ -508,18 +482,18 @@ def _grant(pool: SlotPool, instance_name: str, agent_class: str,
 
     # BUG-11: once-per-grant lifecycle trace.
     waited = (time.monotonic() - ticket.created_at) if ticket else 0.0
-    logger.debug(
-        f"[SLOTPOOL] Granted on '{pool.key}': agent={instance_name} ({agent_class}) "
-        f"acquisition={holder.acquisition_id}"
-        + (f" ticket={ticket.ticket_id} waited={waited:.1f}s" if ticket else ' (fast-path)')
-    )
+    logger.debug(f"[SLOTPOOL] Granted on '{pool.key}': agent={instance_name} ({agent_class}) "
+                 f"acquisition={holder.acquisition_id}" +
+                 (f" ticket={ticket.ticket_id} waited={waited:.1f}s" if ticket else ' (fast-path)'))
     return holder
 
 
 def _make_release_cb(pool: SlotPool, holder: SlotHolder) -> Callable[[], None]:
     """Create a release callback bound to the given holder."""
+
     def release():
         pool.release(holder)
+
     return release
 
 
@@ -539,8 +513,6 @@ def _log_acquire_timeout(pool: SlotPool, ticket: QueueTicket) -> None:
     """Log diagnostic information when acquire() times out. Must be called under pool._cond."""
     now = time.monotonic()
     wait_time = now - ticket.created_at
-    logger.warning(
-        f"[SLOTPOOL] Acquire timeout on pool '{pool.key}' for ticket {ticket.ticket_id} "
-        f"(agent={ticket.instance_name}, wait_time={wait_time:.1f}s): "
-        f"running={len(pool._running)}/{pool.capacity}, waiters={len(pool._waiters)}"
-    )
+    logger.warning(f"[SLOTPOOL] Acquire timeout on pool '{pool.key}' for ticket {ticket.ticket_id} "
+                   f"(agent={ticket.instance_name}, wait_time={wait_time:.1f}s): "
+                   f"running={len(pool._running)}/{pool.capacity}, waiters={len(pool._waiters)}")

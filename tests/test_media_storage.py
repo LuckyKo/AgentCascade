@@ -10,18 +10,14 @@ import io
 import json
 import os
 import re
-import shutil
-import stat
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from PIL import Image
-
 
 # Ensure agent_cascade package is importable from project root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -48,7 +44,7 @@ class TestSaveImageToMedia:
 
     def test_save_from_file_path(self):
         """save_image_to_media() with a valid file path input."""
-        from agent_cascade.utils.media_utils import save_image_to_media, _get_media_root
+        from agent_cascade.utils.media_utils import _get_media_root, save_image_to_media
 
         # Create a temporary test image file
         img = Image.new('RGB', (200, 200), color='red')
@@ -166,21 +162,21 @@ class TestSaveImageToMedia:
 
     def test_invalid_corrupt_image_bytes(self):
         """Invalid/corrupt image bytes should raise MediaStorageError."""
-        from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
+        from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media
 
         with pytest.raises(MediaStorageError):
             save_image_to_media(b'this is not a valid image', source_name='test_corrupt')
 
     def test_non_existent_file_path(self):
         """Non-existent file path input should raise MediaStorageError."""
-        from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
+        from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media
 
         with pytest.raises(MediaStorageError):
             save_image_to_media('/nonexistent/path/to/image.png', source_name='test_missing')
 
     def test_image_exceeds_max_file_size(self):
         """Image exceeding max_file_size_mb limit should raise MediaStorageError."""
-        from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
+        from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media
 
         # Create a moderately sized image with noise pattern that doesn't compress well.
         # Using PIL's ImageDraw to create a checkerboard-like pattern is much faster
@@ -259,21 +255,21 @@ class TestSaveImageFromDataUri:
 
     def test_invalid_data_uri_no_data_prefix(self):
         """Invalid data URI (no 'data:' prefix) should raise MediaStorageError."""
-        from agent_cascade.utils.media_utils import save_image_from_data_uri, MediaStorageError
+        from agent_cascade.utils.media_utils import MediaStorageError, save_image_from_data_uri
 
         with pytest.raises(MediaStorageError, match="does not start with 'data:'"):
             save_image_from_data_uri('not_a_data_uri')
 
     def test_invalid_data_uri_wrong_format(self):
         """Invalid data URI format (missing base64) should raise MediaStorageError."""
-        from agent_cascade.utils.media_utils import save_image_from_data_uri, MediaStorageError
+        from agent_cascade.utils.media_utils import MediaStorageError, save_image_from_data_uri
 
         with pytest.raises(MediaStorageError, match='Invalid data URI format'):
             save_image_from_data_uri('data:image/png;wrongformat,somedata')
 
     def test_invalid_base64(self):
         """Invalid base64 content should raise MediaStorageError."""
-        from agent_cascade.utils.media_utils import save_image_from_data_uri, MediaStorageError
+        from agent_cascade.utils.media_utils import MediaStorageError, save_image_from_data_uri
 
         with pytest.raises(MediaStorageError):
             save_image_from_data_uri('data:image/png;base64,!!!not_valid_base64!!!')
@@ -295,7 +291,7 @@ class TestCleanupOldMedia:
 
     def test_cleanup_removes_old_files(self):
         """Create test files with old mtime, verify they're deleted."""
-        from agent_cascade.utils.media_utils import cleanup_old_media, _get_media_root
+        from agent_cascade.utils.media_utils import _get_media_root, cleanup_old_media
 
         media_root = _get_media_root() / 'images'
         media_root.mkdir(parents=True, exist_ok=True)
@@ -319,7 +315,7 @@ class TestCleanupOldMedia:
 
     def test_cleanup_keeps_new_files(self):
         """Files newer than max_age_days should not be deleted."""
-        from agent_cascade.utils.media_utils import cleanup_old_media, _get_media_root
+        from agent_cascade.utils.media_utils import _get_media_root, cleanup_old_media
 
         media_root = _get_media_root() / 'images'
         media_root.mkdir(parents=True, exist_ok=True)
@@ -330,7 +326,7 @@ class TestCleanupOldMedia:
 
         assert test_file.exists()
 
-        result = cleanup_old_media(max_age_days=30)
+        cleanup_old_media(max_age_days=30)
 
         assert test_file.exists(), 'New file should not be deleted'
 
@@ -356,7 +352,7 @@ class TestIsPathAllowedSecurity:
 
     def test_allowed_media_directory_paths(self):
         """Media directory paths should be allowed."""
-        from agent_cascade.api_server import _is_path_allowed, _get_allowed_file_roots
+        from agent_cascade.api_server import _get_allowed_file_roots, _is_path_allowed
 
         media_root = _get_allowed_file_roots()[0]  # First root is media dir
         media_root.mkdir(parents=True, exist_ok=True)
@@ -371,7 +367,7 @@ class TestIsPathAllowedSecurity:
 
     def test_allowed_workspace_root_files(self):
         """Workspace root files should be allowed."""
-        from agent_cascade.api_server import _is_path_allowed, _get_allowed_file_roots
+        from agent_cascade.api_server import _get_allowed_file_roots, _is_path_allowed
 
         ws_root = _get_allowed_file_roots()[1]  # Second root is workspace
 
@@ -400,7 +396,7 @@ class TestIsPathAllowedSecurity:
 
     def test_blocked_hidden_files(self):
         """Hidden files like .env, .gitconfig should be blocked."""
-        from agent_cascade.api_server import _is_path_allowed, _get_allowed_file_roots
+        from agent_cascade.api_server import _get_allowed_file_roots, _is_path_allowed
 
         ws_root = _get_allowed_file_roots()[1]
 
@@ -419,7 +415,7 @@ class TestIsPathAllowedSecurity:
 
     def test_blocked_sensitive_filenames(self):
         """Sensitive filenames like id_rsa, authorized_keys should be blocked."""
-        from agent_cascade.api_server import _is_path_allowed, _get_allowed_file_roots
+        from agent_cascade.api_server import _get_allowed_file_roots, _is_path_allowed
 
         ws_root = _get_allowed_file_roots()[1]
 
@@ -480,7 +476,6 @@ class TestParseMultimodalContent:
 
         # Find the image item
         image_items = [item for item in result if 'image' in item]
-        text_items = [item for item in result if 'text' in item]
 
         assert len(image_items) == 1, f"Expected 1 image item, got {len(image_items)}: {result}"
 
@@ -525,9 +520,8 @@ class TestParseMultimodalContent:
         original_func = content_parse.save_image_from_data_uri
 
         try:
-            content_parse.save_image_from_data_uri = lambda uri: (_ for _ in ()).throw(
-                MediaStorageError('Simulated disk full')
-            )
+            content_parse.save_image_from_data_uri = lambda uri: (_ for _ in
+                                                                  ()).throw(MediaStorageError('Simulated disk full'))
 
             result = api_server._parse_multimodal_content(input_text)
 
@@ -565,10 +559,8 @@ class TestParseMultimodalContent:
         b64_2 = base64.b64encode(buf2.getvalue()).decode('ascii')
         data_uri_2 = f"data:image/png;base64,{b64_2}"
 
-        input_text = (
-            f"First image: ![img1]({data_uri_1}) "
-            f"and second image: ![img2]({data_uri_2}) end."
-        )
+        input_text = (f"First image: ![img1]({data_uri_1}) "
+                      f"and second image: ![img2]({data_uri_2}) end.")
 
         result = _parse_multimodal_content(input_text)
 
@@ -652,9 +644,8 @@ class TestViewImageIntegration:
 
         This is exactly what view_image does at lines 609-618 of file_ops.py.
         """
-        from agent_cascade.tools.custom.file_ops import ViewImage
-        from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
         from agent_cascade.llm.schema import ContentItem
+        from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media
 
         # Create a test image file
         img = Image.new('RGB', (100, 100), color='red')
@@ -669,10 +660,7 @@ class TestViewImageIntegration:
                     image_source=tmp_path,
                     max_short_side=1080,
                 )
-                result = [
-                    ContentItem(image=media_path),
-                    ContentItem(text=f"Viewing image: {tmp_path}")
-                ]
+                result = [ContentItem(image=media_path), ContentItem(text=f"Viewing image: {tmp_path}")]
             except MediaStorageError as e:
                 # In real view_image, this falls back to base64 - we test that path too
                 pytest.skip(f"Media storage unavailable (expected fallback in production): {e}")
@@ -707,8 +695,8 @@ class TestViewImageIntegration:
         Tests the fallback path at file_ops.py:619-632 where view_image encodes as base64
         when media storage fails.
         """
-        from agent_cascade.utils.media_utils import MediaStorageError
         from agent_cascade.llm.schema import ContentItem
+        from agent_cascade.utils.media_utils import MediaStorageError
 
         # Create a test image file
         img = Image.new('RGB', (100, 100), color='green')
@@ -737,13 +725,13 @@ class TestViewImageIntegration:
                         max_short_side=1080,
                     )
                     result = [ContentItem(image=media_path)]
-                except MediaStorageError as e:
+                except MediaStorageError:
                     # This is the fallback path (file_ops.py:619-632)
                     from agent_cascade.utils.utils import encode_image_as_base64
 
                     try:
                         base64_data_url = encode_image_as_base64(tmp_path, max_short_side_length=1080)
-                    except Exception as enc_err:
+                    except Exception:
                         # Double fallback to file:// URL
                         base64_data_url = Path(tmp_path).as_uri()
 
@@ -842,6 +830,7 @@ class TestInstanceIsolation:
     def test_media_root_without_instance_id(self):
         """Without AGENT_CASCADE_INSTANCE_ID, media root should use default logs/media."""
         import os
+
         # Ensure no instance ID is set
         saved = os.environ.pop('AGENT_CASCADE_INSTANCE_ID', None)
         try:
@@ -862,6 +851,7 @@ class TestInstanceIsolation:
     def test_media_root_with_instance_id(self):
         """With AGENT_CASCADE_INSTANCE_ID set, media root should use instance-specific logs_<id>/media."""
         import os
+
         # Save and set instance ID
         saved = os.environ.get('AGENT_CASCADE_INSTANCE_ID')
         os.environ['AGENT_CASCADE_INSTANCE_ID'] = 'test_instance'
@@ -903,8 +893,8 @@ class TestViewImageCropRegion:
         """ViewImage tool with _resolve_path patched to allow temp paths."""
         from agent_cascade.tools.custom.file_ops import ViewImage
         tool = ViewImage()
+
         # Patch _resolve_path to return the actual Path (bypassing workspace dir validation)
-        original_resolve = tool._resolve_path
 
         def _mock_resolve(path, mode='ro'):
             p = Path(path)
@@ -917,8 +907,6 @@ class TestViewImageCropRegion:
 
     def test_crop_region_valid(self, view_image_tool, test_image_500x300, tmp_path):
         """Valid crop_region produces a cropped image with correct dimensions."""
-        from agent_cascade.llm.schema import ContentItem
-        from agent_cascade.utils.media_utils import save_image_to_media
 
         # Crop the top-left 100x80 region
         crop = '10,20,100,80'
@@ -997,7 +985,6 @@ class TestViewImageCropRegion:
 
     def test_crop_region_exact_bounds(self, view_image_tool, test_image_500x300):
         """crop_region exactly matching image bounds is valid (full-image crop)."""
-        from agent_cascade.llm.schema import ContentItem
         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
             mock_save.return_value = '/fake/media.jpg'
             result = view_image_tool.call(json.dumps({
@@ -1065,8 +1052,8 @@ class TestViewImageCropRegion:
         tool = ViewImage()
 
         with patch(
-            'agent_cascade.tools.custom.screen_capture.capture_screen',
-            return_value=png_bytes,
+                'agent_cascade.tools.custom.screen_capture.capture_screen',
+                return_value=png_bytes,
         ):
             with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
                 mock_save.return_value = str(tmp_path / 'capture_result.jpg')
@@ -1106,8 +1093,9 @@ class TestViewImageCropRegion:
         tool._resolve_path = _mock_resolve
 
         with patch.object(
-            ViewImage, '_convert_svg_to_png',
-            return_value=converted_png,
+                ViewImage,
+                '_convert_svg_to_png',
+                return_value=converted_png,
         ):
             with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
                 mock_save.return_value = str(tmp_path / 'svg_crop_result.jpg')

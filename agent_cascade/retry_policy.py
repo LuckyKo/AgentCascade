@@ -56,7 +56,6 @@ POLICY_CONSERVATIVE = RetryPolicy(
     endpoint_max_retries=0,  # No per-endpoint retries; failover immediately
 )
 
-
 # ── Error classification (single source of truth) ────────────────────────────
 
 # Deterministic client errors: these will recur on EVERY attempt to the same
@@ -97,22 +96,43 @@ def classify_error(error: Exception) -> str:
 
     # Explicitly non-retryable patterns (billing, auth, config)
     fatal_patterns = (
-        'insufficient_quota', 'billing_error', 'account_not_active',
-        'invalid_api_key', 'authentication', 'unauthorized',
-        'forbidden', 'permission denied',
-        'model_not_found', 'invalid_model',
-        'invalid_request', 'validation',
+        'insufficient_quota',
+        'billing_error',
+        'account_not_active',
+        'invalid_api_key',
+        'authentication',
+        'unauthorized',
+        'forbidden',
+        'permission denied',
+        'model_not_found',
+        'invalid_model',
+        'invalid_request',
+        'validation',
     )
 
     # Retryable errors (transient)
     retryable_patterns = (
-        'connection', 'timeout', 'timed out', 'ssl',
-        'broken pipe', 'disconnected', 'eof',
-        'reset by peer', 'refused',
-        'terminated', 'fetch failed',  # Connection termination patterns from logs
-        '503', '502', '504', '429',  # Server errors + rate limiting
-        'network unreachable', 'dns', 'resolution failed',  # Network/DNS issues
-        'temporary', 'overloaded', 'service unavailable',  # Transient server states
+        'connection',
+        'timeout',
+        'timed out',
+        'ssl',
+        'broken pipe',
+        'disconnected',
+        'eof',
+        'reset by peer',
+        'refused',
+        'terminated',
+        'fetch failed',  # Connection termination patterns from logs
+        '503',
+        '502',
+        '504',
+        '429',  # Server errors + rate limiting
+        'network unreachable',
+        'dns',
+        'resolution failed',  # Network/DNS issues
+        'temporary',
+        'overloaded',
+        'service unavailable',  # Transient server states
         'stream_stalled',  # Stuck streaming API (mid-stream silence or total timeout)
     )
 
@@ -155,6 +175,7 @@ def is_deterministic_client_error(error: Exception) -> bool:
 
 # ── Backoff calculation (reusable utility) ────────────────────────────────────
 
+
 def calculate_backoff(attempt: int, policy: RetryPolicy) -> float:
     """Calculate backoff delay with exponential growth and jitter.
 
@@ -167,6 +188,6 @@ def calculate_backoff(attempt: int, policy: RetryPolicy) -> float:
     Returns:
         Delay in seconds, bounded between 0.1 and policy.max_delay.
     """
-    raw = policy.base_delay * (2 ** (attempt - 1))
+    raw = policy.base_delay * (2**(attempt - 1))
     jitter = random.uniform(0, policy.jitter_factor) * raw
     return min(max(raw + jitter, 0.1), policy.max_delay)

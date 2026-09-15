@@ -8,18 +8,17 @@ Ported from agent_logger.py for the new unified architecture.
 Writes to Layer 1 (JSONL file). The pool owns Layer 2 (in-memory working set).
 """
 
+import datetime
 import itertools
 import json
 import os
 import shutil
-import time
-import datetime
 import threading
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
-
 
 # ── Timestamp uniqueness guarantee ──────────────────────────────────────────────
 # Module-level counter to ensure unique timestamps even under rapid calls.
@@ -31,6 +30,7 @@ _timestamp_lock = threading.Lock()
 # incoming history is smaller than this fraction of the tracked working set. Catches
 # catastrophic loss (>50% reduction); legitimate trims like edit/delete stay below it.
 _SHRINK_GUARD_RATIO = 0.5
+
 
 def _next_unique_timestamp() -> str:
     """Generate a strictly increasing timestamp string (microsecond resolution + monotonic counter).
@@ -61,8 +61,12 @@ class AgentInstanceLogger:
     update_history() after compression/rollback events.
     """
 
-    def __init__(self, agent_class: str, instance_name: str, log_dir: str,
-                 base_metadata: Optional[Dict] = None, log_path: Optional[str] = None):
+    def __init__(self,
+                 agent_class: str,
+                 instance_name: str,
+                 log_dir: str,
+                 base_metadata: Optional[Dict] = None,
+                 log_path: Optional[str] = None):
         self.agent_class = (agent_class or '').strip().lower()  # Normalize for case-insensitive tracking
         self.instance_name = instance_name
         self.start_time = datetime.datetime.now()
@@ -84,8 +88,8 @@ class AgentInstanceLogger:
                 'last_update': self.start_time.isoformat(),
                 'current_log_path': self.log_path,
                 'working_dir': os.getcwd(),  # Default to current CWD
-                'supervisor': 'System',      # Default supervisor
-                'caption': '',               # Session caption (set by compressor; first meaningful one wins)
+                'supervisor': 'System',  # Default supervisor
+                'caption': '',  # Session caption (set by compressor; first meaningful one wins)
             },
             'history': []
         }
@@ -104,7 +108,8 @@ class AgentInstanceLogger:
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
         self._file_history_synced = False  # One-shot file sync guard for update_history() — prevents duplicate file loads
         self._write_lock = threading.Lock()  # Lock for read-modify-write operations on JSONL file
-        self._atomic_tmp_counter = itertools.count()  # Per-instance counter for unique temp filenames in _atomic_write_lines
+        self._atomic_tmp_counter = itertools.count(
+        )  # Per-instance counter for unique temp filenames in _atomic_write_lines
         self._initial_save()
 
     def update_supervisor(self, value: str) -> None:
@@ -236,8 +241,7 @@ class AgentInstanceLogger:
                 pass
 
         if not msg_dict and isinstance(message, str):
-            msg_dict = {'role': 'unknown', 'content': message,
-                        'timestamp': _next_unique_timestamp()}
+            msg_dict = {'role': 'unknown', 'content': message, 'timestamp': _next_unique_timestamp()}
 
         return msg_dict
 
@@ -283,7 +287,7 @@ class AgentInstanceLogger:
                 try:
                     os.replace(tmp_path, self.log_path)
                     return True
-                except OSError as e:
+                except OSError:
                     if attempt < 4:
                         time.sleep(0.02 * (attempt + 1))
                         continue
@@ -382,7 +386,9 @@ class AgentInstanceLogger:
                 try:
                     msg_dict = json.loads(line)
                     # FIX #2: Ensure msg_dict is actually a dict before checking keys
-                    if isinstance(msg_dict, dict) and 'metadata' not in msg_dict and 'event' not in msg_dict:  # Only load message dicts, skip metadata lines, event entries, and non-dict JSON values
+                    if isinstance(
+                            msg_dict, dict
+                    ) and 'metadata' not in msg_dict and 'event' not in msg_dict:  # Only load message dicts, skip metadata lines, event entries, and non-dict JSON values
                         self.data['history'].append(msg_dict)
                 except json.JSONDecodeError:
                     logger.warning(f"Skipping malformed JSON line in {self.log_path} — data may be incomplete")
@@ -516,8 +522,9 @@ class AgentInstanceLogger:
 
                 if same_slot:
                     if (normalize(potential_match.get('content')) != normalize(formatted.get('content')) or
-                            normalize(potential_match.get('reasoning_content')) != normalize(formatted.get('reasoning_content')) or
-                            normalize(potential_match.get('function_call')) != normalize(formatted.get('function_call'))):
+                            normalize(potential_match.get('reasoning_content')) != normalize(
+                                formatted.get('reasoning_content')) or normalize(
+                                    potential_match.get('function_call')) != normalize(formatted.get('function_call'))):
                         # CONTENT CHANGED (Manual Edit)
                         old_history[start_search] = formatted
                         needs_rewrite = True
@@ -531,8 +538,9 @@ class AgentInstanceLogger:
                     if (potential_match.get('role') == formatted.get('role') and
                             normalize(potential_match.get('content')) == normalize(formatted.get('content')) and
                             normalize(potential_match.get('name')) == normalize(formatted.get('name')) and
-                            normalize(potential_match.get('reasoning_content')) == normalize(formatted.get('reasoning_content')) and
-                            normalize(potential_match.get('function_call')) == normalize(formatted.get('function_call'))):
+                            normalize(potential_match.get('reasoning_content')) == normalize(
+                                formatted.get('reasoning_content')) and normalize(
+                                    potential_match.get('function_call')) == normalize(formatted.get('function_call'))):
                         found_idx = j
                         break
 
@@ -541,16 +549,12 @@ class AgentInstanceLogger:
                 if buffer:
                     if found_idx > last_match_in_log + 1:
                         insert_pos = found_idx
-                        logger.info(
-                            f"Logger [{self.instance_name}]: Compression detected — "
-                            f"inserting {len(buffer)} message(s) into log at gap boundary index {insert_pos}."
-                        )
+                        logger.info(f"Logger [{self.instance_name}]: Compression detected — "
+                                    f"inserting {len(buffer)} message(s) into log at gap boundary index {insert_pos}.")
                     else:
                         insert_pos = last_match_in_log + 1
-                        logger.info(
-                            f"Logger [{self.instance_name}]: Surgically inserting "
-                            f"{len(buffer)} messages into log at index {insert_pos}."
-                        )
+                        logger.info(f"Logger [{self.instance_name}]: Surgically inserting "
+                                    f"{len(buffer)} messages into log at index {insert_pos}.")
                     self.data['history'] = old_history[:insert_pos] + buffer + old_history[insert_pos:]
                     old_history = self.data['history']
                     found_idx += len(buffer)
@@ -574,7 +578,9 @@ class AgentInstanceLogger:
 
     # ── History reset / rewrite ────────────────────────────────────────────────────
 
-    def rewrite_log_with_history(self, new_history: List[Any], allow_shrink: bool = False,
+    def rewrite_log_with_history(self,
+                                 new_history: List[Any],
+                                 allow_shrink: bool = False,
                                  caller: str = 'unknown') -> bool:
         """Rewrite the log file from scratch with a complete history.
 
@@ -618,13 +624,11 @@ class AgentInstanceLogger:
             prev_tracked = len(self.data['history'])
             new_count = len(new_history)
             if (not allow_shrink and prev_tracked > 0 and new_count < prev_tracked * _SHRINK_GUARD_RATIO):
-                logger.critical(
-                    f"SHRINK GUARD: rewrite_log_with_history REFUSED for {self.log_path} "
-                    f"(caller={caller}). Incoming history has {new_count} messages but the "
-                    f"tracked working set holds {prev_tracked}. Writing would discard "
-                    f"{prev_tracked - new_count} tracked messages. Pass allow_shrink=True "
-                    f"to override."
-                )
+                logger.critical(f"SHRINK GUARD: rewrite_log_with_history REFUSED for {self.log_path} "
+                                f"(caller={caller}). Incoming history has {new_count} messages but the "
+                                f"tracked working set holds {prev_tracked}. Writing would discard "
+                                f"{prev_tracked - new_count} tracked messages. Pass allow_shrink=True "
+                                f"to override.")
                 return False
 
             try:
@@ -647,7 +651,8 @@ class AgentInstanceLogger:
 
             # Update internal tracking — mirror what was written to disk.
             # After rewrite, logger history is the single source of truth for this session.
-            self.data['history'] = formatted_msgs  # Use already-formatted list from above (avoids re-formatting which can assign new timestamps)
+            self.data[
+                'history'] = formatted_msgs  # Use already-formatted list from above (avoids re-formatting which can assign new timestamps)
             self._file_history_synced = True  # Prevent unnecessary file reload on next update_history()
 
             return True
@@ -680,10 +685,8 @@ class AgentInstanceLogger:
             try:
                 # ── Read existing log messages from disk (full history) ──
                 if not self.log_path or not os.path.exists(self.log_path):
-                    logger.debug(
-                        f"Log file missing for {self.instance_name} ({self.log_path}) — "
-                        f"writing pool state directly."
-                    )
+                    logger.debug(f"Log file missing for {self.instance_name} ({self.log_path}) — "
+                                 f"writing pool state directly.")
                     existing_msgs = []
                 else:
                     # Read existing log messages from disk (full history)
@@ -698,10 +701,8 @@ class AgentInstanceLogger:
                                 if isinstance(item, dict) and 'metadata' not in item and 'event' not in item:
                                     existing_msgs.append(item)
                             except json.JSONDecodeError:
-                                logger.debug(
-                                    f"Skipping corrupted JSONL line {line_num} in {self.log_path}: "
-                                    f"'{line[:60]}...'"
-                                )
+                                logger.debug(f"Skipping corrupted JSONL line {line_num} in {self.log_path}: "
+                                             f"'{line[:60]}...'")
 
                 # ── Find the LAST (newest) compression marker in pool state ──
                 last_marker_idx = -1
@@ -724,8 +725,7 @@ class AgentInstanceLogger:
                     # Dedup guard: skip if marker already in file (idempotent no-op)
                     marker_already_in_file = any(
                         isinstance(m.get('content', ''), str) and m['content'] == formatted_marker['content']
-                        for m in existing_msgs
-                    )
+                        for m in existing_msgs)
 
                     if marker_already_in_file:
                         result_msgs = list(existing_msgs)
@@ -745,7 +745,9 @@ class AgentInstanceLogger:
                 # ── Single write to disk ──
                 lines = [json.dumps({'metadata': self.data['metadata']}, ensure_ascii=False) + '\n']
                 for msg in result_msgs:
-                    lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
+                    lines.append(
+                        json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) +
+                        '\n')
 
                 # Fix 4: atomic write — temp file + os.replace() prevents partial-write corruption.
                 if not self._atomic_write_lines(lines):
@@ -826,8 +828,7 @@ class AgentInstanceLogger:
                 if not new_marker_msg:
                     logger.warning(
                         f"No compression marker found in pool state for consolidation sync — "
-                        f"skipping JSONL update. Pool is authoritative; JSONL will be corrected on next compression."
-                    )
+                        f"skipping JSONL update. Pool is authoritative; JSONL will be corrected on next compression.")
                     return False
 
                 # Identify which marker in JSONL corresponds to the last (newest) marker in pool state.
@@ -849,25 +850,24 @@ class AgentInstanceLogger:
                             break
 
                 # Use shared consolidation filtering strategy
-                result_msgs, markers_removed = filter_jsonl_for_consolidation(
-                    existing_msgs, new_marker_msg, last_jsonl_marker_idx
-                )
+                result_msgs, markers_removed = filter_jsonl_for_consolidation(existing_msgs, new_marker_msg,
+                                                                              last_jsonl_marker_idx)
 
                 # Single write to disk
                 lines = [json.dumps({'metadata': self.data['metadata']}, ensure_ascii=False) + '\n']
                 for msg in result_msgs:
-                    lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
+                    lines.append(
+                        json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) +
+                        '\n')
 
                 # Fix 4: atomic write — temp file + os.replace() prevents partial-write corruption.
                 if not self._atomic_write_lines(lines):
                     return False
 
                 self._file_handle = None
-                logger.info(
-                    f"Consolidation JSONL sync for {self.instance_name}: "
-                    f"{len(existing_msgs)} → {len(result_msgs)} messages in file, "
-                    f"{markers_removed} intermediate markers removed"
-                )
+                logger.info(f"Consolidation JSONL sync for {self.instance_name}: "
+                            f"{len(existing_msgs)} → {len(result_msgs)} messages in file, "
+                            f"{markers_removed} intermediate markers removed")
 
                 # Update internal tracking — pool state for in-memory history
                 self.data['history'] = [self._format_message(msg) for msg in new_pool_state]
@@ -916,15 +916,11 @@ class AgentInstanceLogger:
             for i in range(idx_in_new + 1, len(new_history)):
                 self._append_line(self._format_message(new_history[i]))
 
-            logger.info(
-                f"Appended summary baseline and {len(new_history) - 1 - idx_in_new} "
-                f"messages to agent log {self.log_path}."
-            )
+            logger.info(f"Appended summary baseline and {len(new_history) - 1 - idx_in_new} "
+                        f"messages to agent log {self.log_path}.")
         else:
-            logger.warning(
-                f"Could not find summary marker in new_history for {self.instance_name}. "
-                f"No baseline appended."
-            )
+            logger.warning(f"Could not find summary marker in new_history for {self.instance_name}. "
+                           f"No baseline appended.")
 
         # Reset internal tracking to the compressed baseline.
         self.data['history'] = [self._format_message(msg) for msg in new_history]

@@ -7,9 +7,10 @@ from agent_cascade.exceptions import AgentTerminatedError
 
 logger = logging.getLogger(__name__)
 
+
 def _check_termination(pool, instance_name: str) -> bool:
     """Check if an instance has been terminated/dismissed.
-    
+
     Returns True if the instance should abort its current operation.
     Safe to call with None pool or empty instance_name — returns False.
     """
@@ -20,7 +21,7 @@ def _check_termination(pool, instance_name: str) -> bool:
 
 def _interruptible_sleep(duration: float, pool, instance_name: str, interval: float = 0.5) -> None:
     """Sleep for duration seconds, checking termination every interval seconds.
-    
+
     Raises AgentTerminatedError if the instance is terminated during the wait.
     """
     start = time.monotonic()

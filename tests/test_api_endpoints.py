@@ -24,9 +24,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from fastapi.testclient import TestClient
 
 
 class _MockLLMHandler(BaseHTTPRequestHandler):
@@ -42,17 +42,24 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
     _CHAT_COMPLETION = {
         'id': 'mock',
         'object': 'chat.completion',
-        'choices': [
-            {'index': 0, 'message': {'role': 'assistant', 'content': 'ok'}, 'finish_reason': 'stop'}
-        ],
-        'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2},
+        'choices': [{
+            'index': 0,
+            'message': {
+                'role': 'assistant',
+                'content': 'ok'
+            },
+            'finish_reason': 'stop'
+        }],
+        'usage': {
+            'prompt_tokens': 1,
+            'completion_tokens': 1,
+            'total_tokens': 2
+        },
     }
 
-    _STREAM_BODY = (
-        'data: {"id":"mock","object":"chat.completion.chunk",'
-        '"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
-        'data: [DONE]\n\n'
-    )
+    _STREAM_BODY = ('data: {"id":"mock","object":"chat.completion.chunk",'
+                    '"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
+                    'data: [DONE]\n\n')
 
     def log_message(self, format, *args):  # noqa: A002 - signature matches stdlib hook
         pass  # suppress per-request logging noise in test output
@@ -145,8 +152,8 @@ def mock_llm_server():
 @pytest.fixture(scope='module')
 def test_app(mock_llm_server):
     """Create a minimal FastAPI app for testing with mock agent pool."""
-    from agent_cascade.api_server import create_app
     from agent_cascade.agent_pool import AgentPool
+    from agent_cascade.api_server import create_app
 
     llm_cfg = {
         'model': 'test_model',
@@ -184,9 +191,7 @@ def client_no_exceptions(test_app):
 def _generate_client_keypair():
     """Generate X25519 key pair. Returns (private_key, public_key_b64)."""
     private_key = x25519.X25519PrivateKey.generate()
-    public_key_b64 = base64.b64encode(
-        private_key.public_key().public_bytes_raw()
-    ).decode('utf-8')
+    public_key_b64 = base64.b64encode(private_key.public_key().public_bytes_raw()).decode('utf-8')
     return private_key, public_key_b64
 
 
@@ -592,16 +597,17 @@ class TestEndpointManagementCRUD:
     def test_post_endpoints_bulk_works_without_error(self, client_no_exceptions):
         """POST /api/endpoints/bulk processes bulk update without error."""
         bulk_data = {
-            'endpoints': [
-                {
-                    'name': 'bulk_test_1',
-                    'type': 'openai_compatible',
-                    'url': 'http://localhost:1234/v1',
-                    'api_key': 'key1',
-                    'models': ['model-a'],
-                }
-            ],
-            'agent_priorities': {'coder': 1, 'reviewer': 2},
+            'endpoints': [{
+                'name': 'bulk_test_1',
+                'type': 'openai_compatible',
+                'url': 'http://localhost:1234/v1',
+                'api_key': 'key1',
+                'models': ['model-a'],
+            }],
+            'agent_priorities': {
+                'coder': 1,
+                'reviewer': 2
+            },
         }
         resp = client_no_exceptions.post('/api/endpoints/bulk', json=bulk_data)
         # Should not crash; may return 200 or partial success
@@ -735,7 +741,7 @@ class TestWebSocket:
     def test_ws_send_set_session_name_changes_it(self, client_no_exceptions):
         """Send 'set_session_name' via WebSocket; verify session name changed."""
         with client_no_exceptions.websocket_connect('/ws/chat', timeout=self.WS_TIMEOUT) as ws:
-            init = ws.receive_json()
+            ws.receive_json()
 
             new_name = 'RenamedViaWS'
             ws.send_json({'type': 'set_session_name', 'name': new_name})

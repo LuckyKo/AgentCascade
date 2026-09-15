@@ -4,8 +4,9 @@ import logging
 import re
 from datetime import datetime
 from typing import Any, List, Tuple
+
+from agent_cascade.llm.schema import FUNCTION, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
-from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, Message
 from agent_cascade.utils.utils import extract_text_from_message
 
 logger = logging.getLogger(__name__)
@@ -14,9 +15,7 @@ logger = logging.getLogger(__name__)
 # "2026-09-06 10:14 → 2026-09-07 08:30, 22h 16m" (L1) or "L2, <same>, N summaries consolidated".
 # Anchored on the arrow pattern only — no surrounding parens required, so it matches both L1
 # and L2 formats. Groups: (1) start datetime, (2) end datetime.
-_MARKER_TS_RE = re.compile(
-    r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) → (\d{4}-\d{2}-\d{2} \d{2}:\d{2})'
-)
+_MARKER_TS_RE = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) → (\d{4}-\d{2}-\d{2} \d{2}:\d{2})')
 
 
 def is_compression_marker(msg: Any) -> bool:
@@ -36,9 +35,8 @@ def is_compression_marker(msg: Any) -> bool:
     from agent_cascade.prompts.dna import COMPRESSION_MARKER
     role = get_message_role(msg)
     content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-    return (role == USER and isinstance(content, str)
-            and content.startswith(COMPRESSION_MARKER)
-            and '<context_summary>' in content)
+    return (role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER) and
+            '<context_summary>' in content)
 
 
 def select_markers_for_consolidation(marker_indices: List[int]) -> Tuple[List[int], int]:
@@ -164,7 +162,7 @@ def _has_pending_tool_calls(msg) -> bool:
     1. Legacy mode: function_call attribute on the message
     2. Native OpenAI streaming: tool_index in extra dict (set by oai.py)
     3. Standard OpenAI format: tool_calls array (direct attribute or dict key)
-    
+
     Works with Message objects, dicts, and any object with role attributes.
 
     Args:
@@ -363,14 +361,14 @@ def compute_discard_count(active_set, fraction, force):
     # Early guard for empty active set
     if not active_set:
         return 0
-    
+
     # ── Refine: avoid splitting ASSISTANT(tool_call) → FUNCTION(result) pairs ──
     # Always keep at least 2 tail messages regardless of mode. In force mode the
     # difference is only that we guarantee at least 1 discard (above), not that
     # we squeeze more out of the tail.
     tail_keep = 2
     max_discard = len(active_set) - tail_keep
-    
+
     # Refinement advances discard forward when it encounters unsafe boundaries.
     # If final discard exceeds max_discard, compression is invalid at this ratio.
     discard = _refine_tool_call_boundary(active_set, discard, max_discard)
@@ -378,7 +376,7 @@ def compute_discard_count(active_set, fraction, force):
     # If discard went past the keep zone boundary (len - 2), no clean split exists
     if discard > len(active_set) - tail_keep:
         return -1  # Signal: tool chains extend past the keep zone with no clean split
-    
+
     # Post-refinement guard: verify the first kept message is not a FUNCTION response.
     # This catches edge cases where refinement landed on an ASSISTANT but its matching
     # FUNCTION was skipped (e.g., multi-call A with interleaved responses).
@@ -387,7 +385,7 @@ def compute_discard_count(active_set, fraction, force):
         role = get_message_role(msg)
         if role == FUNCTION:
             return -1  # Signal: boundary landed on a FUNCTION response
-    
+
     return discard
 
 
@@ -547,11 +545,11 @@ def rebuild_working_set(
 
     With clean trim, the pool is already compact — we just replace the
     caller's list with a deepcopy of the current pool content.
-    
+
     Cache Invalidation:
     - Clears token count cache in AgentInstance if accessible
     - Ensures fresh preprocessing on next LLM call
-    
+
     Mutates messages_list in-place (caller passes their own list reference).
 
     Args:
@@ -567,7 +565,7 @@ def rebuild_working_set(
     messages_list.clear()
     messages_list.extend(copy.deepcopy(compressed))
     # deepcopy ensures callers don't accidentally mutate pool state through their references
-    
+
     # Invalidate token count cache in AgentInstance (cache invalidation)
     try:
         inst = agent_pool.get_instance(agent_name)
@@ -580,10 +578,10 @@ def rebuild_working_set(
 
 
 def extract_instance_output(
-    messages: list[Any],
-    instance_name: str,
-    was_terminated: bool = False,
-    pool=None  # Optional: AgentPool to resolve actual log path
+        messages: list[Any],
+        instance_name: str,
+        was_terminated: bool = False,
+        pool=None  # Optional: AgentPool to resolve actual log path
 ) -> str:
     """
     Extract text output from a sub-agent's conversation messages.

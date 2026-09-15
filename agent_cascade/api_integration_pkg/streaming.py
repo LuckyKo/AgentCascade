@@ -5,19 +5,18 @@ Phase 3b pure-move refactor. ``broadcast_stream_update`` calls
 """
 
 import asyncio
-import logging
 import os
 import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from agent_cascade.log import logger
 from agent_cascade.agent_pool import AgentPool
-from agent_cascade.llm.schema import Message
-from agent_cascade.settings import STREAM_FORCE_FULL_INTERVAL
-from agent_cascade.api_integration_pkg.cache import _cache_mgr, _STREAM_TOKEN_STATS_CACHE_MAXSIZE
+from agent_cascade.api_integration_pkg.cache import _STREAM_TOKEN_STATS_CACHE_MAXSIZE, _cache_mgr
 from agent_cascade.api_integration_pkg.state_builder import build_stream_update_from_pool
+from agent_cascade.llm.schema import Message
+from agent_cascade.log import logger
+from agent_cascade.settings import STREAM_FORCE_FULL_INTERVAL
 
 # ────────────────────────────────────────────────────────────────────────────
 # FORCE_FULL time-based tracker (replaces tick_num % 100)
@@ -33,16 +32,18 @@ _last_force_full_lock = threading.Lock()
 # Seconds between periodic full (force_full) frames per instance — configurable via
 # AGENT_CASCADE_STREAM_FORCE_FULL_INTERVAL (see agent_cascade.settings).
 _FORCE_FULL_INTERVAL = STREAM_FORCE_FULL_INTERVAL
-_FORCE_FULL_STALE_SECS = 300.0    # Evict entries not updated in 5 minutes
+_FORCE_FULL_STALE_SECS = 300.0  # Evict entries not updated in 5 minutes
+
 
 def clear_force_full_timer(instance_name: str) -> None:
     """Remove the force_full timer entry for an instance (call on dismiss/restart).
-    
+
     This ensures the next broadcast after a restart gets a force_full immediately
     instead of waiting up to 60s for the stale timer to expire.
     """
     with _last_force_full_lock:
         _last_force_full.pop(instance_name, None)
+
 
 def _evict_stale_force_full_entries(now_mono: float) -> None:
     """Lazily evict entries older than _FORCE_FULL_STALE_SECS. Called under lock."""
@@ -50,12 +51,14 @@ def _evict_stale_force_full_entries(now_mono: float) -> None:
     for k in stale:
         del _last_force_full[k]
 
+
 # Rate-limiter for queue-full warnings (warn at most once every 5s).
 # No lock needed: _put_stream_update runs on the event loop thread (single-threaded).
 _qf_last_warn: float = 0.0
 
 # Last time stale force_full entries were evicted (monotonic)
 _last_force_full_evict_time: float = 0.0
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # STREAMING BACKLOG PROBE — TEMPORARY DIAGNOSTIC (evidence-gathering only)
@@ -72,6 +75,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if v is None:
         return default
     return v.strip().lower() in ('1', 'true', 'yes', 'on')
+
 
 STREAM_BACKEND_DEBUG = _env_flag('STREAM_BACKEND_DEBUG', False)
 
@@ -103,6 +107,7 @@ def _probe_get_logger():
         return None
     try:
         import logging
+
         # streaming.py is at <root>/agent_cascade/api_integration_pkg/streaming.py
         project_root = Path(__file__).resolve().parent.parent.parent
         log_dir = project_root / 'logs'
@@ -129,8 +134,8 @@ def _probe_get_logger():
         return None
 
 
-def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
-                  is_streaming_tick: bool, len_changed: bool, qsize) -> None:
+def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int, is_streaming_tick: bool,
+                  len_changed: bool, qsize) -> None:
     """Record one broadcast timing sample. NON-SPAMMY by design:
 
       * logs a line only when yield_to_enqueue_ms > 100 (meaningful backend delay),
@@ -152,9 +157,15 @@ def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
         with _PROBE_LOCK:
             st = _PROBE_STATE.get(instance_name)
             if st is None:
-                st = {'count': 0, 'sum_ms': 0.0, 'max_ms': 0.0,
-                      'prev_delay_ms': None, 'last_log_wall': 0.0,
-                      'max_gap_ms': 0.0, 'tid': tid}
+                st = {
+                    'count': 0,
+                    'sum_ms': 0.0,
+                    'max_ms': 0.0,
+                    'prev_delay_ms': None,
+                    'last_log_wall': 0.0,
+                    'max_gap_ms': 0.0,
+                    'tid': tid
+                }
                 _PROBE_STATE[instance_name] = st
 
             # ── Inter-tick GAP detection (KEY for "weird mode") ──────────────
@@ -180,8 +191,7 @@ def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
                 st['max_ms'] = delay_ms
 
             # Backlog detection: a sharp jump from <50ms to >500ms → one line.
-            backlog = (st['prev_delay_ms'] is not None
-                       and st['prev_delay_ms'] < 50.0 and delay_ms > 500.0)
+            backlog = (st['prev_delay_ms'] is not None and st['prev_delay_ms'] < 50.0 and delay_ms > 500.0)
 
             # Sampling / threshold gating.
             heartbeat = (st['count'] % 50 == 0)
@@ -195,13 +205,11 @@ def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
                     pass  # suppress this sample to keep output non-spammy
                 else:
                     tag = ('BACKLOG ' if backlog else '') + ('GAPSTALL ' if gap_stall else '')
-                    _log_probe(
-                        f"{tag}inst={instance_name} tid={tid % 100000} "
-                        f"yield_to_enqueue_ms={delay_ms:.1f} avg={avg_ms:.1f} max={st['max_ms']:.1f} "
-                        f"gap_ms={max(0.0, gap_ms):.0f} max_gap_ms={st['max_gap_ms']:.0f} "
-                        f"n={st['count']} resp_len={resp_len} tick={int(is_streaming_tick)} "
-                        f"len_chg={int(len_changed)} qsize={qsize}"
-                    )
+                    _log_probe(f"{tag}inst={instance_name} tid={tid % 100000} "
+                               f"yield_to_enqueue_ms={delay_ms:.1f} avg={avg_ms:.1f} max={st['max_ms']:.1f} "
+                               f"gap_ms={max(0.0, gap_ms):.0f} max_gap_ms={st['max_gap_ms']:.0f} "
+                               f"n={st['count']} resp_len={resp_len} tick={int(is_streaming_tick)} "
+                               f"len_chg={int(len_changed)} qsize={qsize}")
                     st['last_log_wall'] = now_wall
 
             st['prev_delay_ms'] = delay_ms
@@ -211,8 +219,8 @@ def _probe_record(instance_name: str, t_yield, t_enqueue: float, resp_len: int,
             # here while already holding _PROBE_LOCK; kept cheap — only when the
             # dict has grown past a small threshold OR at most once per ~30s.
             global _probe_last_cleanup_wall
-            if (len(_PROBE_STATE) > _PROBE_CLEANUP_SIZE_THRESHOLD
-                    or (now_wall - _probe_last_cleanup_wall) >= _PROBE_CLEANUP_INTERVAL_SECS):
+            if (len(_PROBE_STATE) > _PROBE_CLEANUP_SIZE_THRESHOLD or
+                (now_wall - _probe_last_cleanup_wall) >= _PROBE_CLEANUP_INTERVAL_SECS):
                 _probe_last_cleanup_wall = now_wall
                 stale_cutoff = now_wall - _PROBE_STALE_SECS
                 # Evict instances whose most recent activity is older than the
@@ -249,8 +257,14 @@ def _probe_llm_chunk(stream_id: str, model_name: str) -> None:
         with _PROBE_LOCK:
             st = _PROBE_LLM_STATE.get(stream_id)
             if st is None:
-                st = {'count': 0, 'last_wall': None, 'max_gap_ms': 0.0,
-                      'sum_gap_ms': 0.0, 'last_log_wall': 0.0, 'model': model_name}
+                st = {
+                    'count': 0,
+                    'last_wall': None,
+                    'max_gap_ms': 0.0,
+                    'sum_gap_ms': 0.0,
+                    'last_log_wall': 0.0,
+                    'model': model_name
+                }
                 _PROBE_LLM_STATE[stream_id] = st
             gap_ms = (now_wall - st['last_wall']) * 1000.0 if st['last_wall'] is not None else -1.0
             st['last_wall'] = now_wall
@@ -266,11 +280,9 @@ def _probe_llm_chunk(stream_id: str, model_name: str) -> None:
             # Periodic heartbeats are rate-capped to ~1 line/sec.
             if big_gap or (periodic and (now_wall - st['last_log_wall']) >= 1.0):
                 avg_gap = st['sum_gap_ms'] / max(1, st['count'] - 1)
-                _log_probe(
-                    f"{'LLMGAP ' if big_gap else ''}llm_chunk stream={stream_id} model={model_name} "
-                    f"gap_ms={gap_ms:.0f} avg_gap_ms={avg_gap:.0f} max_gap_ms={st['max_gap_ms']:.0f} "
-                    f"chunks={st['count']}"
-                )
+                _log_probe(f"{'LLMGAP ' if big_gap else ''}llm_chunk stream={stream_id} model={model_name} "
+                           f"gap_ms={gap_ms:.0f} avg_gap_ms={avg_gap:.0f} max_gap_ms={st['max_gap_ms']:.0f} "
+                           f"chunks={st['count']}")
                 st['last_log_wall'] = now_wall
     except Exception:
         pass  # probe must never break the LLM stream path
@@ -287,10 +299,8 @@ def _probe_llm_flush(stream_id: str, model_name: str) -> None:
                 avg_gap = st['sum_gap_ms'] / max(1, st['count'] - 1)
                 # A healthy stream has small steady gaps; a burst-at-end shows a
                 # huge max_gap with low chunk count. This line is the summary.
-                _log_probe(
-                    f"LLMDONE stream={stream_id} model={model_name} chunks={st['count']} "
-                    f"avg_gap_ms={avg_gap:.0f} max_gap_ms={st['max_gap_ms']:.0f}"
-                )
+                _log_probe(f"LLMDONE stream={stream_id} model={model_name} chunks={st['count']} "
+                           f"avg_gap_ms={avg_gap:.0f} max_gap_ms={st['max_gap_ms']:.0f}")
     except Exception:
         pass
 
@@ -328,7 +338,8 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
             if now - _hw_last_warn >= 5.0:
                 logger.warning(
                     '[STREAM_QUEUE] WS send queue high-watermark reached: %d/%d (>=75%% capacity). Slow client or network backlog suspected.',
-                    queue.qsize(), queue.maxsize,
+                    queue.qsize(),
+                    queue.maxsize,
                 )
                 _hw_last_warn = now
 
@@ -363,7 +374,8 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
             dropped = non_stream_events[:len(non_stream_events) - room]
             logger.error(
                 '[STREAM_QUEUE] recovery: dropped %d oldest structural event(s) to fit preserved events. Types: %s',
-                len(dropped), [e.get('type', '?') if isinstance(e, dict) else type(e).__name__ for e in dropped],
+                len(dropped),
+                [e.get('type', '?') if isinstance(e, dict) else type(e).__name__ for e in dropped],
             )
             non_stream_events = non_stream_events[len(dropped):]
 
@@ -383,7 +395,9 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
             logger.warning(
                 '[STREAM_QUEUE] WS send queue FULL (maxsize=%d) — purged %d stale stream_update delta(s) '
                 'and reset force_full sync for instance(s): %s. UI will resync to latest on next frame.',
-                queue.maxsize, purged_count, sorted(purged_instances) or ['none'],
+                queue.maxsize,
+                purged_count,
+                sorted(purged_instances) or ['none'],
             )
             _qf_last_warn = now
 
@@ -394,6 +408,7 @@ async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
             logger.error('[STREAM_QUEUE] recovery failed: could not re-insert current event (type=%s)',
                          event.get('type', '?') if isinstance(event, dict) else type(event).__name__)
 
+
 def broadcast_stream_update(
     pool: AgentPool,
     instance_name: str,
@@ -403,9 +418,10 @@ def broadcast_stream_update(
     now_sec: float,
     last_send: float,
     last_resp_len: int,
-    send_queue=None,       # Explicit queue (preferred) or None to use pool._ws_send_queue
-    loop=None,             # Explicit loop (preferred) or None to use pool._ws_loop
-    yield_time: Optional[float] = None,  # PROBE: time.monotonic() captured at the call site right after engine yielded; ignored when STREAM_BACKEND_DEBUG is False
+    send_queue=None,  # Explicit queue (preferred) or None to use pool._ws_send_queue
+    loop=None,  # Explicit loop (preferred) or None to use pool._ws_loop
+    yield_time: Optional[
+        float] = None,  # PROBE: time.monotonic() captured at the call site right after engine yielded; ignored when STREAM_BACKEND_DEBUG is False
 ) -> tuple[float, int]:
     """Build and push a stream_update event for an agent instance.
 
@@ -465,8 +481,7 @@ def broadcast_stream_update(
     # so len_changed=True on the first chunk of each stream → immediate "streaming
     # started" signal. Subsequent chunks in the same stream have stable len → 10fps.
     should_broadcast = (
-        len_changed
-        or (now_sec - last_send > 0.1)  # 100ms throttle for streaming ticks
+        len_changed or (now_sec - last_send > 0.1)  # 100ms throttle for streaming ticks
     )
 
     if not should_broadcast:
@@ -524,7 +539,10 @@ def broadcast_stream_update(
             asyncio.run_coroutine_threadsafe(
                 _put_stream_update(
                     ws_queue,
-                    {'type': 'stream_update', **stream_update},
+                    {
+                        'type': 'stream_update',
+                        **stream_update
+                    },
                 ),
                 ws_loop,
             )
@@ -533,15 +551,16 @@ def broadcast_stream_update(
 
     except Exception as e:
         # RuntimeError if event loop is closed; catch-all for safety
-        logger.debug(
-            f"[STREAM_BROADCAST] Update failed for {instance_name} "
-            f"(non-critical): {e}"
-        )
+        logger.debug(f"[STREAM_BROADCAST] Update failed for {instance_name} "
+                     f"(non-critical): {e}")
         return (last_send, resp_len)
 
+
 def _calc_stream_token_stats(
-    pool: AgentPool, instance_name: str,
-    conv_snapshot: List[Message], stream_resp_snapshot: Optional[List[Message]],
+    pool: AgentPool,
+    instance_name: str,
+    conv_snapshot: List[Message],
+    stream_resp_snapshot: Optional[List[Message]],
     responses: Optional[List[Message]],
 ) -> tuple:
     """Calculate token stats for streaming updates with caching.
@@ -553,7 +572,10 @@ def _calc_stream_token_stats(
         (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
     """
     h_stats, r_stats = _calc_stream_token_stats_uncached(
-        pool, conv_snapshot, stream_resp_snapshot, responses,
+        pool,
+        conv_snapshot,
+        stream_resp_snapshot,
+        responses,
     )
 
     # Cache the computed stats for reuse during active generation
@@ -566,7 +588,8 @@ def _calc_stream_token_stats(
 
 def _calc_stream_token_stats_uncached(
     pool: AgentPool,
-    conv_snapshot: List[Message], stream_resp_snapshot: Optional[List[Message]],
+    conv_snapshot: List[Message],
+    stream_resp_snapshot: Optional[List[Message]],
     responses: Optional[List[Message]],
 ) -> tuple:
     """Pure computation of (h_stats, r_stats) WITHOUT touching the cache.

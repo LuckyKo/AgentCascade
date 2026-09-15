@@ -10,17 +10,12 @@ no-op there, and the internal installer is exercised via an injected fake
 kernel32 (we do NOT monkeypatch os.name — modules cache it at import).
 """
 
-import ctypes
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 import agent_cascade.shared_init as _shared
-from agent_cascade.shared_init import (
-    install_console_ctrl_guard,
-    _install_windows_console_guard,
-)
-
+from agent_cascade.shared_init import _install_windows_console_guard, install_console_ctrl_guard
 
 # CTRL_* event types (wincon.h) — pin the exact values used by the guard.
 CTRL_C_EVENT = 0

@@ -15,11 +15,10 @@ from typing import Callable, List, Optional, Tuple
 
 from agent_cascade.tool_utils import truncate_with_spillover
 
-
 # ─── list_dir filter helpers ──────────────────────────────────────────────
 
 _SIZE_RE = re.compile(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)?$', re.IGNORECASE)
-_SIZE_UNITS = {'B': 1, 'KB': 1024, 'MB': 1024 ** 2, 'GB': 1024 ** 3, 'TB': 1024 ** 4}
+_SIZE_UNITS = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
 
 # Cap on files counted by _compute_scope_info for directory scope reporting.
 # Prevents rglob('*') from walking arbitrarily large trees on the approval
@@ -50,14 +49,35 @@ _RELATIVE_RE = re.compile(
 # Compact unit aliases: "2h", "90min", "1d", "2.5w"
 _COMPACT_RE = re.compile(r'^(\d+(?:\.\d+)?)\s*([a-zA-Z]+)$')
 _UNIT_ALIASES = {
-    's': 1, 'sec': 1, 'second': 1, 'seconds': 1,
-    'm': 60, 'min': 60, 'mins': 60, 'minute': 60, 'minutes': 60,
-    'h': 3600, 'hr': 3600, 'hrs': 3600, 'hour': 3600, 'hours': 3600,
-    'd': 86400, 'day': 86400, 'days': 86400,
-    'w': 604800, 'wk': 604800, 'week': 604800, 'weeks': 604800,
+    's': 1,
+    'sec': 1,
+    'second': 1,
+    'seconds': 1,
+    'm': 60,
+    'min': 60,
+    'mins': 60,
+    'minute': 60,
+    'minutes': 60,
+    'h': 3600,
+    'hr': 3600,
+    'hrs': 3600,
+    'hour': 3600,
+    'hours': 3600,
+    'd': 86400,
+    'day': 86400,
+    'days': 86400,
+    'w': 604800,
+    'wk': 604800,
+    'week': 604800,
+    'weeks': 604800,
     # Approximate: 1mo=30d, 1y=365d (leap years / variable month lengths ignored)
-    'mo': 2592000, 'month': 2592000, 'months': 2592000,
-    'y': 31536000, 'yr': 31536000, 'year': 31536000, 'years': 31536000,
+    'mo': 2592000,
+    'month': 2592000,
+    'months': 2592000,
+    'y': 31536000,
+    'yr': 31536000,
+    'year': 31536000,
+    'years': 31536000,
 }
 
 
@@ -115,14 +135,16 @@ class FilterContext:
     """Bundle of all list_dir filters threaded through the listing call chain."""
     include_fn: Optional[Callable] = None
     exclude_fn: Optional[Callable] = None
-    min_size: Optional[int] = None          # bytes, or None
-    max_size: Optional[int] = None          # bytes, or None
+    min_size: Optional[int] = None  # bytes, or None
+    max_size: Optional[int] = None  # bytes, or None
     modified_after: Optional[float] = None  # epoch, or None
     modified_before: Optional[float] = None  # epoch, or None
     files_only: bool = False
     dirs_only: bool = False
 
+
 # ─── Mixin: File operations for OperationManager ─────────────────────────
+
 
 class FileOpsMixin:
     """File operation methods. Expects self to have __init__-set attributes."""
@@ -375,9 +397,8 @@ class FileOpsMixin:
 
     # ─── Directory listing helpers ────────────────────────────────────────
 
-    def _list_flat(
-        self, resolved: Path, ctx: 'FilterContext', sort_by: str, max_entries: int
-    ) -> Tuple[str, int, int, int]:
+    def _list_flat(self, resolved: Path, ctx: 'FilterContext', sort_by: str,
+                   max_entries: int) -> Tuple[str, int, int, int]:
         """Flat directory listing via os.scandir. Returns (output_str, dirs, files, size)."""
         dirs = []
         files = []
@@ -397,10 +418,11 @@ class FileOpsMixin:
                     stat_info = None
                 # Full filter (name + size + date) via context
                 if not self._matches_filters(
-                    entry.name, is_dir,
-                    size=stat_info.st_size if stat_info else None,
-                    mtime=stat_info.st_mtime if stat_info else None,
-                    ctx=ctx,
+                        entry.name,
+                        is_dir,
+                        size=stat_info.st_size if stat_info else None,
+                        mtime=stat_info.st_mtime if stat_info else None,
+                        ctx=ctx,
                 ):
                     continue
                 e = self._make_entry(entry.name, is_dir, stat_info)
@@ -444,9 +466,8 @@ class FileOpsMixin:
 
         return output, total_dirs, total_files, total_size
 
-    def _list_recursive(
-        self, path: str, resolved: Path, ctx: 'FilterContext', sort_by: str, max_depth: int, max_entries: int
-    ) -> Tuple[str, int, int, int]:
+    def _list_recursive(self, path: str, resolved: Path, ctx: 'FilterContext', sort_by: str, max_depth: int,
+                        max_entries: int) -> Tuple[str, int, int, int]:
         """Recursive directory listing via os.walk. Returns (output_str, dirs, files, size)."""
         entries_by_dir: dict = OrderedDict()
         visited_dirs: set = set()
@@ -457,7 +478,7 @@ class FileOpsMixin:
             current_dir = Path(dirpath)
             abs_path = current_dir.resolve()
 
-            if abs_path in visited_dirs:   # symlink cycle guard
+            if abs_path in visited_dirs:  # symlink cycle guard
                 subdirs.clear()
                 continue
             visited_dirs.add(abs_path)
@@ -505,10 +526,11 @@ class FileOpsMixin:
                     stat_info = None
                 # Full filter (name + size + date) via context, after stat is available.
                 if not self._matches_filters(
-                    f_name, False,
-                    size=stat_info.st_size if stat_info else None,
-                    mtime=stat_info.st_mtime if stat_info else None,
-                    ctx=ctx,
+                        f_name,
+                        False,
+                        size=stat_info.st_size if stat_info else None,
+                        mtime=stat_info.st_mtime if stat_info else None,
+                        ctx=ctx,
                 ):
                     continue
                 f_entry = self._make_entry(f_name, False, stat_info)
@@ -549,9 +571,7 @@ class FileOpsMixin:
         for dirpath in entries_by_dir:
             if dirpath == root_str:
                 continue  # root is never recorded (matches _dir_displayed's no-add branch)
-            if self._matches_filters(
-                Path(dirpath).name, True, None, None, ctx=ctx
-            ):
+            if self._matches_filters(Path(dirpath).name, True, None, None, ctx=ctx):
                 displayed_dirs.add(dirpath)
 
         # Totals count only what is actually displayed. Dirs are counted from the
@@ -666,7 +686,8 @@ class FileOpsMixin:
                 warnings.append(f"[warning] modified_after='{modified_after}' not recognized; no date filter applied.")
             ctx_modified_before = _parse_time(modified_before)
             if modified_before and ctx_modified_before is None:
-                warnings.append(f"[warning] modified_before='{modified_before}' not recognized; no date filter applied.")
+                warnings.append(
+                    f"[warning] modified_before='{modified_before}' not recognized; no date filter applied.")
 
             ctx = FilterContext(
                 include_fn=_build_pattern_fn(include),
@@ -682,14 +703,11 @@ class FileOpsMixin:
             header = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
 
             if recursive:
-                output, total_dirs, total_files, total_size = self._list_recursive(
-                    path, resolved, ctx, sort_by, max_depth, max_entries
-                )
+                output, total_dirs, total_files, total_size = self._list_recursive(path, resolved, ctx, sort_by,
+                                                                                   max_depth, max_entries)
                 is_empty = not (total_dirs or total_files)
             else:
-                output, total_dirs, total_files, total_size = self._list_flat(
-                    resolved, ctx, sort_by, max_entries
-                )
+                output, total_dirs, total_files, total_size = self._list_flat(resolved, ctx, sort_by, max_entries)
                 is_empty = not (total_dirs or total_files)
 
             if is_empty:
@@ -708,7 +726,8 @@ class FileOpsMixin:
 
             result = header + output
             return truncate_with_spillover(
-                result, char_limit,
+                result,
+                char_limit,
                 instance_name=agent_name,
                 tool_name='list_dir',
                 base_dir=self.base_dir,
@@ -799,7 +818,11 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='write_file',
-                tool_args={'path': path, 'content': content, 'justification': justification},
+                tool_args={
+                    'path': path,
+                    'content': content,
+                    'justification': justification
+                },
                 description=description,
             )
             if not approved:
@@ -843,7 +866,9 @@ class FileOpsMixin:
 
     # ─── Edit file (with nested helpers) ──────────────────────────────────
 
-    def edit_file(self, path: str, agent_name: str,
+    def edit_file(self,
+                  path: str,
+                  agent_name: str,
                   old_content: str,
                   new_content: str,
                   match_mode: str = 'exact',
@@ -869,18 +894,19 @@ class FileOpsMixin:
         # Initialize variables before match-mode dispatch (defensive scoping)
         exact_start_line = None
         exact_end_line = None
-        indent_warnings = []       # Initialized to avoid NameError risk
-        start_idx = None           # d&i mode range indices
-        end_idx = None             # d&i mode range indices
-        delta_width = 0            # Indent delta for heuristic feedback
+        indent_warnings = []  # Initialized to avoid NameError risk
+        start_idx = None  # d&i mode range indices
+        end_idx = None  # d&i mode range indices
+        delta_width = 0  # Indent delta for heuristic feedback
+
+        import difflib
 
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
-        import difflib
 
         # ── Helper: parse range spec for delete_and_insert mode ──────────────
         def _parse_range(range_str: str, total_lines: int) -> tuple:
             """Parse old_content as a line range for delete_and_insert mode.
-            
+
             Returns (start_idx, end_idx) as 0-based Python slice indices.
             - start is inclusive, end is exclusive.
             - 1-indexed input: '3:7' means lines 3 through 7.
@@ -889,14 +915,14 @@ class FileOpsMixin:
             - 0 means append at end of file.
             """
             range_str = range_str.strip()
-            
+
             if ':' in range_str:
                 parts = range_str.split(':')
                 if len(parts) != 2:
                     raise ValueError(f"Range must have exactly one ':'. Got '{range_str}'")
-                
+
                 start_part, end_part = parts
-                
+
                 # Parse start (empty means delete all from beginning, i.e., start at line 1)
                 if start_part.strip() == '':
                     start = 1  # Delete from the very first line
@@ -904,7 +930,7 @@ class FileOpsMixin:
                     start = total_lines + 1  # Append beyond last line
                 else:
                     start = int(start_part)
-                
+
                 # Parse end (empty means delete all from start to end of file)
                 if end_part.strip() == '':
                     end = total_lines + 1  # Delete everything from start onward
@@ -916,17 +942,17 @@ class FileOpsMixin:
                     start = total_lines + 1 + start  # 1-indexed: -1 → last line
                 if end < 0:
                     end = total_lines + 1 + end  # consistent 1-indexed semantics
-                
+
                 # Clamp to valid bounds
                 start = max(0, min(start, total_lines + 1))
                 end = max(0, min(end, total_lines + 1))
-                
+
                 if start > end:
                     raise ValueError(f"Start ({start}) must be <= end ({end})")
-                
+
                 # Convert to 0-based slice indices
                 return start - 1, end
-                
+
             else:
                 # Single number = insert-only (or delete single line if new_content is empty)
                 if range_str == '0':
@@ -1014,8 +1040,9 @@ class FileOpsMixin:
                 best_ratio = 0.0
                 best_match_info = None
 
-                for size in range(max(1, n_old_non_empty - 2), min(n_file_non_empty - start_list_idx + 1, n_old_non_empty + 3)):
-                    candidate_slice = file_line_info[start_list_idx : start_list_idx + size]
+                for size in range(max(1, n_old_non_empty - 2),
+                                  min(n_file_non_empty - start_list_idx + 1, n_old_non_empty + 3)):
+                    candidate_slice = file_line_info[start_list_idx:start_list_idx + size]
                     candidate_norms = [item[1] for item in candidate_slice]
                     norm_candidate_joined = ''.join(candidate_norms)
 
@@ -1044,7 +1071,7 @@ class FileOpsMixin:
             exact_start_line = orig_start_idx + 1
             exact_end_line = orig_end_idx + 1
 
-            actual_old_content = ''.join(file_lines[orig_start_idx : orig_end_idx + 1])
+            actual_old_content = ''.join(file_lines[orig_start_idx:orig_end_idx + 1])
             match_ratio = unique_match['ratio']
 
             last_matched_line = file_lines[orig_end_idx]
@@ -1089,7 +1116,8 @@ class FileOpsMixin:
                 result = re.sub(r'\b0[xX][0-9a-fA-F]+\b', '', result)
                 result = re.sub(r'\b0[bB][01]+\b', '', result)
                 result = re.sub(r'\b0[oO][0-7]+\b', '', result)
-                result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_.\[\]()]*\s*(<<=|>>=|\*=|/=|//=|%=|\+=|-=|\|=|&=|\^=)', 'assign', result)
+                result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_.\[\]()]*\s*(<<=|>>=|\*=|/=|//=|%=|\+=|-=|\|=|&=|\^=)',
+                                'assign', result)
                 result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_.\[\]()]*\s*=(?!=)', 'assign', result)
                 result = re.sub(r'\breturn\b.*', 'return', result)
                 result = re.sub(r'\b(?:True|False)\b', '', result)
@@ -1117,11 +1145,8 @@ class FileOpsMixin:
                     for a, b in zip(range(i1_start, i1_end), range(j1_start, j1_end)):
                         old_to_file_map[a] = b
                 elif tag == 'replace':
-                    sub_matcher = difflib.SequenceMatcher(
-                        None,
-                        old_norm_lines[i1_start:i1_end],
-                        file_norm_lines[j1_start:j1_end]
-                    )
+                    sub_matcher = difflib.SequenceMatcher(None, old_norm_lines[i1_start:i1_end],
+                                                          file_norm_lines[j1_start:j1_end])
                     for tag, a_s, a_e, b_s, b_e in sub_matcher.get_opcodes():
                         if tag == 'equal':
                             for a, b in zip(range(a_s, a_e), range(b_s, b_e)):
@@ -1150,11 +1175,8 @@ class FileOpsMixin:
                     leading_ws = fl[:len(fl) - len(fl.lstrip())] if fl.strip() else ''
                     file_indent_by_line[idx] = leading_ws
 
-            def find_best_indent_for_unmapped_line(
-                    line_idx: int,
-                    new_content_lines: list,
-                    new_to_file_map: dict,
-                    file_indent_by_line: dict) -> str:
+            def find_best_indent_for_unmapped_line(line_idx: int, new_content_lines: list, new_to_file_map: dict,
+                                                   file_indent_by_line: dict) -> str:
                 for check_idx in range(line_idx - 1, -1, -1):
                     if check_idx in new_to_file_map:
                         f_idx = new_to_file_map[check_idx]
@@ -1191,8 +1213,8 @@ class FileOpsMixin:
                         adjusted_lines.append(orig_leading_ws + line.lstrip())
                         continue
 
-                best_indent = find_best_indent_for_unmapped_line(
-                    line_idx, new_content_lines, new_to_file_map, file_indent_by_line)
+                best_indent = find_best_indent_for_unmapped_line(line_idx, new_content_lines, new_to_file_map,
+                                                                 file_indent_by_line)
                 if best_indent:
                     adjusted_lines.append(best_indent + line.lstrip())
                 elif file_indent != old_indent and delta_width != 0:
@@ -1229,8 +1251,9 @@ class FileOpsMixin:
                     indent_widths.append((i + 1, width))
 
                 if len(indent_widths) >= 2:
-                    increments = [abs(indent_widths[j][1] - indent_widths[j-1][1])
-                                  for j in range(1, len(indent_widths))]
+                    increments = [
+                        abs(indent_widths[j][1] - indent_widths[j - 1][1]) for j in range(1, len(indent_widths))
+                    ]
                     positive_increments = [inc for inc in increments if inc > 0]
 
                     if len(positive_increments) >= 2:
@@ -1245,11 +1268,9 @@ class FileOpsMixin:
                         diff = abs(curr_w - prev_w)
                         if diff > threshold_val:
                             direction = 'increased' if curr_w > prev_w else 'decreased'
-                            warnings.append(
-                                f"Indentation anomaly at line {curr_line_num} in {file_path}: "
-                                f"indent {direction} from {prev_w} to {curr_w} "
-                                f"(jump of {diff} spaces, threshold={threshold_val})"
-                            )
+                            warnings.append(f"Indentation anomaly at line {curr_line_num} in {file_path}: "
+                                            f"indent {direction} from {prev_w} to {curr_w} "
+                                            f"(jump of {diff} spaces, threshold={threshold_val})")
 
                 return warnings
 
@@ -1351,10 +1372,8 @@ class FileOpsMixin:
             # keepends=False: avoids double-newlines when joined with '\n' below
             old_lines = file_content.splitlines()
             new_lines = new_file_content.splitlines()
-            diff_lines = list(difflib.unified_diff(
-                old_lines, new_lines,
-                fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
-            ))
+            diff_lines = list(
+                difflib.unified_diff(old_lines, new_lines, fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''))
             # Skip --- and +++ headers (first 2), keep @@ headers and content
             diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
             # Limit to 20 lines max; truncate with ellipsis if longer
@@ -1406,7 +1425,7 @@ class FileOpsMixin:
 
             elif match_mode == 'delete_and_insert':
                 d_start = start_idx + 1  # 0-based to 1-based
-                d_end = end_idx          # exclusive in slice semantics
+                d_end = end_idx  # exclusive in slice semantics
                 if start_idx == end_idx:
                     # Insert-only variant
                     res_msg += f" line {d_start} (d&i, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
@@ -1433,7 +1452,14 @@ class FileOpsMixin:
 
     # ─── Re-indent ────────────────────────────────────────────────────────
 
-    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = 'min', justification: str = '') -> str:
+    def re_indent(self,
+                  path: str,
+                  agent_name: str,
+                  lines: str,
+                  indent: int,
+                  indent_type: str,
+                  mode: str = 'min',
+                  justification: str = '') -> str:
         """Re-indents a block of code in a file."""
         try:
             resolved = self._resolve_path(path, mode='rw')
@@ -1631,7 +1657,14 @@ class FileOpsMixin:
             original_ws_unit = 'unknown'
 
         description = f"Re-indent block in: {path} (lines: {lines}, indent: {indent}, type: {indent_type}, mode: {mode})"
-        tool_args = {'path': path, 'lines': lines, 'indent': indent, 'indent_type': indent_type, 'mode': mode, 'justification': justification}
+        tool_args = {
+            'path': path,
+            'lines': lines,
+            'indent': indent,
+            'indent_type': indent_type,
+            'mode': mode,
+            'justification': justification
+        }
 
         if not self._is_auto_approved(path, agent_name):
             approved, reason = self.request_user_approval(
@@ -1678,10 +1711,12 @@ class FileOpsMixin:
                 if changed_count > 0:
                     old_lines = file_content.splitlines()
                     new_lines = new_content_val.splitlines()
-                    diff_lines = list(difflib.unified_diff(
-                        old_lines, new_lines,
-                        fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
-                    ))
+                    diff_lines = list(
+                        difflib.unified_diff(old_lines,
+                                             new_lines,
+                                             fromfile=f'a/{path}',
+                                             tofile=f'b/{path}',
+                                             lineterm=''))
 
                     # Check if all changes are uniform whitespace shifts (same content, different leading ws)
                     # Uses keepends=True to match block_lines/new_block_lines representation used in changed_count
@@ -1861,8 +1896,8 @@ class FileOpsMixin:
                 continue
             # Filters are applied within the base directory of a path (B2).
             if self._has_filters(include, exclude, min_size, max_size, modified_after, modified_before):
-                matched = self._expand_filtered(resolved, include, exclude,
-                                                min_size, max_size, modified_after, modified_before)
+                matched = self._expand_filtered(resolved, include, exclude, min_size, max_size, modified_after,
+                                                modified_before)
                 for m in matched:
                     _add_target(m)
             else:
@@ -1899,8 +1934,11 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='delete_file',
-                tool_args={'count': len(targets), 'paths_preview': paths_preview,
-                           'justification': visible_justification},
+                tool_args={
+                    'count': len(targets),
+                    'paths_preview': paths_preview,
+                    'justification': visible_justification
+                },
                 description=description,
             )
             if not approved:
@@ -1910,7 +1948,7 @@ class FileOpsMixin:
                 justification = f"{justification}\n{reason}".strip()
 
         # ── B4: per-target execution with continue-on-error + aggregated report. ─
-        deleted: List[Tuple[Path, str]] = []   # (resolved, backup_path_str)
+        deleted: List[Tuple[Path, str]] = []  # (resolved, backup_path_str)
         failures: List[str] = []
         for t in targets:
             try:
@@ -1944,8 +1982,8 @@ class FileOpsMixin:
     @staticmethod
     def _has_filters(include, exclude, min_size, max_size, modified_after, modified_before) -> bool:
         """True if any filter argument is a non-empty string."""
-        return any(v and str(v).strip() for v in (include, exclude, min_size, max_size,
-                                                  modified_after, modified_before))
+        return any(
+            v and str(v).strip() for v in (include, exclude, min_size, max_size, modified_after, modified_before))
 
     def _build_filter_ctx(self, include, exclude, min_size, max_size, modified_after, modified_before):
         """Build a FilterContext from raw filter strings (mirrors list_directory)."""
@@ -1958,8 +1996,8 @@ class FileOpsMixin:
             modified_before=_parse_time(modified_before),
         )
 
-    def _expand_filtered(self, base: Path, include, exclude, min_size, max_size,
-                         modified_after, modified_before) -> List[Path]:
+    def _expand_filtered(self, base: Path, include, exclude, min_size, max_size, modified_after,
+                         modified_before) -> List[Path]:
         """Expand *base* into matched targets using the shared list_dir filter helpers.
 
         Mirrors list_directory semantics:
@@ -1994,7 +2032,7 @@ class FileOpsMixin:
         for dirpath, subdirs, filenames in os.walk(str(base), topdown=True):
             current_dir = Path(dirpath)
             abs_path = current_dir.resolve()
-            if abs_path in visited:      # symlink cycle guard (mirrors _list_recursive)
+            if abs_path in visited:  # symlink cycle guard (mirrors _list_recursive)
                 subdirs.clear()
                 continue
             visited.add(abs_path)
@@ -2004,7 +2042,7 @@ class FileOpsMixin:
                     d = current_dir / name
                     try:
                         st = d.stat()
-                        size, mtime = 0, None      # dirs: size/date filters never apply
+                        size, mtime = 0, None  # dirs: size/date filters never apply
                     except OSError:
                         size, mtime = None, None
                     if self._matches_filters(name, True, size=size, mtime=mtime, ctx=ctx):
@@ -2098,7 +2136,7 @@ class FileOpsMixin:
         # unless we are sure the backup is complete. Partial backups are removed.
         try:
             shutil.move(resolved, backup_path)
-        except Exception as move_err:
+        except Exception:
             # Fallback: copy to backup, verify, then remove the original.
             try:
                 if is_directory:
@@ -2188,7 +2226,7 @@ class FileOpsMixin:
         """Copy a file — auto-approved if destination is new or agent-owned."""
         try:
             src_path = self._resolve_path(source, mode='ro')
-            dest_path_check = self._resolve_path(destination, mode='rw')
+            self._resolve_path(destination, mode='rw')  # validate destination is writable (side effect)
         except Exception as e:
             return f"ERROR: {str(e)}"
         if not src_path.exists():
@@ -2199,7 +2237,11 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='copy_file',
-                tool_args={'source': source, 'destination': destination, 'justification': justification},
+                tool_args={
+                    'source': source,
+                    'destination': destination,
+                    'justification': justification
+                },
                 description=description,
             )
             if not approved:
@@ -2268,7 +2310,7 @@ class FileOpsMixin:
         """Move a file — auto-approved if source is agent-owned."""
         try:
             src_path = self._resolve_path(source, mode='rw')
-            dest_path_check = self._resolve_path(destination, mode='rw')
+            self._resolve_path(destination, mode='rw')  # validate destination is writable (side effect)
         except Exception as e:
             return f"ERROR: {str(e)}"
         if not src_path.exists():
@@ -2279,7 +2321,11 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='move_file',
-                tool_args={'source': source, 'destination': destination, 'justification': justification},
+                tool_args={
+                    'source': source,
+                    'destination': destination,
+                    'justification': justification
+                },
                 description=description,
             )
             if not approved:

@@ -35,7 +35,8 @@ import requests
 import soundfile as sf
 from pydantic import BaseModel
 
-from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, ROLE, SYSTEM, USER, ContentItem, Message
+from agent_cascade.llm.schema import (ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, ROLE, SYSTEM, USER, ContentItem,
+                                      Message)
 from agent_cascade.log import logger
 from agent_cascade.settings import CHAT_TEMPLATE_TOKEN_OVERHEAD, IMAGE_TOKEN_ESTIMATE
 
@@ -60,7 +61,8 @@ _HTTP_FETCH_HEADERS = {
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.3',
     'Accept':
         'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Language':
+        'en-US,en;q=0.9',
 }
 _HTTP_FETCH_TIMEOUT = (10, 30)  # (connect, read) seconds
 
@@ -88,17 +90,18 @@ def is_multimodal_content(content) -> bool:
 
 # ── Message Field Accessor Helpers (consolidated from execution_engine, handler, api_server) ──
 
+
 def msg_field(msg, field_name: str, default=None):
     """Get a field from a message, handling both dict and Message objects.
-    
+
     Replaces duplicated _msg_field / _msg_role / _msg_content / _get_msg_role patterns
     that existed across execution_engine.py, compression/handler.py, and api_server.py.
-    
+
     Args:
         msg: Message object or dict with message fields
         field_name: Field name to access ('role', 'content', 'extra', etc.)
         default: Default value if field not found
-        
+
     Returns:
         Field value or default
     """
@@ -107,7 +110,7 @@ def msg_field(msg, field_name: str, default=None):
 
 def msg_set(msg, field_name: str, value) -> None:
     """Set a field on a message, handling both dict and Message objects.
-    
+
     Args:
         msg: Message object or dict with message fields
         field_name: Field name to set ('role', 'content', etc.)
@@ -121,11 +124,11 @@ def msg_set(msg, field_name: str, value) -> None:
 
 def msg_has_field(msg, field_name: str) -> bool:
     """Check if a message has a field, handling both dict and Message objects.
-    
+
     Args:
         msg: Message object or dict with message fields
         field_name: Field name to check for
-        
+
     Returns:
         True if the field exists on the message
     """
@@ -185,12 +188,9 @@ def print_traceback(is_error: bool = True):
         logger.warning(tb)
 
 
-from agent_cascade.utils.thinking_block import (
-    _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE,
-    _THINK_BLOCK_BRACKET_RE,
-    _MARKDOWN_CODE_RE, _TRIPLE_QUOTE_RE,
-    _JSON_STRING_RE, CHINESE_CHAR_RE, _IMAGE_DATA_RE as IMAGE_REGEX
-)
+from agent_cascade.utils.thinking_block import _IMAGE_DATA_RE as IMAGE_REGEX
+from agent_cascade.utils.thinking_block import (_MARKDOWN_CODE_RE, _THINK_BLOCK_BRACKET_RE, _THINK_BLOCK_RE,
+                                                CHINESE_CHAR_RE)
 
 
 def has_chinese_chars(data: Any) -> bool:
@@ -198,9 +198,10 @@ def has_chinese_chars(data: Any) -> bool:
     return bool(CHINESE_CHAR_RE.search(text))
 
 
-def has_chinese_messages(messages: List[Union[Message, dict, list, bool, None]], check_roles: Tuple[str] = (SYSTEM, USER)) -> bool:
+def has_chinese_messages(
+    messages: List[Union[Message, dict, list, bool, None]], check_roles: Tuple[str] = (SYSTEM, USER)) -> bool:
     """Check if any message in the list contains Chinese characters.
-    
+
     Skips non-dict/non-Message items (booleans, None, lists) that can leak via JSON parsing or logger recovery.
     Follows the same defensive pattern as get_history_stats().
     """
@@ -219,7 +220,7 @@ def has_chinese_messages(messages: List[Union[Message, dict, list, bool, None]],
         elif not isinstance(m, (dict, Message)):
             logger.debug(f"has_chinese_messages: skipping unexpected type {type(m).__name__} in messages list")
             continue
-        
+
         # Extract role safely based on type
         if isinstance(m, dict):
             role = m.get('role')
@@ -227,7 +228,7 @@ def has_chinese_messages(messages: List[Union[Message, dict, list, bool, None]],
         else:  # Message object
             role = getattr(m, 'role', None)
             content = getattr(m, 'content', '')
-        
+
         if role in check_roles:
             if has_chinese_chars(content):
                 return True
@@ -240,6 +241,7 @@ _DATA_URL_MIME_TO_EXT = {
     'image/svg+xml': 'svg',
     'application/octet-stream': 'bin',
 }
+
 
 def get_basename_from_url(path_or_url: str) -> str:
     # Handle base64 data URLs - generate a safe filename from MIME type
@@ -351,17 +353,14 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
             # Estimate decoded size before decoding to prevent memory exhaustion
             estimated_size = (len(b64_data) * 3) // 4
             if estimated_size > MAX_DATA_URL_SIZE:
-                raise ValueError(
-                    f'Data URL exceeds maximum allowed size of {MAX_DATA_URL_SIZE / (1024*1024):.0f}MB '
-                    f'(estimated decoded size: {estimated_size / (1024*1024):.1f}MB)'
-                )
+                raise ValueError(f'Data URL exceeds maximum allowed size of {MAX_DATA_URL_SIZE / (1024*1024):.0f}MB '
+                                 f'(estimated decoded size: {estimated_size / (1024*1024):.1f}MB)')
 
             decoded = base64.b64decode(b64_data)
             if len(decoded) > MAX_DATA_URL_SIZE:
                 raise ValueError(
                     f'Decoded data exceeds maximum allowed size of {MAX_DATA_URL_SIZE / (1024*1024):.0f}MB '
-                    f'(got {len(decoded) / (1024*1024):.1f}MB)'
-                )
+                    f'(got {len(decoded) / (1024*1024):.1f}MB)')
 
             with open(new_path, 'wb') as file:
                 file.write(decoded)
@@ -487,7 +486,8 @@ def repair_invalid_json(text: str) -> str:
     # 1. Handle triple quotes in values: """content""" -> "content" (with escaped newlines)
     repaired = re.sub(r'(":\s*)"""(.*?)"""(?=[,}\s])',
                       lambda m: m.group(1) + json.dumps(m.group(2).replace('\\n', '\n')).replace('\\\\n', '\\n'),
-                      text, flags=re.DOTALL)
+                      text,
+                      flags=re.DOTALL)
 
     # 2. Handle literal newlines in double-quoted values (very common failure mode)
     def escape_newlines(match):
@@ -509,11 +509,12 @@ def repair_invalid_json(text: str) -> str:
 
 def json_loads(text: str) -> Union[dict, str]:
     import logging
+
     import json5
 
     _logger = logging.getLogger(__name__)
     original_text = text.strip()
-    
+
     # 0. Strip thinking blocks first to avoid them interfering with parsing
     # if they contain {} markers or quotes.
     # CRITICAL: We only strip from the START using anchored regexes.
@@ -527,13 +528,13 @@ def json_loads(text: str) -> Union[dict, str]:
             if new_text != original_text:
                 original_text = new_text
                 changed = True
-        
+
         if not changed and ('[think' in lower_text or '[thought' in lower_text):
             new_text = _THINK_BLOCK_BRACKET_RE.sub('', original_text, count=1)
             if new_text != original_text:
                 original_text = new_text
                 changed = True
-    
+
     original_text = original_text.strip()
     # 1. Try parsing as-is (handles most cases including those with backticks inside)
     try:
@@ -567,7 +568,7 @@ def json_loads(text: str) -> Union[dict, str]:
         start_idx = text.find('{')
         end_idx = text.rfind('}')
         if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            json_str = text[start_idx:end_idx+1]
+            json_str = text[start_idx:end_idx + 1]
             repaired = repair_invalid_json(json_str)
             # Use repaired string if extraction alone wasn't enough
             try:
@@ -731,14 +732,14 @@ def save_audio_to_file(base_64: str, file_name: str):
 
 def _msg_field_or_extra(msg, field_name):
     """Extract a field from msg, checking direct attribute/dict key first, then the extra dict.
-    
+
     Shared helper for accessing message fields that may live on the message directly
     or nested inside an 'extra' dict (common for non-schema fields like tool_calls).
-    
+
     Args:
         msg: Message object or dict with message fields.
         field_name: Field name to look up.
-        
+
     Returns:
         Field value, or None if not found.
     """
@@ -759,20 +760,20 @@ def _msg_field_or_extra(msg, field_name):
 
 def _format_tool_calls_for_text(msg):
     """Format function_call and tool_calls from an assistant message into readable text.
-    
+
     Shared helper used by both extract_text_from_message() and agent_invoker._format_messages_for_summary().
     Handles dict and Message objects, legacy function_call and modern tool_calls array formats.
     Arguments exceeding MAX_FC_ARGS_LEN are truncated to prevent context blowup.
-    
+
     Args:
         msg: Message object or dict with message fields.
-        
+
     Returns:
         Formatted text like "[TOOL CALL: name(args)]" or empty string if no tool calls found.
     """
     # Check legacy single function_call (takes highest priority)
     fc = _msg_field_or_extra(msg, 'function_call')
-    
+
     if fc is not None:
         if isinstance(fc, dict):
             fc_name = fc.get('name', 'unknown')
@@ -780,16 +781,16 @@ def _format_tool_calls_for_text(msg):
         else:
             fc_name = getattr(fc, 'name', 'unknown')
             fc_args = getattr(fc, 'arguments', '')
-        
+
         # Truncate large arguments to avoid context blowup
         if isinstance(fc_args, str) and len(fc_args) > MAX_FC_ARGS_LEN:
             fc_args = fc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
-        
+
         return f"[TOOL CALL: {fc_name}({fc_args})]"
-    
+
     # Check modern tool_calls array
     tc = _msg_field_or_extra(msg, 'tool_calls')
-    
+
     if tc is not None and isinstance(tc, list) and len(tc) > 0:
         call_parts = []
         for tc_item in tc:
@@ -813,13 +814,13 @@ def _format_tool_calls_for_text(msg):
             else:
                 tc_name = 'unknown'
                 tc_args = ''
-            
+
             # Truncate large arguments to avoid context blowup
             if isinstance(tc_args, str) and len(tc_args) > MAX_FC_ARGS_LEN:
                 tc_args = tc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
-            
+
             call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
-        
+
         return '\n'.join(call_parts)
 
     return ''
@@ -867,15 +868,15 @@ def extract_text_from_message(
     lang: Literal['auto', 'en', 'zh'] = 'auto',
 ) -> str:
     """Extract text content from a message with defensive type checking.
-    
-    BUG FIX: Handle unexpected types (especially booleans and lists) that may leak into 
+
+    BUG FIX: Handle unexpected types (especially booleans and lists) that may leak into
     conversation history via JSON parsing or logger recovery paths.
-    
+
     Args:
         msg: Message object, dict, list, bool, or None (defensive handling).
         add_upload_info: Whether to include upload info in text.
         lang: Language for formatting ('auto', 'en', 'zh').
-        
+
     Returns:
         Extracted text content, or empty string for unexpected types.
     """
@@ -885,26 +886,26 @@ def extract_text_from_message(
     if msg is None:
         logger.debug('extract_text_from_message received None (returning empty)')
         return ''
-    
+
     # Handle list values gracefully (defensive check)
     if isinstance(msg, list):
         logger.debug(f"extract_text_from_message received a list (returning empty): {str(msg)[:50]}")
         return ''
-    
+
     # Handle boolean values gracefully (defensive check - must come before generic isinstance checks since bool is a subclass of int)
     if isinstance(msg, bool):
         logger.debug(f"extract_text_from_message received a bool (returning empty): {msg}")
         return ''
-    
+
     # Handle dict by converting to Message
     if isinstance(msg, dict):
         msg = Message(**msg)
-    
+
     # Now msg should be a Message object - extract content safely
     if not msg_has_field(msg, 'content'):
         logger.debug(f"extract_text_from_message: message has no 'content' attribute: {type(msg)}")
         return ''
-        
+
     if isinstance(msg.content, list):
         text = format_as_text_message(msg, add_upload_info=add_upload_info, lang=lang).content
     elif isinstance(msg.content, str):
@@ -930,7 +931,7 @@ def extract_text_from_message(
 
 def _get_msg_content(msg):
     """Extract content from a message, handling both Message objects and dicts.
-    
+
     Returns the content attribute/value, or None if not present.
     """
     if isinstance(msg, dict):
@@ -1184,8 +1185,7 @@ def _tool_calls_wire_json(msg) -> str:
                 fc_args = getattr(fc, 'arguments', '')
             extra = _msg_field_or_extra(msg, 'extra') or {}
             fid = (extra.get('function_id', '1') if isinstance(extra, dict) else '1')
-            calls = [{'id': fid, 'type': 'function',
-                      'function': {'name': fc_name, 'arguments': fc_args}}]
+            calls = [{'id': fid, 'type': 'function', 'function': {'name': fc_name, 'arguments': fc_args}}]
         else:
             # Modern tool_calls array
             tc = _msg_field_or_extra(msg, 'tool_calls')
@@ -1205,8 +1205,7 @@ def _tool_calls_wire_json(msg) -> str:
                             cargs = getattr(cfunc, 'arguments', '')
                         else:
                             cname, cargs = '', ''
-                    calls.append({'id': cid, 'type': 'function',
-                                  'function': {'name': cname, 'arguments': cargs}})
+                    calls.append({'id': cid, 'type': 'function', 'function': {'name': cname, 'arguments': cargs}})
 
         if not calls:
             return ''
@@ -1218,25 +1217,25 @@ def _tool_calls_wire_json(msg) -> str:
 def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     """Return tokens and words for a message with consistency.
     Uses logic aligned with BaseChatModel._truncate_input_messages_roughly.
-    
+
     BUG FIX: Handle unexpected list objects, boolean values, and None in messages list gracefully.
     When a raw list, bool, or None ends up in the conversation (instead of Message/dict),
     use defensive attribute access to prevent AttributeError.
-    
+
     Args:
         msg: Can be a Message object, dict, list, bool, or None (for graceful handling).
-        
+
     Returns:
         Dictionary with 'tokens' and 'words' counts. Returns zeros for unexpected types.
     """
-    from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
     from agent_cascade.log import logger
-    
+    from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+
     # Handle None gracefully (defensive check)
     if msg is None:
         logger.debug('get_message_stats received None (skipping)')
         return {'tokens': 0, 'words': 0}
-    
+
     if isinstance(msg, dict):
         if '_tokens' in msg and '_words' in msg:
             return {'tokens': msg['_tokens'], 'words': msg['_words']}
@@ -1292,7 +1291,7 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     if not hasattr(get_message_stats, '_msg_stats'):
         get_message_stats._msg_stats = OrderedDict()
         get_message_stats._cache_max_size = 512
-        
+
     msg_cache: OrderedDict = get_message_stats._msg_stats
     cache_max = get_message_stats._cache_max_size
 
@@ -1344,10 +1343,8 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         content_present = any(_content_item_has_visible_text(item) for item in content)
     else:
         content_present = bool(content is not None and str(content).strip())
-    extra_hash = hashlib.md5(
-        (str(content_present) + '\x00' + rc_for_key + '\x00' + tc_json_for_key)
-        .encode('utf-8', errors='replace')
-    ).hexdigest()[:16]
+    extra_hash = hashlib.md5((str(content_present) + '\x00' + rc_for_key + '\x00' + tc_json_for_key).encode(
+        'utf-8', errors='replace')).hexdigest()[:16]
     cache_key = (role, str(content_key), extra_hash)
 
     # Check Message object LRU cache — move to end on hit (most recently used)
@@ -1391,7 +1388,7 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
 
         words = len(text.split())
         stats = {'tokens': tokens, 'words': words}
-        
+
         # Evict oldest entry if at capacity
         if len(msg_cache) >= cache_max:
             msg_cache.popitem(last=False)
@@ -1406,14 +1403,14 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
 
 def get_history_stats(messages: List[Union[Message, dict, list, bool, None]]) -> dict:
     """Calculate total tokens and words in a message list with caching.
-    
+
     Caching strategy:
     - Delegates caching and statistics logic to get_message_stats which has
       a built-in LRU cache for Message objects and inline cache mutation for dicts.
     """
     if not messages:
         return {'tokens': 0, 'words': 0}
-    
+
     total_tokens = 0
     total_words = 0
     for m in messages:
@@ -1428,7 +1425,7 @@ def get_history_stats(messages: List[Union[Message, dict, list, bool, None]]) ->
 
 def format_tool_result_preview(tool_name: str, content: str, max_len: int = 120) -> str:
     """Format a tool result message for display in activity banners.
-    
+
     Returns strings like 'Tool read_file: Found 3 matches...' or 'Tool read_file completed'.
     """
     name = tool_name or 'tool'

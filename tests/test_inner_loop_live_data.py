@@ -58,6 +58,7 @@ import pytest
 # the host (N:\work\...) and inside Docker containers (/workspace/logs).
 # ---------------------------------------------------------------------------
 
+
 def _find_log_dir() -> Path | None:
     """Return the first existing log directory, or None."""
     candidates = [
@@ -79,6 +80,7 @@ LOG_DIR = _find_log_dir()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def extract_assistant_texts(log_dir: Path, min_length: int = 200) -> list[str]:
     """Yield combined reasoning_content + content from every assistant message."""
@@ -133,7 +135,7 @@ def feed_chunks(text: str, chunk_size: int = 256):
     settings.loop_two_phase_enabled = True
     det = InnerLoopDetector(min_chars=0, settings=settings)
     for i in range(0, len(text), chunk_size):
-        result = det.feed(text[i : i + chunk_size])
+        result = det.feed(text[i:i + chunk_size])
         if result:
             return result
     return None
@@ -163,24 +165,21 @@ def feed_repeated_block(block: str, repetitions: int = 20):
 # 1. False-positive rate test on live data
 # ===================================================================
 
+
 class TestFalsePositiveRate:
     """Ensure the detector doesn't fire too often on normal agent output."""
 
     @pytest.mark.skipif(LOG_DIR is None, reason='No log directory found')
     def test_fp_rate_below_5_percent(self):
         texts = extract_assistant_texts(LOG_DIR)
-        assert len(texts) >= 1000, (
-            f"Need ≥ 1000 assistant messages for a meaningful FP rate; "
-            f"got {len(texts)} from {LOG_DIR}"
-        )
+        assert len(texts) >= 1000, (f"Need ≥ 1000 assistant messages for a meaningful FP rate; "
+                                    f"got {len(texts)} from {LOG_DIR}")
 
         fp_count = sum(1 for t in texts if feed_chunks(t) is not None)
         rate = fp_count / len(texts) * 100
 
-        assert rate < 5.0, (
-            f"False positive rate too high: {rate:.1f}% "
-            f"({fp_count}/{len(texts)} messages triggered)"
-        )
+        assert rate < 5.0, (f"False positive rate too high: {rate:.1f}% "
+                            f"({fp_count}/{len(texts)} messages triggered)")
 
     @pytest.mark.skipif(LOG_DIR is None, reason='No log directory found')
     def test_fp_rate_below_1_percent_default(self):
@@ -191,24 +190,21 @@ class TestFalsePositiveRate:
         fp_count = sum(1 for t in texts if feed_chunks(t) is not None)
         rate = fp_count / len(texts) * 100
 
-        assert rate < 3.0, (
-            f"Default FP rate too high: {rate:.2f}% "
-            f"({fp_count}/{len(texts)} messages)"
-        )
+        assert rate < 3.0, (f"Default FP rate too high: {rate:.2f}% "
+                            f"({fp_count}/{len(texts)} messages)")
 
 
 # ===================================================================
 # 2. Actual loop detection tests — synthetic data at realistic lengths
 # ===================================================================
 
+
 class TestCharacterRunDetection:
     """Detect runs of identical characters."""
 
     # Unique filler to pass min_chars (4000) without triggering any detection.
     _FILLER = ' '.join(
-        f"Step {i} involves checking component alpha-{i} for correctness and completeness."
-        for i in range(1, 60)
-    ) + '.'
+        f"Step {i} involves checking component alpha-{i} for correctness and completeness." for i in range(1, 60)) + '.'
 
     def test_single_char_run(self):
         # Unique filler sentences (no repetition that could trigger sentence detection first)
@@ -243,11 +239,9 @@ class TestSentenceRepetition:
         identical block many times via separate feed() calls gives multiple
         confirmation opportunities with distinct positions.
         """
-        block = (
-            'The function takes three parameters for input processing. '
-            'The output is validated against expected results each time. '
-            'Every module requires thorough testing before deployment.'
-        )
+        block = ('The function takes three parameters for input processing. '
+                 'The output is validated against expected results each time. '
+                 'Every module requires thorough testing before deployment.')
         result = feed_repeated_block(block, repetitions=20)
         assert result is not None, 'Should detect repeated sentence pattern via two-phase'
         assert 'loop' in result['reason'].lower() or 'repeat' in result['reason'].lower()
@@ -257,11 +251,9 @@ class TestSentenceRepetition:
 
         Repeating identical observation blocks triggers two-phase confirmation.
         """
-        block = (
-            'The code looks correct here. '
-            'The logic follows the expected pattern throughout. '
-            'No obvious issues were found in the implementation.'
-        )
+        block = ('The code looks correct here. '
+                 'The logic follows the expected pattern throughout. '
+                 'No obvious issues were found in the implementation.')
         result = feed_repeated_block(block, repetitions=20)
         assert result is not None, 'Should detect repeated reasoning via two-phase'
 
@@ -280,17 +272,13 @@ class TestTokenLevelRepetition:
         Feed identical blocks many times so the detector can confirm the loop.
         """
         # One identical block repeated many times → two-phase confirms after ≥3 matches
-        block = (
-            'the quick brown fox jumps over the lazy dog near the river bank today. '
-            'every module requires careful review before integration testing begins. '
-            'the analysis confirms the pattern repeats across all components found.'
-        )
+        block = ('the quick brown fox jumps over the lazy dog near the river bank today. '
+                 'every module requires careful review before integration testing begins. '
+                 'the analysis confirms the pattern repeats across all components found.')
 
         result = feed_repeated_block(block, repetitions=20)
-        assert result is not None, (
-            f"Should detect repetition at ~64 tokens via two-phase; "
-            f"block had {len(block)} chars"
-        )
+        assert result is not None, (f"Should detect repetition at ~64 tokens via two-phase; "
+                                    f"block had {len(block)} chars")
 
     def test_block_loop_256_tokens(self):
         """A paragraph that repeats — triggers two-phase block detection.
@@ -298,16 +286,13 @@ class TestTokenLevelRepetition:
         Identical block repetitions allow confirmation phase to match exactly.
         """
         # One identical block repeated many times → two-phase confirms after ≥3 matches
-        block = (
-            'the quick brown fox jumps over the lazy dog near the river bank. '
-            'every module requires careful review before integration testing. '
-            'the analysis confirms the pattern repeats across all components.'
-        )
+        block = ('the quick brown fox jumps over the lazy dog near the river bank. '
+                 'every module requires careful review before integration testing. '
+                 'the analysis confirms the pattern repeats across all components.')
 
         result = feed_repeated_block(block, repetitions=20)
         assert result is not None, (
-            f"Should detect repeated block (~130 tokens) via two-phase; block had {len(block)} chars"
-        )
+            f"Should detect repeated block (~130 tokens) via two-phase; block had {len(block)} chars")
 
 
 class TestLongReasoningLoop:
@@ -323,22 +308,19 @@ class TestLongReasoningLoop:
         Feed identical reasoning blocks many times so two-phase confirms the loop.
         """
         # One identical reasoning block repeated many times → two-phase confirms after ≥3 matches
-        block = (
-            'the analysis shows the same pattern repeats consistently across modules. '
-            'each component exhibits identical behavior under the current configuration. '
-            'the evidence points to a systematic loop in the processing pipeline.'
-        )
+        block = ('the analysis shows the same pattern repeats consistently across modules. '
+                 'each component exhibits identical behavior under the current configuration. '
+                 'the evidence points to a systematic loop in the processing pipeline.')
 
         result = feed_repeated_block(block, repetitions=20)
-        assert result is not None, (
-            f"Should detect long reasoning loop (~512 tokens) via two-phase; "
-            f"block had {len(block)} chars"
-        )
+        assert result is not None, (f"Should detect long reasoning loop (~512 tokens) via two-phase; "
+                                    f"block had {len(block)} chars")
 
 
 # ===================================================================
 # 3. No-loop tests — normal text should pass silently
 # ===================================================================
+
 
 class TestNoFalseLoop:
     """Normal varied text should NOT trigger detection."""
@@ -349,14 +331,9 @@ class TestNoFalseLoop:
         # Keep sentence count moderate (~105 total) to prevent fragment accumulation
         # from crossing the threshold of 9 before decay halves them (min_chars=0 mode).
         parts = [
-            f"Step {i} involves examining component alpha-{i} for correctness and completeness."
-            for i in range(1, 35)
-        ] + [
-            f"Then I verify that module beta-{i} handles edge cases properly too."
-            for i in range(1, 35)
-        ] + [
-            f"Finally checking subsystem gamma-{i} against the reference implementation spec."
-            for i in range(1, 20)
+            f"Step {i} involves examining component alpha-{i} for correctness and completeness." for i in range(1, 35)
+        ] + [f"Then I verify that module beta-{i} handles edge cases properly too." for i in range(1, 35)] + [
+            f"Finally checking subsystem gamma-{i} against the reference implementation spec." for i in range(1, 20)
         ] + [
             f"After that I cross-reference dataset delta-{i} with baseline metrics and thresholds."
             for i in range(1, 16)
@@ -364,9 +341,7 @@ class TestNoFalseLoop:
         text = ' '.join(parts)
 
         result = feed_chunks(text)
-        assert result is None, (
-            f"Normal reasoning text should not trigger; got: {result}"
-        )
+        assert result is None, (f"Normal reasoning text should not trigger; got: {result}")
 
     def test_normal_code_review(self):
         # Each sentence is unique — 6 base patterns × 10 variations each = 60 unique sentences
@@ -385,14 +360,13 @@ class TestNoFalseLoop:
 
         text = '. '.join(sentences) + '.'
         result = feed_chunks(text)
-        assert result is None, (
-            f"Varied review sentences should not trigger; got: {result}"
-        )
+        assert result is None, (f"Varied review sentences should not trigger; got: {result}")
 
 
 # ===================================================================
 # 4. Parameter sensitivity — verify tuned params reduce FPs further
 # ===================================================================
+
 
 class TestParameterSensitivity:
     """Verify that higher thresholds actually reduce false positives."""
@@ -411,19 +385,19 @@ class TestParameterSensitivity:
             # Higher threshold and higher char_run_limit → strictly fewer FPs
             det = InnerLoopDetector(char_run_limit=150)
             for i in range(0, len(t), 100):
-                if det.feed(t[i : i + 100]):
+                if det.feed(t[i:i + 100]):
                     tuned_fps += 1
                     break
 
         # Allow small variance due to different chunking behavior with tuned params
         assert tuned_fps <= default_fps + 2, (
-            f"Tuned params should not significantly increase FPs: {tuned_fps} > {default_fps}"
-        )
+            f"Tuned params should not significantly increase FPs: {tuned_fps} > {default_fps}")
 
 
 # ===================================================================
 # 5. Edge cases with live data
 # ===================================================================
+
 
 class TestLiveDataEdgeCases:
     """Verify detector handles real-world edge cases gracefully."""
@@ -434,7 +408,7 @@ class TestLiveDataEdgeCases:
         for text in texts:
             det = InnerLoopDetector()
             # Feed one char at a time (extreme chunking)
-            for ch_group in [text[i : i + 1] for i in range(min(200, len(text)))]:
+            for ch_group in [text[i:i + 1] for i in range(min(200, len(text)))]:
                 result = det.feed(ch_group)
                 if result:
                     break  # OK to detect, just shouldn't crash

@@ -13,15 +13,15 @@
 # limitations under the License.
 
 import copy
-import httpx
 import logging
 import os
 import threading
-import time
-import openai
-import requests
 from pprint import pformat
 from typing import Dict, Iterator, List, Optional
+
+import httpx
+import openai
+import requests
 
 from agent_cascade.utils.utils import format_as_text_message
 
@@ -30,7 +30,7 @@ if openai.__version__.startswith('0.'):
 else:
     from openai import OpenAIError
 
-from agent_cascade.llm.base import ModelServiceError, register_llm, _fire_usage_callback
+from agent_cascade.llm.base import ModelServiceError, _fire_usage_callback, register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
 from agent_cascade.log import logger
@@ -73,13 +73,8 @@ def _get_cached_client(base_url: str, api_key: str) -> openai.OpenAI:
         # keepalive_expiry defaults to 3.0s (below LM Studio's 5s server timeout)
         # so idle connections are proactively discarded before becoming stale.
         # Override via env var AGENT_CASCADE_LM_STUDIO_KEEPALIVE if needed per environment.
-        from agent_cascade.settings import (
-            LM_STUDIO_KEEPALIVE_SECONDS,
-            HTTP_READ_TIMEOUT,
-            HTTP_CONNECT_TIMEOUT,
-            HTTP_WRITE_TIMEOUT,
-            HTTP_POOL_TIMEOUT,
-        )
+        from agent_cascade.settings import (HTTP_CONNECT_TIMEOUT, HTTP_POOL_TIMEOUT, HTTP_READ_TIMEOUT,
+                                            HTTP_WRITE_TIMEOUT, LM_STUDIO_KEEPALIVE_SECONDS)
         keepalive = float(os.environ.get('AGENT_CASCADE_LM_STUDIO_KEEPALIVE', str(LM_STUDIO_KEEPALIVE_SECONDS)))
         logger.debug(f"[CACHE] MISS creating new client for {base_url}")
         _CLIENT_CACHE[key] = openai.OpenAI(
@@ -111,11 +106,28 @@ def flush_client_cache() -> None:
 
 # Standard OpenAI-compatible inference parameters
 ALLOWED_LLM_PARAMS = {
-    'temperature', 'top_p', 'top_k', 'n', 'stop', 'max_tokens',
-    'presence_penalty', 'frequency_penalty', 'logit_bias', 'user',
-    'response_format', 'tools', 'tool_choice', 'parallel_tool_calls',
-    'min_p', 'repeat_penalty', 'repetition_penalty', 'extra_body',
-    'timeout', 'request_timeout', 'api_base', 'api_key',
+    'temperature',
+    'top_p',
+    'top_k',
+    'n',
+    'stop',
+    'max_tokens',
+    'presence_penalty',
+    'frequency_penalty',
+    'logit_bias',
+    'user',
+    'response_format',
+    'tools',
+    'tool_choice',
+    'parallel_tool_calls',
+    'min_p',
+    'repeat_penalty',
+    'repetition_penalty',
+    'extra_body',
+    'timeout',
+    'request_timeout',
+    'api_base',
+    'api_key',
     # Standard OpenAI API param (o1/o3 reasoning models). Set per-endpoint via
     # the "Reasoning Effort" pulldown; backends that don't support it 400 → fatal.
     'reasoning_effort',
@@ -234,6 +246,7 @@ def _extract_usage(usage_obj):
 # ── Circuit-breaker consult for bypass HTTP paths (Change E) ─────────────────
 # The router's per-server breaker gates call_with_fallback; paths that fire HTTP
 # directly (context detection) must consult it too or they hammer a busy server.
+
 
 def _breaker_blocks_base(api_base: Optional[str]) -> bool:
     """True when a live router's server breaker says this base must not be contacted.
@@ -356,10 +369,8 @@ class TextChatAtOAI(BaseFnCallModel):
         # forbids contacting this base (busy loading a model), skip THIS detection cycle
         # entirely — zero /models GETs. The next call after the window elapses will retry.
         if _breaker_blocks_base(api_base):
-            logger.debug(
-                f"[oai] Skipping context-window detection for {api_base} "
-                f"(server breaker open — server busy loading a model)."
-            )
+            logger.debug(f"[oai] Skipping context-window detection for {api_base} "
+                         f"(server breaker open — server busy loading a model).")
             return
         try:
             models_url = f"{api_base.rstrip('/')}/models"
@@ -385,7 +396,7 @@ class TextChatAtOAI(BaseFnCallModel):
                     if m.get('id') in _match_ids:
                         target_model = m
                         break
-                
+
                 # 2. Prefer models marked as "loaded" by the server (llama-autoloader compatibility)
                 if not target_model:
                     loaded_models = [m for m in data if m.get('loaded') is True]
@@ -399,29 +410,35 @@ class TextChatAtOAI(BaseFnCallModel):
                             mid_lower = m.get('id', '').lower()
                             if any(n.lower() in mid_lower for n in _match_ids):
                                 target_model = m
-                                logger.debug(f"Using loaded model '{target_model.get('id')}' for context detection (name match).")
+                                logger.debug(
+                                    f"Using loaded model '{target_model.get('id')}' for context detection (name match)."
+                                )
                                 break
-                
-                # 3. If no exact match and only one model, assume it's the one 
+
+                # 3. If no exact match and only one model, assume it's the one
                 # BUT ONLY if it's a plausible chat model and we are in dynamic mode.
                 if not target_model and len(data) == 1:
                     m_id = data[0].get('id', '').lower()
                     # Skip auto-selection for models that are clearly for other tasks (TTS, Whisper, etc.)
                     is_plausible_chat = not any(k in m_id for k in non_chat_keywords)
-                    
+
                     if is_plausible_chat:
                         if self.dynamic_model:
                             target_model = data[0]
                             new_model_id = target_model.get('id')
-                            logger.info(f"Auto-selected single available model '{new_model_id}' for calls and context detection.")
+                            logger.info(
+                                f"Auto-selected single available model '{new_model_id}' for calls and context detection."
+                            )
                             self.model = new_model_id
                             self.original_model = new_model_id
                         else:
-                            # User provided a model name, but it wasn't in the list. 
+                            # User provided a model name, but it wasn't in the list.
                             # We can use the single available model for CONTEXT detection, but we keep the user's name for calls.
                             target_model = data[0]
-                            logger.info(f"Using single available model '{target_model.get('id')}' for context length detection fallback.")
-                
+                            logger.info(
+                                f"Using single available model '{target_model.get('id')}' for context length detection fallback."
+                            )
+
                 # 4. Special case for LM Studio / whatever_is_on
                 if not target_model and (self.model == 'whatever_is_on' or not data):
                     # Use the first model if it exists and looks plausible
@@ -429,15 +446,16 @@ class TextChatAtOAI(BaseFnCallModel):
                         m_id = data[0].get('id', '').lower()
                         if not any(k in m_id for k in non_chat_keywords):
                             target_model = data[0]
-                            logger.info(f"Picking first available model '{target_model.get('id')}' for potential context detection.")
-                
+                            logger.info(
+                                f"Picking first available model '{target_model.get('id')}' for potential context detection."
+                            )
+
                 if target_model:
                     # 5. Extract context length from model object (check direct and nested config)
-                    ctx_len = (target_model.get('context_length') or 
-                               target_model.get('max_context_length') or
+                    ctx_len = (target_model.get('context_length') or target_model.get('max_context_length') or
                                target_model.get('config', {}).get('context_length') or
                                target_model.get('config', {}).get('max_context_length'))
-                    
+
                     # 6. If still missing, try querying the specific model endpoint
                     if not ctx_len:
                         try:
@@ -446,24 +464,27 @@ class TextChatAtOAI(BaseFnCallModel):
                             spec_resp = requests.get(specific_url, headers=headers, timeout=3)
                             if spec_resp.status_code == 200:
                                 spec_data = spec_resp.json()
-                                ctx_len = (spec_data.get('context_length') or 
-                                           spec_data.get('max_context_length') or
+                                ctx_len = (spec_data.get('context_length') or spec_data.get('max_context_length') or
                                            spec_data.get('config', {}).get('context_length') or
                                            spec_data.get('config', {}).get('max_context_length'))
                         except Exception as inner_e:
                             logger.debug(f"Individual model metadata query failed: {inner_e}")
-                    
+
                     if ctx_len:
                         detected_len = int(ctx_len)
                         # Only auto-update if not manually set by user, or if we are upgrading from a default/small value
                         current_val = self.generate_cfg.get('max_input_tokens')
                         if not current_val or current_val == 58000 or current_val == 4096:
-                            logger.info(f"Dynamically detected context window for {target_model.get('id')}: {detected_len}")
+                            logger.info(
+                                f"Dynamically detected context window for {target_model.get('id')}: {detected_len}")
                             self.generate_cfg['max_input_tokens'] = detected_len
                         else:
-                            logger.debug(f"Detected context window {detected_len} for {target_model.get('id')}, but keeping user-defined limit of {current_val}.")
+                            logger.debug(
+                                f"Detected context window {detected_len} for {target_model.get('id')}, but keeping user-defined limit of {current_val}."
+                            )
                     else:
-                        logger.info(f"Model {target_model.get('id')} found, but could not detect context length via API.")
+                        logger.info(
+                            f"Model {target_model.get('id')} found, but could not detect context length via API.")
                 else:
                     logger.debug(f"Could not identify a target model in {models_url} for context length detection.")
         except Exception as e:
@@ -522,8 +543,10 @@ class TextChatAtOAI(BaseFnCallModel):
 
         if log_api_post:
             try:
-                import json, time
+                import json
+                import time
                 from pathlib import Path
+
                 from agent_cascade.settings import DEFAULT_WORKSPACE
                 debug_dir = Path(DEFAULT_WORKSPACE) / 'logs' / 'debug'
                 debug_dir.mkdir(parents=True, exist_ok=True)
@@ -533,7 +556,7 @@ class TextChatAtOAI(BaseFnCallModel):
                     json.dump(dump_data, f, indent=2, ensure_ascii=False)
             except Exception as e:
                 logger.error(f"Failed to dump API POST: {e}")
-        
+
         response = None
         try:
             #logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create START model={request_model}")
@@ -546,14 +569,16 @@ class TextChatAtOAI(BaseFnCallModel):
             if delta_stream:
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
                 for sse in watch_stream(
-                    response._iter_events(),
-                    STREAM_MAX_SILENCE_SECONDS,
-                    STREAM_MAX_TOTAL_SECONDS,
-                    error_message_prefix='OpenAI',
+                        response._iter_events(),
+                        STREAM_MAX_SILENCE_SECONDS,
+                        STREAM_MAX_TOTAL_SECONDS,
+                        error_message_prefix='OpenAI',
                 ):
                     if sse.data == '[DONE]':
                         continue
-                    chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
+                    chunk = response._client._process_response_data(data=sse.json(),
+                                                                    cast_to=response._cast_to,
+                                                                    response=response.response)
 
                     # Capture the model id the server reports (e.g. a llama.cpp --alias /
                     # gguf filename). Stored in _server_model ONLY — self.model stays as the
@@ -565,9 +590,10 @@ class TextChatAtOAI(BaseFnCallModel):
                             self._server_model = chunk.model
                             if self.dynamic_model and cur_base:
                                 self._detect_context_window(cur_base, cur_key)
-                        
+
                     if chunk.choices:
-                        reasoning = chunk.choices[0].delta.reasoning_content if hasattr(chunk.choices[0].delta, 'reasoning_content') else ''
+                        reasoning = chunk.choices[0].delta.reasoning_content if hasattr(
+                            chunk.choices[0].delta, 'reasoning_content') else ''
                         content = chunk.choices[0].delta.content if hasattr(chunk.choices[0].delta, 'content') else ''
                         if reasoning or content:
                             yield [Message(role=ASSISTANT, content=content or '', reasoning_content=reasoning or '')]
@@ -579,14 +605,16 @@ class TextChatAtOAI(BaseFnCallModel):
                 _usage_emitted = False
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
                 for sse in watch_stream(
-                    response._iter_events(),
-                    STREAM_MAX_SILENCE_SECONDS,
-                    STREAM_MAX_TOTAL_SECONDS,
-                    error_message_prefix='OpenAI',
+                        response._iter_events(),
+                        STREAM_MAX_SILENCE_SECONDS,
+                        STREAM_MAX_TOTAL_SECONDS,
+                        error_message_prefix='OpenAI',
                 ):
                     if sse.data == '[DONE]':
                         continue
-                    chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
+                    chunk = response._client._process_response_data(data=sse.json(),
+                                                                    cast_to=response._cast_to,
+                                                                    response=response.response)
 
                     # ── PROBE (gated on STREAM_BACKEND_DEBUG): LLM SSE chunk cadence ──
                     # Records when each real chunk arrives so we can distinguish
@@ -624,13 +652,14 @@ class TextChatAtOAI(BaseFnCallModel):
                         if hasattr(chunk.choices[0].delta, 'tool_calls') and chunk.choices[0].delta.tool_calls:
                             # Track which positions were matched in this chunk to handle parallel tool calls sharing same index
                             _chunk_matched = set()
-                            _initial_len = len(full_tool_calls)  # Prevent merging distinct new calls created within this chunk
+                            _initial_len = len(
+                                full_tool_calls)  # Prevent merging distinct new calls created within this chunk
                             for tc in chunk.choices[0].delta.tool_calls:
                                 tc_id = getattr(tc, 'id', None)
                                 tc_func = getattr(tc, 'function', None)
                                 tc_name = getattr(tc_func, 'name', None) or '' if tc_func else ''
                                 tc_args = getattr(tc_func, 'arguments', None) or '' if tc_func else ''
-                                
+
                                 # Find existing tool call to append to (by ID, then reverse fallback for Grok compat)
                                 matched = None
                                 matched_idx = -1
@@ -654,28 +683,28 @@ class TextChatAtOAI(BaseFnCallModel):
                                     if matched is None and _initial_len > 0 and (tc_name or tc_args):
                                         matched = full_tool_calls[-1]
                                         matched_idx = len(full_tool_calls) - 1
-                                
+
                                 # Mark the matched position so next tool call in this chunk won't reuse it
                                 if matched is not None:
                                     _chunk_matched.add(matched_idx)
-                                
+
                                 if matched:
                                     if tc_name:
                                         matched.function_call.name = (matched.function_call.name or '') + tc_name
                                     if tc_args:
-                                        matched.function_call.arguments = (matched.function_call.arguments or '') + tc_args
+                                        matched.function_call.arguments = (matched.function_call.arguments or
+                                                                           '') + tc_args
                                 else:
                                     new_idx = len(full_tool_calls)
                                     full_tool_calls.append(
                                         Message(role=ASSISTANT,
                                                 content='',
-                                                function_call=FunctionCall(name=tc_name,
-                                                                           arguments=tc_args),
+                                                function_call=FunctionCall(name=tc_name, arguments=tc_args),
                                                 extra={'function_id': tc_id or f'call_{new_idx}'}))
                                     # Mark the newly created entry so subsequent deltas in this chunk
                                     # won't merge into it (parallel tool calls should stay separate)
                                     _chunk_matched.add(new_idx)
-                                    
+
                         res = []
                         finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
                         extra = {}
@@ -686,14 +715,13 @@ class TextChatAtOAI(BaseFnCallModel):
                         if usage_to_attach:
                             extra['usage'] = usage_to_attach
                             _usage_emitted = True
-                        
+
                         if full_reasoning_content or full_response:
-                            res.append(Message(
-                                role=ASSISTANT,
-                                content=full_response,
-                                reasoning_content=full_reasoning_content,
-                                extra=extra
-                            ))
+                            res.append(
+                                Message(role=ASSISTANT,
+                                        content=full_response,
+                                        reasoning_content=full_reasoning_content,
+                                        extra=extra))
                         if full_tool_calls:
                             for tc in full_tool_calls:
                                 if not tc.extra:
@@ -714,11 +742,15 @@ class TextChatAtOAI(BaseFnCallModel):
                 if last_usage and not _usage_emitted and (full_response or full_reasoning_content or full_tool_calls):
                     # Fire callback for late-arriving usage data
                     _fire_usage_callback(last_usage)
-                    
+
                     extra = {'usage': last_usage}
                     res = []
                     if full_reasoning_content or full_response:
-                        res.append(Message(role=ASSISTANT, content=full_response, reasoning_content=full_reasoning_content, extra=extra))
+                        res.append(
+                            Message(role=ASSISTANT,
+                                    content=full_response,
+                                    reasoning_content=full_reasoning_content,
+                                    extra=extra))
                     if full_tool_calls:
                         for tc in full_tool_calls:
                             if not tc.extra:
@@ -732,8 +764,7 @@ class TextChatAtOAI(BaseFnCallModel):
         except RuntimeError as ex:
             # Catch watch_stream timeouts and wrap as ModelServiceError for retry logic
             raise ModelServiceError(exception=ex)
-        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException,
-                ConnectionResetError, OSError) as ex:
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, ConnectionResetError, OSError) as ex:
             # Catch non-OpenAI network/transport errors so they are wrapped
             # as ModelServiceError and caught by Layer 1 retry logic
             code = None
@@ -756,7 +787,9 @@ class TextChatAtOAI(BaseFnCallModel):
             local_model = self.original_model if self.dynamic_model else self.model
         request_model = local_model
         if self.dynamic_model:
-            logger.debug(f"LLM model selection: self.model={self.model!r}, original_model={self.original_model!r}, local_model={local_model!r}, request_model={request_model!r}")
+            logger.debug(
+                f"LLM model selection: self.model={self.model!r}, original_model={self.original_model!r}, local_model={local_model!r}, request_model={request_model!r}"
+            )
 
         log_api_post = generate_cfg.pop('log_api_post', False)
 
@@ -782,8 +815,10 @@ class TextChatAtOAI(BaseFnCallModel):
 
         if log_api_post:
             try:
-                import json, time
+                import json
+                import time
                 from pathlib import Path
+
                 from agent_cascade.settings import DEFAULT_WORKSPACE
                 debug_dir = Path(DEFAULT_WORKSPACE) / 'logs' / 'debug'
                 debug_dir.mkdir(parents=True, exist_ok=True)
@@ -808,7 +843,7 @@ class TextChatAtOAI(BaseFnCallModel):
 
             finish_reason = getattr(response.choices[0], 'finish_reason', None)
             extra = {'finish_reason': finish_reason} if finish_reason else {}
-            
+
             # Feature 006: Capture usage info from OpenAI non-streaming response
             if hasattr(response, 'usage') and response.usage:
                 extra['usage'] = _extract_usage(response.usage)
@@ -829,31 +864,23 @@ class TextChatAtOAI(BaseFnCallModel):
                     result.append(
                         Message(role=ASSISTANT,
                                 content='',
-                                function_call=FunctionCall(name=tc_name,
-                                                           arguments=tc_args),
-                                extra={'function_id': tc_id})
-                    )
+                                function_call=FunctionCall(name=tc_name, arguments=tc_args),
+                                extra={'function_id': tc_id}))
                 # Also include content/reasoning if present alongside tool_calls
                 reasoning = getattr(msg, 'reasoning_content', None) or ''
                 content = msg.content or ''
                 if content or reasoning:
-                    result.insert(0, Message(role=ASSISTANT,
-                                            content=content,
-                                            reasoning_content=reasoning,
-                                            extra=extra))
+                    result.insert(0, Message(role=ASSISTANT, content=content, reasoning_content=reasoning, extra=extra))
             else:
                 # No tool_calls — standard text response
                 reasoning = getattr(msg, 'reasoning_content', None) or ''
-                result.append(Message(role=ASSISTANT,
-                                      content=msg.content or '',
-                                      reasoning_content=reasoning,
-                                      extra=extra))
+                result.append(
+                    Message(role=ASSISTANT, content=msg.content or '', reasoning_content=reasoning, extra=extra))
             return result
         except OpenAIError as ex:
             code = str(getattr(ex, 'code', None) or getattr(ex, 'status_code', None) or '')
             raise ModelServiceError(exception=ex, code=code if code else None)
-        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException,
-                ConnectionResetError, OSError) as ex:
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, ConnectionResetError, OSError) as ex:
             # Catch non-OpenAI network/transport errors so they are wrapped
             # as ModelServiceError and caught by Layer 1 retry logic
             code = None

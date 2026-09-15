@@ -19,14 +19,12 @@ Run: pytest tests/test_llm_call_deadline.py -v
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fake clock: advances only by the amount slept, so the test controls time.
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class FakeClock:
     """Manual monotonic clock. ``sleep`` advances it; ``monotonic`` reports it.
@@ -52,6 +50,7 @@ class FakeClock:
 # Helpers: mock pool + real ExecutionEngine (mirrors test_fallback_compression.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def _make_pool_and_engine():
     """Create a mocked pool and real ExecutionEngine for testing the retry loop."""
     from agent_cascade.execution_engine import ExecutionEngine
@@ -74,7 +73,7 @@ def _make_pool_and_engine():
 
     # settings must be a real object with proper attributes, not mocks.
     class Settings:
-        retry_max_attempts = 5       # Plenty of attempts so the deadline, not the attempt cap, ends the loop
+        retry_max_attempts = 5  # Plenty of attempts so the deadline, not the attempt cap, ends the loop
         retry_base_delay = 0.1
         retry_max_delay = 1.0
         loop_min_chars = 4000
@@ -128,21 +127,25 @@ def _run_with_deadline(engine, instance, deadline_seconds, mock_execute, clock):
             clock.deadline = clock.monotonic() + deadline_seconds
             with patch('agent_cascade.engine.llm_call.time.monotonic', side_effect=clock.monotonic), \
                  patch('agent_cascade.engine.llm_call.time.sleep', side_effect=clock.sleep):
-                return list(engine._execute_llm_call_with_retry(
-                    instance, [Message(role=USER, content='test')], _make_template(), []))
+                return list(
+                    engine._execute_llm_call_with_retry(instance, [Message(role=USER, content='test')],
+                                                        _make_template(), []))
 
 
 def _always_fail():
     """Mock _execute_llm_call that always raises (a transient error)."""
+
     def mock_execute(*args, **kwargs):
         raise ConnectionError('Simulated failure')
         yield  # pragma: no cover (turns this into a generator)
+
     return mock_execute
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. Deadline fires → yields the system error and stops retrying
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestDeadlineFires:
     """When the wall-clock deadline is exceeded, the generator yields a SYSTEM ERROR."""
@@ -182,6 +185,7 @@ class TestDeadlineFires:
 # 2. Deadline does NOT fire within the limit
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestDeadlineNotFired:
     """A call that completes (or fails normally) before the deadline is unaffected."""
 
@@ -220,6 +224,7 @@ class TestDeadlineNotFired:
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. Backoff respects the deadline (does not sleep past it)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestBackoffRespectsDeadline:
     """The backoff sleep is capped by the remaining time to the deadline."""

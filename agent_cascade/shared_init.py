@@ -14,10 +14,10 @@ from pathlib import Path
 from agent_cascade.log import logger
 from agent_cascade.telemetry import TelemetryCollector
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 #  1. Workspace detection & directory creation
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def detect_workspace_dir(project_root: Path) -> str:
     """
@@ -85,6 +85,7 @@ def ensure_workspace(workspace_dir: str) -> Path:
 #  1b. Config file initialization (secrets.json, api_endpoints.json)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def ensure_config_files(project_root_path: Path):
     """
     Ensure config files exist at startup by triggering their auto-generation logic.
@@ -130,6 +131,7 @@ def ensure_config_files(project_root_path: Path):
 #  2. OperationManager & AgentPool initialization
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def create_operation_manager(workspace_dir: str):
     """Create and return an OperationManager instance."""
     from agent_cascade.operation_manager import OperationManager
@@ -151,7 +153,9 @@ def create_agent_pool(llm_cfg, agents_path: str, workspace_dir: str, operation_m
         logger.debug('[INIT] TelemetryCollector initialized, log_dir=%s', telemetry.log_dir)
 
         pool = AgentPool(
-            llm_cfg, agents_path, workspace_dir=workspace_dir,
+            llm_cfg,
+            agents_path,
+            workspace_dir=workspace_dir,
             operation_manager=operation_manager,
             telemetry=telemetry,
         )
@@ -162,7 +166,8 @@ def create_agent_pool(llm_cfg, agents_path: str, workspace_dir: str, operation_m
         raise SystemExit(1)
 
 
-def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_timeout: float, idle_check_interval: float):
+def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_timeout: float,
+                             idle_check_interval: float):
     """
     Configure pool settings (idle timeout), set the back-reference on OperationManager,
     and start background services.
@@ -203,6 +208,7 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_
 #  3. Orchestrator loading with fallback
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def load_orchestrator(agent_pool):
     """
     Retrieve the orchestrator from the pool. Falls back to manual loading if not found.
@@ -227,6 +233,7 @@ def load_orchestrator(agent_pool):
 #  4. Build the all_agents list from pool + orchestrator
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def build_all_agents_list(agent_pool, orchestrator):
     """Return a list of [orchestrator, *other_agents_from_pool]."""
     all_agents = [orchestrator]
@@ -246,6 +253,7 @@ def build_all_agents_list(agent_pool, orchestrator):
 # ──────────────────────────────────────────────────────────────────────────────
 #  5. High-level convenience function (for callers that want one-liner init)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def initialize_infrastructure(project_root: Path, llm_cfg):
     """
@@ -286,6 +294,7 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
 #  6. Signal handler for graceful shutdown (shared across entry points)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def setup_signal_handler(agent_pool, server=None):
     """Set up graceful shutdown signal handlers for SIGINT and SIGTERM.
 
@@ -297,6 +306,7 @@ def setup_signal_handler(agent_pool, server=None):
         Optional uvicorn server object. If provided, its ``should_exit`` flag
         is set for a clean uvicorn shutdown (avoids resource leaks from sys.exit).
     """
+
     def handle_shutdown(signum, frame):
         logger.info('\n[INFO] Initiating graceful shutdown...')
         agent_pool.stopped = True
@@ -338,7 +348,7 @@ def setup_signal_handler(agent_pool, server=None):
 #  6b. Windows console Ctrl+C defense-in-depth guard
 # ──────────────────────────────────────────────────────────────────────────────
 
-_console_ctrl_handler = None      # KEEP REFERENCE — ctypes callback must not be GC'd (dangling ptr crash)
+_console_ctrl_handler = None  # KEEP REFERENCE — ctypes callback must not be GC'd (dangling ptr crash)
 _console_ctrl_raw_handler = None  # raw Python callable behind the ctypes wrapper (test hook / introspection)
 _console_guard_installed = False
 
@@ -364,11 +374,7 @@ def _install_windows_console_guard(kernel32=None) -> bool:
 
     # CTRL_* event types (wincon.h): CTRL_C=0, CTRL_BREAK=1, CTRL_CLOSE=2,
     # CTRL_LOGOFF=4, CTRL_SHUTDOWN=5.
-    CTRL_C_EVENT = 0
-    CTRL_BREAK_EVENT = 1
-    CTRL_CLOSE_EVENT = 2
     CTRL_LOGOFF_EVENT = 4
-    CTRL_SHUTDOWN_EVENT = 5
 
     def _handler(ctrl_type):
         # Runs on a raw Windows control thread — must re-acquire the GIL.
@@ -403,6 +409,7 @@ def _install_windows_console_guard(kernel32=None) -> bool:
 #  7. Shared CLI argument parsing
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def parse_cli_args(argv=None, description='AgentCascade'):
     """Parse common CLI arguments shared across launch scripts.
 
@@ -416,11 +423,9 @@ def parse_cli_args(argv=None, description='AgentCascade'):
         '--auto_security',
         action='store_true',
         default=False,
-        help=(
-            'Start with Auto-Ask Security mode enabled. The security advisor will '
-            'auto-check all tool calls before execution (same as toggling "Auto-Ask '
-            'Security" on in the UI). By default, security checks run only when '
-            'triggered by agent prompts.'
-        ),
+        help=('Start with Auto-Ask Security mode enabled. The security advisor will '
+              'auto-check all tool calls before execution (same as toggling "Auto-Ask '
+              'Security" on in the UI). By default, security checks run only when '
+              'triggered by agent prompts.'),
     )
     return parser.parse_args(argv)

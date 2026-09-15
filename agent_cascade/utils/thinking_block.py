@@ -63,10 +63,10 @@ def strip_thinking_blocks(data: Any) -> Any:
     """
     if not isinstance(data, str):
         return data
-        
+
     # Optimization: only run regex if we see potential tags
     lower_data = data.lower()
-    
+
     any_changed = False
     changed = True
     while changed:
@@ -78,7 +78,7 @@ def strip_thinking_blocks(data: Any) -> Any:
                 lower_data = data.lower()
                 changed = True
                 any_changed = True
-        
+
         if not changed and ('[think' in lower_data or '[thought' in lower_data):
             new_data = _BRACKET_SEARCH_RE.sub('', data, count=1)
             if new_data != data:
@@ -86,7 +86,7 @@ def strip_thinking_blocks(data: Any) -> Any:
                 lower_data = data.lower()
                 changed = True
                 any_changed = True
-                
+
         if not changed and '<|channel>thought' in lower_data:
             new_data = _GEMMA_THOUGHT_RE.sub('', data, count=1)
             if new_data != data:
@@ -94,7 +94,7 @@ def strip_thinking_blocks(data: Any) -> Any:
                 lower_data = data.lower()
                 changed = True
                 any_changed = True
-    
+
     # Only strip whitespace if we actually removed thinking blocks.
     # This preserves original whitespace for strings without thinking tags,
     # which is critical for preserving indentation in code content like edit_file's new_content.

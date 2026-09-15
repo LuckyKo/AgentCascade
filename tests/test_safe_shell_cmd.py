@@ -5,6 +5,7 @@ import sys
 
 from agent_cascade.operation_manager import OperationManager
 
+
 def test_safe_commands():
     """Commands that should be auto-approved (safe read-only)."""
     safe = [
@@ -163,6 +164,7 @@ def test_safe_commands():
 
     assert not failed, f"{len(failed)} safe commands were incorrectly rejected: {failed}"
 
+
 def test_unsafe_commands():
     """Commands that should require approval (potentially dangerous)."""
     unsafe = [
@@ -293,6 +295,7 @@ def test_unsafe_commands():
 
     assert not failed, f"{len(failed)} unsafe commands were incorrectly auto-approved: {failed}"
 
+
 def test_strip_cd_prefix():
     """Test the _strip_cd_prefix helper directly."""
     from agent_cascade.operation_manager.shell import ShellMixin
@@ -331,6 +334,7 @@ def test_strip_cd_prefix():
 
     assert not failed, f"{len(failed)} _strip_cd_prefix tests failed: {failed}"
 
+
 if __name__ == '__main__':
     # Run the three test functions; each asserts internally and raises on failure.
     try:
@@ -342,7 +346,10 @@ if __name__ == '__main__':
         sys.exit(1)
 
     # ── Async control command checks (manual, not covered by the functions above) ──
-    async_safe = ['__status', '__kill', '__ctrl_c', '__heartbeat=5', '__heartbeat=0', '__heartbeat=10.5', '__heartbeat=', '__heartbeat=abc']
+    async_safe = [
+        '__status', '__kill', '__ctrl_c', '__heartbeat=5', '__heartbeat=0', '__heartbeat=10.5', '__heartbeat=',
+        '__heartbeat=abc'
+    ]
     async_unsafe = ['__heartbeat', '__status_extra', '__kill_me']
     async_failures = []
     for cmd in async_safe:

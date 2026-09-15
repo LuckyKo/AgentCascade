@@ -15,14 +15,10 @@ try to resolve its parameters as fixtures.
 """
 
 import json
-import os
-import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Dict, Any, Optional
-
-import pytest
+from typing import Any, Dict
 
 BASE = 'http://127.0.0.1:1234'
 PROMPT_REPEATS = 200
@@ -69,16 +65,14 @@ def check_response(res: dict, step_name: str) -> None:
 
 
 def build_large_prompt(n_repeats: int = PROMPT_REPEATS) -> str:
-    paragraph = (
-        'The quick brown fox jumps over the lazy dog. '
-        'Artificial intelligence has transformed how we interact with technology. '
-        'Machine learning models continue to improve in both speed and accuracy. '
-        'Natural language processing enables computers to understand human speech. '
-        'Deep learning architectures like transformers have revolutionized the field. '
-        'Large language models can generate coherent and contextually relevant text. '
-        'Each new generation of models builds upon the insights of the previous one. '
-        'Research in AI safety and alignment remains an active area of study. '
-    )
+    paragraph = ('The quick brown fox jumps over the lazy dog. '
+                 'Artificial intelligence has transformed how we interact with technology. '
+                 'Machine learning models continue to improve in both speed and accuracy. '
+                 'Natural language processing enables computers to understand human speech. '
+                 'Deep learning architectures like transformers have revolutionized the field. '
+                 'Large language models can generate coherent and contextually relevant text. '
+                 'Each new generation of models builds upon the insights of the previous one. '
+                 'Research in AI safety and alignment remains an active area of study. ')
     return (paragraph * n_repeats).strip()
 
 
@@ -198,7 +192,9 @@ def run_model_test(
         timings = res_warmup.get('timings', {})
         cached = usage.get('prompt_tokens_details', {}).get('cached_tokens', 0)
         prompt_n = timings.get('prompt_n', 0)
-        print(f"  Warmup - Prompt tokens: {usage['prompt_tokens']}, Cached: {cached}, Processed: {prompt_n}, Wall time: {t1-t0:.2f}s")
+        print(
+            f"  Warmup - Prompt tokens: {usage['prompt_tokens']}, Cached: {cached}, Processed: {prompt_n}, Wall time: {t1-t0:.2f}s"
+        )
     else:
         print(f"  Warmup skipped, Wall time: {t1-t0:.2f}s")
 
