@@ -151,6 +151,13 @@ class TestConfigureWindowsUtf8Shape:
         wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & ' + user
 
+    def test_semicolon_starting_command_stripped_in_wrapper(self):
+        # Transform-ordering edge: `;` translates to a leading `&`, which the stripper
+        # then removes — same valid wrap as `& echo hi`. Pinned so reordering the two
+        # transforms (or changing either default) cannot silently regress this path.
+        wrapped, _ = configure_windows_utf8('; echo hi')
+        assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
+
     def test_flags_include_new_process_group(self):
         import subprocess
         _, flags = configure_windows_utf8('echo A')

@@ -94,6 +94,11 @@ def _translate_semicolons_for_cmd(command: str) -> str:
     quote). This errs on the side of leaving the command untouched rather than
     splitting a literal that happens to contain an unpaired quote.
 
+    Ordering note: this runs BEFORE ``_strip_leading_ampersands_for_cmd``. A command
+    starting with ``;`` (e.g. ``"; echo hi"``) is translated to a leading ``&`` and
+    then stripped — both paths converge on the same valid wrap, so no special case
+    is needed (pinned by test_semicolon_starting_command_stripped_in_wrapper).
+
     Args:
         command: The raw user command string (before the chcp prefix is added).
 
