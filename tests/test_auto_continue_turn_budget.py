@@ -289,3 +289,36 @@ class TestAutoContinueConsumesTurns:
         list(engine.run(instance))
 
         assert _llm_call_count(llm) == 1
+
+
+class TestTurnLimitNoticeSuppressedForSingleTurn:
+    """max_turns=1: the single turn IS the complete task — no 'incomplete' notice."""
+
+    def test_no_turn_limit_notice_when_max_turns_is_one(self):
+        """max_turns=1, clean response → conversation must NOT contain 'Turn limit reached'.
+
+        Regression guard: with max_turns=1 the agent gets exactly one turn which IS
+        the full task. Appending a '[Turn limit reached — results may be incomplete...]'
+        notice is noise that pollutes extract_instance_output() (reads messages[-1]).
+        """
+        pool = _FakePool()
+        llm = _ScriptedLLM([_clean_msg()])
+        instance = _make_instance(1)  # max_turns=1
+        engine = _build_engine(pool, instance, llm)
+
+        list(engine.run(instance))
+
+        assert _llm_call_count(llm) == 1
+        # The last assistant message in the conversation must NOT carry the notice.
+        conv = instance.conversation
+        last_assistant_content = None
+        for msg in reversed(conv):
+            role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            if role == ASSISTANT:
+                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                last_assistant_content = content
+                break
+        assert last_assistant_content is not None, 'no assistant message in conversation'
+        assert 'Turn limit reached' not in last_assistant_content, (
+            f"max_turns=1 agent should NOT get a turn-limit notice, got: {last_assistant_content!r}"
+        )

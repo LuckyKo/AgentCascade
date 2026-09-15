@@ -823,8 +823,9 @@ def test_fix_a_final_delivered_when_last_tick_throttled(subagent_harness):
     last_inst = _extract_instance(last_ev, INSTANCE_NAME)
     last_msg = _last_assistant_message(last_inst)
     assert last_msg is not None, 'final frame has no assistant message'
-    # The fully accumulated content must be present. (A "[Turn limit reached...]" notice may be
-    # appended after it because max_turns=1, so we check membership rather than endswith.)
+    # The fully accumulated content must be present. (No "[Turn limit reached...]" notice is
+    # appended for max_turns=1 — the single turn IS the complete task — but we still check
+    # membership rather than endswith to be robust against any trailing metadata.)
     final_content = (last_msg.get('content') or '')
     assert 'part19_final-committed-message_' in final_content, (
         f"final committed message lost — last frame content tail={final_content[-80:]!r}")

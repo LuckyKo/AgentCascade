@@ -766,7 +766,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     break
 
             # ── Cleanup: Turn limit reached ────────────────────────────────
-            if turns_available <= 0:
+            # Muted for max_turns=1 agents: their single turn IS the complete task,
+            # so there is no "incomplete" state — the notice would be pure noise.
+            if turns_available <= 0 and max_turns > 1:
                 # Inject turn limit notice into the LAST assistant message
                 # content
                 # instead of appending a new message. This ensures
