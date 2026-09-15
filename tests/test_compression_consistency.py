@@ -315,7 +315,7 @@ class TestSingleCompression:
 
         with patch('agent_cascade.compression.core.invoke_compression_agent',
                    return_value=('Summary of first compression', '')):
-            result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         assert result.success is True
         conv = pool.get_conversation('TestAgent')
@@ -346,7 +346,7 @@ class TestSingleCompression:
 
         with patch('agent_cascade.compression.core.invoke_compression_agent',
                    return_value=('Summary of first compression', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         # Simulate handler sync: preserve full history + insert marker at mirrored pos
         pool_conv = pool.get_conversation('TestAgent')
@@ -383,7 +383,7 @@ class TestSingleCompression:
         _write_jsonl(tmp_jsonl, original_conv)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
 
@@ -416,7 +416,7 @@ class TestMultipleCompressions:
 
         # First compression
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 1', '')):
-            r1 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            r1 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
         assert r1.success is True
 
         conv_after_1 = pool.get_conversation('TestAgent')
@@ -434,7 +434,7 @@ class TestMultipleCompressions:
 
         # Second compression
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 2', '')):
-            r2 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            r2 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         assert r2.success is True
         conv_after_2 = pool.get_conversation('TestAgent')
@@ -469,7 +469,7 @@ class TestMultipleCompressions:
 
         # First compression
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 1', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         conv_after_1 = pool.get_conversation('TestAgent')
         # Simulate handler sync: preserve full history + insert marker at mirrored pos
@@ -486,7 +486,7 @@ class TestMultipleCompressions:
 
         # Second compression
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 2', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
         # Simulate handler sync for second compression
@@ -544,7 +544,7 @@ class TestMultipleCompressions:
             return (s, '')
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', side_effect=capture_summary):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         conv = pool.get_conversation('TestAgent')
         # Add more messages
@@ -553,7 +553,7 @@ class TestMultipleCompressions:
         pool.instance_conversations['TestAgent'] = conv
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', side_effect=capture_summary):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         assert len(summaries) == 2
         markers = [m for m in pool.get_conversation('TestAgent') if _is_marker(m)]
@@ -584,7 +584,7 @@ class TestCrashRecovery:
         _write_jsonl(tmp_jsonl, original_conv)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary of events', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
 
@@ -613,7 +613,7 @@ class TestCrashRecovery:
 
         # First compression
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 1', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
         conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, conv)
 
@@ -627,7 +627,7 @@ class TestCrashRecovery:
         append_messages(pool, extra)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 2', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
 
@@ -707,7 +707,7 @@ class TestTailSyncVerification:
         _write_jsonl(tmp_jsonl, original_conv)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
 
@@ -728,7 +728,7 @@ class TestTailSyncVerification:
 
         # First compression
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 1', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
         conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, conv)
 
@@ -742,7 +742,7 @@ class TestTailSyncVerification:
         append_messages(pool, extra)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 2', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
@@ -760,7 +760,7 @@ class TestTailSyncVerification:
         _write_jsonl(tmp_jsonl, original_conv)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
 
@@ -827,7 +827,7 @@ class TestFullCycle:
 
         # Phase 1: First compression
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary phase 1', '')):
-            r1 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            r1 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
         assert r1.success is True
 
         conv_1 = pool.get_conversation('TestAgent')
@@ -849,7 +849,7 @@ class TestFullCycle:
         append_messages(pool, extra, tmp_jsonl)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary phase 2', '')):
-            r2 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            r2 = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
         assert r2.success is True
 
         conv_final = pool.get_conversation('TestAgent')
@@ -893,7 +893,7 @@ class TestFullCycle:
         _write_jsonl(tmp_jsonl, original_conv)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
@@ -919,7 +919,7 @@ class TestEdgeCases:
 
         for i in range(3):
             with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=(f"Summary {i}", '')):
-                r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+                r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
             if not r.success:
                 break  # Not enough messages — expected
 
@@ -941,7 +941,7 @@ class TestEdgeCases:
         pool = pool_with_history
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
         assert r.success is True
 
         conv = pool.get_conversation('TestAgent')
@@ -955,7 +955,7 @@ class TestEdgeCases:
         pool = MockAgentPool(history)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            r = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         assert not r.success  # Not enough messages to compress
         conv = pool.get_conversation('TestAgent')
@@ -975,7 +975,7 @@ class TestEdgeCases:
         _write_jsonl(tmp_jsonl, original_conv)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, pool_conv)
@@ -1014,7 +1014,7 @@ class TestNCompressions:
             # Compress
             with patch('agent_cascade.compression.core.invoke_compression_agent',
                        return_value=(f"Summary {comp_num + 1}", '')):
-                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
             assert result.success, f"Comp #{comp_num+1} failed: {result.error}"
 
@@ -1068,7 +1068,7 @@ class TestNCompressions:
         for comp_num in range(n_compressions):
             with patch('agent_cascade.compression.core.invoke_compression_agent',
                        return_value=(f"Summary {comp_num + 1}", '')):
-                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
             assert result.success, f"Comp #{comp_num+1} failed: {result.error}"
 
             pool_conv = pool.get_conversation('TestAgent')
@@ -1159,7 +1159,7 @@ class TestTailSyncModule:
         _write_jsonl(tmp_jsonl, original_conv)
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, pool_conv)
@@ -1184,7 +1184,7 @@ class TestForwardOnlyRecovery:
 
         # Two compressions to create multiple markers
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 1', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
         conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, conv)
 
@@ -1197,7 +1197,7 @@ class TestForwardOnlyRecovery:
         pool.instance_conversations['TestAgent'] = conv + extra
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary 2', '')):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool.get_conversation('TestAgent')
         _write_jsonl(tmp_jsonl, pool_conv)
@@ -1299,7 +1299,7 @@ class TestMessagePreservation:
 
         with patch('agent_cascade.compression.core.invoke_compression_agent',
                    return_value=('Summary of compression', '')):
-            compress_context(pool_with_history, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool_with_history, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool_with_history.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)
@@ -1331,7 +1331,7 @@ class TestMessagePreservation:
         for comp_num in range(n_compressions):
             with patch('agent_cascade.compression.core.invoke_compression_agent',
                        return_value=(f"Summary round {comp_num + 1}", '')):
-                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+                result = compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
             assert result.success, f"Compression #{comp_num+1} failed: {result.error}"
 
@@ -1365,7 +1365,7 @@ class TestMessagePreservation:
                 tracked_contents[m.content] = m.role
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', return_value=('Summary', '')):
-            compress_context(pool_with_history, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool_with_history, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         pool_conv = pool_with_history.get_conversation('TestAgent')
         simulate_reset_history(tmp_jsonl, pool_conv)

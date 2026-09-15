@@ -319,6 +319,7 @@ class TestCompressContextToolPairsIntegration:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -356,6 +357,7 @@ class TestCompressContextToolPairsIntegration:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -399,6 +401,7 @@ class TestCompressContextToolPairsIntegration:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -435,6 +438,7 @@ class TestParallelToolCallsPattern:
             result = compress_context(
                 agent_pool=pool, target_agent_name='TestAgent',
                 fraction=0.5, mode='auto', force=False,
+                trigger='user',
             )
 
         assert result.success is True

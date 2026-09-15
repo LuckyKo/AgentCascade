@@ -67,6 +67,9 @@ class CompressContext(BaseTool):
         # Legacy kwargs from /compress command path in api_server.py WebSocket handler
         dry_run = kwargs.get('dry_run', False)
         precomputed_summary = kwargs.get('precomputed_summary')
+        # 'trigger' is NOT in the LLM-facing parameters schema — only trusted callers
+        # (/compress passes trigger='user') can set it. Default 'agent' applies the guard.
+        trigger = kwargs.get('trigger', 'agent')
 
         if not self.agent_pool:
             return 'ERROR: agent_pool not connected to tool'
@@ -135,6 +138,7 @@ class CompressContext(BaseTool):
             force=force,
             dry_run=dry_run,
             precomputed_summary=precomputed_summary,
+            trigger=trigger,
         )
 
         if result.success:

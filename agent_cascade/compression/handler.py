@@ -1126,6 +1126,7 @@ class CompressionHandler:
                 messages=messages,
                 agent_instance_name=inst_name,
                 agent_obj=instance,
+                trigger='user',  # /compress is a user action — bypass the min-usage guard
             )
             logger.info(f"/compress applied for {inst_name}: {result_str}")
 

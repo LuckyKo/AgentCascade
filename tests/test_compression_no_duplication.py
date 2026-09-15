@@ -50,6 +50,11 @@ def compress_and_sync(pool, inst_name, agent_class='coder', **kwargs):
     Returns CompressResult.
     """
     from agent_cascade.compression.core import compress_context as _compress
+    # These integration tests exercise the compression MECHANISM (no-duplication,
+    # JSONL sync) with small/low-usage conversations and do NOT intend the new
+    # agent-triggered min-usage guard. Default trigger='user' mirrors the real
+    # /compress path so the guard is bypassed; callers may still override.
+    kwargs.setdefault('trigger', 'user')
     result = _compress(agent_pool=pool, target_agent_name=inst_name, **kwargs)
     if result.success:
         conv = pool.get_conversation(inst_name)

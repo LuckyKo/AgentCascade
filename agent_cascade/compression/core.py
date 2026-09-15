@@ -12,9 +12,9 @@ from agent_cascade.compression.result import CompressResult
 from agent_cascade.llm.schema import FUNCTION, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER, COMPRESSION_PROMPT
 from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE, COMPRESSION_DEFAULT_FRACTION,
-                                    COMPRESSION_MAX_CONSOLIDATION_TOKENS)
+                                    COMPRESSION_MAX_CONSOLIDATION_TOKENS, COMPRESSION_MIN_USAGE_PCT)
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-from agent_cascade.utils.utils import extract_text_from_message, strip_base64_from_images
+from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, strip_base64_from_images
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,67 @@ def _compression_failure(error: str, mode: str) -> CompressResult:
         error=error,
         mode=mode,
     )
+
+
+def _estimate_usage_pct(agent_pool, target_agent_name: str, history) -> float | None:
+    """Estimate context usage percentage for the min-usage guard.
+
+    Pure computation (no LLM call, no pool mutation). Mirrors BOTH sides of the
+    engine's forced-path math so the guard's numerator and denominator match what
+    ``_count_history_tokens`` / ``_get_effective_limit`` use:
+
+      * Numerator: message tokens (``get_message_stats``) PLUS tool-schema tokens
+        (``estimate_functions_tokens`` over the instance's active functions), exactly
+        as ``engine/core.py::_count_history_tokens(..., functions=...)`` counts them.
+      * Denominator: effective limit = max input tokens minus the compression reserve,
+        floored to max if that would go <= 0.
+
+    Tool-schema counting is fail-soft: if resolving active functions or estimating
+    their tokens fails for any reason, we fall back to the message-only count rather
+    than aborting — a schema-counting bug must never block compression.
+
+    Returns:
+        Usage as a percentage (0-100+), or None on any failure (fail-open).
+    """
+    try:
+        instance = agent_pool.instances.get(target_agent_name)
+        if instance is None:
+            return None
+
+        # Message tokens over the already-fetched full conversation.
+        current_tokens = sum(get_message_stats(m)['tokens'] for m in history)
+
+        # Add tool-schema tokens to match the engine's forced-path numerator
+        # (engine/core.py::_count_history_tokens counts functions when provided).
+        # Fail-soft: on ANY error, keep the message-only count and continue.
+        try:
+            from agent_cascade.engine.helpers import _get_active_functions_from_template
+            from agent_cascade.utils.utils import estimate_functions_tokens
+            template = agent_pool.get_template(instance.agent_class)
+            if template is not None:
+                active_functions = _get_active_functions_from_template(template, instance, pool=agent_pool)
+                current_tokens += estimate_functions_tokens(active_functions)
+        except Exception as e:
+            logger.debug(f"min-usage guard: tool-schema token count skipped for '{target_agent_name}': {e}")
+
+        # Resolve max input tokens, falling back to the settings default.
+        from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
+        from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
+        max_tokens = _resolve_max_tokens(agent_pool, instance)
+        if not max_tokens:
+            max_tokens = DEFAULT_MAX_INPUT_TOKENS
+
+        # Effective limit = max minus reserve, floored to max if that goes <= 0.
+        # Mirrors engine/core.py::_get_effective_limit (compression_exec reserve math).
+        reserve = getattr(agent_pool.settings, 'compression_context_reserve_tokens', 0) or 0
+        effective_limit = max_tokens - reserve
+        if effective_limit <= 0:
+            effective_limit = max_tokens
+
+        return current_tokens / effective_limit * 100
+    except Exception as e:
+        logger.warning(f"min-usage guard: failed to estimate usage for '{target_agent_name}': {e}")
+        return None
 
 
 def _consolidate_markers(
@@ -258,6 +319,7 @@ def compress_context(
         force: bool = False,  # Bypass validation guards (forced compression at >95%)
         dry_run: bool = False,  # If True, generate summary but don't mutate pool
         precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call in auto mode
+        trigger: str = 'agent',  # "agent" (guard applies) / "user" (/compress, bypass) / "forced" (>95%, bypass)
 ) -> CompressResult:
     """
     Unified compression function. Handles ALL compression triggers:
@@ -279,6 +341,8 @@ def compress_context(
         force: If True, bypass the "not enough messages" guard.
         dry_run: If True, generate summary but don't mutate pool (for /compress command).
         precomputed_summary: Pre-generated summary to skip LLM call in auto mode.
+        trigger: Who initiated compression. "agent" (default) applies the min-context-usage
+            guard; "user" (/compress command) and "forced" (>95% auto) bypass it.
 
     Returns:
         CompressResult with success status, summary text, and metadata.
@@ -340,6 +404,28 @@ def compress_context(
     except Exception:
         # Token counting is advisory — if it fails, skip the token guard
         total_tokens = 0
+
+    # ── 2b. Guard: agent-triggered min context usage (refuse if below threshold) ──
+    # Applies ONLY to genuine agent-initiated calls. Bypassed when:
+    #   * trigger != 'agent'  → /compress passes trigger='user' (explicit user action).
+    #   * force               → the >95% forced path (execute_force_compression) sets force=True.
+    #   * dry_run             → the /compress preview/approval path generates a summary for
+    #                           user review without mutating the pool; that must never be
+    #                           blocked by the usage guard, so dry-run is always allowed.
+    if trigger == 'agent' and not force and not dry_run:
+        _min_pct = getattr(agent_pool.settings, 'compression_min_usage_pct', COMPRESSION_MIN_USAGE_PCT)
+        _usage_pct = _estimate_usage_pct(agent_pool, target_agent_name, history)
+        if _usage_pct is None:
+            logger.warning("min-usage guard: context usage could not be computed — failing open")
+        elif _usage_pct < _min_pct:
+            return CompressResult(
+                success=False, summary_text=None, marker_message=None,
+                messages_discarded=0, tail_count=len(active_set),
+                error=f"Refused by min-usage guard: context {_usage_pct:.1f}% is below the "
+                      f"{_min_pct:.0f}% minimum for agent-triggered compression. "
+                      f"Context will fill naturally; use /compress to force it.",
+                mode=mode,
+            )
 
     # ── 3. Calculate discard count ──
     target_discard_count = compute_discard_count(active_set, fraction, force)

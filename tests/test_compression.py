@@ -274,6 +274,7 @@ class TestMarkerTimestampPositional:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -297,6 +298,7 @@ class TestMarkerTimestampPositional:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -324,6 +326,7 @@ class TestMarkerTimestampPositional:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -383,6 +386,7 @@ class TestLiveMarkerTsStamping:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -487,6 +491,7 @@ class TestCompressContextCleanTrim:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -508,6 +513,7 @@ class TestCompressContextCleanTrim:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         new_history = pool.get_conversation('TestAgent')
@@ -534,6 +540,7 @@ class TestCompressContextCleanTrim:
                 fraction=0.5,
                 mode='auto',
                 force=True,
+                trigger='user',
             )
 
         assert result1.success is True
@@ -549,6 +556,7 @@ class TestCompressContextCleanTrim:
                 fraction=0.5,
                 mode='auto',
                 force=True,
+                trigger='user',
             )
 
         # Second compression should also succeed (or defer if too small)
@@ -584,7 +592,7 @@ class TestCompressContextTargetMessages:
             return ('Summary', '')
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', side_effect=capture_invoke):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         assert len(captured_target_messages) == 1
         target_msgs = captured_target_messages[0]
@@ -628,7 +636,7 @@ class TestCompressContextTargetMessages:
             return ('Compound summary', '')
 
         with patch('agent_cascade.compression.core.invoke_compression_agent', side_effect=capture_invoke):
-            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto')
+            compress_context(pool, 'TestAgent', fraction=0.5, mode='auto', trigger='user')
 
         assert len(captured_target_messages) == 1
         target_msgs, existing_summary = captured_target_messages[0]
@@ -668,6 +676,7 @@ class TestCompressContextForceMode:
                 fraction=0.1,  # int(6*0.1) = 0 → would discard 0 without force
                 mode='auto',
                 force=True,
+                trigger='user',
             )
 
         # Force mode should succeed — at least 1 message discarded even though
@@ -695,6 +704,7 @@ class TestCompressContextManualMode:
                 fraction=0.5,
                 mode='manual',
                 summary_text='User-provided summary of events',
+                trigger='user',
             )
 
         # invoke_compression_agent should NOT have been called
@@ -712,6 +722,7 @@ class TestCompressContextManualMode:
             fraction=0.5,
             mode='manual',
             summary_text=None,
+            trigger='user',
         )
 
         assert result.success is False
@@ -741,6 +752,7 @@ class TestCompressContextDryRun:
                 fraction=0.5,
                 mode='auto',
                 dry_run=True,
+                trigger='user',
             )
 
         assert result.success is True
@@ -760,6 +772,7 @@ class TestCompressContextDryRun:
                 fraction=0.5,
                 mode='auto',
                 dry_run=True,
+                trigger='user',
             )
 
         assert result.messages_discarded > 0
@@ -786,6 +799,7 @@ class TestCompressContextFailurePaths:
                 target_agent_name='TestAgent',
                 fraction=0.5,
                 mode='auto',
+                trigger='user',
             )
 
         assert result.success is False
@@ -802,6 +816,7 @@ class TestCompressContextFailurePaths:
             target_agent_name='TestAgent',
             fraction=0.5,
             mode='auto',
+            trigger='user',
         )
 
         assert result.success is False
@@ -820,6 +835,7 @@ class TestCompressContextFailurePaths:
             target_agent_name='TestAgent',
             fraction=0.5,
             mode='auto',
+            trigger='user',
         )
 
         assert result.success is False
@@ -846,6 +862,7 @@ class TestFractionValidation:
             target_agent_name='TestAgent',
             fraction=-0.1,
             mode='auto',
+            trigger='user',
         )
 
         assert result.success is False
@@ -860,6 +877,7 @@ class TestFractionValidation:
             target_agent_name='TestAgent',
             fraction=1.5,
             mode='auto',
+            trigger='user',
         )
 
         assert result.success is False
@@ -874,6 +892,7 @@ class TestFractionValidation:
             target_agent_name='TestAgent',
             fraction=0.0,
             mode='auto',
+            trigger='user',
         )
 
         # Should pass validation but fail at "not enough to compress" guard
@@ -893,6 +912,7 @@ class TestFractionValidation:
                 fraction=1.0,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         # Should pass validation and succeed (clamped to len-2 tail)
@@ -1141,6 +1161,7 @@ class TestCompressContextPrecomputedSummary:
                 fraction=0.5,
                 mode='auto',  # auto mode — but precomputed_summary takes priority
                 precomputed_summary='Pre-generated summary from /compress command',
+                trigger='user',
             )
 
         mock_invoke.assert_not_called()
@@ -1157,6 +1178,7 @@ class TestCompressContextPrecomputedSummary:
             fraction=0.5,
             mode='auto',
             precomputed_summary='   ',  # whitespace only → stripped to empty
+            trigger='user',
         )
 
         assert result.success is False
@@ -1174,6 +1196,7 @@ class TestCompressContextPrecomputedSummary:
                 mode='manual',
                 summary_text=None,  # No summary_text — would fail without precomputed_summary
                 precomputed_summary='Fallback summary',
+                trigger='user',
             )
 
         mock_invoke.assert_not_called()
@@ -1200,6 +1223,7 @@ class TestCompressContextEmptySummary:
                 target_agent_name='TestAgent',
                 fraction=0.5,
                 mode='auto',
+                trigger='user',
             )
 
         assert result.success is False
@@ -1219,6 +1243,7 @@ class TestCompressContextEmptySummary:
                 target_agent_name='TestAgent',
                 fraction=0.5,
                 mode='auto',
+                trigger='user',
             )
 
         assert result.success is False
@@ -1275,6 +1300,7 @@ class TestCompressContextPoolMutationFailure:
                 target_agent_name='TestAgent',
                 fraction=0.5,
                 mode='auto',
+                trigger='user',
             )
 
         assert result.success is False
@@ -1312,6 +1338,7 @@ class TestCompressContextDictMessages:
                 fraction=0.5,
                 mode='auto',
                 force=False,
+                trigger='user',
             )
 
         assert result.success is True
@@ -1347,6 +1374,7 @@ class TestTokenGuard:
                 target_agent_name='TestAgent',
                 fraction=0.5,
                 mode='auto',
+                trigger='user',
             )
 
         assert result.success is False
@@ -1379,6 +1407,7 @@ class TestTokenGuard:
                     fraction=0.5,
                     mode='auto',
                     force=True,  # Needed because small set → discard_count could be 0 without force
+                    trigger='user',
                 )
 
         assert result.success is True
@@ -1406,6 +1435,7 @@ class TestCompressContextDryRunWithForce:
                 mode='auto',
                 force=True,  # Bypass the small-set guard
                 dry_run=True,  # Don't mutate pool
+                trigger='user',
             )
 
         assert result.success is True
