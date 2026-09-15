@@ -8,12 +8,9 @@ triggers:
   - find bloat
 ---
 
-ponytail-review, repo-wide. Scan the whole tree instead of a diff. Rank
-findings biggest cut first.
+Repo-wide over-engineering audit (the whole-tree counterpart to a diff review). Scan the entire tree instead of a diff; rank findings biggest cut first. One-shot report — lists findings, applies nothing.
 
 ## Tags
-
-Same as ponytail-review:
 
 - `delete:` dead code, unused flexibility, speculative feature. Replacement: nothing.
 - `stdlib:` hand-rolled thing the standard library ships. Name the function.
@@ -36,5 +33,5 @@ End with `net: -<N> lines, -<M> deps possible.` Nothing to cut: `Lean already. S
 
 Scope: over-engineering and complexity only. Correctness bugs, security holes,
 and performance are explicitly out of scope. Route them to a normal review
-pass. Lists findings, applies nothing. One-shot.
-"stop ponytail-audit" or "normal mode" to revert.
+pass. Lists findings, applies nothing. One-shot report — the user ends it by
+asking for a normal review or by not following up.

@@ -1,6 +1,6 @@
 ---
 name: review-fix-plan-critical-analysis
-description: Systematic critique of proposed code changes by cross-referencing claims with actual source implementation, identifying edge cases, and validating acceptance criteria before any code is written.
+description: Systematic pre-implementation critique of proposed code changes — cross-reference every claim against actual source, identify edge cases and regression risks, validate acceptance criteria before any code is written.
 source: auto-generated
 version: "1.0.0"
 triggers:
@@ -9,61 +9,21 @@ triggers:
   - "verify against source"
   - "code review before implementation"
   - "plan-level critique"
-generated_by: reviewer
-generated_from_task: "Review a FIX PLAN for correctness, risk, and missing edge cases. Do NOT write or modify any code — critique the plan only."
 ---
 
 ## Goal
 
-Enable rigorous pre-implementation validation of proposed fixes by systematically verifying every claim against actual source code, identifying logical flaws, edge cases, and regression risks.
+Rigorous pre-implementation validation: verify every claim in a proposed fix against actual source, and surface logical flaws, edge cases, and regression risks. Critique the plan only — do NOT write or modify code.
 
 ## Procedure
 
-### Step 1 — Gather Source Evidence
-Read all relevant source files mentioned in the plan. Use `read_file` for specific line ranges and `grep` to locate patterns. Do not review blind — every claim must be grounded in actual code.
-
-### Step 2 — Validate Root Cause Claims
-For each asserted root cause:
-- Locate the exact code that produces the behavior
-- Check if the mechanism is unconditional or conditional
-- Verify measurements/timestamps against actual logic
-- Confirm whether the issue is structural or content-driven
-
-### Step 3 — Scrutinize Proposed Fixes
-For each proposed change:
-- **Backend:** Check if logic handles throttling, deduplication, and final-state guarantees correctly. Look for cases where the last tick was suppressed but a final frame is still needed.
-- **Frontend:** Verify DOM manipulation patterns match data structures. Ensure incremental append preserves all invariants (dedup, resync, index-mismatch handling).
-- **Interaction:** Identify whether two fixes could interfere or create new edge cases.
-
-### Step 4 — Identify Missing Edge Cases
-Consider:
-- What happens when the last loop tick was throttled out?
-- What if a frame is dropped and resync is needed?
-- Could the fix break lazy rendering, tab switching, or error recovery?
-- Are there race conditions or timing issues?
-
-### Step 5 — Rate Severity and Suggest Fixes
-Use severity ratings:
-- 🔴 **Critical**: Data loss, corruption, or security hole
-- 🟠 **Major**: Significant regression risk or incorrect behavior
-- 🟡 **Minor**: Edge case not covered, testability issue
-- 🔵 **Nit**: Minor improvement, documentation
-
-Provide concrete code suggestions for every issue raised.
-
-### Step 6 — Deliver Structured Verdict
-Final report must include:
-- One of: **APPROVE / APPROVE-WITH-CHANGES / REJECT**
-- Prioritized list of required changes before implementation
-- Any claims found to be WRONG in light of actual source
-- Specific file:line references for all findings
+1. **Gather source evidence.** Read all relevant source files named in the plan (`read_file` for line ranges, `grep` to locate patterns). Never review blind — every claim must be grounded in actual code.
+2. **Validate root-cause claims.** For each asserted cause: locate the exact code producing the behavior; is the mechanism unconditional or conditional; do measurements/timestamps match the logic; is it structural or content-driven?
+3. **Scrutinize proposed fixes.** Backend: does logic handle throttling, deduplication, and final-state guarantees correctly (e.g., last tick suppressed but a final frame still needed)? Frontend: do DOM patterns match data structures; does incremental append preserve all invariants (dedup, resync, index-mismatch handling)? Interaction: can two fixes interfere or create new edge cases?
+4. **Identify missing edge cases.** Last loop tick throttled out? Frame dropped and resync needed? Could the fix break lazy rendering, tab switching, or error recovery? Race conditions / timing issues?
+5. **Rate severity + suggest fixes.** 🔴 Critical — data loss/corruption/security hole. 🟠 Major — significant regression risk or incorrect behavior. 🟡 Minor — uncovered edge case, testability issue. 🔵 Nit — minor improvement/docs. Concrete code suggestion for every issue raised.
+6. **Deliver a structured verdict.** One of **APPROVE / APPROVE-WITH-CHANGES / REJECT**; prioritized list of required changes before implementation; any claims found WRONG in light of actual source; specific file:line references for all findings.
 
 ## Tips
 
-- Always read the full context before reviewing — never trust a summary.
-- Use `code_interpreter` to simulate suspect code when possible.
-- Check existing tests to understand intended behavior and gaps.
-- Don't allow over-engineered solutions that hide bugs instead of fixing root cause.
-- Never approve work you haven't personally inspected against source.
-- Look for off-by-one errors, race conditions, and state invariants.
-- Verify that acceptance criteria truly cover all edge cases.
+Always read full context before reviewing (never trust a summary); use `code_interpreter` to simulate suspect code when possible; check existing tests for intended behavior and gaps; reject over-engineered solutions that hide bugs instead of fixing root cause; never approve work you haven't personally inspected against source; look for off-by-one, race conditions, state invariants; verify acceptance criteria truly cover all edge cases.

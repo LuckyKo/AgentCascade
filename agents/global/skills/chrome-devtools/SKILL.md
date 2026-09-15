@@ -1,80 +1,44 @@
 ---
 name: chrome-devtools
-description: Uses Chrome DevTools via MCP for efficient debugging, troubleshooting and browser automation. Use when debugging web pages, automating browser interactions, analyzing performance, or inspecting network requests. This skill does not apply to `--slim` mode (MCP configuration).
+description: Uses Chrome DevTools via MCP for debugging, troubleshooting and browser automation — page targeting, element interaction, efficient data retrieval, and extension testing. Does not apply to `--slim` mode.
 triggers:
-  - chrome devtools
-  - debug web page
-  - browser automation
-  - inspect network requests
-  - take snapshot
-  - evaluate script in browser
+  - "chrome devtools"
+  - "debug web page"
+  - "browser automation"
+  - "inspect network requests"
+  - "take snapshot"
+  - "evaluate script in browser"
 ---
 
-## Core Concepts
+## Core concepts
 
-**Browser lifecycle**: Browser starts automatically on first tool call using a persistent Chrome profile. Configure via CLI args in the MCP server configuration: `npx chrome-devtools-mcp@latest --help`.
-Addional tooling can be enabled by providing the following flags:
+- **Browser lifecycle:** starts automatically on first tool call using a persistent Chrome profile. Configure via CLI args in the MCP server config: `npx chrome-devtools-mcp@latest --help`. Extra flags: `--categoryExtensions` (extension tooling), `--memoryDebugging` (memory tooling).
+- **Page targeting:** page-scoped tools need a `pageId`. Get IDs from `list_pages` or the ID returned by `new_page`. For `evaluate_script`, `pageId` is required when targeting pages — except with `--categoryExtensions`, where you may pass `serviceWorkerId` instead to evaluate inside an extension background service worker.
+- **Element interaction:** `take_snapshot` returns page structure with element `uid`s for interaction. If an element isn't found, take a fresh snapshot (it may have been removed or the page changed).
 
-- For extension tooling, use the `--categoryExtensions` flag.
-- For memory tooling, use the `--memoryDebugging` flag.
+## Workflow patterns
 
-**Page targeting**: Page-scoped tools require a `pageId` parameter to target a specific page. Use `list_pages` to see available pages and their IDs (e.g. `pageId: 1`), or use the ID returned when creating a page with `new_page`.
-Note: For `evaluate_script`, `pageId` is required when targeting pages. However, when `--categoryExtensions` is enabled, `pageId` is optional so you can pass `serviceWorkerId` instead to evaluate inside an extension background service worker.
-**Element interaction**: Use `take_snapshot` to get page structure with element `uid`s. Each element has a unique `uid` for interaction. If an element isn't found, take a fresh snapshot - the element may have been removed or the page changed.
+**Before interacting:** 1) navigate (`navigate_page`/`new_page`) → 2) `wait_for` if you know what to wait for → 3) `take_snapshot` with `pageId` → 4) interact using snapshot `uid`s, passing the matching `pageId`.
 
-## Workflow Patterns
+**Efficient data retrieval:** use `filePath` for large outputs (screenshots/snapshots/traces); use pagination (`pageIdx`, `pageSize`) + filtering (`types`) to minimize data; set `includeSnapshot: false` on input actions unless you need updated state.
 
-### Before interacting with a page
+**Tool selection:** automation/interaction → `take_snapshot` (text-based, faster); visual inspection → `take_screenshot`; data not in the accessibility tree → `evaluate_script`.
 
-1. Navigate: `navigate_page` or `new_page`
-2. Wait: `wait_for` to ensure content is loaded if you know what you look for.
-3. Snapshot: `take_snapshot` with `pageId` to understand page structure
-4. Interact: Use element `uid`s from snapshot for `click`, `fill`, etc., passing the corresponding `pageId`.
+**Parallel execution:** you can batch multiple tool calls, but keep order navigate → wait → snapshot → interact.
 
-### Efficient data retrieval
+## Testing an extension
 
-- Use `filePath` parameter for large outputs (screenshots, snapshots, traces)
-- Use pagination (`pageIdx`, `pageSize`) and filtering (`types`) to minimize data
-- Set `includeSnapshot: false` on input actions unless you need updated page state
-
-### Tool selection
-
-- **Automation/interaction**: `take_snapshot` (text-based, faster, better for automation)
-- **Visual inspection**: `take_screenshot` (when user needs to see visual state)
-- **Additional details**: `evaluate_script` for data not in accessibility tree
-
-### Parallel execution
-
-You can send multiple tool calls in parallel, but maintain correct order: navigate → wait → snapshot → interact.
-
-### Testing an extension
-
-> **Before proceeding**: Extension tools (`install_extension`, `list_extensions`, etc.) are only available when the MCP server is started with the `--categoryExtensions` flag. If these tools are not in your tool list, stop and ask the user to update their MCP server configuration:
->
-> ```json
-> {
->   "mcpServers": {
->     "chrome-devtools": {
->       "command": "npx",
->       "args": ["chrome-devtools-mcp@latest", "--categoryExtensions"]
->     }
->   }
-> }
-> ```
->
-> After updating, the user must restart the MCP server (or their AI client) for the change to take effect.
-
-1. **Install**: Use `install_extension` with the path to the unpacked extension.
-2. **Identify**: Get the extension ID from the response or by calling `list_extensions`.
-3. **Trigger Action**: Use `trigger_extension_action` to open the popup or side panel if applicable.
-4. **Verify Service Worker**: Use `evaluate_script` with `serviceWorkerId` (omitting `pageId` and `args`) to check extension state or trigger background actions. When evaluating in a page, pass `pageId` (omitting `serviceWorkerId`).
-5. **Verify Page Behavior**: Navigate to a page where the extension operates and use `take_snapshot` to check if content scripts injected elements or modified the page correctly.
+Extension tools (`install_extension`, `list_extensions`, etc.) exist only when the server started with `--categoryExtensions`. If they're missing from your tool list, stop and ask the user to update MCP config and restart:
+```json
+{ "mcpServers": { "chrome-devtools": { "command": "npx",
+  "args": ["chrome-devtools-mcp@latest", "--categoryExtensions"] } } }
+```
+1. **Install:** `install_extension` with the unpacked-extension path.
+2. **Identify:** get the extension ID from the response or `list_extensions`.
+3. **Trigger action:** `trigger_extension_action` to open the popup/side panel if applicable.
+4. **Verify service worker:** `evaluate_script` with `serviceWorkerId` (omit `pageId` and `args`) for background state/actions; when evaluating in a page, pass `pageId` (omit `serviceWorkerId`).
+5. **Verify page behavior:** navigate to a page where the extension operates; `take_snapshot` to confirm content scripts injected/modified elements correctly.
 
 ## Troubleshooting
 
-If `chrome-devtools-mcp` is insufficient, guide users to use Chrome DevTools UI:
-
-- https://developer.chrome.com/docs/devtools
-- https://developer.chrome.com/docs/devtools/ai-assistance
-
-If there are errors launching `chrome-devtools-mcp` or Chrome, refer to https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/troubleshooting.md.
+If `chrome-devtools-mcp` is insufficient, point users to the DevTools UI: https://developer.chrome.com/docs/devtools (and /ai-assistance). For launch errors, see https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/troubleshooting.md.
