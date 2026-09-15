@@ -644,6 +644,54 @@ class TestSkillManager:
             assert sorted(map(repr, bodies)) == sorted(map(repr, expected_bodies)), \
                 f"bodies do not correspond to names for {value!r}"
 
+    # -- resolve_load_skill_pairs (name + body) --
+
+    def test_resolve_pairs_explicit_returns_name_body_tuples(self):
+        """resolve_load_skill_pairs with an explicit list returns (name, body) tuples."""
+        self._setup_manager_with_skills()
+        pairs = self.manager.resolve_load_skill_pairs(['version-control'])
+        assert isinstance(pairs, list) and len(pairs) == 1
+        name, body = pairs[0]
+        assert name == 'version-control'
+        assert isinstance(body, str) and len(body) > 50
+        # Body must match what load_full_instructions returns for that name.
+        assert body == self.manager.load_full_instructions('version-control')
+
+    def test_resolve_pairs_skips_missing_names(self):
+        """Missing skill names are dropped from the pairs (consistent with resolve_load_skill)."""
+        self._setup_manager_with_skills()
+        pairs = self.manager.resolve_load_skill_pairs(['version-control', 'nonexistent-skill'])
+        assert [n for n, _ in pairs] == ['version-control']
+
+    def test_resolve_pairs_auto_mode(self):
+        """AUTO mode returns (name, body) pairs matching the name resolver."""
+        self._setup_manager_with_skills()
+        kwargs = {'task_text': 'slow API connection pooling issues'}
+        pairs = self.manager.resolve_load_skill_pairs('AUTO', **kwargs)
+        names = self.manager.resolve_load_skill_names('AUTO', **kwargs)
+        # Names from pairs must exactly match the shared name resolver.
+        assert [n for n, _ in pairs] == names
+        for n, body in pairs:
+            assert body == self.manager.load_full_instructions(n)
+
+    def test_resolve_pairs_none_and_null_return_empty(self):
+        self._setup_manager_with_skills()
+        assert self.manager.resolve_load_skill_pairs('NONE') == []
+        assert self.manager.resolve_load_skill_pairs(None) == []
+
+    def test_resolve_pairs_matches_bodies_drift_guard(self):
+        """Drift guard: pairs' names must be exactly the shared name resolver's output."""
+        self._setup_manager_with_skills()
+        for value, kwargs in [
+            (['version-control', 'systematic-debugging'], {}),
+            ('AUTO', {'task_text': 'slow API connection pooling issues'}),
+            ('NONE', {}),
+            (None, {}),
+        ]:
+            pairs = self.manager.resolve_load_skill_pairs(value, **kwargs)
+            names = self.manager.resolve_load_skill_names(value, **kwargs)
+            assert [n for n, _ in pairs] == names, f"drift for {value!r}"
+
     # -- Fix B: Multi-tier discovery with priority resolution --
 
     def test_discover_picks_up_workspace_tier(self, tmp_path):
@@ -851,6 +899,78 @@ class TestEdgeCases:
         # Old keyword should be gone if it doesn't appear in new data
         for kw, names in m._inverted_index.items():
             assert 'old-skill' not in names
+
+
+# ===========================================================================
+# 9. Skills Block Formatting — named skills in system prompt injection
+# ===========================================================================
+
+
+class TestSkillsBlockFormatting:
+    """_build_skills_block / _inject_skills_to_system_message label skills by name."""
+
+    def test_build_block_named_tuples_use_real_name(self):
+        from agent_cascade.engine.helpers import _build_skills_block
+        block = _build_skills_block([('docker-best-practices', 'DOCKER BODY')])
+        assert '### Skill docker-best-practices' in block
+        assert 'DOCKER BODY' in block
+        # Must NOT fall back to a positional index label.
+        assert '### Skill 1' not in block
+
+    def test_build_block_multiple_named(self):
+        from agent_cascade.engine.helpers import _build_skills_block
+        block = _build_skills_block([
+            ('skill-a', 'BODY A'),
+            ('skill-b', 'BODY B'),
+        ])
+        assert '### Skill skill-a' in block
+        assert '### Skill skill-b' in block
+        assert '### Skill 1' not in block and '### Skill 2' not in block
+
+    def test_build_block_plain_strings_backward_compat(self):
+        """Plain strings (no name) still render with the old positional label."""
+        from agent_cascade.engine.helpers import _build_skills_block
+        block = _build_skills_block(['BODY ONE', 'BODY TWO'])
+        assert '### Skill 1' in block
+        assert '### Skill 2' in block
+
+    def test_build_block_mixed_tuple_and_string(self):
+        from agent_cascade.engine.helpers import _build_skills_block
+        block = _build_skills_block([('named-skill', 'NAMED'), 'PLAIN BODY'])
+        assert '### Skill named-skill' in block
+        assert '### Skill 2' in block  # plain string gets positional label
+
+    def test_build_block_empty_returns_empty(self):
+        from agent_cascade.engine.helpers import _build_skills_block
+        assert _build_skills_block([]) == ''
+
+    def test_inject_named_skills_into_system_message(self):
+        """End-to-end: named skills produce '### Skill <name>' in the system message."""
+        from agent_cascade.engine.helpers import _inject_skills_to_system_message
+        from agent_cascade.llm.schema import SYSTEM, Message
+
+        sys_msg = Message(role=SYSTEM, content='You are a helpful agent.')
+        injected = _inject_skills_to_system_message(
+            pool=None, instance_or_sysmsg=sys_msg,
+            skills_to_inject=[('docker-best-practices', 'DOCKER INSTRUCTIONS')],
+        )
+        assert injected is True
+        assert '## Active Skills' in sys_msg.content
+        assert '### Skill docker-best-practices' in sys_msg.content
+        assert 'DOCKER INSTRUCTIONS' in sys_msg.content
+        assert '### Skill 1' not in sys_msg.content
+
+    def test_inject_plain_string_backward_compat(self):
+        from agent_cascade.engine.helpers import _inject_skills_to_system_message
+        from agent_cascade.llm.schema import SYSTEM, Message
+
+        sys_msg = Message(role=SYSTEM, content='You are a helpful agent.')
+        injected = _inject_skills_to_system_message(
+            pool=None, instance_or_sysmsg=sys_msg,
+            skills_to_inject=['PLAIN BODY'],
+        )
+        assert injected is True
+        assert '### Skill 1' in sys_msg.content
 
 
 # ===========================================================================

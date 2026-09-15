@@ -417,7 +417,10 @@ def _build_skills_block(loaded_skills: list) -> str:
     agent knows which expertise applies to its current task.
 
     Args:
-        loaded_skills: List of instruction strings (from SkillManager.resolve_load_skill).
+        loaded_skills: List of either ``(name, body)`` tuples (preferred — labels the
+            section with the skill's real name, e.g. "### Skill docker-best-practices")
+            or plain instruction strings (backward compat — labeled positionally as
+            "### Skill 1", "### Skill 2", ...).
 
     Returns:
         Formatted markdown block, or empty string if no skills loaded.
@@ -426,11 +429,17 @@ def _build_skills_block(loaded_skills: list) -> str:
         return ''
 
     parts = ['\n\n## Active Skills']
-    for idx, instructions in enumerate(loaded_skills, 1):
-        parts.append(f"\n### Skill {idx}\n{instructions}")
+    for idx, item in enumerate(loaded_skills, 1):
+        if isinstance(item, tuple) and len(item) == 2:
+            name, body = item
+            parts.append(f"\n### Skill {name}\n{body}")
+        else:
+            # Backward compat: plain string without a name → positional label.
+            parts.append(f"\n### Skill {idx}\n{item}")
 
     logger.debug('[SKILLS] Built skills block with %d skill(s), total ~%d chars', len(loaded_skills),
-                 sum(len(s) for s in loaded_skills))
+                  sum(len(item[1]) if isinstance(item, tuple) and len(item) == 2 else len(item)
+                      for item in loaded_skills))
     return '\n'.join(parts)
 
 
@@ -448,8 +457,9 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
     Args:
         pool: AgentPool providing skill_manager and settings.
         instance_or_sysmsg: Either an AgentInstance or a Message object whose content is modified in-place.
-        skills_to_inject: Optional list of instruction strings to inject.
-            If None or empty, nothing is injected (returns False).
+        skills_to_inject: Optional list of ``(name, body)`` tuples (or plain instruction
+            strings for backward compat) to inject. If None or empty, nothing is injected
+            (returns False).
 
     Returns:
         True if skills were injected, False otherwise.
@@ -549,7 +559,7 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
         logger.warning("[SKILLS] _inject_self_augmentation_skill: 'self-augmentation' skill not found in registry")
         return False
 
-    skills_to_inject.append(self_augmentation_instructions)
+    skills_to_inject.append(('self-augmentation', self_augmentation_instructions))
 
     injected = _inject_skills_to_system_message(pool, instance, skills_to_inject)
     # Telemetry: capture Self-Augmentation for the restore/runner paths. The fresh-init
@@ -741,7 +751,8 @@ def _refresh_active_skills_block(pool, instance, skills_to_inject=None) -> bool:
     Args:
         pool: AgentPool providing skill_manager and settings.
         instance: AgentInstance whose conversation[0] is a SYSTEM message.
-        skills_to_inject: List of instruction strings. None/empty removes the block.
+        skills_to_inject: List of ``(name, body)`` tuples (or plain instruction strings).
+            None/empty removes the block.
 
     Returns:
         True if content was changed, False otherwise.
@@ -785,7 +796,7 @@ def _resolve_recall_skills(pool) -> list:
     Gated by the GLOBAL toggle; refreshes Self-Augmentation from the current
     registry (≤ TTL). Does NOT run the Skill Advisor or do AUTO matching.
 
-    Returns a list of instruction strings (may be empty when skills are disabled).
+    Returns a list of ``(name, body)`` tuples (may be empty when skills are disabled).
     """
     sm = getattr(pool, 'skill_manager', None)
     if not sm:
@@ -801,5 +812,5 @@ def _resolve_recall_skills(pool) -> list:
     skills = []
     self_aug = sm.load_full_instructions('self-augmentation')
     if self_aug:
-        skills.append(self_aug)
+        skills.append(('self-augmentation', self_aug))
     return skills

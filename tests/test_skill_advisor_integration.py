@@ -54,9 +54,11 @@ class FakeSkillManager:
 
     def __init__(self, names):
         self._names = list(names)
-        # Basic keyword-match fallback — returns a distinctive body so tests can tell
-        # the fallback path ran. Wrapped in MagicMock to record/inspect calls.
-        self.resolve_load_skill = MagicMock(return_value=['# basic-keyword-match-skill\nresolved via basic matching'])
+        # Basic keyword-match fallback — returns a distinctive (name, body) pair so tests
+        # can tell the fallback path ran. Wrapped in MagicMock to record/inspect calls.
+        # core.py's basic/AUTO + "none"-explicit branches call resolve_load_skill_pairs.
+        self.resolve_load_skill_pairs = MagicMock(
+            return_value=[('basic-keyword-match-skill', '# basic-keyword-match-skill\nresolved via basic matching')])
 
     def resolve_load_skill_names(self, load_skill_value, task_text='', context_text=''):
         # Mirrors the real SkillManager: returns the names backing resolve_load_skill's
@@ -278,7 +280,7 @@ class TestAdvisorApprove:
         assert 'instructions for docker-best-practices' in sys_msg.content
         # Basic fallback must NOT have been used on the approve path.
         assert '# basic-keyword-match-skill' not in sys_msg.content
-        pool.skill_manager.resolve_load_skill.assert_not_called()
+        pool.skill_manager.resolve_load_skill_pairs.assert_not_called()
 
     def test_advisor_notes_propagated_to_task_message(self):
         """Advisor task_notes must be appended to args['context'] so
@@ -352,9 +354,9 @@ class TestAdvisorFallback:
         # Instance still allocated (fallback proceeds as if basic mode).
         lifecycle.find_or_create_instance.assert_called_once()
 
-        # Fallback path: resolve_load_skill (basic keyword match) was ACTUALLY called,
+        # Fallback path: resolve_load_skill_pairs (basic keyword match) was ACTUALLY called,
         # NOT the advisor's recommendations. The injected skill body is the basic one.
-        pool.skill_manager.resolve_load_skill.assert_called_once()
+        pool.skill_manager.resolve_load_skill_pairs.assert_called_once()
         sys_msg = lifecycle.build_system_message.return_value
         assert '# basic-keyword-match-skill' in sys_msg.content
 
@@ -369,8 +371,8 @@ class TestAdvisorFallback:
 
         assert mock_advisor.call_count == 1
         lifecycle.find_or_create_instance.assert_called_once()
-        # Fallback used basic keyword match (resolve_load_skill), not advisor skills.
-        pool.skill_manager.resolve_load_skill.assert_called_once()
+        # Fallback used basic keyword match (resolve_load_skill_pairs), not advisor skills.
+        pool.skill_manager.resolve_load_skill_pairs.assert_called_once()
         sys_msg = lifecycle.build_system_message.return_value
         assert '# basic-keyword-match-skill' in sys_msg.content
 
@@ -389,9 +391,9 @@ class TestBasicModeSkipsAdvisor:
         # The gate condition (auto_skill_mode == "advanced") is False → no advisor.
         assert mock_advisor.call_count == 0
 
-        # Still allocates and uses basic keyword matching (resolve_load_skill).
+        # Still allocates and uses basic keyword matching (resolve_load_skill_pairs).
         lifecycle.find_or_create_instance.assert_called_once()
-        pool.skill_manager.resolve_load_skill.assert_called_once()
+        pool.skill_manager.resolve_load_skill_pairs.assert_called_once()
         sys_msg = lifecycle.build_system_message.return_value
         assert '# basic-keyword-match-skill' in sys_msg.content
 
@@ -420,9 +422,9 @@ class TestNoneMode:
 
         # Advisor never runs in none mode.
         assert mock_advisor.call_count == 0
-        # Basic keyword match (resolve_load_skill) must NOT run for AUTO under none mode —
+        # Basic keyword match (resolve_load_skill_pairs) must NOT run for AUTO under none mode —
         # that is the observable distinguishing "none" from "basic".
-        pool.skill_manager.resolve_load_skill.assert_not_called()
+        pool.skill_manager.resolve_load_skill_pairs.assert_not_called()
 
         sys_msg = lifecycle.build_system_message.return_value
         # No matched/auto skill body injected (neither advisor nor basic fallback).
@@ -430,8 +432,8 @@ class TestNoneMode:
 
     def test_none_explicit_list_still_resolves(self):
         # "none" + explicit list → caller-set skills are still resolved (preserved),
-        # unlike the AUTO case above. The FakeSkillManager's resolve_load_skill is a
-        # MagicMock returning a fixed body, so we assert it was invoked with the list.
+        # unlike the AUTO case above. The FakeSkillManager's resolve_load_skill_pairs is a
+        # MagicMock returning a fixed (name, body) pair, so we assert it was invoked with the list.
         _, pool, lifecycle, mock_advisor, _ = _run_gate(
             self._approve(),
             auto_skill_mode='none',
@@ -441,8 +443,8 @@ class TestNoneMode:
         # Advisor never runs in none mode.
         assert mock_advisor.call_count == 0
         # The explicit list is resolved literally by name (caller skills preserved).
-        pool.skill_manager.resolve_load_skill.assert_called_once()
-        call_args = pool.skill_manager.resolve_load_skill.call_args.args
+        pool.skill_manager.resolve_load_skill_pairs.assert_called_once()
+        call_args = pool.skill_manager.resolve_load_skill_pairs.call_args.args
         assert call_args[0] == ['docker-best-practices']
 
         sys_msg = lifecycle.build_system_message.return_value
@@ -462,10 +464,10 @@ class TestNoneMode:
 
         # Advisor never runs in none mode.
         assert mock_advisor.call_count == 0
-        # The JSON-string list is resolved (passed through to resolve_load_skill, which
+        # The JSON-string list is resolved (passed through to resolve_load_skill_pairs, which
         # decodes it internally — same as the Basic path).
-        pool.skill_manager.resolve_load_skill.assert_called_once()
-        call_args = pool.skill_manager.resolve_load_skill.call_args.args
+        pool.skill_manager.resolve_load_skill_pairs.assert_called_once()
+        call_args = pool.skill_manager.resolve_load_skill_pairs.call_args.args
         assert call_args[0] == '["docker-best-practices"]'
 
         sys_msg = lifecycle.build_system_message.return_value

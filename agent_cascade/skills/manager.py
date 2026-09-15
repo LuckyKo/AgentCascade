@@ -652,6 +652,31 @@ class SkillManager:
                 instructions.append(body)
         return instructions
 
+    def resolve_load_skill_pairs(
+        self,
+        load_skill_value: Union[List[str], str, None],
+        task_text: str = '',
+        context_text: str = '',
+    ) -> List[Tuple[str, str]]:
+        """Like :meth:`resolve_load_skill` but returns ``(name, body)`` pairs.
+
+        The name is preserved alongside each skill's instruction body so callers
+        (e.g. system-prompt injection) can label skills by their real name rather
+        than a positional index. Name-computation shares the same single source of
+        truth as ``resolve_load_skill`` / ``resolve_load_skill_names``, so the two
+        never drift apart.
+
+        Returns:
+            List of ``(skill_name, full_instruction_body)`` tuples (one per loaded skill).
+        """
+        _names = self._resolve_skill_names(load_skill_value, task_text, context_text)
+        pairs: List[Tuple[str, str]] = []
+        for name in _names:
+            body = self.load_full_instructions(name)
+            if body:
+                pairs.append((name, body))
+        return pairs
+
     # ── Dynamic Registration ─────────────────────────────────────────────
 
     def register_skill_from_content(

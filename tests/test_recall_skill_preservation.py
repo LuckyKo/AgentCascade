@@ -248,14 +248,14 @@ class TestNewInstanceAutoInjectsSkills:
         engine, mock_pool = _make_engine(inst, is_reuse=False)
 
         mock_pool.skill_manager = MagicMock()
-        mock_pool.skill_manager.resolve_load_skill = MagicMock(return_value=['matched-skill'])
+        mock_pool.skill_manager.resolve_load_skill_pairs = MagicMock(return_value=[('matched-skill', 'MATCHED-BODY')])
         # load_full_instructions returns the Self-Augmentation instructions.
         mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='SELF-AUGMENTATION-TEXT')
 
         _run(engine, load_skill='AUTO')
 
-        # Skills were resolved and self-augmentation looked up.
-        mock_pool.skill_manager.resolve_load_skill.assert_called_once()
+        # Skills were resolved (as name/body pairs) and self-augmentation looked up.
+        mock_pool.skill_manager.resolve_load_skill_pairs.assert_called_once()
         assert 'self-augmentation' in [c.args[0] for c in mock_pool.skill_manager.load_full_instructions.call_args_list]
         # A fresh system message was built (new-instance path).
         engine.lifecycle.build_system_message.assert_called_once()
@@ -366,10 +366,10 @@ class TestRecallRefreshesSkills:
         """KV-cache no-op: when the refreshed block is logically identical to what's
         already there, _replace_section returns the content unchanged (byte-identical)
         and no system-message rebuild happens."""
-        # Pre-build the EXACT block _build_skills_block would produce for "SAME CONTENT"
-        # so the refresh is a logical no-op.
+        # Pre-build the EXACT block _build_skills_block would produce for the
+        # self-augmentation (name, body) pair so the refresh is a logical no-op.
         from agent_cascade.engine.helpers import _build_skills_block
-        fresh_block = _build_skills_block(['SAME CONTENT'])
+        fresh_block = _build_skills_block([('self-augmentation', 'SAME CONTENT')])
         existing_sys = Message(
             role=SYSTEM,
             content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder' + fresh_block,
