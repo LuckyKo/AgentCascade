@@ -122,36 +122,36 @@ class TestRecallPreservesSystemPrompt:
         init_positional = engine.lifecycle.initialize_conversation.call_args[0]
         assert init_positional[1] is existing_sys, 'recall must pass existing conversation[0] as sys_msg'
 
-    def test_recall_refreshes_skills_when_global_on(self):
-        """NEW CONTRACT (Fix A): on recall, the '## Active Skills' block IS refreshed.
+    def test_recall_keeps_skills_block_verbatim_when_global_on(self):
+        """CONTRACT (todo.md:229 follow-up): on recall the system prompt is kept
+        byte-for-byte verbatim — NO skill refresh, even when the global toggle is ON.
 
-        The per-call load_skill arg is still ignored (no AUTO re-matching), but the
-        global toggle gates a refresh of Self-Augmentation at its CURRENT content.
-        This replaces the old contract that asserted recall never touched skills.
+        The per-call load_skill arg is ignored AND no registry lookup happens at all:
+        the LLM prefix cache must survive a recall as a cheap cache-hit. Skill updates
+        are picked up only on a rebuild (new instance / external load). This replaces
+        the old Fix A contract that asserted recall refreshed the Active Skills block.
         """
         # System prompt that already contains an Active Skills block with STALE content.
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n## Active Skills\n### Skill 1\nSTALE SELF-AUG',
-        )
+        original_content = ('You are worker1.\n## Active Skills\n### Skill 1\nSTALE SELF-AUG')
+        existing_sys = Message(role=SYSTEM, content=original_content)
         inst = _make_mock_instance(conversation=[existing_sys])
         engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
 
-        # Skill manager present; recall refreshes Self-Augmentation at current content.
+        # Skill manager present with DIFFERENT (fresh) content — recall must NOT touch it.
         mock_pool.skill_manager = MagicMock()
         mock_pool.skill_manager.resolve_load_skill = MagicMock(return_value=[])
         mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='NEW SELF-AUG')
 
         _run(engine, load_skill='NONE')  # per-call arg is ignored on recall
 
-        # Per-call AUTO matching is still NOT run on recall (no re-matching).
+        # No skill lookup of any kind on recall — not even the self-augmentation refresh.
         mock_pool.skill_manager.resolve_load_skill.assert_not_called()
-        # But Self-Augmentation IS refreshed at its current content.
-        mock_pool.skill_manager.load_full_instructions.assert_called_once_with('self-augmentation')
+        mock_pool.skill_manager.load_full_instructions.assert_not_called()
         engine.lifecycle.build_system_message.assert_not_called()
-        # The stale block was replaced with the fresh content.
-        assert 'NEW SELF-AUG' in inst.conversation[0].content
-        assert 'STALE SELF-AUG' not in inst.conversation[0].content
+        # conversation[0] is byte-for-byte UNCHANGED (prefix cache preserved) and is the
+        # SAME object — any mutation (even whitespace) fails this test.
+        assert inst.conversation[0].content == original_content
+        assert inst.conversation[0] is existing_sys
 
     def test_recall_noop_when_global_off(self):
         """NEW CONTRACT (Fix A): when the global toggle is OFF, recall leaves content
@@ -332,230 +332,114 @@ class TestExternalLoadInjectsSelfAugmentation:
 
 
 # ──────────────────────────────────────────────
-# 5. Fix A — recall refreshes the '## Active Skills' block
+# 5. NEW CONTRACT (todo.md:229 follow-up) — recall keeps conversation[0] verbatim;
+#    skill refresh happens ONLY on rebuild (new instance / external load)
 # ──────────────────────────────────────────────
 
 
-class TestRecallRefreshesSkills:
+class TestRecallKeepsSkillsVerbatim:
 
-    def test_recall_reflects_edited_self_augmentation(self):
-        """REGRESSION (Fix A): a skill edited since instance creation is picked up on
-        recall — the '## Active Skills' block shows the CURRENT content, not the stale
-        one frozen at creation time."""
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-            '## Active Skills\n\n### Skill 1\nOLD SELF-AUG CONTENT',
-        )
+    def test_recall_does_not_pick_up_edited_skill(self):
+        """REGRESSION (todo.md:229 follow-up): a skill edited since instance creation is
+        NOT picked up on a plain idle recall — the system prompt is kept byte-for-byte
+        verbatim. The registry may return different content; recall must not touch it.
+        Skill updates are deferred to a rebuild (new instance / external load)."""
+        original_content = ('You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
+                            '## Active Skills\n\n### Skill 1\nOLD SELF-AUG CONTENT')
+        existing_sys = Message(role=SYSTEM, content=original_content)
         inst = _make_mock_instance(conversation=[existing_sys])
         engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
 
+        # Registry returns EDITED content — recall must ignore it entirely.
         mock_pool.skill_manager = MagicMock()
         mock_pool.skill_manager._ensure_discovered = MagicMock()
         mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='NEW SELF-AUG CONTENT (edited)')
 
         _run(engine, load_skill='AUTO')
 
-        # Registry was refreshed (≤ TTL) so the edited content is current.
-        mock_pool.skill_manager._ensure_discovered.assert_called()
-        # The block now reflects the edited skill, not the stale one.
-        assert 'NEW SELF-AUG CONTENT (edited)' in inst.conversation[0].content
-        assert 'OLD SELF-AUG CONTENT' not in inst.conversation[0].content
-
-    def test_recall_does_not_rebuild_system_message_when_skills_unchanged(self):
-        """KV-cache no-op: when the refreshed block is logically identical to what's
-        already there, _replace_section returns the content unchanged (byte-identical)
-        and no system-message rebuild happens."""
-        # Pre-build the EXACT block _build_skills_block would produce for the
-        # self-augmentation (name, body) pair so the refresh is a logical no-op.
-        from agent_cascade.engine.helpers import _build_skills_block
-        fresh_block = _build_skills_block([('self-augmentation', 'SAME CONTENT')])
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder' + fresh_block,
-        )
-        original_content = existing_sys.content
-        inst = _make_mock_instance(conversation=[existing_sys])
-        engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
-
-        mock_pool.skill_manager = MagicMock()
-        mock_pool.skill_manager._ensure_discovered = MagicMock()
-        mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='SAME CONTENT')
-
-        _run(engine, load_skill='AUTO')
-
-        # Still a recall — no fresh system-message rebuild.
-        engine.lifecycle.build_system_message.assert_not_called()
-        # Content is byte-identical (KV/prefix cache preserved).
-        assert inst.conversation[0].content == original_content
-
-    def test_recall_global_off_removes_skills_block(self):
-        """When the global toggle is flipped OFF between recalls, the existing
-        '## Active Skills' block is removed on recall."""
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-            '## Active Skills\n\n### Skill 1\nOLD SELF-AUG CONTENT',
-        )
-        inst = _make_mock_instance(conversation=[existing_sys])
-        engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='NONE')
-
-        mock_pool.skill_manager = MagicMock()
-        mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='SHOULD-NOT-APPEAR')
-
-        _run(engine, load_skill='AUTO')
-
-        # The Active Skills heading is gone from the system message.
-        assert '## Active Skills' not in inst.conversation[0].content
-        # Global OFF → no self-aug lookup either.
+        # Recall performs NO skill lookup — the edited body is never fetched. (The
+        # one-off _ensure_discovered at core.py:2770 is the Skill Advisor gate and runs
+        # for every delegation regardless of recall; it does NOT fetch/rewrite content.)
         mock_pool.skill_manager.load_full_instructions.assert_not_called()
+        engine.lifecycle.build_system_message.assert_not_called()
+        # The edited skill is NOT picked up — prompt unchanged byte-for-byte.
+        assert inst.conversation[0].content == original_content
+        assert 'NEW SELF-AUG CONTENT (edited)' not in inst.conversation[0].content
+        assert inst.conversation[0] is existing_sys
 
-    def test_recall_still_ignores_per_call_load_skill_arg(self):
-        """Contract preserved: even though recall now refreshes skills, the per-call
-        load_skill arg is still ignored — no AUTO re-matching against the new task.
-        The recall resolver uses _resolve_recall_skills, which never calls
-        resolve_load_skill."""
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## Active Skills\n\n### Skill 1\nOLD CONTENT',
-        )
+    def test_recall_keeps_prompt_verbatim_when_registry_changed(self):
+        """CORE PIN for the new contract: recall of an idle instance leaves
+        conversation[0].content byte-for-byte identical even when the skill registry has
+        changed (mock load_full_instructions to return DIFFERENT content). This is a real
+        pin — it FAILS if the old _refresh_active_skills_block call were re-added, because
+        that call would rewrite the block with the new content."""
+        original_content = ('You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
+                            '## Active Skills\n\n### Skill testing-best-practices\nOLD-MATCHED-BODY\n\n'
+                            '### Skill self-augmentation\nOLD-SELF-AUG-BODY')
+        existing_sys = Message(role=SYSTEM, content=original_content)
         inst = _make_mock_instance(conversation=[existing_sys])
         engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
 
-        mock_pool.skill_manager = MagicMock()
-        mock_pool.skill_manager._ensure_discovered = MagicMock()
-        mock_pool.skill_manager.resolve_load_skill = MagicMock(return_value=['matched-skill'])
-        mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='NEW CONTENT')
-
-        _run(engine, load_skill='AUTO')  # per-call AUTO must be ignored on recall
-
-        # No AUTO re-matching against the new task on recall.
-        mock_pool.skill_manager.resolve_load_skill.assert_not_called()
-
-
-# ──────────────────────────────────────────────
-# 5b. NON-LOSSY merge — previously-loaded matched skills survive recall
-#     (todo.md:229 — Fix A's lossy resolver dropped them, invalidating the
-#      prefix cache and forcing a full reprocess every turn)
-# ──────────────────────────────────────────────
-
-
-class TestRecallNonLossyMerge:
-
-    def test_recall_preserves_previously_loaded_matched_skill(self):
-        """CORE REGRESSION (todo.md:229): a matched skill that was legitimately injected at
-        creation must SURVIVE recall — it is not silently dropped just because the resolver
-        only re-returns Self-Augmentation. This test MUST FAIL on the lossy code and PASS
-        after the non-lossy merge."""
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-            '## Active Skills\n\n### Skill testing-best-practices\nMATCHED-BODY\n\n'
-            '### Skill self-augmentation\nSELF-AUG-BODY',
-        )
-        inst = _make_mock_instance(conversation=[existing_sys])
-        engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
-
-        # Registry still has both skills (refresh returns their current bodies).
-        mock_pool.skill_manager._ensure_discovered = MagicMock()
-        mock_pool.skill_manager.load_full_instructions = MagicMock(side_effect=lambda name, count_load=True: {
-            'testing-best-practices': 'MATCHED-BODY',
-            'self-augmentation': 'SELF-AUG-BODY',
-        }.get(name),
-                                                                  )
-
-        _run(engine, load_skill='AUTO')
-
-        # The previously-loaded matched skill is NOT dropped on recall.
-        assert '### Skill testing-best-practices' in inst.conversation[0].content
-        assert 'MATCHED-BODY' in inst.conversation[0].content
-        # Self-Augmentation is still present (always-there when skills ON).
-        assert '### Skill self-augmentation' in inst.conversation[0].content
-
-    def test_recall_refreshes_matched_skill_body_from_registry(self):
-        """Live-edit propagation: a matched skill whose body was edited since creation shows
-        the CURRENT registry content on recall (not the stale frozen one)."""
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## Active Skills\n\n'
-            '### Skill testing-best-practices\nOLD-MATCHED-BODY\n\n'
-            '### Skill self-augmentation\nSELF-AUG-BODY',
-        )
-        inst = _make_mock_instance(conversation=[existing_sys])
-        engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
-
+        # Registry now returns DIFFERENT bodies for both skills (registry changed).
         mock_pool.skill_manager._ensure_discovered = MagicMock()
         mock_pool.skill_manager.load_full_instructions = MagicMock(side_effect=lambda name, count_load=True: {
             'testing-best-practices': 'NEW-MATCHED-BODY',
-            'self-augmentation': 'SELF-AUG-BODY',
+            'self-augmentation': 'NEW-SELF-AUG-BODY',
         }.get(name),
                                                                   )
 
         _run(engine, load_skill='AUTO')
 
-        # The block now reflects the edited matched skill, not the stale one.
-        assert 'NEW-MATCHED-BODY' in inst.conversation[0].content
-        assert 'OLD-MATCHED-BODY' not in inst.conversation[0].content
-
-    def test_recall_drops_deleted_matched_skill(self):
-        """A matched skill that is genuinely gone from the registry (load returns None) is
-        dropped on recall; Self-Augmentation remains."""
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## Active Skills\n\n'
-            '### Skill deleted-skill\nGONE-BODY\n\n'
-            '### Skill self-augmentation\nSELF-AUG-BODY',
-        )
-        inst = _make_mock_instance(conversation=[existing_sys])
-        engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
-
-        # deleted-skill returns None (deleted since creation); self-aug survives.
-        mock_pool.skill_manager._ensure_discovered = MagicMock()
-        mock_pool.skill_manager.load_full_instructions = MagicMock(side_effect=lambda name, count_load=True:
-                                                                   ('SELF-AUG-BODY'
-                                                                    if name == 'self-augmentation' else None),
-                                                                  )
-
-        _run(engine, load_skill='AUTO')
-
-        # Deleted skill is dropped; Self-Augmentation remains.
-        assert '### Skill deleted-skill' not in inst.conversation[0].content
-        assert 'GONE-BODY' not in inst.conversation[0].content
-        assert '### Skill self-augmentation' in inst.conversation[0].content
-
-    def test_recall_no_change_preserves_byte_identity(self):
-        """Prefix-cache guard: when every existing skill resolves to a byte-identical body on
-        recall, the no-op guard fires and the system message content is UNCHANGED — this is
-        what actually prevents reprocessing (the whole point of the non-lossy merge)."""
-        # Pre-build the EXACT block _build_skills_block would produce for both skills so the
-        # refresh is a logical no-op.
-        from agent_cascade.engine.helpers import _build_skills_block
-        fresh_block = _build_skills_block([
-            ('testing-best-practices', 'MATCHED-BODY'),
-            ('self-augmentation', 'SELF-AUG-BODY'),
-        ])
-        existing_sys = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder' + fresh_block,
-        )
-        original_content = existing_sys.content
-        inst = _make_mock_instance(conversation=[existing_sys])
-        engine, mock_pool = _make_engine(inst, is_reuse=True, global_mode='AUTO')
-
-        # Registry returns byte-identical bodies for both skills.
-        mock_pool.skill_manager._ensure_discovered = MagicMock()
-        mock_pool.skill_manager.load_full_instructions = MagicMock(side_effect=lambda name, count_load=True: {
-            'testing-best-practices': 'MATCHED-BODY',
-            'self-augmentation': 'SELF-AUG-BODY',
-        }.get(name),
-                                                                  )
-
-        _run(engine, load_skill='AUTO')
-
-        # Still a recall — no fresh system-message rebuild.
+        # Recall never fetches skill bodies and never rebuilds the system message.
+        # (The one-off _ensure_discovered at core.py:2770 is the Skill Advisor gate and
+        # runs for every delegation regardless of recall; it does NOT fetch/rewrite.)
+        mock_pool.skill_manager.load_full_instructions.assert_not_called()
         engine.lifecycle.build_system_message.assert_not_called()
-        # Content is byte-identical (KV/prefix cache preserved).
+        # EXACT equality — any mutation (even whitespace) fails this test.
         assert inst.conversation[0].content == original_content
+        assert 'NEW-MATCHED-BODY' not in inst.conversation[0].content
+        assert 'NEW-SELF-AUG-BODY' not in inst.conversation[0].content
+        # Same object, untouched.
+        assert inst.conversation[0] is existing_sys
+
+
+class TestRebuildPathStillRefreshesSkills:
+
+    def test_new_instance_builds_fresh_system_message_with_current_skills(self):
+        """Guard against breaking the rebuild path while removing the recall refresh: a
+        NEW instance (empty conversation) still builds a fresh system message and injects
+        current skills (Self-Augmentation + matched)."""
+        inst = _make_mock_instance(conversation=[])
+        engine, mock_pool = _make_engine(inst, is_reuse=False, global_mode='AUTO')
+
+        mock_pool.skill_manager = MagicMock()
+        mock_pool.skill_manager.resolve_load_skill_pairs = MagicMock(return_value=[('matched-skill', 'MATCHED-BODY')])
+        mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='SELF-AUGMENTATION-TEXT')
+
+        _run(engine, load_skill='AUTO')
+
+        # Rebuild path: fresh system message built + skills resolved and self-aug looked up.
+        engine.lifecycle.build_system_message.assert_called_once()
+        mock_pool.skill_manager.resolve_load_skill_pairs.assert_called_once()
+        assert 'self-augmentation' in [c.args[0] for c in mock_pool.skill_manager.load_full_instructions.call_args_list]
+
+    def test_external_load_builds_fresh_system_message_with_current_skills(self):
+        """Guard: an external load (session_was_loaded=True, reload-from-file after
+        termination) goes to the rebuild path — it builds a fresh system message and
+        injects current skills, so updated skills ARE picked up there."""
+        # External load produces a FRESH instance with empty conversation.
+        inst = _make_mock_instance(conversation=[])
+        engine, mock_pool = _make_engine(inst, is_reuse=False, session_was_loaded=True, global_mode='AUTO')
+
+        mock_pool.skill_manager = MagicMock()
+        mock_pool.skill_manager.resolve_load_skill_pairs = MagicMock(return_value=[('matched-skill', 'MATCHED-BODY')])
+        mock_pool.skill_manager.load_full_instructions = MagicMock(return_value='SELF-AUGMENTATION-TEXT')
+
+        _run(engine, load_skill='AUTO')
+
+        # Rebuild path taken: fresh system message built + self-augmentation injected.
+        engine.lifecycle.build_system_message.assert_called_once()
+        assert 'self-augmentation' in [c.args[0] for c in mock_pool.skill_manager.load_full_instructions.call_args_list]
 
 
 # ──────────────────────────────────────────────
@@ -565,75 +449,10 @@ class TestRecallNonLossyMerge:
 
 class TestSkillsBlockInternalHeadings:
     """Regression for BUG_0009: skill content contains its own level-2 (##)
-    markdown headings (e.g. "## WHEN TO ACT", "## TOOL REFERENCE"). The old
-    _SKILLS_SECTION_RE stopped at the first internal ## boundary, so only a
-    prefix of the block was replaced and the rest became orphaned tail —
-    producing duplicated skill text after a refresh. The block must be matched
-    greedily to EOF (it is always the last section)."""
-
-    def _skill_with_internal_headings(self):
-        return ('## Goal\nDo things.\n\n'
-                '## WHEN TO ACT (Concrete Triggers)\n- trigger A\n\n'
-                '## TOOL REFERENCE\n- tool X\n\n'
-                '## REQUIRED WORKFLOW\n1. step one\n2. step two')
-
-    def test_refresh_replaces_full_block_no_orphaned_tail(self):
-        """When the skill content has internal ## headings, a refresh must replace
-        the ENTIRE old block and leave no orphaned tail or duplicate text."""
-        from agent_cascade.engine.helpers import _refresh_active_skills_block
-
-        # Old system prompt: skills block (last section) with internal ## headings.
-        old_skill = self._skill_with_internal_headings()
-        sys_msg = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-            '## Active Skills\n### Skill 1\n' + old_skill,
-        )
-        inst = _make_mock_instance(conversation=[sys_msg])
-
-        # New skill content — different body, also with internal ## headings.
-        new_skill = ('## Goal\nDo OTHER things.\n\n'
-                     '## WHEN TO ACT (Concrete Triggers)\n- trigger B\n\n'
-                     '## TOOL REFERENCE\n- tool Y')
-        pool = MagicMock()
-
-        changed = _refresh_active_skills_block(pool, inst, [new_skill])
-
-        assert changed is True
-        result = sys_msg.content
-        # Exactly ONE '## Active Skills' heading — no duplicate.
-        assert result.count('## Active Skills') == 1
-        # New content present, old content fully gone (no orphaned tail).
-        assert 'Do OTHER things.' in result
-        assert 'Do things.' not in result
-        assert 'trigger A' not in result
-        assert 'step two' not in result
-        # The internal ## headings of the NEW skill survived intact.
-        assert '## WHEN TO ACT (Concrete Triggers)' in result
-        assert '## TOOL REFERENCE' in result
-
-    def test_refresh_to_empty_removes_entire_block(self):
-        """Removing skills (empty list) must strip the whole block including any
-        internal ## headings, leaving no orphaned tail."""
-        from agent_cascade.engine.helpers import _refresh_active_skills_block
-
-        old_skill = self._skill_with_internal_headings()
-        sys_msg = Message(
-            role=SYSTEM,
-            content='You are worker1.\n\n## AVAILABLE AGENTS\n- coder\n\n'
-            '## Active Skills\n### Skill 1\n' + old_skill,
-        )
-        inst = _make_mock_instance(conversation=[sys_msg])
-        pool = MagicMock()
-
-        changed = _refresh_active_skills_block(pool, inst, [])
-
-        assert changed is True
-        result = sys_msg.content
-        assert '## Active Skills' not in result
-        # No orphaned tail from the old block's internal headings.
-        assert '## WHEN TO ACT (Concrete Triggers)' not in result
-        assert 'step two' not in result
+    markdown headings (e.g. "## WHEN TO ACT", "## TOOL REFERENCE"). The
+    idempotency guard in _inject_skills_to_system_message must detect heading
+    variants so a malformed or user-edited '## Active Skills' heading can't
+    bypass it and cause duplicate injection."""
 
     def test_inject_guard_tolerates_heading_variants(self):
         """BUG_0009 refinement: the idempotency guard must detect heading variants
