@@ -2910,7 +2910,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # still ignored on recall; only the global toggle + Self-Augmentation are
             # refreshed. Thread-safety: recall runs single-threaded per instance — it was
             # idle and no other thread can access it at this point, so no lock is needed.
-            _refresh_active_skills_block(self.pool, inst, _resolve_recall_skills(self.pool))
+            _refresh_active_skills_block(self.pool, inst, _resolve_recall_skills(self.pool, inst))
             sys_msg = inst.conversation[0]
             logger.debug(
                 "[SKILLS] Recall of %s: refreshed '## Active Skills' block "
@@ -2975,8 +2975,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                 _tel.record_skills_loaded(inst.agent_class, _advisor_loaded_names, 'advisor')
                     else:
                         try:
-                            loaded_skills = skill_manager.resolve_load_skill_pairs(
-                                load_skill_value, task_text, context_text)
+                            loaded_skills = skill_manager.resolve_load_skill_pairs(load_skill_value, task_text,
+                                                                                   context_text)
                         except Exception as e:
                             logger.warning('[SKILLS] Failed to resolve skills for %s: %s', instance_name, e)
                             loaded_skills = []
@@ -3000,8 +3000,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # name and silently skipped (it won't match a real skill) — existing
                     # resolve_load_skill behavior, preserved so it isn't surprising later.
                     try:
-                        loaded_skills = skill_manager.resolve_load_skill_pairs(
-                            load_skill_value, task_text, context_text)
+                        loaded_skills = skill_manager.resolve_load_skill_pairs(load_skill_value, task_text,
+                                                                               context_text)
                     except Exception as e:
                         logger.warning('[SKILLS] Failed to resolve skills for %s: %s', instance_name, e)
                         loaded_skills = []
@@ -3022,8 +3022,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 #     load_skill="NONE". _inject_skills_to_system_message is idempotent
                 #     (skips when '## Active Skills' already exists).
                 self_augmentation_instructions = skill_manager.load_full_instructions('self-augmentation')
-                if (self_augmentation_instructions
-                        and ('self-augmentation', self_augmentation_instructions) not in loaded_skills):
+                if (self_augmentation_instructions and
+                    ('self-augmentation', self_augmentation_instructions) not in loaded_skills):
                     loaded_skills.append(('self-augmentation', self_augmentation_instructions))
                     # Telemetry: capture Self-Augmentation (init path only). The restore/
                     # runner paths record it in _inject_self_augmentation_skill instead —

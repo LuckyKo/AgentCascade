@@ -437,9 +437,9 @@ def _build_skills_block(loaded_skills: list) -> str:
             # Backward compat: plain string without a name → positional label.
             parts.append(f"\n### Skill {idx}\n{item}")
 
-    logger.debug('[SKILLS] Built skills block with %d skill(s), total ~%d chars', len(loaded_skills),
-                  sum(len(item[1]) if isinstance(item, tuple) and len(item) == 2 else len(item)
-                      for item in loaded_skills))
+    logger.debug(
+        '[SKILLS] Built skills block with %d skill(s), total ~%d chars', len(loaded_skills),
+        sum(len(item[1]) if isinstance(item, tuple) and len(item) == 2 else len(item) for item in loaded_skills))
     return '\n'.join(parts)
 
 
@@ -790,11 +790,41 @@ def _refresh_active_skills_block(pool, instance, skills_to_inject=None) -> bool:
     return True
 
 
-def _resolve_recall_skills(pool) -> list:
-    """Resolve skill instructions to inject on recall of an idle agent.
+# Matches "### Skill <name>" headers inside the Active Skills block. The name runs from
+# after "### Skill " to end-of-line. Names are skill identifiers (no spaces in practice),
+# but we capture to end-of-line and strip, so a hypothetical spaced name still works.
+_SKILL_HEADER_RE = re.compile(r'^### Skill (.+?)\s*$', flags=re.MULTILINE)
 
-    Gated by the GLOBAL toggle; refreshes Self-Augmentation from the current
-    registry (≤ TTL). Does NOT run the Skill Advisor or do AUTO matching.
+
+def _existing_skill_names(sys_msg_content: str) -> list[str]:
+    """Return the ordered list of skill names present in the '## Active Skills' block.
+
+    Only looks inside the block (from '## Active Skills' to EOF, which is where it lives).
+    Returns [] if the block is absent. Order = order of appearance (preserved on merge).
+    """
+    if '## Active Skills' not in sys_msg_content:
+        return []
+    block = _SKILLS_SECTION_RE.search(sys_msg_content)
+    if not block:
+        return []
+    # Only consider headers that appear at the start of a line (avoid matching skill body text
+    # that happens to contain "### Skill"). _build_skills_block emits them at line starts.
+    names = [m.group(1).strip() for m in _SKILL_HEADER_RE.finditer(block.group(0))]
+    # Drop positional labels ("### Skill 1", "### Skill 2", ...) — these are backward-compat
+    # placeholders from _build_skills_block for unnamed (plain-string) skills, not real skill
+    # identifiers. Preserving them would try to re-load a non-existent "skill" named "1".
+    return [n for n in names if not n.isdigit()]
+
+
+def _resolve_recall_skills(pool, instance=None) -> list:
+    """Resolve skill instructions to inject on recall of an idle agent (NON-LOSSY).
+
+    Gated by the GLOBAL toggle. Preserves previously-loaded matched skills (so they are not
+    silently dropped on recall — that would invalidate the prefix cache), refreshes each
+    body from the current registry (live-edit propagation), drops a skill only if it is gone
+    from the registry, and ensures Self-Augmentation is present when skills are ON.
+
+    Does NOT run the Skill Advisor or do AUTO matching.
 
     Returns a list of ``(name, body)`` tuples (may be empty when skills are disabled).
     """
@@ -808,9 +838,25 @@ def _resolve_recall_skills(pool) -> list:
     # Refresh registry so edited/added skills are current (≤ TTL).
     sm._ensure_discovered()
 
-    # Self-Augmentation is the one skill that must always be present when skills are ON.
+    # Names already present in the system prompt (order preserved). Empty when instance is
+    # None (defensive) or the block is absent.
+    existing = []
+    conversation = getattr(instance, 'conversation', None) if instance is not None else None
+    sys_msg = conversation[0] if conversation else None
+    if sys_msg is not None and getattr(sys_msg, 'role', None) == SYSTEM:
+        existing = _existing_skill_names(sys_msg.content or '')
+
     skills = []
+    seen = set()
+    # 1) Preserve + refresh previously-loaded skills (drop only if gone from registry).
+    for name in existing:
+        body = sm.load_full_instructions(name, count_load=False)
+        if body is None:
+            continue  # skill deleted since creation — drop it
+        skills.append((name, body))
+        seen.add(name.lower())
+    # 2) Ensure Self-Augmentation is present when skills are ON (the always-there skill).
     self_aug = sm.load_full_instructions('self-augmentation')
-    if self_aug:
+    if self_aug and 'self-augmentation' not in seen:
         skills.append(('self-augmentation', self_aug))
     return skills
