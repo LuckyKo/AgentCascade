@@ -70,6 +70,19 @@ def _make_skill_content(
     return f"---\n{yaml_block}---\n\n{body}"
 
 
+def _isolate_metrics(manager, tmp_path, reset=False):
+    """Point a manager's metrics file at a temp path (avoid clobbering production).
+
+    When ``reset`` is True the in-memory metrics dict is also emptied so the
+    production skills-metrics.json (loaded at __init__) cannot leak real ratings
+    into tests. Intended as the body of an autouse fixture: call it, then ``yield``.
+    """
+    manager._metrics_file = tmp_path / 'skills-metrics.json'
+    if reset:
+        with manager._metrics_lock:
+            manager._metrics = {}
+
+
 def _cleanup_test_artifacts():
     """Remove test-specific artifacts left by the skill generation tests.
 
@@ -1228,7 +1241,7 @@ class TestRatingMetrics:
         """Point the manager's metrics file at a temp path (avoid clobbering production)."""
         self.manager = fresh_manager
         self.metrics_file = tmp_path / 'skills-metrics.json'
-        fresh_manager._metrics_file = self.metrics_file
+        _isolate_metrics(fresh_manager, tmp_path)
         yield
 
     def test_record_rating_shape_and_average(self, fresh_manager):
@@ -1368,7 +1381,7 @@ class TestNewSkillInitialRating:
     @pytest.fixture(autouse=True)
     def _isolated_metrics(self, fresh_manager, tmp_path):
         self.manager = fresh_manager
-        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
+        _isolate_metrics(fresh_manager, tmp_path)
         yield
 
     def test_new_skill_gets_initial_0_5(self, fresh_manager):
@@ -1412,12 +1425,7 @@ class TestReflectionPrompt:
     @pytest.fixture(autouse=True)
     def _isolated_metrics(self, fresh_manager, tmp_path):
         self.manager = fresh_manager
-        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
-        # Start from an EMPTY metrics dict: the production skills-metrics.json (loaded at
-        # __init__) would otherwise leak real ratings into these tests and any flush would
-        # write them back through to the production file.
-        with fresh_manager._metrics_lock:
-            fresh_manager._metrics = {}
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
         yield
 
     def test_prompt_contains_loaded_skills_list(self, fresh_manager):
@@ -1494,12 +1502,7 @@ class TestProposeSkillRatingModes:
     @pytest.fixture(autouse=True)
     def _isolated_metrics(self, fresh_manager, tmp_path):
         self.manager = fresh_manager
-        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
-        # Start from an EMPTY metrics dict: the production skills-metrics.json (loaded at
-        # __init__) would otherwise leak real ratings into these tests and any flush would
-        # write them back through to the production file.
-        with fresh_manager._metrics_lock:
-            fresh_manager._metrics = {}
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
         yield
 
     def test_rating_only_records_and_skips_approval(self, fresh_manager):
@@ -1700,12 +1703,7 @@ class TestCandidateFlow:
         """
         self.manager = fresh_manager
         self.metrics_file = tmp_path / 'skills-metrics.json'
-        fresh_manager._metrics_file = self.metrics_file
-        # Start from an EMPTY metrics dict: the production skills-metrics.json (loaded at
-        # __init__) would otherwise leak real ratings into these tests, and any test-side
-        # flush would write them back through to the production file.
-        with fresh_manager._metrics_lock:
-            fresh_manager._metrics = {}
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
         fresh_manager._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
         fresh_manager._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
         # Neutralize the forced discovery refresh inside evaluate_candidates() so the

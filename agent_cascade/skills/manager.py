@@ -47,6 +47,19 @@ _PRIORITY_CANDIDATE = 4  # Upgrade candidates (agents/global/candidates/) — st
 # Candidate storage: stable name-keyed dirs under agents/global/candidates/<name>/SKILL.md.
 _CANDIDATES_DIR = Path('agents/global/candidates')
 
+# Retries for deleting a candidate dir (Windows file-lock scenarios).
+_CANDIDATE_DIR_RETRIES = 3
+
+
+def _atomic_write_text(dst: Path, content: str) -> None:
+    """Atomically write ``content`` to ``dst`` via a sibling .tmp + os.replace.
+
+    NOT a plain rename: os.replace is Windows-safe when the target already exists.
+    """
+    tmp_out = dst.with_suffix('.tmp')
+    tmp_out.write_text(content, encoding='utf-8')
+    _os.replace(str(tmp_out), str(dst))
+
 
 def _priority_for_root(root: Path) -> int:
     """Map a scan root directory to its skill-tier priority.
@@ -1105,11 +1118,8 @@ class SkillManager:
         candidate_file = candidate_dir / 'SKILL.md'
         try:
             candidate_dir.mkdir(parents=True, exist_ok=True)
-            # Atomic tmp+replace (NOT rename — Windows-safe when replacing an existing target).
-            tmp_out = candidate_file.with_suffix('.tmp')
-            tmp_out.write_text(pending_file.read_text(encoding='utf-8'), encoding='utf-8')
-            _os.replace(str(tmp_out), str(candidate_file))
-        except Exception as e:
+            _atomic_write_text(candidate_file, pending_file.read_text(encoding='utf-8'))
+        except OSError as e:
             logger.warning('[SKILLS] Failed to write candidate file for %s: %s', name, e)
             return False
 
@@ -1143,6 +1153,10 @@ class SkillManager:
                 entry['ratings_by_version'] = by_version_ratings
 
         new_version = parsed.get('version', '1.0.0')
+        if new_version == prod_version:
+            logger.warning(
+                '[SKILLS] Candidate %s reuses incumbent version %s — per-version ratings will collide (gate compares avg_cand vs avg_prod from the same ratings_by_version key)',
+                name, new_version)
         old_winner = self._skills_registry.get(name, {}).get('version', prod_version)
         self._skills_registry[name] = {
             'name': name,
@@ -1198,7 +1212,7 @@ class SkillManager:
         """Delete candidates/<name>/ (best-effort; Windows-safe retries)."""
         candidates_root, _ = self._candidate_dirs()
         candidate_dir = candidates_root / name
-        for attempt in range(3):
+        for attempt in range(_CANDIDATE_DIR_RETRIES):
             try:
                 if candidate_dir.exists():
                     for child in list(candidate_dir.iterdir()):
@@ -1210,7 +1224,7 @@ class SkillManager:
                         candidate_dir.rmdir()
                 return
             except OSError:
-                if attempt < 2:
+                if attempt < _CANDIDATE_DIR_RETRIES - 1:
                     time.sleep(0.1 * (attempt + 1))
         logger.warning('[SKILLS] Could not delete candidate dir for %s', name)
 
@@ -1230,10 +1244,8 @@ class SkillManager:
         new_version = parsed.get('version', '1.0.0')
         try:
             prod_dir.mkdir(parents=True, exist_ok=True)
-            tmp_out = prod_file.with_suffix('.tmp')
-            tmp_out.write_text(cand_file.read_text(encoding='utf-8'), encoding='utf-8')
-            _os.replace(str(tmp_out), str(prod_file))
-        except Exception as e:
+            _atomic_write_text(prod_file, cand_file.read_text(encoding='utf-8'))
+        except OSError as e:
             logger.warning('[SKILLS] Candidate promotion file copy failed for %s: %s', name, e)
             return
 
