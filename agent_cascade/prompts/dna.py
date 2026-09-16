@@ -168,7 +168,7 @@ SKILL_ADVISOR_PROMPT = (
 # --- Auto-Skill Reflection (extended-turns phase) ---
 # Injected at the start of the auto-skill extended turns. {loaded_skills} is a rendered list of the
 # skills loaded for this run — one line per skill carrying its current average rating
-# ("- name (avg 7.5/10, rated 4x)" when rated, or "- name (unrated)"), or "(none)";
+# ("- name (avg 7.5/10, rated 4×)" when rated, or "- name (unrated)"), or "(none)";
 # {skill_creator_body} is the full skill-creator SKILL.md body (embedded by the caller).
 AUTO_SKILL_REFLECTION_PROMPT = (
     '## Skill Reflection\n\n'
@@ -695,7 +695,7 @@ TOOL_METADATA = {
                         'requested, because rating is not a content modification.'),
         'parameters': {
             'name':
-                'The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
+                'REQUIRED. The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
             'skill_content':
                 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             'justification':

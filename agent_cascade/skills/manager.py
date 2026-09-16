@@ -93,6 +93,16 @@ def _skill_matches_platform(frontmatter: dict) -> bool:
     return False
 
 
+def rating_sort_key(name: str, avg: Optional[float]) -> tuple:
+    """Canonical sort key for skill lists ordered by average rating.
+
+    Rated skills first (highest average first), unrated last; name ascending tiebreak.
+    """
+    if avg is None:
+        return (1, 0.0, name.lower())
+    return (0, -avg, name.lower())
+
+
 def _build_auto_skill_reflection_prompt(loaded_skill_names: Optional[List[str]],
                                         skill_creator_body: str,
                                         skill_manager=None) -> str:
@@ -100,17 +110,16 @@ def _build_auto_skill_reflection_prompt(loaded_skill_names: Optional[List[str]],
 
     ``loaded_skill_names`` is rendered as one line per entry, or "(none)" when empty/None.
     Each line carries the skill's current average rating (looked up via ``skill_manager``,
-    when provided): "- name (avg 7.5/10, rated 4x)" when rated, or "- name (unrated)"
+    when provided): "- name (avg 7.5/10, rated 4×)" when rated, or "- name (unrated)"
     otherwise. Without a manager every skill renders as "(unrated)".
     The full skill-creator body is embedded verbatim (same as the previous inline prompt).
     """
     if loaded_skill_names:
         lines = []
         for name in loaded_skill_names:
-            rating = skill_manager.get_rating_average(name) if skill_manager is not None else None
+            rating, count = skill_manager.get_rating_info(name) if skill_manager is not None else (None, 0)
             if rating is not None:
-                count = (skill_manager.get_metrics(name).get('ratings') or {}).get('count', 0)
-                lines.append(f'- {name} (avg {rating}/10, rated {count}x)')
+                lines.append(f'- {name} (avg {rating}/10, rated {count}×)')
             else:
                 lines.append(f'- {name} (unrated)')
         loaded_list = '\n'.join(lines)
@@ -536,18 +545,22 @@ class SkillManager:
                 return self._metrics.get(skill_name, {'total_loads': 0, 'by_version': {}})
             return dict(self._metrics)
 
+    def get_rating_info(self, skill_name: str) -> tuple:
+        """Return (average or None, count) for a skill's ratings under one lock acquisition."""
+        with self._metrics_lock:
+            ratings = (self._metrics.get(skill_name) or {}).get('ratings') or {}
+            count = ratings.get('count', 0)
+            if not count:
+                return None, 0
+            return round(ratings['sum'] / count, 2), count
+
     def get_rating_average(self, skill_name: str) -> Optional[float]:
         """Return the average quality rating for a skill (0-10), or None if unrated.
 
         Average = sum / count from the per-skill ``ratings`` sub-dict. Returns None
         when the skill has no ratings entry or its count is zero ("unrated").
         """
-        with self._metrics_lock:
-            ratings = (self._metrics.get(skill_name) or {}).get('ratings') or {}
-            count = ratings.get('count', 0)
-            if not count:
-                return None
-            return round(ratings['sum'] / count, 2)
+        return self.get_rating_info(skill_name)[0]
 
     # ── Tier 2 Loading (Full Instructions) ───────────────────────────────────
 

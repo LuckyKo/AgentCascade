@@ -7,6 +7,7 @@ This is the primary way orchestrators decide which skills to load via call_agent
 
 import logging
 
+from agent_cascade.skills.manager import rating_sort_key
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
@@ -79,19 +80,16 @@ class ScanSkills(BaseTool):
         if not query.strip():
 
             def _sort_key(skill):
-                avg = skill_manager.get_rating_average(skill['name'])
-                rated = avg is not None
-                return (not rated, -(avg or 0.0), skill['name'].lower())
+                return rating_sort_key(skill['name'], skill_manager.get_rating_average(skill['name']))
 
             lines = ['## Available Skills']
             for skill in sorted(all_skills, key=_sort_key):
                 source = skill.get('source', 'system')
                 version = skill.get('version', '1.0.0')
-                rating = skill_manager.get_rating_average(skill['name'])
+                rating, count = skill_manager.get_rating_info(skill['name'])
                 if rating is None:
                     rating_str = 'n/a'
                 else:
-                    count = (skill_manager.get_metrics(skill['name']).get('ratings') or {}).get('count', 0)
                     rating_str = f'{rating}×{count}'
                 lines.append(f"- **{skill['name']}** [{source}] v{version} (rating: {rating_str}): "
                              f"{skill.get('description', 'No description')}")
@@ -114,11 +112,10 @@ class ScanSkills(BaseTool):
             version = meta.get('version', '1.0.0') if meta else '1.0.0'
             metrics = skill_manager.get_metrics(name)
             loads = metrics.get('total_loads', 0)
-            rating = skill_manager.get_rating_average(name)
+            rating, count = skill_manager.get_rating_info(name)
             if rating is None:
                 rating_str = 'n/a'
             else:
-                count = (metrics.get('ratings') or {}).get('count', 0)
                 rating_str = f'{rating}×{count}'
             lines.append(f"- **{name}** [{source}] v{version} (score: {score:.2f}, loads: {loads}, "
                          f"rating: {rating_str}): {desc}")

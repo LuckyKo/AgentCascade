@@ -1405,7 +1405,7 @@ class TestReflectionPrompt:
         )
         assert injected is True
         prompt = appended[0]
-        assert '- docker-best-practices (avg 7.5/10, rated 2x)' in prompt
+        assert '- docker-best-practices (avg 7.5/10, rated 2×)' in prompt
         assert '- code-review (unrated)' in prompt
 
 

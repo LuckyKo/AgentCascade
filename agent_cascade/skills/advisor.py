@@ -65,6 +65,7 @@ def build_skill_advisor_prompt(
     """
     from agent_cascade.log import logger
     from agent_cascade.prompts.dna import SKILL_ADVISOR_PROMPT
+    from agent_cascade.skills.manager import rating_sort_key
 
     # Acquire a fresh list at run time (cache-respecting, like scan_skills/load_skill).
     try:
@@ -82,10 +83,9 @@ def build_skill_advisor_prompt(
         rating = skill_manager.get_rating_average(name)
         if rating is None:
             rating_tag = '(unrated)'
-            sort_key = (1, 0.0, name.lower())
         else:
             rating_tag = f'(rating {rating}/10)'
-            sort_key = (0, -rating, name.lower())
+        sort_key = rating_sort_key(name, rating)
         line = f"- {name} {rating_tag}: {description}" if description else f"- {name} {rating_tag}"
         entries.append((sort_key, line))
 
