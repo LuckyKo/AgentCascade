@@ -26,6 +26,19 @@ def _next_patch_version(version: str) -> str:
         return '1.0.1'
 
 
+def _coerce_rating(value):
+    """Return (float_value or None, error_string or None) for a 0-10 rating."""
+    if value is None:
+        return None, None
+    try:
+        float_val = float(value)
+    except (TypeError, ValueError):
+        return None, f"Invalid rating value: {value!r} (expected a number 0-10)"
+    if not (0.0 <= float_val <= 10.0):
+        return None, f"Invalid rating {float_val}: must be between 0 and 10."
+    return float_val, None
+
+
 @register_tool('propose_skill', allow_overwrite=True)
 class ProposeSkill(BaseTool):
     """Tool to propose a new reusable skill for future tasks."""
@@ -113,10 +126,10 @@ class ProposeSkill(BaseTool):
             existing_meta = skill_manager.get_skill_metadata(proposed_name)
             if existing_meta is None:
                 return f"Cannot rate unknown skill '{proposed_name}'. It is not in the registry."
-            try:
-                skill_manager.record_rating(proposed_name, float(rating_value))
-            except (ValueError, TypeError) as e:
-                return f"Invalid rating {rating_value!r}: must be a number between 0 and 10. ({e})"
+            rating_float, err = _coerce_rating(rating_value)
+            if err:
+                return err
+            skill_manager.record_rating(proposed_name, rating_float)
             logger.info('[PROPOSE-SKILL] Rating-only: %s -> %s', proposed_name, rating_value)
             return (f"Recorded rating {rating_value}/10 for skill '{proposed_name}' "
                     f"(v{existing_meta.get('version', '1.0.0')}).")
@@ -126,26 +139,19 @@ class ProposeSkill(BaseTool):
                     'YAML frontmatter (description, triggers) and body. To rate an existing skill, '
                     'provide `rating` as well.')
 
-        try:
-            justification = parsed.get('justification')
-        except (AttributeError, TypeError):
-            return 'Invalid parameters for propose_skill'
+        justification = parsed.get('justification')
 
         if not justification:
             return "'justification' is required to create or update a skill"
 
         # Validate rating early when supplied alongside content.
-        content_rating = None
-        if rating_value is not None:
-            try:
-                content_rating = float(rating_value)
-            except (TypeError, ValueError):
-                return f"Invalid rating value: {rating_value!r} (expected a number 0-10)"
-            if not (0.0 <= content_rating <= 10.0):
-                return f"Invalid rating {content_rating}: must be between 0 and 10."
+        content_rating, err = _coerce_rating(rating_value)
+        if err:
+            return err
 
-        # The `name` argument is authoritative. Parse the frontmatter to (a) patch the name
-        # field so the on-disk SKILL.md matches the registered name, and (b) read version/description.
+        # The `name` argument is authoritative. Match the frontmatter block ONCE, parse its
+        # scalar fields, determine whether this is an update and compute the effective version
+        # BEFORE reconstruction, then patch name (+version on updates) in a single pass.
         # NOTE: lightweight line-based parse — sufficient for scalar keys (name/version/description);
         # block-style or multi-line YAML values are not interpreted (only first physical line captured).
         fm = {}
@@ -156,15 +162,6 @@ class ProposeSkill(BaseTool):
                 m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$', line)
                 if m:
                     fm[m.group(1)] = m.group(2).strip().strip('"\'')
-
-            def _patch_field(text, key, value):
-                """Replace or insert a top-level scalar field within frontmatter text only."""
-                if re.search(r'(?m)^%s\s*:' % key, text):
-                    return re.sub(r'(?m)^%s\s*:.*$' % key, f'{key}: {value}', text, count=1)
-                return f'{key}: {value}\n' + text
-
-            fm_text = _patch_field(fm_text, 'name', proposed_name)
-            skill_content = skill_content[:fm_match.start(1)] + fm_text + skill_content[fm_match.end(1):]
 
         proposed_version = fm.get('version', '1.0.0')
 
@@ -182,21 +179,31 @@ class ProposeSkill(BaseTool):
             proposed_norm = normalize_version(proposed_version)
             effective_version = proposed_norm if (proposed_norm != '1.0.0' and proposed_norm != existing_version) \
                 else _next_patch_version(existing_version)
+        else:
+            effective_version = normalize_version(proposed_version) or '1.0.0'
 
-            # Patch the version inside the FRONTMATTER BLOCK ONLY (a body line like "version: X"
-            # must never be touched). Re-locate the block after the name patch above.
-            fm_match2 = re.match(r'^---\s*\n(.*?)\n---\s*\n?', skill_content, re.DOTALL)
-            if fm_match2:
-                fm_text2 = _patch_field(fm_match2.group(1), 'version', effective_version)
-                skill_content = (skill_content[:fm_match2.start(1)] + fm_text2 + skill_content[fm_match2.end(1):])
+        # Patch the frontmatter block (name always; version only on updates) in one pass, so a
+        # body line like "version: X" is never touched.
+        if fm_match:
 
+            def _patch_field(text, key, value):
+                """Replace or insert a top-level scalar field within frontmatter text only."""
+                if re.search(r'(?m)^%s\s*:' % key, text):
+                    return re.sub(r'(?m)^%s\s*:.*$' % key, f'{key}: {value}', text, count=1)
+                return f'{key}: {value}\n' + text
+
+            fm_text = _patch_field(fm_match.group(1), 'name', proposed_name)
+            if is_update:
+                fm_text = _patch_field(fm_text, 'version', effective_version)
+            skill_content = skill_content[:fm_match.start(1)] + fm_text + skill_content[fm_match.end(1):]
+
+        if is_update:
             # Approval for UPDATE — content for an existing name is always an update;
             # the patch version above makes effective_version differ from existing_version.
             description = (f"📝 **Update Existing Skill**: {proposed_name}\n\n"
                            f"Current version: v{existing_version} → New version: v{effective_version}\n"
                            f"Justification: {justification}")
         else:
-            effective_version = normalize_version(proposed_version) or '1.0.0'
             # Approval for NEW skill
             description = (f"📝 **Propose New Skill**: {proposed_name}\n\n"
                            f"Description: {fm.get('description', '') if fm else ''}\n"
@@ -244,4 +251,5 @@ class ProposeSkill(BaseTool):
             return f"Skill '{proposed_name}' {verb} successfully (v{effective_version})."
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'
-            return f"Skill registration failed: {error_detail}"
+            action = 'update' if is_update else 'register'
+            return f"Failed to {action} skill '{proposed_name}': {error_detail}"

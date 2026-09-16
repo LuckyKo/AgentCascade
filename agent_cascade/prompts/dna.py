@@ -692,7 +692,7 @@ TOOL_METADATA = {
                         'requested, because rating is not a content modification.'),
         'parameters': {
             'name':
-                'The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
+                'REQUIRED. The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
             'skill_content':
                 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             'justification':
