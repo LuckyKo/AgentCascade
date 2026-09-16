@@ -16,7 +16,6 @@ from agent_cascade.compression.core import compress_context
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 from tests.conftest import MockAgentPool
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -184,14 +183,15 @@ class TestMinUsageGuardToolSchemaTokens:
         pool = self._make_pool_with_tools(num_pairs=2, reserve_tokens=3000, min_usage_pct=50.0)
 
         # Tool schemas contribute enough tokens to cross the 50% line (4000 of 7000 ≈ 57%).
+        # NOTE: these two helpers are imported at module level in compression.core, so patch
+        # core's own bindings (not the source modules) — that is where _estimate_usage_pct looks them up.
         with patch('agent_cascade.api_integration_pkg.tokens._resolve_max_tokens', return_value=10_000), \
-             patch('agent_cascade.engine.helpers._get_active_functions_from_template',
+             patch('agent_cascade.compression.core._get_active_functions_from_template',
                    return_value=[{'name': 'f'}] * 50), \
-             patch('agent_cascade.utils.utils.estimate_functions_tokens', return_value=4000), \
+             patch('agent_cascade.compression.core.estimate_functions_tokens', return_value=4000), \
              patch('agent_cascade.compression.core.invoke_compression_agent') as mock_invoke:
             mock_invoke.return_value = ('Fresh compression summary', '')
-            result = compress_context(
-                agent_pool=pool, target_agent_name='TestAgent', fraction=0.5, mode='auto')
+            result = compress_context(agent_pool=pool, target_agent_name='TestAgent', fraction=0.5, mode='auto')
 
         # NOT refused by the min-usage guard — tool tokens lifted usage above 50%.
         assert 'min-usage guard' not in (result.error or '')
@@ -208,8 +208,7 @@ class TestMinUsageGuardToolSchemaTokens:
         with patch('agent_cascade.api_integration_pkg.tokens._resolve_max_tokens', return_value=10_000), \
              patch('agent_cascade.compression.core.invoke_compression_agent') as mock_invoke:
             mock_invoke.return_value = ('Fresh compression summary', '')
-            result = compress_context(
-                agent_pool=pool, target_agent_name='TestAgent', fraction=0.5, mode='auto')
+            result = compress_context(agent_pool=pool, target_agent_name='TestAgent', fraction=0.5, mode='auto')
 
         # Refused because message-only usage is far below 50% (no tool tokens added).
         assert result.success is False

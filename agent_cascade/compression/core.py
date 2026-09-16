@@ -9,12 +9,15 @@ from agent_cascade.compression.helpers import (_parse_marker_timestamps, _refine
                                                compute_discard_count, extract_summary_from_marker, get_message_role,
                                                select_markers_for_consolidation)
 from agent_cascade.compression.result import CompressResult
+from agent_cascade.engine.helpers import _get_active_functions_from_template
 from agent_cascade.llm.schema import FUNCTION, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER, COMPRESSION_PROMPT
 from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE, COMPRESSION_DEFAULT_FRACTION,
-                                    COMPRESSION_MAX_CONSOLIDATION_TOKENS, COMPRESSION_MIN_USAGE_PCT)
+                                    COMPRESSION_MAX_CONSOLIDATION_TOKENS, COMPRESSION_MIN_USAGE_PCT,
+                                    DEFAULT_MAX_INPUT_TOKENS)
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, strip_base64_from_images
+from agent_cascade.utils.utils import (estimate_functions_tokens, extract_text_from_message, get_message_stats,
+                                       strip_base64_from_images)
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +70,6 @@ def _estimate_usage_pct(agent_pool, target_agent_name: str, history) -> float | 
         # (engine/core.py::_count_history_tokens counts functions when provided).
         # Fail-soft: on ANY error, keep the message-only count and continue.
         try:
-            from agent_cascade.engine.helpers import _get_active_functions_from_template
-            from agent_cascade.utils.utils import estimate_functions_tokens
             template = agent_pool.get_template(instance.agent_class)
             if template is not None:
                 active_functions = _get_active_functions_from_template(template, instance, pool=agent_pool)
@@ -77,8 +78,10 @@ def _estimate_usage_pct(agent_pool, target_agent_name: str, history) -> float | 
             logger.debug(f"min-usage guard: tool-schema token count skipped for '{target_agent_name}': {e}")
 
         # Resolve max input tokens, falling back to the settings default.
+        # Imported locally (not at module level): api_integration_pkg.tokens triggers the
+        # package __init__ -> runner -> agent_pool -> full agent stack, which we don't want
+        # pulled into this module's import time.
         from agent_cascade.api_integration_pkg.tokens import _resolve_max_tokens
-        from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
         max_tokens = _resolve_max_tokens(agent_pool, instance)
         if not max_tokens:
             max_tokens = DEFAULT_MAX_INPUT_TOKENS
@@ -416,14 +419,17 @@ def compress_context(
         _min_pct = getattr(agent_pool.settings, 'compression_min_usage_pct', COMPRESSION_MIN_USAGE_PCT)
         _usage_pct = _estimate_usage_pct(agent_pool, target_agent_name, history)
         if _usage_pct is None:
-            logger.warning("min-usage guard: context usage could not be computed — failing open")
+            logger.warning('min-usage guard: context usage could not be computed — failing open')
         elif _usage_pct < _min_pct:
             return CompressResult(
-                success=False, summary_text=None, marker_message=None,
-                messages_discarded=0, tail_count=len(active_set),
+                success=False,
+                summary_text=None,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=len(active_set),
                 error=f"Refused by min-usage guard: context {_usage_pct:.1f}% is below the "
-                      f"{_min_pct:.0f}% minimum for agent-triggered compression. "
-                      f"Context will fill naturally; use /compress to force it.",
+                f"{_min_pct:.0f}% minimum for agent-triggered compression. "
+                f"Context will fill naturally; use /compress to force it.",
                 mode=mode,
             )
 
