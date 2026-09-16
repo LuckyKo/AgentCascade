@@ -233,6 +233,12 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 self._async_registry.shutdown(wait=False)  # Quick stop — don't block waiting for tasks
             except Exception as e:
                 logger.debug(f"Async registry shutdown failed (non-critical): {e}")
+            # Final metrics flush: ratings bypass batching, but load counters are
+            # still batched and would be lost without a flush on pool stop.
+            try:
+                self.skill_manager._flush_metrics_to_disk()
+            except Exception as e:
+                logger.debug(f"Skill metrics final flush failed (non-critical): {e}")
             logger.debug('Background services shut down (idle_checker + async_registry)')
         else:
             self._stopped_event.clear()

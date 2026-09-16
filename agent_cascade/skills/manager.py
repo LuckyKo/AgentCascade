@@ -8,6 +8,7 @@ Handles:
   - Resolving load_skill arguments (list / AUTO / NONE)
 """
 
+import copy as _copy
 import json as _json
 import os as _os
 import sys as _sys
@@ -184,7 +185,10 @@ class SkillManager:
             self._metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
             tmp_path = self._metrics_file.with_suffix('.tmp')
-            data = {'schema_version': '1.1', 'skills': self._metrics}
+            # Snapshot under lock (deep copy: nested per-skill dicts are shared with live state).
+            # The tree is small JSON; copying is far cheaper than risking a torn write.
+            with self._metrics_lock:
+                data = {'schema_version': '1.1', 'skills': _copy.deepcopy(self._metrics)}
 
             # Open temp file for writing with exclusive lock (POSIX only)
             fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
@@ -275,6 +279,10 @@ class SkillManager:
         if not (0.0 <= float(rating) <= 10.0):
             raise ValueError(f"rating must be in [0, 10], got {rating}")
         self._record_rating(skill_name, float(rating))
+        # Ratings are rare, deliberate events — batch them and a short session
+        # (<=4 ratings, exit before the 30s interval) silently loses data.
+        # Flush immediately; load counters keep their batched behavior.
+        self._flush_metrics_to_disk()
 
     # ── Discovery ────────────────────────────────────────────────────────────
 

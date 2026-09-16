@@ -1248,6 +1248,45 @@ class TestRatingMetrics:
         with pytest.raises(ValueError):
             m.record_rating('my-skill', -0.5)
 
+    def test_record_rating_persists_immediately_without_extra_increments(self, fresh_manager):
+        """Regression: one rating must be on disk immediately (no sleep/increments).
+
+        Bug: ratings were batched with the load-counter flush policy (5 pending or
+        30s) and nothing flushed on exit, so a short session recording <=4 ratings
+        lost all but threshold-crossing writes. Fix: record_rating flushes at once.
+        """
+        m = self.manager
+        m.record_rating('my-skill', 7.5)
+        assert self.metrics_file.exists(), 'metrics file not written after a single rating'
+        import json as _json
+        data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
+        r = data['skills']['my-skill']['ratings']
+        assert r['count'] == 1
+        assert abs(r['sum'] - 7.5) < 1e-9
+        assert r['latest'] == 7.5
+
+    def test_record_rating_invalid_does_not_flush(self, fresh_manager):
+        """The ValueError path must not write/flush anything to disk."""
+        m = self.manager
+        with pytest.raises(ValueError):
+            m.record_rating('my-skill', 11.0)
+        assert not self.metrics_file.exists()
+
+    def test_pool_stop_triggers_final_metrics_flush(self, tmp_path):
+        """Pool stopped.setter True-branch must best-effort flush skill metrics."""
+        from unittest.mock import MagicMock
+        pool = MagicMock(name='pool')
+        pool._idle = MagicMock()
+        pool._async_registry = MagicMock()
+        pool.skill_manager = MagicMock()
+
+        # Invoke the real setter on a stub (no AgentPool.__init__ needed).
+        from agent_cascade.pool.core import AgentPool
+        AgentPool.stopped.fset(pool, True)
+
+        assert pool._stopped_event.is_set()
+        pool.skill_manager._flush_metrics_to_disk.assert_called_once_with()
+
     def test_backward_compat_missing_ratings_key(self, fresh_manager):
         """A 1.0-style entry without 'ratings' is read as no ratings (no crash)."""
         import json as _json
@@ -1386,9 +1425,13 @@ class TestReflectionPrompt:
         assert injected is True
         assert '(none)' in appended[0]
 
-    def test_prompt_lines_carry_rating_info(self, fresh_manager):
+    def test_prompt_lines_carry_rating_info(self, fresh_manager, tmp_path):
         """Loaded-skill lines show the current average rating (or 'unrated')."""
         from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
+
+        # record_rating flushes to disk immediately — point the metrics file at a
+        # temp path so this test doesn't write through to production metrics.
+        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
         inst = self._make_inst(fresh_manager)
         # Rate one skill so it renders with an average; leave the other unrated.
         fresh_manager.record_rating('docker-best-practices', 8.0)
