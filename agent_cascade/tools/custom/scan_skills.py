@@ -82,6 +82,21 @@ class ScanSkills(BaseTool):
             def _sort_key(skill):
                 return rating_sort_key(skill['name'], skill_manager.get_rating_average(skill['name']))
 
+            # Candidate marker data (no-query mode only): names whose registry winner is a
+            # candidate file, plus the incumbent version parsed from its production file.
+            candidate_names = set(skill_manager.get_candidate_names())
+            _, _production_root = skill_manager._candidate_dirs()
+
+            def _incumbent_version(name: str) -> str:
+                prod_file = _production_root / name / 'SKILL.md'
+                if not prod_file.exists():
+                    return '?'
+                try:
+                    from agent_cascade.skills.parser import parse_skill_file
+                    return parse_skill_file(prod_file).get('version', '?')
+                except (OSError, FileNotFoundError):
+                    return '?'
+
             lines = ['## Available Skills']
             for skill in sorted(all_skills, key=_sort_key):
                 source = skill.get('source', 'system')
@@ -91,7 +106,9 @@ class ScanSkills(BaseTool):
                     rating_str = 'n/a'
                 else:
                     rating_str = f'{rating}×{count}'
-                lines.append(f"- **{skill['name']}** [{source}] v{version} (rating: {rating_str}): "
+                candidate_note = (f" (candidate, pending decision vs v{_incumbent_version(skill['name'])})"
+                                  if skill['name'] in candidate_names else '')
+                lines.append(f"- **{skill['name']}** [{source}] v{version} (rating: {rating_str}){candidate_note}: "
                              f"{skill.get('description', 'No description')}")
             return '\n'.join(lines)
 

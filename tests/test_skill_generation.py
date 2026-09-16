@@ -74,10 +74,11 @@ def _cleanup_test_artifacts():
     """Remove test-specific artifacts left by the skill generation tests.
 
     - pending-skills/: deletes all entries (these are always test artifacts).
-    - agents/global/skills/: only deletes directories whose names match test patterns
+    - candidates/: only deletes directories whose names match test patterns
       ("test-*", "tmp-*"). Production skills must never be deleted here; we
       cannot rely on a hardcoded whitelist of canonical skills because new
       production skills get added over time.
+    - agents/global/skills/: same test-pattern rule as above.
     """
 
     def _is_test_skill(name: str) -> bool:
@@ -111,6 +112,13 @@ def _cleanup_test_artifacts():
     if pending_root.exists():
         for entry in list(pending_root.iterdir()):
             if entry.is_dir():
+                _remove_empty_dir(entry)
+
+    # Candidate-flow artifacts: test-named candidates left by the decision-gate tests.
+    candidates_root = Path('agents/global/candidates')
+    if candidates_root.exists():
+        for entry in list(candidates_root.iterdir()):
+            if entry.is_dir() and _is_test_skill(entry.name):
                 _remove_empty_dir(entry)
 
     skills_root = Path('agents/global/skills')
@@ -238,14 +246,18 @@ class TestRegistration:
         assert success, f"Registration failed: {errors}"
         assert name in fresh_manager._skills_registry
 
-    def test_duplicate_skill_rejected(self, fresh_manager):
+    def test_duplicate_skill_becomes_candidate(self, fresh_manager):
+        """Re-proposing an existing name is an upgrade proposal: it registers as a
+        live-serving candidate (agents/global/candidates/), not a hard duplicate failure."""
         name = f"duplicate-test-skill-{_uid()}"
         content = _make_skill_content(name=name)
-        fresh_manager.register_skill_from_content(content)
+        success1, _ = fresh_manager.register_skill_from_content(content)
+        assert success1
         content2 = _make_skill_content(name=name)
-        success, errors = fresh_manager.register_skill_from_content(content2)
-        assert not success
-        assert len(errors) > 0
+        success2, errors = fresh_manager.register_skill_from_content(content2)
+        assert success2, f'upgrade proposal should register as candidate: {errors}'
+        reg = fresh_manager._skills_registry.get(name)
+        assert reg is not None and 'candidates' in reg['file_path']
 
     def test_triggers_stored_in_registry(self, fresh_manager):
         triggers = ['pytest', 'unit-test', 'mocking']
@@ -413,7 +425,9 @@ class TestProposeValidatePromote:
         assert 'pending-skills' in reg['file_path']
 
     def test_duplicate_in_full_flow(self, fresh_manager):
-        """Register same skill twice — second should fail."""
+        """Re-proposing an existing skill name is now an UPGRADE proposal (candidate flow),
+        not a hard duplicate failure: it registers as a live-serving candidate in
+        agents/global/candidates/ and triggers the decision gate immediately."""
         name = f"integration-test-skill-{_uid()}"
         content = _make_skill_content(
             name=name,
@@ -432,8 +446,9 @@ class TestProposeValidatePromote:
             generated_from_task='Test again',
         )
         success2, errors = fresh_manager.register_skill_from_content(content2, auto_promote=True)
-        assert not success2
-        assert len(errors) > 0, 'Duplicate should fail with errors'
+        assert success2, f'Upgrade proposal should register as candidate: {errors}'
+        reg = fresh_manager._skills_registry[name]
+        assert 'candidates' in reg['file_path'], 'second registration must land in the candidates dir'
 
 
 # ===========================================================================
@@ -1228,14 +1243,15 @@ class TestRatingMetrics:
         # Average computable: sum / count
         assert abs(r['sum'] / r['count'] - 7.0) < 1e-9
 
-    def test_record_rating_flushes_to_disk_schema_1_1(self, fresh_manager):
+    def test_record_rating_flushes_to_disk_schema_1_2(self, fresh_manager):
         m = self.manager
         m.record_rating('my-skill', 5.5)
         m._flush_metrics_to_disk()
         assert self.metrics_file.exists()
         import json as _json
         data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
-        assert data['schema_version'] == '1.1'
+        # Schema bumped to 1.2 (per-version rating history); older files are still tolerated on load.
+        assert data['schema_version'] == '1.2'
         r = data['skills']['my-skill']['ratings']
         assert r['count'] == 1
         assert abs(r['sum'] - 5.5) < 1e-9
@@ -1380,6 +1396,10 @@ class TestReflectionPrompt:
         inst.conversation = [{'role': 'user', 'content': 'task'}]
         inst._auto_skill_proposed = False
         inst._auto_skill_proposed_count = 0
+        # load_full_instructions('skill-creator') must NOT re-read the real production file:
+        # that would flush the (isolated) metrics back through to the production file and
+        # repopulate _metrics from disk on the next load. A body-only stub short-circuits
+        # the disk fallback.
         fresh_manager._skills_registry['skill-creator'] = {
             'name': 'skill-creator',
             'file_path': 'agents/global/skills/skill-creator/SKILL.md',
@@ -1388,6 +1408,17 @@ class TestReflectionPrompt:
             },
         }
         return inst
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
+        # Start from an EMPTY metrics dict: the production skills-metrics.json (loaded at
+        # __init__) would otherwise leak real ratings into these tests and any flush would
+        # write them back through to the production file.
+        with fresh_manager._metrics_lock:
+            fresh_manager._metrics = {}
+        yield
 
     def test_prompt_contains_loaded_skills_list(self, fresh_manager):
         from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
@@ -1425,13 +1456,10 @@ class TestReflectionPrompt:
         assert injected is True
         assert '(none)' in appended[0]
 
-    def test_prompt_lines_carry_rating_info(self, fresh_manager, tmp_path):
+    def test_prompt_lines_carry_rating_info(self, fresh_manager):
         """Loaded-skill lines show the current average rating (or 'unrated')."""
         from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
 
-        # record_rating flushes to disk immediately — point the metrics file at a
-        # temp path so this test doesn't write through to production metrics.
-        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
         inst = self._make_inst(fresh_manager)
         # Rate one skill so it renders with an average; leave the other unrated.
         fresh_manager.record_rating('docker-best-practices', 8.0)
@@ -1467,6 +1495,11 @@ class TestProposeSkillRatingModes:
     def _isolated_metrics(self, fresh_manager, tmp_path):
         self.manager = fresh_manager
         fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
+        # Start from an EMPTY metrics dict: the production skills-metrics.json (loaded at
+        # __init__) would otherwise leak real ratings into these tests and any flush would
+        # write them back through to the production file.
+        with fresh_manager._metrics_lock:
+            fresh_manager._metrics = {}
         yield
 
     def test_rating_only_records_and_skips_approval(self, fresh_manager):
@@ -1623,3 +1656,673 @@ class TestProposeSkillRatingModes:
         assert 'updated' in result.lower()
         assert m.get_skill_metadata(name)['version'] != v1  # patch version auto-incremented
         pool.operation_manager.request_user_approval.assert_called_once()
+
+
+# ===========================================================================
+# Candidate flow — live-serving upgrade candidates (Phase 2 of skill evolution)
+# ===========================================================================
+
+
+def _write_incumbent(m, name: str, version: str = '1.0.0', body_marker: str = 'INCUMBENT_BODY'):
+    """Write a production SKILL.md directly to the manager's production root and register it."""
+    _, prod_root = m._candidate_dirs()  # returns (candidates_root, production_root)
+    d = prod_root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / 'SKILL.md').write_text(
+        f'---\nname: {name}\ndescription: Incumbent skill version for candidate flow tests\n'
+        f'version: {version}\ntriggers:\n  - candidate\n  - test\n---\n\n{body_marker}\n',
+        encoding='utf-8')
+    from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+    from agent_cascade.skills.parser import parse_skill_file
+    parsed = parse_skill_file(d / 'SKILL.md')
+    m._skills_registry[name] = {
+        'name': name,
+        'description': parsed.get('frontmatter', {}).get('description', ''),
+        'source': 'system',
+        'triggers': parsed.get('frontmatter', {}).get('triggers', []),
+        'version': version,
+        'file_path': str(d / 'SKILL.md'),
+        '_priority': _PRIORITY_SYSTEM,
+        '_parsed_data': parsed,
+    }
+
+
+class TestCandidateFlow:
+    """Live-serving upgrade candidates: registration, serving priority, decision gate."""
+
+    @pytest.fixture(autouse=True)
+    def _candidate_env(self, fresh_manager, tmp_path):
+        """Isolated metrics file + isolated candidate/production dirs (no real-tree writes).
+
+        The manager's stored discovery paths are cleared so the immediate eval trigger
+        inside register_skill_from_content() cannot re-scan the REAL agents/global/skills
+        tree and clear the registry entries these tests stage manually.
+        """
+        self.manager = fresh_manager
+        self.metrics_file = tmp_path / 'skills-metrics.json'
+        fresh_manager._metrics_file = self.metrics_file
+        # Start from an EMPTY metrics dict: the production skills-metrics.json (loaded at
+        # __init__) would otherwise leak real ratings into these tests, and any test-side
+        # flush would write them back through to the production file.
+        with fresh_manager._metrics_lock:
+            fresh_manager._metrics = {}
+        fresh_manager._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
+        fresh_manager._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
+        # Neutralize the forced discovery refresh inside evaluate_candidates() so the
+        # manually staged registry entries survive (discover() would clear them).
+        # _skill_paths=[] alone is not enough: invalidate_cache() resets the TTL and
+        # _ensure_discovered() may still call discover([]) which clears the registry.
+        fresh_manager._skill_paths = []
+        fresh_manager.invalidate_cache = lambda *a, **k: None
+        fresh_manager._ensure_discovered = lambda *a, **k: None
+        yield
+
+    # -- Serving priority ----------------------------------------------------
+
+    def test_candidate_beats_incumbent_in_registry(self, fresh_manager):
+        """A candidate registered with _PRIORITY_CANDIDATE=4 wins the registry over the incumbent."""
+        from agent_cascade.skills.manager import _PRIORITY_AGENT, _PRIORITY_CANDIDATE, _PRIORITY_SYSTEM, _PRIORITY_USER
+
+        # Existing tier constants untouched.
+        assert (_PRIORITY_SYSTEM, _PRIORITY_AGENT, _PRIORITY_USER, _PRIORITY_CANDIDATE) == (1, 2, 3, 4)
+
+        m = self.manager
+        name = f"test-cand-priority-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        content = _make_skill_content(
+            name=name,
+            description='Candidate upgrade version for serving priority test',
+            triggers=['candidate', 'priority'],
+            generated_from_task='test candidate serving priority',
+        )
+        success, errors = m.register_skill_from_content(content, task_text='test candidate serving priority')
+        assert success, f"upgrade registration failed: {errors}"
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_CANDIDATE
+        assert 'candidates' in reg['file_path']
+        # The candidate body is what gets served (winner resolution).
+        assert m.load_full_instructions(name, count_load=False) == content.split('---\n', 2)[2].strip()
+
+    def test_candidate_tier_discovered_with_highest_priority(self, fresh_manager):
+        """Discovery of the candidates root registers skills at _PRIORITY_CANDIDATE."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        m = self.manager
+        name = f"test-cand-discovery-{_uid()}"
+        cand_root, prod_root = m._candidate_dirs()
+        d = cand_root / name
+        d.mkdir(parents=True)
+        (d / 'SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: Candidate tier discovery test skill body\n'
+            'version: 2.0.0\ntriggers:\n  - candidate\n---\n\nCANDIDATE_DISCOVERY_BODY\n',
+            encoding='utf-8')
+
+        # Discover the full pool tier list (production + candidates), like the pool does.
+        m._cache_ttl = 0.0
+        m.discover([prod_root, cand_root])
+        assert name in m._skills_registry
+        assert m._skills_registry[name]['_priority'] == _PRIORITY_CANDIDATE
+        assert m.get_candidate_names() == [name]
+
+    # -- Upgrade → candidate file -------------------------------------------
+
+    def test_upgrade_lands_in_candidates_dir(self, fresh_manager):
+        """Re-proposing an existing name writes candidates/<name>/SKILL.md; production untouched."""
+        m = self.manager
+        name = f"test-cand-upgrade-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='ORIGINAL_INCUMBENT')
+        prod_file = (m._production_skills_dir / name / 'SKILL.md')
+        original_prod = prod_file.read_text(encoding='utf-8')
+
+        content = _make_skill_content(
+            name=name,
+            description='Upgrade candidate version for candidates dir test',
+            triggers=['upgrade', 'candidate'],
+            generated_from_task='test upgrade lands in candidates',
+        )
+        success, errors = m.register_skill_from_content(content, task_text='test upgrade lands in candidates')
+        assert success, f"upgrade registration failed: {errors}"
+
+        cand_file = (m._candidates_dir / name / 'SKILL.md')
+        assert cand_file.exists(), 'candidate file must exist under agents/global/candidates/<name>/'
+        assert prod_file.read_text(encoding='utf-8') == original_prod, 'production file must be untouched'
+        reg = m._skills_registry[name]
+        assert reg['file_path'] == str(cand_file)
+
+    # -- Rating accumulation per version -------------------------------------
+
+    def test_ratings_accrue_to_serving_candidate_version(self, fresh_manager):
+        """While the candidate serves, ratings accrue to its own version key (schema 1.2)."""
+        m = self.manager
+        name = f"test-cand-ratings-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        content = _make_skill_content(
+            name=name,
+            description='Candidate version for per-version rating accumulation',
+            triggers=['ratings', 'version'],
+            generated_from_task='test per-version ratings',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test per-version ratings')
+        assert success
+        cand_version = m.get_skill_metadata(name)['version']
+
+        m.record_rating(name, 8.0)
+        m.record_rating(name, 9.0)
+        entry = m.get_metrics(name)
+        # Aggregate (backward compat) and per-version history both updated.
+        assert entry['ratings']['count'] == 2
+        assert abs(entry['ratings']['sum'] - 17.0) < 1e-9
+        assert entry['ratings_by_version'][cand_version]['count'] == 2
+        assert abs(entry['ratings_by_version'][cand_version]['sum'] - 17.0) < 1e-9
+
+    # -- Decision gate: promote / discard ------------------------------------
+
+    def test_promote_on_better(self, fresh_manager):
+        m = self.manager
+        name = f"test-cand-promote-better-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='OLD_INCUMBENT')
+        prod_file = (m._production_skills_dir / name / 'SKILL.md')
+
+        content = _make_skill_content(
+            name=name,
+            description='Better candidate version for promotion test',
+            triggers=['promote', 'better'],
+            generated_from_task='test promote on better average',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test promote on better average')
+        assert success
+        cand_version = m.get_skill_metadata(name)['version']
+
+        # Incumbent avg 5.0 (2 ratings) vs candidate avg 8.5 (3 ratings) → promote.
+        for r in (4.0, 6.0):
+            m.record_rating(name, r)  # these land on the candidate version key (it serves)
+        # Seed the incumbent's own history directly (pre-candidacy era).
+        with m._metrics_lock:
+            m._metrics[name]['ratings_by_version']['1.0.0'] = {'count': 2, 'sum': 10.0, 'latest': 6.0}
+
+        # Not yet at the gate threshold (3 ratings on candidate key) — add one more.
+        m.record_rating(name, 8.5)
+        m.evaluate_candidates()
+
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_SYSTEM, 'promoted candidate must be back at SYSTEM priority'
+        assert reg['file_path'] == str(prod_file)
+        assert reg['version'] == cand_version
+        assert not (m._candidates_dir / name).exists(), 'candidate dir must be deleted on promote'
+        # Metrics transfer: aggregate mirrors the winner's history; per-version intact.
+        entry = m.get_metrics(name)
+        assert entry['ratings']['count'] == 3
+        assert abs(entry['ratings']['sum'] - (4.0 + 6.0 + 8.5)) < 1e-9
+        assert '1.0.0' in entry['ratings_by_version'] and cand_version in entry['ratings_by_version']
+
+    def test_promote_on_equal(self, fresh_manager):
+        m = self.manager
+        name = f"test-cand-promote-equal-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        prod_file = (m._production_skills_dir / name / 'SKILL.md')
+
+        # Give the candidate a distinct version (2.0.0) so its rating history does not share
+        # the incumbent's ratings_by_version['1.0.0'] key — otherwise the two versions collide
+        # and the gate compares a polluted baseline against itself.
+        content = _make_skill_content(
+            name=name,
+            description='Equal-average candidate version for promotion test',
+            triggers=['promote', 'equal'],
+            generated_from_task='test promote on equal average',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        success, _ = m.register_skill_from_content(content, task_text='test promote on equal average')
+        assert success
+        cand_version = m.get_skill_metadata(name)['version']
+
+        # Both versions avg 7.0 → "better or equal" promotes.
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 14.0, 'latest': 8.0}
+        for r in (6.0, 7.0, 8.0):
+            m.record_rating(name, r)
+        m.evaluate_candidates()
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == 1 and reg['version'] == cand_version
+        assert reg['file_path'] == str(prod_file)
+        assert not (m._candidates_dir / name).exists()
+
+    def test_discard_on_worse(self, fresh_manager):
+        m = self.manager
+        name = f"test-cand-discard-worse-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='KEEP_INCUMBENT')
+        prod_file = (m._production_skills_dir / name / 'SKILL.md')
+
+        # Distinct candidate version (2.0.0) so its rating history does not corrupt the
+        # incumbent's shared 1.0.0 key — the discard must revert the aggregate exactly.
+        content = _make_skill_content(
+            name=name,
+            description='Worse candidate version for discard test',
+            triggers=['discard', 'worse'],
+            generated_from_task='test discard on worse average',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        success, _ = m.register_skill_from_content(content, task_text='test discard on worse average')
+        assert success
+        cand_version = m.get_skill_metadata(name)['version']
+
+        # Incumbent avg 8.0 (2) vs candidate avg 5.0 (3) → discard.
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 16.0, 'latest': 9.0}
+        for r in (4.0, 5.0, 6.0):
+            m.record_rating(name, r)
+        m.evaluate_candidates()
+
+        # Candidate gone; next discovery restores the incumbent to service.
+        assert not (m._candidates_dir / name).exists(), 'candidate dir must be deleted on discard'
+        # Restore via explicit discovery of both roots (mirrors the pool tier list).
+        _, prod_root = m._candidate_dirs()
+        m.invalidate_cache()
+        m.discover([prod_root, m._candidates_dir])
+        reg = m._skills_registry.get(name)
+        assert reg is not None, 'incumbent must be restored to the registry on next discovery'
+        assert reg['_priority'] == 1 and reg['version'] == '1.0.0'
+        # Metrics: aggregate reverted to incumbent history; candidate entry kept as evidence.
+        entry = m.get_metrics(name)
+        assert entry['ratings']['count'] == 2
+        assert abs(entry['ratings']['sum'] - 16.0) < 1e-9
+        assert cand_version in entry['ratings_by_version'], 'candidate per-version history must be kept'
+
+    def test_gate_waits_for_min_ratings(self, fresh_manager):
+        """Below CANDIDATE_MIN_RATINGS the candidate stays pending (no decision)."""
+        from agent_cascade.settings import CANDIDATE_MIN_RATINGS
+        m = self.manager
+        name = f"test-cand-gate-wait-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        # Distinct candidate version (2.0.0) so its rating count is tracked separately from
+        # the incumbent's 1.0.0 key — otherwise the shared key reaches the gate threshold early.
+        content = _make_skill_content(
+            name=name,
+            description='Pending candidate version for min-ratings gate test',
+            triggers=['gate', 'wait'],
+            generated_from_task='test gate waits for min ratings',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        success, _ = m.register_skill_from_content(content, task_text='test gate waits for min ratings')
+        assert success
+
+        # Only 2 ratings (below the default threshold of 3) — even a worse candidate survives.
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 10.0, 'latest': 10.0}
+        for r in (1.0, 2.0):
+            m.record_rating(name, r)
+        m.evaluate_candidates()
+
+        assert m.get_candidate_names() == [name], 'candidate must remain pending below the rating gate'
+        assert CANDIDATE_MIN_RATINGS == 3
+
+    def test_metrics_transfer_keeps_total_loads(self, fresh_manager):
+        """On promote, total_loads (cumulative across versions) is kept as-is."""
+        m = self.manager
+        name = f"test-cand-loads-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        # Distinct candidate version (2.0.0) so its rating history is separable from the
+        # incumbent's shared 1.0.0 key (the gate mirrors the winner's per-version history).
+        content = _make_skill_content(
+            name=name,
+            description='Candidate version for total_loads preservation test',
+            triggers=['loads', 'transfer'],
+            generated_from_task='test total loads kept on gate',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        success, _ = m.register_skill_from_content(content, task_text='test total loads kept on gate')
+        assert success
+
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry['total_loads'] = 42
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 5.0, 'latest': 5.0}
+        for r in (9.0, 9.0, 9.0):
+            m.record_rating(name, r)
+        m.evaluate_candidates()
+
+        entry = m.get_metrics(name)
+        assert entry['total_loads'] == 42, 'total_loads must be kept across the gate'
+        assert entry['ratings']['count'] == 3 and abs(entry['ratings']['sum'] - 27.0) < 1e-9
+
+    # -- Legacy (schema 1.1) incumbent handling --------------------------------
+
+    def test_legacy_incumbent_backfill(self, fresh_manager):
+        """A 1.1 metrics entry gets ratings_by_version[prod_version] seeded at candidate creation."""
+        m = self.manager
+        name = f"test-cand-legacy-backfill-{_uid()}"
+        _write_incumbent(m, name, '1.2.3')
+
+        # Simulate a schema-1.1 incumbent: aggregate ratings, no ratings_by_version.
+        with m._metrics_lock:
+            m._metrics[name] = {
+                'total_loads': 7,
+                'by_version': {
+                    '1.2.3': 7
+                },
+                'ratings': {
+                    'count': 2,
+                    'sum': 15.0,
+                    'latest': 8.0,
+                    'last_version': '1.2.3'
+                },
+            }
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate over a legacy schema-1.1 incumbent skill',
+            triggers=['legacy', 'backfill'],
+            generated_from_task='test legacy incumbent backfill',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test legacy incumbent backfill')
+        assert success
+
+        entry = m.get_metrics(name)
+        assert entry['ratings_by_version']['1.2.3'] == {'count': 2, 'sum': 15.0, 'latest': 8.0}, \
+            'legacy aggregate must be seeded into ratings_by_version[<incumbent version>]'
+
+    def test_legacy_discard_revert_exactness(self, fresh_manager):
+        """Discarding a candidate over a legacy incumbent reverts the aggregate exactly."""
+        m = self.manager
+        name = f"test-cand-legacy-discard-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        with m._metrics_lock:
+            m._metrics[name] = {
+                'total_loads': 5,
+                'by_version': {
+                    '1.0.0': 5
+                },
+                'ratings': {
+                    'count': 2,
+                    'sum': 14.0,
+                    'latest': 9.0,
+                    'last_version': '1.0.0'
+                },
+            }
+
+        # Distinct candidate version (2.0.0) so its ratings don't corrupt the backfilled
+        # incumbent 1.0.0 key — the discard must revert the aggregate exactly to count 2.
+        content = _make_skill_content(
+            name=name,
+            description='Candidate discarded over a legacy incumbent skill',
+            triggers=['legacy', 'discard'],
+            generated_from_task='test legacy discard revert exactness',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        success, _ = m.register_skill_from_content(content, task_text='test legacy discard revert exactness')
+        assert success
+
+        # Candidate is worse (avg 4.0×3) than incumbent (avg 7.0×2) → discard.
+        for r in (3.0, 4.0, 5.0):
+            m.record_rating(name, r)
+        m.evaluate_candidates()
+
+        entry = m.get_metrics(name)
+        assert entry['ratings']['count'] == 2 and abs(entry['ratings']['sum'] - 14.0) < 1e-9, \
+            'aggregate must revert exactly to the incumbent history'
+        assert entry['total_loads'] == 5
+
+    # -- Version resolution ----------------------------------------------------
+
+    def test_incumbent_version_parsed_from_file(self, fresh_manager):
+        """prod_version comes from the incumbent FILE frontmatter, not the registry."""
+        m = self.manager
+        name = f"test-cand-file-version-{_uid()}"
+        _write_incumbent(m, name, '3.1.4', body_marker='FILE_VERSION_INCUMBENT')
+
+        # Seed a minimal legacy aggregate so the backfill path has something to seed from;
+        # an unrated incumbent (no ratings block) is not backfilled, which would skip the key.
+        with m._metrics_lock:
+            m._metrics[name] = {
+                'total_loads': 1,
+                'by_version': {
+                    '3.1.4': 1
+                },
+                'ratings': {
+                    'count': 1,
+                    'sum': 7.0,
+                    'latest': 7.0,
+                    'last_version': '3.1.4'
+                },
+            }
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate over a file-versioned incumbent skill here',
+            triggers=['file', 'version'],
+            generated_from_task='test incumbent version from file',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test incumbent version from file')
+        assert success
+
+        # Backfill must have used the FILE version (3.1.4) as the key.
+        entry = m.get_metrics(name)
+        assert '3.1.4' in entry['ratings_by_version']
+
+    # -- Orphan handling ---------------------------------------------------------
+
+    def test_orphan_candidate_discarded(self, fresh_manager):
+        """Incumbent file deleted → candidate is orphaned and discarded immediately."""
+        m = self.manager
+        name = f"test-cand-orphan-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate whose incumbent gets deleted (orphan test)',
+            triggers=['orphan', 'incumbent'],
+            generated_from_task='test orphan candidate discard',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test orphan candidate discard')
+        assert success
+
+        # Manually delete the incumbent file (simulates out-of-band removal).
+        prod_file = (m._production_skills_dir / name / 'SKILL.md')
+        prod_file.unlink()
+        m.evaluate_candidates()
+
+        assert not (m._candidates_dir / name).exists(), 'orphaned candidate dir must be deleted'
+        assert name not in m.get_candidate_names()
+
+    def test_disabled_incumbent_keeps_candidate_pending(self, fresh_manager):
+        """A disabled incumbent is still an incumbent: the candidate stays pending, not orphaned."""
+        m = self.manager
+        name = f"test-cand-disabled-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate over a disabled incumbent skill here',
+            triggers=['disabled', 'incumbent'],
+            generated_from_task='test disabled incumbent pending',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test disabled incumbent pending')
+        assert success
+
+        # Only 2 ratings (below the gate) + disabled incumbent → must survive evaluation.
+        for r in (9.0, 9.0):
+            m.record_rating(name, r)
+        m._disabled_names.add(name)  # simulate AGENT_CASCADE_SKILLS_DISABLED membership
+        m.evaluate_candidates()
+
+        assert (m._candidates_dir / name).exists(), 'candidate over a disabled incumbent must stay pending'
+        assert m.get_candidate_names() == [name]
+
+    # -- Re-proposal over an existing candidate -----------------------------------
+
+    def test_reproposal_over_existing_candidate(self, fresh_manager):
+        """A new proposal while a candidate exists replaces the file and re-triggers eval."""
+        m = self.manager
+        name = f"test-cand-repropose-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        # Each proposal carries an explicit, distinct version so a re-proposal is observable
+        # (v2 != v1) and the first candidate's per-version rating history stays separable.
+        content1 = _make_skill_content(
+            name=name,
+            description='First candidate version for re-proposal test here',
+            triggers=['repropose', 'first'],
+            generated_from_task='test re-proposal first candidate',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        success1, _ = m.register_skill_from_content(content1, task_text='test re-proposal first candidate')
+        assert success1
+        v1 = m.get_skill_metadata(name)['version']
+
+        # Seed ratings on the first candidate version so its history exists.
+        for r in (8.0, 9.0):
+            m.record_rating(name, r)
+
+        content2 = _make_skill_content(
+            name=name,
+            description='Second candidate version replacing the first one',
+            triggers=['repropose', 'second'],
+            generated_from_task='test re-proposal second candidate',
+        ).replace('---\n', '---\nversion: 3.0.0\n', 1)
+        success2, _ = m.register_skill_from_content(content2, task_text='test re-proposal second candidate')
+        assert success2
+
+        cand_file = (m._candidates_dir / name / 'SKILL.md')
+        assert cand_file.exists()
+        on_disk = cand_file.read_text(encoding='utf-8')
+        assert 'Second candidate version replacing the first one' in on_disk, \
+            'candidate file must be replaced by the newest proposal'
+        v2 = m.get_skill_metadata(name)['version']
+        assert v2 != v1
+        # Old per-version history kept as evidence.
+        entry = m.get_metrics(name)
+        assert v1 in entry['ratings_by_version'] and entry['ratings_by_version'][v1]['count'] == 2
+
+    # -- Idempotency ---------------------------------------------------------------
+
+    def test_double_trigger_cannot_double_promote(self, fresh_manager):
+        """Calling evaluate_candidates() twice (registration trigger + timer) is idempotent."""
+        m = self.manager
+        name = f"test-cand-idempotent-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate for double-trigger idempotency test here',
+            triggers=['idempotent', 'double'],
+            generated_from_task='test double trigger idempotency',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test double trigger idempotency')
+        assert success  # registration already triggered one eval (below gate: not enough ratings)
+
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 5.0, 'latest': 5.0}
+        for r in (9.0, 9.0, 9.0):
+            m.record_rating(name, r)
+
+        m.evaluate_candidates()
+        reg_after_first = dict(m._skills_registry[name])
+        m.evaluate_candidates()  # second trigger — must be a no-op now that it is promoted
+        assert m._skills_registry[name] == reg_after_first
+        assert not (m._candidates_dir / name).exists()
+
+    def test_double_trigger_cannot_double_discard(self, fresh_manager):
+        m = self.manager
+        name = f"test-cand-idempotent-discard-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate for double-trigger discard idempotency test',
+            triggers=['idempotent', 'discard'],
+            generated_from_task='test double trigger discard idempotency',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test double trigger discard idempotency')
+        assert success
+
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 10.0, 'latest': 10.0}
+        for r in (1.0, 2.0, 3.0):
+            m.record_rating(name, r)
+
+        m.evaluate_candidates()
+        assert not (m._candidates_dir / name).exists()
+        state_after_first = m.get_metrics(name)
+        m.evaluate_candidates()  # second trigger — candidate already gone; must not crash or re-revert
+        assert m.get_metrics(name)['ratings'] == state_after_first['ratings']
+
+    # -- New-skill path unchanged ----------------------------------------------------
+
+    def test_new_skill_path_unchanged(self, fresh_manager):
+        """A brand-new name still registers straight to production (no candidate flow)."""
+        m = self.manager
+        name = f"test-cand-newskill-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Brand new skill that must bypass the candidate flow',
+            triggers=['newskill', 'bypass'],
+            generated_from_task='test new skill path unchanged',
+        )
+        success, errors = m.register_skill_from_content(content, task_text='test new skill path unchanged')
+        assert success, f"new-skill registration failed: {errors}"
+
+        reg = m._skills_registry[name]
+        assert 'candidates' not in reg['file_path']
+        assert (m._production_skills_dir / name / 'SKILL.md').exists(), \
+            'new skills must still be promoted straight to production'
+        assert m.get_candidate_names() == []
+
+    # -- scan_skills visibility ------------------------------------------------------
+
+    def test_scan_skills_marks_candidate_lines(self, fresh_manager):
+        """No-query scan_skills listing marks the candidate line with its incumbent version."""
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+        m = self.manager
+        name = f"test-cand-scan-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate visible in scan_skills listing test here',
+            triggers=['scan', 'candidate'],
+            generated_from_task='test scan skills candidate marker',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='test scan skills candidate marker')
+        assert success
+
+        pool = MagicMock()
+        pool.skill_manager = m
+        tool = ScanSkills(agent_pool=pool)
+        import json as _json
+        listing = tool.call(_json.dumps({'query': ''}))
+        line = next(l for l in listing.splitlines() if f'**{name}**' in l)
+        assert '(candidate, pending decision vs v1.0.0)' in line
+
+    # -- Metrics schema -----------------------------------------------------------------
+
+    def test_flush_bumps_schema_to_1_2(self, fresh_manager):
+        """A 1.1 metrics file is tolerated on load and bumped to 1.2 on flush."""
+        import json as _json
+        m = self.manager
+        self.metrics_file.write_text(_json.dumps({
+            'schema_version': '1.1',
+            'skills': {
+                'legacy-skill': {
+                    'total_loads': 3,
+                    'by_version': {
+                        '1.0.0': 3
+                    },
+                    'ratings': {
+                        'count': 1,
+                        'sum': 8.0,
+                        'latest': 8.0,
+                        'last_version': '1.0.0'
+                    }
+                }
+            }
+        }),
+                                     encoding='utf-8')
+        m._load_metrics()
+        assert m.get_metrics('legacy-skill')['total_loads'] == 3
+
+        m.record_rating('legacy-skill', 7.0)
+        data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
+        assert data['schema_version'] == '1.2'

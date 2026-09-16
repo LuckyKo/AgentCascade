@@ -202,11 +202,45 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         if _user_skills.exists():
             _skill_tiers.append(_user_skills)
 
+        # Tier 4 — upgrade candidates: agents/global/candidates/ (highest priority; a
+        # candidate always wins the serving race while it exists until the decision gate
+        # promotes or discards it). Scan order is irrelevant — priority decides.
+        _candidate_skills = self.agents_dir / 'global' / 'candidates'
+        if _candidate_skills.exists():
+            _skill_tiers.append(_candidate_skills)
+
         if _skill_tiers:
             self.skill_manager.discover(_skill_tiers)
 
+        # Run the candidate decision gate once after discovery completes (catches
+        # candidates left pending from a previous session).
+        try:
+            self.skill_manager.evaluate_candidates()
+        except Exception as e:  # noqa: BLE001 — never block pool init on the gate
+            logger.warning(f"Initial candidate evaluation failed (non-critical): {e}")
+
+        # Safety-net timer: re-runs the gate every CANDIDATE_EVAL_INTERVAL_SECONDS to catch
+        # orphaned candidates (manual file deletions) and out-of-band rating changes.
+        from agent_cascade.settings import CANDIDATE_EVAL_INTERVAL_SECONDS
+        self._candidate_eval_stop = threading.Event()
+        self._candidate_eval_thread = threading.Thread(
+            target=self._candidate_eval_loop,
+            args=(CANDIDATE_EVAL_INTERVAL_SECONDS,),
+            name='skill-candidate-eval',
+            daemon=True,
+        )
+        self._candidate_eval_thread.start()
+
         # ── Agent discovery ──────────────────────────────────────────────────
         self._discover_agents(agents_dir)
+
+    def _candidate_eval_loop(self, interval: float):
+        """Periodically re-run the skill candidate decision gate (safety net)."""
+        while not self._candidate_eval_stop.wait(interval):
+            try:
+                self.skill_manager.evaluate_candidates()
+            except Exception as e:  # noqa: BLE001 — a gate hiccup must not kill the timer
+                logger.debug(f"Candidate eval tick failed (non-critical): {e}")
 
     def start(self):
         """Start background services (idle checker, etc.). Call after pool initialization."""
@@ -229,6 +263,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 self._idle.stop()
             except Exception as e:
                 logger.debug(f"Idle manager shutdown failed (non-critical): {e}")
+            try:
+                self._candidate_eval_stop.set()  # stop the candidate decision-gate timer
+            except Exception as e:
+                logger.debug(f"Candidate eval timer shutdown failed (non-critical): {e}")
             try:
                 self._async_registry.shutdown(wait=False)  # Quick stop — don't block waiting for tasks
             except Exception as e:

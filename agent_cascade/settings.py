@@ -525,7 +525,16 @@ AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
 SKILL_RATING_INITIAL: float = float(os.getenv('AGENT_CASCADE_SKILL_RATING_INITIAL',
                                               0.5))  # Initial rating auto-recorded for newly-registered skills
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for auto-promotion
-AUTO_SKILL_AUTO_PROMOTE: bool = True  # Auto-promote validated skills to agents/global/skills/
+# Applies to NEW skills only: a newly-registered skill is moved straight from the pending
+# staging dir into agents/global/skills/. Upgrade proposals (name == existing production skill)
+# do NOT use this flag — they become live-serving candidates in agents/global/candidates/ and
+# are promoted/discarded by the rating-based decision gate (evaluate_candidates).
+AUTO_SKILL_AUTO_PROMOTE: bool = True  # Auto-promote validated NEW skills to agents/global/skills/
+CANDIDATE_MIN_RATINGS: int = int(
+    os.getenv('AGENT_CASCADE_CANDIDATE_MIN_RATINGS',
+              3))  # Ratings a candidate must accumulate before the decision gate compares it with the incumbent
+CANDIDATE_EVAL_INTERVAL_SECONDS: float = float(os.getenv(
+    'AGENT_CASCADE_CANDIDATE_EVAL_INTERVAL', 30.0))  # Safety-net interval for the candidate evaluation timer
 AUTO_SKILL_MAX_SIZE_KB: int = 15  # Maximum SKILL.md file size in KB
 MAX_SKILL_INJECTION_TOKENS: int = 8000  # Max tokens for skill injection per turn
 MAX_SKILLS_PER_CALL: int = 3  # Max skills to propose per reflection call

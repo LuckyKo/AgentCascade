@@ -26,7 +26,8 @@ except ImportError:
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
 from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_MIN_TURNS,
-                                    LOAD_SKILL_AUTO, LOAD_SKILL_NONE, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
+                                    CANDIDATE_EVAL_INTERVAL_SECONDS, CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO,
+                                    LOAD_SKILL_NONE, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
                                     SKILL_RATING_INITIAL, SKILLS_DISABLED)
 
 from .cache_helper import compute_scan_signature
@@ -39,16 +40,23 @@ from .validator import validate_skill
 _PRIORITY_SYSTEM = 1  # System/global skills (agents/global/skills/)
 _PRIORITY_AGENT = 2  # Agent-specific skills (agents/*/skills/)
 _PRIORITY_USER = 3  # User-defined skills (workspace/skills/)
+_PRIORITY_CANDIDATE = 4  # Upgrade candidates (agents/global/candidates/) — strictly highest;
+# a candidate ALWAYS wins the serving race while it exists, until the rating-based
+# decision gate promotes or discards it.
+
+# Candidate storage: stable name-keyed dirs under agents/global/candidates/<name>/SKILL.md.
+_CANDIDATES_DIR = Path('agents/global/candidates')
 
 
 def _priority_for_root(root: Path) -> int:
     """Map a scan root directory to its skill-tier priority.
 
     Derives the tier from path components (most specific check first):
-      - .../agents/global/skills  → _PRIORITY_SYSTEM (shared global store)
-      - .../agents/<name>/skills  → _PRIORITY_AGENT
-      - .../workspace/skills      → _PRIORITY_USER
-      - anything else             → _PRIORITY_SYSTEM (default)
+      - .../agents/global/candidates → _PRIORITY_CANDIDATE (upgrade candidates, highest)
+      - .../agents/global/skills     → _PRIORITY_SYSTEM (shared global store)
+      - .../agents/<name>/skills     → _PRIORITY_AGENT
+      - .../workspace/skills         → _PRIORITY_USER
+      - anything else                → _PRIORITY_SYSTEM (default)
 
     Matching on path parts (rather than an explicit tier list) keeps
     ``discover(skill_paths)``'s signature unchanged and degrades gracefully to
@@ -57,6 +65,10 @@ def _priority_for_root(root: Path) -> int:
     still override it on name collision.
     """
     parts = [p.lower() for p in root.parts]
+    if 'agents' in parts and parts[-1] == 'candidates':
+        # agents/global/candidates holds live-serving upgrade candidates; the
+        # candidate tier must beat every production tier while a candidate exists.
+        return _PRIORITY_CANDIDATE
     if 'agents' in parts and parts[-1] == 'skills':
         # agents/global/skills is the shared global store, not an agent-specific one.
         if 'global' in parts:
@@ -167,8 +179,12 @@ class SkillManager:
             return
         try:
             data = _json.loads(self._metrics_file.read_text(encoding='utf-8'))
+            # Tolerate older schema versions (1.0/1.1): entries without
+            # ratings_by_version fall back to the aggregate ratings at read time;
+            # the next flush bumps the stored file to 1.2.
             self._metrics = data.get('skills', {})
-            logger.debug('[SKILLS] Loaded metrics for %d skills', len(self._metrics))
+            logger.debug('[SKILLS] Loaded metrics for %d skills (schema %s)', len(self._metrics),
+                         data.get('schema_version', 'unknown'))
         except Exception as e:
             logger.warning('[SKILLS] Failed to load metrics file: %s — starting fresh', e)
             self._metrics = {}
@@ -188,7 +204,9 @@ class SkillManager:
             # Snapshot under lock (deep copy: nested per-skill dicts are shared with live state).
             # The tree is small JSON; copying is far cheaper than risking a torn write.
             with self._metrics_lock:
-                data = {'schema_version': '1.1', 'skills': _copy.deepcopy(self._metrics)}
+                # Schema 1.2 adds per-version rating history (ratings_by_version) so the
+                # candidate decision gate can compare versions; older files are bumped here.
+                data = {'schema_version': '1.2', 'skills': _copy.deepcopy(self._metrics)}
 
             # Open temp file for writing with exclusive lock (POSIX only)
             fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
@@ -242,8 +260,12 @@ class SkillManager:
         """Record a quality rating for a skill (buffered, same flush path as load counts).
 
         Per-skill entry gains a compact ``ratings`` sub-dict supporting an average:
-        ``{"count": int, "sum": float, "latest": float, "last_version": str}``.
-        Average = sum / count. Reuses the metrics lock + pending-flush counter.
+        ``{"count": int, "sum": float, "latest": float, "last_version": str}`` — kept
+        unchanged for backward compatibility. Schema 1.2 additionally records the rating
+        under ``ratings_by_version[<current version>]`` so the candidate decision gate can
+        compare per-version histories (the version is resolved from the registry entry, so
+        a serving candidate accrues ratings to its own version key). Reuses the metrics
+        lock + pending-flush counter.
         """
         with self._metrics_lock:
             entry = self._metrics.setdefault(skill_name, {'total_loads': 0, 'by_version': {}})
@@ -254,6 +276,13 @@ class SkillManager:
             version = self._skills_registry.get(skill_name, {}).get('version', '')
             if version:
                 ratings['last_version'] = version
+                # Per-version history (schema 1.2): the serving version is what gets rated.
+                by_version_ratings = entry.setdefault('ratings_by_version', {})
+                vr = by_version_ratings.get(version) or {'count': 0, 'sum': 0.0, 'latest': None}
+                vr['count'] += 1
+                vr['sum'] = round(vr['sum'] + rating, 4)
+                vr['latest'] = rating
+                by_version_ratings[version] = vr
             entry['ratings'] = ratings
 
             self._pending_flush_count += 1
@@ -837,8 +866,15 @@ class SkillManager:
             # Extract generated_from_task for self-match validation (if task_text not provided)
             validation_task = task_text or frontmatter.get('generated_from_task', '')
 
-            # 3. Validate BEFORE modifying registry
+            # 3. Validate BEFORE modifying registry. An existing name in ANY tier is an
+            # UPGRADE proposal (candidate flow) — the validator's uniqueness check must not
+            # reject it, so only truly-new names are passed as "existing".
+            with self._write_lock:
+                existing_entry = self._skills_registry.get(name)
+            upgrade = existing_entry is not None
             existing = set(self._skills_registry.keys())
+            if upgrade:
+                existing.discard(name)
             passed, errors = validate_skill(skill_content, name, existing, validation_task, check_injection=True)
             if not passed:
                 logger.debug("[SKILLS] Validation failed for '%s': %s", name, errors)
@@ -854,14 +890,22 @@ class SkillManager:
                 # Duplicate resolution (check again under lock)
                 existing_entry = self._skills_registry.get(name)
                 if existing_entry is not None:
-                    existing_priority = existing_entry.get('_priority', _PRIORITY_SYSTEM)
-                    if _PRIORITY_SYSTEM <= existing_priority:
-                        # Clean up pending file
-                        if pending_file.exists():
+                    # Name exists in ANY tier (production or candidate) → UPGRADE proposal.
+                    # Write/replace the candidate file and register it at _PRIORITY_CANDIDATE
+                    # (highest), so it immediately takes over serving from whatever version
+                    # was winning before. If a candidate already exists its file is replaced
+                    # (newest proposal wins); old per-version ratings stay in metrics history.
+                    if self._register_candidate_upgrade(name, pending_file, parsed, frontmatter, source):
+                        return True, []
+                    # Candidate write failed (I/O error) — do NOT fall through to the
+                    # new-skill path: that would overwrite the existing production file
+                    # and bypass the candidate flow. Clean up and report the failure.
+                    if pending_file.exists():
+                        try:
                             pending_file.unlink()
-                        if pending_dir.exists() and not any(pending_dir.iterdir()):
-                            pending_dir.rmdir()
-                        return False, [f"Skill '{name}' already exists in registry"]
+                        except OSError:
+                            pass
+                    return False, ['Candidate upgrade registration failed (see log)']
 
                 self._skills_registry[name] = {
                     'name': name,
@@ -874,16 +918,31 @@ class SkillManager:
                     '_parsed_data': parsed,
                 }
 
-                # Promote if validated
+                # Promote if validated (new skills only — upgrades go through the candidate flow).
+                # Use _candidate_dirs()[1] as the production root so both registration paths
+                # share one source of truth; in production this is agents/global/skills/.
                 if auto_promote and AUTO_SKILL_AUTO_PROMOTE:
-                    target_dir = Path(f"agents/global/skills/{name}")
+                    _, production_root = self._candidate_dirs()
+                    target_dir = production_root / name
                     target_dir.mkdir(parents=True, exist_ok=True)
                     target_file = target_dir / 'SKILL.md'
-                    if target_file.exists():
-                        target_file.unlink()
-                    pending_file.rename(target_file)
+                    # Atomic tmp+replace (NOT rename): the pending staging dir is CWD-relative
+                    # while production_root may be overridden to another drive in tests — a
+                    # cross-drive rename raises WinError 17. Copying via a same-dir temp file
+                    # is Windows-safe and matches the candidate-flow write path.
+                    tmp_out = target_file.with_suffix('.tmp')
+                    tmp_out.write_text(pending_file.read_text(encoding='utf-8'), encoding='utf-8')
+                    _os.replace(str(tmp_out), str(target_file))
                     self._skills_registry[name]['file_path'] = str(target_file)
-                    logger.info("[SKILLS] Promoted skill '%s' to agents/global/skills/%s/", name, name)
+                    # The copy (not a move) leaves the pending staging file behind — clean it up.
+                    try:
+                        if pending_file.exists():
+                            pending_file.unlink()
+                        if pending_dir.exists() and not any(pending_dir.iterdir()):
+                            pending_dir.rmdir()
+                    except OSError:
+                        pass  # Best-effort cleanup
+                    logger.info("[SKILLS] Promoted skill '%s' to %s/", name, production_root / name)
                 else:
                     logger.info("[SKILLS] Skill '%s' validated, staying in pending (auto_promote=%s)", name,
                                 auto_promote)
@@ -1005,6 +1064,340 @@ class SkillManager:
 
             logger.info("[SKILLS] Updated skill '%s' from v%s to v%s", name, old_version, new_version)
             return True, []
+
+    # ── Candidate flow (live-serving upgrade candidates) ────────────────────
+
+    def _candidate_dirs(self):
+        """Return (candidates_root, production_skills_root) for the candidate flow.
+
+        Both default to the CWD-relative agents/global/ layout; tests may override
+        via the ``_candidates_dir`` / ``_production_skills_dir`` attributes.
+        """
+        candidates = getattr(self, '_candidates_dir', None) or _CANDIDATES_DIR
+        production = getattr(self, '_production_skills_dir', None) or Path('agents/global/skills')
+        return Path(candidates), Path(production)
+
+    def get_candidate_names(self) -> List[str]:
+        """Return the names of skills whose registry winner is a candidate file.
+
+        Used by scan_skills to mark pending-decision lines in its no-query listing.
+        """
+        with self._write_lock:
+            return [n for n, e in self._skills_registry.items() if e.get('_priority') == _PRIORITY_CANDIDATE]
+
+    def _register_candidate_upgrade(self, name: str, pending_file: Path, parsed: dict, frontmatter: dict,
+                                    source: str) -> bool:
+        """Register an upgrade proposal as a live-serving candidate (caller holds _write_lock).
+
+        Writes/replace agents/global/candidates/<name>/SKILL.md atomically, registers the
+        candidate at _PRIORITY_CANDIDATE (so it immediately takes over serving), backfills
+        the incumbent's legacy metrics with ratings_by_version[<incumbent version>], and
+        triggers evaluate_candidates() immediately.
+
+        Called while the caller holds _write_lock; evaluate_candidates() re-acquires it
+        via RLock reentrancy, so no deadlock risk.
+
+        Returns True on success (caller returns early); False means the candidate file
+        write failed — the caller must NOT fall through to the new-skill path.
+        """
+        candidates_root, production_root = self._candidate_dirs()
+        candidate_dir = candidates_root / name
+        candidate_file = candidate_dir / 'SKILL.md'
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            # Atomic tmp+replace (NOT rename — Windows-safe when replacing an existing target).
+            tmp_out = candidate_file.with_suffix('.tmp')
+            tmp_out.write_text(pending_file.read_text(encoding='utf-8'), encoding='utf-8')
+            _os.replace(str(tmp_out), str(candidate_file))
+        except Exception as e:
+            logger.warning('[SKILLS] Failed to write candidate file for %s: %s', name, e)
+            return False
+
+        # Resolve the incumbent version from its PRODUCTION file (the registry entry is
+        # about to be replaced by the candidate, so the registry alone can't provide it).
+        # Fallback: the pre-existing registry entry's version (covers test setups where the
+        # production root isn't the one holding the file on disk).
+        prod_file = production_root / name / 'SKILL.md'
+        prod_version = self._skills_registry.get(name, {}).get('version') or '1.0.0'
+        if prod_file.exists():
+            try:
+                prod_version = parse_skill_file(prod_file).get('version', prod_version)
+            except (FileNotFoundError, OSError):
+                pass
+
+        # Legacy incumbent backfill (D4): a schema-1.1 metrics entry lacks
+        # ratings_by_version — seed it with the aggregate so the comparison baseline and
+        # discard-revert are exact even for pre-1.2 incumbents. Always ensure the key
+        # exists (even empty) so per-version lookups never fall back to the aggregate.
+        with self._metrics_lock:
+            entry = self._metrics.get(name)
+            if entry is not None and 'ratings_by_version' not in entry:
+                by_version_ratings = {}
+                agg = entry.get('ratings')
+                if agg and agg.get('count'):
+                    by_version_ratings[prod_version] = {
+                        'count': agg['count'],
+                        'sum': round(agg['sum'], 4),
+                        'latest': agg.get('latest')
+                    }
+                entry['ratings_by_version'] = by_version_ratings
+
+        new_version = parsed.get('version', '1.0.0')
+        old_winner = self._skills_registry.get(name, {}).get('version', prod_version)
+        self._skills_registry[name] = {
+            'name': name,
+            'description': frontmatter.get('description', ''),
+            'source': source,
+            'triggers': frontmatter.get('triggers', []),
+            'version': new_version,
+            'file_path': str(candidate_file),
+            '_priority': _PRIORITY_CANDIDATE,
+            '_parsed_data': parsed,
+        }
+        self._rebuild_index()
+
+        # Clean up the (now moved) pending staging dir.
+        try:
+            if pending_file.exists():
+                pending_file.unlink()
+            if pending_file.parent.exists() and not any(pending_file.parent.iterdir()):
+                pending_file.parent.rmdir()
+        except OSError:
+            pass  # Best-effort cleanup
+
+        logger.info("[SKILLS] Registered '%s' as candidate v%s, now serving in place of v%s "
+                    '(decision gate active)', name, new_version, old_winner)
+
+        # Immediate decision trigger (D5b): a pending candidate + new proposal must be
+        # decided without waiting for the timer. The caller's _write_lock is still held;
+        # evaluate_candidates() re-enters it via RLock and is idempotent.
+        try:
+            self.evaluate_candidates()
+        except Exception as e:  # noqa: BLE001 — a gate hiccup must not fail registration
+            logger.warning('[SKILLS] Immediate candidate evaluation failed for %s: %s', name, e)
+
+        return True
+
+    def _version_rating_avg(self, skill_name: str, version: str):
+        """Return (avg or None, count) for one version's rating history.
+
+        Reads ratings_by_version[version]; legacy entries without it fall back to the
+        aggregate ratings block (D3). Returns (None, 0) when unrated.
+        """
+        with self._metrics_lock:
+            entry = self._metrics.get(skill_name) or {}
+            history = (entry.get('ratings_by_version') or {}).get(version)
+            if history is None:
+                history = entry.get('ratings') or {}  # legacy fallback
+            count = history.get('count', 0)
+            if not count:
+                return None, 0
+            return round(history['sum'] / count, 2), count
+
+    def _remove_candidate_dir(self, name: str) -> None:
+        """Delete candidates/<name>/ (best-effort; Windows-safe retries)."""
+        candidates_root, _ = self._candidate_dirs()
+        candidate_dir = candidates_root / name
+        for attempt in range(3):
+            try:
+                if candidate_dir.exists():
+                    for child in list(candidate_dir.iterdir()):
+                        try:
+                            child.unlink()
+                        except OSError:
+                            pass
+                    if not any(candidate_dir.iterdir()):
+                        candidate_dir.rmdir()
+                return
+            except OSError:
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+        logger.warning('[SKILLS] Could not delete candidate dir for %s', name)
+
+    def _promote_candidate(self, name: str, cand_file: Path, parsed: dict, prod_version: str) -> None:
+        """Promote a candidate over the incumbent (caller holds _write_lock).
+
+        Copies the candidate file over the production file (atomic tmp+replace), deletes
+        the candidate dir, updates the registry entry in place back to SYSTEM priority,
+        and transfers metrics: total_loads kept, aggregate ratings swapped from the winner,
+        per-version history intact for both versions.
+        """
+        candidates_root, production_root = self._candidate_dirs()
+        prod_dir = production_root / name
+        prod_file = prod_dir / 'SKILL.md'
+
+        frontmatter = parsed.get('frontmatter', {})
+        new_version = parsed.get('version', '1.0.0')
+        try:
+            prod_dir.mkdir(parents=True, exist_ok=True)
+            tmp_out = prod_file.with_suffix('.tmp')
+            tmp_out.write_text(cand_file.read_text(encoding='utf-8'), encoding='utf-8')
+            _os.replace(str(tmp_out), str(prod_file))
+        except Exception as e:
+            logger.warning('[SKILLS] Candidate promotion file copy failed for %s: %s', name, e)
+            return
+
+        self._remove_candidate_dir(name)
+
+        # Update the registry entry in place (same fields update_skill_in_place updates).
+        reg = self._skills_registry.get(name)
+        if reg is not None:
+            reg.update({
+                'description': frontmatter.get('description', reg.get('description', '')),
+                'version': new_version,
+                'triggers': frontmatter.get('triggers', reg.get('triggers', [])),
+                'file_path': str(prod_file),
+                '_priority': _PRIORITY_SYSTEM,
+                '_parsed_data': parsed,
+            })
+        self._rebuild_index()
+
+        # Metrics transfer on gate: aggregate ratings mirror the promoted version's history;
+        # total_loads and per-version history are untouched.
+        with self._metrics_lock:
+            entry = self._metrics.get(name)
+            if entry is not None:
+                winner = (entry.get('ratings_by_version') or {}).get(new_version)
+                if winner:
+                    entry['ratings'] = {
+                        'count': winner['count'],
+                        'sum': round(winner['sum'], 4),
+                        'latest': winner.get('latest'),
+                        'last_version': new_version
+                    }
+
+        avg_cand, cand_n = self._version_rating_avg(name, new_version)
+        avg_prod, prod_n = self._version_rating_avg(name, prod_version)
+        logger.info("[SKILLS] Candidate '%s' v%s promoted over v%s (avg %s×%d vs %s×%d)", name, new_version,
+                    prod_version, avg_cand, cand_n, avg_prod, prod_n)
+
+    def _discard_candidate(self, name: str, prod_version: str) -> None:
+        """Discard a candidate (caller holds _write_lock).
+
+        Deletes candidates/<name>/ and removes its registry entry; the next discovery
+        restores the incumbent to service. Metrics: aggregate ratings revert to the
+        incumbent's history (legacy fallback: existing aggregate); total_loads untouched;
+        the candidate's per-version entry is kept as evidence.
+        """
+        self._remove_candidate_dir(name)
+
+        with self._write_lock:
+            reg = self._skills_registry.get(name)
+            if reg is not None and reg.get('_priority') == _PRIORITY_CANDIDATE:
+                del self._skills_registry[name]
+                self._rebuild_index()
+
+        with self._metrics_lock:
+            entry = self._metrics.get(name)
+            if entry is not None:
+                by_version = entry.get('ratings_by_version') or {}
+                incumbent_hist = by_version.get(prod_version)
+                if incumbent_hist:
+                    entry['ratings'] = {
+                        'count': incumbent_hist['count'],
+                        'sum': round(incumbent_hist['sum'], 4),
+                        'latest': incumbent_hist.get('latest'),
+                        'last_version': prod_version
+                    }
+                # else: legacy fallback — keep the existing aggregate as-is
+
+        logger.info("[SKILLS] Candidate '%s' discarded (incumbent v%s restored on next discovery)", name, prod_version)
+
+    def evaluate_candidates(self) -> None:
+        """Run the rating-based decision gate for all live-serving candidates.
+
+        Triggers: pool startup after discovery, every new candidate registration, and a
+        30s safety-net timer (catches orphaned candidates after manual file deletions and
+        out-of-band rating changes). Forces a discovery refresh first so the registry is
+        current regardless of cache TTL state. All registry reads/mutations run under
+        _write_lock; every gate action re-verifies disk state so concurrent/duplicate
+        triggers cannot double-promote or double-discard (idempotent).
+
+        Decision per candidate: orphan check (incumbent file missing → discard; a disabled
+        incumbent still keeps its candidate pending), then once the candidate has >=
+        CANDIDATE_MIN_RATINGS ratings, compare averages (2dp): candidate >= incumbent →
+        promote; else discard.
+        """
+        # Force a discovery refresh first (D5) — registry must be current regardless of TTL.
+        try:
+            self.invalidate_cache()
+            self._ensure_discovered()
+        except Exception as e:  # noqa: BLE001 — proceed with the current registry on failure
+            logger.warning('[SKILLS] Candidate eval discovery refresh failed: %s', e)
+
+        candidates_root, production_root = self._candidate_dirs()
+
+        with self._write_lock:
+            candidate_names = [n for n, e in self._skills_registry.items() if e.get('_priority') == _PRIORITY_CANDIDATE]
+
+        for name in candidate_names:
+            try:
+                prod_file = production_root / name / 'SKILL.md'
+                cand_dir = candidates_root / name
+                cand_file = cand_dir / 'SKILL.md'
+
+                with self._write_lock:
+                    reg = self._skills_registry.get(name)
+                    # Idempotency: re-verify the candidate still exists and is registered.
+                    if reg is None or reg.get('_priority') != _PRIORITY_CANDIDATE:
+                        continue
+                    if not cand_file.exists():
+                        # Candidate file vanished out-of-band — drop the stale registry entry.
+                        del self._skills_registry[name]
+                        self._rebuild_index()
+                        logger.info("[SKILLS] Candidate '%s' file missing; removed stale registry entry", name)
+                        continue
+                    candidate_version = reg.get('version', '1.0.0')
+
+                # 0. Orphan check — disk-based: a candidate only exists to upgrade something.
+                # A DISABLED incumbent is still an incumbent (it just isn't served), so only
+                # a missing production file orphans the candidate.
+                # NOTE: this must run BEFORE the rating gate — an orphaned candidate has no
+                # incumbent to compare against and would otherwise stay pending forever,
+                # shadowing nothing but never being cleaned up.
+                if not prod_file.exists():
+                    with self._write_lock:
+                        if self._skills_registry.get(name, {}).get('_priority') != _PRIORITY_CANDIDATE:
+                            continue  # already decided by a concurrent trigger
+                        self._discard_candidate(name, '1.0.0')
+                    logger.info("[SKILLS] Candidate '%s' orphaned (incumbent file missing) — discarded", name)
+                    continue
+
+                # 1. Resolve versions: candidate from registry, incumbent parsed from its file.
+                try:
+                    prod_version = parse_skill_file(prod_file).get('version', '1.0.0')
+                except (FileNotFoundError, OSError):
+                    prod_version = '1.0.0'
+                avg_cand, cand_n = self._version_rating_avg(name, candidate_version)
+                avg_prod, prod_n = self._version_rating_avg(name, prod_version)
+                if avg_prod is None:
+                    avg_prod = 0.0  # unrated incumbent → any rated candidate promotes
+
+                # 2. Gate on minimum ratings.
+                if cand_n < CANDIDATE_MIN_RATINGS:
+                    logger.debug("[SKILLS] Candidate '%s' pending decision (%d/%d ratings)", name, cand_n,
+                                 CANDIDATE_MIN_RATINGS)
+                    continue
+
+                # 3-5. Compare averages (2dp): better or equal → promote; worse → discard.
+                with self._write_lock:
+                    reg = self._skills_registry.get(name)
+                    if reg is None or reg.get('_priority') != _PRIORITY_CANDIDATE:
+                        continue  # concurrent trigger already decided this candidate
+                    if not cand_file.exists():
+                        del self._skills_registry[name]
+                        self._rebuild_index()
+                        continue
+                    parsed = parse_skill_file(cand_file)
+                    if avg_cand is None or avg_cand >= avg_prod:
+                        self._promote_candidate(name, cand_file, parsed, prod_version)
+                    else:
+                        self._discard_candidate(name, prod_version)
+                        logger.info("[SKILLS] Candidate '%s' v%s worse than incumbent v%s "
+                                    '(avg %s×%d vs %s×%d)', name, candidate_version, prod_version, avg_cand, cand_n,
+                                    avg_prod, prod_n)
+            except Exception as e:  # noqa: BLE001 — one bad candidate must not stop the rest
+                logger.warning('[SKILLS] Candidate evaluation failed for %s: %s', name, e)
 
     # ── Auto-skill trigger hook ──────────────────────────────────────────────
 
