@@ -2,16 +2,28 @@
 Propose Skill Tool — Allows agents to propose new reusable skills.
 
 Writes full SKILL.md content (including YAML frontmatter) and registers it
-via SkillManager. Supports optional self-match validation against a test task.
+via SkillManager. The skill name is a required argument; if the frontmatter
+name disagrees, the argument wins and the frontmatter is patched. Rating-only
+mode (name + rating, no content) records a rating without modifying content.
 """
 
 import logging
+import re
 
-from agent_cascade.skills.parser import parse_frontmatter
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
+
+
+def _next_patch_version(version: str) -> str:
+    """Return the next patch version for a semver string (fallback '1.0.1')."""
+    try:
+        parts = version.split('.')
+        padded = parts + ['0'] * (3 - len(parts))
+        return f"{padded[0]}.{padded[1]}.{int(padded[2]) + 1}"
+    except (ValueError, IndexError):
+        return '1.0.1'
 
 
 @register_tool('propose_skill', allow_overwrite=True)
@@ -20,42 +32,32 @@ class ProposeSkill(BaseTool):
 
     name = 'propose_skill'
     description = ('Propose a new reusable skill for future tasks, or rate an existing one. '
-                   'To CREATE/UPDATE: provide the full SKILL.md content including YAML frontmatter '
-                   '(name, description, triggers). To RATE ONLY (no content change): provide just '
-                   '`name` and `rating` — no skill_content needed and no approval is requested, '
-                   'because rating is not a content modification.')
+                   '`name` is always required. To CREATE/UPDATE: provide `name` plus the full '
+                   'SKILL.md content (YAML frontmatter + body); if the name already exists this is '
+                   'an update (patch version auto-incremented). To RATE ONLY (no content change): '
+                   'provide just `name` and `rating` — no skill_content needed and no approval is '
+                   'requested, because rating is not a content modification.')
     parameters = {
         'type': 'object',
         'properties': {
+            'name': {
+                'type':
+                    'string',
+                'description': ('REQUIRED. The skill name (snake_case). For new skills it becomes the '
+                                'registered name; for existing names with content it targets an update; '
+                                'with `rating` and no content it records a rating for that skill.'),
+            },
             'skill_content': {
                 'type':
                     'string',
                 'description':
                     'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             },
-            'test_task': {
-                'type':
-                    'string',
-                'description':
-                    'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.',
-            },
             'justification': {
                 'type':
                     'string',
                 'description':
                     'Why this skill is needed. Required for creating/updating a skill; optional for rating-only.',
-            },
-            'update_existing': {
-                'type': 'boolean',
-                'default': False,
-                'description': 'If True and skill name exists, create a new version instead of rejecting.',
-            },
-            'name': {
-                'type':
-                    'string',
-                'description': ('Optional. The registered skill name to rate (rating-only mode). '
-                                'Must match an existing skill. When provided with `rating` and no '
-                                '`skill_content`, records a rating without modifying content.'),
             },
             'rating': {
                 'type':
@@ -69,6 +71,7 @@ class ProposeSkill(BaseTool):
                                 'record a rating after registration/update.'),
             },
         },
+        'required': ['name'],
     }
 
     def __init__(self, agent_pool=None, **kwargs):
@@ -79,8 +82,9 @@ class ProposeSkill(BaseTool):
         """Execute propose_skill.
 
         Args:
-            params: JSON string with 'skill_content' (required), 'justification' (required),
-                    'test_task' (optional), and 'update_existing' (optional).
+            params: JSON string with 'name' (required), 'skill_content' + 'justification'
+                    (required to create/update), and optional 'rating'. Rating-only mode is
+                    'name' + 'rating' without content.
             kwargs: Additional context (agent_instance_name for logging).
 
         Returns:
@@ -88,10 +92,12 @@ class ProposeSkill(BaseTool):
         """
         parsed = parse_tool_params(params)
 
+        proposed_name = (parsed.get('name') or '').strip()
         skill_content = parsed.get('skill_content', '')
-        test_task = parsed.get('test_task', '')
-        rating_name = (parsed.get('name') or '').strip()
         rating_value = parsed.get('rating')
+
+        if not proposed_name:
+            return "The 'name' argument is required for propose_skill."
 
         # Get SkillManager from pool
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
@@ -103,26 +109,25 @@ class ProposeSkill(BaseTool):
         # and the user-approval flow. Security note: this bypasses approval by design (a rating is
         # not a content change) but means any agent can adjust a skill's recorded rating at any
         # time; ratings are currently advisory-only and feed no gating/scoring decision.
-        if not skill_content and rating_name and rating_value is not None:
-            existing_meta = skill_manager.get_skill_metadata(rating_name)
+        if not skill_content and rating_value is not None:
+            existing_meta = skill_manager.get_skill_metadata(proposed_name)
             if existing_meta is None:
-                return f"Cannot rate unknown skill '{rating_name}'. It is not in the registry."
+                return f"Cannot rate unknown skill '{proposed_name}'. It is not in the registry."
             try:
-                skill_manager.record_rating(rating_name, float(rating_value))
+                skill_manager.record_rating(proposed_name, float(rating_value))
             except (ValueError, TypeError) as e:
                 return f"Invalid rating {rating_value!r}: must be a number between 0 and 10. ({e})"
-            logger.info('[PROPOSE-SKILL] Rating-only: %s -> %s', rating_name, rating_value)
-            return (f"Recorded rating {rating_value}/10 for skill '{rating_name}' "
+            logger.info('[PROPOSE-SKILL] Rating-only: %s -> %s', proposed_name, rating_value)
+            return (f"Recorded rating {rating_value}/10 for skill '{proposed_name}' "
                     f"(v{existing_meta.get('version', '1.0.0')}).")
 
         if not skill_content:
             return ('No skill content provided. To create/update a skill include full SKILL.md with '
-                    'YAML frontmatter (name, description, triggers). To rate an existing skill, '
-                    'provide `name` and `rating` instead.')
+                    'YAML frontmatter (description, triggers) and body. To rate an existing skill, '
+                    'provide `rating` as well.')
 
         try:
             justification = parsed.get('justification')
-            update_existing = bool(parsed.get('update_existing', False))
         except (AttributeError, TypeError):
             return 'Invalid parameters for propose_skill'
 
@@ -139,13 +144,29 @@ class ProposeSkill(BaseTool):
             if not (0.0 <= content_rating <= 10.0):
                 return f"Invalid rating {content_rating}: must be between 0 and 10."
 
-        # Parse frontmatter for name and version
-        fm, _ = parse_frontmatter(skill_content)
-        proposed_name = fm.get('name', '') if fm else ''
-        proposed_version = fm.get('version', '1.0.0') if fm else '1.0.0'
+        # The `name` argument is authoritative. Parse the frontmatter to (a) patch the name
+        # field so the on-disk SKILL.md matches the registered name, and (b) read version/description.
+        # NOTE: lightweight line-based parse — sufficient for scalar keys (name/version/description);
+        # block-style or multi-line YAML values are not interpreted (only first physical line captured).
+        fm = {}
+        fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n?', skill_content, re.DOTALL)
+        if fm_match:
+            fm_text = fm_match.group(1)
+            for line in fm_text.splitlines():
+                m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$', line)
+                if m:
+                    fm[m.group(1)] = m.group(2).strip().strip('"\'')
 
-        if not proposed_name:
-            return 'Skill name is required in YAML frontmatter.'
+            def _patch_field(text, key, value):
+                """Replace or insert a top-level scalar field within frontmatter text only."""
+                if re.search(r'(?m)^%s\s*:' % key, text):
+                    return re.sub(r'(?m)^%s\s*:.*$' % key, f'{key}: {value}', text, count=1)
+                return f'{key}: {value}\n' + text
+
+            fm_text = _patch_field(fm_text, 'name', proposed_name)
+            skill_content = skill_content[:fm_match.start(1)] + fm_text + skill_content[fm_match.end(1):]
+
+        proposed_version = fm.get('version', '1.0.0')
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
         existing_meta = skill_manager.get_skill_metadata(proposed_name)
@@ -156,28 +177,21 @@ class ProposeSkill(BaseTool):
         if is_update:
             existing_version = existing_meta.get('version', '1.0.0')
 
-            # Auto-increment version if not provided or same as existing
-            effective_version = normalize_version(proposed_version)
+            # An update always advances the version: if the content carries no explicit
+            # (valid semver) version, or one equal to the existing, compute the next patch.
+            proposed_norm = normalize_version(proposed_version)
+            effective_version = proposed_norm if (proposed_norm != '1.0.0' and proposed_norm != existing_version) \
+                else _next_patch_version(existing_version)
 
-            if effective_version == existing_version:
-                # Compute next patch version
-                try:
-                    parts = existing_version.split('.')
-                    padded = parts + ['0'] * (3 - len(parts))
-                    effective_version = f"{padded[0]}.{padded[1]}.{int(padded[2]) + 1}"
-                except (ValueError, IndexError):
-                    effective_version = '1.0.1'
+            # Patch the version inside the FRONTMATTER BLOCK ONLY (a body line like "version: X"
+            # must never be touched). Re-locate the block after the name patch above.
+            fm_match2 = re.match(r'^---\s*\n(.*?)\n---\s*\n?', skill_content, re.DOTALL)
+            if fm_match2:
+                fm_text2 = _patch_field(fm_match2.group(1), 'version', effective_version)
+                skill_content = (skill_content[:fm_match2.start(1)] + fm_text2 + skill_content[fm_match2.end(1):])
 
-                # Patch frontmatter with computed version
-                skill_content = skill_content.replace(f'version: {proposed_version}', f'version: {effective_version}',
-                                                      1)
-
-            # Reject only if no explicit update flag AND proposed version equals existing
-            if not update_existing and effective_version == existing_version:
-                return (f"Skill '{proposed_name}' already exists (v{existing_version}).\n\n"
-                        f"To update it, set update_existing=true or provide a higher version in frontmatter.")
-
-            # Approval for UPDATE
+            # Approval for UPDATE — content for an existing name is always an update;
+            # the patch version above makes effective_version differ from existing_version.
             description = (f"📝 **Update Existing Skill**: {proposed_name}\n\n"
                            f"Current version: v{existing_version} → New version: v{effective_version}\n"
                            f"Justification: {justification}")
@@ -197,7 +211,6 @@ class ProposeSkill(BaseTool):
             tool_args={
                 'skill_content': skill_content,
                 'justification': justification,
-                'update_existing': is_update,
             },
             description=description,
         )
@@ -216,7 +229,6 @@ class ProposeSkill(BaseTool):
             success, errors = skill_manager.register_skill_from_content(
                 skill_content=skill_content,
                 source='auto-generated',
-                task_text=test_task,
             )
 
         if success:
@@ -228,7 +240,8 @@ class ProposeSkill(BaseTool):
                     skill_manager.record_rating(proposed_name, content_rating)
                 except ValueError as e:
                     logger.warning('[PROPOSE-SKILL] Failed to record rating for %s: %s', proposed_name, e)
-            return f"Skill '{proposed_name}' registered successfully (v{effective_version})."
+            verb = 'updated' if is_update else 'registered'
+            return f"Skill '{proposed_name}' {verb} successfully (v{effective_version})."
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'
             return f"Skill registration failed: {error_detail}"

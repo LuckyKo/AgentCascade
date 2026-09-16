@@ -70,11 +70,12 @@ Include code examples, commands, or config snippets.
 
 ```
 propose_skill(params={
+    "name": "<snake_case skill name — required, becomes the registered name>",
     "skill_content": "<full SKILL.md with frontmatter and body>",
-    "test_task": "<the task text that triggered this skill creation>"
+    "justification": "<why this skill is needed>"
 })
 ```
-The tool writes the skill to a pending location, validates structure (frontmatter, required fields, uniqueness), runs self-match validation against the test task, and auto-promotes to `.qwen/skills/` if validated.
+The `name` argument is authoritative: if the frontmatter carries a different name it is patched to match. If the name already exists, the call is an in-place update (patch version auto-incremented). The tool writes the skill to a pending location, validates structure (frontmatter, required fields, uniqueness), and auto-promotes to `agents/global/skills/` if validated.
 
 ## Agent-specific guidance
 

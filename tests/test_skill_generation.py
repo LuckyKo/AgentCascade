@@ -10,6 +10,7 @@ Covers:
   - Integration: hot-reload (new skill discoverable after registration)
 """
 
+import re
 import sys
 import time
 import uuid
@@ -1382,6 +1383,9 @@ class TestProposeSkillRatingModes:
         import json as _json
         result = tool.call(_json.dumps({'name': name, 'rating': 7.5}))
         assert 'Recorded rating' in result
+        # Frontmatter name must have been patched to the argument (arg is authoritative).
+        on_disk = Path(m.get_skill_metadata(name)['file_path']).read_text(encoding='utf-8')
+        assert re.search(r'(?m)^name:\s*%s\s*$' % re.escape(name), on_disk)
         entry = m.get_metrics(name)
         # Initial 0.5 + this 7.5 → count 2, latest 7.5
         assert entry['ratings']['latest'] == 7.5
@@ -1408,12 +1412,68 @@ class TestProposeSkillRatingModes:
         result = tool.call(_json.dumps({'name': name, 'rating': 12}))
         assert 'Invalid rating' in result
 
-    def test_rating_without_name_and_content_rejected(self, fresh_manager):
+    def test_missing_name_rejected(self, fresh_manager):
+        """name is a required argument — missing it fails fast with a clear message."""
         tool, _ = self._make_tool(self.manager)
         import json as _json
         result = tool.call(_json.dumps({'rating': 5}))
-        # No content and no name → the "no skill content" guidance path.
-        assert 'No skill content' in result
+        assert "The 'name' argument is required" in result
+
+    def test_name_arg_overrides_frontmatter_name(self, fresh_manager):
+        """The name argument is authoritative: a mismatching frontmatter name gets patched."""
+        m = self.manager
+        arg_name = f"test-name-override-{_uid()}"
+        content = _make_skill_content(name=f'different-frontmatter-name-{_uid()}',
+                                      description='Name override target skill body text',
+                                      triggers=['name', 'override'],
+                                      generated_from_task='name override test')
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': arg_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert m.get_skill_metadata(arg_name) is not None
+        on_disk = Path(m.get_skill_metadata(arg_name)['file_path']).read_text(encoding='utf-8')
+        assert re.search(r'(?m)^name:\s*%s\s*$' % re.escape(arg_name), on_disk)
+
+    def test_version_patch_stays_in_frontmatter(self, fresh_manager):
+        """Version auto-bump must not touch a body line that looks like 'version: X'."""
+        m = self.manager
+        name = f"test-fm-version-scope-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Frontmatter version scoping target skill',
+                                      triggers=['fm', 'scope'],
+                                      body='## Notes\n\nversion: 9.9.9 (body line that must survive)\n\n'
+                                      'Follow these steps carefully to complete the task.\n',
+                                      generated_from_task='frontmatter scope test')
+        assert m.register_skill_from_content(content, task_text='frontmatter scope test')[0]
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        updated = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        assert 'updated' in result.lower()
+        on_disk = Path(m.get_skill_metadata(name)['file_path']).read_text(encoding='utf-8')
+        # Body line must be untouched; frontmatter version must have advanced past 1.0.0.
+        assert 'version: 9.9.9 (body line that must survive)' in on_disk
+        fm_block = re.match(r'^---\s*\n(.*?)\n---', on_disk, re.DOTALL).group(1)
+        assert re.search(r'(?m)^version:\s*1\.0\.1\s*$', fm_block)
+
+    def test_update_respects_explicit_higher_version(self, fresh_manager):
+        """An explicit higher semver in content is kept as-is (no clobbering)."""
+        m = self.manager
+        name = f"test-explicit-version-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Explicit version target skill body text',
+                                      triggers=['explicit', 'version'],
+                                      generated_from_task='explicit version test')
+        assert m.register_skill_from_content(content, task_text='explicit version test')[0]
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        bumped = content.replace('---\n', '---\nversion: 2.1.0\n', 1)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': bumped, 'justification': 'major work'}))
+        assert 'updated' in result.lower()
+        assert m.get_skill_metadata(name)['version'] == '2.1.0'
 
     def test_rating_only_non_numeric_rejected(self, fresh_manager):
         """A non-numeric rating (list) must not crash — return a clear error."""
@@ -1438,9 +1498,28 @@ class TestProposeSkillRatingModes:
                                       generated_from_task='content plus rating test')
         tool, pool = self._make_tool(m)
         import json as _json
-        result = tool.call(_json.dumps({'skill_content': content, 'justification': 'j', 'rating': 9.0}))
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j', 'rating': 9.0}))
         assert 'registered successfully' in result
         entry = m.get_metrics(name)
         # Initial 0.5 + explicit 9.0 → latest 9.0, count 2
         assert entry['ratings']['latest'] == 9.0
         assert entry['ratings']['count'] == 2
+
+    def test_content_for_existing_name_is_implicit_update(self, fresh_manager):
+        """Content for an existing skill name is always an update (no flag needed)."""
+        m = self.manager
+        name = f"test-implicit-update-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Implicit update target skill body here',
+                                      triggers=['implicit', 'update'],
+                                      generated_from_task='implicit update test')
+        assert m.register_skill_from_content(content, task_text='implicit update test')[0]
+        v1 = m.get_skill_metadata(name)['version']
+
+        tool, pool = self._make_tool(m)
+        import json as _json
+        updated = content.replace('Implicit update target skill body here', 'Implicit update target skill body v2 here')
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        assert 'updated' in result.lower()
+        assert m.get_skill_metadata(name)['version'] != v1  # patch version auto-incremented
+        pool.operation_manager.request_user_approval.assert_called_once()

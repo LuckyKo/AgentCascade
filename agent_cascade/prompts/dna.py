@@ -182,8 +182,9 @@ AUTO_SKILL_REFLECTION_PROMPT = (
     'high rating. Do NOT rate skills you did not apply.\n\n'
     '### 2. Propose new / updated skills (only if warranted)\n'
     'If you noticed a reusable pattern, procedure, or gap the loaded skills did not cover, propose '
-    'a new skill (or an update) by calling `propose_skill` with full `skill_content`. New skills '
-    'start at rating 0.5 automatically.\n\n'
+    'a new skill (or an update) by calling `propose_skill` with its `name` and full `skill_content`. '
+    'The `name` argument is authoritative — it becomes the registered name. New skills start at '
+    'rating 0.5 automatically.\n\n'
     '### Skill creation guide\n\n{skill_creator_body}\n')
 
 # --- Knowledge Base Templates ---
@@ -684,21 +685,18 @@ TOOL_METADATA = {
     },
     'propose_skill': {
         'description': ('Propose a new reusable skill for future tasks, or rate an existing one. '
-                        'To CREATE/UPDATE: provide the full SKILL.md content including YAML frontmatter '
-                        '(name, description, triggers). To RATE ONLY (no content change): provide just '
-                        '`name` and `rating` — no skill_content needed and no approval is requested, '
-                        'because rating is not a content modification.'),
+                        '`name` is always required. To CREATE/UPDATE: provide `name` plus the full '
+                        'SKILL.md content (YAML frontmatter + body); if the name already exists this is '
+                        'an update (patch version auto-incremented). To RATE ONLY (no content change): '
+                        'provide just `name` and `rating` — no skill_content needed and no approval is '
+                        'requested, because rating is not a content modification.'),
         'parameters': {
+            'name':
+                'The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
             'skill_content':
                 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
-            'test_task':
-                'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.',
             'justification':
                 'Why this skill is needed. Required for creating/updating a skill; optional for rating-only.',
-            'update_existing':
-                'If True and skill name exists, create a new version instead of rejecting.',
-            'name':
-                'Optional. The registered skill name to rate (rating-only mode). Must match an existing skill. When provided with `rating` and no `skill_content`, records a rating without modifying content.',
             'rating':
                 'Optional quality rating (0-10, 0.5 steps) for an existing skill. Use with `name` for rating-only mode, or alongside `skill_content` to record a rating after registration/update.'
         }
