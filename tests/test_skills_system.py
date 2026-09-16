@@ -401,7 +401,7 @@ class TestSkillManager:
 
     # -- Cache invalidation (regression: stale discovery cache after NONE-mode clear) --
 
-    def test_invalidate_cache_forces_rediscovery_after_none_mode_clear(self):
+    def test_invalidate_cache_forces_rediscovery_after_none_mode_clear(self, tmp_path):
         """Regression test for the stale-discovery-cache bug.
 
         Bug: when ``default_load_skill_mode`` is set to "NONE", the config handler
@@ -411,25 +411,43 @@ class TestSkillManager:
         were valid.
 
         This test reproduces the exact scenario:
-          1. Discover from the real skills dir -> >0 skills registered.
+          1. Discover from a skills dir -> >0 skills registered.
           2. Simulate the OLD (buggy) NONE-mode handler: clear registry WITHOUT
              invalidating the cache -> re-discovery is a cache hit -> stays empty.
           3. Simulate the FIXED flow: clear registry + invalidate_cache() ->
              re-discovery re-reads from disk -> skills are back.
+
+        Uses an isolated tmp_path skills dir (not the real agents/global/skills) so
+        the scan signature and skill count are stable for the duration of the test.
+        The old version read the shared real dir, which under parallel xdist runs can
+        be mutated by concurrent workers / the skill system between step 1 and steps
+        2/3 — changing the signature (breaking the "stale cache hit" assumption in
+        step 2) or the count (breaking the == initial_count check in step 3).
 
         A short TTL (0.0) makes the cache age out immediately, so the test is
         deterministic and fast (no sleeping). The signature check still short-
         circuits in step 2 because the on-disk files did not change, which is
         exactly what the old code relied on to skip re-registration.
         """
+        # Build a hermetic skills dir with two fixed, valid skills so discovery
+        # registers a known count and the signature is stable across all steps.
+        skills_root = tmp_path / 'skills'
+        for name in ('version-control', 'systematic-debugging'):
+            skill_dir = skills_root / name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / 'SKILL.md').write_text(
+                f'---\nname: {name}\ndescription: fixture skill for cache-invalidation test\n'
+                f'version: "1.0.0"\n---\n# Body\n',
+                encoding='utf-8')
+
         sm = self.manager
         # Short TTL so any elapsed time counts as "expired" (no sleeping needed).
         sm._cache_ttl = 0.0
 
-        # Step 1: discover from the real skills dir.
-        sm.discover([_SKILLS_DIR])
+        # Step 1: discover from the isolated skills dir.
+        sm.discover([skills_root])
         initial_count = len(sm._skills_registry)
-        assert initial_count > 0, 'Expected at least one skill in the real skills dir'
+        assert initial_count == 2, f'Expected exactly 2 fixture skills, got {initial_count}'
 
         # Step 2 (OLD/buggy behavior): clear registry + rebuild index WITHOUT
         # invalidating the cache. The cache still holds a valid signature and a
@@ -684,7 +702,9 @@ class TestSkillManager:
         self._setup_manager_with_skills()
         for value, kwargs in [
             (['version-control', 'systematic-debugging'], {}),
-            ('AUTO', {'task_text': 'slow API connection pooling issues'}),
+            ('AUTO', {
+                'task_text': 'slow API connection pooling issues'
+            }),
             ('NONE', {}),
             (None, {}),
         ]:
@@ -951,7 +971,8 @@ class TestSkillsBlockFormatting:
 
         sys_msg = Message(role=SYSTEM, content='You are a helpful agent.')
         injected = _inject_skills_to_system_message(
-            pool=None, instance_or_sysmsg=sys_msg,
+            pool=None,
+            instance_or_sysmsg=sys_msg,
             skills_to_inject=[('docker-best-practices', 'DOCKER INSTRUCTIONS')],
         )
         assert injected is True
@@ -966,7 +987,8 @@ class TestSkillsBlockFormatting:
 
         sys_msg = Message(role=SYSTEM, content='You are a helpful agent.')
         injected = _inject_skills_to_system_message(
-            pool=None, instance_or_sysmsg=sys_msg,
+            pool=None,
+            instance_or_sysmsg=sys_msg,
             skills_to_inject=['PLAIN BODY'],
         )
         assert injected is True
