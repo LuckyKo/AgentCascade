@@ -2895,6 +2895,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         task_text = args.get('task', '')
         skill_manager = getattr(self.pool, 'skill_manager', None)
         context_text = args.get('context', '')  # only used in else branch for resolve_load_skill
+        # Skills resolved/injected this run (name, body) pairs. Initialized here so it is always
+        # bound even on the recall path (which skips resolution and keeps the system prompt
+        # verbatim) — the auto-skill call site below reads it to build the reflection prompt.
+        loaded_skills = []
         # Skill Advisor (Advanced mode): append its improved notes to the context so
         # they reach the child agent via build_task_message. Only on fresh instances —
         # recall preserves conversation[0] verbatim and never rebuilds the task message.
@@ -3197,6 +3201,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 rollback_fn=lambda pop_count: self.pool._rollback_instance(instance_name, pop_count=pop_count),
                 is_stopped=lambda: self._is_terminal_stop(instance_name),
                 engine_run_generator=lambda: self.run(inst),
+                turns_effectuated=getattr(inst, '_current_turn', 0),
+                loaded_skill_names=[name for name, _body in loaded_skills],
             )
 
             # Item 12: Always emit final sub-agent state after loop completes

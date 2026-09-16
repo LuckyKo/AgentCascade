@@ -24,7 +24,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent_cascade.settings import AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_MIN_TOOL_CALLS, AUTO_SKILL_PROMOTION_THRESHOLD
+from agent_cascade.settings import AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_PROMOTION_THRESHOLD
 from agent_cascade.skills.manager import SkillManager
 from agent_cascade.skills.matcher import SkillMatcher
 from agent_cascade.skills.parser import parse_frontmatter
@@ -605,13 +605,25 @@ class TestCallAgentReturn:
         }
         return inst
 
-    def _trigger(self, inst, fresh_manager, total_tool_calls=10, check_result=None, state_idle=True):
+    def _trigger(self,
+                 inst,
+                 fresh_manager,
+                 total_tool_calls=10,
+                 check_result=None,
+                 state_idle=True,
+                 turns_effectuated=None,
+                 loaded_skill_names=None):
         """Run auto-skill reflection with snapshot-based rollback.
 
         Uses the new two-function API: check_and_inject → simulate turns → finalize.
+        ``turns_effectuated`` defaults to a value above the gate threshold so that existing
+        tests (which don't set it) still fire; pass an explicit low value to test the gate.
         """
         if check_result is None:
             check_result = []
+        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
+        if turns_effectuated is None:
+            turns_effectuated = AUTO_SKILL_MIN_TURNS + 1
 
         def rollback_fn(pop_count):
             if pop_count > 0:
@@ -629,6 +641,8 @@ class TestCallAgentReturn:
                 'role': 'user',
                 'content': msg
             }),
+            turns_effectuated=turns_effectuated,
+            loaded_skill_names=loaded_skill_names,
         )
 
         if not injected:
@@ -672,23 +686,37 @@ class TestCallAgentReturn:
         created = self._trigger(inst, fresh_manager)
         assert created == []
 
-    def test_returns_empty_when_tool_count_below_threshold(self, fresh_manager):
-        """Tool count below AUTO_SKILL_MIN_TOOL_CALLS → returns []."""
+    def test_returns_empty_when_turns_below_threshold(self, fresh_manager):
+        """Turns effectuated <= AUTO_SKILL_MIN_TURNS → returns [] (gate is turns-based)."""
+        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
         inst = self._make_inst(fresh_manager)
-        created = self._trigger(inst, fresh_manager, total_tool_calls=AUTO_SKILL_MIN_TOOL_CALLS - 1)
+        # Even with plenty of tool calls, low turns must NOT fire.
+        created = self._trigger(inst, fresh_manager, total_tool_calls=100, turns_effectuated=AUTO_SKILL_MIN_TURNS)
         assert created == []
 
-    def test_returns_empty_when_skill_matches_found(self, fresh_manager):
-        """Matching skills exist → returns []."""
+    def test_fires_on_turns_not_tool_calls(self, fresh_manager):
+        """Gate fires on turns > N even with zero tool calls (tool-call gate removed)."""
+        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
         inst = self._make_inst(fresh_manager)
-        # Register a skill that will match "Write a test"
+        created = self._trigger(inst, fresh_manager, total_tool_calls=0, turns_effectuated=AUTO_SKILL_MIN_TURNS + 1)
+        # Fires: prompt injected then rolled back; no skills created in this mock → [] but the
+        # injection itself happened. Verify via flag set by check_and_inject.
+        assert inst._auto_skill_proposed is True
+
+    def test_gate_independent_of_match_score(self, fresh_manager):
+        """A strong keyword match no longer blocks the gate (match condition removed)."""
+        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
+        inst = self._make_inst(fresh_manager)
+        # Register a skill that will strongly match "Write a test"
         fresh_manager._skills_registry['test-writing'] = {
             'name': 'test-writing',
             'file_path': 'agents/global/skills/test-writing/SKILL.md',
             'triggers': ['test', 'write'],
         }
         fresh_manager._matcher.build_index(list(fresh_manager._skills_registry.values()))
-        created = self._trigger(inst, fresh_manager)
+        created = self._trigger(inst, fresh_manager, turns_effectuated=AUTO_SKILL_MIN_TURNS + 1)
+        # The match must NOT prevent firing — the prompt is injected.
+        assert inst._auto_skill_proposed is True
         assert created == []
 
     def test_returns_empty_when_not_idle(self, fresh_manager):
@@ -1169,3 +1197,250 @@ class TestRollbackTailSync:
 
         # Verify notice is actually in the last message
         assert '[Auto-skill created:' in inst.conversation[-1].content
+
+
+# ===========================================================================
+# 9. Skill Rating — metrics writer, prompt, and propose_skill modes
+# ===========================================================================
+
+
+class TestRatingMetrics:
+    """_record_rating / record_rating persistence and schema 1.1."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        """Point the manager's metrics file at a temp path (avoid clobbering production)."""
+        self.manager = fresh_manager
+        self.metrics_file = tmp_path / 'skills-metrics.json'
+        fresh_manager._metrics_file = self.metrics_file
+        yield
+
+    def test_record_rating_shape_and_average(self, fresh_manager):
+        m = self.manager
+        m.record_rating('my-skill', 8.0)
+        m.record_rating('my-skill', 6.0)
+        entry = m.get_metrics('my-skill')
+        r = entry['ratings']
+        assert r['count'] == 2
+        assert abs(r['sum'] - 14.0) < 1e-9
+        assert r['latest'] == 6.0
+        # Average computable: sum / count
+        assert abs(r['sum'] / r['count'] - 7.0) < 1e-9
+
+    def test_record_rating_flushes_to_disk_schema_1_1(self, fresh_manager):
+        m = self.manager
+        m.record_rating('my-skill', 5.5)
+        m._flush_metrics_to_disk()
+        assert self.metrics_file.exists()
+        import json as _json
+        data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
+        assert data['schema_version'] == '1.1'
+        r = data['skills']['my-skill']['ratings']
+        assert r['count'] == 1
+        assert abs(r['sum'] - 5.5) < 1e-9
+        assert r['latest'] == 5.5
+
+    def test_record_rating_rejects_out_of_range(self, fresh_manager):
+        m = self.manager
+        with pytest.raises(ValueError):
+            m.record_rating('my-skill', 11.0)
+        with pytest.raises(ValueError):
+            m.record_rating('my-skill', -0.5)
+
+    def test_backward_compat_missing_ratings_key(self, fresh_manager):
+        """A 1.0-style entry without 'ratings' is read as no ratings (no crash)."""
+        import json as _json
+        self.metrics_file.write_text(_json.dumps({
+            'schema_version': '1.0',
+            'skills': {
+                'legacy-skill': {
+                    'total_loads': 3,
+                    'by_version': {
+                        '1.0.0': 3
+                    }
+                }
+            }
+        }),
+                                     encoding='utf-8')
+        m = SkillManager()
+        m._metrics_file = self.metrics_file
+        m._load_metrics()
+        entry = m.get_metrics('legacy-skill')
+        assert entry['total_loads'] == 3
+        # No ratings key present → treated as absent, not an error.
+        assert 'ratings' not in entry
+
+
+class TestNewSkillInitialRating:
+    """Newly-registered skills get an initial rating of SKILL_RATING_INITIAL (0.5)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
+        yield
+
+    def test_new_skill_gets_initial_0_5(self, fresh_manager):
+        from agent_cascade.settings import SKILL_RATING_INITIAL
+        m = self.manager
+        name = f"test-initial-rating-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Skill to verify initial rating is recorded at registration',
+            triggers=['initial', 'rating'],
+            generated_from_task='Verify initial rating',
+        )
+        success, _ = m.register_skill_from_content(content, task_text='Verify initial rating')
+        assert success
+        entry = m.get_metrics(name)
+        assert entry['ratings']['latest'] == SKILL_RATING_INITIAL
+        assert entry['ratings']['count'] == 1
+
+
+class TestReflectionPrompt:
+    """The injected auto-skill prompt contains the loaded-skills list + skill-creator body."""
+
+    def _make_inst(self, fresh_manager):
+        inst = MagicMock()
+        inst.conversation = [{'role': 'user', 'content': 'task'}]
+        inst._auto_skill_proposed = False
+        inst._auto_skill_proposed_count = 0
+        fresh_manager._skills_registry['skill-creator'] = {
+            'name': 'skill-creator',
+            'file_path': 'agents/global/skills/skill-creator/SKILL.md',
+            '_parsed_data': {
+                'body': 'UNIQUE_CREATOR_BODY_MARKER'
+            },
+        }
+        return inst
+
+    def test_prompt_contains_loaded_skills_list(self, fresh_manager):
+        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
+        inst = self._make_inst(fresh_manager)
+        appended = []
+        injected = fresh_manager.check_and_inject_auto_skill_prompt(
+            inst=inst,
+            total_tool_calls=0,
+            task_text='t',
+            instance_name='w',
+            append_fn=appended.append,
+            turns_effectuated=AUTO_SKILL_MIN_TURNS + 1,
+            loaded_skill_names=['docker-best-practices', 'code-review'],
+        )
+        assert injected is True
+        prompt = appended[0]
+        assert '- docker-best-practices' in prompt
+        assert '- code-review' in prompt
+        # skill-creator body embedded
+        assert 'UNIQUE_CREATOR_BODY_MARKER' in prompt
+
+    def test_prompt_shows_none_when_no_skills(self, fresh_manager):
+        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
+        inst = self._make_inst(fresh_manager)
+        appended = []
+        injected = fresh_manager.check_and_inject_auto_skill_prompt(
+            inst=inst,
+            total_tool_calls=0,
+            task_text='t',
+            instance_name='w',
+            append_fn=appended.append,
+            turns_effectuated=AUTO_SKILL_MIN_TURNS + 1,
+            loaded_skill_names=None,
+        )
+        assert injected is True
+        assert '(none)' in appended[0]
+
+
+class TestProposeSkillRatingModes:
+    """propose_skill rating-only and content+rating modes."""
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        # Rating-only mode must NOT reach approval; content mode does. Auto-approve by default.
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        fresh_manager._metrics_file = tmp_path / 'skills-metrics.json'
+        yield
+
+    def test_rating_only_records_and_skips_approval(self, fresh_manager):
+        m = self.manager
+        # Register a skill so it exists in the registry.
+        name = f"test-rate-target-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Target skill for rating-only mode test',
+                                      triggers=['rate', 'target'],
+                                      generated_from_task='rate the target skill')
+        assert m.register_skill_from_content(content, task_text='rate the target skill')[0]
+
+        tool, pool = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'rating': 7.5}))
+        assert 'Recorded rating' in result
+        entry = m.get_metrics(name)
+        # Initial 0.5 + this 7.5 → count 2, latest 7.5
+        assert entry['ratings']['latest'] == 7.5
+        assert entry['ratings']['count'] == 2
+        # Rating-only must NOT request approval.
+        pool.operation_manager.request_user_approval.assert_not_called()
+
+    def test_rating_only_unknown_name_rejected(self, fresh_manager):
+        tool, _ = self._make_tool(self.manager)
+        import json as _json
+        result = tool.call(_json.dumps({'name': 'does-not-exist-xyz', 'rating': 5}))
+        assert 'unknown skill' in result.lower() or 'not in the registry' in result
+
+    def test_rating_only_out_of_range_rejected(self, fresh_manager):
+        m = self.manager
+        name = f"test-rate-range-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Range-check target skill for rating',
+                                      triggers=['range', 'check'],
+                                      generated_from_task='range check the rating')
+        assert m.register_skill_from_content(content, task_text='range check the rating')[0]
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'rating': 12}))
+        assert 'Invalid rating' in result
+
+    def test_rating_without_name_and_content_rejected(self, fresh_manager):
+        tool, _ = self._make_tool(self.manager)
+        import json as _json
+        result = tool.call(_json.dumps({'rating': 5}))
+        # No content and no name → the "no skill content" guidance path.
+        assert 'No skill content' in result
+
+    def test_rating_only_non_numeric_rejected(self, fresh_manager):
+        """A non-numeric rating (list) must not crash — return a clear error."""
+        m = self.manager
+        name = f"test-rate-nonnum-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Non-numeric rating guard target skill',
+                                      triggers=['nonnum', 'guard'],
+                                      generated_from_task='non numeric guard')
+        assert m.register_skill_from_content(content, task_text='non numeric guard')[0]
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'rating': ['bad']}))
+        assert 'Invalid rating' in result
+
+    def test_content_plus_rating_records_after_success(self, fresh_manager):
+        m = self.manager
+        name = f"test-content-rating-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Content-plus-rating target skill body',
+                                      triggers=['content', 'rating'],
+                                      generated_from_task='content plus rating test')
+        tool, pool = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'skill_content': content, 'justification': 'j', 'rating': 9.0}))
+        assert 'registered successfully' in result
+        entry = m.get_metrics(name)
+        # Initial 0.5 + explicit 9.0 → latest 9.0, count 2
+        assert entry['ratings']['latest'] == 9.0
+        assert entry['ratings']['count'] == 2

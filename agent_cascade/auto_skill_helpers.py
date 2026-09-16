@@ -21,6 +21,8 @@ def run_auto_skill_proposal(
     rollback_fn: Callable[[int], None],
     is_stopped: Callable[[], bool],
     engine_run_generator: Optional[Callable] = None,
+    turns_effectuated: int = 0,
+    loaded_skill_names: Optional[List[str]] = None,
 ) -> List[str]:
     """Run the auto-skill gating/injection flow and return created_skills list.
 
@@ -59,6 +61,8 @@ def run_auto_skill_proposal(
             task_text=task_text,
             instance_name=instance_name,
             append_fn=append_fn,
+            turns_effectuated=turns_effectuated,
+            loaded_skill_names=loaded_skill_names,
     ):
         return []
 

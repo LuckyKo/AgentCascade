@@ -242,6 +242,7 @@ def run_agent_thread_unified(
                 rollback_fn=lambda pop_count: pool._rollback_instance(instance_name, pop_count=pop_count),
                 is_stopped=is_stopped,
                 engine_run_generator=lambda: ExecutionEngine(pool).run(inst),
+                turns_effectuated=getattr(inst, '_current_turn', 0),
             )
 
         # ── Final state broadcast ────────────────────────────────────────

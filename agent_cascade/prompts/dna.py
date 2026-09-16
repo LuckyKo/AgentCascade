@@ -163,6 +163,29 @@ SKILL_ADVISOR_PROMPT = (
     'OR\n'
     '[VERDICT] DENY — <reason>')
 
+# --- Auto-Skill Reflection (extended-turns phase) ---
+# Injected at the start of the auto-skill extended turns. {loaded_skills} is a rendered list of the
+# skills loaded for this run (one "- name" per line, or "(none)"); {skill_creator_body} is the full
+# skill-creator SKILL.md body (embedded by the caller, as in the previous inline prompt).
+AUTO_SKILL_REFLECTION_PROMPT = (
+    '## Skill Reflection\n\n'
+    'You just finished a task. Before wrapping up, do the following.\n\n'
+    '### 1. Rate the skills you actually used\n'
+    'Skills loaded this run:\n{loaded_skills}\n\n'
+    'For EACH skill above that you ACTUALLY applied during the run, call `propose_skill` with '
+    '`name` and a numeric `rating` (0-10, 0.5 steps) — do NOT include skill_content.\n'
+    'Rate honestly on what happened, not on how good the documentation reads:\n'
+    '- used AND it clearly helped → high rating (7-10)\n'
+    '- loaded but you barely needed / ignored it → no rating / skip\n'
+    '- actively misleading or harmful → very low (0-4)\n'
+    'Discourage generosity bias: a skill that was merely present but not needed should NOT get a '
+    'high rating. Do NOT rate skills you did not apply.\n\n'
+    '### 2. Propose new / updated skills (only if warranted)\n'
+    'If you noticed a reusable pattern, procedure, or gap the loaded skills did not cover, propose '
+    'a new skill (or an update) by calling `propose_skill` with full `skill_content`. New skills '
+    'start at rating 0.5 automatically.\n\n'
+    '### Skill creation guide\n\n{skill_creator_body}\n')
+
 # --- Knowledge Base Templates ---
 KNOWLEDGE_TEMPLATE_ZH = """# 知识库
 

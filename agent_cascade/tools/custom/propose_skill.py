@@ -19,9 +19,11 @@ class ProposeSkill(BaseTool):
     """Tool to propose a new reusable skill for future tasks."""
 
     name = 'propose_skill'
-    description = ('Propose a new reusable skill for future tasks. '
-                   'Provide the full SKILL.md content including YAML frontmatter '
-                   'with name, description, and triggers fields.')
+    description = ('Propose a new reusable skill for future tasks, or rate an existing one. '
+                   'To CREATE/UPDATE: provide the full SKILL.md content including YAML frontmatter '
+                   '(name, description, triggers). To RATE ONLY (no content change): provide just '
+                   '`name` and `rating` — no skill_content needed and no approval is requested, '
+                   'because rating is not a content modification.')
     parameters = {
         'type': 'object',
         'properties': {
@@ -29,7 +31,7 @@ class ProposeSkill(BaseTool):
                 'type':
                     'string',
                 'description':
-                    'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
+                    'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             },
             'test_task': {
                 'type':
@@ -38,16 +40,35 @@ class ProposeSkill(BaseTool):
                     'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.',
             },
             'justification': {
-                'type': 'string',
-                'description': 'Why this skill is needed. Required for both new skills and updates.',
+                'type':
+                    'string',
+                'description':
+                    'Why this skill is needed. Required for creating/updating a skill; optional for rating-only.',
             },
             'update_existing': {
                 'type': 'boolean',
                 'default': False,
                 'description': 'If True and skill name exists, create a new version instead of rejecting.',
             },
+            'name': {
+                'type':
+                    'string',
+                'description': ('Optional. The registered skill name to rate (rating-only mode). '
+                                'Must match an existing skill. When provided with `rating` and no '
+                                '`skill_content`, records a rating without modifying content.'),
+            },
+            'rating': {
+                'type':
+                    'number',
+                'minimum':
+                    0,
+                'maximum':
+                    10,
+                'description': ('Optional quality rating (0-10, 0.5 steps) for an existing skill. '
+                                'Use with `name` for rating-only mode, or alongside `skill_content` to '
+                                'record a rating after registration/update.'),
+            },
         },
-        'required': ['skill_content', 'justification'],
     }
 
     def __init__(self, agent_pool=None, **kwargs):
@@ -69,9 +90,35 @@ class ProposeSkill(BaseTool):
 
         skill_content = parsed.get('skill_content', '')
         test_task = parsed.get('test_task', '')
+        rating_name = (parsed.get('name') or '').strip()
+        rating_value = parsed.get('rating')
+
+        # Get SkillManager from pool
+        skill_manager = getattr(self.agent_pool, 'skill_manager', None)
+        if skill_manager is None:
+            return 'No skills system available. Skills may not have been initialized.'
+
+        # ── Rating-only mode: name + rating, no content → record and confirm ──
+        # This is NOT a content modification, so it skips frontmatter validation, version bump,
+        # and the user-approval flow. Security note: this bypasses approval by design (a rating is
+        # not a content change) but means any agent can adjust a skill's recorded rating at any
+        # time; ratings are currently advisory-only and feed no gating/scoring decision.
+        if not skill_content and rating_name and rating_value is not None:
+            existing_meta = skill_manager.get_skill_metadata(rating_name)
+            if existing_meta is None:
+                return f"Cannot rate unknown skill '{rating_name}'. It is not in the registry."
+            try:
+                skill_manager.record_rating(rating_name, float(rating_value))
+            except (ValueError, TypeError) as e:
+                return f"Invalid rating {rating_value!r}: must be a number between 0 and 10. ({e})"
+            logger.info('[PROPOSE-SKILL] Rating-only: %s -> %s', rating_name, rating_value)
+            return (f"Recorded rating {rating_value}/10 for skill '{rating_name}' "
+                    f"(v{existing_meta.get('version', '1.0.0')}).")
 
         if not skill_content:
-            return 'No skill content provided. Include YAML frontmatter with name, description, and triggers fields.'
+            return ('No skill content provided. To create/update a skill include full SKILL.md with '
+                    'YAML frontmatter (name, description, triggers). To rate an existing skill, '
+                    'provide `name` and `rating` instead.')
 
         try:
             justification = parsed.get('justification')
@@ -80,12 +127,17 @@ class ProposeSkill(BaseTool):
             return 'Invalid parameters for propose_skill'
 
         if not justification:
-            return "'justification' is required for propose_skill"
+            return "'justification' is required to create or update a skill"
 
-        # Get SkillManager from pool
-        skill_manager = getattr(self.agent_pool, 'skill_manager', None)
-        if skill_manager is None:
-            return 'No skills system available. Skills may not have been initialized.'
+        # Validate rating early when supplied alongside content.
+        content_rating = None
+        if rating_value is not None:
+            try:
+                content_rating = float(rating_value)
+            except (TypeError, ValueError):
+                return f"Invalid rating value: {rating_value!r} (expected a number 0-10)"
+            if not (0.0 <= content_rating <= 10.0):
+                return f"Invalid rating {content_rating}: must be between 0 and 10."
 
         # Parse frontmatter for name and version
         fm, _ = parse_frontmatter(skill_content)
@@ -168,6 +220,14 @@ class ProposeSkill(BaseTool):
             )
 
         if success:
+            # If a rating was supplied alongside content, record it after successful
+            # registration/update. New skills already got an initial 0.5 in the manager; this
+            # records the caller's explicit assessment on top of that.
+            if content_rating is not None:
+                try:
+                    skill_manager.record_rating(proposed_name, content_rating)
+                except ValueError as e:
+                    logger.warning('[PROPOSE-SKILL] Failed to record rating for %s: %s', proposed_name, e)
             return f"Skill '{proposed_name}' registered successfully (v{effective_version})."
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'

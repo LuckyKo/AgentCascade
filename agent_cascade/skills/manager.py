@@ -23,9 +23,10 @@ except ImportError:
     _fcntl = None  # No-op on Windows; we accept the limitation
 
 from agent_cascade.log import logger
-from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_MIN_TOOL_CALLS,
+from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
+from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_MIN_TURNS,
                                     LOAD_SKILL_AUTO, LOAD_SKILL_NONE, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
-                                    SKILLS_DISABLED)
+                                    SKILL_RATING_INITIAL, SKILLS_DISABLED)
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher
@@ -92,6 +93,22 @@ def _skill_matches_platform(frontmatter: dict) -> bool:
     return False
 
 
+def _build_auto_skill_reflection_prompt(loaded_skill_names: Optional[List[str]], skill_creator_body: str) -> str:
+    """Render the auto-skill reflection prompt (dna.py template) for injection.
+
+    ``loaded_skill_names`` is rendered as one "- name" line per entry, or "(none)" when empty/None.
+    The full skill-creator body is embedded verbatim (same as the previous inline prompt).
+    """
+    if loaded_skill_names:
+        loaded_list = '\n'.join(f'- {name}' for name in loaded_skill_names)
+    else:
+        loaded_list = '(none)'
+    return AUTO_SKILL_REFLECTION_PROMPT.format(
+        loaded_skills=loaded_list,
+        skill_creator_body=skill_creator_body,
+    )
+
+
 class SkillManager:
     """Manages skill discovery, registration and resolution.
 
@@ -145,7 +162,7 @@ class SkillManager:
             self._metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
             tmp_path = self._metrics_file.with_suffix('.tmp')
-            data = {'schema_version': '1.0', 'skills': self._metrics}
+            data = {'schema_version': '1.1', 'skills': self._metrics}
 
             # Open temp file for writing with exclusive lock (POSIX only)
             fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
@@ -194,6 +211,48 @@ class SkillManager:
 
         if flush_needed:
             self._flush_metrics_to_disk()
+
+    def _record_rating(self, skill_name: str, rating: float) -> None:
+        """Record a quality rating for a skill (buffered, same flush path as load counts).
+
+        Per-skill entry gains a compact ``ratings`` sub-dict supporting an average:
+        ``{"count": int, "sum": float, "latest": float, "last_version": str}``.
+        Average = sum / count. Reuses the metrics lock + pending-flush counter.
+        """
+        with self._metrics_lock:
+            entry = self._metrics.setdefault(skill_name, {'total_loads': 0, 'by_version': {}})
+            ratings = entry.get('ratings') or {'count': 0, 'sum': 0.0, 'latest': None, 'last_version': ''}
+            ratings['count'] += 1
+            ratings['sum'] = round(ratings['sum'] + rating, 4)
+            ratings['latest'] = rating
+            version = self._skills_registry.get(skill_name, {}).get('version', '')
+            if version:
+                ratings['last_version'] = version
+            entry['ratings'] = ratings
+
+            self._pending_flush_count += 1
+            now = time.monotonic()
+            should_flush = (self._pending_flush_count >= self._FLUSH_THRESHOLD or
+                            (now - self._last_flush_time) >= self._FLUSH_INTERVAL)
+
+            if should_flush:
+                self._pending_flush_count = 0
+                self._last_flush_time = now
+                flush_needed = True
+            else:
+                flush_needed = False
+
+        if flush_needed:
+            self._flush_metrics_to_disk()
+
+    def record_rating(self, skill_name: str, rating: float) -> None:
+        """Public wrapper: validate a 0-10 rating and persist it via ``_record_rating``.
+
+        Raises ValueError for out-of-range ratings so callers can surface the error.
+        """
+        if not (0.0 <= float(rating) <= 10.0):
+            raise ValueError(f"rating must be in [0, 10], got {rating}")
+        self._record_rating(skill_name, float(rating))
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
@@ -785,6 +844,13 @@ class SkillManager:
                 # Rebuild index
                 self._rebuild_index()
 
+            # Record the initial rating (single source of truth in the manager). New skills start
+            # at SKILL_RATING_INITIAL so they have a baseline before any agent rates them.
+            try:
+                self._record_rating(name, SKILL_RATING_INITIAL)
+            except Exception as e:
+                logger.warning('[SKILLS] Failed to record initial rating for %s: %s', name, e)
+
             return True, []
 
         except Exception as e:
@@ -902,18 +968,25 @@ class SkillManager:
         task_text: str,
         instance_name: str,
         append_fn,
+        turns_effectuated: int = 0,
+        loaded_skill_names: Optional[List[str]] = None,
     ) -> bool:
-        """Check trigger conditions and inject the auto-skill prompt.
+        """Check trigger conditions and inject the auto-skill reflection prompt.
 
-        Returns True if the prompt was injected (caller should run extra turns).
-        Returns False if no reflection is needed.
+        The gate fires when ``turns_effectuated > AUTO_SKILL_MIN_TURNS`` — independent of loaded
+        skills and of any top-skill match score. (The legacy tool-call-count and match-score gates
+        were replaced by this turns-based gate.)
+
+        Returns True if the prompt was injected (caller should run extra turns), else False.
 
         Args:
             inst: The agent instance.
-            total_tool_calls: Cumulative tool call count.
-            task_text: Task description text for skill matching.
+            total_tool_calls: Cumulative tool call count (logging only — no longer a gate).
+            task_text: Task description text (retained for context/logging).
             instance_name: Human-readable instance label for logging.
             append_fn: Callable(msg) -> None to append a user message.
+            turns_effectuated: Number of turns effectuated on this run (inst._current_turn).
+            loaded_skill_names: Names of skills loaded for this run (for the prompt's list).
 
         Returns:
             True if prompt was injected, False otherwise.
@@ -925,23 +998,21 @@ class SkillManager:
             if proposed_count >= AUTO_SKILL_MAX_PER_SESSION:
                 return False
 
-        matches = self.match_skills(task_text) if task_text else []
-        logger.debug('[AUTO-SKILL] Check: tool_count=%d, matches=%d', total_tool_calls, len(matches))
+        logger.debug('[AUTO-SKILL] Check: turns=%d (min=%d), tool_count=%d', turns_effectuated, AUTO_SKILL_MIN_TURNS,
+                     total_tool_calls)
 
-        if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS:
-            return False
-        if matches and matches[0][1] > SKILL_MATCH_THRESHOLD:
+        # Gate: strictly greater than the configured turn threshold. Independent of loaded skills
+        # and match score (the old tool-call + top-match conditions are intentionally removed).
+        if turns_effectuated <= AUTO_SKILL_MIN_TURNS:
             return False
 
         creator = self.load_full_instructions('skill-creator')
         if not creator:
             return False
 
-        logger.info('[AUTO-SKILL] Trigger fired for %s (%d tools)', instance_name, total_tool_calls)
-        prompt = (f"## Skill Reflection\n\n{creator}\n\n"
-                  f"You completed a task using {total_tool_calls} tool calls. "
-                  f"If the approach could help future similar tasks, "
-                  f"propose a reusable skill by calling propose_skill.")
+        logger.info('[AUTO-SKILL] Trigger fired for %s (turns=%d, tools=%d)', instance_name, turns_effectuated,
+                    total_tool_calls)
+        prompt = _build_auto_skill_reflection_prompt(loaded_skill_names, creator)
 
         append_fn(prompt)
         with inst._compression_lock:

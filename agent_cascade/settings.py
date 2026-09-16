@@ -143,9 +143,9 @@ COMPRESSION_RECOUNT_THRESHOLD: float = float(
     os.getenv('AGENT_CASCADE_COMPRESSION_RECOUNT_THRESHOLD',
               0.85))  # Force full recount at X fraction of allocated max when cache invalidated
 COMPRESSION_DEFAULT_FRACTION: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_DEFAULT_FRACTION',
-                                                       0.7))  # Default fraction of history to discard (70%)
+                                                      0.7))  # Default fraction of history to discard (70%)
 COMPRESSION_MIN_USAGE_PCT: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_MIN_USAGE_PCT',
-                                                     50.0))  # Refuse agent-triggered compression below X% context usage
+                                                   50.0))  # Refuse agent-triggered compression below X% context usage
 COMPRESSION_MIN_FRACTION: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_MIN_FRACTION',
                                                   0.1))  # Minimum allowed compression fraction
 COMPRESSION_MAX_FRACTION: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_MAX_FRACTION',
@@ -519,7 +519,11 @@ SKILLS_DISABLED: List[str] = [s.strip().lower() for s in _SKILLS_DISABLED_RAW.sp
 AUTO_SKILL_ENABLED: bool = False  # Toggle auto-skill generation on/off
 AUTO_SKILL_EXTRA_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_EXTRA_TURNS',
                                             25))  # Extra turns for auto-skill execution before rollback
-AUTO_SKILL_MIN_TOOL_CALLS: int = 5  # Minimum tool calls before triggering reflection
+AUTO_SKILL_MIN_TOOL_CALLS: int = 5  # (legacy) minimum tool calls; superseded by AUTO_SKILL_MIN_TURNS gate
+AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
+                                          50))  # Fire reflection when turns effectuated > N (strictly greater)
+SKILL_RATING_INITIAL: float = float(os.getenv('AGENT_CASCADE_SKILL_RATING_INITIAL',
+                                              0.5))  # Initial rating auto-recorded for newly-registered skills
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for auto-promotion
 AUTO_SKILL_AUTO_PROMOTE: bool = True  # Auto-promote validated skills to agents/global/skills/
 AUTO_SKILL_MAX_SIZE_KB: int = 15  # Maximum SKILL.md file size in KB
