@@ -683,14 +683,24 @@ TOOL_METADATA = {
         }
     },
     'propose_skill': {
-        'description': ('Propose a new reusable skill for future tasks. '
-                        'Provide the full SKILL.md content including YAML frontmatter '
-                        'with name, description, and triggers fields.'),
+        'description': ('Propose a new reusable skill for future tasks, or rate an existing one. '
+                        'To CREATE/UPDATE: provide the full SKILL.md content including YAML frontmatter '
+                        '(name, description, triggers). To RATE ONLY (no content change): provide just '
+                        '`name` and `rating` — no skill_content needed and no approval is requested, '
+                        'because rating is not a content modification.'),
         'parameters': {
             'skill_content':
-                'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
+                'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             'test_task':
-                'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.'
+                'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.',
+            'justification':
+                'Why this skill is needed. Required for creating/updating a skill; optional for rating-only.',
+            'update_existing':
+                'If True and skill name exists, create a new version instead of rejecting.',
+            'name':
+                'Optional. The registered skill name to rate (rating-only mode). Must match an existing skill. When provided with `rating` and no `skill_content`, records a rating without modifying content.',
+            'rating':
+                'Optional quality rating (0-10, 0.5 steps) for an existing skill. Use with `name` for rating-only mode, or alongside `skill_content` to record a rating after registration/update.'
         }
     },
     'load_skill': {
