@@ -60,7 +60,8 @@ def build_skill_advisor_prompt(
     """Build the advisor prompt with available-skills metadata.
 
     Excludes ``self-augmentation`` from the skills list (it is always present).
-    Each skill is formatted as ``- {name}: {description}``.
+    Skills are ordered by average quality rating (desc; unrated last, name asc tiebreak) and
+    formatted as ``- {name} (rating 7.5/10): {description}`` or ``- {name} (unrated): {description}``.
     """
     from agent_cascade.log import logger
     from agent_cascade.prompts.dna import SKILL_ADVISOR_PROMPT
@@ -71,14 +72,25 @@ def build_skill_advisor_prompt(
     except Exception as e:  # noqa: BLE001 — never block the advisor over a discovery hiccup
         logger.warning('[SKILL-ADVISOR] _ensure_discovered failed (using cached list): %s', e)
 
-    metadata_lines = []
+    # Build (sort_key, line) pairs; sort by average rating desc, unrated last, name asc tiebreak.
+    entries = []
     for meta in skill_manager.get_all_metadata():
         name = (meta.get('name') or '').strip()
         if not name or name.lower() == _SELF_AUGMENTATION:
             continue
         description = (meta.get('description') or '').strip().replace('\n', ' ')
-        metadata_lines.append(f"- {name}: {description}" if description else f"- {name}")
+        rating = skill_manager.get_rating_average(name)
+        if rating is None:
+            rating_tag = '(unrated)'
+            sort_key = (1, 0.0, name.lower())
+        else:
+            rating_tag = f'(rating {rating}/10)'
+            sort_key = (0, -rating, name.lower())
+        line = f"- {name} {rating_tag}: {description}" if description else f"- {name} {rating_tag}"
+        entries.append((sort_key, line))
 
+    entries.sort(key=lambda e: e[0])
+    metadata_lines = [line for _, line in entries]
     skills_metadata = '\n'.join(metadata_lines) if metadata_lines else '(none)'
 
     # Escape braces in user-provided content to prevent .format() injection.

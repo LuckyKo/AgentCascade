@@ -40,6 +40,10 @@ class MockSkillManager:
     def get_all_metadata(self):
         return [{'name': n, 'description': f"desc for {n}"} for n in self._names]
 
+    def get_rating_average(self, name):
+        """No ratings by default — every skill is unrated."""
+        return None
+
     def load_full_instructions(self, name):
         # Case-insensitive match, mirrors the real manager.
         for n in self._names:
@@ -179,6 +183,43 @@ class TestBuildSkillAdvisorPrompt:
         sm = MockSkillManager(['a'])
         prompt = build_skill_advisor_prompt(sm, 'task', 'Context with {placeholder} and }braces{', 'coder', 'Maine')
         assert '{placeholder}' in prompt
+
+    def test_skills_list_orders_by_rating_desc_unrated_last(self):
+        """Advisor skill list is sorted by average rating desc; unrated last, name asc tiebreak."""
+
+        class RatingManager(MockSkillManager):
+            _ratings = {'zeta': 9.0, 'alpha': 6.5, 'beta': 6.5}
+
+            def get_rating_average(self, name):
+                return self._ratings.get(name)
+
+        sm = RatingManager(['delta', 'zeta', 'alpha', 'beta'])
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        names = [l[2:].split(' ')[0] for l in skill_lines]
+        # zeta (9.0) first; alpha/beta tie at 6.5 → name asc; delta unrated last.
+        assert names == ['zeta', 'alpha', 'beta', 'delta']
+
+    def test_skills_list_line_format(self):
+        """Rated lines carry '(rating X/10)'; unrated lines carry '(unrated)'."""
+
+        class RatingManager(MockSkillManager):
+            _ratings = {'zeta': 9.0}
+
+            def get_rating_average(self, name):
+                return self._ratings.get(name)
+
+        sm = RatingManager(['zeta', 'delta'])
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        assert '- zeta (rating 9.0/10): desc for zeta' in prompt
+        assert '- delta (unrated): desc for delta' in prompt
+
+    def test_prompt_notes_rating_is_advisory(self):
+        """The template notes the list is ordered by rating and ratings are advisory."""
+        sm = MockSkillManager(['a'])
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        assert 'ordered by quality rating' in prompt
+        assert 'advisory' in prompt
 
 
 # ===========================================================================

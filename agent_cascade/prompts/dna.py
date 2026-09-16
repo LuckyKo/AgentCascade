@@ -155,7 +155,9 @@ SKILL_ADVISOR_PROMPT = (
     'Caller: {caller_name}\n'
     'Task: {task_text}\n'
     'Context: {context_text}\n\n'
-    '## AVAILABLE SKILLS:\n{skills_metadata}\n\n'
+    '## AVAILABLE SKILLS (ordered by quality rating, highest first; unrated skills last):\n'
+    'Ratings are advisory signals only — relevance to the task still decides which skills to pick.\n'
+    '{skills_metadata}\n\n'
     '## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n'
     '[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n'
     '[NOTES] <additional task notes or "none">\n'
@@ -165,8 +167,9 @@ SKILL_ADVISOR_PROMPT = (
 
 # --- Auto-Skill Reflection (extended-turns phase) ---
 # Injected at the start of the auto-skill extended turns. {loaded_skills} is a rendered list of the
-# skills loaded for this run (one "- name" per line, or "(none)"); {skill_creator_body} is the full
-# skill-creator SKILL.md body (embedded by the caller, as in the previous inline prompt).
+# skills loaded for this run — one line per skill carrying its current average rating
+# ("- name (avg 7.5/10, rated 4x)" when rated, or "- name (unrated)"), or "(none)";
+# {skill_creator_body} is the full skill-creator SKILL.md body (embedded by the caller).
 AUTO_SKILL_REFLECTION_PROMPT = (
     '## Skill Reflection\n\n'
     'You just finished a task. Before wrapping up, do the following.\n\n'
@@ -677,7 +680,7 @@ TOOL_METADATA = {
     'scan_skills': {
         'description': ('Scan registered skills and return matching skills with relevance scores. '
                         'Use this to discover which skills are available before calling call_agent with load_skill. '
-                        'Returns skill names, descriptions, and match scores for the given query.'),
+                        'Returns skill names, descriptions, match scores, and quality ratings for the given query.'),
         'parameters': {
             'query':
                 'Search query or task description to match against available skills. Leave empty to list all registered skills.'
@@ -692,7 +695,7 @@ TOOL_METADATA = {
                         'requested, because rating is not a content modification.'),
         'parameters': {
             'name':
-                'REQUIRED. The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
+                'The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
             'skill_content':
                 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             'justification':

@@ -93,14 +93,27 @@ def _skill_matches_platform(frontmatter: dict) -> bool:
     return False
 
 
-def _build_auto_skill_reflection_prompt(loaded_skill_names: Optional[List[str]], skill_creator_body: str) -> str:
+def _build_auto_skill_reflection_prompt(loaded_skill_names: Optional[List[str]],
+                                        skill_creator_body: str,
+                                        skill_manager=None) -> str:
     """Render the auto-skill reflection prompt (dna.py template) for injection.
 
-    ``loaded_skill_names`` is rendered as one "- name" line per entry, or "(none)" when empty/None.
+    ``loaded_skill_names`` is rendered as one line per entry, or "(none)" when empty/None.
+    Each line carries the skill's current average rating (looked up via ``skill_manager``,
+    when provided): "- name (avg 7.5/10, rated 4x)" when rated, or "- name (unrated)"
+    otherwise. Without a manager every skill renders as "(unrated)".
     The full skill-creator body is embedded verbatim (same as the previous inline prompt).
     """
     if loaded_skill_names:
-        loaded_list = '\n'.join(f'- {name}' for name in loaded_skill_names)
+        lines = []
+        for name in loaded_skill_names:
+            rating = skill_manager.get_rating_average(name) if skill_manager is not None else None
+            if rating is not None:
+                count = (skill_manager.get_metrics(name).get('ratings') or {}).get('count', 0)
+                lines.append(f'- {name} (avg {rating}/10, rated {count}x)')
+            else:
+                lines.append(f'- {name} (unrated)')
+        loaded_list = '\n'.join(lines)
     else:
         loaded_list = '(none)'
     return AUTO_SKILL_REFLECTION_PROMPT.format(
@@ -522,6 +535,19 @@ class SkillManager:
             if skill_name:
                 return self._metrics.get(skill_name, {'total_loads': 0, 'by_version': {}})
             return dict(self._metrics)
+
+    def get_rating_average(self, skill_name: str) -> Optional[float]:
+        """Return the average quality rating for a skill (0-10), or None if unrated.
+
+        Average = sum / count from the per-skill ``ratings`` sub-dict. Returns None
+        when the skill has no ratings entry or its count is zero ("unrated").
+        """
+        with self._metrics_lock:
+            ratings = (self._metrics.get(skill_name) or {}).get('ratings') or {}
+            count = ratings.get('count', 0)
+            if not count:
+                return None
+            return round(ratings['sum'] / count, 2)
 
     # ── Tier 2 Loading (Full Instructions) ───────────────────────────────────
 
@@ -1012,7 +1038,7 @@ class SkillManager:
 
         logger.info('[AUTO-SKILL] Trigger fired for %s (turns=%d, tools=%d)', instance_name, turns_effectuated,
                     total_tool_calls)
-        prompt = _build_auto_skill_reflection_prompt(loaded_skill_names, creator)
+        prompt = _build_auto_skill_reflection_prompt(loaded_skill_names, creator, self)
 
         append_fn(prompt)
         with inst._compression_lock:

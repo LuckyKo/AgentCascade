@@ -1003,3 +1003,75 @@ class TestSkillsBlockFormatting:
 def _run_async(coro):
     """Run an async coroutine synchronously."""
     return asyncio.get_event_loop().run_until_complete(coro)
+
+
+# ===========================================================================
+# 6. scan_skills display — rating column + no-query ordering
+# ===========================================================================
+
+
+class TestScanSkillsRatingDisplay:
+    """scan_skills shows quality ratings; no-query mode sorts by rating desc (unrated last)."""
+
+    @pytest.fixture(autouse=True)
+    def _tool(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+
+        manager = SkillManager()
+        manager._metrics_file = tmp_path / 'skills-metrics.json'  # isolate metrics writes
+        # Seed a deterministic registry (bypasses disk discovery).
+        for name in ('alpha', 'bravo', 'charlie'):
+            manager._skills_registry[name] = {
+                'name': name,
+                'description': f'desc {name}',
+                'source': 'system',
+                'version': '1.0.2',
+            }
+        pool = MagicMock()
+        pool.skill_manager = manager
+        self.manager = manager
+        self.tool = ScanSkills(agent_pool=pool)
+
+    def test_no_query_orders_by_rating_desc_unrated_last_name_tiebreak(self):
+        # alpha 8.0, bravo 6.5 (tie with charlie), charlie 6.5 → order: alpha, bravo, charlie, delta(unrated)
+        self.manager.record_rating('alpha', 8.0)
+        self.manager.record_rating('bravo', 6.5)
+        self.manager.record_rating('charlie', 6.5)
+        # delta stays unrated
+        self.manager._skills_registry['delta'] = {
+            'name': 'delta',
+            'description': 'desc delta',
+            'source': 'system',
+            'version': '1.0.2',
+        }
+
+        out = self.tool.call({'query': ''})
+        lines = [l for l in out.splitlines() if l.startswith('- **')]
+        names = [l.split('**')[1] for l in lines]
+        assert names == ['alpha', 'bravo', 'charlie', 'delta']
+
+        # Rating column present: rated shows avg×count, unrated shows n/a.
+        alpha_line = next(l for l in lines if '**alpha**' in l)
+        assert '(rating: 8.0×1)' in alpha_line
+        delta_line = next(l for l in lines if '**delta**' in l)
+        assert '(rating: n/a)' in delta_line
+
+    def test_query_mode_appends_rating_without_reordering(self):
+        """Query mode keeps matcher ordering; rating is appended to each line."""
+        self.manager.record_rating('alpha', 9.0)
+        # Force a deterministic matcher order (charlie first, alpha second).
+        self.manager.match_skills = lambda q: [('charlie', 0.9), ('alpha', 0.5)]
+
+        out = self.tool.call({'query': 'some query'})
+        lines = [l for l in out.splitlines() if l.startswith('- **')]
+        names = [l.split('**')[1] for l in lines]
+        # Order follows the matcher, NOT the rating (charlie unrated comes first).
+        assert names == ['charlie', 'alpha']
+
+        alpha_line = next(l for l in lines if '**alpha**' in l)
+        assert 'score: 0.50' in alpha_line
+        assert 'rating: 9.0×1' in alpha_line
+        charlie_line = next(l for l in lines if '**charlie**' in l)
+        assert 'rating: n/a' in charlie_line

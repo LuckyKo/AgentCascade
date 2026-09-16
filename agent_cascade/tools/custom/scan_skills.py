@@ -20,7 +20,7 @@ class ScanSkills(BaseTool):
     name = 'scan_skills'
     description = ('Scan registered skills and return matching skills with relevance scores. '
                    'Use this to discover which skills are available before calling call_agent with load_skill. '
-                   'Returns skill names, descriptions, and match scores for the given query.')
+                   'Returns skill names, descriptions, match scores, and quality ratings for the given query.')
     parameters = {
         'type': 'object',
         'properties': {
@@ -75,14 +75,26 @@ class ScanSkills(BaseTool):
             if not all_skills:
                 return 'No skills are currently registered in the system.'
 
-        # If no query, just list everything
+        # If no query, list everything sorted by average rating (desc); unrated last, name asc tiebreak.
         if not query.strip():
+
+            def _sort_key(skill):
+                avg = skill_manager.get_rating_average(skill['name'])
+                rated = avg is not None
+                return (not rated, -(avg or 0.0), skill['name'].lower())
+
             lines = ['## Available Skills']
-            for skill in all_skills:
+            for skill in sorted(all_skills, key=_sort_key):
                 source = skill.get('source', 'system')
                 version = skill.get('version', '1.0.0')
-                lines.append(
-                    f"- **{skill['name']}** [{source}] v{version}: {skill.get('description', 'No description')}")
+                rating = skill_manager.get_rating_average(skill['name'])
+                if rating is None:
+                    rating_str = 'n/a'
+                else:
+                    count = (skill_manager.get_metrics(skill['name']).get('ratings') or {}).get('count', 0)
+                    rating_str = f'{rating}×{count}'
+                lines.append(f"- **{skill['name']}** [{source}] v{version} (rating: {rating_str}): "
+                             f"{skill.get('description', 'No description')}")
             return '\n'.join(lines)
 
         # Use public API to score skills against the query
@@ -102,6 +114,13 @@ class ScanSkills(BaseTool):
             version = meta.get('version', '1.0.0') if meta else '1.0.0'
             metrics = skill_manager.get_metrics(name)
             loads = metrics.get('total_loads', 0)
-            lines.append(f"- **{name}** [{source}] v{version} (score: {score:.2f}, loads: {loads}): {desc}")
+            rating = skill_manager.get_rating_average(name)
+            if rating is None:
+                rating_str = 'n/a'
+            else:
+                count = (metrics.get('ratings') or {}).get('count', 0)
+                rating_str = f'{rating}×{count}'
+            lines.append(f"- **{name}** [{source}] v{version} (score: {score:.2f}, loads: {loads}, "
+                         f"rating: {rating_str}): {desc}")
 
         return '\n'.join(lines)

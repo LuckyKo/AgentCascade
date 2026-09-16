@@ -1271,6 +1271,41 @@ class TestRatingMetrics:
         # No ratings key present → treated as absent, not an error.
         assert 'ratings' not in entry
 
+    def test_get_rating_average_rated(self, fresh_manager):
+        """get_rating_average returns the rounded sum/count for a rated skill."""
+        m = self.manager
+        m.record_rating('my-skill', 8.0)
+        m.record_rating('my-skill', 6.0)
+        assert m.get_rating_average('my-skill') == 7.0
+
+    def test_get_rating_average_unrated(self, fresh_manager):
+        """A skill with no ratings entry is unrated → None."""
+        m = self.manager
+        assert m.get_rating_average('never-rated') is None
+
+    def test_get_rating_average_zero_count(self, fresh_manager):
+        """A ratings sub-dict with count=0 is treated as unrated → None (no ZeroDivisionError)."""
+        m = self.manager
+        m._metrics['weird-skill'] = {
+            'total_loads': 0,
+            'by_version': {},
+            'ratings': {
+                'count': 0,
+                'sum': 0.0,
+                'latest': None,
+                'last_version': ''
+            }
+        }
+        assert m.get_rating_average('weird-skill') is None
+
+    def test_get_rating_average_rounding(self, fresh_manager):
+        """Average is rounded to 2 decimal places."""
+        m = self.manager
+        m.record_rating('s', 7.0)
+        m.record_rating('s', 7.1)
+        # (7.0 + 7.1)/2 = 7.05
+        assert m.get_rating_average('s') == 7.05
+
 
 class TestNewSkillInitialRating:
     """Newly-registered skills get an initial rating of SKILL_RATING_INITIAL (0.5)."""
@@ -1350,6 +1385,28 @@ class TestReflectionPrompt:
         )
         assert injected is True
         assert '(none)' in appended[0]
+
+    def test_prompt_lines_carry_rating_info(self, fresh_manager):
+        """Loaded-skill lines show the current average rating (or 'unrated')."""
+        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
+        inst = self._make_inst(fresh_manager)
+        # Rate one skill so it renders with an average; leave the other unrated.
+        fresh_manager.record_rating('docker-best-practices', 8.0)
+        fresh_manager.record_rating('docker-best-practices', 7.0)  # avg 7.5, count 2
+        appended = []
+        injected = fresh_manager.check_and_inject_auto_skill_prompt(
+            inst=inst,
+            total_tool_calls=0,
+            task_text='t',
+            instance_name='w',
+            append_fn=appended.append,
+            turns_effectuated=AUTO_SKILL_MIN_TURNS + 1,
+            loaded_skill_names=['docker-best-practices', 'code-review'],
+        )
+        assert injected is True
+        prompt = appended[0]
+        assert '- docker-best-practices (avg 7.5/10, rated 2x)' in prompt
+        assert '- code-review (unrated)' in prompt
 
 
 class TestProposeSkillRatingModes:
