@@ -232,9 +232,22 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
     def _try_auto_skill_extension(self, instance, messages, llm_messages, loaded_skill_names=None) -> bool:
         """In-loop auto-skill trigger (replaces the post-run two-run helper).
 
-        Called from run() at the budget-exhaustion point (turns_available == 1),
-        BEFORE the final-turn tool-disable decision. When all gates pass it:
-          1. snapshots the pre-reflection task output onto the instance,
+        Called from run() at the NATURAL-COMPLETION point (Phase 5), i.e. right before
+        the loop breaks when _post_turn_checks reports a natural end — an assistant turn
+        with no tool call, no pending async work, and non-empty content.
+
+        IMPORTANT: _post_turn_checks returns False via FOUR paths (terminal stop, terminal
+        stop during the compression wait, pure-thinking stall, genuine completion) that all
+        collapse into the same ``if not completed:`` in run(). The caller therefore gates this
+        call on ``_is_genuine_completion(instance, response)`` so it is reached ONLY on genuine
+        completion — a stopped or stalled agent never triggers skill reflection. This method
+        itself does NOT re-check stop/stall; the gating is the caller's responsibility.
+
+        When all gates pass it:
+          1. snapshots the pre-reflection task output onto the instance — at natural
+             end the final answer is already committed (per-iteration order: LLM →
+             _process_response commits → _post_turn_checks), so this captures the
+             just-completed final answer, not a previous turn's reply;
           2. injects the reflection prompt into BOTH instance.conversation
              (via _append_and_log) and the loop-local working sets (R3),
           3. sets the one-shot _auto_skill_proposed flag.
@@ -734,59 +747,36 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     self._append_and_log(instance, warn_user)
                     llm_messages.append(warn_user)
                 if turns_available == 1:
-                    # ── Auto-skill in-loop trigger (replaces post-run helper) ──
-                    # Qualification runs BEFORE the tool-disable decision. When it
-                    # fires, the ENTIRE final-turn block below is skipped: no warning
-                    # message and no disabled_tools override — tools stay enabled so
-                    # the request prefix is unchanged (KV-cache friendly). The budget
-                    # reset below grants AUTO_SKILL_EXTRA_TURNS fresh turns for the
-                    # reflection; see _try_auto_skill_extension for gates.
-                    _auto_skill_fired = self._try_auto_skill_extension(
-                        instance,
-                        messages,
-                        llm_messages,
-                        loaded_skill_names=getattr(instance, '_loaded_skill_names', None),
-                    )
+                    # Final-turn handling for a run that is genuinely ending on its last
+                    # turn. The auto-skill reflection trigger no longer lives here — it
+                    # now fires at the natural-completion point (Phase 5, below), which is
+                    # reached only when _post_turn_checks reports completion. So this block
+                    # always applies to non-extended runs: warn and disable tools so the
+                    # agent is forced to deliver a final answer on its last turn.
+                    # Final turn warning: insert as a separate user message
+                    # (not inline) so it's treated as a distinct conversational
+                    # turn, not appended to the last message.
+                    # Muted for max_turns=1 agents: this is their only turn and
+                    # tools are being disabled below regardless, so the warning
+                    # adds no information — just noise in the transcript.
+                    if max_turns != 1:
+                        final_msg = self._make_user_message(
+                            f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
+                            f"Wrap up and deliver your results now.]")
+                        self._append_and_log(instance, final_msg)
+                        llm_messages.append(final_msg)
 
-                    if not _auto_skill_fired:
-                        # Final turn warning: insert as a separate user message
-                        # (not inline) so it's treated as a distinct conversational
-                        # turn, not appended to the last message.
-                        # Muted for max_turns=1 agents: this is their only turn and
-                        # tools are being disabled below regardless, so the warning
-                        # adds no information — just noise in the transcript.
-                        if max_turns != 1:
-                            final_msg = self._make_user_message(
-                                f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
-                                f"Wrap up and deliver your results now.]")
-                            self._append_and_log(instance, final_msg)
-                            llm_messages.append(final_msg)
-
-                        # Disable ALL tools on the last turn so agent is forced to
-                        # return a final answer
-                        template = self.pool.get_template(instance.agent_class)
-                        if template and hasattr(template, 'function_map'):
-                            all_tools = list(template.function_map.keys())
-                            if all_tools:
-                                if not hasattr(instance,
-                                               '_generate_cfg_override') or instance._generate_cfg_override is None:
-                                    instance._generate_cfg_override = {}
-                                instance._generate_cfg_override['disabled_tools'] = all_tools
-                                final_turn_tools_disabled = True
-
-                    # ── Budget reset on trigger (F1; exact form verified in plan §2.1) ──
-                    # The loop runs on the LOCALS max_turns/turns_available and L573
-                    # recomputes instance._current_turn from them each iteration, so
-                    # BOTH must be reset — mutating only inst.max_turns would have no
-                    # effect on loop continuation. turns_available gets +1 because
-                    # _consume_turn decrements BEFORE the next loop check. The
-                    # instance.max_turns assignment is belt-and-braces for post-run
-                    # readers; run()'s exit finally restores it (R6).
-                    if _auto_skill_fired:
-                        instance._auto_skill_orig_max_turns = instance.max_turns
-                        instance.max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
-                        max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
-                        turns_available = AUTO_SKILL_EXTRA_TURNS + 1
+                    # Disable ALL tools on the last turn so agent is forced to
+                    # return a final answer
+                    template = self.pool.get_template(instance.agent_class)
+                    if template and hasattr(template, 'function_map'):
+                        all_tools = list(template.function_map.keys())
+                        if all_tools:
+                            if not hasattr(instance,
+                                           '_generate_cfg_override') or instance._generate_cfg_override is None:
+                                instance._generate_cfg_override = {}
+                            instance._generate_cfg_override['disabled_tools'] = all_tools
+                            final_turn_tools_disabled = True
 
                 turns_available = self._consume_turn(instance, turns_available)
 
@@ -895,7 +885,28 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     continue
 
                 # ── Phase 5: Post-Turn Checks ───────────────────────────────
-                if not self._post_turn_checks(instance, messages, llm_messages, response):
+                completed = self._post_turn_checks(instance, messages, llm_messages, response)
+                if not completed:
+                    # _post_turn_checks breaks on four paths (stop ×2, stall, genuine
+                    # completion); only the last may reflect. _is_genuine_completion
+                    # excludes stop/stall so a stopped or stalled agent never triggers.
+                    if self._is_genuine_completion(instance, response) and \
+                            self._try_auto_skill_extension(
+                                instance, messages, llm_messages,
+                                loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
+                        # Trigger fired: grant AUTO_SKILL_EXTRA_TURNS fresh turns for the reflection.
+                        # Loop-locals live in run()'s frame (NOT the instance), so the reset MUST stay here.
+                        instance._auto_skill_orig_max_turns = instance.max_turns   # R6 snapshot
+                        instance.max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
+                        max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
+                        # NOTE: this trigger fires at Phase 5 (natural completion), i.e. AFTER
+                        # _consume_turn has already decremented turns_available for the triggering
+                        # turn — so the reset is exactly AUTO_SKILL_EXTRA_TURNS (NOT +1). The old
+                        # budget-exhaustion design fired BEFORE _consume_turn, which is why its
+                        # reset carried a +1; that no longer applies at this call site.
+                        turns_available = AUTO_SKILL_EXTRA_TURNS
+                        yield response
+                        continue                                                   # run the reflection turns
                     break
 
             # ── Cleanup: Turn limit reached ────────────────────────────────
@@ -2175,6 +2186,32 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             return True
 
         return False
+
+    def _is_genuine_completion(self, instance: AgentInstance, response: List[Message]) -> bool:
+        """True only when a Phase-5 break is a GENUINE natural completion (a real final
+        answer), as opposed to an excluded exit.
+
+        ``_post_turn_checks`` returns False via four distinct paths that all collapse into
+        the same ``if not completed:`` in run(): terminal stop, terminal stop during the
+        compression wait, pure-thinking stall, and genuine completion. The auto-skill
+        reflection must fire only on the last one — a stopped or stalled agent has not
+        delivered a real answer to reflect on. This helper mirrors exactly the two
+        predicates ``_post_turn_checks`` uses for its non-completion break paths
+        (``_is_terminal_stop`` and ``_detect_pure_thinking_turn``) so the gating cannot
+        drift from the method it guards.
+
+        Args:
+            instance: The agent being executed.
+            response: Response list from the just-finished turn.
+
+        Returns:
+            True only when NOT terminal-stop AND NOT a pure-thinking stall.
+        """
+        if self._is_terminal_stop(instance.instance_name):
+            return False  # terminal stop (or stop during compression wait) — excluded
+        if self._detect_pure_thinking_turn(instance, response):
+            return False  # pure reasoning turn — agent stalled, not completed
+        return True
 
     def _transition_to_sleeping_if_pending(self, instance: AgentInstance, inst_name: str) -> bool:
         """Handle SLEEPING state transition when async tools are pending.

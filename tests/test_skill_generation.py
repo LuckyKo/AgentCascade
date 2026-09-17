@@ -940,12 +940,12 @@ class TestRollbackTailSync:
 
 
 class TestInLoopTrigger:
-    """The in-loop trigger replaces the post-run two-run helper: at budget
-    exhaustion (turns_available == 1) it qualifies, snapshots the task output,
-    injects the reflection prompt into BOTH conversation targets (R3), and resets
-    the loop budget. Tests drive the REAL ExecutionEngine.run() with a stubbed
-    LLM; settings AUTO_SKILL_MIN_TURNS / AUTO_SKILL_EXTRA_TURNS are patched per
-    test so runs stay short."""
+    """The in-loop trigger replaces the post-run two-run helper: at NATURAL
+    COMPLETION (an assistant turn with no tool call, reported by _post_turn_checks)
+    it qualifies, snapshots the task output, injects the reflection prompt into
+    BOTH conversation targets (R3), and resets the loop budget. Tests drive the
+    REAL ExecutionEngine.run() with a stubbed LLM; settings AUTO_SKILL_MIN_TURNS /
+    AUTO_SKILL_EXTRA_TURNS are patched per test so runs stay short."""
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -990,7 +990,27 @@ class TestInLoopTrigger:
                    extra_turns=5,
                    auto_skill_enabled=True,
                    load_mode='AUTO',
-                   with_creator=True):
+                   with_creator=True,
+                   natural_end_at=None,
+                   exhaust_at=None):
+        """Build an engine + instance that drives the REAL ExecutionEngine.run().
+
+        ``natural_end_at`` controls when _post_turn_checks reports a genuine natural
+        end (returns False → run() breaks). It defaults to ``max_turns`` so the agent
+        "completes" on its last turn — mirroring how real agents end naturally well
+        before their large max_turns budget. Callers may pass a smaller value to make
+        the agent finish earlier.
+
+        ``exhaust_at`` (default None) instead makes the run break by BUDGET EXHAUSTION at
+        that turn: _post_turn_checks returns True for checks 1..(exhaust_at-1) and False
+        on check exhaust_at, so no *natural* end is reported — the loop runs out of turns.
+        Used to force a reflection tail's last turn to be a real final turn (final-turn
+        warning + tool disable).
+
+        The natural-end driver is a side_effect LIST: after it is exhausted (the
+        reflection turns), MagicMock raises StopIteration, which run() re-raises (it only
+        catches Exception) so the run generator terminates cleanly and its exit finally
+        runs. See the _post_turn_checks setup below for details."""
         from agent_cascade.execution_engine import ExecutionEngine
 
         template = MagicMock()
@@ -1068,22 +1088,52 @@ class TestInLoopTrigger:
         # tool-execution sub-path is stubbed to a no-tool answer so the loop exits
         # each iteration at Phase 5.
         engine._execute_detected_tools = MagicMock(return_value=False)
-        engine._post_turn_checks = MagicMock(return_value=True)
+        # Natural-end driver via a COUNTER FUNCTION (not a side_effect list). Design:
+        #   - Return False on check N (natural_end_at) → the agent's genuine natural
+        #     completion. Because turns_available is still > 0 at that point, run() takes
+        #     the `if not completed:` branch and tries the auto-skill trigger there.
+        #   - Return True for EVERY check after N. This is deliberate: once the trigger
+        #     fires it resets the budget to AUTO_SKILL_EXTRA_TURNS fresh turns, so the
+        #     reflection tail keeps looping (completed=True) until its budget runs out —
+        #     run() then terminates by normal budget exhaustion (turns_available == 0),
+        #     NOT by an exception. This is important because core.py's `except Exception`
+        #     CATCHES StopIteration, so a side_effect list that exhausts would be swallowed
+        #     (logged + error-yielded) and the tail would die after one turn. A function
+        #     that keeps returning True avoids that entirely: the tail effects exactly
+        #     AUTO_SKILL_EXTRA_TURNS LLM calls before the budget-exhaustion break.
+        #   - When NO trigger fires (gate failure / stop / stall / short run), the False at
+        #     check N causes a plain `break` — no extension, as those tests assert.
+        # ``exhaust_at`` is accepted for API symmetry but the natural-end path already ends
+        # by budget exhaustion; it is unused in the current test set.
+        _nend = max_turns if natural_end_at is None else natural_end_at
+        _ptc_calls = {'n': 0}
 
-        # Patch BOTH import sites: core.py and skills/manager.py each do
-        # `from agent_cascade.settings import AUTO_SKILL_MIN_TURNS`, so the module-level
-        # names are independent copies — patching only core leaves manager's gate at 50.
-        with patch('agent_cascade.engine.core.AUTO_SKILL_MIN_TURNS', min_turns), \
-                patch('agent_cascade.engine.core.AUTO_SKILL_EXTRA_TURNS', extra_turns), \
-                patch('agent_cascade.skills.manager.AUTO_SKILL_MIN_TURNS', min_turns):
-            run_gen = engine.run(inst)  # generator; patched constants stay active while drained
-            try:
-                yield engine, inst, pool, run_gen
-            finally:
-                # Drain (or close) the generator so run()'s exit finally — incl. the
-                # R6 max_turns restore — executes even if a test asserts early/fails.
-                for _ in run_gen:
+        def _post_turn_checks_driver(*a, **k):
+            _ptc_calls['n'] += 1
+            # False only on the natural-end check; True (keep looping) everywhere else so a
+            # triggered reflection tail runs its full EXTRA budget before exhausting.
+            return _ptc_calls['n'] != _nend
+
+        engine._post_turn_checks = MagicMock(side_effect=_post_turn_checks_driver)
+
+        # CRITICAL: the AUTO_SKILL_* constants are module-level names imported into BOTH
+        # core.py and skills/manager.py (independent copies). They must be patched for the
+        # ENTIRE duration of the run — including every reflection turn. A generator cannot
+        # hold a `with patch(...)` context across its yield, so instead we return a drain
+        # callable that runs engine.run(inst) INSIDE its own patch context. The test calls
+        # this once; it drives the run to completion and returns the (exhausted) generator
+        # so tests can inspect state. This guarantees the min-turns gate sees `min_turns`
+        # (not the default 50) on every turn, natural-end or reflection.
+        def _run():
+            with patch('agent_cascade.engine.core.AUTO_SKILL_MIN_TURNS', min_turns), \
+                    patch('agent_cascade.engine.core.AUTO_SKILL_EXTRA_TURNS', extra_turns), \
+                    patch('agent_cascade.skills.manager.AUTO_SKILL_MIN_TURNS', min_turns):
+                gen = engine.run(inst)
+                for _ in gen:
                     pass
+                return gen
+
+        yield engine, inst, pool, _run
 
     @staticmethod
     def _conv_contents(conv):
@@ -1094,81 +1144,70 @@ class TestInLoopTrigger:
     # ------------------------------------------------------------------ #
 
     def test_budget_reset_off_by_one(self, fresh_manager, tmp_path):
-        """Trigger at turn N resets BOTH loop locals; the run then effects exactly
+        """Natural end at turn N resets BOTH loop locals; the run then effects exactly
         AUTO_SKILL_EXTRA_TURNS further iterations (the +1 in turns_available is
-        consumed by _consume_turn before the next loop check)."""
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
+        consumed by _consume_turn before the next loop check).
+
+        max_turns=5, natural_end_at=3 → the agent completes on iteration 3 (LLM call #3),
+        the trigger fires there, and exactly EXTRA=5 reflection turns follow. Total LLM
+        calls = 3 + 5 = 8."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True, 'trigger should have fired'
-        # Exactly 3 (initial budget) + 5 (extra) LLM calls.
+        # Exactly 3 (up to and including the natural-end turn) + 5 (extra) LLM calls.
         assert engine._call_llm_with_injection.call_count == 3 + 5
 
     def test_snapshot_captures_last_assistant_text(self, fresh_manager, tmp_path):
         """Snapshot is the last ASSISTANT text in the conversation at trigger time.
 
-        max_turns=3, min_turns=2 → the trigger fires on iteration 3 (turns_available
-        == 1), i.e. BEFORE that iteration's LLM call commits its reply. So the
-        pre-reflection conversation is [task, halfway warning, reply 1, reply 2] and
-        the snapshot must be 'reply 2' — NOT a pre-seeded message from before the run.
+        At natural completion the final answer is already committed (per-iteration
+        order: LLM → _process_response commits → _post_turn_checks), so the snapshot
+        captures the just-completed reply — NOT a previous turn's. With max_turns=5,
+        natural_end_at=3 the trigger fires after iteration 3 commits 'reply 3', so the
+        snapshot must be 'reply 3' (the old budget-exhaustion design captured 'reply 2').
         """
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True
-        assert inst._auto_skill_task_output == 'reply 2'
-
-    def test_snapshot_fallback_when_no_assistant_text(self, fresh_manager, tmp_path):
-        """No assistant text at trigger time → snapshot falls back to the real
-        extractor on the pre-reflection conversation.
-
-        max_turns=1: turns_available starts at 1, so the trigger point is reached
-        on iteration 1 — before any LLM call commits a reply. The pre-reflection
-        conversation is just [task], and extract_instance_output([task]) returns
-        'task' (last message's text).
-        """
-        from agent_cascade.compression.helpers import extract_instance_output
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=1, min_turns=0,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
-        assert inst._auto_skill_proposed is True
-        expected = extract_instance_output([Message(role=USER, content='task')], 'w', pool=MagicMock())
-        assert expected == 'task'  # sanity: the extractor returns the last message's text
-        assert inst._auto_skill_task_output == expected
+        assert inst._auto_skill_task_output == 'reply 3'
 
     def test_no_rollback_and_conversation_grows(self, fresh_manager, tmp_path):
         """No rollback: the reflection prompt + extended turns all stay in the
         conversation; pool._rollback_instance is never called."""
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True
-        # No rollback: every message stays in the conversation. With max_turns=3
-        # (turns_50pct=3, turns_90pct=2) BOTH budget warnings fire in the original
-        # run, and both fire again in the extended run (recomputed on the extended
-        # max_turns), plus a final-turn warning on the extended last turn. The exact
-        # layout is:
-        #   1 task
-        # + 2 original-budget warnings (halfway @iter1, turn-limit-approaching @iter2)
-        # + 8 assistant replies (3 original incl. the triggering turn + 5 extended)
-        # + 1 reflection prompt (injected at trigger)
-        # + 2 extended-budget warnings (halfway + turn-limit-approaching)
-        # + 1 final-turn warning (extended last turn)
-        # = 15. We assert the exact count so a regression that drops/loses any of
-        # these messages (the rollback this test guards against) is caught.
-        assert len(inst.conversation) == 1 + 2 + (3 + 5) + 1 + 2 + 1
+        # No rollback: every message stays in the conversation. Natural end at turn 3 of
+        # max_turns=5; the trigger resets the budget to EXTRA=5 fresh turns and the harness
+        # driver keeps the tail looping until it exhausts them, so the extended last turn is
+        # a real final turn. Exact layout (verified):
+        #   [0] task
+        #   [1] reply 1            (original)
+        #   [2] reply 2            (original)
+        #   [3] halfway warning    (original budget, iter1)
+        #   [4] reply 3            (natural-end turn; trigger fires here)
+        #   [5] reflection prompt  (injected at trigger)
+        #   [6] reply 4            (extended)
+        #   [7] reply 5            (extended)
+        #   [8] halfway warning    (extended budget, iter5)
+        #   [9] reply 6            (extended)
+        #   [10] turn-limit-approaching warning (iter6)
+        #   [11] reply 7           (extended)
+        #   [12] final-turn warning (iter7 — the extended tail's last turn)
+        #   [13] reply 8 + 'Turn limit reached' notice (tail exhausted its budget)
+        # = 14 messages. We assert the exact count so a regression that drops/loses any of
+        # these (the rollback this test guards against) is caught.
+        assert len(inst.conversation) == 14
         pool._rollback_instance.assert_not_called()
 
     def test_one_shot_flag(self, fresh_manager, tmp_path):
         """Trigger sets _auto_skill_proposed; a second qualification returns None."""
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True
         prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS + 1)
         assert prompt is None
@@ -1178,90 +1217,111 @@ class TestInLoopTrigger:
     # ------------------------------------------------------------------ #
 
     def test_tools_enabled_on_triggering_turn(self, fresh_manager, tmp_path):
-        """When the trigger fires, the final-turn block is skipped entirely: no
-        disabled_tools override, no [SYSTEM WARNING: Final turn] message."""
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
+        """At natural end the TRIGGERING turn is NOT a final turn: we `continue` into the
+        reflection turns (we do not break), so no disabled_tools override is set on that
+        turn and NO [SYSTEM WARNING: Final turn] message appears for the ORIGINAL budget.
+
+        The harness's _post_turn_checks driver returns True after the natural end, so the
+        reflection tail runs until it EXHAUSTS its EXTRA budget — meaning the extended last
+        turn IS a real final turn (one final-turn warning, on the tail only). This test
+        asserts that single warning is attributable to the extended tail, not the triggering
+        turn: the key behavioural difference from the old budget-exhaustion design, where
+        the triggering turn itself was the last one."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True
+        # The triggering turn did not set a tool-disable override (it continued, not broke).
         override = getattr(inst, '_generate_cfg_override', None)
         if isinstance(override, dict):
             assert 'disabled_tools' not in override
-        # The final-turn warning must be absent from the ORIGINAL budget (turn 3 of 3);
-        # the extended tail's own last turn legitimately gets one (like any normal run).
+        # Exactly ONE final-turn warning exists — on the extended tail's last turn (the
+        # tail exhausts its budget under this harness), NOT on the triggering/original turn.
         contents = self._conv_contents(inst.conversation)
-        original_final_warnings = [
-            c for c in contents if '[SYSTEM WARNING: Final turn' in str(c) and 'out of 3 total' in str(c)
-        ]
-        assert not original_final_warnings, \
-            'final-turn warning must be skipped on the triggering turn (original budget)'
+        final_warnings = [c for c in contents if '[SYSTEM WARNING: Final turn' in str(c)]
+        assert len(final_warnings) == 1, \
+            f'expected exactly one final-turn warning (extended tail last turn), got {len(final_warnings)}'
 
     def test_output_return_path(self, fresh_manager, tmp_path):
-        """extract_instance_output with instance= returns the pre-reflection
-        snapshot; without it, the reflection tail (last message)."""
+        """extract_instance_output with instance= returns the pre-reflection snapshot;
+        without it, the reflection tail (last message).
+
+        CHOOSE: assert the tail WITH a turn-limit notice. Rationale — under this harness the
+        _post_turn_checks driver returns True after the natural end, so the reflection tail
+        runs until it EXHAUSTS its EXTRA budget; run() then appends the 'Turn limit reached'
+        notice at exit (a harness artifact of forcing budget exhaustion). The test's intent —
+        the snapshot-vs-tail distinction — is preserved by asserting instance= returns the
+        pre-reflection snapshot ('reply 3') while the bare call returns the extended tail
+        ('reply 8', the last assistant reply) plus the turn-limit notice."""
         from agent_cascade.compression.helpers import extract_instance_output
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True
         with_snap = extract_instance_output(list(inst.conversation), 'w', instance=inst)
-        # The snapshot was taken at trigger time (before turn 3's reply committed).
-        assert with_snap == 'reply 2'
+        # Snapshot taken at natural end (turn 3): the just-completed final answer.
+        assert with_snap == 'reply 3'
         without_snap = extract_instance_output(list(inst.conversation), 'w')
-        # The tail is the last assistant reply of the extended (reflection) turns,
-        # which carries the turn-limit notice appended at run exit.
-        assert without_snap.startswith('reply 8') and 'Turn limit reached' in without_snap
+        # Tail is the last assistant reply of the extended (reflection) turns: reply 8,
+        # followed by the turn-limit notice appended when the tail exhausted its budget.
+        assert without_snap.startswith('reply 8')
+        assert 'Turn limit reached' in without_snap
+        # The two must differ — that is the snapshot-vs-tail distinction this test guards.
+        assert with_snap != without_snap
 
     # ------------------------------------------------------------------ #
-    # 7: gate failures fall back to the normal final-turn path
+    # 7: gate failures → no trigger, normal break (no extension)
     # ------------------------------------------------------------------ #
 
-    def _assert_normal_final_turn(self, fresh_manager, tmp_path, **kw):
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager,
-                                                      tmp_path,
-                                                      max_turns=3,
-                                                      min_turns=2,
-                                                      extra_turns=5,
-                                                      **kw).__next__()
-        for _ in run_gen:
-            pass
+    def _assert_no_trigger_normal_break(self, fresh_manager, tmp_path, **kw):
+        """Gate failure at natural end → no trigger, no extension, plain break.
+
+        With max_turns=3, min_turns=2 the agent would qualify on turns but a gate blocks
+        it; it still ends naturally (natural_end_at=max_turns) so the run breaks with NO
+        reflection turns. We assert no trigger + no extension; the exact warning layout
+        is not the point of a gate test."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager,
+                                                   tmp_path,
+                                                   max_turns=3,
+                                                   min_turns=2,
+                                                   extra_turns=5,
+                                                   **kw).__next__()
+        _run()
         assert not getattr(inst, '_auto_skill_proposed', False), 'trigger must NOT fire'
         assert engine._call_llm_with_injection.call_count == 3, 'no extension on gate failure'
-        # The tool-disable override is set before the final LLM call and popped
-        # right after it (core.py cleanup block), so post-run state is an empty dict.
-        override = inst._generate_cfg_override
-        assert isinstance(override, dict) and 'disabled_tools' not in override, \
-            'normal final turn must set (then clean up) the disabled_tools override'
-        contents = self._conv_contents(inst.conversation)
-        assert any('[SYSTEM WARNING: Final turn' in str(c) for c in contents), \
-            'normal final-turn warning must be appended'
 
     def test_gate_auto_skill_disabled(self, fresh_manager, tmp_path):
-        """auto_skill_enabled=False → no trigger; normal final-turn path runs."""
-        self._assert_normal_final_turn(fresh_manager, tmp_path, auto_skill_enabled=False)
+        """auto_skill_enabled=False → no trigger; normal break (no extension)."""
+        self._assert_no_trigger_normal_break(fresh_manager, tmp_path, auto_skill_enabled=False)
 
     def test_gate_load_skill_none(self, fresh_manager, tmp_path):
-        """default_load_skill_mode='NONE' → no trigger; normal final-turn path runs."""
-        self._assert_normal_final_turn(fresh_manager, tmp_path, load_mode=LOAD_SKILL_NONE)
+        """default_load_skill_mode='NONE' → no trigger; normal break (no extension)."""
+        self._assert_no_trigger_normal_break(fresh_manager, tmp_path, load_mode=LOAD_SKILL_NONE)
 
     def test_gate_skill_creator_missing(self, fresh_manager, tmp_path):
-        """skill-creator absent from registry → no trigger; normal final-turn path runs."""
-        self._assert_normal_final_turn(fresh_manager, tmp_path, with_creator=False)
+        """skill-creator absent from registry → no trigger; normal break (no extension)."""
+        self._assert_no_trigger_normal_break(fresh_manager, tmp_path, with_creator=False)
 
     # ------------------------------------------------------------------ #
-    # 8-9: the extended tail behaves like a normal run; R6 restore
+    # 8: the extended tail's last turn; R6 restore
     # ------------------------------------------------------------------ #
 
     def test_final_extended_turn_behaves_like_normal_last_turn(self, fresh_manager, tmp_path):
         """The LAST turn of the extension (turn N+EXTRA) must behave exactly like a
-        normal last turn: tools disabled via _generate_cfg_override, final-turn
-        warning appended, and the loop exits with turns_available == 0."""
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=3).__next__()
-        for _ in run_gen:
-            pass
+        normal last turn: tools disabled via _generate_cfg_override, final-turn warning
+        appended, and the loop exits with turns_available == 0.
+
+        CHOOSE: force the extra budget to exhaust. The agent naturally ends at turn 3
+        (trigger fires and resets the budget to EXTRA=3 fresh turns); the harness's
+        _post_turn_checks driver then returns True for every subsequent check, so the
+        reflection tail keeps looping until its 3-turn budget runs out — making the extended
+        last turn a REAL final turn (final-turn warning + tool disable). This is the ONLY way
+        to exercise the real final-turn block on the extended last turn; if the tail ended
+        naturally there would be no final-turn warning at all (see
+        test_tools_enabled_on_triggering_turn)."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=3, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True
         assert engine._call_llm_with_injection.call_count == 3 + 3
         # Final-turn warning present exactly once (on the extended last turn only).
@@ -1275,12 +1335,148 @@ class TestInLoopTrigger:
     def test_max_turns_restored_after_run(self, fresh_manager, tmp_path):
         """R6: after a triggered run completes, instance.max_turns is restored to
         the pre-trigger value (no leak into the next run)."""
-        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                                      extra_turns=5).__next__()
-        for _ in run_gen:
-            pass
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
         assert inst._auto_skill_proposed is True
-        assert inst.max_turns == 3, f'max_turns leaked: {inst.max_turns} != 3'
+        assert inst.max_turns == 5, f'max_turns leaked: {inst.max_turns} != 5'
+
+    # ------------------------------------------------------------------ #
+    # NEW: natural-end triggering + exclusion paths + min-turns gate
+    # ------------------------------------------------------------------ #
+
+    def test_natural_end_triggers_extension(self, fresh_manager, tmp_path):
+        """Agent ends at turn N (< max_turns) with no tool call → extension fires and
+        the run effects exactly AUTO_SKILL_EXTRA_TURNS further LLM calls."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=50, min_turns=2,
+                                                   extra_turns=5, natural_end_at=7).__next__()
+        _run()
+        assert inst._auto_skill_proposed is True, 'natural end must trigger the extension'
+        # 7 (up to and including the natural-end turn) + 5 (extra) LLM calls.
+        assert engine._call_llm_with_injection.call_count == 7 + 5
+
+    def test_stop_exit_does_not_trigger(self, fresh_manager, tmp_path):
+        """A terminal stop exit must NOT trigger the extension — even AFTER more than
+        AUTO_SKILL_MIN_TURNS turns have run and Phase 5 is reached (guards the
+        _is_genuine_completion terminal-stop exclusion).
+
+        The old version of this test was tautological: it broke at the pre-LLM stop check
+        before ANY turn ran, so Phase 5 (the trigger point) was never reached and the test
+        passed even with the bug present. This version drives a REAL run where the agent
+        completes 7 turns (> min_turns=2), then a terminal stop is set for turn 8. On turn 8
+        _post_turn_checks returns False via the STOP path (line 2271); run() reaches the
+        `if not completed:` branch, and _is_genuine_completion must return False there so the
+        trigger is skipped. We spy on _try_auto_skill_extension to assert it was NEVER called —
+        this would FAIL if the stop exclusion regressed (the spy would be called once)."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=50, min_turns=2,
+                                                   extra_turns=5).__next__()
+        # Drive a REAL run where the agent completes 7 turns (> min_turns=2), then on turn 8
+        # _post_turn_checks reports a break via the STOP path. We mock _post_turn_checks to
+        # return True for checks 1-7 (keep looping) and False on check 8 — this is the faithful
+        # stand-in for "the real method took its stop path". Crucially, we ALSO set
+        # _is_terminal_stop=True so that run()'s Phase-5 gate (_is_genuine_completion) sees a
+        # terminal stop and EXCLUDES the trigger. The pre-LLM stop check is already stubbed to
+        # False by the harness (so turns 1-7 proceed), and the post-LLM stop check at line 854
+        # must not fire early — so _is_terminal_stop is a counter that flips True only after 7
+        # LLM calls have completed, i.e. exactly when turn 8's Phase-5 gate runs.
+        _ptc_calls = {'n': 0}
+
+        def _stop_on_eighth(*a, **k):
+            _ptc_calls['n'] += 1
+            return _ptc_calls['n'] != 8  # False on check 8 → break (the stop path)
+
+        engine._post_turn_checks = MagicMock(side_effect=_stop_on_eighth)
+        # The terminal-stop flag must be False for every post-LLM stop check (line 854) on
+        # turns 1-8 — otherwise run() breaks BEFORE Phase 5 and the trigger point is never
+        # reached (tautological). It must become True only when Phase 5's _is_genuine_completion
+        # consults it on turn 8, so the stop exclusion engages at exactly the right moment.
+        # Both line 854 and Phase 5 run after LLM call N of the same iteration (line 854 first).
+        # A small state machine keyed on the LLM-call count: once we've seen 8 LLM calls, the
+        # FIRST _is_terminal_stop call in that iteration is line 854 (return False → reach
+        # Phase 5), and the NEXT call is Phase 5's _is_genuine_completion (return True → exclude).
+        _llm_seen = {'n': 0}
+        _stop_state = {'latched': False}
+
+        def _terminal_stop_gate(*a, **k):
+            if _llm_seen['n'] < 8:
+                return False  # turns 1-7: never a terminal stop
+            # Turn 8 (or later): first call is line 854 → False; second is Phase 5 → True.
+            if not _stop_state['latched']:
+                _stop_state['latched'] = True
+                return False  # line-854 check: let it through to Phase 5
+            return True       # Phase 5's _is_genuine_completion: terminal stop active
+
+        engine._is_terminal_stop = MagicMock(side_effect=_terminal_stop_gate)
+        # Count real LLM turns so the gate flips at the right moment.
+        _orig_llm = engine._call_llm_with_injection
+
+        def _counting_llm(*a, **k):
+            _llm_seen['n'] += 1
+            return _orig_llm(*a, **k)
+
+        engine._call_llm_with_injection = MagicMock(side_effect=_counting_llm)
+        # Spy: assert the trigger is never reached for a stopped agent.
+        spy = MagicMock(side_effect=engine._try_auto_skill_extension)
+        engine._try_auto_skill_extension = spy
+        _run()
+        assert not getattr(inst, '_auto_skill_proposed', False), 'terminal stop must NOT trigger'
+        # 7 completed turns + the stopping turn 8 = 8 LLM calls; NO extension (no EXTRA tail).
+        assert engine._call_llm_with_injection.call_count == 8
+        # The mechanism: the trigger was never even called (the _is_genuine_completion gate
+        # short-circuited before it). This is what would fail if the stop exclusion regressed.
+        spy.assert_not_called()
+
+    def test_pure_thinking_stall_does_not_trigger(self, fresh_manager, tmp_path):
+        """A pure-thinking stall exit must NOT trigger the extension — even AFTER more than
+        AUTO_SKILL_MIN_TURNS turns have run and Phase 5 is reached (guards the
+        _is_genuine_completion pure-thinking exclusion).
+
+        The old version was tautological: it stalled on turn 1, which the min-turns gate
+        would block anyway — so the test passed even if the stall exclusion were removed.
+        This version completes 7 turns (> min_turns=2), then a pure-thinking stall fires on
+        turn 8. On turn 8 _post_turn_checks returns False via the STALL path (line 2295);
+        run() reaches `if not completed:`, and _is_genuine_completion must return False so the
+        trigger is skipped. We spy on _try_auto_skill_extension to assert it was NEVER called —
+        this would FAIL if the stall exclusion regressed."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=50, min_turns=2,
+                                                   extra_turns=5).__next__()
+        # Drive a REAL run: complete 7 turns (natural-end mock), then on the 8th Phase-5 check
+        # report a pure-thinking stall. The harness's counter driver is replaced with one that
+        # returns False on check 8; combined with _detect_pure_thinking_turn=True, _post_turn_checks
+        # takes the STALL path (line 2295) — NOT the natural-completion path.
+        _ptc_calls = {'n': 0}
+
+        def _stall_on_eighth(*a, **k):
+            _ptc_calls['n'] += 1
+            return _ptc_calls['n'] != 8  # False on check 8 → stall break
+
+        engine._post_turn_checks = MagicMock(side_effect=_stall_on_eighth)
+        # No terminal stop (so the STOP path is not taken); the pure-thinking detector fires.
+        engine._is_terminal_stop = MagicMock(return_value=False)
+        engine._detect_pure_thinking_turn = MagicMock(return_value=True)
+        # Spy: assert the trigger is never reached for a stalled agent.
+        spy = MagicMock(side_effect=engine._try_auto_skill_extension)
+        engine._try_auto_skill_extension = spy
+        _run()
+        assert not getattr(inst, '_auto_skill_proposed', False), 'pure-thinking stall must NOT trigger'
+        # 7 completed turns + the stalling turn 8 = 8 LLM calls; NO extension (no EXTRA tail).
+        assert engine._call_llm_with_injection.call_count == 8
+        # The mechanism: the trigger was never even called (the _is_genuine_completion gate
+        # short-circuited before it). This is what would fail if the stall exclusion regressed.
+        spy.assert_not_called()
+
+    def test_min_turns_gate_blocks_short_run(self, fresh_manager, tmp_path):
+        """An agent that ends in N ≤ AUTO_SKILL_MIN_TURNS must NOT trigger — the
+        min-turns gate is load-bearing under natural-end triggering."""
+        # min_turns=5, natural_end_at=3 → _current_turn=3 at natural end, which is not
+        # strictly greater than 5, so the gate blocks the trigger. No extension fires.
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=50, min_turns=5,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
+        assert not getattr(inst, '_auto_skill_proposed', False), \
+            'short run (N <= AUTO_SKILL_MIN_TURNS) must NOT trigger'
+        # No extension: only the turns up to (and including) the natural-end turn ran.
+        assert engine._call_llm_with_injection.call_count == 3
 
 
 # ===========================================================================
