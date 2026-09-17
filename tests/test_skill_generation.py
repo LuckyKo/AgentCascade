@@ -1899,9 +1899,9 @@ class TestProposeSkillRatingModes:
         that routes to _register_candidate_upgrade (candidate folder + evaluate_candidates gate).
         """
         m = self.manager
-        # Isolated candidate/production dirs + neutralized discovery refresh, so the immediate
-        # eval trigger inside register_skill_from_content() cannot re-scan the REAL
-        # agents/global/skills tree and clear the manually staged incumbent.
+        # Isolated candidate/production dirs; neutralize evaluate_candidates()'s forced discovery
+        # refresh (invalidate_cache / _ensure_discovered) so the immediate gate trigger inside
+        # register_skill_from_content() can't re-scan/re-parse the manually staged registry mid-test.
         tmp_path = Path(m._metrics_file).parent
         m._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
         m._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
@@ -1944,6 +1944,78 @@ class TestProposeSkillRatingModes:
         reg = m._skills_registry[name]
         assert reg['file_path'] == str(cand_file)
 
+    def test_repropose_when_candidate_already_present(self, fresh_manager):
+        """Two successive propose_skill updates on an existing name replace the candidate file.
+
+        Guards the manager's "existing candidate file is replaced" path through the actual tool:
+        a second update must overwrite candidates/<name>/SKILL.md (not append/duplicate), leave
+        the production file byte-for-byte untouched, and keep exactly one registry entry at
+        _PRIORITY_CANDIDATE.
+        """
+        m = self.manager
+        # Same isolation as test_update_routes_through_candidate_not_production: isolated
+        # candidate/production dirs + neutralized discovery refresh (the immediate gate trigger
+        # inside register_skill_from_content() must not re-scan the staged registry mid-test).
+        tmp_path = Path(m._metrics_file).parent
+        m._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
+        m._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
+        m._skill_paths = []
+        m.invalidate_cache = lambda *a, **k: None
+        m._ensure_discovered = lambda *a, **k: None
+
+        name = f"test-repropose-tool-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='INCUMBENT_BODY_MARKER')
+        prod_file = (m._production_skills_dir / name / 'SKILL.md')
+        original_prod = prod_file.read_text(encoding='utf-8')
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+
+        # First update: candidate v2.0.0 with marker #1. (Description embeds the task text so
+        # Tier-2 self-match validation passes, as in test_update_routes_through_candidate_not_production.)
+        content1 = _make_skill_content(
+            name=name,
+            description='First re-proposal over an existing skill via tool',
+            triggers=['repropose', 'first'],
+            generated_from_task='test re-propose first via tool',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        marker1 = 'REPROPOSE_MARKER_1'
+        content1 = content1.replace('## Instructions', f'## Instructions\n\n{marker1}', 1)
+        result1 = tool.call(_json.dumps({'name': name, 'skill_content': content1,
+                                         'justification': 'first re-proposal', 'rating': 8.0}))
+        assert 'updated' in result1.lower()
+
+        # Second update (successive): candidate v3.0.0 with marker #2 — must REPLACE the file.
+        content2 = _make_skill_content(
+            name=name,
+            description='Second re-proposal replacing the first one via tool',
+            triggers=['repropose', 'second'],
+            generated_from_task='test re-propose second via tool',
+        ).replace('---\n', '---\nversion: 3.0.0\n', 1)
+        marker2 = 'REPROPOSE_MARKER_2'
+        content2 = content2.replace('## Instructions', f'## Instructions\n\n{marker2}', 1)
+        result2 = tool.call(_json.dumps({'name': name, 'skill_content': content2,
+                                         'justification': 'second re-proposal', 'rating': 9.0}))
+        assert 'updated' in result2.lower()
+
+        # The candidate file holds the LATEST proposal: marker #2 present, marker #1 gone.
+        cand_file = (m._candidates_dir / name / 'SKILL.md')
+        assert cand_file.exists(), 'candidate must exist under candidates/<name>/'
+        cand_now = cand_file.read_text(encoding='utf-8')
+        assert marker2 in cand_now, 'latest proposal must be present in the candidate file'
+        assert marker1 not in cand_now, 're-proposal must replace (not append/duplicate) the candidate'
+
+        # Production is still byte-for-byte unchanged.
+        assert prod_file.read_text(encoding='utf-8') == original_prod, \
+            'production SKILL.md must be byte-for-byte untouched after re-proposals'
+
+        # Exactly ONE registry entry for this name, at _PRIORITY_CANDIDATE (no duplicates).
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        entries = [e for n, e in m._skills_registry.items() if n == name]
+        assert len(entries) == 1, f'expected exactly one registry entry, got {len(entries)}'
+        assert entries[0]['_priority'] == _PRIORITY_CANDIDATE
+        assert entries[0]['file_path'] == str(cand_file)
+
 
 # ===========================================================================
 # Candidate flow — live-serving upgrade candidates (Phase 2 of skill evolution)
@@ -1981,9 +2053,9 @@ class TestCandidateFlow:
     def _candidate_env(self, fresh_manager, tmp_path):
         """Isolated metrics file + isolated candidate/production dirs (no real-tree writes).
 
-        The manager's stored discovery paths are cleared so the immediate eval trigger
-        inside register_skill_from_content() cannot re-scan the REAL agents/global/skills
-        tree and clear the registry entries these tests stage manually.
+        Neutralize evaluate_candidates()'s forced discovery refresh (invalidate_cache /
+        _ensure_discovered) so the immediate gate trigger inside register_skill_from_content()
+        can't re-scan/re-parse the manually staged registry mid-test.
         """
         self.manager = fresh_manager
         self.metrics_file = tmp_path / 'skills-metrics.json'
