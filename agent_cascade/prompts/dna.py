@@ -188,6 +188,7 @@ AUTO_SKILL_REFLECTION_PROMPT = (
     'a new skill (or an update) by calling `propose_skill` with its `name` and full `skill_content`. '
     'The `name` argument is authoritative — it becomes the registered name. New skills start at '
     'rating 0.5 automatically.\n\n'
+    '### 3. Optionally leave a project memory for any non-obvious failure or gotcha worth avoiding next time (see Self-Augmentation)\n'
     '### Skill creation guide\n\n{skill_creator_body}\n')
 
 # --- Knowledge Base Templates ---
@@ -695,7 +696,7 @@ TOOL_METADATA = {
                         'requested, because rating is not a content modification.'),
         'parameters': {
             'name':
-                'REQUIRED. The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
+                'The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
             'skill_content':
                 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             'justification':
