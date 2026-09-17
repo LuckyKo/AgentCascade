@@ -674,13 +674,29 @@ class TextChatAtOAI(BaseFnCallModel):
                                     # No ID — reverse walk to match most recent entry first.
                                     # Grok sends parallel tool calls with same index=0; continuations arrive
                                     # for the newest call before older ones finish, so we need last-first matching.
+                                    # NAME-AWARE (Bug B): a delta with a NON-EMPTY tc_name only matches an
+                                    # entry with the SAME name (a continuation of that call); an empty tc_name
+                                    # is a bare-args continuation and matches the most recent entry. A fresh
+                                    # non-empty name that differs from every existing entry must NOT match —
+                                    # it starts a NEW parallel call, so leave matched=None to append below.
                                     for idx in range(len(full_tool_calls) - 1, -1, -1):
                                         if idx not in _chunk_matched and idx < _initial_len:
-                                            matched = full_tool_calls[idx]
-                                            matched_idx = idx
-                                            break
-                                    # All pre-existing entries matched this chunk: merge into last entry only
-                                    if matched is None and _initial_len > 0 and (tc_name or tc_args):
+                                            if tc_name:
+                                                existing_name = (full_tool_calls[idx].function_call.name or '')
+                                                if existing_name == tc_name:
+                                                    matched = full_tool_calls[idx]
+                                                    matched_idx = idx
+                                                    break
+                                            else:
+                                                matched = full_tool_calls[idx]
+                                                matched_idx = idx
+                                                break
+                                    # All pre-existing entries matched this chunk: merge into the last
+                                    # entry ONLY for a true continuation (empty tc_name, non-empty
+                                    # tc_args). A NON-EMPTY tc_name means a fresh call — leave matched=None
+                                    # so a new entry is appended instead of fusing two distinct parallel
+                                    # calls (Bug B).
+                                    if matched is None and _initial_len > 0 and not tc_name and tc_args:
                                         matched = full_tool_calls[-1]
                                         matched_idx = len(full_tool_calls) - 1
 

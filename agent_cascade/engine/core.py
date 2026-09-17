@@ -1563,10 +1563,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # Count is same — check if any message content changed
             for old_msg, new_msg in zip(instance._streaming_responses, last_output):
                 # FIX: Also check reasoning_content and function_call to catch
-                # all changes
+                # all changes. extra.function_id is compared too so a tool-call batch whose
+                # identity changed (e.g. an id assigned after the first delta, or a merge/
+                # re-split of parallel calls) is always detected even when name+args are equal.
                 if (getattr(old_msg, 'content', None) != getattr(new_msg, 'content', None) or
                         getattr(old_msg, 'reasoning_content', None) != getattr(new_msg, 'reasoning_content', None) or
-                        getattr(old_msg, 'function_call', None) != getattr(new_msg, 'function_call', None)):
+                        getattr(old_msg, 'function_call', None) != getattr(new_msg, 'function_call', None) or
+                        (getattr(old_msg, 'extra', None) or {}).get('function_id') !=
+                        (getattr(new_msg, 'extra', None) or {}).get('function_id')):
                     needs_update = True
                     break
 

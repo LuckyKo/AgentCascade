@@ -4346,8 +4346,17 @@ function renderSubAgentPanel(panel, agentData, name) {
   // During tool execution pauses, text doesn't grow but tokens do — without this the render skips.
   const tokPart = (typeof tokCount === 'number' && !isNaN(tokCount)) ? tokCount : '0';
 
+  // Tool-bubble signature: capture the name+arguments of EVERY tool-call bubble (not just the
+  // last message). A changed/dropped non-last parallel tool bubble must force a re-render — the
+  // old key only reflected the LAST message's function_call args, so a collapsed second bubble
+  // left the key unchanged and the panel froze after the first tool bubble. Args are short, so
+  // append the raw signature directly (no hash); this also catches same-length arg swaps.
+  const toolSig = displayMsgs.filter(m => m.function_call)
+    .map(m => (m.function_call.name || '') + ':' + (m.function_call.arguments || ''))
+    .join('|');
+
   // Include streaming state in contentKey so bubble UI (waiting animation, token count) updates even when content dims match
-  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0') + ':' + tokPart;
+  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0') + ':' + tokPart + ':' + toolSig;
 
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
     // Nothing changed — skip scrollHeight read and all DOM updates.
