@@ -101,14 +101,13 @@ class ScanSkills(BaseTool):
             for skill in sorted(all_skills, key=_sort_key):
                 source = skill.get('source', 'system')
                 version = skill.get('version', '1.0.0')
-                rating, count = skill_manager.get_rating_info(skill['name'])
-                if rating is None:
-                    rating_str = 'n/a'
-                else:
-                    rating_str = f'{rating}×{count}'
+                chars = skill.get('chars', 0)
+                rating = skill_manager.get_rating_average(skill['name'])
+                rating_str = f'{rating}' if rating is not None else 'n/a'
                 candidate_note = (f" (candidate, pending decision vs v{_incumbent_version(skill['name'])})"
                                   if skill['name'] in candidate_names else '')
-                lines.append(f"- **{skill['name']}** [{source}] v{version} (rating: {rating_str}){candidate_note}: "
+                lines.append(f"- **{skill['name']}** [{source}] v{version} "
+                             f"(rating: {rating_str}, ~{chars // 1000}.{'0' if chars % 1000 < 500 else '5'}k chars){candidate_note}: "
                              f"{skill.get('description', 'No description')}")
             return '\n'.join(lines)
 
@@ -129,12 +128,10 @@ class ScanSkills(BaseTool):
             version = meta.get('version', '1.0.0') if meta else '1.0.0'
             metrics = skill_manager.get_metrics(name)
             loads = metrics.get('total_loads', 0)
-            rating, count = skill_manager.get_rating_info(name)
-            if rating is None:
-                rating_str = 'n/a'
-            else:
-                rating_str = f'{rating}×{count}'
+            rating = skill_manager.get_rating_average(name)
+            rating_str = f'{rating}' if rating is not None else 'n/a'
+            chars = skill_manager.get_skill_chars(name)
             lines.append(f"- **{name}** [{source}] v{version} (score: {score:.2f}, loads: {loads}, "
-                         f"rating: {rating_str}): {desc}")
+                         f"rating: {rating_str}, ~{chars // 1000}.{'0' if chars % 1000 < 500 else '5'}k chars): {desc}")
 
         return '\n'.join(lines)

@@ -534,6 +534,19 @@ class SkillManager:
         with self._write_lock:
             return self._skills_registry.get(skill_name)
 
+    def get_skill_chars(self, skill_name: str) -> int:
+        """Return the body character count for a skill (0 if unavailable).
+
+        Reads from the in-memory ``_parsed_data`` cache populated during discovery.
+        No disk I/O — returns 0 if the skill is unknown or its body hasn't been parsed yet.
+        """
+        with self._write_lock:
+            entry = self._skills_registry.get(skill_name)
+            if not entry:
+                return 0
+            parsed = entry.get('_parsed_data')
+            return len(parsed.get('body', '')) if parsed else 0
+
     def get_skill_names(self) -> List[str]:
         """Return a list of all registered skill names.
 
@@ -566,18 +579,21 @@ class SkillManager:
     def get_all_metadata(self) -> List[Dict[str, Any]]:
         """Return all Tier 1 metadata (for scan_skills tool).
 
-        Returns a list of dicts with 'name' and 'description' keys, suitable
+        Returns a list of dicts with 'name', 'description', and 'chars' keys, suitable
         for display or matching. Internal fields (_priority, _parsed_data) are excluded.
         """
         with self._write_lock:
             result = []
             for name, data in self._skills_registry.items():
+                parsed = data.get('_parsed_data')
+                body_len = len(parsed.get('body', '')) if parsed else 0
                 result.append({
                     'name': data.get('name', name),
                     'description': data.get('description', ''),
                     'triggers': data.get('triggers', []),
                     'source': data.get('source', 'system'),
                     'version': data.get('version', '1.0.0'),
+                    'chars': body_len,
                 })
             return result
 

@@ -103,6 +103,9 @@ $null
 # Inactive skill archive (do not track)
 agents/global/skills/INACTIVE/
 
+# Skill candidates (pending review, not yet promoted)
+agents/global/candidates/
+
 # Skill usage metrics (runtime-generated: load counts, ratings)
 agents/global/skills-metrics.json
 

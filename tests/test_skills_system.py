@@ -1052,11 +1052,12 @@ class TestScanSkillsRatingDisplay:
         names = [l.split('**')[1] for l in lines]
         assert names == ['alpha', 'bravo', 'charlie', 'delta']
 
-        # Rating column present: rated shows avg×count, unrated shows n/a.
+        # Rating column present: rated shows avg, unrated shows n/a.
+        # Chars field is also displayed (e.g. "~0.0k chars" for empty-body test skills).
         alpha_line = next(l for l in lines if '**alpha**' in l)
-        assert '(rating: 8.0×1)' in alpha_line
+        assert 'rating: 8.0' in alpha_line
         delta_line = next(l for l in lines if '**delta**' in l)
-        assert '(rating: n/a)' in delta_line
+        assert 'rating: n/a' in delta_line
 
     def test_query_mode_appends_rating_without_reordering(self):
         """Query mode keeps matcher ordering; rating is appended to each line."""
@@ -1072,6 +1073,6 @@ class TestScanSkillsRatingDisplay:
 
         alpha_line = next(l for l in lines if '**alpha**' in l)
         assert 'score: 0.50' in alpha_line
-        assert 'rating: 9.0×1' in alpha_line
+        assert 'rating: 9.0' in alpha_line
         charlie_line = next(l for l in lines if '**charlie**' in l)
         assert 'rating: n/a' in charlie_line
