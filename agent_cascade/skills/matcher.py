@@ -9,7 +9,7 @@ Semantic embedding matching (Phase 3) can be layered on top of this class.
 
 import re
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from agent_cascade.log import logger
 
@@ -17,7 +17,8 @@ from agent_cascade.log import logger
 _TOKEN_RE = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
 
 
-def skill_frontmatter_text(name: str, description: str, triggers) -> str:
+def skill_frontmatter_text(name: str, description: str,
+                           triggers: Optional[Union[List[str], str]]) -> str:
     """Build the comparable frontmatter text for a skill.
 
     Concatenates only the fields the matcher indexes (name + description + triggers),
@@ -42,7 +43,8 @@ def skill_similarity(text_a: str, text_b: str) -> float:
     return SequenceMatcher(None, text_a, text_b).ratio()
 
 
-def find_similar_skills(proposed_name: str, proposed_description: str, proposed_triggers,
+def find_similar_skills(proposed_name: str, proposed_description: str,
+                        proposed_triggers: Optional[Union[List[str], str]],
                         existing_metadata: List[Dict], threshold: float,
                         exclude_names: Optional[List[str]] = None) -> List[Tuple[str, float]]:
     """Find existing skills whose frontmatter text is MORE similar than ``threshold``.

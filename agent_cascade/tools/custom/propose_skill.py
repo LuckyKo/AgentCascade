@@ -180,7 +180,9 @@ class ProposeSkill(BaseTool):
         # silently collide with a different one. Frontmatter fields only — cheap.
         try:
             all_metadata = skill_manager.get_all_metadata()
-        except Exception as e:  # pragma: no cover - defensive; gate must not break propose
+        except (TypeError, AttributeError) as e:  # pragma: no cover - defensive; gate must not break propose
+            # get_all_metadata() is a pure in-memory dict-building loop (no I/O), so the only
+            # realistic failures are malformed registry entries. Narrowed from bare Exception.
             logger.warning('[PROPOSE-SKILL] similarity gate skipped (get_all_metadata failed): %s', e)
             all_metadata = []
 
