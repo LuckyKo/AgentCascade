@@ -258,6 +258,8 @@ class AgentInstance:
         str] = None  # Pre-reflection task output snapshot taken when the in-loop trigger fires (read by extract_instance_output(instance=...))
     _auto_skill_orig_max_turns: Optional[
         int] = None  # Pre-trigger max_turns snapshot; run()'s exit finally restores it (R6) so the extended budget never leaks into the next run
+    _loaded_skill_names: Optional[List[str]] = field(
+        default=None)  # This run's resolved skill names, set in _create_and_run_agent so the in-loop auto-skill trigger can render them in the reflection prompt
 
     # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
     _system_prompt_initialized: bool = field(
