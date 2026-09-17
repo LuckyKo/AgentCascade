@@ -29,7 +29,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from agent_cascade.agent_instance import AgentState
 from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 from agent_cascade.settings import (AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS, AUTO_SKILL_PROMOTION_THRESHOLD,
-                                    DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE)
+                                    CANDIDATE_MIN_RATINGS, DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE)
 from agent_cascade.skills.manager import SkillManager
 from agent_cascade.skills.matcher import SkillMatcher
 from agent_cascade.skills.parser import parse_frontmatter
@@ -1854,25 +1854,28 @@ class TestCandidateFlow:
         _write_incumbent(m, name, '1.0.0', body_marker='OLD_INCUMBENT')
         prod_file = (m._production_skills_dir / name / 'SKILL.md')
 
+        # Distinct candidate version (2.0.0) so its rating history does not share the
+        # incumbent's ratings_by_version['1.0.0'] key — otherwise the two versions collide
+        # and the gate compares a polluted baseline against itself.
         content = _make_skill_content(
             name=name,
             description='Better candidate version for promotion test',
             triggers=['promote', 'better'],
             generated_from_task='test promote on better average',
-        )
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
         success, _ = m.register_skill_from_content(content, task_text='test promote on better average')
         assert success
         cand_version = m.get_skill_metadata(name)['version']
 
-        # Incumbent avg 5.0 (2 ratings) vs candidate avg 8.5 (3 ratings) → promote.
-        for r in (4.0, 6.0):
+        # Incumbent avg 5.0 (2 ratings) vs candidate avg 9.2 (CANDIDATE_MIN_RATINGS ratings) → promote.
+        for r in (9.0, 9.0, 9.0, 9.0, 10.0):
             m.record_rating(name, r)  # these land on the candidate version key (it serves)
         # Seed the incumbent's own history directly (pre-candidacy era).
         with m._metrics_lock:
             m._metrics[name]['ratings_by_version']['1.0.0'] = {'count': 2, 'sum': 10.0, 'latest': 6.0}
 
-        # Not yet at the gate threshold (3 ratings on candidate key) — add one more.
-        m.record_rating(name, 8.5)
+        # Candidate now has exactly CANDIDATE_MIN_RATINGS ratings on its own key → gate crossed.
+        assert m._version_rating_avg(name, cand_version)[1] == CANDIDATE_MIN_RATINGS
         m.evaluate_candidates()
 
         from agent_cascade.skills.manager import _PRIORITY_SYSTEM
@@ -1883,8 +1886,8 @@ class TestCandidateFlow:
         assert not (m._candidates_dir / name).exists(), 'candidate dir must be deleted on promote'
         # Metrics transfer: aggregate mirrors the winner's history; per-version intact.
         entry = m.get_metrics(name)
-        assert entry['ratings']['count'] == 3
-        assert abs(entry['ratings']['sum'] - (4.0 + 6.0 + 8.5)) < 1e-9
+        assert entry['ratings']['count'] == CANDIDATE_MIN_RATINGS
+        assert abs(entry['ratings']['sum'] - (9.0 * 4 + 10.0)) < 1e-9
         assert '1.0.0' in entry['ratings_by_version'] and cand_version in entry['ratings_by_version']
 
     def test_promote_on_equal(self, fresh_manager):
@@ -1910,7 +1913,8 @@ class TestCandidateFlow:
         with m._metrics_lock:
             entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
             entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 14.0, 'latest': 8.0}
-        for r in (6.0, 7.0, 8.0):
+        # Candidate: exactly CANDIDATE_MIN_RATINGS ratings averaging 7.0 (== incumbent avg).
+        for r in (6.0, 7.0, 8.0) + (7.0,) * (CANDIDATE_MIN_RATINGS - 3):
             m.record_rating(name, r)
         m.evaluate_candidates()
 
@@ -1937,11 +1941,12 @@ class TestCandidateFlow:
         assert success
         cand_version = m.get_skill_metadata(name)['version']
 
-        # Incumbent avg 8.0 (2) vs candidate avg 5.0 (3) → discard.
+        # Incumbent avg 8.0 (2) vs candidate avg 5.0 (CANDIDATE_MIN_RATINGS) → discard.
         with m._metrics_lock:
             entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
             entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 16.0, 'latest': 9.0}
-        for r in (4.0, 5.0, 6.0):
+        # Candidate: exactly CANDIDATE_MIN_RATINGS ratings averaging 5.0 (< incumbent avg).
+        for r in (4.0, 5.0, 6.0) + (5.0,) * (CANDIDATE_MIN_RATINGS - 3):
             m.record_rating(name, r)
         m.evaluate_candidates()
 
@@ -1962,7 +1967,6 @@ class TestCandidateFlow:
 
     def test_gate_waits_for_min_ratings(self, fresh_manager):
         """Below CANDIDATE_MIN_RATINGS the candidate stays pending (no decision)."""
-        from agent_cascade.settings import CANDIDATE_MIN_RATINGS
         m = self.manager
         name = f"test-cand-gate-wait-{_uid()}"
         _write_incumbent(m, name, '1.0.0')
@@ -1978,16 +1982,15 @@ class TestCandidateFlow:
         success, _ = m.register_skill_from_content(content, task_text='test gate waits for min ratings')
         assert success
 
-        # Only 2 ratings (below the default threshold of 3) — even a worse candidate survives.
+        # Only CANDIDATE_MIN_RATINGS - 1 ratings (below the gate) — even a worse candidate survives.
         with m._metrics_lock:
             entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
             entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 10.0, 'latest': 10.0}
-        for r in (1.0, 2.0):
+        for r in (1.0, 2.0) + (1.0,) * (CANDIDATE_MIN_RATINGS - 3):
             m.record_rating(name, r)
         m.evaluate_candidates()
 
         assert m.get_candidate_names() == [name], 'candidate must remain pending below the rating gate'
-        assert CANDIDATE_MIN_RATINGS == 3
 
     def test_metrics_transfer_keeps_total_loads(self, fresh_manager):
         """On promote, total_loads (cumulative across versions) is kept as-is."""
@@ -2010,13 +2013,14 @@ class TestCandidateFlow:
             entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
             entry['total_loads'] = 42
             entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 5.0, 'latest': 5.0}
-        for r in (9.0, 9.0, 9.0):
+        # Candidate: exactly CANDIDATE_MIN_RATINGS ratings (all 9.0) → gate crossed, promotes.
+        for r in (9.0,) * CANDIDATE_MIN_RATINGS:
             m.record_rating(name, r)
         m.evaluate_candidates()
 
         entry = m.get_metrics(name)
         assert entry['total_loads'] == 42, 'total_loads must be kept across the gate'
-        assert entry['ratings']['count'] == 3 and abs(entry['ratings']['sum'] - 27.0) < 1e-9
+        assert entry['ratings']['count'] == CANDIDATE_MIN_RATINGS and abs(entry['ratings']['sum'] - 9.0 * CANDIDATE_MIN_RATINGS) < 1e-9
 
     # -- Legacy (schema 1.1) incumbent handling --------------------------------
 
@@ -2085,8 +2089,8 @@ class TestCandidateFlow:
         success, _ = m.register_skill_from_content(content, task_text='test legacy discard revert exactness')
         assert success
 
-        # Candidate is worse (avg 4.0×3) than incumbent (avg 7.0×2) → discard.
-        for r in (3.0, 4.0, 5.0):
+        # Candidate is worse (avg 4.0 × CANDIDATE_MIN_RATINGS) than incumbent (avg 7.0×2) → discard.
+        for r in (3.0, 4.0, 5.0) + (4.0,) * (CANDIDATE_MIN_RATINGS - 3):
             m.record_rating(name, r)
         m.evaluate_candidates()
 
@@ -2172,8 +2176,8 @@ class TestCandidateFlow:
         success, _ = m.register_skill_from_content(content, task_text='test disabled incumbent pending')
         assert success
 
-        # Only 2 ratings (below the gate) + disabled incumbent → must survive evaluation.
-        for r in (9.0, 9.0):
+        # Only CANDIDATE_MIN_RATINGS - 1 ratings (below the gate) + disabled incumbent → must survive.
+        for r in (9.0, 9.0) + (9.0,) * (CANDIDATE_MIN_RATINGS - 3):
             m.record_rating(name, r)
         m._disabled_names.add(name)  # simulate AGENT_CASCADE_SKILLS_DISABLED membership
         m.evaluate_candidates()
@@ -2245,7 +2249,8 @@ class TestCandidateFlow:
         with m._metrics_lock:
             entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
             entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 5.0, 'latest': 5.0}
-        for r in (9.0, 9.0, 9.0):
+        # Candidate: exactly CANDIDATE_MIN_RATINGS ratings (all 9.0 > incumbent 5.0) → first eval promotes.
+        for r in (9.0,) * CANDIDATE_MIN_RATINGS:
             m.record_rating(name, r)
 
         m.evaluate_candidates()
@@ -2271,7 +2276,8 @@ class TestCandidateFlow:
         with m._metrics_lock:
             entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
             entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 1, 'sum': 10.0, 'latest': 10.0}
-        for r in (1.0, 2.0, 3.0):
+        # Candidate: exactly CANDIDATE_MIN_RATINGS ratings averaging 2.0 (< incumbent 10.0) → first eval discards.
+        for r in (1.0, 2.0, 3.0) + (2.0,) * (CANDIDATE_MIN_RATINGS - 3):
             m.record_rating(name, r)
 
         m.evaluate_candidates()
