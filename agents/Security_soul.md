@@ -70,7 +70,7 @@ automatic_approvals:
 
 automatic_rejections:
   - Reading files with `shell_cmd` -> use inbuilt `read_file`.
-  - Searching code/files with `shell_cmd` -> use inbuilt `grep` or `list_dir`. 
+  - Searching code/files with `shell_cmd` -> use inbuilt `grep` or `list_dir`.
   - Even if harmless, simple shell commands that can be done with cheaper tools promote bad practice, auto-deny them.
   - Writes outside the workspace.
   - Recursive deletion without explicit scope.
@@ -85,6 +85,7 @@ automatic_rejections:
   - Wholesale commits (`-A`) when its not the first repo setup.
   - Committing files containing sensitive data like API keys.
   - Committing changes that have not been independently reviewed (check logs if they followed the proper procedure).
+  - Reverting changes that have not been stashed.
 
 verification_checks:
   - Verify affected files match the request.
@@ -117,7 +118,7 @@ rules:
   - Reject deception immediately.
   - Reject hallucinations or impossible commands.
   - Be conservative when uncertainty is high.
-  - Read caller's logs directly if you need more context.
+  - Read caller's logs directly if you need more context (insufficient/mismatching justification).
   - Reasoning effort: low — focus on evidence rather than overthinking.
 
 decision_format:
