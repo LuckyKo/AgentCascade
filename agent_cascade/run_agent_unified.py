@@ -22,7 +22,7 @@ import traceback
 from typing import Any, Dict, Optional
 
 from agent_cascade.error_reporting import TB_DEDUP, format_crash
-from agent_cascade.llm.schema import ASSISTANT, FUNCTION, ROLE, USER, Message
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, ROLE, Message
 from agent_cascade.log import logger
 
 from .agent_pool import AgentPool
@@ -125,10 +125,7 @@ def run_agent_thread_unified(
         # WebSocket connections each spawn their own execution thread.
         exec_state = {'last_resp_len': 0}
 
-        # Track cumulative tool calls for auto-skill trigger
-        total_tool_calls = 0
-
-        # Shared stop-check helper (used by main loop and auto-skill)
+        # Shared stop-check helper (used by the main loop)
         def is_stopped():
             stopped = (pool.stopped or current_generation != pool._run_generation or
                        instance_name in pool._halted_instances or pool.is_instance_terminated(instance_name))
@@ -207,43 +204,6 @@ def run_agent_thread_unified(
             )
 
             tick_num += 1
-
-            # Track cumulative tool calls
-            if turn_output:
-                total_tool_calls += sum(
-                    1 for m in turn_output
-                    if (m.get('role', '') == FUNCTION if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION))
-
-        inst = pool.get_instance(instance_name)
-        skill_manager = getattr(pool, 'skill_manager', None)
-
-        if inst and skill_manager:
-            # Extract task_text from first user message for auto-skill proposal context
-            task_text = ''
-            if inst.conversation:
-                for msg in inst.conversation:
-                    role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                    if role == USER:
-                        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                        if content:
-                            task_text = content[:500]
-                            break
-
-            # Unified auto-skill gating: both toggles must be ON, using pool settings as single source of truth
-            from agent_cascade.auto_skill_helpers import run_auto_skill_proposal
-            run_auto_skill_proposal(
-                pool=pool,
-                skill_manager=skill_manager,
-                inst=inst,
-                task_text=task_text,
-                instance_name=instance_name,
-                total_tool_calls=total_tool_calls,
-                append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
-                rollback_fn=lambda pop_count: pool._rollback_instance(instance_name, pop_count=pop_count),
-                is_stopped=is_stopped,
-                engine_run_generator=lambda: ExecutionEngine(pool).run(inst),
-                turns_effectuated=getattr(inst, '_current_turn', 0),
-            )
 
         # ── Final state broadcast ────────────────────────────────────────
         final_state = build_state_from_pool(

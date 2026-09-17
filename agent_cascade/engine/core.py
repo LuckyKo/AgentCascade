@@ -34,13 +34,13 @@ from agent_cascade.log import logger
 from agent_cascade.operation_manager import clear_current_instance_name, set_current_instance_name
 from agent_cascade.retry_policy import RetryPolicy, calculate_backoff, classify_error
 from agent_cascade.settings import (AGENT_SLEEPING_MAX_WAIT_SECONDS, AUTO_SKILL_ENABLED, AUTO_SKILL_EXTRA_TURNS,
-                                    AUTO_SKILL_MODE_NONE, CHARS_PER_TOKEN_ESTIMATE, COMPRESSION_DEFAULT_FRACTION,
-                                    COMPRESSION_RECOUNT_THRESHOLD, DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_INPUT_TOKENS,
-                                    DEFAULT_MAX_TURNS, DEFAULT_TOOL_RESULT_MAX_CHARS, LLM_MAX_RETRIES,
-                                    LLM_RETRY_BASE_DELAY, LLM_RETRY_MAX_BACKOFF, LOAD_SKILL_AUTO, LOAD_SKILL_NONE,
-                                    MAX_AUTO_CONTINUE_ATTEMPTS, REASONING_ONLY_CONTINUE_ATTEMPTS,
-                                    SOFT_CONTINUE_NUDGE_ENABLED, STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
-                                    TOKEN_ESTIMATE_CHAR_DIVISOR)
+                                    AUTO_SKILL_MIN_TURNS, AUTO_SKILL_MODE_NONE, CHARS_PER_TOKEN_ESTIMATE,
+                                    COMPRESSION_DEFAULT_FRACTION, COMPRESSION_RECOUNT_THRESHOLD,
+                                    DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_INPUT_TOKENS, DEFAULT_MAX_TURNS,
+                                    DEFAULT_TOOL_RESULT_MAX_CHARS, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY,
+                                    LLM_RETRY_MAX_BACKOFF, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_CONTINUE_ATTEMPTS,
+                                    REASONING_ONLY_CONTINUE_ATTEMPTS, SOFT_CONTINUE_NUDGE_ENABLED,
+                                    STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS, TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
 from agent_cascade.stream_publisher import StreamPublisher
 from agent_cascade.tool_dispatcher import ToolDispatcher
@@ -53,6 +53,16 @@ from agent_cascade.utils.utils import extract_text_from_message, get_message_sta
 SLEEPING_LOOP_BACKOFF = 0.1  # Seconds to sleep when re-entering loop from SLEEPING state
 _COMPRESSION_WAIT_TIMEOUT = 1.0  # Seconds to wait per iteration when suspended by compression
 REACQUIRE_TIMEOUT = 30.0  # Bounded FAST re-acquire window (post-yield fast path); on timeout the instance re-enters FIFO at tail (unbounded)
+
+
+def _extract_instance_output(*args, **kwargs):
+    """Lazy wrapper around compression.helpers.extract_instance_output.
+
+    Used only by the auto-skill in-loop trigger's snapshot fallback (§2.3 step 2).
+    Imported inside the call so module import time is unchanged.
+    """
+    from agent_cascade.compression.helpers import extract_instance_output
+    return extract_instance_output(*args, **kwargs)
 
 
 def _is_explicit_skill_list(load_skill_value) -> bool:
@@ -218,6 +228,101 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             with instance._compression_lock:
                 instance.append_message(msg)
                 log_inst.log_message(msg)
+
+    def _try_auto_skill_extension(self, instance, messages, llm_messages, loaded_skill_names=None) -> bool:
+        """In-loop auto-skill trigger (replaces the post-run two-run helper).
+
+        Called from run() at the budget-exhaustion point (turns_available == 1),
+        BEFORE the final-turn tool-disable decision. When all gates pass it:
+          1. snapshots the pre-reflection task output onto the instance,
+          2. injects the reflection prompt into BOTH instance.conversation
+             (via _append_and_log) and the loop-local working sets (R3),
+          3. sets the one-shot _auto_skill_proposed flag.
+
+        Returns True on a successful trigger (caller then resets the loop budget);
+        False otherwise. Best-effort: ANY exception is logged and returns False —
+        a gate failure must never break the run.
+        """
+        try:
+            # ── Gates (fast path, no locks) ────────────────────────────────
+            skill_manager = getattr(self.pool, 'skill_manager', None)
+            if skill_manager is None:
+                return False
+            settings = getattr(self.pool, 'settings', None)
+            if not getattr(settings, 'auto_skill_enabled', AUTO_SKILL_ENABLED):
+                return False
+            if getattr(settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE) == LOAD_SKILL_NONE:
+                return False
+            if instance._current_turn <= AUTO_SKILL_MIN_TURNS:
+                return False
+
+            # ── One-shot flag + snapshot capture (under the compression lock) ─
+            with instance._compression_lock:
+                if getattr(instance, '_auto_skill_proposed', False):
+                    return False
+
+                # Find the last ASSISTANT message with text content — same
+                # dict/Message branching as the turn-limit notice in run() — and
+                # extract its text. If none exists, fall back to the current
+                # result on the pre-reflection conversation (may be a FUNCTION-role
+                # warning or "no text output" string; that is the honest state of
+                # this run). Never leave the attribute unset.
+                snapshot = None
+                for msg in reversed(instance.conversation):
+                    msg_role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                    if msg_role != ASSISTANT:
+                        continue
+                    has_text = False
+                    if isinstance(msg, dict):
+                        content = msg.get('content', '')
+                        if isinstance(content, list):
+                            has_text = any(isinstance(item, dict) and item.get('type') == 'text' for item in content)
+                        elif isinstance(content, str):
+                            has_text = bool(content)
+                    else:
+                        content = getattr(msg, 'content', '')
+                        if isinstance(content, list):
+                            has_text = any(isinstance(item, dict) and item.get('type') == 'text' for item in content)
+                        elif isinstance(content, str):
+                            has_text = bool(content)
+                    if has_text:
+                        snapshot = extract_text_from_message(msg, add_upload_info=False)
+                        break
+                if snapshot is None:
+                    snapshot = _extract_instance_output(list(instance.conversation),
+                                                        instance.instance_name,
+                                                        pool=self.pool)
+
+                instance._auto_skill_task_output = snapshot
+
+            # ── Qualification + prompt build (pure; no conversation/flag mutation) ─
+            prompt = skill_manager.auto_skill_qualifies(instance,
+                                                        instance._current_turn,
+                                                        loaded_skill_names=loaded_skill_names)
+            if not prompt:
+                return False
+
+            # ── Inject via the existing path (R3: all targets, same object) ────
+            # Mirrors _inject_soft_continue_nudge's house pattern: conversation +
+            # JSONL log atomically, then the loop-local working sets. `messages`
+            # (full working set) and llm_messages are separate list objects here —
+            # run() builds them from fresh copies in _setup_turn — so each needs
+            # its own append for the reflection prompt to reach both views.
+            user_msg = self._make_user_message(prompt)
+            with instance._compression_lock:
+                self._append_and_log(instance, user_msg, lock_held=True)
+                messages.append(user_msg)
+                llm_messages.append(user_msg)
+
+            with instance._compression_lock:
+                instance._auto_skill_proposed = True
+
+            logger.info('[AUTO-SKILL] In-loop trigger fired for %s (turns=%d)', instance.instance_name,
+                        instance._current_turn)
+            return True
+        except Exception as e:
+            logger.warning('[AUTO-SKILL] In-loop trigger failed for %s: %s', getattr(instance, 'instance_name', '?'), e)
+            return False
 
     def _append_and_log_batch(
             self,
@@ -629,30 +734,59 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     self._append_and_log(instance, warn_user)
                     llm_messages.append(warn_user)
                 if turns_available == 1:
-                    # Final turn warning: insert as a separate user message
-                    # (not inline) so it's treated as a distinct conversational
-                    # turn, not appended to the last message.
-                    # Muted for max_turns=1 agents: this is their only turn and
-                    # tools are being disabled below regardless, so the warning
-                    # adds no information — just noise in the transcript.
-                    if max_turns != 1:
-                        final_msg = self._make_user_message(
-                            f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
-                            f"Wrap up and deliver your results now.]")
-                        self._append_and_log(instance, final_msg)
-                        llm_messages.append(final_msg)
+                    # ── Auto-skill in-loop trigger (replaces post-run helper) ──
+                    # Qualification runs BEFORE the tool-disable decision. When it
+                    # fires, the ENTIRE final-turn block below is skipped: no warning
+                    # message and no disabled_tools override — tools stay enabled so
+                    # the request prefix is unchanged (KV-cache friendly). The budget
+                    # reset below grants AUTO_SKILL_EXTRA_TURNS fresh turns for the
+                    # reflection; see _try_auto_skill_extension for gates.
+                    _auto_skill_fired = self._try_auto_skill_extension(
+                        instance,
+                        messages,
+                        llm_messages,
+                        loaded_skill_names=getattr(instance, '_loaded_skill_names', None),
+                    )
 
-                    # Disable ALL tools on the last turn so agent is forced to
-                    # return a final answer
-                    template = self.pool.get_template(instance.agent_class)
-                    if template and hasattr(template, 'function_map'):
-                        all_tools = list(template.function_map.keys())
-                        if all_tools:
-                            if not hasattr(instance,
-                                           '_generate_cfg_override') or instance._generate_cfg_override is None:
-                                instance._generate_cfg_override = {}
-                            instance._generate_cfg_override['disabled_tools'] = all_tools
-                            final_turn_tools_disabled = True
+                    if not _auto_skill_fired:
+                        # Final turn warning: insert as a separate user message
+                        # (not inline) so it's treated as a distinct conversational
+                        # turn, not appended to the last message.
+                        # Muted for max_turns=1 agents: this is their only turn and
+                        # tools are being disabled below regardless, so the warning
+                        # adds no information — just noise in the transcript.
+                        if max_turns != 1:
+                            final_msg = self._make_user_message(
+                                f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
+                                f"Wrap up and deliver your results now.]")
+                            self._append_and_log(instance, final_msg)
+                            llm_messages.append(final_msg)
+
+                        # Disable ALL tools on the last turn so agent is forced to
+                        # return a final answer
+                        template = self.pool.get_template(instance.agent_class)
+                        if template and hasattr(template, 'function_map'):
+                            all_tools = list(template.function_map.keys())
+                            if all_tools:
+                                if not hasattr(instance,
+                                               '_generate_cfg_override') or instance._generate_cfg_override is None:
+                                    instance._generate_cfg_override = {}
+                                instance._generate_cfg_override['disabled_tools'] = all_tools
+                                final_turn_tools_disabled = True
+
+                    # ── Budget reset on trigger (F1; exact form verified in plan §2.1) ──
+                    # The loop runs on the LOCALS max_turns/turns_available and L573
+                    # recomputes instance._current_turn from them each iteration, so
+                    # BOTH must be reset — mutating only inst.max_turns would have no
+                    # effect on loop continuation. turns_available gets +1 because
+                    # _consume_turn decrements BEFORE the next loop check. The
+                    # instance.max_turns assignment is belt-and-braces for post-run
+                    # readers; run()'s exit finally restores it (R6).
+                    if _auto_skill_fired:
+                        instance._auto_skill_orig_max_turns = instance.max_turns
+                        instance.max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
+                        max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
+                        turns_available = AUTO_SKILL_EXTRA_TURNS + 1
 
                 turns_available = self._consume_turn(instance, turns_available)
 
@@ -844,6 +978,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         finally:
             # C4 fix: Always clean up — transition to IDLE regardless of how we
             # exit
+
+            # R6 (locked): restore the pre-trigger turn budget so a triggered run's
+            # extended max_turns does NOT leak into this instance's NEXT run. The
+            # snapshot is taken at trigger time (see _try_auto_skill_extension block);
+            # when no trigger fired the attribute is absent and nothing happens.
+            if getattr(instance, '_auto_skill_orig_max_turns', None) is not None:
+                instance.max_turns = instance._auto_skill_orig_max_turns
 
             inst_name = instance.instance_name
             suspended_this_run = getattr(instance, '_compression_suspended_at', 0.0) > 0.0
@@ -3038,6 +3179,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # loaded_skills stays empty → nothing is injected.
             _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
 
+            # Record this run's resolved skill names on the instance so the
+            # in-loop auto-skill trigger can render them in the reflection prompt
+            # (plan §2.3). Recall path leaves it unset → prompt renders "(none)".
+            inst._loaded_skill_names = [name for name, _body in loaded_skills] if loaded_skills else None
+
         # Write augmented context (with advisor notes) into a COPY of args so
         # build_task_message picks it up without mutating the caller's dict.
         # Only on fresh instances — recall preserves the original task message verbatim.
@@ -3101,9 +3247,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     q.clear()
                 return inst, []
 
-            # Track cumulative tool calls across all turns
-            total_tool_calls = 0
-
             # Bind the generator so we can close it deterministically on early
             # break (same pattern as core.py:691-692). Without close(), a break
             # on terminal stop leaves run() suspended before its exit finally,
@@ -3133,9 +3276,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         final_resp, is_streaming_tick = resp
                     else:
                         final_resp, is_streaming_tick = resp, False
-
-                    # Count tool calls from FUNCTION role messages
-                    total_tool_calls += sum(1 for m in final_resp if msg_field(m, 'role', '') == FUNCTION)
 
                     # Item 12: Throttled sub-agent WebUI state update (every 5
                     # turns) — Fix
@@ -3187,23 +3327,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # regardless. See: .agent_lessons/lessons_msg_count_bug.md for
             # detailed analysis.
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
-
-            # Unified auto-skill gating: both toggles must be ON, using pool settings as single source of truth
-            from agent_cascade.auto_skill_helpers import run_auto_skill_proposal
-            created_skills = run_auto_skill_proposal(
-                pool=self.pool,
-                skill_manager=skill_manager,
-                inst=inst,
-                task_text=task_text,
-                instance_name=instance_name,
-                total_tool_calls=total_tool_calls,
-                append_fn=lambda msg: self._append_and_log(inst, self._make_user_message(msg)),
-                rollback_fn=lambda pop_count: self.pool._rollback_instance(instance_name, pop_count=pop_count),
-                is_stopped=lambda: self._is_terminal_stop(instance_name),
-                engine_run_generator=lambda: self.run(inst),
-                turns_effectuated=getattr(inst, '_current_turn', 0),
-                loaded_skill_names=[name for name, _body in loaded_skills],
-            )
 
             # Item 12: Always emit final sub-agent state after loop completes
             # (Fix

@@ -1,14 +1,7 @@
 repos:
-  - repo: https://github.com/PyCQA/isort.git
-    rev: 5.11.5
-    hooks:
-      - id: isort
-        args: ["--line-length", "120"]
-  - repo: https://github.com/pre-commit/mirrors-yapf.git
-    rev: v0.32.0
-    hooks:
-      - id: yapf
-        args: ["--style", "{based_on_style: google, column_limit: 120}", "-i"]
+  # NOTE: isort + yapf were removed — the two formatters produce conflicting
+  # import layouts (isort --line-length 120 vs yapf google/column_limit 120),
+  # so the hooks rewrote the same file on every commit and never converged.
   - repo: https://github.com/pre-commit/pre-commit-hooks.git
     rev: v4.3.0
     hooks:

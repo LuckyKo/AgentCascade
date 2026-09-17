@@ -21,12 +21,11 @@ from agent_cascade.settings import (
     AGENT_IDLE_CHECK_INTERVAL, AGENT_IDLE_TIMEOUT, AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL, CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
     CI_EXECUTION_TIMEOUT, CI_STALE_CONTAINER_TTL, CI_WATCHDOG_TIMEOUT, COMPRESSION_FORCE_THRESHOLD,
-    COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT,
-    COMPRESSION_WARNING_THRESHOLD, DEFAULT_AUTO_SKILL_MODE,
-    DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS, DEFAULT_COMPRESSION_MAX_ATTEMPTS,
-    DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT,
-    STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED,
-    TOOL_LOOP_SIM_THRESHOLD)
+    COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
+    DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
+    DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
+    DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT, STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
+    SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD)
 
 
 class AgentState(Enum):
@@ -253,8 +252,12 @@ class AgentInstance:
         default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
 
     # ── Auto-Skill Tracking ────────────────────────────────────────────────
-    _auto_skill_proposed: bool = field(default=False)  # Tracks if auto-skill prompt was injected for this instance
-    _auto_skill_proposed_count: int = field(default=0)  # Number of times auto-skill was proposed in this session
+    _auto_skill_proposed: bool = field(
+        default=False)  # Tracks if the in-loop auto-skill trigger fired for this instance (one-shot, never reset)
+    _auto_skill_task_output: Optional[
+        str] = None  # Pre-reflection task output snapshot taken when the in-loop trigger fires (read by extract_instance_output(instance=...))
+    _auto_skill_orig_max_turns: Optional[
+        int] = None  # Pre-trigger max_turns snapshot; run()'s exit finally restores it (R6) so the extended budget never leaks into the next run
 
     # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
     _system_prompt_initialized: bool = field(

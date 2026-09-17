@@ -25,10 +25,9 @@ except ImportError:
 
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
-from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_MIN_TURNS,
-                                    CANDIDATE_EVAL_INTERVAL_SECONDS, CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO,
-                                    LOAD_SKILL_NONE, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
-                                    SKILL_RATING_INITIAL, SKILLS_DISABLED)
+from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURNS, CANDIDATE_EVAL_INTERVAL_SECONDS,
+                                    CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, SKILL_CACHE_TTL_SECONDS,
+                                    SKILL_MATCH_THRESHOLD, SKILL_RATING_INITIAL, SKILLS_DISABLED)
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher
@@ -151,10 +150,11 @@ def _build_auto_skill_reflection_prompt(loaded_skill_names: Optional[List[str]],
         loaded_list = '\n'.join(lines)
     else:
         loaded_list = '(none)'
-    return AUTO_SKILL_REFLECTION_PROMPT.format(
-        loaded_skills=loaded_list,
-        skill_creator_body=skill_creator_body,
-    )
+    # Two-pass replacement instead of str.format(): the embedded skill-creator body
+    # is arbitrary SKILL.md text and may contain literal braces (code blocks, JSON
+    # examples), which would raise KeyError/ValueError inside format().
+    return AUTO_SKILL_REFLECTION_PROMPT.replace('{loaded_skills}',
+                                                loaded_list).replace('{skill_creator_body}', skill_creator_body)
 
 
 class SkillManager:
@@ -1413,147 +1413,46 @@ class SkillManager:
 
     # ── Auto-skill trigger hook ──────────────────────────────────────────────
 
-    def check_and_inject_auto_skill_prompt(
+    def auto_skill_qualifies(
         self,
         inst,
-        total_tool_calls: int,
-        task_text: str,
-        instance_name: str,
-        append_fn,
-        turns_effectuated: int = 0,
+        turns_effectuated: int,
         loaded_skill_names: Optional[List[str]] = None,
-    ) -> bool:
-        """Check trigger conditions and inject the auto-skill reflection prompt.
+    ) -> Optional[str]:
+        """Pure qualification check + prompt builder for the in-loop auto-skill trigger.
 
-        The gate fires when ``turns_effectuated > AUTO_SKILL_MIN_TURNS`` — independent of loaded
-        skills and of any top-skill match score. (The legacy tool-call-count and match-score gates
-        were replaced by this turns-based gate.)
+        Returns the built reflection prompt string when all gates pass, else ``None``.
+        This method has NO side effects: it does not append anything to the conversation
+        and does not set any flag — the engine loop (core.py) owns prompt injection
+        (via ``_append_and_log`` + ``llm_messages.append``) and sets the one-shot
+        ``inst._auto_skill_proposed`` flag after a successful trigger.
 
-        Returns True if the prompt was injected (caller should run extra turns), else False.
+        Gates (all must pass):
+          - ``not inst._auto_skill_proposed`` (one-shot; never reset).
+          - ``turns_effectuated > AUTO_SKILL_MIN_TURNS`` (strictly greater — the turns-based
+            gate that replaced the legacy tool-call-count and match-score gates).
+          - skill-creator is loadable from the registry.
 
         Args:
-            inst: The agent instance.
-            total_tool_calls: Cumulative tool call count (logging only — no longer a gate).
-            task_text: Task description text (retained for context/logging).
-            instance_name: Human-readable instance label for logging.
-            append_fn: Callable(msg) -> None to append a user message.
+            inst: The agent instance (flag read under its compression lock).
             turns_effectuated: Number of turns effectuated on this run (inst._current_turn).
             loaded_skill_names: Names of skills loaded for this run (for the prompt's list).
 
         Returns:
-            True if prompt was injected, False otherwise.
+            The reflection prompt string when qualified, else None.
         """
         with inst._compression_lock:
             if getattr(inst, '_auto_skill_proposed', False):
-                return False
-            proposed_count = getattr(inst, '_auto_skill_proposed_count', 0)
-            if proposed_count >= AUTO_SKILL_MAX_PER_SESSION:
-                return False
-
-        logger.debug('[AUTO-SKILL] Check: turns=%d (min=%d), tool_count=%d', turns_effectuated, AUTO_SKILL_MIN_TURNS,
-                     total_tool_calls)
+                return None
 
         # Gate: strictly greater than the configured turn threshold. Independent of loaded skills
         # and match score (the old tool-call + top-match conditions are intentionally removed).
         if turns_effectuated <= AUTO_SKILL_MIN_TURNS:
-            return False
+            return None
 
-        creator = self.load_full_instructions('skill-creator')
+        creator = self.load_full_instructions('skill-creator', count_load=False)
         if not creator:
-            return False
+            return None
 
-        logger.info('[AUTO-SKILL] Trigger fired for %s (turns=%d, tools=%d)', instance_name, turns_effectuated,
-                    total_tool_calls)
-        prompt = _build_auto_skill_reflection_prompt(loaded_skill_names, creator, self)
-
-        append_fn(prompt)
-        with inst._compression_lock:
-            inst._auto_skill_proposed = True
-        return True
-
-    def finalize_auto_skill(
-        self,
-        inst,
-        instance_name: str,
-        snapshot_length: int,
-        rollback_fn,
-        check_skill_created_fn,
-    ) -> List[str]:
-        """Rollback conversation and discover created skills after auto-skill turns.
-
-        Args:
-            inst: The agent instance.
-            instance_name: Human-readable instance label for logging.
-            snapshot_length: Conversation length before extra turns.
-            rollback_fn: Callable(pop_count) -> None to remove N messages.
-            check_skill_created_fn: Callable() -> List[str] returning newly
-                                    registered skill names.
-
-        Returns:
-            List of skill names created during the reflection turns.
-        """
-        # Compute pop_count from delta
-        rollback_ok = True
-        if snapshot_length >= 0:
-            try:
-                # Read current_len under lock
-                with inst._compression_lock:
-                    current_len = len(inst.conversation)
-                pop_count = max(0, current_len - snapshot_length)
-                if pop_count > 0:
-                    rollback_fn(pop_count)
-                    # Verify rollback under lock
-                    with inst._compression_lock:
-                        actual_len = len(inst.conversation)
-                        state_name = None
-                        current_state = getattr(inst, 'state', None)
-                        if current_state is not None:
-                            state_name = getattr(current_state, 'name', None)
-                        if state_name in ('SLEEPING', 'COMPLETING'):
-                            from agent_cascade.agent_instance import AgentState
-                            inst._transition(AgentState.IDLE)
-                            logger.debug('[AUTO-SKILL] State reset to IDLE for %s', instance_name)
-                    if actual_len > snapshot_length + 1:
-                        logger.warning('[AUTO-SKILL] Rollback verification failed for %s: '
-                                       'expected <=%d, got %d', instance_name, snapshot_length, actual_len)
-                        rollback_ok = False
-                    else:
-                        logger.debug('[AUTO-SKILL] Rolled back %d messages for %s', pop_count, instance_name)
-                elif current_len < snapshot_length:
-                    logger.debug('[AUTO-SKILL] Compression removed %d messages during extra turns for %s',
-                                 snapshot_length - current_len, instance_name)
-            except Exception as e:
-                logger.warning('[AUTO-SKILL] Rollback error for %s: %s', instance_name, e)
-                rollback_ok = False
-
-        # Discover which skills were created (only if rollback succeeded)
-        created_skills = []
-        if rollback_ok and check_skill_created_fn is not None:
-            try:
-                created_skills = check_skill_created_fn()
-            except Exception as e:
-                logger.debug('[AUTO-SKILL] Skill check error for %s: %s', instance_name, e)
-
-        if created_skills:
-            with inst._compression_lock:
-                inst._auto_skill_proposed = True
-                inst._auto_skill_proposed_count = getattr(inst, '_auto_skill_proposed_count', 0) + 1
-            logger.info('[AUTO-SKILL] Created skills: %s', created_skills)
-
-        return created_skills
-
-
-def inject_skill_notice(inst, created_skills: List[str]) -> None:
-    """Inject auto-skill notice into the last assistant message.
-
-    Shared helper to eliminate duplication between execution_engine and
-    run_agent_unified callers.
-    """
-    if not created_skills or not inst.conversation:
-        return
-    notice = f"\n\n[Auto-skill created: {', '.join(created_skills)}]"
-    last = inst.conversation[-1]
-    if isinstance(last, dict):
-        last['content'] = str(last.get('content', '')) + notice
-    else:
-        last.content = str(getattr(last, 'content', '')) + notice
+        logger.debug('[AUTO-SKILL] Qualification passed: turns=%d (min=%d)', turns_effectuated, AUTO_SKILL_MIN_TURNS)
+        return _build_auto_skill_reflection_prompt(loaded_skill_names, creator, self)

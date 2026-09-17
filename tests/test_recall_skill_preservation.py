@@ -85,11 +85,11 @@ def _run(engine, load_skill):
     if load_skill is not None:
         args['load_skill'] = load_skill
 
-    # Neutralize the auto-skill proposal helper so it doesn't append "[Auto-skill
-    # created:]" to the system message on our mock pool — that's unrelated to the
-    # behavior under test and would pollute exact-content assertions.
-    with patch.object(engine, 'run', side_effect=fake_run), \
-            patch('agent_cascade.auto_skill_helpers.run_auto_skill_proposal', return_value=[]):
+    # No auto-skill neutralization needed: the stubbed run() returns iter([]) so the
+    # loop effects zero turns, and the in-loop trigger gate (_current_turn >
+    # AUTO_SKILL_MIN_TURNS=50) can never fire. (The old post-run helper patch was
+    # removed with agent_cascade/auto_skill_helpers.py.)
+    with patch.object(engine, 'run', side_effect=fake_run):
         engine._create_and_run_agent(
             agent_class='test_agent',
             instance_name='worker1',

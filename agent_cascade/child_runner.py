@@ -129,8 +129,10 @@ def run_child_core(
     # Check stopped/terminated/halted status
     was_stopped, was_terminated = _check_status(pool, instance_name)
 
-    # Extract and format result
-    result = extract_instance_output(conv, instance_name, was_terminated=was_terminated, pool=pool)
+    # Extract and format result. Passing the live instance lets an auto-skill
+    # extended run return its pre-reflection task output snapshot instead of the
+    # reflection-tail message (plan §3.3); non-auto-skill runs are unaffected.
+    result = extract_instance_output(conv, instance_name, was_terminated=was_terminated, pool=pool, instance=inst)
 
     # Detect if the child's only output is a system error or termination notice.
     # Check the RAW output BEFORE _format_result wraps it in "[Agent 'name' Completed]:".

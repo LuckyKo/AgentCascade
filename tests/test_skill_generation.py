@@ -12,10 +12,11 @@ Covers:
 
 import re
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -25,7 +26,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent_cascade.settings import AUTO_SKILL_MAX_PER_SESSION, AUTO_SKILL_PROMOTION_THRESHOLD
+from agent_cascade.agent_instance import AgentState
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
+from agent_cascade.settings import (AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS, AUTO_SKILL_PROMOTION_THRESHOLD,
+                                    DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE)
 from agent_cascade.skills.manager import SkillManager
 from agent_cascade.skills.matcher import SkillMatcher
 from agent_cascade.skills.parser import parse_frontmatter
@@ -623,7 +627,6 @@ class TestCallAgentReturn:
         inst = MagicMock()
         inst.conversation = self._make_conversation(conv_len)
         inst._auto_skill_proposed = False
-        inst._auto_skill_proposed_count = 0
         inst.state = 'IDLE'
         fresh_manager._skills_registry['skill-creator'] = {
             'name': 'skill-creator',
@@ -634,107 +637,35 @@ class TestCallAgentReturn:
         }
         return inst
 
-    def _trigger(self,
-                 inst,
-                 fresh_manager,
-                 total_tool_calls=10,
-                 check_result=None,
-                 state_idle=True,
-                 turns_effectuated=None,
-                 loaded_skill_names=None):
-        """Run auto-skill reflection with snapshot-based rollback.
-
-        Uses the new two-function API: check_and_inject → simulate turns → finalize.
-        ``turns_effectuated`` defaults to a value above the gate threshold so that existing
-        tests (which don't set it) still fire; pass an explicit low value to test the gate.
-        """
-        if check_result is None:
-            check_result = []
-        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
-        if turns_effectuated is None:
-            turns_effectuated = AUTO_SKILL_MIN_TURNS + 1
-
-        def rollback_fn(pop_count):
-            if pop_count > 0:
-                del inst.conversation[-pop_count:]
-
-        snapshot_length = len(inst.conversation)
-
-        # Check trigger and inject prompt
-        injected = fresh_manager.check_and_inject_auto_skill_prompt(
-            inst=inst,
-            total_tool_calls=total_tool_calls,
-            task_text='Write a test',
-            instance_name='worker',
-            append_fn=lambda msg: inst.conversation.append({
-                'role': 'user',
-                'content': msg
-            }),
-            turns_effectuated=turns_effectuated,
-            loaded_skill_names=loaded_skill_names,
-        )
-
-        if not injected:
-            return []
-
-        # Simulate a few turns (the engine loop handles this in production)
-        for _ in range(3):
-            inst.conversation.append({'role': 'assistant', 'content': 'reply'})
-
-        # Finalize: rollback and discover created skills
-        return fresh_manager.finalize_auto_skill(
-            inst=inst,
-            instance_name='worker',
-            snapshot_length=snapshot_length,
-            rollback_fn=rollback_fn,
-            check_skill_created_fn=lambda: check_result,
-        )
-
-    def _inject_notice(self, inst, created):
-        """Inject notice into last message (mirrors execution_engine)."""
-        if created and inst.conversation:
-            notice = f"\n\n[Auto-skill created: {', '.join(created)}]"
-            last = inst.conversation[-1]
-            last['content'] = str(last.get('content', '')) + notice
-
     # ------------------------------------------------------------------ #
-    # Early return guards
+    # Qualification gates (pure method: no conversation/flag mutation)
     # ------------------------------------------------------------------ #
 
-    def test_returns_empty_when_auto_skill_proposed(self, fresh_manager):
-        """_auto_skill_proposed flag set → returns []."""
+    def test_returns_none_when_auto_skill_proposed(self, fresh_manager):
+        """_auto_skill_proposed flag set → qualification returns None (one-shot)."""
         inst = self._make_inst(fresh_manager)
         inst._auto_skill_proposed = True
-        created = self._trigger(inst, fresh_manager)
-        assert created == []
+        prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS + 1)
+        assert prompt is None
 
-    def test_returns_empty_when_session_limit_exceeded(self, fresh_manager):
-        """AUTO_SKILL_MAX_PER_SESSION exceeded → returns []."""
+    def test_returns_none_when_turns_below_threshold(self, fresh_manager):
+        """Turns effectuated <= AUTO_SKILL_MIN_TURNS → None (gate is turns-based)."""
         inst = self._make_inst(fresh_manager)
-        inst._auto_skill_proposed_count = AUTO_SKILL_MAX_PER_SESSION
-        created = self._trigger(inst, fresh_manager)
-        assert created == []
-
-    def test_returns_empty_when_turns_below_threshold(self, fresh_manager):
-        """Turns effectuated <= AUTO_SKILL_MIN_TURNS → returns [] (gate is turns-based)."""
-        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
-        inst = self._make_inst(fresh_manager)
-        # Even with plenty of tool calls, low turns must NOT fire.
-        created = self._trigger(inst, fresh_manager, total_tool_calls=100, turns_effectuated=AUTO_SKILL_MIN_TURNS)
-        assert created == []
+        prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS)
+        assert prompt is None
 
     def test_fires_on_turns_not_tool_calls(self, fresh_manager):
-        """Gate fires on turns > N even with zero tool calls (tool-call gate removed)."""
-        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
+        """Gate fires on turns > N (tool-call gate removed). The pure method
+        returns the built prompt and does NOT set the one-shot flag — that is
+        core.py's job after a successful trigger."""
         inst = self._make_inst(fresh_manager)
-        created = self._trigger(inst, fresh_manager, total_tool_calls=0, turns_effectuated=AUTO_SKILL_MIN_TURNS + 1)
-        # Fires: prompt injected then rolled back; no skills created in this mock → [] but the
-        # injection itself happened. Verify via flag set by check_and_inject.
-        assert inst._auto_skill_proposed is True
+        prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS + 1)
+        assert isinstance(prompt, str) and prompt
+        # Pure method: flag must NOT be set by the qualification itself.
+        assert not inst._auto_skill_proposed
 
     def test_gate_independent_of_match_score(self, fresh_manager):
         """A strong keyword match no longer blocks the gate (match condition removed)."""
-        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
         inst = self._make_inst(fresh_manager)
         # Register a skill that will strongly match "Write a test"
         fresh_manager._skills_registry['test-writing'] = {
@@ -743,165 +674,24 @@ class TestCallAgentReturn:
             'triggers': ['test', 'write'],
         }
         fresh_manager._matcher.build_index(list(fresh_manager._skills_registry.values()))
-        created = self._trigger(inst, fresh_manager, turns_effectuated=AUTO_SKILL_MIN_TURNS + 1)
-        # The match must NOT prevent firing — the prompt is injected.
-        assert inst._auto_skill_proposed is True
-        assert created == []
+        prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS + 1)
+        # The match must NOT prevent firing — the prompt is built.
+        assert isinstance(prompt, str) and prompt
 
-    def test_returns_empty_when_not_idle(self, fresh_manager):
-        """Instance not idle → returns []."""
-        inst = self._make_inst(fresh_manager)
-        created = self._trigger(inst, fresh_manager, state_idle=False)
-        assert created == []
-
-    def test_returns_empty_when_skill_creator_missing(self, fresh_manager):
-        """skill-creator not in registry → returns []."""
+    def test_returns_none_when_skill_creator_missing(self, fresh_manager):
+        """skill-creator not in registry → None."""
         inst = self._make_inst(fresh_manager)
         del fresh_manager._skills_registry['skill-creator']
-        created = self._trigger(inst, fresh_manager)
-        assert created == []
+        prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS + 1)
+        assert prompt is None
 
-    # ------------------------------------------------------------------ #
-    # Rollback behaviour
-    # ------------------------------------------------------------------ #
-
-    def test_rollback_restores_conversation_length(self, fresh_manager):
-        """Conversation length returns to original after rollback."""
+    def test_qualification_does_not_mutate_conversation(self, fresh_manager):
+        """Pure contract: qualifying does not append anything to the conversation."""
         inst = self._make_inst(fresh_manager)
         original_len = len(inst.conversation)
-
-        self._trigger(inst, fresh_manager)
-
+        prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS + 1)
+        assert isinstance(prompt, str) and prompt
         assert len(inst.conversation) == original_len
-
-    def test_rollback_called_with_correct_pop_count(self, fresh_manager):
-        """rollback_fn is invoked with the pop_count (messages added during extra turns)."""
-        inst = self._make_inst(fresh_manager)
-        original_len = len(inst.conversation)
-
-        captured_counts = []
-
-        def rollback_fn(pop_count):
-            captured_counts.append(pop_count)
-            if pop_count > 0:
-                del inst.conversation[-pop_count:]
-
-        snapshot_length = len(inst.conversation)
-
-        fresh_manager.check_and_inject_auto_skill_prompt(
-            inst=inst,
-            total_tool_calls=10,
-            task_text='Write a test',
-            instance_name='worker',
-            append_fn=lambda msg: inst.conversation.append({
-                'role': 'user',
-                'content': msg
-            }),
-        )
-        # Simulate turns
-        for _ in range(3):
-            inst.conversation.append({'role': 'assistant', 'content': 'reply'})
-
-        fresh_manager.finalize_auto_skill(
-            inst=inst,
-            instance_name='worker',
-            snapshot_length=snapshot_length,
-            rollback_fn=rollback_fn,
-            check_skill_created_fn=lambda: [],
-        )
-
-        assert len(captured_counts) == 1
-        assert captured_counts[0] > 0  # some messages were added and popped
-        assert len(inst.conversation) == original_len
-
-    # ------------------------------------------------------------------ #
-    # Notice injection (consolidated test)
-    # ------------------------------------------------------------------ #
-
-    def test_notice_injected_into_last_message_after_rollback(self, fresh_manager):
-        """Full return path: trigger → rollback → notice → returned conv.
-
-        Covers:
-        - Notice appended to last message content
-        - No new message added (length preserved)
-        - Returned conversation copy includes the notice
-        - final_resp (deep copy taken before trigger) is unaffected
-        """
-        inst = self._make_inst(fresh_manager)
-        original_len = len(inst.conversation)
-        # Simulate final_resp snapshot taken before trigger
-        final_resp = [dict(m) for m in inst.conversation]
-
-        created = self._trigger(inst, fresh_manager, check_result=['my-skill'])
-        self._inject_notice(inst, created)
-
-        # Returned conversation
-        returned_conv = list(inst.conversation)
-
-        # Length preserved
-        assert len(returned_conv) == original_len
-        assert len(inst.conversation) == original_len
-
-        # Notice present in returned conv
-        assert '[Auto-skill created:' in returned_conv[-1]['content']
-        assert 'my-skill' in returned_conv[-1]['content']
-
-        # final_resp untouched
-        assert len(final_resp) == original_len
-        assert '[Auto-skill created:' not in final_resp[-1]['content']
-
-    def test_no_notice_when_no_skills_created(self, fresh_manager):
-        """When no skills are created, last message content is unchanged."""
-        inst = self._make_inst(fresh_manager)
-        original_last_content = inst.conversation[-1]['content']
-
-        self._trigger(inst, fresh_manager)
-
-        assert inst.conversation[-1]['content'] == original_last_content
-
-    # ------------------------------------------------------------------ #
-    # Compression resilience
-    # ------------------------------------------------------------------ #
-
-    def test_rollback_survives_compression_during_extra_turns(self, fresh_manager):
-        """When compression removes messages during extra turns, rollback still
-        restores the original conversation length using the marker approach."""
-        inst = self._make_inst(fresh_manager, conv_len=20)
-        original_len = len(inst.conversation)
-
-        def run_turn_with_compression():
-            inst.conversation.append({'role': 'assistant', 'content': 'reply'})
-            if len(inst.conversation) >= 3:
-                inst.conversation.pop(0)
-                inst.conversation.pop(0)
-
-        self._trigger(inst, fresh_manager, state_idle=True)
-
-        assert len(inst.conversation) == original_len
-        # Verify original messages survived (at least some of them)
-        assert len(inst.conversation) > 0
-
-    # ------------------------------------------------------------------ #
-    # Edge cases
-    # ------------------------------------------------------------------ #
-
-    def test_empty_conversation(self, fresh_manager):
-        """Works with an empty conversation list."""
-        inst = self._make_inst(fresh_manager, conv_len=0)
-        created = self._trigger(inst, fresh_manager)
-        assert len(created) == 0
-        # No crash; conversation may have messages from extra turns
-        # but rollback should handle empty gracefully
-
-    def test_single_message_conversation(self, fresh_manager):
-        """Works with a single-message conversation."""
-        inst = self._make_inst(fresh_manager, conv_len=1)
-        original_content = inst.conversation[-1]['content']
-
-        self._trigger(inst, fresh_manager)
-
-        assert len(inst.conversation) >= 1
-        assert inst.conversation[-1]['content'] == original_content
 
 
 # ===========================================================================
@@ -1143,89 +933,354 @@ class TestRollbackTailSync:
         in_sync, pt, jt = check_tail_sync('test-sync-comp', inst.conversation, test_jsonl)
         assert in_sync, f"Tail sync failed: pool_tail={pt}, jsonl_tail={jt}"
 
-    def test_notice_injection_preserves_tail_sync(self, tmp_path):
-        """Full auto-skill rollback flow: notice injection doesn't break tail sync.
 
-        Flow:
-          1. Build conversation → snapshot length
-          2. Append extra messages
-          3. Rollback to snapshot
-          4. Inject notice into last message (content modification, no new messages)
-          5. Verify tail sync still holds
+# ===========================================================================
+# 8b. In-loop auto-skill trigger — engine loop integration (plan §5.3)
+# ===========================================================================
+
+
+class TestInLoopTrigger:
+    """The in-loop trigger replaces the post-run two-run helper: at budget
+    exhaustion (turns_available == 1) it qualifies, snapshots the task output,
+    injects the reflection prompt into BOTH conversation targets (R3), and resets
+    the loop budget. Tests drive the REAL ExecutionEngine.run() with a stubbed
+    LLM; settings AUTO_SKILL_MIN_TURNS / AUTO_SKILL_EXTRA_TURNS are patched per
+    test so runs stay short."""
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _make_inst(max_turns, conv_len=1):
+        from agent_cascade.agent_instance import AgentInstance
+        inst = AgentInstance.__new__(AgentInstance)
+        inst.instance_name = 'w'
+        inst.agent_class = 'test_agent'
+        # Single fixed task message: the real _setup_turn would prepend a system
+        # message (insert_message_at_head), but our stub returns the conversation
+        # as-is, so the conv stays exactly [task] until messages are committed.
+        inst.conversation = [Message(role=USER, content='task')]
+        inst._cached_messages = list(inst.conversation)
+        inst._cached_llm_messages = list(inst.conversation)
+        inst.max_turns = max_turns
+        # run() transitions IDLE→RUNNING itself; starting in RUNNING trips the
+        # L1 race guard (core.py raises "[BUG] ... should be IDLE").
+        inst.state = AgentState.IDLE
+        inst._compression_lock = threading.RLock()
+        inst._state_lock = threading.RLock()
+        inst._generate_cfg_override = None
+        inst._turn_consumed = False
+        inst._slot_release = None
+        inst._slot_key = None
+        inst._compression_suspended_at = 0.0
+        inst._last_config_version = -1
+        inst._last_token_count_conversation_length = -1
+        inst._continue_saved_msg = None
+        inst._auto_skill_proposed = False
+        # run()'s Phase 3 streaming-tick path reads this (core.py:806).
+        inst._streaming_responses = []
+        return inst
+
+    @staticmethod
+    def _make_pool(fresh_manager,
+                   tmp_path,
+                   max_turns=3,
+                   min_turns=2,
+                   extra_turns=5,
+                   auto_skill_enabled=True,
+                   load_mode='AUTO',
+                   with_creator=True):
+        from agent_cascade.execution_engine import ExecutionEngine
+
+        template = MagicMock()
+        template.function_map = {'tool_a': None, 'tool_b': None}
+
+        pool = MagicMock()
+        pool.settings.auto_skill_enabled = auto_skill_enabled
+        pool.settings.default_load_skill_mode = load_mode
+        pool.settings.tail_sync_check_enabled = False
+        pool.get_template.return_value = template
+        pool.is_instance_terminated.return_value = False
+        pool.has_pending.return_value = False
+        pool.has_messages.return_value = False
+        pool.drain_queue.return_value = []
+        # Real logger object (not a MagicMock): _log_messages_to_jsonl's count-based
+        # delta sync reads len(log.data['history']) and appends on every
+        # log_message() call. A MagicMock auto-attribute would stay truthy, making
+        # the delta look non-empty every pass and double-logging committed messages.
+        # tmp_path keeps the JSONL metadata write off the repo tree (test isolation).
+        from agent_cascade.logger import AgentInstanceLogger
+        log_inst = AgentInstanceLogger('test_agent', 'w', str(tmp_path), log_path=str(tmp_path / 'w.jsonl'))
+        pool.get_logger.return_value = log_inst
+
+        if with_creator:
+            # Populate the registry via REAL discovery, not hand-registration.
+            # load_full_instructions() does a direct _skills_registry.get() lookup and
+            # never calls _ensure_discovered(), so a bare SkillManager() (empty registry)
+            # returns None for 'skill-creator' and the trigger gate silently fails.
+            # discover() scans agents/global/skills (contains skill-creator/SKILL.md,
+            # relative to cwd N:\work\WD\AgentCascade). _cache_ttl=0.0 forces a scan on
+            # this fresh manager so TTL/signature cache cannot short-circuit it — the
+            # same pattern as test_candidate_tier_discovered_with_highest_priority.
+            fresh_manager._cache_ttl = 0.0
+            fresh_manager.discover([Path('agents/global/skills')])
+        pool.skill_manager = fresh_manager
+
+        engine = ExecutionEngine(pool)
+        inst = TestInLoopTrigger._make_inst(max_turns)
+
+        # Stub the turn machinery: one assistant message per LLM call, no tools.
+        def fake_setup_turn(instance):
+            return list(instance.conversation), [Message(role=USER, content='task')], []
+
+        engine._setup_turn = MagicMock(side_effect=fake_setup_turn)
+        engine._pre_llm_checks = MagicMock(return_value=False)
+        engine._check_stop_conditions = MagicMock(return_value=False)
+        engine._is_suspended_by_compression = MagicMock(return_value=False)
+        # Stub the un-stubbed path pieces that would otherwise hit the real pool:
+        # terminal-stop guards (MagicMock pool attrs are truthy → early exit),
+        # slot acquire (auto-attribute _acquire_slot would be "present"), and the
+        # stream-termination check inside the Phase 3 yield loop.
+        engine._is_terminal_stop = MagicMock(return_value=False)
+        engine._acquire_slot_with_logging = MagicMock(return_value=None)
+        engine._check_stream_termination = MagicMock(return_value=None)
+        # A generator (not a bare iterator) so run()'s `finally: gen.close()`
+        # works — list_iterator has no .close().
+        # Number replies by a per-call counter, NOT len(msgs): the turn-limit
+        # warnings are now full user-message insertions into llm_messages, so
+        # len(msgs) drifts from the iteration number. A counter keeps "reply N"
+        # == "Nth LLM call" (== iteration N), which is what the snapshot/tail
+        # assertions below reason about (e.g. trigger at iter 3 → last committed
+        # assistant text is 'reply 2').
+        _llm_call_count = {'n': 0}
+
+        def fake_llm(inst, msgs):
+            # None first = streaming tick (drives the yield path), then the turn's
+            # assistant message. Mirrors a real LLM stream; run()'s Phase 3 loop
+            # only appends Message/dict items to turn_output.
+            _llm_call_count['n'] += 1
+            yield None
+            yield Message(role=ASSISTANT, content=f"reply {_llm_call_count['n']}")
+
+        engine._call_llm_with_injection = MagicMock(side_effect=lambda inst, msgs: fake_llm(inst, msgs))
+        # REAL _process_response (commits turn_output via _append_and_log_batch); its
+        # tool-execution sub-path is stubbed to a no-tool answer so the loop exits
+        # each iteration at Phase 5.
+        engine._execute_detected_tools = MagicMock(return_value=False)
+        engine._post_turn_checks = MagicMock(return_value=True)
+
+        # Patch BOTH import sites: core.py and skills/manager.py each do
+        # `from agent_cascade.settings import AUTO_SKILL_MIN_TURNS`, so the module-level
+        # names are independent copies — patching only core leaves manager's gate at 50.
+        with patch('agent_cascade.engine.core.AUTO_SKILL_MIN_TURNS', min_turns), \
+                patch('agent_cascade.engine.core.AUTO_SKILL_EXTRA_TURNS', extra_turns), \
+                patch('agent_cascade.skills.manager.AUTO_SKILL_MIN_TURNS', min_turns):
+            run_gen = engine.run(inst)  # generator; patched constants stay active while drained
+            try:
+                yield engine, inst, pool, run_gen
+            finally:
+                # Drain (or close) the generator so run()'s exit finally — incl. the
+                # R6 max_turns restore — executes even if a test asserts early/fails.
+                for _ in run_gen:
+                    pass
+
+    @staticmethod
+    def _conv_contents(conv):
+        return [m.content if isinstance(m, Message) else m.get('content', '') for m in conv]
+
+    # ------------------------------------------------------------------ #
+    # 1-4: budget reset, snapshot, no-rollback, one-shot flag
+    # ------------------------------------------------------------------ #
+
+    def test_budget_reset_off_by_one(self, fresh_manager, tmp_path):
+        """Trigger at turn N resets BOTH loop locals; the run then effects exactly
+        AUTO_SKILL_EXTRA_TURNS further iterations (the +1 in turns_available is
+        consumed by _consume_turn before the next loop check)."""
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True, 'trigger should have fired'
+        # Exactly 3 (initial budget) + 5 (extra) LLM calls.
+        assert engine._call_llm_with_injection.call_count == 3 + 5
+
+    def test_snapshot_captures_last_assistant_text(self, fresh_manager, tmp_path):
+        """Snapshot is the last ASSISTANT text in the conversation at trigger time.
+
+        max_turns=3, min_turns=2 → the trigger fires on iteration 3 (turns_available
+        == 1), i.e. BEFORE that iteration's LLM call commits its reply. So the
+        pre-reflection conversation is [task, halfway warning, reply 1, reply 2] and
+        the snapshot must be 'reply 2' — NOT a pre-seeded message from before the run.
         """
-        from agent_cascade.agent_pool import AgentPool
-        from agent_cascade.llm.schema import ASSISTANT, USER, Message
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        assert inst._auto_skill_task_output == 'reply 2'
 
-        # Step 1: Build conversation (SYS + 3 pairs = 7 messages)
-        conv = self._build_conv(3)  # 7 messages
-        snapshot_len = len(conv)
-        assert snapshot_len == 7
+    def test_snapshot_fallback_when_no_assistant_text(self, fresh_manager, tmp_path):
+        """No assistant text at trigger time → snapshot falls back to the real
+        extractor on the pre-reflection conversation.
 
-        # Create pool + instance
-        pool = AgentPool(llm_cfg={})
-        inst = pool.create_instance('test-sync-notice', 'coder')
-        inst.conversation = list(conv)
+        max_turns=1: turns_available starts at 1, so the trigger point is reached
+        on iteration 1 — before any LLM call commits a reply. The pre-reflection
+        conversation is just [task], and extract_instance_output([task]) returns
+        'task' (last message's text).
+        """
+        from agent_cascade.compression.helpers import extract_instance_output
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=1, min_turns=0,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        expected = extract_instance_output([Message(role=USER, content='task')], 'w', pool=MagicMock())
+        assert expected == 'task'  # sanity: the extractor returns the last message's text
+        assert inst._auto_skill_task_output == expected
 
-        # Get logger
-        log_inst = pool.get_logger('test-sync-notice', 'coder')
-        test_jsonl = log_inst.log_path
+    def test_no_rollback_and_conversation_grows(self, fresh_manager, tmp_path):
+        """No rollback: the reflection prompt + extended turns all stay in the
+        conversation; pool._rollback_instance is never called."""
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        # No rollback: every message stays in the conversation. With max_turns=3
+        # (turns_50pct=3, turns_90pct=2) BOTH budget warnings fire in the original
+        # run, and both fire again in the extended run (recomputed on the extended
+        # max_turns), plus a final-turn warning on the extended last turn. The exact
+        # layout is:
+        #   1 task
+        # + 2 original-budget warnings (halfway @iter1, turn-limit-approaching @iter2)
+        # + 8 assistant replies (3 original incl. the triggering turn + 5 extended)
+        # + 1 reflection prompt (injected at trigger)
+        # + 2 extended-budget warnings (halfway + turn-limit-approaching)
+        # + 1 final-turn warning (extended last turn)
+        # = 15. We assert the exact count so a regression that drops/loses any of
+        # these messages (the rollback this test guards against) is caught.
+        assert len(inst.conversation) == 1 + 2 + (3 + 5) + 1 + 2 + 1
+        pool._rollback_instance.assert_not_called()
 
-        # Write initial state
-        self._write_jsonl(test_jsonl, conv)
+    def test_one_shot_flag(self, fresh_manager, tmp_path):
+        """Trigger sets _auto_skill_proposed; a second qualification returns None."""
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        prompt = fresh_manager.auto_skill_qualifies(inst, AUTO_SKILL_MIN_TURNS + 1)
+        assert prompt is None
 
-        # Load history into logger's internal state so truncate_to works correctly
-        log_inst.load_history_from_file()
+    # ------------------------------------------------------------------ #
+    # 5-6: tools stay enabled on the triggering turn; output return path
+    # ------------------------------------------------------------------ #
 
-        # Step 2: Append 4 extra messages
-        extra = [
-            Message(role=USER, content='Extra user'),
-            Message(role=ASSISTANT, content='Extra assistant'),
-            Message(role=USER, content='Extra user 2'),
-            Message(role=ASSISTANT, content='Extra assistant 2'),
+    def test_tools_enabled_on_triggering_turn(self, fresh_manager, tmp_path):
+        """When the trigger fires, the final-turn block is skipped entirely: no
+        disabled_tools override, no [SYSTEM WARNING: Final turn] message."""
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        override = getattr(inst, '_generate_cfg_override', None)
+        if isinstance(override, dict):
+            assert 'disabled_tools' not in override
+        # The final-turn warning must be absent from the ORIGINAL budget (turn 3 of 3);
+        # the extended tail's own last turn legitimately gets one (like any normal run).
+        contents = self._conv_contents(inst.conversation)
+        original_final_warnings = [
+            c for c in contents if '[SYSTEM WARNING: Final turn' in str(c) and 'out of 3 total' in str(c)
         ]
-        inst.conversation.extend(extra)
-        log_inst.update_history(extra)
-        assert len(inst.conversation) == 11
+        assert not original_final_warnings, \
+            'final-turn warning must be skipped on the triggering turn (original budget)'
 
-        # Step 3: Rollback to snapshot
-        removed = pool._rollback_instance(
-            'test-sync-notice',
-            target_length=snapshot_len,
-            sync_logger=True,
-            tail_sync_check=True,
-        )
-        assert removed == 4, f"Expected 4 removed, got {removed}"
-        assert len(inst.conversation) == snapshot_len
+    def test_output_return_path(self, fresh_manager, tmp_path):
+        """extract_instance_output with instance= returns the pre-reflection
+        snapshot; without it, the reflection tail (last message)."""
+        from agent_cascade.compression.helpers import extract_instance_output
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        with_snap = extract_instance_output(list(inst.conversation), 'w', instance=inst)
+        # The snapshot was taken at trigger time (before turn 3's reply committed).
+        assert with_snap == 'reply 2'
+        without_snap = extract_instance_output(list(inst.conversation), 'w')
+        # The tail is the last assistant reply of the extended (reflection) turns,
+        # which carries the turn-limit notice appended at run exit.
+        assert without_snap.startswith('reply 8') and 'Turn limit reached' in without_snap
 
-        # Verify tail sync before notice injection
-        from agent_cascade.logger.tail_sync_check import check_tail_sync
-        in_sync_before, pt_before, jt_before = check_tail_sync('test-sync-notice', inst.conversation, test_jsonl)
-        assert in_sync_before, \
-            f"Tail sync failed before notice: pool_tail={pt_before}, jsonl_tail={jt_before}"
+    # ------------------------------------------------------------------ #
+    # 7: gate failures fall back to the normal final-turn path
+    # ------------------------------------------------------------------ #
 
-        # Step 4: Inject notice into last message (content-only modification)
-        notice = '\n\n[Auto-skill created: test-skill]'
-        inst.conversation[-1].content += notice
+    def _assert_normal_final_turn(self, fresh_manager, tmp_path, **kw):
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager,
+                                                      tmp_path,
+                                                      max_turns=3,
+                                                      min_turns=2,
+                                                      extra_turns=5,
+                                                      **kw).__next__()
+        for _ in run_gen:
+            pass
+        assert not getattr(inst, '_auto_skill_proposed', False), 'trigger must NOT fire'
+        assert engine._call_llm_with_injection.call_count == 3, 'no extension on gate failure'
+        # The tool-disable override is set before the final LLM call and popped
+        # right after it (core.py cleanup block), so post-run state is an empty dict.
+        override = inst._generate_cfg_override
+        assert isinstance(override, dict) and 'disabled_tools' not in override, \
+            'normal final turn must set (then clean up) the disabled_tools override'
+        contents = self._conv_contents(inst.conversation)
+        assert any('[SYSTEM WARNING: Final turn' in str(c) for c in contents), \
+            'normal final-turn warning must be appended'
 
-        # Step 5: Verify message count unchanged in pool
-        assert len(inst.conversation) == snapshot_len
+    def test_gate_auto_skill_disabled(self, fresh_manager, tmp_path):
+        """auto_skill_enabled=False → no trigger; normal final-turn path runs."""
+        self._assert_normal_final_turn(fresh_manager, tmp_path, auto_skill_enabled=False)
 
-        # Verify JSONL message count also unchanged (no new messages appended)
-        jsonl_after_notice = self._read_jsonl_messages(test_jsonl)
-        assert len(jsonl_after_notice) == snapshot_len, \
-            f"JSONL has {len(jsonl_after_notice)} messages after notice, expected {snapshot_len}"
+    def test_gate_load_skill_none(self, fresh_manager, tmp_path):
+        """default_load_skill_mode='NONE' → no trigger; normal final-turn path runs."""
+        self._assert_normal_final_turn(fresh_manager, tmp_path, load_mode=LOAD_SKILL_NONE)
 
-        # Step 6: Verify tail sync still holds (no new messages added)
-        in_sync_after, pt_after, jt_after = check_tail_sync('test-sync-notice', inst.conversation, test_jsonl)
-        assert in_sync_after, \
-            f"Tail sync failed after notice injection: pool_tail={pt_after}, jsonl_tail={jt_after}"
+    def test_gate_skill_creator_missing(self, fresh_manager, tmp_path):
+        """skill-creator absent from registry → no trigger; normal final-turn path runs."""
+        self._assert_normal_final_turn(fresh_manager, tmp_path, with_creator=False)
 
-        # Counts should be identical before and after notice injection
-        assert pt_before == pt_after, 'Pool tail count changed after notice injection'
-        assert jt_before == jt_after, 'JSONL tail count changed after notice injection'
+    # ------------------------------------------------------------------ #
+    # 8-9: the extended tail behaves like a normal run; R6 restore
+    # ------------------------------------------------------------------ #
 
-        # Verify notice is actually in the last message
-        assert '[Auto-skill created:' in inst.conversation[-1].content
+    def test_final_extended_turn_behaves_like_normal_last_turn(self, fresh_manager, tmp_path):
+        """The LAST turn of the extension (turn N+EXTRA) must behave exactly like a
+        normal last turn: tools disabled via _generate_cfg_override, final-turn
+        warning appended, and the loop exits with turns_available == 0."""
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=3).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        assert engine._call_llm_with_injection.call_count == 3 + 3
+        # Final-turn warning present exactly once (on the extended last turn only).
+        contents = self._conv_contents(inst.conversation)
+        warnings = [c for c in contents if '[SYSTEM WARNING: Final turn' in str(c)]
+        assert len(warnings) == 1, f'expected exactly one final-turn warning, got {len(warnings)}'
+        # Tool-disable override was set and then cleaned up (popped after the call).
+        override = inst._generate_cfg_override
+        assert isinstance(override, dict) and 'disabled_tools' not in override
+
+    def test_max_turns_restored_after_run(self, fresh_manager, tmp_path):
+        """R6: after a triggered run completes, instance.max_turns is restored to
+        the pre-trigger value (no leak into the next run)."""
+        engine, inst, pool, run_gen = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                      extra_turns=5).__next__()
+        for _ in run_gen:
+            pass
+        assert inst._auto_skill_proposed is True
+        assert inst.max_turns == 3, f'max_turns leaked: {inst.max_turns} != 3'
 
 
 # ===========================================================================
@@ -1408,7 +1463,6 @@ class TestReflectionPrompt:
         inst = MagicMock()
         inst.conversation = [{'role': 'user', 'content': 'task'}]
         inst._auto_skill_proposed = False
-        inst._auto_skill_proposed_count = 0
         # load_full_instructions('skill-creator') must NOT re-read the real production file:
         # that would flush the (isolated) metrics back through to the production file and
         # repopulate _metrics from disk on the next load. A body-only stub short-circuits
@@ -1429,61 +1483,40 @@ class TestReflectionPrompt:
         yield
 
     def test_prompt_contains_loaded_skills_list(self, fresh_manager):
-        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
         inst = self._make_inst(fresh_manager)
-        appended = []
-        injected = fresh_manager.check_and_inject_auto_skill_prompt(
+        prompt = fresh_manager.auto_skill_qualifies(
             inst=inst,
-            total_tool_calls=0,
-            task_text='t',
-            instance_name='w',
-            append_fn=appended.append,
             turns_effectuated=AUTO_SKILL_MIN_TURNS + 1,
             loaded_skill_names=['docker-best-practices', 'code-review'],
         )
-        assert injected is True
-        prompt = appended[0]
+        assert isinstance(prompt, str) and prompt
         assert '- docker-best-practices' in prompt
         assert '- code-review' in prompt
         # skill-creator body embedded
         assert 'UNIQUE_CREATOR_BODY_MARKER' in prompt
 
     def test_prompt_shows_none_when_no_skills(self, fresh_manager):
-        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
         inst = self._make_inst(fresh_manager)
-        appended = []
-        injected = fresh_manager.check_and_inject_auto_skill_prompt(
+        prompt = fresh_manager.auto_skill_qualifies(
             inst=inst,
-            total_tool_calls=0,
-            task_text='t',
-            instance_name='w',
-            append_fn=appended.append,
             turns_effectuated=AUTO_SKILL_MIN_TURNS + 1,
             loaded_skill_names=None,
         )
-        assert injected is True
-        assert '(none)' in appended[0]
+        assert isinstance(prompt, str) and prompt
+        assert '(none)' in prompt
 
     def test_prompt_lines_carry_rating_info(self, fresh_manager):
         """Loaded-skill lines show the current average rating (or 'unrated')."""
-        from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
-
         inst = self._make_inst(fresh_manager)
         # Rate one skill so it renders with an average; leave the other unrated.
         fresh_manager.record_rating('docker-best-practices', 8.0)
         fresh_manager.record_rating('docker-best-practices', 7.0)  # avg 7.5, count 2
-        appended = []
-        injected = fresh_manager.check_and_inject_auto_skill_prompt(
+        prompt = fresh_manager.auto_skill_qualifies(
             inst=inst,
-            total_tool_calls=0,
-            task_text='t',
-            instance_name='w',
-            append_fn=appended.append,
             turns_effectuated=AUTO_SKILL_MIN_TURNS + 1,
             loaded_skill_names=['docker-best-practices', 'code-review'],
         )
-        assert injected is True
-        prompt = appended[0]
+        assert isinstance(prompt, str) and prompt
         assert '- docker-best-practices (avg 7.5/10, rated 2×)' in prompt
         assert '- code-review (unrated)' in prompt
 

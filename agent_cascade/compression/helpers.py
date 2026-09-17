@@ -581,7 +581,8 @@ def extract_instance_output(
         messages: list[Any],
         instance_name: str,
         was_terminated: bool = False,
-        pool=None  # Optional: AgentPool to resolve actual log path
+        pool=None,  # Optional: AgentPool to resolve actual log path
+        instance=None,  # Optional: AgentInstance (auto-skill snapshot support)
 ) -> str:
     """
     Extract text output from a sub-agent's conversation messages.
@@ -594,10 +595,24 @@ def extract_instance_output(
         instance_name: The agent instance name (used in fallback warnings).
         was_terminated: If True, the agent was terminated by user — return a termination message instead of generic warning.
         pool: Optional AgentPool for resolving actual log file paths.
+        instance: Optional live AgentInstance. When provided and it carries an
+            ``_auto_skill_task_output`` snapshot (set by the in-loop auto-skill
+            trigger), that pre-reflection task output is returned instead of
+            ``messages[-1]`` — the conversation tail at that point is reflection
+            history, not the task result. Non-auto-skill instances never have the
+            attribute set, so passing them changes nothing.
 
     Returns:
         The extracted text, or a warning message if no output was found.
     """
+
+    # Auto-skill in-loop trigger: if this instance extended into reflection turns,
+    # the conversation tail is now reflection history. Return the pre-reflection
+    # task output snapshot captured at trigger time instead of messages[-1].
+    if instance is not None:
+        snap = getattr(instance, '_auto_skill_task_output', None)
+        if isinstance(snap, str):
+            return snap
 
     # Helper to get the best available log path hint
     def _get_log_path_hint():
