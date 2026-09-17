@@ -507,7 +507,13 @@ AUTO_SKILL_MODE_BASIC: str = 'basic'
 AUTO_SKILL_MODE_ADVANCED: str = 'advanced'
 AUTO_SKILL_MODE_NONE: str = 'none'
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_MATCH_THRESHOLD',
-                                               '0.15'))  # Minimum relevance score for AUTO mode skill loading
+                                                '0.15'))  # Minimum relevance score for AUTO mode skill loading
+# Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
+# frontmatter text is MORE similar than this ratio to any existing registered skill
+# is rejected before approval/registration. Strict `>` comparison — a score of exactly
+# 0.95 PASSES (is not rejected); only scores strictly greater than 0.95 are rejected.
+# Frontmatter fields only (name + description + triggers); the body is excluded for speed.
+SKILL_DUP_SIM_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_DUP_SIM_THRESHOLD', '0.95'))
 SKILL_CACHE_TTL_SECONDS: float = float(os.getenv('AGENT_CASCADE_SKILL_CACHE_TTL',
                                                  30.0))  # Cache TTL for mtime-based discovery cache
 
@@ -522,7 +528,7 @@ AUTO_SKILL_EXTRA_TURNS: int = int(
               25))  # Fresh turn budget granted at in-loop trigger time (added on top of the exhausted budget)
 AUTO_SKILL_MIN_TOOL_CALLS: int = 5  # (legacy) minimum tool calls; superseded by AUTO_SKILL_MIN_TURNS gate
 AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
-                                          50))  # Fire reflection when turns effectuated > N (strictly greater)
+                                          40))  # Fire reflection when turns effectuated > N (strictly greater)
 SKILL_RATING_INITIAL: float = float(os.getenv('AGENT_CASCADE_SKILL_RATING_INITIAL',
                                               0.5))  # Initial rating auto-recorded for newly-registered skills
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for auto-promotion

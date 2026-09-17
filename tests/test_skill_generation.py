@@ -2017,6 +2017,104 @@ class TestProposeSkillRatingModes:
         assert entries[0]['file_path'] == str(cand_file)
 
 
+class TestProposeSkillSimilarityGate:
+    """Hard-reject similarity gate in propose_skill (frontmatter-text dedup)."""
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        # Auto-approve by default so the NEW-skill path reaches registration when not rejected.
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    def test_new_skill_rejected_when_too_similar(self, fresh_manager):
+        """A NEW skill whose frontmatter is ~identical to an existing one is hard-rejected."""
+        m = self.manager
+        import json as _json
+        base_name = f"test-dup-gate-{_uid()}"
+        content = _make_skill_content(name=base_name,
+                                      description='Best practices for Docker builds and images',
+                                      triggers=['docker', 'compose'],
+                                      generated_from_task='docker best practices')
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+
+        # Propose a NEW (different) name but near-identical frontmatter. Derive the dup name by
+        # changing only the last char of the incumbent's uid so the frontmatter-text ratio stays
+        # well above 0.95 (two independent random uids differ in too many chars to exceed it).
+        dup_name = base_name[:-1] + ('a' if base_name[-1] != 'a' else 'b')
+        assert dup_name != base_name
+        dup_content = _make_skill_content(name=dup_name,
+                                          description='Best practices for Docker builds and images',
+                                          triggers=['docker', 'compose'],
+                                          generated_from_task='docker best practices')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': dup_name, 'skill_content': dup_content,
+                                        'justification': 'j'}))
+        assert result.startswith('REJECTED:'), f'expected hard-reject, got: {result!r}'
+        assert 'too similar to existing skills' in result
+        # The colliding incumbent must be listed with its score.
+        assert base_name in result
+        assert 'similarity:' in result
+        # Hard-reject means no approval request and no registration of the duplicate.
+        pool.operation_manager.request_user_approval.assert_not_called()
+        assert m.get_skill_metadata(dup_name) is None
+
+    def test_update_of_own_name_not_self_rejected(self, fresh_manager):
+        """An UPDATE excludes its own incumbent — a near-identical re-propose of the same name passes."""
+        m = self.manager
+        import json as _json
+        # Isolated candidate/production dirs + neutralized discovery refresh so the update's
+        # candidate-flow registration (which runs AFTER the gate) succeeds in this test.
+        tmp_path = Path(m._metrics_file).parent
+        m._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
+        m._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
+        m._skill_paths = []
+        m.invalidate_cache = lambda *a, **k: None
+        m._ensure_discovered = lambda *a, **k: None
+
+        name = f"test-dup-gate-update-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Best practices for Docker builds and images',
+                                      triggers=['docker', 'compose'],
+                                      generated_from_task='docker best practices')
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+
+        # Update the SAME name with near-identical frontmatter (only body changes) — must NOT self-reject.
+        updated = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        tool, _ = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        assert not result.startswith('REJECTED:'), f'update must not self-reject, got: {result!r}'
+        assert 'updated' in result.lower()
+
+    def test_distinct_new_skill_passes_gate(self, fresh_manager):
+        """A NEW skill unrelated to existing skills passes the gate and registers."""
+        m = self.manager
+        import json as _json
+        base_name = f"test-dup-gate-base-{_uid()}"
+        content = _make_skill_content(name=base_name,
+                                      description='Best practices for Docker builds and images',
+                                      triggers=['docker', 'compose'],
+                                      generated_from_task='docker best practices')
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+
+        new_name = f"test-dup-gate-distinct-{_uid()}"
+        distinct = _make_skill_content(name=new_name,
+                                       description='Run PostgreSQL database migrations safely with rollback',
+                                       triggers=['sql', 'postgres'],
+                                       generated_from_task='postgres migration')
+        tool, _ = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': distinct, 'justification': 'j'}))
+        assert not result.startswith('REJECTED:'), f'distinct skill must pass gate, got: {result!r}'
+        assert 'registered successfully' in result
+
+
 # ===========================================================================
 # Candidate flow — live-serving upgrade candidates (Phase 2 of skill evolution)
 # ===========================================================================

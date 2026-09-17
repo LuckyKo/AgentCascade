@@ -8,12 +8,64 @@ Semantic embedding matching (Phase 3) can be layered on top of this class.
 """
 
 import re
-from typing import Dict, List, Tuple
+from difflib import SequenceMatcher
+from typing import Dict, List, Optional, Tuple
 
 from agent_cascade.log import logger
 
 # Regex for tokenizing: alphanumeric + underscores/hyphens, case-insensitive matching
 _TOKEN_RE = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
+
+
+def skill_frontmatter_text(name: str, description: str, triggers) -> str:
+    """Build the comparable frontmatter text for a skill.
+
+    Concatenates only the fields the matcher indexes (name + description + triggers),
+    normalizing whitespace. The body is deliberately excluded: it can be up to 15 KB and
+    difflib on that is slow, while frontmatter is what identifies a skill's intent.
+
+    ``triggers`` may be a list, a single string, or missing/None — all are normalized to
+    plain text (missing → empty).
+    """
+    if triggers is None:
+        trigger_text = ''
+    elif isinstance(triggers, (list, tuple)):
+        trigger_text = ' '.join(str(t) for t in triggers)
+    else:
+        trigger_text = str(triggers)
+    raw = f"{name or ''} {description or ''} {trigger_text}"
+    return re.sub(r'\s+', ' ', raw).strip()
+
+
+def skill_similarity(text_a: str, text_b: str) -> float:
+    """Return the difflib SequenceMatcher ratio (0.0–1.0) between two frontmatter texts."""
+    return SequenceMatcher(None, text_a, text_b).ratio()
+
+
+def find_similar_skills(proposed_name: str, proposed_description: str, proposed_triggers,
+                        existing_metadata: List[Dict], threshold: float,
+                        exclude_names: Optional[List[str]] = None) -> List[Tuple[str, float]]:
+    """Find existing skills whose frontmatter text is MORE similar than ``threshold``.
+
+    Compares the proposal against every entry in ``existing_metadata`` (each a dict with
+    'name'/'description'/'triggers'), skipping any name in ``exclude_names`` (used to let an
+    UPDATE resemble its own incumbent). Returns (name, similarity) tuples sorted by
+    similarity descending. Only skills with similarity strictly greater than the threshold
+    are returned.
+    """
+    proposed_text = skill_frontmatter_text(proposed_name, proposed_description, proposed_triggers)
+    exclude = set(exclude_names or [])
+    collisions: List[Tuple[str, float]] = []
+    for meta in existing_metadata:
+        name = meta.get('name', '')
+        if not name or name in exclude:
+            continue
+        other_text = skill_frontmatter_text(name, meta.get('description', ''), meta.get('triggers', []))
+        sim = skill_similarity(proposed_text, other_text)
+        if sim > threshold:
+            collisions.append((name, sim))
+    collisions.sort(key=lambda x: (-x[1], x[0]))
+    return collisions
 
 
 class SkillMatcher:

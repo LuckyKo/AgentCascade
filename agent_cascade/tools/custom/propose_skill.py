@@ -10,6 +10,9 @@ mode (name + rating, no content) records a rating without modifying content.
 import logging
 import re
 
+from agent_cascade.skills.matcher import find_similar_skills
+from agent_cascade.skills.parser import normalize_version, parse_frontmatter
+from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
@@ -169,7 +172,37 @@ class ProposeSkill(BaseTool):
         existing_meta = skill_manager.get_skill_metadata(proposed_name)
         is_update = existing_meta is not None
 
-        from agent_cascade.skills.parser import normalize_version
+        # ── Hard-reject similarity gate (NEW + UPDATE) ────────────────────────
+        # Reject a proposal whose frontmatter text is too similar to an existing skill,
+        # before any approval request or registration. For an UPDATE we exclude the
+        # incumbent of that name (an update is expected to resemble its own current
+        # version), but still compare against every OTHER skill so an update cannot
+        # silently collide with a different one. Frontmatter fields only — cheap.
+        try:
+            all_metadata = skill_manager.get_all_metadata()
+        except Exception as e:  # pragma: no cover - defensive; gate must not break propose
+            logger.warning('[PROPOSE-SKILL] similarity gate skipped (get_all_metadata failed): %s', e)
+            all_metadata = []
+
+        # Extract the proposal's description/triggers with the robust YAML parser so block-style
+        # `triggers:` lists are read correctly (the lightweight line parse above only captures
+        # scalar values and would yield an empty string for a list, making the comparison
+        # asymmetric against registered metadata that stores real triggers).
+        prop_fm, _ = parse_frontmatter(skill_content)
+        collisions = find_similar_skills(
+            proposed_name, str(prop_fm.get('description', '') or ''), prop_fm.get('triggers'),
+            all_metadata, SKILL_DUP_SIM_THRESHOLD,
+            exclude_names=[proposed_name] if is_update else None,
+        )
+        if collisions:
+            lines = [f"  - '{name}' (similarity: {sim * 100:.1f}%)" for name, sim in collisions]
+            logger.warning('[PROPOSE-SKILL] REJECTED duplicate %s (%d collisions, threshold %.2f)',
+                           proposed_name, len(collisions), SKILL_DUP_SIM_THRESHOLD)
+            return (f"REJECTED: proposed skill '{proposed_name}' is too similar to existing skills "
+                    f"(threshold {SKILL_DUP_SIM_THRESHOLD * 100:.0f}%):\n"
+                    + '\n'.join(lines) +
+                    "\nIf this is an update, use the existing skill's name. Otherwise differentiate "
+                    'the name/description/triggers and re-propose.')
 
         if is_update:
             existing_version = existing_meta.get('version', '1.0.0')
