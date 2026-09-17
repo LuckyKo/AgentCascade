@@ -417,10 +417,11 @@ TOOL_METADATA = {
             '**Execution mode:** auto/sync/async — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
             '**Windows note:** unquoted `;` is translated to `&` (cmd.exe has no `;` separator) so `A; B` runs both commands. Quote a literal `;` to keep it as data.\n\n'
+            'Special commands (no approval required): __help (list auto-approved commands), __status, __kill, __ctrl_c, __heartbeat=N.\n'
         ),
         'parameters': {
             'command':
-                'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one. Use "__help" (no justification needed) to list which commands are auto-approved vs. require approval.',
+                'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
             'justification':
                 'Why you need to execute this command.',
             'cwd':
