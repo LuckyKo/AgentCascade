@@ -161,6 +161,15 @@ class ShellCmd(BaseTool):
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
 
+    def _is_restricted(self, agent_name: str) -> bool:
+        """True if the calling agent instance is system-invoked (restricted shell).
+
+        Delegates to ShellMixin._agent_is_restricted — pass self so it can resolve
+        self.agent_pool via the same logic as the sync path in shell.py.
+        """
+        # ShellMixin._agent_is_restricted expects (self, agent_name) where self has .agent_pool
+        return ShellMixin._agent_is_restricted(self, agent_name)
+
     @staticmethod
     def _truncate_shell_message(text: str, agent_name: str, agent_pool) -> str:
         """Truncate __wait output using mid-truncation with spillover.
@@ -233,6 +242,16 @@ class ShellCmd(BaseTool):
             except (ValueError, TypeError):
                 raise ValueError(f"tool_id must be a numeric value, got: {tool_id!r}")
 
+        # Resolve the runtime agent instance name early so the __help branch below can
+        # render the correct restricted/normal banner. Nothing else here depends on it.
+        agent_name = self._get_agent_name(kwargs)
+
+        # ── __help: informational, works for ALL agents (incl. restricted). ──
+        # Checked before the justification-required check and before control-command routing
+        # so it needs no `justification` and is unambiguous even if a tool_id is also passed.
+        if command.strip().lower() == '__help':
+            return ShellMixin._format_help(restricted=self._is_restricted(agent_name))
+
         # Validate justification is required for non-control commands.
         # Note: Control commands are detected here and routed before auto-async logic applies.
         # Even if a control command has timeout > 60, it won't trigger auto-async mode.
@@ -242,8 +261,6 @@ class ShellCmd(BaseTool):
 
         if not has_tool_id and not justification:
             raise ValueError("'justification' is required for shell_cmd unless using control commands with tool_id")
-
-        agent_name = self._get_agent_name(kwargs)
 
         # ── Handle control commands + stdin input for existing async shells (takes priority) ──
         if has_tool_id:
@@ -395,6 +412,12 @@ class ShellCmd(BaseTool):
 
         # ── Approval gate: mirror sync mode logic ────────────────────
         is_safe = ShellMixin._is_safe_readonly_shell_command(command)
+
+        # ── Restricted (system-invoked) agents: hard-reject non-read-only commands. ──
+        if not is_safe and self._is_restricted(agent_name):
+            return ('REJECTED: Command not allowed for system agents. '
+                    'Only read-only filesystem/git commands are permitted. '
+                    'Use __help to see allowed commands.')
 
         if not is_safe:
             description = (f"⚠️ **SECURITY WARNING**: This is a host shell command running in async (background) mode. "

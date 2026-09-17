@@ -419,7 +419,7 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'command':
-                'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
+                'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one. Use "__help" (no justification needed) to list which commands are auto-approved vs. require approval.',
             'justification':
                 'Why you need to execute this command.',
             'cwd':

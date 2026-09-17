@@ -238,6 +238,7 @@ class AgentInstance:
 
     # ── Remaining Fields with defaults ──────────────────────────────────
     is_terminated: bool = False  # Set when terminate_instance() is called on this instance (Fix Bug41)
+    restricted_shell: bool = False  # Set True in _create_system_agent; shell_cmd hard-rejects non-read-only commands (no user approval for system agents)
     max_turns: Optional[int] = None  # Per-instance turn limit (None = use default 50)
     _current_turn: int = field(default=0)  # Current turn number during execution (for system_info display)
     _turn_consumed: bool = field(

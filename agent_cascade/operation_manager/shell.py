@@ -240,6 +240,75 @@ class ShellMixin:
         return True
 
     @staticmethod
+    def _format_help(restricted: bool = False) -> str:
+        """Return a formatted list of auto-approved shell commands/patterns for __help.
+
+        Rendered directly from the class-level allow-list sets so the output can never
+        drift from what ``_is_safe_readonly_shell_command`` actually accepts.
+        """
+        def _join(items):
+            return ', '.join(sorted(items))
+
+        banner = ('[RESTRICTED MODE] You are a system-invoked agent. ONLY the read-only '
+                  'commands below will run; everything else is REJECTED (no user approval).') \
+            if restricted else \
+            '[NORMAL MODE] Commands below run WITHOUT approval. Anything else prompts the user.'
+
+        lines = [
+            'shell_cmd auto-approval reference',
+            '=' * 40,
+            banner,
+            '',
+            f"Primary read-only commands ({len(ShellMixin._SAFE_PRIMARY_COMMANDS)}):",
+            f"  {_join(ShellMixin._SAFE_PRIMARY_COMMANDS)}",
+            '',
+            f"Git subcommands ({len(ShellMixin._SAFE_GIT_SUBCOMMANDS)}) — run as 'git <subcommand> ...':",
+            f"  {_join(ShellMixin._SAFE_GIT_SUBCOMMANDS)}",
+            '',
+            'Allowed git flags before the subcommand:',
+            f"  {_join(ShellMixin._GIT_FLAGS)}",
+            '',
+            'Dangerous git args that are BLOCKED (per subcommand):',
+        ]
+        for sub in sorted(ShellMixin._DANGEROUS_GIT_ARGS):
+            lines.append(f"  git {sub}: {' '.join(sorted(ShellMixin._DANGEROUS_GIT_ARGS[sub]))}")
+        lines += [
+            '',
+            f"Safe pipe/filter stages (anything after a '|') ({len(ShellMixin._SAFE_PIPE_COMMANDS)}):",
+            f"  {_join(ShellMixin._SAFE_PIPE_COMMANDS)}",
+            '',
+            'Allowed patterns:',
+            "  - 'cd <path> && <cmd>' or 'cd <path>; <cmd>' prefix (single command after)",
+            "  - pipelines: '<safe cmd> | <safe filter> | ...'",
+            '  - redirections to /dev/null, NUL, or file descriptors (e.g. 2>/dev/null) are allowed',
+            '',
+            f"Async shell control commands ({len(ShellMixin._CONTROL_COMMANDS)}):",
+            f"  {_join(ShellMixin._CONTROL_COMMANDS)}, __heartbeat=N",
+            '  (these require a tool_id from a previously launched async shell)',
+            '',
+            "NOT allowed: subshells $(...)/`...`, background '&', file-write redirections, "
+            "cmd/powershell wrappers, chained '&&'/'||'/';' beyond the cd prefix.",
+        ]
+        return '\n'.join(lines)
+
+    def _agent_is_restricted(self, agent_name: str) -> bool:
+        """True if the calling agent instance is system-invoked (restricted shell).
+
+        Resolves ``agent_name`` against ``self.agent_pool.instances``. Requires a real dict
+        of instances so that MagicMock pools (whose ``instances`` is an auto-attribute mock,
+        not a dict) degrade to False — never blocks and never mis-flags a mock pool. A real
+        instance built before this change simply lacks the attribute → False via getattr.
+        """
+        pool = getattr(self, 'agent_pool', None)
+        if not pool or not hasattr(pool, 'instances'):
+            return False
+        instances = pool.instances
+        if not isinstance(instances, dict):
+            return False
+        inst = instances.get(agent_name)
+        return bool(getattr(inst, 'restricted_shell', False))
+
+    @staticmethod
     def _strip_cd_prefix(cmd: str) -> str:
         """Strip 'cd <path> &&' or 'cd <path>;' prefix from a command.
 
@@ -458,6 +527,13 @@ class ShellMixin:
         effective_timeout = timeout if timeout is not None else DEFAULT_SHELL_TIMEOUT
 
         is_safe = self._is_safe_readonly_shell_command(command)
+
+        # ── Restricted (system-invoked) agents: hard-reject non-read-only commands.
+        #    No user approval prompt — there is no human in the loop for system agents. ──
+        if not is_safe and self._agent_is_restricted(agent_name):
+            return ('REJECTED: Command not allowed for system agents. '
+                    'Only read-only filesystem/git commands are permitted. '
+                    'Use __help to see allowed commands.')
 
         if is_safe:
             approved = True

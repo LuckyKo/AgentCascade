@@ -3543,6 +3543,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # Phase 4.4: Delegate to StreamPublisher for WebSocket push
         self.stream_publisher.push_initial_state(inst, caller)
 
+        # System-invoked agents have no human in the loop for shell approval:
+        # restrict their shell_cmd to read-only commands only.
+        inst.restricted_shell = True
+
         return inst
 
     # ═══════════════════════════════════════════════════════════════════════
