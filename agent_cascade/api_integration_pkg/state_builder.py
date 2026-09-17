@@ -992,11 +992,46 @@ def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:
     return False
 
 
+def _streaming_fingerprint(msg, idx):
+    """Return the 5-tuple dedup fingerprint for a (possibly partial) message.
+
+    Uniform shape across committed and streaming messages so set membership is
+    consistent: (content, reasoning, func_call, name, id_part). Access works for BOTH
+    dict and object messages (mirrors the streaming loop's isinstance/getattr pattern).
+
+    ``id_part`` disambiguates PARALLEL tool-call messages that would otherwise collide on
+    (content='', reasoning='', str(function_call), name=None): it is extra.function_id when
+    present, else the batch index ``idx`` — ANY falsy function_id (absent, empty string, or
+    None) falls back to ``idx``, and index 0 must never be used as an id (hence the truthy
+    ``or idx``), else None for non-tool messages. Because both the seed loop and the
+    streaming append loop use this SAME shape, set membership stays correct and lengths
+    never mix.
+    """
+    if isinstance(msg, dict):
+        content = msg.get(CONTENT, '') or ''
+        reasoning = msg.get(REASONING_CONTENT, '') or ''
+        func_call = str(msg.get('function_call'))
+        name = msg.get(NAME)
+        extra = msg.get('extra')
+    else:
+        content = getattr(msg, CONTENT, '') or ''
+        reasoning = getattr(msg, REASONING_CONTENT, '') or ''
+        func_call = str(getattr(msg, 'function_call', None))
+        name = getattr(msg, NAME, None)
+        extra = getattr(msg, 'extra', None)
+
+    if func_call != 'None':
+        id_part = (extra or {}).get('function_id') or idx
+    else:
+        id_part = None
+    return (content, reasoning, func_call, name, id_part)
+
+
 def _is_stale_prefix_of_serialized(
     stream_content: str,
     stream_reasoning: str,
     serialized_msgs: List[dict],
-    has_func_call: bool = False,
+    is_tool_call: bool = False,
 ) -> bool:
     """Return True if a streaming partial is a STALE version of the LAST serialized assistant.
 
@@ -1040,7 +1075,7 @@ def _is_stale_prefix_of_serialized(
     # "prefix" match against a prior (tool or text) assistant would wrongly drop every parallel
     # tool bubble after the first (the reported UI freeze). If the in-flight partial carries a
     # function_call it is a tool-call message, not a stale text prefix -> not stale.
-    if has_func_call:
+    if is_tool_call:
         return False
 
     # Find the LAST serialized assistant message with string content — the only candidate that
@@ -1175,27 +1210,18 @@ def _serialize_instance(
         # to exclude the last committed message; doing so would break this dedup guarantee.
         #
         # Fingerprint shape: a UNIFORM 5-tuple (content, reasoning, func_call, name, id_part)
-        # built identically for BOTH the committed-tail seed loop below AND the streaming
-        # append loop. The 5th element `id_part` disambiguates PARALLEL tool-call messages that
-        # would otherwise collide on (content='', reasoning='', str(function_call), name=None):
-        # two calls to the same tool with equal/partial args previously collapsed into one and
-        # the second was silently dropped (num_streaming undercount -> UI freeze). id_part is
-        # extra.function_id when present, else the loop index `j` (stable within one
-        # serialization pass — exactly where collisions occur), else None. Because both loops
-        # use the SAME shape, set membership stays correct and lengths never mix.
+        # built by _streaming_fingerprint identically for BOTH the committed-tail seed loop
+        # below AND the streaming append loop. The 5th element `id_part` disambiguates PARALLEL
+        # tool-call messages that would otherwise collide on (content='', reasoning='',
+        # str(function_call), name=None): two calls to the same tool with equal/partial args
+        # previously collapsed into one and the second was silently dropped (num_streaming
+        # undercount -> UI freeze). id_part is extra.function_id when present, else the batch
+        # index `j` (stable within one serialization pass — exactly where collisions occur),
+        # else None. Because both loops use the SAME shape, set membership stays correct and
+        # lengths never mix.
         existing_fingerprints = set()
         for j, msg in enumerate(serialized_msgs):
-            content = msg.get(CONTENT, '') or ''
-            reasoning = msg.get(REASONING_CONTENT, '') or ''
-            func_call = str(msg.get('function_call'))
-            name = msg.get(NAME)
-            # Tool-call messages: extra.function_id when present, else the loop index j so two
-            # identical same-tool calls still differ. Non-tool messages: None.
-            if msg.get('function_call'):
-                id_part = (msg.get('extra') or {}).get('function_id') or j
-            else:
-                id_part = None
-            fingerprint = (content, reasoning, func_call, name, id_part)
+            fingerprint = _streaming_fingerprint(msg, j)
             if fingerprint != ('', '', 'None', None, None):
                 existing_fingerprints.add(fingerprint)
 
@@ -1208,20 +1234,14 @@ def _serialize_instance(
                                                                        dict) else getattr(stream_msg, CONTENT, '') or ''
             stream_reasoning = stream_msg.get(REASONING_CONTENT, '') if isinstance(
                 stream_msg, dict) else getattr(stream_msg, REASONING_CONTENT, '') or ''
-            stream_func_call = str(
+            is_tool_call = str(
                 stream_msg.get('function_call') if isinstance(stream_msg, dict
-                                                             ) else getattr(stream_msg, 'function_call', None))
-            stream_name = stream_msg.get(NAME) if isinstance(stream_msg, dict) else getattr(stream_msg, NAME, None)
-            has_func_call = stream_func_call != 'None'
-            # id_part (5th tuple element): extra.function_id for tool-call messages, falling back
-            # to the loop index j when a model omits the id, so two identical same-tool parallel
-            # calls still differ; None for non-tool messages. Must match the seed loop's shape.
-            if has_func_call:
-                stream_extra = stream_msg.get('extra') if isinstance(stream_msg, dict) else getattr(stream_msg, 'extra', None)
-                stream_id_part = (stream_extra or {}).get('function_id') or j
-            else:
-                stream_id_part = None
-            fingerprint = (stream_content, stream_reasoning, stream_func_call, stream_name, stream_id_part)
+                                                              ) else getattr(stream_msg, 'function_call', None)) != 'None'
+            # id-aware 5-tuple fingerprint (see _streaming_fingerprint): extra.function_id for
+            # tool-call messages, falling back to the batch index j so two identical same-tool
+            # parallel calls still differ; None for non-tool messages. Must match the seed
+            # loop's shape for set membership.
+            fingerprint = _streaming_fingerprint(stream_msg, j)
 
             # Only append if not duplicate and has meaningful content.
             # Guard 2 (stale-prefix dedup): also skip a partial that is a STALE version of the
@@ -1231,12 +1251,12 @@ def _serialize_instance(
             # that exact-fingerprint dedup misses. It can NEVER suppress legitimate streaming
             # growth: a genuinely growing partial is not yet committed, so the last serialized
             # assistant (an older turn's final, or none) does not contain it.
-            # Pass a BOOLEAN "has function call" (not the str(...) value, whose 'None' string is
+            # Pass a BOOLEAN "is tool call" (not the str(...) value, whose 'None' string is
             # not Python None) so the guard can exempt tool-call messages without false-exempting
             # text partials.
             if fingerprint not in existing_fingerprints and fingerprint != ('', '', 'None', None, None) \
                     and not _is_stale_prefix_of_serialized(stream_content, stream_reasoning, serialized_msgs,
-                                                          has_func_call):
+                                                          is_tool_call):
                 # use_cache=False: streaming partials are short-lived deep copies whose
                 # memory addresses get recycled by GC. Caching them by id() causes stale
                 # hits when the next turn's copy lands at the same address (id collision).
