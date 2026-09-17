@@ -315,7 +315,7 @@ class CompressionExecMixin:
             role=USER,
             content=(
                 f"[SYSTEM]: You appear to be stuck in a loop — {reason}. "
-                f"Try a different approach to break the pattern."
+                f"Please take a moment to gather your thoughts/check your notes before trying a different approach."
             ),
         )
         self._append_and_log(instance, hint_msg)

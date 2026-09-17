@@ -533,7 +533,7 @@ AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for au
 AUTO_SKILL_AUTO_PROMOTE: bool = True  # Auto-promote validated NEW skills to agents/global/skills/
 CANDIDATE_MIN_RATINGS: int = int(
     os.getenv('AGENT_CASCADE_CANDIDATE_MIN_RATINGS',
-              3))  # Ratings a candidate must accumulate before the decision gate compares it with the incumbent
+              5))  # Ratings a candidate must accumulate before the decision gate compares it with the incumbent
 CANDIDATE_EVAL_INTERVAL_SECONDS: float = float(os.getenv(
     'AGENT_CASCADE_CANDIDATE_EVAL_INTERVAL', 30.0))  # Safety-net interval for the candidate evaluation timer
 AUTO_SKILL_MAX_SIZE_KB: int = 15  # Maximum SKILL.md file size in KB
