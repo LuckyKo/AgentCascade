@@ -1889,6 +1889,61 @@ class TestProposeSkillRatingModes:
         assert m.get_skill_metadata(name)['version'] != v1  # patch version auto-incremented
         pool.operation_manager.request_user_approval.assert_called_once()
 
+    def test_update_routes_through_candidate_not_production(self, fresh_manager):
+        """Regression: an update (content for an existing name) must create a candidate,
+        not overwrite the production SKILL.md directly.
+
+        Before the fix, propose_skill routed updates to SkillManager.update_skill_in_place(),
+        which overwrote the production file and bypassed the candidate/decision-gate flow.
+        Now both new and update go through register_skill_from_content(); for an existing name
+        that routes to _register_candidate_upgrade (candidate folder + evaluate_candidates gate).
+        """
+        m = self.manager
+        # Isolated candidate/production dirs + neutralized discovery refresh, so the immediate
+        # eval trigger inside register_skill_from_content() cannot re-scan the REAL
+        # agents/global/skills tree and clear the manually staged incumbent.
+        tmp_path = Path(m._metrics_file).parent
+        m._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
+        m._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
+        m._skill_paths = []
+        m.invalidate_cache = lambda *a, **k: None
+        m._ensure_discovered = lambda *a, **k: None
+
+        name = f"test-update-candidate-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='INCUMBENT_BODY_MARKER')
+        prod_file = (m._production_skills_dir / name / 'SKILL.md')
+        original_prod = prod_file.read_text(encoding='utf-8')
+
+        # Update content with a distinct version (2.0.0) and a marker only present in the new body.
+        updated = _make_skill_content(
+            name=name,
+            description='Updated skill routed through candidate flow',
+            triggers=['update', 'candidate'],
+            generated_from_task='test update routes to candidate',
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        marker = 'UPDATE_BODY_MARKER'
+        updated = updated.replace('## Instructions', f'## Instructions\n\n{marker}', 1)
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated,
+                                        'justification': 'refine via candidate flow', 'rating': 9.0}))
+        assert 'updated' in result.lower()
+
+        # New content must NOT be in the production file (no direct overwrite).
+        prod_now = prod_file.read_text(encoding='utf-8')
+        assert marker not in prod_now, 'production SKILL.md must not be overwritten directly by an update'
+        assert prod_now == original_prod, 'production file must be byte-for-byte untouched'
+
+        # New content MUST be present under agents/global/candidates/<name>/SKILL.md.
+        cand_file = (m._candidates_dir / name / 'SKILL.md')
+        assert cand_file.exists(), 'update must create a candidate under candidates/<name>/'
+        cand_now = cand_file.read_text(encoding='utf-8')
+        assert marker in cand_now, 'candidate SKILL.md must contain the new content'
+        # Registry winner is now the live-serving candidate.
+        reg = m._skills_registry[name]
+        assert reg['file_path'] == str(cand_file)
+
 
 # ===========================================================================
 # Candidate flow — live-serving upgrade candidates (Phase 2 of skill evolution)

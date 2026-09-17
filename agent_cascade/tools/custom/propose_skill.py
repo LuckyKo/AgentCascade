@@ -225,18 +225,14 @@ class ProposeSkill(BaseTool):
         if not approved:
             return f"REJECTED: {reason}"
 
-        # Proceed with registration or update
-        if is_update:
-            success, errors = skill_manager.update_skill_in_place(
-                name=proposed_name,
-                skill_content=skill_content,
-                source='auto-generated',
-            )
-        else:
-            success, errors = skill_manager.register_skill_from_content(
-                skill_content=skill_content,
-                source='auto-generated',
-            )
+        # Both NEW skills and UPDATES go through register_skill_from_content. For an existing
+        # name it routes to _register_candidate_upgrade (candidate folder + decision gate), so
+        # an update creates a candidate that the gate later promotes/discards — it never
+        # overwrites the production file directly. A new name registers/auto-promotes as before.
+        success, errors = skill_manager.register_skill_from_content(
+            skill_content=skill_content,
+            source='auto-generated',
+        )
 
         if success:
             # If a rating was supplied alongside content, record it after successful
