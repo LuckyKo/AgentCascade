@@ -145,6 +145,28 @@ def _set_generating_true(session: dict) -> None:
 # protocol limit, so a plain module constant (no env override) is intentional.
 _SESSION_CAPTION_MAX_LEN = 120
 
+# Cache for _read_session_caption: key = (path_str, mtime, size) → caption string.
+# Avoids re-reading unchanged log files on every /api/sessions call.
+_caption_cache: dict[tuple[str, float, int], str] = {}
+_CAPTION_CACHE_MAX = 2000  # cap to prevent unbounded growth
+_caption_cache_lock = threading.Lock()
+
+
+def _caption_cache_get(path_str: str, mtime: float, size: int) -> str | None:
+    """Return cached caption or None on miss."""
+    with _caption_cache_lock:
+        return _caption_cache.get((path_str, mtime, size))
+
+
+def _caption_cache_set(path_str: str, mtime: float, size: int, caption: str) -> None:
+    """Store caption; evict oldest entries if over cap (simple FIFO by insertion)."""
+    with _caption_cache_lock:
+        if len(_caption_cache) >= _CAPTION_CACHE_MAX:
+            # Remove first 10% of entries (dict preserves insertion order)
+            for k in list(_caption_cache.keys())[:_CAPTION_CACHE_MAX // 10]:
+                del _caption_cache[k]
+        _caption_cache[(path_str, mtime, size)] = caption
+
 
 def _truncate_caption(text: str) -> str:
     """Collapse whitespace and truncate ``text`` to ``_SESSION_CAPTION_MAX_LEN`` chars.
@@ -160,8 +182,36 @@ def _truncate_caption(text: str) -> str:
     return collapsed[:_SESSION_CAPTION_MAX_LEN].rstrip() + '…'
 
 
-def _read_session_caption(path, max_scan_lines: int = 200) -> str:
+def _read_session_caption(path, mtime: float = None, size: int = None, max_scan_lines: int = 200) -> str:
     """Read a session log's display caption without loading the whole file.
+
+    Results are cached by (path, mtime, size) so unchanged files are O(1) on repeat calls.
+    If mtime/size are not provided, no caching is performed.
+
+    Semantics (single "caption" field for the UI):
+      1. ``metadata.caption`` from line 1, if non-empty (the compressor-generated caption).
+      2. Otherwise, the first USER message's text (scanned forward from line 2, stopping
+         early — at most ``max_scan_lines`` lines) truncated to ~120 chars with an ellipsis.
+      3. Otherwise "" (no caption and no user message found / unreadable file).
+
+    Only leading lines are read; the rest of the file is never touched. All errors are
+    swallowed (returning "") so a malformed/empty/partial log can't break the listing.
+    """
+    path_str = str(path)
+    if mtime is not None and size is not None:
+        cached = _caption_cache_get(path_str, mtime, size)
+        if cached is not None:
+            return cached
+
+    caption = _read_session_caption_uncached(path, max_scan_lines)
+
+    if mtime is not None and size is not None:
+        _caption_cache_set(path_str, mtime, size, caption)
+    return caption
+
+
+def _read_session_caption_uncached(path, max_scan_lines: int = 200) -> str:
+    """Read a session log's display caption without loading the whole file (no caching).
 
     Semantics (single "caption" field for the UI):
       1. ``metadata.caption`` from line 1, if non-empty (the compressor-generated caption).
@@ -206,6 +256,52 @@ def _read_session_caption(path, max_scan_lines: int = 200) -> str:
     except Exception as e:
         logger.debug(f"Failed to read session caption for {path}: {e}")
     return ''
+
+
+def _scan_sessions_sync(log_dir: Path) -> list[dict]:
+    """Synchronous session scan (runs in a worker thread via asyncio.to_thread).
+
+    Uses os.scandir instead of glob+stat to get file attributes from the directory
+    listing itself — avoids a separate stat() syscall per file (~1.7x faster on Windows).
+    """
+    sessions = []
+    try:
+        entries = list(os.scandir(log_dir))
+    except OSError as e:
+        logger.debug(f"Failed to scan log dir {log_dir}: {e}")
+        return sessions
+
+    for entry in entries:
+        if not entry.name.endswith('.jsonl'):
+            continue
+        try:
+            p = Path(entry.path)
+            parts = p.stem.split('_')
+            if len(parts) >= 3:
+                agent_class = parts[0]
+                timestamp = parts[-2] + '_' + parts[-1]
+                instance_name = '_'.join(parts[1:-2])
+            else:
+                agent_class = 'Unknown'
+                instance_name = p.stem
+                timestamp = 'Unknown'
+
+            st = entry.stat(follow_symlinks=False)
+            sessions.append({
+                'path': str(p),
+                'name': instance_name,
+                'agent': agent_class,
+                'timestamp': timestamp,
+                'size': st.st_size,
+                'mtime': st.st_mtime,
+                'caption': _read_session_caption(p, mtime=st.st_mtime, size=st.st_size),
+            })
+        except Exception as e:
+            logger.debug(f"Failed to parse session log file info: {e}")
+            continue
+
+    sessions.sort(key=lambda x: x['mtime'], reverse=True)
+    return sessions
 
 
 def create_app(agents, agent_pool, config=None, auto_security=True):
@@ -974,38 +1070,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if not log_dir.exists():
             return {'sessions': []}
 
-        sessions = []
-        for p in log_dir.glob('*.jsonl'):
-            try:
-                # Basic info from filename: agent_class_instance_name_timestamp.jsonl
-                parts = p.stem.split('_')
-                if len(parts) >= 3:
-                    agent_class = parts[0]
-                    timestamp = parts[-2] + '_' + parts[-1]
-                    instance_name = '_'.join(parts[1:-2])
-                else:
-                    agent_class = 'Unknown'
-                    instance_name = p.stem
-                    timestamp = 'Unknown'
-
-                sessions.append({
-                    'path': str(p),
-                    'name': instance_name,
-                    'agent': agent_class,
-                    'timestamp': timestamp,
-                    'size': p.stat().st_size,
-                    'mtime': p.stat().st_mtime,
-                    # Session caption: metadata.caption if set, else truncated first USER
-                    # message (fallback), else "". Read cheaply — line 1 for the caption,
-                    # and only enough leading lines to find the first user message.
-                    'caption': _read_session_caption(p),
-                })
-            except Exception as e:
-                logger.debug(f"Failed to parse session log file info: {e}")
-                continue
-
-        # Sort by mtime descending
-        sessions.sort(key=lambda x: x['mtime'], reverse=True)
+        # Offload blocking I/O to a thread so the event loop stays responsive.
+        sessions = await asyncio.to_thread(_scan_sessions_sync, log_dir)
         return {'sessions': sessions}
 
     @app.get('/api/file')
