@@ -876,6 +876,29 @@ class TestEngineQueryExtraction:
         q = ExecutionEngine._extract_memory_hint_query(turn, 1000)
         assert q == ''
 
+    def test_tool_call_only_turn_with_real_function_call_returns_empty(self):
+        """Regression: a tool-call-only turn (empty content + non-empty function_call, no
+        reasoning) must yield '' — the shared extract_text_from_message() tool-call fallback
+        used to leak "[TOOL CALL: ...]" into the query and fire the hint on such turns.
+        """
+        from agent_cascade.engine.core import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        # content is empty; a REAL function_call is present (the exact reported bug shape).
+        msg = Message(role=ASSISTANT, content='',
+                      extra={'function_call': FunctionCall(name='read_file', arguments='{"path": "x"}')})
+        turn = [msg]
+        q = ExecutionEngine._extract_memory_hint_query(turn, 1000)
+        assert q == '', f'tool-call-only turn must not trigger a hint, got query: {q!r}'
+
+    def test_text_content_list_parts_joined(self):
+        """List content: the ``text`` fields of the parts are joined into the query."""
+        from agent_cascade.engine.core import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, ContentItem, Message
+        msg = Message(role=ASSISTANT,
+                      content=[ContentItem(text='compression'), ContentItem(text='hang debug')])
+        q = ExecutionEngine._extract_memory_hint_query([msg], 1000)
+        assert 'compression' in q and 'hang debug' in q
+
     def test_reasoning_only_turn_has_query(self):
         """A pure-thinking turn (reasoning_content, no text) still produces a query."""
         from agent_cascade.engine.core import ExecutionEngine

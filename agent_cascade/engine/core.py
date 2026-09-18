@@ -376,19 +376,37 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
     @staticmethod
     def _extract_memory_hint_query(turn_output, max_chars: int) -> str:
-        """Build the hint query from a turn's assistant text/reasoning.
+        """Build the hint query from a turn's assistant text/reasoning ONLY.
 
-        Returns '' when the turn is tool-call-only (no content and no reasoning),
-        which is the trigger-exclusion case (plan §1.2 / R6). Concatenates text +
-        reasoning across all messages, capped at ``max_chars``.
+        Reads each assistant message's ``content`` DIRECTLY (str, or the ``text``
+        fields of list parts) plus its ``reasoning_content`` — it deliberately does
+        NOT use the shared ``extract_text_from_message()`` helper, whose tool-call
+        fallback would leak tool-call descriptions into the query.
+
+        Returns '' when a turn has NEITHER text NOR reasoning (e.g. a tool-call-only
+        turn) — that is the trigger-exclusion case (plan §1.2 / R6). Tool calls are
+        NEVER part of the query, by design. Concatenates text + reasoning across all
+        messages, capped at ``max_chars``.
         """
         parts = []
         for msg in (turn_output or []):
             role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
             if role != ASSISTANT:
                 continue
-            # Text content.
-            text = extract_text_from_message(msg, add_upload_info=False)
+            # Text content — read DIRECTLY (no tool-call fallback).
+            content = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', None)
+            text = ''
+            if isinstance(content, str):
+                text = content.strip()
+            elif isinstance(content, list):
+                # Join the ``text`` fields of dict parts (mirror prior expectations).
+                frags = []
+                for part in content:
+                    t = part.get('text') if isinstance(part, dict) else getattr(part, 'text', None)
+                    if isinstance(t, str) and t.strip():
+                        frags.append(t.strip())
+                text = ' '.join(frags).strip()
+            # (any other content type → ignored)
             if text:
                 parts.append(text)
             # Reasoning content (a pure-thinking turn still counts as "has content").
