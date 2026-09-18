@@ -14,7 +14,7 @@ from agent_cascade.llm.schema import USER, Message
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
-from ..agent_instance import AgentInstance, PoolSettings
+from ..agent_instance import ACTIVE_STATES, AgentInstance, PoolSettings
 from ..async_tools import AsyncToolRegistry
 from .config_persist import ConfigPersistMixin
 from .conversation import ConversationMixin
@@ -248,10 +248,24 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # ── Agent discovery ──────────────────────────────────────────────────
         self._discover_agents(agents_dir)
 
+    def has_active_agent(self) -> bool:
+        """Return True if any pool instance is in an active state.
+
+        SLEEPING counts as active — the agent is merely waiting on an async tool,
+        not idle. Used to gate the candidate-eval safety-net timer so it doesn't
+        re-scan while every agent is idle/terminated.
+        """
+        return any(inst.state in ACTIVE_STATES for inst in self.instances.values())
+
     def _candidate_eval_loop(self, interval: float):
         """Periodically re-run the skill candidate decision gate (safety net)."""
         while not self._candidate_eval_stop.wait(interval):
             try:
+                # Skip the tick when no agent is active: a full re-scan is pointless
+                # while everything is idle/terminated (SLEEPING still counts as active,
+                # since it's just waiting on an async tool).
+                if not self.has_active_agent():
+                    continue
                 self.skill_manager.evaluate_candidates()
             except Exception as e:  # noqa: BLE001 — a gate hiccup must not kill the timer
                 logger.debug(f"Candidate eval tick failed (non-critical): {e}")
