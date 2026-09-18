@@ -44,6 +44,7 @@ Run: pytest tests/test_turn_limit_warning_user_messages.py -v
 import time
 from typing import List
 
+import pytest
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
@@ -520,25 +521,24 @@ def _run_with_auto_skill_reflection(max_turns: int):
 class TestTurnLimitWarningAutoSkillReflection:
     """50%/90% budget warnings must NOT fire during the auto-skill reflection extension."""
 
-    def test_no_stale_budget_warning_during_reflection(self):
-        """max_turns=80 → original turns_90pct=int(80*0.1)=8, turns_50pct=int(80*0.5)=40.
+    @pytest.mark.parametrize('max_turns', [80, 50], ids=['budget_80', 'budget_50'])
+    def test_no_stale_budget_warning_during_reflection(self, max_turns):
+        """The original task phase runs all ``max_turns`` tool-call turns (it never completes
+        early), so it legitimately fires the "Halfway" and "Turn limit approaching" warnings
+        with the ORIGINAL budget — that is correct behavior, NOT the bug.
 
-        The original task phase runs all 80 tool-call turns (it never completes early), so it
-        legitimately fires the "Halfway" warning ONCE at turn 40 with the ORIGINAL budget
-        ("out of 80 total") — that is correct, expected behavior, NOT the bug.
+        The BUG: after the trigger, max_turns becomes ``max_turns + AUTO_SKILL_EXTRA_TURNS``
+        (e.g. 80→105, 50→75) and turns_available resets to AUTO_SKILL_EXTRA_TURNS=25, counting
+        down 25→1. The STALE turns_90pct (computed from the original budget: int(80*0.1)=8 /
+        int(50*0.1)=5) is crossed on a reflection turn, which pre-fix fired a misleading
+        "You have N turn(s) remaining out of {extended_total} total." warning right after the
+        auto-skill prompt. Post-fix that stale-threshold firing is suppressed, so NO budget
+        warning carries the EXTENDED budget.
 
-        The BUG: after the trigger, max_turns becomes 80+25=105 and turns_available resets to
-        AUTO_SKILL_EXTRA_TURNS=25, counting down 25→1. The STALE turns_90pct=8 (computed from
-        the original budget) is crossed on a reflection turn (turns_available==8), which
-        pre-fix fired a misleading "You have 8 turn(s) remaining out of 105 total." warning
-        right after the auto-skill prompt. Post-fix that stale-threshold firing is suppressed,
-        so NO budget warning carries the EXTENDED budget ("out of 105").
-
-        The assertion therefore keys on the misleading extended-budget phrasing — not on the
-        mere absence of any "Turn limit approaching" text (a legitimate original-budget one
-        would be fine).
+        The assertion keys on the misleading extended-budget phrasing — not on the mere absence
+        of any "Turn limit approaching" text (a legitimate original-budget one would be fine).
+        Parametrized over two budgets to guard that the fix is not specific to a single size.
         """
-        max_turns = 80
         llm, instance = _run_with_auto_skill_reflection(max_turns)
 
         # Sanity: the reflection actually fired (one-shot flag set at trigger time). We do
@@ -547,12 +547,9 @@ class TestTurnLimitWarningAutoSkillReflection:
         assert getattr(instance, '_auto_skill_proposed', False) is True, \
             'auto-skill reflection did not trigger — test harness misconfigured'
 
-        # The extended budget that the misleading warning would print.
-        extended_total = max_turns + AUTO_SKILL_EXTRA_TURNS  # 105
+        extended_total = max_turns + AUTO_SKILL_EXTRA_TURNS
 
         # (a) NO budget warning anywhere in the conversation carries the EXTENDED budget.
-        #     Pre-fix the stale turns_90pct=8 crossed during the reflection fired exactly one
-        #     such message ("...out of 105 total"); post-fix it is suppressed.
         for msg in instance.conversation:
             if _msg_role(msg) != USER:
                 continue
@@ -566,34 +563,9 @@ class TestTurnLimitWarningAutoSkillReflection:
         # (b) The original task phase's legitimate warnings are UNCHANGED: exactly one
         #     "Halfway" and one "Turn limit approaching", both with the ORIGINAL budget.
         assert _count_in_conversation(instance, 'Halfway through your turn budget') == 1, \
-            "original-phase 'Halfway' warning should fire exactly once (out of 80 total)"
+            f"original-phase 'Halfway' warning should fire exactly once (out of {max_turns} total)"
         assert _count_in_conversation(instance, 'Turn limit approaching') == 1, \
-            "original-phase 'Turn limit approaching' warning should fire exactly once (out of 80 total)"
-
-    def test_no_stale_budget_warning_during_reflection_small_budget(self):
-        """max_turns=50 → original turns_90pct=int(50*0.1)=5, turns_50pct=int(50*0.5)=25.
-
-        Second data point: the extended budget is 50+25=75 and the stale turns_90pct=5 is
-        crossed during the reflection (turns_available counts down from 25, passing 5). Pre-fix
-        this fired "You have 5 turn(s) remaining out of 75 total."; post-fix it is suppressed.
-        Guards that the fix is not specific to a single budget size.
-        """
-        max_turns = 50
-        llm, instance = _run_with_auto_skill_reflection(max_turns)
-
-        assert getattr(instance, '_auto_skill_proposed', False) is True, \
-            'auto-skill reflection did not trigger — test harness misconfigured'
-        extended_total = max_turns + AUTO_SKILL_EXTRA_TURNS  # 75
-
-        for msg in instance.conversation:
-            if _msg_role(msg) != USER:
-                continue
-            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if not isinstance(content, str):
-                continue
-            assert f'out of {extended_total} total' not in content, \
-                (f"misleading extended-budget budget warning leaked into conversation "
-                 f"(stale threshold fired during reflection): {content[:120]!r}")
+            f"original-phase 'Turn limit approaching' warning should fire exactly once (out of {max_turns} total)"
 
     def test_reflection_phase_llm_context_has_no_extended_budget_warning(self):
         """The reflection phase (the AUTO_SKILL_EXTRA_TURNS LLM calls AFTER the triggering

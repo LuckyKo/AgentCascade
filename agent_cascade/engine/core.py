@@ -748,8 +748,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             inst_name = instance.instance_name
             turns_90pct = max(2, int(max_turns * 0.1))  # 90% threshold, min 2 to avoid collision with final turn
             turns_50pct = max(3, int(max_turns * 0.5))  # 50% mid-point warning, min 3 to avoid overlap with 90%/final
-            # Set True when the auto-skill reflection extension fires (Phase 5); suppresses the
-            # 50%/90% budget warnings for the fresh reflection turns (see reset block below).
+            # Start False; set True during the auto-skill reflection extension (Phase 5) to
+            # suppress the 50%/90% budget warnings for the fresh reflection turns (reset block below).
             _suppress_budget_warnings = False
 
             while turns_available > 0:
@@ -971,13 +971,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         instance._auto_skill_orig_max_turns = instance.max_turns   # R6 snapshot
                         instance.max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
                         max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
-                        # The 50%/90% warnings are about the ORIGINAL task budget, which is already
-                        # exhausted here — the reflection is a bounded fresh phase (turns_available
-                        # counts down from exactly AUTO_SKILL_EXTRA_TURNS while max_turns holds the
-                        # extended total), so "approaching limit" is meaningless and any recomputed
-                        # threshold would still print a misleading "N remaining out of {max_turns}".
-                        # Suppress them for the reflection turns; the final-turn warning (==1) below
-                        # still fires on the reflection's last turn.
+                        # 50%/90% warnings apply to the ORIGINAL budget, already exhausted here.
+                        # The reflection is a fresh phase (turns_available counts down from
+                        # AUTO_SKILL_EXTRA_TURNS while max_turns is extended), so those thresholds
+                        # are meaningless and would print misleading "N remaining out of {extended}"
+                        # messages. Suppress them; the final-turn warning (==1) still fires on the
+                        # reflection's last turn.
                         _suppress_budget_warnings = True
                         # NOTE: this trigger fires at Phase 5 (natural completion), i.e. AFTER
                         # _consume_turn has already decremented turns_available for the triggering
