@@ -878,6 +878,18 @@ def compress_context(
             logger.error(f"Hierarchical consolidation failed for '{target_agent_name}' (non-fatal): {e}. "
                          f"Normal compression succeeded; markers will be consolidated on next cycle.")
 
+    # ── 15. Memory-hint state reset (feature: memory_hint, plan §5.2) ────────
+    # On a real (non-dry-run) success, clear the target instance's read-set + cooldown
+    # so memories are re-hintable after context loss. Covers both L1 chunk replacement
+    # and L2 marker consolidation (consolidation runs earlier in this same path).
+    if not dry_run:
+        try:
+            _mh_inst = agent_pool.get_instance(target_agent_name)
+            if _mh_inst is not None:
+                _mh_inst._reset_memory_hint_state()
+        except Exception as e:  # noqa: BLE001 — best-effort, never affect compression result
+            logger.debug(f"[MEMORY_HINT] post-compression reset failed for '{target_agent_name}': {e}")
+
     return CompressResult(
         success=True,
         summary_text=generated_summary,

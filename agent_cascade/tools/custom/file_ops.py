@@ -160,6 +160,37 @@ class ReadFile(BaseTool, PathResolutionMixin):
             return DEFAULT_READ_LINES, True  # wild read — high-water mark applied post-hoc
 
     # ------------------------------------------------------------------ #
+    #  Helper: memory-hint read tracking (feature: memory_hint)           #
+    # ------------------------------------------------------------------ #
+    def _track_memory_read(self, resolved: Path) -> None:
+        """Record a lesson read if ``resolved`` is under a .agent_lessons/ vault.
+
+        Best-effort: any failure is swallowed so it never affects the read. Uses the
+        current thread-local instance name (set by the engine before each tool call).
+        """
+        try:
+            pool = self.agent_pool
+            if pool is None:
+                return
+            manager = getattr(pool, 'memory_hint_manager', None)
+            if manager is None:
+                return
+            om = getattr(pool, 'operation_manager', None)
+            from agent_cascade.memory_hint.vault import discover_vaults, is_under_vault
+            vault_roots = discover_vaults(om)
+            if not vault_roots:
+                return
+            hit = is_under_vault(resolved, vault_roots)
+            if not hit:
+                return
+            vault_root, rel_path = hit
+            from agent_cascade.operation_manager.path_security import _get_current_instance_name
+            inst_name = _get_current_instance_name()
+            manager.on_memory_read(inst_name, vault_root, rel_path)
+        except Exception:  # noqa: BLE001 — best-effort, never affect the read
+            pass
+
+    # ------------------------------------------------------------------ #
     #  Helper: read text file with streaming line-by-line iteration       #
     # ------------------------------------------------------------------ #
     def _read_text_file(
@@ -374,6 +405,12 @@ class ReadFile(BaseTool, PathResolutionMixin):
             # Check for binary content
             if _is_binary_file(resolved):
                 return self._read_binary_file(path, resolved)
+
+            # ── Memory-hint read tracking (feature: memory_hint, plan §2.2) ──
+            # If this file is a lesson under a .agent_lessons/ vault, record the read so
+            # the hint dedup set + stats sidecar stay in sync. Best-effort; never affects
+            # the read itself. Runs after all guards pass (resolved path known, is_file).
+            self._track_memory_read(resolved)
 
             # Resolve negative/zero start_line against total file length
             if raw_start <= 0:

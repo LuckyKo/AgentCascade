@@ -1466,6 +1466,11 @@ if __name__ == '__main__':
         'shell_char_limit': 8000,
         'code_char_limit': 8000,
         'list_dir_char_limit': 8000,
+        # Memory-hint feature (plan §7) — OFF by default.
+        'memory_hint_enabled': False,
+        'memory_hint_threshold': 0.35,
+        'memory_hint_max_chars': 300,
+        'memory_hint_query_chars': 1000,
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)

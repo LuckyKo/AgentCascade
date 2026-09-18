@@ -231,6 +231,20 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         )
         self._candidate_eval_thread.start()
 
+        # ── Memory-Hint System (feature: memory_hint, plan §2.2 / §6.3) ───────
+        # Best-effort: the manager is always created (so a runtime UI toggle takes
+        # effect without restart), but its worker + startup rescan only run when
+        # memory_hint_enabled. Any init failure is swallowed — hints are non-critical.
+        try:
+            from agent_cascade.memory_hint import MemoryHintManager
+            self.memory_hint_manager = MemoryHintManager(self)
+            if (self.llm_cfg or {}).get('memory_hint_enabled', False):
+                self.memory_hint_manager.start()
+                self.memory_hint_manager.rescan_vaults()
+        except Exception as e:  # noqa: BLE001 — never block pool init on the hint system
+            logger.warning(f"Memory-hint manager init failed (non-critical): {e}")
+            self.memory_hint_manager = None
+
         # ── Agent discovery ──────────────────────────────────────────────────
         self._discover_agents(agents_dir)
 

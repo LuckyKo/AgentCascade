@@ -337,6 +337,69 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             logger.warning('[AUTO-SKILL] In-loop trigger failed for %s: %s', getattr(instance, 'instance_name', '?'), e)
             return False
 
+    def _maybe_submit_memory_hint(self, instance, turn_output) -> None:
+        """Best-effort memory-hint submit at the Phase-3/Phase-4 boundary.
+
+        Feature: memory_hint (plan §1.2). Submits a hint job for any turn that has
+        assistant text or reasoning content — including text+tool turns — excluding
+        tool-call-only turns. Delivery is async on a daemon worker and rides the
+        existing tool-warning queue; there is NO user-message injection here.
+
+        Best-effort: ANY exception is swallowed (never raises, never blocks, never
+        mutates the turn budget). Fast path returns before touching locks/manager.
+        """
+        try:
+            manager = getattr(self.pool, 'memory_hint_manager', None)
+            if manager is None:
+                return
+            cfg = getattr(self.pool, 'llm_cfg', None) or {}
+            if not cfg.get('memory_hint_enabled', False):
+                return
+
+            # Skip sleeping instances (state can change; re-checked at delivery too).
+            try:
+                from agent_cascade.agent_instance import AgentState
+                if getattr(instance, 'state', None) == AgentState.SLEEPING:
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+
+            query = self._extract_memory_hint_query(turn_output, int(cfg.get('memory_hint_query_chars', 1000)))
+            if not query:
+                return  # tool-call-only turn (no text/reasoning) → do not trigger.
+
+            manager.submit(instance.instance_name, query, getattr(instance, 'agent_class', ''),
+                           turn=getattr(instance, '_current_turn', -1))
+        except Exception as e:  # noqa: BLE001 — best-effort, never break the run
+            logger.debug('[MEMORY_HINT] submit hook failed for %s: %s',
+                         getattr(instance, 'instance_name', '?'), e)
+
+    @staticmethod
+    def _extract_memory_hint_query(turn_output, max_chars: int) -> str:
+        """Build the hint query from a turn's assistant text/reasoning.
+
+        Returns '' when the turn is tool-call-only (no content and no reasoning),
+        which is the trigger-exclusion case (plan §1.2 / R6). Concatenates text +
+        reasoning across all messages, capped at ``max_chars``.
+        """
+        parts = []
+        for msg in (turn_output or []):
+            role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            if role != ASSISTANT:
+                continue
+            # Text content.
+            text = extract_text_from_message(msg, add_upload_info=False)
+            if text:
+                parts.append(text)
+            # Reasoning content (a pure-thinking turn still counts as "has content").
+            rc = msg.get('reasoning_content') if isinstance(msg, dict) else getattr(msg, 'reasoning_content', None)
+            from agent_cascade.utils.utils import _reasoning_to_text
+            rc_text = _reasoning_to_text(rc)
+            if rc_text:
+                parts.append(rc_text)
+        query = ' '.join(p for p in parts if p).strip()
+        return query[:max_chars]
+
     def _append_and_log_batch(
             self,
             instance: AgentInstance,
@@ -870,6 +933,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     if hasattr(instance, '_generate_cfg_override') and isinstance(instance._generate_cfg_override,
                                                                                   dict):
                         instance._generate_cfg_override.pop('disabled_tools', None)
+
+                # ── Memory-Hint trigger (feature: memory_hint) ────────────────
+                # Phase-3/Phase-4 boundary: turn_output is fully populated here. Best-effort;
+                # never blocks, never mutates the turn budget. Hints ride the tool-warning
+                # queue (NO user-message injection — plan §0 / R1).
+                self._maybe_submit_memory_hint(instance, turn_output)
 
                 # logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)}
                 # messages from LLM")

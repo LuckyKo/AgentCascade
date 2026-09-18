@@ -124,6 +124,15 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
                         len(self.extra_work_folders_rw))
             if self.agent_pool:
                 self.agent_pool.notify_config_changed()
+                # Memory-hint rescan (feature: memory_hint, plan §6.2): vaults live under the
+                # working dirs, so a folder change may add/remove vaults. Best-effort; the
+                # manager's daemon worker also polls _config_version as a safety net.
+                try:
+                    mh_manager = getattr(self.agent_pool, 'memory_hint_manager', None)
+                    if mh_manager is not None:
+                        mh_manager.rescan_vaults()
+                except Exception as e:  # noqa: BLE001 — best-effort, never break folder update
+                    logger.debug('[MEMORY_HINT] rescan on folder change failed: %s', e)
         else:
             logger.debug('[Workspace] Tiered folders unchanged, skipping config notification')
 

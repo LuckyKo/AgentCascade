@@ -70,7 +70,10 @@ class ConfigPersistMixin:
                 if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
                     for key in ('tool_result_max_chars', 'wild_read_truncation_chars', 'grep_char_limit',
                                 'grep_spillover', 'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
-                                'max_images_for_llm'):
+                                'max_images_for_llm',
+                                # Memory-hint feature (plan §7)
+                                'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_chars',
+                                'memory_hint_query_chars'):
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 
@@ -227,6 +230,32 @@ class ConfigPersistMixin:
                 if val is not None:
                     try:
                         self.llm_cfg['max_images_for_llm'] = int(val)
+                    except (ValueError, TypeError):
+                        pass
+
+                # ── Memory-hint feature (plan §7) — restore 4 keys into llm_cfg ──
+                val = data.pop('memory_hint_enabled', None)
+                if val is not None:
+                    self.llm_cfg['memory_hint_enabled'] = bool(val)
+
+                val = data.pop('memory_hint_threshold', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['memory_hint_threshold'] = min(max(0.0, float(val)), 1.0)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('memory_hint_max_chars', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['memory_hint_max_chars'] = min(max(100, int(val)), 5000)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('memory_hint_query_chars', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['memory_hint_query_chars'] = min(max(100, int(val)), 4000)
                     except (ValueError, TypeError):
                         pass
 

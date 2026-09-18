@@ -188,7 +188,7 @@
               </svg>
             </button>
             <input type="file" id="imageInput" accept="image/*" style="display: none;">
-            
+
             <button id="insertDocBtn" class="btn btn-icon" title="Insert Document"
               style="padding: 0 10px; background: none; border: none; color: var(--text-secondary); cursor: pointer;">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -472,7 +472,7 @@
                   </label>
                 </div>
               </div>
-              
+
               <!-- Cache Pool -->
               <div class="settings-section">
                 <h3 class="settings-section-title">Cache Pool</h3>
@@ -502,10 +502,10 @@
                 <button class="settings-sub-tab-btn active" data-target="subtab-system">System</button>
                 <button class="settings-sub-tab-btn" data-target="subtab-per-agent">Per Agent</button>
               </div>
-              
+
               <!-- System Sub-tab: Global Settings -->
               <div class="settings-sub-panel active" id="subtab-system">
-                
+
                 <!-- API Endpoints Section -->
                 <div class="settings-section">
                   <h3 class="settings-section-title">API Endpoints
@@ -724,6 +724,29 @@
                         </label>
                       </div>
                     </details>
+
+                    <!-- Memory Hint (feature: memory_hint, plan §7) — OFF by default -->
+                    <details class="settings-section">
+                      <summary class="settings-section-title">Memory Hint</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span title="Surface relevant .agent_lessons memories as tool-warning hints (no user-message injection). Off by default.">Enable Memory Hint</span>
+                          <input type="checkbox" id="setting-memory-hint-enabled" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Cosine strong-match gate [0,1]. Higher = fewer, more confident hints.">Match Threshold</span>
+                          <input type="number" id="setting-memory-hint-threshold" min="0" max="1" step="0.05" value="0.35" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Max characters for a single hint (clamped 100–5000).">Hint Max Chars</span>
+                          <input type="number" id="setting-memory-hint-max-chars" min="100" max="5000" step="50" value="300" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Chars of turn text used as the query key (clamped 100–4000).">Query Chars</span>
+                          <input type="number" id="setting-memory-hint-query-chars" min="100" max="4000" step="50" value="1000" />
+                        </label>
+                      </div>
+                    </details>
                   </div>
                 </div>
 
@@ -765,10 +788,10 @@
                   </div>
                 </div>
               </div>
-              
+
               <!-- Per Agent Sub-tab: Individual Agent Settings -->
               <div class="settings-sub-panel" id="subtab-per-agent">
-                
+
                 <!-- Target Agent Section (selector only) -->
                 <div class="settings-section">
                   <h3 class="settings-section-title">Target Agent</h3>
@@ -782,7 +805,7 @@
                     ℹ️ Select an agent to configure its active tools below.
                   </div>
                 </div>
-                
+
                 <!-- Active Tools Section -->
                 <div class="settings-section">
                   <h3 class="settings-section-title">Active Tools</h3>

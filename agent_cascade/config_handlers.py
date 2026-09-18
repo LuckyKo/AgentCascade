@@ -75,6 +75,11 @@ POOL_SETTINGS_KEYS = frozenset({
     'shell_char_limit',
     'code_char_limit',
     'list_dir_char_limit',
+    # Memory-hint feature (plan §7) — persisted via pool_settings.json.
+    'memory_hint_enabled',
+    'memory_hint_threshold',
+    'memory_hint_max_chars',
+    'memory_hint_query_chars',
     # Image base64 management
     'max_images_for_llm',
     # Image caption mode (auto/always/off)
@@ -616,6 +621,47 @@ def _handle_wild_read_truncation_chars(ui_cfg: dict, agent_pool: Optional[Any], 
         val = int(ui_cfg.get('wild_read_truncation_chars', 2000))
         upper = agent_pool.llm_cfg.get('tool_result_max_chars', 25000)
         agent_pool.llm_cfg['wild_read_truncation_chars'] = min(max(500, val), upper)
+
+
+# ── Memory-hint feature handlers (plan §7) ────────────────────────────────────
+@register_config_handler('memory_hint_enabled')
+def _handle_memory_hint_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle the memory-hint feature kill switch (default OFF)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        agent_pool.llm_cfg['memory_hint_enabled'] = bool(ui_cfg.get('memory_hint_enabled', False))
+
+
+@register_config_handler('memory_hint_threshold')
+def _handle_memory_hint_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Cosine strong-match gate. Clamped to [0, 1]."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = float(ui_cfg.get('memory_hint_threshold', 0.35))
+        except (TypeError, ValueError):
+            val = 0.35
+        agent_pool.llm_cfg['memory_hint_threshold'] = min(max(0.0, val), 1.0)
+
+
+@register_config_handler('memory_hint_max_chars')
+def _handle_memory_hint_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Cap on a single hint's text length. Clamped to [100, 5000]."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = int(ui_cfg.get('memory_hint_max_chars', 300))
+        except (TypeError, ValueError):
+            val = 300
+        agent_pool.llm_cfg['memory_hint_max_chars'] = min(max(100, val), 5000)
+
+
+@register_config_handler('memory_hint_query_chars')
+def _handle_memory_hint_query_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Chars of turn text used as the hint query key. Clamped to [100, 4000]."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = int(ui_cfg.get('memory_hint_query_chars', 1000))
+        except (TypeError, ValueError):
+            val = 1000
+        agent_pool.llm_cfg['memory_hint_query_chars'] = min(max(100, val), 4000)
 
 
 @register_config_handler('grep_char_limit')
