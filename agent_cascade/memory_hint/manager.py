@@ -120,6 +120,8 @@ class MemoryHintManager:
             self._pending[instance_name] = job
         try:
             self._job_queue.put_nowait(job)
+            logger.info('[MEMORY_HINT] %s: hint job submitted (turn=%d, query_len=%d)',
+                        instance_name, turn, len(query))
         except Exception as e:  # noqa: BLE001 — never block/raise on the main path
             logger.debug('[MEMORY_HINT] submit failed for %s: %s', instance_name, e)
 
@@ -231,21 +233,25 @@ class MemoryHintManager:
 
         # TTL drop: don't hint a turn the agent has long since passed.
         if time.monotonic() - job.get('submitted_at', 0.0) > JOB_TTL_SECONDS:
+            logger.info('[MEMORY_HINT] %s: dropped (job expired, ttl=%.0fs)', name, JOB_TTL_SECONDS)
             return
 
         settings = self._settings()
         if not settings['enabled']:
+            logger.info('[MEMORY_HINT] %s: skipped (feature disabled)', name)
             return
 
         # Re-resolve the instance (may be gone/dismissed by delivery time).
         inst = self._pool.get_instance(name)
         if inst is None:
+            logger.info('[MEMORY_HINT] %s: dropped (instance gone)', name)
             return
 
         # State-change guard: skip sleeping instances (plan §4.3).
         try:
             from agent_cascade.agent_instance import AgentState
             if getattr(inst, 'state', None) == AgentState.SLEEPING:
+                logger.info('[MEMORY_HINT] %s: skipped (SLEEPING)', name)
                 return
         except Exception:  # noqa: BLE001
             pass
@@ -254,32 +260,43 @@ class MemoryHintManager:
         with self._index_lock:
             matches = self._matcher.match(query)
         if not matches:
+            logger.info('[MEMORY_HINT] %s: no matches (query=%r...)', name, query[:80])
             return
 
         threshold = settings['threshold']
         strong = [(path, score) for path, score in matches if score >= threshold]
         # Noise gate: too many strong matches → query is generic; skip (plan §8).
         if len(strong) > MAX_HINTS_PER_TURN:
-            logger.debug('[MEMORY_HINT] noise gate: %d strong matches for %s, skipping',
-                         len(strong), name)
+            logger.info('[MEMORY_HINT] %s: noise gate — %d strong matches (threshold=%.2f), skipping',
+                        name, len(strong), threshold)
             return
         if not strong:
+            best = matches[0]
+            logger.info('[MEMORY_HINT] %s: %d match(es) below threshold %.2f (best=%.3f %s)',
+                        name, len(matches), threshold, best[1], best[0])
             return
 
         # Dedup: skip memories already read or recently hinted (under the instance lock).
         now = time.monotonic()
         cooldown = settings['cooldown_seconds']
         to_hint: List[str] = []
+        skipped_read: List[str] = []
+        skipped_cooldown: List[str] = []
         with inst._compression_lock:
             for path, _score in strong:
                 if path in inst._memories_read:
+                    skipped_read.append(path)
                     continue
                 last = inst._recently_hinted.get(path)
                 if last is not None and (now - last) < cooldown:
+                    skipped_cooldown.append(path)
                     continue
                 to_hint.append(path)
 
         if not to_hint:
+            logger.info('[MEMORY_HINT] %s: all %d strong match(es) filtered out '
+                        '(already_read=%s, in_cooldown=%s)',
+                        name, len(strong), skipped_read or '-', skipped_cooldown or '-')
             return
 
         # ``strong`` is already score-descending (inherited from matcher.match), so the
@@ -325,8 +342,10 @@ class MemoryHintManager:
         try:
             from agent_cascade.operation_manager.path_security import _queue_tool_warning
             _queue_tool_warning(self._pool, name, hint_text)
+            logger.info('[MEMORY_HINT] %s: queued hint (%d entries):\n%s',
+                        name, hint_text.count('\n  - '), hint_text)
         except Exception as e:  # noqa: BLE001 — best-effort delivery
-            logger.debug('[MEMORY_HINT] delivery failed for %s: %s', name, e)
+            logger.warning('[MEMORY_HINT] delivery failed for %s: %s', name, e)
 
     # ── Read-tracking callback (wired to the ReadFile hook) ──────────────────
 
