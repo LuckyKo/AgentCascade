@@ -164,8 +164,9 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     # Memory-hint feature (plan §7) — propagated to agents so tool-level reads see them.
     'memory_hint_enabled',
     'memory_hint_threshold',
-    'memory_hint_max_chars',
+    'memory_hint_max_entries',
     'memory_hint_query_chars',
+    'memory_hint_cooldown_seconds',
 )
 
 # Default value for max_images_for_llm when not explicitly configured.

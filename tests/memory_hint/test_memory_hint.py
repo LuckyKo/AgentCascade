@@ -257,7 +257,8 @@ class TestManagerDedup:
         pool = MagicMock()
         pool.llm_cfg = {'memory_hint_enabled': enabled,
                         'memory_hint_threshold': 0.35,
-                        'memory_hint_max_chars': 300,
+                        'memory_hint_max_entries': 3,
+                        'memory_hint_cooldown_seconds': 600,
                         'memory_hint_query_chars': 1000}
         pool.operation_manager = _make_om(v.parent)
         pool.get_instance.return_value = inst
@@ -406,11 +407,79 @@ class TestManagerDedup:
         mgr.submit('', 'real query', 'test_agent')
         assert mgr._pending == {}
 
-    def test_build_hint_respects_max_chars(self, tmp_path):
+    def test_build_hint_truncates_long_entries(self, tmp_path):
+        """Each entry's path is clipped to HINT_ENTRY_MAX_CHARS for readability."""
+        from agent_cascade.memory_hint import HINT_ENTRY_MAX_CHARS
         mgr, _inst = self._manager_with_lesson(tmp_path)
-        paths = [f'memory-{i}.md' for i in range(50)]
-        text = mgr._build_hint(paths, max_chars=120)
-        assert len(text) <= 120
+        long_path = 'x' * (HINT_ENTRY_MAX_CHARS + 50)
+        text = mgr._build_hint([long_path])
+        # The single entry line must not exceed the per-entry cap.
+        for line in text.splitlines():
+            assert len(line) <= HINT_ENTRY_MAX_CHARS + 4  # "  - " prefix (4 chars)
+
+    def test_build_hint_lists_all_paths_in_order(self, tmp_path):
+        """_build_hint lists every path it is given, in order (no internal cap)."""
+        mgr, _inst = self._manager_with_lesson(tmp_path)
+        paths = [f'memory-{i}.md' for i in range(5)]
+        text = mgr._build_hint(paths)
+        assert '(5)' in text  # header count
+        for p in paths:
+            assert p in text
+
+    def test_max_entries_caps_to_top3_of_4(self, tmp_path):
+        """With 4 strong matches and max_entries=3, the hint lists exactly top-3 by score.
+
+        The 4th (lowest-scoring) match is excluded even though it passes the noise gate
+        (<= MAX_HINTS_PER_TURN). This proves the cap applies to the score-ordered list.
+        """
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        # Four lessons all strongly matching the same query, with graded relevance:
+        # doc1 repeats the key phrase most (highest score), doc4 least (lowest).
+        _write_lesson(v, 'doc-one.md', 'Doc One',
+                      'engine loop compression hang debugging daemon thread lock ordering',
+                      'engine loop compression hang debugging daemon thread lock ordering')
+        _write_lesson(v, 'doc-two.md', 'Doc Two',
+                      'engine loop compression hang debugging daemon thread',
+                      'engine loop compression hang debugging daemon thread')
+        _write_lesson(v, 'doc-three.md', 'Doc Three',
+                      'engine loop compression hang debugging',
+                      'engine loop compression hang debugging')
+        _write_lesson(v, 'doc-four.md', 'Doc Four',
+                      'engine loop compression hang',
+                      'engine loop compression hang')
+
+        inst = _FakeInst()
+        pool = MagicMock()
+        pool.llm_cfg = {'memory_hint_enabled': True,
+                        'memory_hint_threshold': 0.15,   # low so all 4 are "strong"
+                        'memory_hint_max_entries': 3,    # cap to top-3
+                        'memory_hint_cooldown_seconds': 600,
+                        'memory_hint_query_chars': 1000}
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+
+        # Sanity: the matcher actually returns all 4 as strong (pre-cap).
+        with mgr._index_lock:
+            matches = mgr._matcher.match('engine loop compression hang debugging daemon thread lock ordering')
+        strong = [(p, s) for p, s in matches if s >= 0.15]
+        assert len(strong) == 4, f"expected 4 strong matches, got {len(strong)}: {strong}"
+
+        job = {'instance_name': 'w',
+               'query': 'engine loop compression hang debugging daemon thread lock ordering',
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        mgr._process_job(job)
+
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        # Exactly top-3 by score are listed; the 4th (lowest) is excluded.
+        assert '(3)' in hint  # header count reflects the cap, not the 4 raw matches
+        assert 'doc-one.md' in hint
+        assert 'doc-two.md' in hint
+        assert 'doc-three.md' in hint
+        assert 'doc-four.md' not in hint
 
 
 # ── 5. Instance reset helper + defaults ─────────────────────────────────────
@@ -496,9 +565,24 @@ class TestEngineQueryExtraction:
 # ── 7. Constants sanity (orchestrator hard constraints) ─────────────────────
 
 class TestConstants:
-    def test_cooldown_is_fixed_600(self):
-        """Cooldown must be the fixed 600s constant (no UI setting)."""
+    def test_cooldown_fallback_default_is_600(self):
+        """HINT_COOLDOWN_SECONDS is the fallback default when the UI setting is absent."""
         assert HINT_COOLDOWN_SECONDS == 600.0
+
+    def test_settings_reads_cooldown_and_max_entries_live(self, tmp_path):
+        """_settings() reads cooldown + max_entries from llm_cfg with safe fallbacks."""
+        pool = MagicMock()
+        mgr = MemoryHintManager(pool)
+        # Absent keys → defaults (600.0 / 3).
+        pool.llm_cfg = {}
+        s = mgr._settings()
+        assert s['cooldown_seconds'] == 600.0
+        assert s['max_entries'] == 3
+        # Present keys → live values.
+        pool.llm_cfg = {'memory_hint_cooldown_seconds': 120, 'memory_hint_max_entries': 4}
+        s = mgr._settings()
+        assert s['cooldown_seconds'] == 120.0
+        assert s['max_entries'] == 4
 
     def test_max_hints_per_turn(self):
         assert MAX_HINTS_PER_TURN == 4

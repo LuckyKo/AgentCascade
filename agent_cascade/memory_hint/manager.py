@@ -24,7 +24,8 @@ from .matcher import MemoryMatcher
 from .vault import VaultIndex, discover_vaults
 
 # Cooldown (seconds) before the same memory may be re-hinted to an instance.
-# Fixed constant per orchestrator decision — NOT a UI setting.
+# This is now a UI setting (``memory_hint_cooldown_seconds``); this constant is
+# only the fallback default when the setting is absent/invalid.
 HINT_COOLDOWN_SECONDS = 600.0
 
 # A job older than this (monotonic seconds) is dropped on drain so we never hint
@@ -34,6 +35,11 @@ JOB_TTL_SECONDS = 30.0
 # Noise gate: more than this many strong matches means the query is too generic;
 # skip rather than spam (plan §8 noise gate / R2).
 MAX_HINTS_PER_TURN = 4
+
+# Per-entry text cap inside a hint, for readability. Internal constant — NOT a
+# UI setting (the user-facing knob is ``memory_hint_max_entries``, which caps the
+# NUMBER of entries listed, not their length).
+HINT_ENTRY_MAX_CHARS = 120
 
 
 class MemoryHintManager:
@@ -173,10 +179,16 @@ class MemoryHintManager:
 
     def _settings(self) -> dict:
         cfg = getattr(self._pool, 'llm_cfg', None) or {}
+        # Cooldown is a live UI setting; fall back to the module default if absent.
+        try:
+            cooldown = float(cfg.get('memory_hint_cooldown_seconds', HINT_COOLDOWN_SECONDS))
+        except (TypeError, ValueError):
+            cooldown = HINT_COOLDOWN_SECONDS
         return {
             'enabled': bool(cfg.get('memory_hint_enabled', False)),
             'threshold': float(cfg.get('memory_hint_threshold', 0.35)),
-            'max_chars': int(cfg.get('memory_hint_max_chars', 300)),
+            'max_entries': int(cfg.get('memory_hint_max_entries', 3)),
+            'cooldown_seconds': cooldown,
             'query_chars': int(cfg.get('memory_hint_query_chars', 1000)),
         }
 
@@ -256,20 +268,28 @@ class MemoryHintManager:
 
         # Dedup: skip memories already read or recently hinted (under the instance lock).
         now = time.monotonic()
+        cooldown = settings['cooldown_seconds']
         to_hint: List[str] = []
         with inst._compression_lock:
             for path, _score in strong:
                 if path in inst._memories_read:
                     continue
                 last = inst._recently_hinted.get(path)
-                if last is not None and (now - last) < HINT_COOLDOWN_SECONDS:
+                if last is not None and (now - last) < cooldown:
                     continue
                 to_hint.append(path)
 
         if not to_hint:
             return
 
-        hint_text = self._build_hint(to_hint, settings['max_chars'])
+        # ``strong`` is already score-descending (inherited from matcher.match), so the
+        # post-cooldown ``to_hint`` list keeps that order. Cap to the top-N entries
+        # BEFORE building the hint text (the cap applies after the cooldown skip).
+        max_entries = settings['max_entries']
+        if max_entries > 0:
+            to_hint = to_hint[:max_entries]
+
+        hint_text = self._build_hint(to_hint)
         if not hint_text:
             return
 
@@ -281,16 +301,24 @@ class MemoryHintManager:
 
         self._deliver(inst, name, hint_text)
 
-    def _build_hint(self, paths: List[str], max_chars: int) -> str:
-        """Deterministic hint text listing the matched memory paths (plan §3.3)."""
+    def _build_hint(self, paths: List[str]) -> str:
+        """Deterministic hint text listing the matched memory paths (plan §3.3).
+
+        ``paths`` is expected to already be capped to the top-N entries by the caller;
+        each entry's path text is truncated to ``HINT_ENTRY_MAX_CHARS`` for readability.
+        """
         if not paths:
             return ''
         header = f'[MEMORY HINT] Relevant memories you may want to re-read ({len(paths)}):'
-        lines = [f"  - {p}" for p in paths]
-        text = header + '\n' + '\n'.join(lines)
-        if len(text) > max_chars:
-            text = text[:max_chars]
-        return text
+
+        def _clip(p: str) -> str:
+            p = str(p)
+            if len(p) > HINT_ENTRY_MAX_CHARS:
+                return p[:HINT_ENTRY_MAX_CHARS - 1] + '…'
+            return p
+
+        lines = [f"  - {_clip(p)}" for p in paths]
+        return header + '\n' + '\n'.join(lines)
 
     def _deliver(self, inst, name: str, hint_text: str) -> None:
         """Queue the hint via the existing tool-warning path (NO user injection)."""

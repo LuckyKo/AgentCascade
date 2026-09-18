@@ -1469,8 +1469,9 @@ if __name__ == '__main__':
         # Memory-hint feature (plan §7) — OFF by default.
         'memory_hint_enabled': False,
         'memory_hint_threshold': 0.35,
-        'memory_hint_max_chars': 300,
+        'memory_hint_max_entries': 3,
         'memory_hint_query_chars': 1000,
+        'memory_hint_cooldown_seconds': 600,
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)

@@ -9,7 +9,13 @@ swallowed so hints can never affect the agent.
 See docs/skills_system_architecture.md-style design in plans/memory_hint_PLAN.md.
 """
 
-from .manager import MemoryHintManager, HINT_COOLDOWN_SECONDS, JOB_TTL_SECONDS, MAX_HINTS_PER_TURN
+from .manager import (
+    MemoryHintManager,
+    HINT_COOLDOWN_SECONDS,
+    HINT_ENTRY_MAX_CHARS,
+    JOB_TTL_SECONDS,
+    MAX_HINTS_PER_TURN,
+)
 from .matcher import MemoryMatcher
 from .vault import VaultIndex, discover_vaults, parse_frontmatter, identity_text, is_under_vault
 from .stats import bump_read_count, load_stats
@@ -17,6 +23,7 @@ from .stats import bump_read_count, load_stats
 __all__ = [
     'MemoryHintManager',
     'HINT_COOLDOWN_SECONDS',
+    'HINT_ENTRY_MAX_CHARS',
     'JOB_TTL_SECONDS',
     'MAX_HINTS_PER_TURN',
     'MemoryMatcher',

@@ -203,8 +203,9 @@ const POOL_SETTINGS_MAP = [
   // Memory-hint feature (plan §7) — underscore keys via getGenerateCfg(), like the tool-char family.
   { id: '#setting-memory-hint-enabled', prop: 'checked', key: 'memory_hint_enabled', localKey: 'memory_hint_enabled' },
   { id: '#setting-memory-hint-threshold', prop: 'value', key: 'memory_hint_threshold', localKey: 'memory_hint_threshold' },
-  { id: '#setting-memory-hint-max-chars', prop: 'value', key: 'memory_hint_max_chars', localKey: 'memory_hint_max_chars' },
+  { id: '#setting-memory-hint-max-entries', prop: 'value', key: 'memory_hint_max_entries', localKey: 'memory_hint_max_entries' },
   { id: '#setting-memory-hint-query-chars', prop: 'value', key: 'memory_hint_query_chars', localKey: 'memory_hint_query_chars' },
+  { id: '#setting-memory-hint-cooldown', prop: 'value', key: 'memory_hint_cooldown_seconds', localKey: 'memory_hint_cooldown_seconds' },
   // Approval timeout settings
   { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
   { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
@@ -1182,8 +1183,9 @@ function saveSettings(sendToServer) {
   // Memory-hint feature (plan §7): persist the toggle + 3 numeric settings under underscore keys.
   if ($('#setting-memory-hint-enabled')) s['memory_hint_enabled'] = $('#setting-memory-hint-enabled').checked;
   if ($('#setting-memory-hint-threshold')) s['memory_hint_threshold'] = $('#setting-memory-hint-threshold').value;
-  if ($('#setting-memory-hint-max-chars')) s['memory_hint_max_chars'] = $('#setting-memory-hint-max-chars').value;
+  if ($('#setting-memory-hint-max-entries')) s['memory_hint_max_entries'] = $('#setting-memory-hint-max-entries').value;
   if ($('#setting-memory-hint-query-chars')) s['memory_hint_query_chars'] = $('#setting-memory-hint-query-chars').value;
+  if ($('#setting-memory-hint-cooldown')) s['memory_hint_cooldown_seconds'] = $('#setting-memory-hint-cooldown').value;
   if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
   if ($('#setting-system-idle-timeout')) s['system-idle-timeout'] = $('#setting-system-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
@@ -1381,11 +1383,14 @@ function loadSettings() {
     if (_isFiniteRestore(s['memory_hint_threshold'])) {
       $('#setting-memory-hint-threshold').value = s['memory_hint_threshold'];
     }
-    if (_isFiniteRestore(s['memory_hint_max_chars'])) {
-      $('#setting-memory-hint-max-chars').value = s['memory_hint_max_chars'];
+    if (_isFiniteRestore(s['memory_hint_max_entries'])) {
+      $('#setting-memory-hint-max-entries').value = s['memory_hint_max_entries'];
     }
     if (_isFiniteRestore(s['memory_hint_query_chars'])) {
       $('#setting-memory-hint-query-chars').value = s['memory_hint_query_chars'];
+    }
+    if (_isFiniteRestore(s['memory_hint_cooldown_seconds'])) {
+      $('#setting-memory-hint-cooldown').value = s['memory_hint_cooldown_seconds'];
     }
     if (_isFiniteRestore(s['idle-timeout'])) {
       $('#setting-idle-timeout').value = s['idle-timeout'];
@@ -5616,8 +5621,9 @@ function getGenerateCfg() {
   // Memory-hint feature (plan §7) — clamped to match the server-side config handlers.
   if ($('#setting-memory-hint-enabled')) cfg.memory_hint_enabled = $('#setting-memory-hint-enabled').checked;
   if ($('#setting-memory-hint-threshold')) { const _mht = parseFloat($('#setting-memory-hint-threshold').value); cfg.memory_hint_threshold = Number.isNaN(_mht) ? 0.35 : Math.min(1, Math.max(0, _mht)); }
-  if ($('#setting-memory-hint-max-chars')) { const _mmh = parseInt($('#setting-memory-hint-max-chars').value); cfg.memory_hint_max_chars = Number.isNaN(_mmh) ? 300 : Math.min(5000, Math.max(100, _mmh)); }
+  if ($('#setting-memory-hint-max-entries')) { const _mme = parseInt($('#setting-memory-hint-max-entries').value); cfg.memory_hint_max_entries = Number.isNaN(_mme) ? 3 : Math.min(4, Math.max(1, _mme)); }
   if ($('#setting-memory-hint-query-chars')) { const _mqc = parseInt($('#setting-memory-hint-query-chars').value); cfg.memory_hint_query_chars = Number.isNaN(_mqc) ? 1000 : Math.min(4000, Math.max(100, _mqc)); }
+  if ($('#setting-memory-hint-cooldown')) { const _mcd = parseFloat($('#setting-memory-hint-cooldown').value); cfg.memory_hint_cooldown_seconds = Number.isNaN(_mcd) ? 600 : Math.min(86400, Math.max(0, _mcd)); }
 
   // Compression threshold settings (PoolSettings fields) — clamped to match saveSettings() validation
   if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = Math.min(99, Math.max(50, parseFloat($('#setting-compression-warning-threshold').value) || 90));

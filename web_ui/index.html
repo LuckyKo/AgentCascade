@@ -738,12 +738,16 @@
                           <input type="number" id="setting-memory-hint-threshold" min="0" max="1" step="0.05" value="0.35" />
                         </label>
                         <label class="setting-field">
-                          <span title="Max characters for a single hint (clamped 100–5000).">Hint Max Chars</span>
-                          <input type="number" id="setting-memory-hint-max-chars" min="100" max="5000" step="50" value="300" />
+                          <span title="Max number of top-scoring memories listed in a hint (clamped 1–4).">Hint Max Entries</span>
+                          <input type="number" id="setting-memory-hint-max-entries" min="1" max="4" step="1" value="3" />
                         </label>
                         <label class="setting-field">
                           <span title="Chars of turn text used as the query key (clamped 100–4000).">Query Chars</span>
                           <input type="number" id="setting-memory-hint-query-chars" min="100" max="4000" step="50" value="1000" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Seconds before the same memory may be re-hinted (clamped 0–86400).">Hint Cooldown (s)</span>
+                          <input type="number" id="setting-memory-hint-cooldown" min="0" max="86400" step="30" value="600" />
                         </label>
                       </div>
                     </details>

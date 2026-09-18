@@ -72,8 +72,8 @@ class ConfigPersistMixin:
                                 'grep_spillover', 'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
                                 'max_images_for_llm',
                                 # Memory-hint feature (plan §7)
-                                'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_chars',
-                                'memory_hint_query_chars'):
+                                'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_entries',
+                                'memory_hint_query_chars', 'memory_hint_cooldown_seconds'):
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 
@@ -245,10 +245,10 @@ class ConfigPersistMixin:
                     except (ValueError, TypeError):
                         pass
 
-                val = data.pop('memory_hint_max_chars', None)
+                val = data.pop('memory_hint_max_entries', None)
                 if val is not None:
                     try:
-                        self.llm_cfg['memory_hint_max_chars'] = min(max(100, int(val)), 5000)
+                        self.llm_cfg['memory_hint_max_entries'] = min(max(1, int(val)), 4)
                     except (ValueError, TypeError):
                         pass
 
@@ -256,6 +256,13 @@ class ConfigPersistMixin:
                 if val is not None:
                     try:
                         self.llm_cfg['memory_hint_query_chars'] = min(max(100, int(val)), 4000)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('memory_hint_cooldown_seconds', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['memory_hint_cooldown_seconds'] = min(max(0.0, float(val)), 86400.0)
                     except (ValueError, TypeError):
                         pass
 

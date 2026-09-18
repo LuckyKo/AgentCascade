@@ -78,8 +78,9 @@ POOL_SETTINGS_KEYS = frozenset({
     # Memory-hint feature (plan §7) — persisted via pool_settings.json.
     'memory_hint_enabled',
     'memory_hint_threshold',
-    'memory_hint_max_chars',
+    'memory_hint_max_entries',
     'memory_hint_query_chars',
+    'memory_hint_cooldown_seconds',
     # Image base64 management
     'max_images_for_llm',
     # Image caption mode (auto/always/off)
@@ -642,15 +643,15 @@ def _handle_memory_hint_threshold(ui_cfg: dict, agent_pool: Optional[Any], agent
         agent_pool.llm_cfg['memory_hint_threshold'] = min(max(0.0, val), 1.0)
 
 
-@register_config_handler('memory_hint_max_chars')
-def _handle_memory_hint_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Cap on a single hint's text length. Clamped to [100, 5000]."""
+@register_config_handler('memory_hint_max_entries')
+def _handle_memory_hint_max_entries(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Max number of top-scoring entries listed in a hint. Clamped to [1, 4]."""
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         try:
-            val = int(ui_cfg.get('memory_hint_max_chars', 300))
+            val = int(ui_cfg.get('memory_hint_max_entries', 3))
         except (TypeError, ValueError):
-            val = 300
-        agent_pool.llm_cfg['memory_hint_max_chars'] = min(max(100, val), 5000)
+            val = 3
+        agent_pool.llm_cfg['memory_hint_max_entries'] = min(max(1, val), 4)
 
 
 @register_config_handler('memory_hint_query_chars')
@@ -662,6 +663,17 @@ def _handle_memory_hint_query_chars(ui_cfg: dict, agent_pool: Optional[Any], age
         except (TypeError, ValueError):
             val = 1000
         agent_pool.llm_cfg['memory_hint_query_chars'] = min(max(100, val), 4000)
+
+
+@register_config_handler('memory_hint_cooldown_seconds')
+def _handle_memory_hint_cooldown_seconds(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Seconds before the same memory may be re-hinted. Clamped to [0, 86400]."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = float(ui_cfg.get('memory_hint_cooldown_seconds', 600))
+        except (TypeError, ValueError):
+            val = 600.0
+        agent_pool.llm_cfg['memory_hint_cooldown_seconds'] = min(max(0.0, val), 86400.0)
 
 
 @register_config_handler('grep_char_limit')

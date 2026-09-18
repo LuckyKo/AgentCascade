@@ -129,7 +129,8 @@ class TestMemoryHintE2E:
         pool.llm_cfg = {
             'memory_hint_enabled': enabled,
             'memory_hint_threshold': 0.35,
-            'memory_hint_max_chars': 300,
+            'memory_hint_max_entries': 3,
+            'memory_hint_cooldown_seconds': 600,
             'memory_hint_query_chars': 1000,
         }
 
