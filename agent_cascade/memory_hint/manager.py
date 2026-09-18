@@ -45,8 +45,12 @@ MAX_HINTS_PER_TURN = 4
 
 # Per-entry text cap inside a hint, for readability. Internal constant — NOT a
 # UI setting (the user-facing knob is ``memory_hint_max_entries``, which caps the
-# NUMBER of entries listed, not their length).
-HINT_ENTRY_MAX_CHARS = 120
+# NUMBER of entries listed, not their length). Sized so ABSOLUTE display paths
+# survive the clip: a Windows vault path like
+# ``N:\work\WD\AgentWorkspace\.agent_lessons\xxx.md`` is ~55 chars, plus any
+# subdirs. (Bumped 120 → 200 when entries switched from bare rel_paths to
+# absolute display paths — see :meth:`MemoryHintManager._display_path`.)
+HINT_ENTRY_MAX_CHARS = 256
 
 # ── Self-calibrating gate constants ─────────────────────────────────────────
 # These were TUNED empirically from a ~47-sample labeled replay of real agent
@@ -415,7 +419,14 @@ class MemoryHintManager:
         if max_entries > 0:
             to_hint = to_hint[:max_entries]
 
-        hint_text = self._build_hint(to_hint)
+        # Display text only: resolve each vault-relative path to an ABSOLUTE file
+        # path so the agent knows WHICH same-named lesson to read across multiple
+        # vaults. Bookkeeping above (dedup / cooldown / _memories_read) already ran
+        # on the bare rel_path identity and is left untouched — only what we SHOW
+        # changes here.
+        display = [self._display_path(p) for p in to_hint]
+
+        hint_text = self._build_hint(display)
         if not hint_text:
             return
 
@@ -427,11 +438,40 @@ class MemoryHintManager:
 
         self._deliver(inst, name, hint_text)
 
+    def _display_path(self, rel: str) -> str:
+        """Resolve a vault-relative lesson path to an ABSOLUTE display string.
+
+        Multiple vaults can hold same-named lessons, so the hint must show which
+        file to read. Walk ``self._vault_indexes`` (first hit wins — consistent with
+        the merged-index "first vault wins" rule) and return the first root under
+        which ``(root / rel)`` exists as a file. If no vault holds it (e.g. the
+        vault was removed since the index was built), fall back to ``rel`` unchanged:
+        this is a best-effort display feature and must never crash.
+
+        NOTE: only the DISPLAYED text changes here — dedup / cooldown / read-tracking
+        all key on the bare vault-relative identity (see :meth:`on_memory_read`).
+        """
+        rel = str(rel)
+        # Vault indexes store rel_paths in POSIX form (as_posix()); normalize so
+        # joining against a Windows root resolves correctly.
+        normalized = rel.replace('\\', '/')
+        try:
+            with self._index_lock:
+                for root in self._vault_indexes:
+                    if (root / normalized).is_file():
+                        return str(root / normalized)
+        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+            logger.debug('[MEMORY_HINT] _display_path failed for %s: %s', rel, e)
+        return rel
+
     def _build_hint(self, paths: List[str]) -> str:
         """Deterministic hint text listing the matched memory paths (plan §3.3).
 
-        ``paths`` is expected to already be capped to the top-N entries by the caller;
-        each entry's path text is truncated to ``HINT_ENTRY_MAX_CHARS`` for readability.
+        ``paths`` are ABSOLUTE display paths (resolved from vault-relative identities
+        by :meth:`_display_path`); they are expected to already be capped to the top-N
+        entries by the caller, and each entry's text is truncated to
+        ``HINT_ENTRY_MAX_CHARS`` for readability. Bookkeeping identity stays
+        vault-relative — only the displayed text here is absolute.
         """
         if not paths:
             return ''

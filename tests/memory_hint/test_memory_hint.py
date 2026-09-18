@@ -315,6 +315,63 @@ class TestManagerDedup:
         # Cooldown recorded.
         assert 'compression-debug.md' in inst._recently_hinted
 
+    def test_display_path_is_absolute_and_points_to_existing_vault(self, tmp_path):
+        """Two vaults each holding a SAME-named lesson → the hinted path is absolute and
+        points into exactly ONE existing vault dir (os.path.isfile true).
+
+        This is the real value-add of showing absolute paths: with two same-named
+        lessons, the bare rel_path alone can't tell the agent which file to read. The
+        merged index keys on the bare rel_path ("first vault wins"), so exactly one
+        lesson is matched/hinted; _display_path must resolve it to a real absolute path.
+        """
+        import os
+
+        v1 = tmp_path / 'projA' / '.agent_lessons'
+        v2 = tmp_path / 'projB' / '.agent_lessons'
+        for v in (v1, v2):
+            v.mkdir(parents=True)
+            _write_lesson(v, 'shared-lesson.md', 'Shared Lesson',
+                          'How to debug compression hangs in the engine loop',
+                          'When compression hangs check the daemon thread and lock ordering.')
+
+        inst = _FakeInst()
+        pool = MagicMock()
+        pool.llm_cfg = {'memory_hint_enabled': True,
+                        'memory_hint_max_entries': 3,
+                        'memory_hint_cooldown_seconds': 600,
+                        'memory_hint_query_chars': 1000}
+        # Both vault roots are discoverable (base_dir + one extra RW folder).
+        pool.operation_manager = _make_om(v1.parent, rw=[v2.parent])
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+
+        # Sanity: both vaults are indexed and the bare rel_path is a single merged key.
+        assert len(mgr._vault_indexes) == 2, f'expected 2 vault indexes, got {len(mgr._vault_indexes)}'
+        with mgr._index_lock:
+            matches = mgr._matcher.match('debugging a compression hang in the engine loop')
+        matched_rels = [p for p, _s in matches]
+        assert 'shared-lesson.md' in matched_rels, f'shared lesson not matched: {matches}'
+
+        # The displayed path resolves to an ABSOLUTE file that actually exists.
+        disp = mgr._display_path('shared-lesson.md')
+        assert os.path.isabs(disp), f'display path must be absolute, got {disp!r}'
+        assert os.path.isfile(disp), f'display path must point to a real file: {disp!r}'
+
+        # It points into exactly ONE of the two vault dirs (first-hit-wins), not both.
+        in_v1 = str(v1) in disp
+        in_v2 = str(v2) in disp
+        assert in_v1 != in_v2, \
+            f'display path must point to exactly one vault dir: {disp!r} (v1={in_v1}, v2={in_v2})'
+
+        # End-to-end: the delivered hint carries that absolute path.
+        job = {'instance_name': 'w', 'query': 'debugging a compression hang in the engine loop',
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert disp in hint, f'absolute display path missing from hint: {hint}'
+
     def test_process_job_dedup_already_read(self, tmp_path):
         """A lesson already in _memories_read is never re-hinted."""
         mgr, inst = self._manager_with_lesson(tmp_path)
