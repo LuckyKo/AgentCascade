@@ -3,6 +3,7 @@
 Phase 3b pure-move refactor. Top of the dependency DAG — imports state_builder + tokens.
 """
 
+import random
 import sys
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -13,6 +14,7 @@ from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.execution_engine import ExecutionEngine
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.log import logger
+from agent_cascade.prompts.dna import LOOP_FEEDBACK_MESSAGES
 
 
 def create_main_agent_instance(
@@ -213,8 +215,7 @@ def run_agent_in_pool_with_recovery(
                 if inst is not None:
                     hint = Message(
                         role=USER,
-                        content=(f"[SYSTEM]: You appear to be stuck in a loop ({e.reason}). "
-                                 f"Try a different approach."),
+                        content=random.choice(LOOP_FEEDBACK_MESSAGES),
                     )
                     inst.append_message(hint)
 

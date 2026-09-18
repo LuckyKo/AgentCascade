@@ -82,6 +82,17 @@ XML_MIN_LENGTH: int = 40
 # --- Agent Persona & System Messages ---
 DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 
+# --- Loop Detection Feedback ---
+# Injected as a USER message when the loop detector fires. Randomly selected per occurrence.
+# Tone: firm redirect. The agent already "tried different" and looped again — so the
+# message must explicitly forbid repeating the last action and demand a structural change.
+LOOP_FEEDBACK_MESSAGES: List[str] = [
+    '[SYSTEM]: Loop detected — your last action is what caused this. Do NOT repeat it. Identify the specific thing that\'s blocking you (a missing file? wrong assumption? tool error?) and address THAT directly. If you\'re unsure what\'s wrong, read back the error or output from your last attempt before acting again.',
+    '[SYSTEM]: You\'re repeating yourself. The approach you just tried did not work — trying it again will not work either. Change your method: use a different tool, a different file, or break the problem into a smaller step. The task is still valid, but your current tactic is the problem.',
+    '[SYSTEM]: Repetition loop broken. You must take a structurally different action now — not the same command, edit, or read you just did. Ask yourself: what information am I missing that would let me move forward? Go get THAT, then continue the task.',
+    '[SYSTEM]: Stop. You\'ve been doing the same thing multiple times with no progress. Before your next action, explicitly state in one sentence what went wrong last time and what you will do differently. Then act on it. The goal hasn\'t changed — only your method must.',
+]
+
 # --- Memory Compression ---
 COMPRESSION_MARKER = '--- CONTEXT COMPRESSED'
 COMPRESSION_END_MARKER = '--- END SUMMARY ---'  # Marker compressor must append; validated on output

@@ -12,6 +12,7 @@ is preserved as-is (v3 decision: patch targets point at this true home module).
 
 from __future__ import annotations
 
+import random
 import time
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
@@ -22,7 +23,7 @@ from agent_cascade.engine.helpers import _invalidate_token_cache
 from agent_cascade.exceptions import ContextWindowExceeded
 from agent_cascade.llm.schema import USER, Message
 from agent_cascade.log import logger
-from agent_cascade.prompts.dna import COMPRESSION_PROMPT
+from agent_cascade.prompts.dna import COMPRESSION_PROMPT, LOOP_FEEDBACK_MESSAGES
 from agent_cascade.settings import CHARS_PER_TOKEN_ESTIMATE, COMPRESSION_RECOUNT_THRESHOLD, DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message
@@ -310,13 +311,10 @@ class CompressionExecMixin:
         self.pool._rollback_instance(inst_name, pop_count=pop_count)
 
         # Step 2: Append hint message (goes to conversation + logger
-        # atomically)
+        # atomically). Randomly selected from LOOP_FEEDBACK_MESSAGES.
         hint_msg = Message(
             role=USER,
-            content=(
-                f"[SYSTEM]: You appear to be stuck in a loop — {reason}. "
-                f"Please take a moment to gather your thoughts/check your notes before trying a different approach."
-            ),
+            content=random.choice(LOOP_FEEDBACK_MESSAGES),
         )
         self._append_and_log(instance, hint_msg)
 
