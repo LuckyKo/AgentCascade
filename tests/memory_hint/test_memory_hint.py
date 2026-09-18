@@ -17,6 +17,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_cascade.memory_hint import (
+    EWMA_ALPHA,
+    FLOOR_MIN,
+    FLOOR_SEED,
+    GAP,
     HINT_COOLDOWN_SECONDS,
     JOB_TTL_SECONDS,
     MAX_HINTS_PER_TURN,
@@ -275,13 +279,20 @@ class TestManagerDedup:
     def _manager_with_lesson(self, tmp_path, enabled=True):
         v = tmp_path / 'proj' / '.agent_lessons'
         v.mkdir(parents=True)
+        # Two lessons with DISJOINT topic words: the compression query must make
+        # compression-debug.md a CLEAR winner (top1 − top2 ≥ GAP) under the
+        # self-calibrating gate, not a near-tie.
         _write_lesson(v, 'compression-debug.md', 'Compression Debug',
                       'How to debug compression hangs in the engine loop',
                       'When compression hangs check the daemon thread and lock ordering.')
+        _write_lesson(v, 'skill-creator-notes.md', 'Skill Creator Notes',
+                      'Notes on writing reusable skills with frontmatter',
+                      'Skills need a name description tags and a clear body section.')
         inst = _FakeInst()
         pool = MagicMock()
+        # threshold 0/absent = pure adaptive gate (the primary gate is now the
+        # EWMA floor + specificity gap, not this fixed value).
         pool.llm_cfg = {'memory_hint_enabled': enabled,
-                        'memory_hint_threshold': 0.35,
                         'memory_hint_max_entries': 3,
                         'memory_hint_cooldown_seconds': 600,
                         'memory_hint_query_chars': 1000}
@@ -292,7 +303,7 @@ class TestManagerDedup:
         return mgr, inst
 
     def test_process_job_delivers_via_tool_warning(self, tmp_path):
-        """A strong match not yet read is delivered onto _tool_warnings (NOT a user msg)."""
+        """A clear-winner match not yet read is delivered onto _tool_warnings (NOT a user msg)."""
         mgr, inst = self._manager_with_lesson(tmp_path)
         job = {'instance_name': 'w', 'query': 'debugging a compression hang in the engine loop',
                'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
@@ -469,32 +480,40 @@ class TestManagerDedup:
             assert p in text
 
     def test_max_entries_caps_to_top3_of_4(self, tmp_path):
-        """With 4 strong matches and max_entries=3, the hint lists exactly top-3 by score.
+        """With 4 matches and max_entries=3, the hint lists exactly top-3 by score.
 
         The 4th (lowest-scoring) match is excluded even though it passes the noise gate
         (<= MAX_HINTS_PER_TURN). This proves the cap applies to the score-ordered list.
+
+        Under the self-calibrating gate the fixture must make doc-one.md a CLEAR
+        winner (top1 − top2 ≥ GAP, above the adaptive floor) — so the docs share only
+        weak filler words while doc-one carries the query's distinctive tokens.
         """
         v = tmp_path / 'proj' / '.agent_lessons'
         v.mkdir(parents=True)
-        # Four lessons all strongly matching the same query, with graded relevance:
-        # doc1 repeats the key phrase most (highest score), doc4 least (lowest).
+        # All four docs share the same topic words ("pipeline worker retry …"), so all
+        # clear the adaptive floor (≥ FLOOR_SEED); doc-one adds the query's distinctive
+        # "backoff tuning" words → clear top-1 with gap ≥ GAP. The other three are
+        # exact ties, so their relative order is the matcher's path-name tiebreak —
+        # assertions below use the ACTUAL ranking, not a guessed one. (Scores verified:
+        # 0.78 / 0.26 / 0.26 / 0.26.)
         _write_lesson(v, 'doc-one.md', 'Doc One',
-                      'engine loop compression hang debugging daemon thread lock ordering',
-                      'engine loop compression hang debugging daemon thread lock ordering')
+                      'pipeline worker retry backoff tuning notes about engine work',
+                      'pipeline worker retry backoff tuning notes about engine work')
         _write_lesson(v, 'doc-two.md', 'Doc Two',
-                      'engine loop compression hang debugging daemon thread',
-                      'engine loop compression hang debugging daemon thread')
+                      'pipeline worker retry scheduling notes about engine work',
+                      'pipeline worker retry scheduling notes about engine work')
         _write_lesson(v, 'doc-three.md', 'Doc Three',
-                      'engine loop compression hang debugging',
-                      'engine loop compression hang debugging')
+                      'pipeline worker retry batching notes about engine work',
+                      'pipeline worker retry batching notes about engine work')
         _write_lesson(v, 'doc-four.md', 'Doc Four',
-                      'engine loop compression hang',
-                      'engine loop compression hang')
+                      'pipeline worker retry queueing notes about engine work',
+                      'pipeline worker retry queueing notes about engine work')
 
         inst = _FakeInst()
         pool = MagicMock()
+        # threshold 0/absent = pure adaptive gate; max_entries=3 caps to top-3.
         pool.llm_cfg = {'memory_hint_enabled': True,
-                        'memory_hint_threshold': 0.15,   # low so all 4 are "strong"
                         'memory_hint_max_entries': 3,    # cap to top-3
                         'memory_hint_cooldown_seconds': 600,
                         'memory_hint_query_chars': 1000}
@@ -503,25 +522,206 @@ class TestManagerDedup:
         mgr = MemoryHintManager(pool)
         mgr.rescan_vaults()
 
-        # Sanity: the matcher actually returns all 4 as strong (pre-cap).
+        query = 'pipeline worker retry backoff tuning'
+        # Sanity: the matcher ranks all 4 above the floor, and doc-one is a clear winner.
         with mgr._index_lock:
-            matches = mgr._matcher.match('engine loop compression hang debugging daemon thread lock ordering')
-        strong = [(p, s) for p, s in matches if s >= 0.15]
-        assert len(strong) == 4, f"expected 4 strong matches, got {len(strong)}: {strong}"
+            matches = mgr._matcher.match(query)
+        assert len(matches) == 4, f"expected 4 matches, got {len(matches)}: {matches}"
+        top1 = matches[0]
+        top2 = matches[1]
+        assert top1[0] == 'doc-one.md', f'expected doc-one.md to rank first, got {top1}'
+        assert top1[1] - top2[1] >= GAP, \
+            f"fixture must be a clear winner: gap={top1[1] - top2[1]:.4f} < GAP={GAP}: {matches}"
+        floor = mgr._current_floor(0.0)
+        assert all(s >= floor for _p, s in matches), \
+            f"fixture must have all 4 above the floor {floor:.3f}: {matches}"
 
-        job = {'instance_name': 'w',
-               'query': 'engine loop compression hang debugging daemon thread lock ordering',
+        job = {'instance_name': 'w', 'query': query,
                'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
         mgr._process_job(job)
 
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
-        # Exactly top-3 by score are listed; the 4th (lowest) is excluded.
+        # Exactly top-3 by score are listed; the 4th (lowest, per the ACTUAL ranking)
+        # is excluded. The cap applies to the score-ordered list regardless of tie order.
+        ranked = [p for p, _s in matches]
+        expected_in = ranked[:3]
+        excluded = ranked[3]
         assert '(3)' in hint  # header count reflects the cap, not the 4 raw matches
-        assert 'doc-one.md' in hint
-        assert 'doc-two.md' in hint
-        assert 'doc-three.md' in hint
-        assert 'doc-four.md' not in hint
+        for p in expected_in:
+            assert p in hint, f'{p} (top-3) missing from hint: {hint}'
+        assert excluded not in hint, f'{excluded} (4th) must be capped out of hint'
+
+
+# ── 4b. Manager: self-calibrating gate (floor / gap / noise) ───────────────
+
+class TestManagerGate:
+    """The adaptive specificity gate in _process_job (replaces the fixed threshold)."""
+
+    def _make_mgr(self, tmp_path, lessons, query, **cfg_over):
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        for rel, name, desc, body in lessons:
+            _write_lesson(v, rel, name, desc, body)
+        inst = _FakeInst()
+        pool = MagicMock()
+        cfg = {'memory_hint_enabled': True,
+               'memory_hint_max_entries': 3,
+               'memory_hint_cooldown_seconds': 600,
+               'memory_hint_query_chars': 1000}
+        cfg.update(cfg_over)
+        pool.llm_cfg = cfg
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+        job = {'instance_name': 'w', 'query': query,
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        return mgr, inst, job
+
+    def test_gate_clear_winner_fires(self, tmp_path):
+        """(a) A single clear winner (top1 ≥ floor, gap ≥ GAP) delivers a hint."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+            ('skill-creator-notes.md', 'Skill Creator Notes',
+             'Notes on writing reusable skills with frontmatter',
+             'Skills need a name description tags and a clear body section.'),
+        ]
+        mgr, inst, job = self._make_mgr(tmp_path, lessons,
+                                        'debugging a compression hang in the engine loop')
+        with mgr._index_lock:
+            matches = mgr._matcher.match(job['query'])
+        assert len(matches) >= 1
+        assert matches[0][1] >= FLOOR_MIN, f'top1 {matches[0][1]:.3f} below floor min'
+        top2 = matches[1][1] if len(matches) > 1 else 0.0
+        assert matches[0][1] - top2 >= GAP, 'fixture must be a clear winner'
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        assert 'compression-debug.md' in inst._tool_warnings[0]
+
+    def test_gate_diffuse_tie_skips_with_reason_gap(self, tmp_path):
+        """(b) A diffuse tie (top1 − top2 < GAP) skips even when top1 ≥ floor."""
+        # Both lessons carry the same distinctive words → near-equal scores.
+        lessons = [
+            ('alpha.md', 'Alpha', 'quantum flux capacitor calibration procedure',
+             'quantum flux capacitor calibration procedure steps'),
+            ('beta.md', 'Beta', 'quantum flux capacitor calibration routine',
+             'quantum flux capacitor calibration routine steps'),
+        ]
+        query = 'quantum flux capacitor calibration'
+        mgr, inst, job = self._make_mgr(tmp_path, lessons, query)
+        with mgr._index_lock:
+            matches = mgr._matcher.match(query)
+        assert len(matches) == 2, f'expected both docs to match, got {matches}'
+        top1, top2 = matches[0][1], matches[1][1]
+        # The fixture must be a genuine near-tie above the floor (else the gap gate
+        # is not what is being exercised).
+        assert top1 >= FLOOR_MIN, f'top1 {top1:.3f} below floor min — bad fixture'
+        assert top1 - top2 < GAP, f"fixture must be a tie: gap={top1 - top2:.4f} ≥ GAP={GAP}"
+        mgr._process_job(job)
+        assert inst._tool_warnings == []
+
+    def test_gate_no_signal_skips_with_reason_floor(self, tmp_path):
+        """(c) No signal (top1 < floor) skips before the gap gate is even reached."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        # A query that only weakly overlaps the lesson ("thread lock" → 0.124):
+        # non-zero score, but below the adaptive floor (seed FLOOR_SEED).
+        mgr, inst, job = self._make_mgr(tmp_path, lessons, 'thread lock')
+        with mgr._index_lock:
+            matches = mgr._matcher.match(job['query'])
+        assert len(matches) == 1, f'expected exactly one weak match, got {matches}'
+        top1 = matches[0][1]
+        # Fresh manager → floor is the seed; the fixture must sit below it.
+        assert FLOOR_MIN <= top1 < FLOOR_SEED, \
+            f'top1 {top1:.3f} not in [{FLOOR_MIN}, {FLOOR_SEED}) — bad fixture'
+        mgr._process_job(job)
+        assert inst._tool_warnings == []
+
+    def test_gate_noise_skips_when_more_than_max_strong(self, tmp_path):
+        """(d) More than MAX_HINTS_PER_TURN docs at/above the floor → noise skip.
+
+        The fixture must pass the earlier gates (top1 ≥ floor AND gap ≥ GAP) so the
+        NOISE gate is what actually skips — otherwise this test proves nothing about
+        it. One doc carries distinctive words (clear winner, gap ≈ 0.53) while all
+        five share the topic phrase (all ≥ floor).
+        """
+        lessons = [
+            ('bulk-0.md', 'Bulk 0', 'shared bulk processing pipeline tokens zebra quokka falcon',
+             'shared bulk processing pipeline tokens zebra quokka falcon'),
+        ] + [
+            (f'bulk-{i}.md', f'Bulk {i}', 'shared bulk processing pipeline tokens',
+             'shared bulk processing pipeline tokens')
+            for i in range(1, MAX_HINTS_PER_TURN + 1)
+        ]
+        query = 'shared bulk processing pipeline zebra quokka falcon'
+        mgr, inst, job = self._make_mgr(tmp_path, lessons, query)
+        with mgr._index_lock:
+            matches = mgr._matcher.match(query)
+        floor = mgr._current_floor(0.0)
+        top1, top2 = matches[0][1], matches[1][1]
+        n_strong = sum(1 for _p, s in matches if s >= floor)
+        assert len(matches) == MAX_HINTS_PER_TURN + 1, f'expected 5 matches, got {matches}'
+        # The earlier gates must NOT trip: this isolates the noise gate.
+        assert top1 >= floor, f'top1 {top1:.3f} below floor {floor:.3f} — bad fixture'
+        assert top1 - top2 >= GAP, \
+            f"gap {top1 - top2:.4f} < GAP would skip before the noise gate: {matches}"
+        assert n_strong > MAX_HINTS_PER_TURN, \
+            f"fixture must trip the noise gate: only {n_strong}/{len(matches)} ≥ floor {floor:.3f}"
+        mgr._process_job(job)
+        assert inst._tool_warnings == []
+
+    def test_ewma_floor_stays_above_min_after_low_stream(self, tmp_path):
+        """(e) A stream of low top-1 scores can never push the floor below FLOOR_MIN."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, _inst, _job = self._make_mgr(tmp_path, lessons, 'thread lock')
+        assert mgr._adaptive_floor == FLOOR_SEED
+        # Feed a long stream of weak scores (each below FLOOR_MIN).
+        for _ in range(200):
+            mgr._update_floor(0.01)
+        assert mgr._adaptive_floor >= FLOOR_MIN - 1e-9
+        assert abs(mgr._adaptive_floor - FLOOR_MIN) < 1e-9, \
+            f'floor should have settled at the bound: {mgr._adaptive_floor}'
+        # And a high score must be able to raise it again (EWMA is two-way).
+        mgr._update_floor(0.5)
+        expected = EWMA_ALPHA * 0.5 + (1.0 - EWMA_ALPHA) * FLOOR_MIN
+        assert abs(mgr._adaptive_floor - max(FLOOR_MIN, expected)) < 1e-9
+
+    def test_threshold_override_raises_floor(self, tmp_path):
+        """memory_hint_threshold > 0 acts as a MINIMUM floor (can only make hints rarer)."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+            ('skill-creator-notes.md', 'Skill Creator Notes',
+             'Notes on writing reusable skills with frontmatter',
+             'Skills need a name description tags and a clear body section.'),
+        ]
+        mgr, inst, job = self._make_mgr(tmp_path, lessons,
+                                        'debugging a compression hang in the engine loop')
+        with mgr._index_lock:
+            matches = mgr._matcher.match(job['query'])
+        top1 = matches[0][1]
+        # Without override the gate fires; with an override above top1 it must skip.
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1, 'baseline: clear winner must fire'
+
+        inst2 = _FakeInst()
+        mgr._pool.get_instance.return_value = inst2
+        mgr._pool.llm_cfg['memory_hint_threshold'] = min(1.0, top1 + 0.1)
+        job2 = {'instance_name': 'w', 'query': job['query'],
+                'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 4}
+        mgr._process_job(job2)
+        assert inst2._tool_warnings == [], 'override above top1 must suppress the hint'
 
 
 # ── 5. Instance reset helper + defaults ─────────────────────────────────────
@@ -631,3 +831,22 @@ class TestConstants:
 
     def test_job_ttl_positive(self):
         assert JOB_TTL_SECONDS > 0
+
+    def test_gate_constants_tuned_values(self):
+        """The gate constants carry the TUNED values from the labeled replay."""
+        assert GAP == 0.03
+        assert FLOOR_SEED == 0.20
+        assert FLOOR_MIN == 0.12
+        assert EWMA_ALPHA == 0.05
+        # Invariants the gate logic depends on:
+        assert 0.0 < EWMA_ALPHA < 1.0
+        assert FLOOR_MIN <= FLOOR_SEED
+
+    def test_settings_threshold_defaults_to_adaptive(self, tmp_path):
+        """Absent memory_hint_threshold → 0.0 (pure adaptive), not the retired 0.35."""
+        pool = MagicMock()
+        mgr = MemoryHintManager(pool)
+        pool.llm_cfg = {}
+        assert mgr._settings()['threshold'] == 0.0
+        pool.llm_cfg = {'memory_hint_threshold': 0.25}
+        assert mgr._settings()['threshold'] == 0.25

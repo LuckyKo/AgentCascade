@@ -11,6 +11,10 @@ See docs/skills_system_architecture.md-style design in plans/memory_hint_PLAN.md
 
 from .manager import (
     MemoryHintManager,
+    EWMA_ALPHA,
+    FLOOR_MIN,
+    FLOOR_SEED,
+    GAP,
     HINT_COOLDOWN_SECONDS,
     HINT_ENTRY_MAX_CHARS,
     JOB_TTL_SECONDS,
@@ -22,6 +26,10 @@ from .stats import bump_read_count, load_stats
 
 __all__ = [
     'MemoryHintManager',
+    'EWMA_ALPHA',
+    'FLOOR_MIN',
+    'FLOOR_SEED',
+    'GAP',
     'HINT_COOLDOWN_SECONDS',
     'HINT_ENTRY_MAX_CHARS',
     'JOB_TTL_SECONDS',

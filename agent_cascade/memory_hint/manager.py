@@ -1,11 +1,18 @@
 """MemoryHintManager — async orchestration for the memory-hint feature.
 
 One low-priority **daemon** worker thread consumes a job queue and, on a strong
-match (1–4 memories past threshold, not already read, not recently hinted),
-delivers a hint via ``_queue_tool_warning`` onto the instance's existing
-``_tool_warnings`` queue (plan §1.3). There is **NO USER-message injection** —
-the hint rides the normal tool-result drain and is dropped if no tool result
-ever follows (plan §0 / R1).
+match (1–4 memories past the adaptive floor, not already read, not recently
+hinted), delivers a hint via ``_queue_tool_warning`` onto the instance's
+existing ``_tool_warnings`` queue (plan §1.3). There is **NO USER-message
+injection** — the hint rides the normal tool-result drain and is dropped if no
+tool result ever follows (plan §0 / R1).
+
+The gate is a self-calibrating *specificity* check, not a fixed threshold:
+``top1 < floor`` → skip (no signal), ``top1 - top2 < GAP`` → skip (diffuse tie),
+more than ``MAX_HINTS_PER_TURN`` docs at/above the floor → skip (noise). The
+floor is an EWMA of per-turn top-1 scores (bounded below by ``FLOOR_MIN``);
+the ``memory_hint_threshold`` setting is an optional override that can only
+RAISE the floor (0 = pure adaptive behavior).
 
 The main loop never blocks: ``submit()`` is a non-blocking put of a small dict.
 All matching + I/O happens in the background thread. Any exception anywhere in
@@ -41,6 +48,26 @@ MAX_HINTS_PER_TURN = 4
 # NUMBER of entries listed, not their length).
 HINT_ENTRY_MAX_CHARS = 120
 
+# ── Self-calibrating gate constants ─────────────────────────────────────────
+# These were TUNED empirically from a ~47-sample labeled replay of real agent
+# queries through the actual matcher against the real vault index (precision
+# ≈ 1.0 at a ~9–11% fire rate), NOT derived from first principles. Re-tune
+# when the vault or the query mix shifts materially. See
+# plans/memory_hint_TUNING.md for the measurement methodology.
+#
+# GAP: minimum top1 − top2 separation for a "single clear winner". A diffuse
+# multi-topic query has top1 ≈ top2 (gap < GAP) and is skipped as ambiguous.
+GAP = 0.03
+# FLOOR_SEED: initial value of the adaptive floor before any turns are seen.
+FLOOR_SEED = 0.20
+# FLOOR_MIN: hard lower bound for the EWMA floor — the signal check must never
+# degenerate into "any non-zero score fires".
+FLOOR_MIN = 0.12
+# EWMA_ALPHA: per-turn learning rate for the adaptive floor (floor ← α·top1 +
+# (1−α)·floor). Small on purpose: the floor tracks the corpus's own score
+# distribution slowly and must not chase a single spike.
+EWMA_ALPHA = 0.05
+
 
 class MemoryHintManager:
     """Owns the daemon worker, job queue, vault indexes and hint delivery."""
@@ -63,6 +90,13 @@ class MemoryHintManager:
         self._matcher = MemoryMatcher()
         self._vault_indexes: Dict[Path, VaultIndex] = {}
         self._index_lock = threading.RLock()
+
+        # Adaptive signal floor: EWMA of per-turn top-1 scores (in-memory only —
+        # intentionally NOT persisted; a fresh process re-seeds and re-calibrates).
+        # Guarded by _floor_lock because tests may drive _process_job from multiple
+        # threads even though the production worker is single-threaded.
+        self._adaptive_floor = FLOOR_SEED
+        self._floor_lock = threading.Lock()
 
         # Safety-net rescan trigger (plan §6.2): worker compares this each idle tick.
         self._last_config_version = -1
@@ -189,11 +223,41 @@ class MemoryHintManager:
             cooldown = HINT_COOLDOWN_SECONDS
         return {
             'enabled': bool(cfg.get('memory_hint_enabled', False)),
-            'threshold': float(cfg.get('memory_hint_threshold', 0.35)),
+            # ``memory_hint_threshold`` is now an optional OVERRIDE / kill-switch:
+            # the primary gate is the adaptive floor (EWMA of per-turn top-1 scores).
+            # A value > 0 is used as a MINIMUM floor (max(floor, threshold)) — it can
+            # only make hints rarer, never more frequent. 0 (or absent) = pure
+            # adaptive behavior. See the module docstring for the gate design.
+            'threshold': float(cfg.get('memory_hint_threshold', 0.0)),
             'max_entries': int(cfg.get('memory_hint_max_entries', 3)),
             'cooldown_seconds': cooldown,
             'query_chars': int(cfg.get('memory_hint_query_chars', 1000)),
         }
+
+    def _current_floor(self, override: float) -> float:
+        """Effective signal floor for this turn.
+
+        The adaptive EWMA floor (bounded below by ``FLOOR_MIN``), optionally raised
+        by the user's ``memory_hint_threshold`` override — which can only make the
+        gate stricter, never looser.
+        """
+        with self._floor_lock:
+            floor = max(FLOOR_MIN, self._adaptive_floor)
+        if override > 0.0:
+            floor = max(floor, override)
+        return floor
+
+    def _update_floor(self, top1: float) -> None:
+        """Feed one processed turn's top-1 score into the EWMA floor.
+
+        Called on EVERY job that produced matches (fire or skip), so the floor
+        tracks the corpus's own score distribution regardless of gate outcome.
+        Bounded below by ``FLOOR_MIN`` so a stream of weak scores can never push
+        the signal check to zero. In-memory only — no persistence by design.
+        """
+        with self._floor_lock:
+            new = EWMA_ALPHA * top1 + (1.0 - EWMA_ALPHA) * self._adaptive_floor
+            self._adaptive_floor = max(FLOOR_MIN, new)
 
     # ── Worker loop ──────────────────────────────────────────────────────────
 
@@ -265,18 +329,39 @@ class MemoryHintManager:
             logger.debug('[MEMORY_HINT] %s: no matches (query_len=%d)', name, len(query))
             return
 
-        threshold = settings['threshold']
-        strong = [(path, score) for path, score in matches if score >= threshold]
-        # Noise gate: too many strong matches → query is generic; skip (plan §8).
+        # Self-calibrating specificity gate (replaces the fixed-threshold check):
+        #   1) signal floor — is there ANY real signal? (top1 < floor → skip)
+        #   2) specificity gap — a SINGLE clear winner, not a diffuse tie?
+        #      (top1 − top2 < GAP → skip; top2 = 0.0 for a lone match)
+        #   3) noise gate — unchanged in effect: > MAX_HINTS_PER_TURN docs at/above
+        #      the floor means the query is generic; skip (plan §8).
+        scores = [score for _path, score in matches]  # matches already sorted desc
+        top1 = scores[0]
+        top2 = scores[1] if len(scores) > 1 else 0.0
+        floor = self._current_floor(settings['threshold'])
+
+        # Feed the EWMA on EVERY matched job (fire or skip) so the floor tracks
+        # the corpus's own score distribution regardless of gate outcome.
+        self._update_floor(top1)
+
+        gap = top1 - top2
+        if top1 < floor:
+            logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → skip(floor)',
+                         name, top1, top2, gap, floor)
+            return
+        if gap < GAP:
+            logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → skip(gap)',
+                         name, top1, top2, gap, floor)
+            return
+
+        strong = [(path, score) for path, score in matches if score >= floor]
         if len(strong) > MAX_HINTS_PER_TURN:
-            logger.debug('[MEMORY_HINT] %s: noise gate — %d strong matches (threshold=%.2f), skipping',
-                         name, len(strong), threshold)
+            logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → skip(noise) (%d strong)',
+                         name, top1, top2, gap, floor, len(strong))
             return
-        if not strong:
-            best = matches[0]
-            logger.debug('[MEMORY_HINT] %s: %d match(es) below threshold %.2f (best=%.3f %s)',
-                         name, len(matches), threshold, best[1], best[0])
-            return
+
+        logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → fire',
+                     name, top1, top2, gap, floor)
 
         # Dedup: skip memories already read or recently hinted (under the instance lock).
         now = time.monotonic()

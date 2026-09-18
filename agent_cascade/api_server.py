@@ -1467,8 +1467,10 @@ if __name__ == '__main__':
         'code_char_limit': 8000,
         'list_dir_char_limit': 8000,
         # Memory-hint feature (plan §7) — OFF by default.
+        # memory_hint_threshold is an optional override floor for the adaptive gate;
+        # 0 = pure adaptive behavior (the primary gate is self-calibrating).
         'memory_hint_enabled': False,
-        'memory_hint_threshold': 0.35,
+        'memory_hint_threshold': 0.0,
         'memory_hint_max_entries': 3,
         'memory_hint_query_chars': 1000,
         'memory_hint_cooldown_seconds': 600,

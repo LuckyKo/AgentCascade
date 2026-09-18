@@ -634,12 +634,18 @@ def _handle_memory_hint_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents:
 
 @register_config_handler('memory_hint_threshold')
 def _handle_memory_hint_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Cosine strong-match gate. Clamped to [0, 1]."""
+    """Override floor for the adaptive hint gate (clamped to [0, 1]).
+
+    The primary gate is self-calibrating (EWMA of per-turn top-1 scores + a
+    specificity gap); this setting is an optional override that can only RAISE
+    the minimum score floor — it makes hints rarer, never more frequent.
+    0 = pure adaptive behavior (the default).
+    """
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         try:
-            val = float(ui_cfg.get('memory_hint_threshold', 0.35))
+            val = float(ui_cfg.get('memory_hint_threshold', 0.0))
         except (TypeError, ValueError):
-            val = 0.35
+            val = 0.0
         agent_pool.llm_cfg['memory_hint_threshold'] = min(max(0.0, val), 1.0)
 
 

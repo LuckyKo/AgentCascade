@@ -101,7 +101,8 @@ class TestMemoryHintE2E:
         v = tmp_path / 'proj' / '.agent_lessons'
         v.mkdir(parents=True)
         # Body deliberately overlaps the fake-LLM reply text ("debugging a compression
-        # hang in the engine loop") so the match clears the 0.35 threshold comfortably.
+        # hang in the engine loop") so it is a CLEAR winner under the self-calibrating
+        # gate (top1 above the adaptive floor; as the only doc, top2 = 0 → gap OK).
         _write_lesson(v, 'compression-debug.md', 'Compression Debug',
                       'How to debug compression hangs in the engine loop daemon thread lock ordering',
                       'Debugging a compression hang in the engine loop: check the daemon '
@@ -125,10 +126,10 @@ class TestMemoryHintE2E:
         log_inst = AgentInstanceLogger('test_agent', 'w', str(tmp_path), log_path=str(tmp_path / 'w.jsonl'))
         pool.get_logger.return_value = log_inst
 
-        # Settings the manager reads live each cycle.
+        # Settings the manager reads live each cycle. No memory_hint_threshold key:
+        # 0/absent = pure adaptive gate (EWMA floor + specificity gap).
         pool.llm_cfg = {
             'memory_hint_enabled': enabled,
-            'memory_hint_threshold': 0.35,
             'memory_hint_max_entries': 3,
             'memory_hint_cooldown_seconds': 600,
             'memory_hint_query_chars': 1000,
@@ -167,8 +168,8 @@ class TestMemoryHintE2E:
             _llm_call_count['n'] += 1
             yield None
             # Reply text is deliberately domain-specific so it strongly matches the
-            # "Compression Debug" lesson (score > threshold). 'reply N' keeps replies
-            # distinguishable for conversation-layout assertions.
+            # "Compression Debug" lesson (clear winner under the adaptive gate).
+            # 'reply N' keeps replies distinguishable for layout assertions.
             yield Message(role=ASSISTANT,
                           content=f"reply {_llm_call_count['n']} debugging a compression hang in the engine loop")
 
