@@ -229,6 +229,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 instance.append_message(msg)
                 log_inst.log_message(msg)
 
+    def _append_and_log_to_llm(self, instance, msg, llm_messages, *, lock_held=False) -> None:
+        """Append msg to conversation + JSONL log + the LLM working view, exactly once.
+
+        _append_and_log() already appends to instance._cached_llm_messages. The local
+        `llm_messages` is normally the SAME object as _cached_llm_messages (see
+        _setup_turn), so we must NOT append again unconditionally — that double-appends
+        injected system messages and corrupts the LLM view on recall/rebuild. Only mirror
+        into `llm_messages` when it has diverged from _cached_llm_messages (e.g. after a
+        forced-compression consolidation rebuild), so every path is exactly-once.
+        """
+        self._append_and_log(instance, msg, lock_held=lock_held)
+        if llm_messages is not instance._cached_llm_messages:
+            llm_messages.append(msg)
+
     def _try_auto_skill_extension(self, instance, messages, llm_messages, loaded_skill_names=None) -> bool:
         """In-loop auto-skill trigger (replaces the post-run two-run helper).
 
@@ -316,16 +330,15 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 return False
 
             # ── Inject via the existing path (R3: all targets, same object) ────
-            # Mirrors _inject_soft_continue_nudge's house pattern: conversation +
-            # JSONL log atomically, then the loop-local working sets. `messages`
-            # (full working set) and llm_messages are separate list objects here —
-            # run() builds them from fresh copies in _setup_turn — so each needs
-            # its own append for the reflection prompt to reach both views.
+            # _append_and_log_to_llm appends to conversation + JSONL log and mirrors
+            # into llm_messages exactly once (identity-checked against
+            # _cached_llm_messages). `messages` (full working set) is a separate list
+            # object here — run() builds it from a fresh copy in _setup_turn — so it
+            # still needs its own append for the reflection prompt to reach both views.
             user_msg = self._make_user_message(prompt)
             with instance._compression_lock:
-                self._append_and_log(instance, user_msg, lock_held=True)
+                self._append_and_log_to_llm(instance, user_msg, llm_messages, lock_held=True)
                 messages.append(user_msg)
-                llm_messages.append(user_msg)
 
             with instance._compression_lock:
                 instance._auto_skill_proposed = True
@@ -811,7 +824,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # Turn limit warnings (50%, 90%, final) — one-time only, emitted as SEPARATE USER messages.
                 # Checked BEFORE decrement so max_turns=1 agents still get the final warning.
                 # Each threshold fires at most once (exact integer equality + single-step decrement).
-                # Pattern: _make_user_message → _append_and_log → llm_messages.append.
+                # Pattern: _make_user_message → _append_and_log_to_llm, which appends to
+                # conversation + JSONL log and mirrors into llm_messages exactly once.
                 # NOTE: these are NOT added to the local `messages` list because _setup_turn()
                 # runs ONCE per run (not per iteration); loop detection/compression thus see a view
                 # that omits them — same as the final-turn warning. Bounded (<=2 messages) and does
@@ -821,15 +835,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                 f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
                                 f"Assess your progress and plan remaining steps.]")
                     warn_user = self._make_user_message(warn_msg)
-                    self._append_and_log(instance, warn_user)
-                    llm_messages.append(warn_user)
+                    self._append_and_log_to_llm(instance, warn_user, llm_messages)
                 if not _suppress_budget_warnings and turns_available == turns_90pct:
                     warn_msg = (f"[SYSTEM WARNING: Turn limit approaching. "
                                 f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
                                 f"Plan your remaining steps carefully.]")
                     warn_user = self._make_user_message(warn_msg)
-                    self._append_and_log(instance, warn_user)
-                    llm_messages.append(warn_user)
+                    self._append_and_log_to_llm(instance, warn_user, llm_messages)
                 if turns_available == 1:
                     # Final-turn handling for a run that is genuinely ending on its last
                     # turn. The auto-skill reflection trigger no longer lives here — it
@@ -847,8 +859,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         final_msg = self._make_user_message(
                             f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
                             f"Wrap up and deliver your results now.]")
-                        self._append_and_log(instance, final_msg)
-                        llm_messages.append(final_msg)
+                        self._append_and_log_to_llm(instance, final_msg, llm_messages)
 
                     # Disable ALL tools on the last turn so agent is forced to
                     # return a final answer
@@ -2098,9 +2109,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         msg = self._make_user_message(text)
         with instance._compression_lock:
             messages.append(msg)  # full working set
-            llm_messages.append(msg)  # LLM-formatted set
             response.append(msg)  # local accumulator (UI visibility)
-            self._append_and_log(instance, msg, lock_held=True)  # conversation + JSONL log atomically
+            self._append_and_log_to_llm(instance, msg, llm_messages, lock_held=True)  # conversation + JSONL log + LLM view (exactly once)
         # Keep the JSONL log in sync with the appended nudge (house pattern).
         self._sync_conversation_log(instance, inst_name, 'reasoning_soft_continue')
 

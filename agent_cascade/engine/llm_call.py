@@ -361,14 +361,13 @@ class LLMCallMixin:
 
                     # Inject the advisory USER message (warning-first)
                     # Same pattern as the turn-limit warnings in engine/core.py:
-                    # _append_and_log (conversation pool + instance logger, atomic)
-                    # then llm_messages.append so it is in the LLM context for the
-                    # pending call this turn. NOT appended to the local `messages`
-                    # list — the loop-detection view may omit it, which keeps our
-                    # own warning outside Tier-1's window on the next check.
+                    # _append_and_log_to_llm appends to conversation + JSONL log and
+                    # mirrors into llm_messages exactly once (identity-checked against
+                    # _cached_llm_messages). NOT appended to the local `messages` list —
+                    # the loop-detection view may omit it, which keeps our own warning
+                    # outside Tier-1's window on the next check.
                     warn_msg = Message(role=USER, content=_FUZZY_WARNING_TEMPLATE.format(reason=reason))
-                    self._append_and_log(instance, warn_msg)
-                    llm_messages.append(warn_msg)
+                    self._append_and_log_to_llm(instance, warn_msg, llm_messages)
 
                     instance._fuzzy_warn_armed = False
                     instance._fuzzy_warn_last_turn = current_turn
