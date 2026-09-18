@@ -166,6 +166,18 @@ class LoadSkill(BaseTool):
                 _agent_class = getattr(inst, 'agent_class', '') or ''
                 _tel.record_skills_loaded(_agent_class, loaded, 'runtime')
 
+        # Record successfully-loaded names on the instance so the auto-skill reflection
+        # prompt's "Skills loaded this run" list (dna.py) is accurate during extended turns.
+        # Preserve init-time AUTO-matched names and dedupe while keeping order; a failure to
+        # record must never break the tool call. `inst` is guaranteed non-None here (we
+        # returned early above if resolution failed).
+        if loaded:
+            try:
+                existing = inst._loaded_skill_names or []
+                inst._loaded_skill_names = list(dict.fromkeys(existing + loaded))
+            except Exception as e:
+                logger.warning("[SKILLS] Runtime load: failed to record _loaded_skill_names for '%s': %s", agent_name, e)
+
         # Build summary
         lines = []
         if loaded:

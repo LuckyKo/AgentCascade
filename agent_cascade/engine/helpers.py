@@ -567,6 +567,20 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
     # exclusive code paths, so each self-aug injection is counted exactly once. Only
     # record when injection actually happened (idempotency guard may have skipped).
     if injected:
+        # Seed the reflection list so the root/main agent's "Skills loaded this run" is
+        # accurate: self-augmentation IS injected into its system message but was never
+        # recorded before (only the sub-agent spawn path in core.py set this field). Preserve
+        # any existing names and dedupe; runtime load_skill loads will append to it later.
+        try:
+            # Build a fresh list (don't mutate the existing one in case it's shared),
+            # preserving order and deduping — same pattern as load_skill.py.
+            existing = instance._loaded_skill_names or []
+            if 'self-augmentation' not in existing:
+                existing = existing + ['self-augmentation']
+            instance._loaded_skill_names = list(dict.fromkeys(existing))
+        except Exception as e:
+            logger.debug('[SKILLS] _inject_self_augmentation_skill: failed to seed _loaded_skill_names: %s', e)
+
         _tel = getattr(pool, 'telemetry', None)
         if _tel is not None:
             _tel.record_skills_loaded(instance.agent_class, ['self-augmentation'], 'self-augmentation')
