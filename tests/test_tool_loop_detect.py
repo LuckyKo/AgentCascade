@@ -187,6 +187,44 @@ class TestFixtures:
         assert 'EXIT:1' in reason
         assert pop_count > 0
 
+    def test_timeout_loop_code_interpreter(self):
+        """REGRESSION: agent repeatedly calls code_interpreter with the same pytest
+        subprocess, each call times out at 120s. The timeout output varies in partial
+        stdout (different test names, pass counts) but the failure class is always
+        TIMEOUT. Layer 2 must fire via identical TIMEOUT class + near-duplicate args."""
+        code = ('import subprocess\nout = subprocess.run(\n'
+                "    ['python', '-m', 'pytest', 'tests/test_skill_generation.py',\n"
+                "     '-n', '0', '-q', '--no-header'],\n"
+                "    cwd='/extra_rw_0', capture_output=True, text=True, timeout=100)\n"
+                "print('rc:', out.returncode)\nprint(out.stdout[-2500:])")
+        msgs = [Message(role=USER, content='run the tests')]
+        for i in range(8):
+            msgs.append(_fc_msg('code_interpreter', {'code': code}))
+            # Varying partial output (different test names, pass counts) but same timeout header
+            partial = f"rc: 2\ntests/test_skill_generation.py::TestX::test_{i} PASSED\n47 passed in 9.{i}s"
+            out = (f"Timeout: Code execution exceeded the 120-second time limit.\n\n"
+                   f"Partial output:\n\nstdout:\n```\n{partial}\n```")
+            msgs.append(_fn_msg('code_interpreter', out))
+        result = detect_tool_loop(msgs)
+        assert result is not None, 'Layer 2 should fire on repeated code_interpreter timeouts'
+        reason, pop_count = result
+        assert 'TIMEOUT' in reason
+        assert 'code_interpreter' in reason
+        assert pop_count > 0
+
+    def test_timeout_loop_shell_cmd(self):
+        """Same pattern via shell_cmd: repeated commands that time out."""
+        msgs = [Message(role=USER, content='run build')]
+        for i in range(6):
+            msgs.append(_fc_msg('shell_cmd', {'command': 'python build.py --full'}))
+            out = f"ERROR: Command timed out after 300 seconds (killed)"
+            msgs.append(_fn_msg('shell_cmd', out))
+        result = detect_tool_loop(msgs)
+        assert result is not None, 'Layer 2 should fire on repeated shell_cmd timeouts'
+        reason, pop_count = result
+        assert 'TIMEOUT' in reason
+        assert pop_count > 0
+
     def test_fixture_pop_count_keeps_first_pair(self):
         # pop_count convention: dropping that many messages leaves ONE pair of the run.
         msgs = _load_fixture('tool_loop_sample1_tail.jsonl')

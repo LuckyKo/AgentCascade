@@ -342,13 +342,21 @@ def _targets(args_json: str) -> frozenset:
     return frozenset(found)
 
 
+#: Timeout patterns — code_interpreter and shell_cmd both produce these on timeout.
+_TIMEOUT_RES = (
+    re.compile(r'Timeout: Code execution exceeded the \d+-second time limit'),
+    re.compile(r'ERROR: Command timed out after \d+ seconds'),
+)
+
 def _fail_class(content: str) -> Optional[str]:
     """Classify a tool output as a failure, or None if not a classifiable failure.
 
-    Returns one of ``EXIT:<n>`` (n≠0), ``NOOUT``, ``TESTFAIL``, ``TRACEBACK``.
+    Returns one of ``EXIT:<n>`` (n≠0), ``NOOUT``, ``TESTFAIL``, ``TRACEBACK``, ``TIMEOUT``.
     The TRACEBACK class covers tools that raise an exception without printing an
     exit code or FAILED banner (e.g. code_interpreter) — the key guard for the
     generic Layer 2 path, which must only chain on genuinely failing outputs.
+    TIMEOUT covers code_interpreter/shell_cmd timeout messages where the tool
+    itself reports the timeout (not a traceback or exit code).
     """
     m = _EXIT_CODE_RE.search(content)
     if m and int(m.group(1)) != 0:
@@ -359,6 +367,8 @@ def _fail_class(content: str) -> Optional[str]:
         return 'TESTFAIL'
     if _TRACEBACK_RE.search(content):
         return 'TRACEBACK'
+    if any(rx.search(content) for rx in _TIMEOUT_RES):
+        return 'TIMEOUT'
     return None
 
 
