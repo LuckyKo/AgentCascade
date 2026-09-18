@@ -880,12 +880,17 @@ class TestEngineQueryExtraction:
         """Regression: a tool-call-only turn (empty content + non-empty function_call, no
         reasoning) must yield '' — the shared extract_text_from_message() tool-call fallback
         used to leak "[TOOL CALL: ...]" into the query and fire the hint on such turns.
+
+        The message shape mirrors the REAL one built in llm/oai.py:716-719 (top-level
+        ``function_call`` kwarg + ``function_id`` in ``extra``), not a synthetic dict.
         """
         from agent_cascade.engine.core import ExecutionEngine
         from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
         # content is empty; a REAL function_call is present (the exact reported bug shape).
-        msg = Message(role=ASSISTANT, content='',
-                      extra={'function_call': FunctionCall(name='read_file', arguments='{"path": "x"}')})
+        msg = Message(role=ASSISTANT,
+                      content='',
+                      function_call=FunctionCall(name='read_file', arguments='{"path": "x"}'),
+                      extra={'function_id': 'call_0'})
         turn = [msg]
         q = ExecutionEngine._extract_memory_hint_query(turn, 1000)
         assert q == '', f'tool-call-only turn must not trigger a hint, got query: {q!r}'

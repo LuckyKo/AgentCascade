@@ -48,8 +48,8 @@ MAX_HINTS_PER_TURN = 4
 # NUMBER of entries listed, not their length). Sized so ABSOLUTE display paths
 # survive the clip: a Windows vault path like
 # ``N:\work\WD\AgentWorkspace\.agent_lessons\xxx.md`` is ~55 chars, plus any
-# subdirs. (Bumped 120 → 200 when entries switched from bare rel_paths to
-# absolute display paths — see :meth:`MemoryHintManager._display_path`.)
+# subdirs. Current value 256 (raised from the original 120 when entries switched
+# from bare rel_paths to absolute display paths — see :meth:`MemoryHintManager._display_path`).
 HINT_ENTRY_MAX_CHARS = 256
 
 # ── Self-calibrating gate constants ─────────────────────────────────────────
@@ -166,30 +166,40 @@ class MemoryHintManager:
     # ── Vault index management ───────────────────────────────────────────────
 
     def rescan_vaults(self) -> None:
-        """(Re)discover vaults and rebuild the merged matcher index (background-safe)."""
+        """(Re)discover vaults and rebuild the merged matcher index (background-safe).
+
+        ALL reads/writes of ``self._vault_indexes`` happen inside ONE
+        ``with self._index_lock:`` block. A concurrent ``_display_path`` / match
+        iterates that dict under the same lock, so mutating it outside would risk a
+        RuntimeError (dict changed size during iteration) or a torn read. The lock is
+        an RLock, so nesting is fine. We hold it across the per-vault ``rescan()``
+        calls on purpose: rescans are infrequent and small, and keeping everything in
+        one critical section guarantees the merged index + matcher see one consistent
+        dict (no half-built state ever visible to a reader).
+        """
         try:
             om = getattr(self._pool, 'operation_manager', None)
             vault_roots = discover_vaults(om)
-            new_indexes: Dict[Path, VaultIndex] = {}
-            changed = False
-            for root in vault_roots:
-                idx = self._vault_indexes.get(root)
-                if idx is None:
-                    idx = VaultIndex(root)
-                    self._vault_indexes[root] = idx
-                    # A brand-new index has no documents yet — build it now.
-                    changed = idx.rescan() or True
-                else:
-                    changed = idx.rescan() or changed
-                new_indexes[root] = idx
-
-            # Drop indexes for vaults that no longer exist.
-            for root in list(self._vault_indexes.keys()):
-                if root not in new_indexes:
-                    del self._vault_indexes[root]
-                    changed = True
-
             with self._index_lock:
+                new_indexes: Dict[Path, VaultIndex] = {}
+                changed = False
+                for root in vault_roots:
+                    idx = self._vault_indexes.get(root)
+                    if idx is None:
+                        idx = VaultIndex(root)
+                        self._vault_indexes[root] = idx
+                        # A brand-new index has no documents yet — build it now.
+                        changed = idx.rescan() or True
+                    else:
+                        changed = idx.rescan() or changed
+                    new_indexes[root] = idx
+
+                # Drop indexes for vaults that no longer exist.
+                for root in list(self._vault_indexes.keys()):
+                    if root not in new_indexes:
+                        del self._vault_indexes[root]
+                        changed = True
+
                 # Key by BARE vault-relative path (plan §3.1/§3.4): the dedup set, cooldown
                 # map and stats sidecar all use bare rel_path, so the matcher must too —
                 # otherwise a read recorded as "x.md" never matches the hinted key
@@ -340,9 +350,14 @@ class MemoryHintManager:
         except Exception:  # noqa: BLE001
             pass
 
-        # Match against the current index snapshot.
+        # Match against the current index snapshot, and capture an ORDERED snapshot of
+        # the vault roots in the SAME lock block. Display resolution later uses this
+        # snapshot (not the live dict) so a concurrent rescan can't change iteration
+        # order or drop a vault between scoring and display — keeping "first vault wins"
+        # consistent between the scored file and the displayed absolute path.
         with self._index_lock:
             matches = self._matcher.match(query)
+            roots_snapshot = list(self._vault_indexes.keys())
         if not matches:
             # Log only the query length — never the raw text (sensitive data).
             logger.debug('[MEMORY_HINT] %s: no matches (query_len=%d)', name, len(query))
@@ -423,8 +438,9 @@ class MemoryHintManager:
         # path so the agent knows WHICH same-named lesson to read across multiple
         # vaults. Bookkeeping above (dedup / cooldown / _memories_read) already ran
         # on the bare rel_path identity and is left untouched — only what we SHOW
-        # changes here.
-        display = [self._display_path(p) for p in to_hint]
+        # changes here. Pass the match-time root snapshot so display resolves against
+        # the same vault set/order that produced the scores (see roots_snapshot above).
+        display = [self._display_path(p, roots=roots_snapshot) for p in to_hint]
 
         hint_text = self._build_hint(display)
         if not hint_text:
@@ -438,15 +454,23 @@ class MemoryHintManager:
 
         self._deliver(inst, name, hint_text)
 
-    def _display_path(self, rel: str) -> str:
+    def _display_path(self, rel: str, roots: Optional[List[Path]] = None) -> str:
         """Resolve a vault-relative lesson path to an ABSOLUTE display string.
 
         Multiple vaults can hold same-named lessons, so the hint must show which
-        file to read. Walk ``self._vault_indexes`` (first hit wins — consistent with
+        file to read. Walk the candidate vault roots (first hit wins — consistent with
         the merged-index "first vault wins" rule) and return the first root under
         which ``(root / rel)`` exists as a file. If no vault holds it (e.g. the
         vault was removed since the index was built), fall back to ``rel`` unchanged:
         this is a best-effort display feature and must never crash.
+
+        Args:
+            rel: Vault-relative lesson path (bare identity used by bookkeeping).
+            roots: Ordered snapshot of vault roots captured at match time. When given,
+                resolution walks THIS list instead of the live ``self._vault_indexes``
+                dict — so a concurrent rescan can't change iteration order or drop a
+                vault between scoring and display (keeps first-vault-wins consistent).
+                When omitted, falls back to the live dict under ``_index_lock``.
 
         NOTE: only the DISPLAYED text changes here — dedup / cooldown / read-tracking
         all key on the bare vault-relative identity (see :meth:`on_memory_read`).
@@ -456,10 +480,14 @@ class MemoryHintManager:
         # joining against a Windows root resolves correctly.
         normalized = rel.replace('\\', '/')
         try:
-            with self._index_lock:
-                for root in self._vault_indexes:
-                    if (root / normalized).is_file():
-                        return str(root / normalized)
+            if roots is not None:
+                candidates = list(roots)
+            else:
+                with self._index_lock:
+                    candidates = list(self._vault_indexes.keys())
+            for root in candidates:
+                if (root / normalized).is_file():
+                    return str(root / normalized)
         except Exception as e:  # noqa: BLE001 — best-effort, never raise
             logger.debug('[MEMORY_HINT] _display_path failed for %s: %s', rel, e)
         return rel
