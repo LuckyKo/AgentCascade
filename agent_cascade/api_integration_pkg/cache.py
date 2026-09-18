@@ -43,6 +43,17 @@ class CacheManager:
         # They must NOT share stream_versions or the mismatch causes permanent cache misses.
         self.stream_token_stats_versions: Dict[str, tuple] = {}
 
+        # Streaming committed-range cache: instance_name -> dict with keys
+        #   prefix_key             (history_count, last_msg_fingerprint)  -- identity of the
+        #                            committed conversation at build time (stable within a turn)
+        #   cut_point              int    -- _safe_tail_start_index used when built
+        #   committed_serialized   List[dict] -- serialize_message(msgs[cut_point:]) (the ENTIRE
+        #                            history when cut_point==0, i.e. an unbroken tool chain)
+        #   committed_fps          set    -- _streaming_fingerprint of those msgs (dedup seed)
+        # Reused verbatim across all frames of a turn so per-frame cost is O(streaming), not O(n).
+        # See state_builder._serialize_instance for the rationale + invariants.
+        self.prefix_cache: Dict[str, dict] = {}
+
     def clear_all(self) -> None:
         """Clear all caches. Called during session reset."""
         with self._lock:
@@ -51,6 +62,7 @@ class CacheManager:
             self.cached_instances.clear()
             self.stream_token_stats.clear()
             self.stream_token_stats_versions.clear()
+            self.prefix_cache.clear()
 
     def evict_if_full(self, cache_name: str, maxsize: int) -> None:
         """Evict oldest entry if cache exceeds max size (FIFO).
@@ -79,6 +91,7 @@ class CacheManager:
             self.stream_versions.pop(instance_name, None)
             self.cached_instances.pop(instance_name, None)
             self.stream_token_stats.pop(instance_name, None)
+            self.prefix_cache.pop(instance_name, None)
 
 
 # Module-level CacheManager instance
@@ -86,6 +99,9 @@ _cache_mgr = CacheManager()
 
 _TOKEN_STATS_CACHE_MAXSIZE = 5000
 _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100
+# Streaming committed-prefix cache: one entry per instance (each holds a serialized prefix +
+# its fingerprints). Bounded to keep memory flat across many instances; evict oldest on overflow.
+_PREFIX_CACHE_MAXSIZE = 100
 
 
 def _clear_performance_caches():

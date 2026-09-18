@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.agent_pool import AgentPool
-from agent_cascade.api_integration_pkg.cache import (_TOKEN_STATS_CACHE_MAXSIZE, _cache_mgr, _get_ui_cache,
-                                                     _store_ui_cache)
+from agent_cascade.api_integration_pkg.cache import (_PREFIX_CACHE_MAXSIZE, _TOKEN_STATS_CACHE_MAXSIZE, _cache_mgr,
+                                                     _get_ui_cache, _store_ui_cache)
 from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
 from agent_cascade.constants import POOL_SETTINGS_TO_BROADCAST
 from agent_cascade.llm.schema import ASSISTANT, CONTENT, NAME, REASONING_CONTENT, ROLE, Message
@@ -1119,6 +1119,50 @@ def _is_stale_prefix_of_serialized(
     return content_ok and reasoning_ok
 
 
+def _prefix_cache_lookup(name: str, prefix_key: tuple, cut_point: int):
+    """Return the cached committed-prefix entry for *name*, or None on a miss.
+
+    A HIT requires BOTH the prefix identity key (history_count, last_msg_fingerprint) AND the
+    cut point to match — if either changed since the entry was built the prefix must be rebuilt.
+    The caller MUST hold ``_cache_mgr._lock`` (RLock).
+    """
+    entry = _cache_mgr.prefix_cache.get(name)
+    if entry is not None and entry['prefix_key'] == prefix_key and entry['cut_point'] == cut_point:
+        return entry
+    return None
+
+
+def _prefix_cache_store(name: str, prefix_key: tuple, cut_point: int, committed_serialized: list,
+                        committed_fps: set) -> None:
+    """Store/replace the committed-range cache entry for *name* (FIFO-evict on overflow).
+
+    Caches the SERIALIZED form of the stable committed range ``msgs[cut_point:]`` (the "committed
+    tail" — which is the ENTIRE history when start_idx==0, i.e. an unbroken tool chain) PLUS its
+    fingerprints. The committed conversation is unchanged within a turn, so on every subsequent
+    frame of that turn (a HIT) we reuse ``committed_serialized`` verbatim and re-serialize ONLY the
+    growing streaming partials — converting both per-frame O(n) terms (the serialize loop AND the
+    fingerprint seed loop) to O(1) + O(streaming).
+
+    The wire format is unchanged: a delta frame still sends exactly ``msgs[cut_point:]`` (same as
+    before); we just compute it in O(1) on a HIT instead of O(n).
+
+    The caller MUST hold ``_cache_mgr._lock``. Re-inserting an existing key moves it to the MRU
+    position; a new key evicts the oldest when the cache is at capacity, bounding memory across many
+    instances.
+    """
+    if name in _cache_mgr.prefix_cache:
+        del _cache_mgr.prefix_cache[name]
+    while len(_cache_mgr.prefix_cache) >= _PREFIX_CACHE_MAXSIZE:
+        oldest_key = next(iter(_cache_mgr.prefix_cache))
+        del _cache_mgr.prefix_cache[oldest_key]
+    _cache_mgr.prefix_cache[name] = {
+        'prefix_key': prefix_key,
+        'cut_point': cut_point,
+        'committed_serialized': committed_serialized,
+        'committed_fps': committed_fps,
+    }
+
+
 def _serialize_instance(
     inst: AgentInstance,
     pool: AgentPool,
@@ -1187,11 +1231,63 @@ def _serialize_instance(
     )
     start_idx = _safe_tail_start_index(msgs) if use_delta else 0
 
-    # NOTE: absolute indices! The frontend's merge is purely positional via
-    # `history_count - messages.length`, so a tail frame's first message must carry
-    # `index == start_idx`. Passing relative indices would silently break the splice
-    # AND change what serialize_message caches (it only caches index > 0).
-    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[start_idx:], start=start_idx)]
+    # ── Committed-prefix cache (delta-mode only) ───────────────────────────
+    # The committed conversation is STABLE within a turn — it only changes when Phase 4
+    # commits a new message (turn boundary) or compression shrinks it. During a turn's
+    # streaming, only `_streaming_responses` grows. So the committed prefix
+    # (`msgs[0:start_idx]`) can be serialized ONCE per turn and reused verbatim across all
+    # frames of that turn; each frame then re-serializes ONLY the growing tail
+    # (`msgs[start_idx:]`, bounded by TAIL_COMMITTED / the last tool chain) + appends the
+    # streaming partials. This converts the per-frame O(n) full-history serialization (the
+    # dominant cost for tool-chain conversations, where start_idx==0 forces a full send) into
+    # O(tail), freeing the engine thread so the LLM generator no longer idles each frame.
+    #
+    # Invariants preserved (see plan "Critical invariants"):
+    #   * DEDUP: `existing_fingerprints` is seeded from prefix_fps ∪ tail_fps — the SAME set
+    #     the no-cache path builds by walking all of serialized_msgs. A streaming partial that
+    #     matches a PREFIX message (not just the tail) is still deduped.
+    #   * ABSOLUTE INDICES: the prefix is serialized with absolute indices [0:start_idx]; the
+    #     tail continues from start_idx. Nothing is renumbered.
+    #   * STALE-PREFIX GUARD: `_is_stale_prefix_of_serialized` receives the FULL
+    #     `serialized_msgs` (prefix + tail) so its "last serialized assistant" scan is correct.
+    # The cache is BYPASSED for force_full / connect-time frames (use_delta False → full send)
+    # and on prefix_shrink (a forced full frame); a rebuild happens automatically on the next
+    # partial frame because the identity key (history_count, last_msg_fingerprint) changes.
+    # Committed-range cache (Phase 1 fix for todo.md #137): the committed conversation is STABLE
+    # within a turn — only `_streaming_responses` grows. So the serialized form of the committed
+    # range `msgs[start_idx:]` (the ENTIRE history when start_idx==0, i.e. an unbroken tool chain)
+    # is computed ONCE per turn and reused verbatim across all frames; each frame re-serializes ONLY
+    # the growing streaming partials. This converts BOTH per-frame O(n) terms — the serialize loop
+    # AND the fingerprint seed loop — to O(1) + O(streaming). The wire format is unchanged (a delta
+    # frame still sends exactly `msgs[start_idx:]`); we just compute it in O(1) on a HIT.
+    committed_fps: set = set()
+    if use_delta:
+        prefix_key = (original_history_count, _msg_fingerprint(msgs[-1]) if msgs else None)
+        with _cache_mgr._lock:
+            cached_entry = _prefix_cache_lookup(inst.instance_name, prefix_key, start_idx)
+        if cached_entry is not None:
+            # HIT: reuse the committed range verbatim (O(1) list copy); do NOT re-serialize it.
+            serialized_msgs = list(cached_entry['committed_serialized'])
+            committed_fps = set(cached_entry['committed_fps'])
+        else:
+            # MISS: serialize the committed range once (same work as today's delta frame) and cache
+            # it + its fingerprints. Amortized to once per turn instead of once per frame.
+            serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[start_idx:], start=start_idx)]
+            with _cache_mgr._lock:
+                committed_fps = {
+                    fp
+                    for fp in (_streaming_fingerprint(sm, j) for j, sm in enumerate(serialized_msgs))
+                    if fp != ('', '', 'None', None, None)
+                }
+                # Store a COPY: the streaming loop below appends partials to `serialized_msgs`, and
+                # we must not bake frame N's partial into the cached entry reused by frames N+1..end.
+                _prefix_cache_store(inst.instance_name, prefix_key, start_idx, list(serialized_msgs), committed_fps)
+    else:
+        # NOTE: absolute indices! The frontend's merge is purely positional via
+        # `history_count - messages.length`, so a tail frame's first message must carry
+        # `index == start_idx`. Passing relative indices would silently break the splice
+        # AND change what serialize_message caches (it only caches index > 0).
+        serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[start_idx:], start=start_idx)]
 
     # Set is_partial=True when there are active streaming responses so the frontend uses
     # the partial merge path (smart splice with history_count), which properly handles
@@ -1219,11 +1315,19 @@ def _serialize_instance(
         # index `j` (stable within one serialization pass — exactly where collisions occur),
         # else None. Because both loops use the SAME shape, set membership stays correct and
         # lengths never mix.
-        existing_fingerprints = set()
-        for j, msg in enumerate(serialized_msgs):
-            fingerprint = _streaming_fingerprint(msg, j)
-            if fingerprint != ('', '', 'None', None, None):
-                existing_fingerprints.add(fingerprint)
+        # Seed the dedup set from the cached committed-range fingerprints (computed ONCE per turn
+        # on a MISS; empty on a non-delta / force_full frame, where we re-walk below). This skips
+        # the O(n) fingerprint walk of serialized_msgs on every frame — the dominant per-frame cost.
+        # Coverage is identical to the no-cache path: committed_fps is built from exactly the same
+        # messages (serialized_msgs before streaming partials are appended), so a streaming partial
+        # matching ANY committed message (including one in an unbroken tool chain) is still deduped.
+        existing_fingerprints = set(committed_fps)
+        if not committed_fps:
+            # Non-delta / force_full frame: no cache entry, walk the full range to build the seed.
+            for j, msg in enumerate(serialized_msgs):
+                fingerprint = _streaming_fingerprint(msg, j)
+                if fingerprint != ('', '', 'None', None, None):
+                    existing_fingerprints.add(fingerprint)
 
         # Append streaming responses that aren't already in serialized_msgs
         for j, stream_msg in enumerate(stream_responses):
