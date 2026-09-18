@@ -602,6 +602,17 @@ class TestSkillManager:
         )
         assert isinstance(result, list)
 
+    def test_resolve_auto_caps_at_max_skills(self):
+        """Basic AUTO mode must return at most MAX_AUTO_SKILLS_PER_CALL matched skills."""
+        from agent_cascade.settings import MAX_AUTO_SKILLS_PER_CALL
+        self._setup_manager_with_skills()
+        # Broad query that should match multiple indexed skills.
+        result = self.manager.resolve_load_skill(
+            'AUTO',
+            task_text='skill matching docker testing code review debugging git version control',
+        )
+        assert len(result) <= MAX_AUTO_SKILLS_PER_CALL
+
     # -- resolve_load_skill_names (shared name-computation) --
 
     def test_resolve_names_explicit_returns_only_loadable(self):

@@ -190,7 +190,7 @@ AUTO_SKILL_REFLECTION_PROMPT = (
     'For EACH skill above that you ACTUALLY applied during the run, call `propose_skill` with '
     '`name` and a numeric `rating` (0-10, 0.5 steps) — do NOT include skill_content.\n'
     'Rate honestly on what happened, not on how good the documentation reads:\n'
-    '- used AND it clearly helped → high rating (7-10)\n'
+    '- used AND it clearly helped → high rating (6-10)\n'
     '- loaded but you barely needed / ignored it → no rating / skip\n'
     '- actively misleading or harmful → very low (0-4)\n'
     'Discourage generosity bias: a skill that was merely present but not needed should NOT get a '
@@ -429,7 +429,7 @@ TOOL_METADATA = {
             '**Execution mode:** auto/sync/async — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
             '**Windows note:** unquoted `;` is translated to `&` (cmd.exe has no `;` separator) so `A; B` runs both commands. Quote a literal `;` to keep it as data.\n\n'
-            'Special commands (no approval required): __help (list auto-approved commands), __status, __kill, __ctrl_c, __heartbeat=N.\n'
+            'Special commands (no justification required): __help (list auto-approved commands), __status, __kill, __ctrl_c, __heartbeat=N.\n'
         ),
         'parameters': {
             'command':

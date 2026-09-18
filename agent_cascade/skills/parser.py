@@ -125,5 +125,5 @@ def parse_skill_file(skill_path: Path) -> Dict[str, Any]:
         'version': normalize_version(frontmatter.get('version')),
     }
 
-    logger.debug('[SKILLS] Parsed skill file: %s (name=%s)', skill_path, frontmatter.get('name', 'unknown'))
+    # logger.debug('[SKILLS] Parsed skill file: %s (name=%s)', skill_path, frontmatter.get('name', 'unknown'))
     return result

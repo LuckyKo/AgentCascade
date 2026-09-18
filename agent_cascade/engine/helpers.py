@@ -664,7 +664,7 @@ def _build_session_metadata(pool, instance) -> str:
         meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
     if extra_rw:
         meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
-    meta_lines.append(f"- Log Path: {log_path}")
+    meta_lines.append(f"- Your log Path: {log_path}")
     meta_lines.append('Use your logs to recall details from turns that were compressed.')
 
     return '\n'.join(meta_lines)

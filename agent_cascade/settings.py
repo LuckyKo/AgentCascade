@@ -508,6 +508,7 @@ AUTO_SKILL_MODE_ADVANCED: str = 'advanced'
 AUTO_SKILL_MODE_NONE: str = 'none'
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_MATCH_THRESHOLD',
                                                 '0.15'))  # Minimum relevance score for AUTO mode skill loading
+MAX_AUTO_SKILLS_PER_CALL: int = 3  # Hard cap on Basic AUTO keyword-matched skills per call (self-augmentation excluded)
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly

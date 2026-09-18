@@ -26,8 +26,8 @@ except ImportError:
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
 from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURNS, CANDIDATE_EVAL_INTERVAL_SECONDS,
-                                    CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, SKILL_CACHE_TTL_SECONDS,
-                                    SKILL_MATCH_THRESHOLD, SKILL_RATING_INITIAL, SKILLS_DISABLED)
+                                    CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL,
+                                    SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD, SKILL_RATING_INITIAL, SKILLS_DISABLED)
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher
@@ -756,8 +756,11 @@ class SkillManager:
                     logger.debug('[SKILLS] AUTO mode — no matching skills for query')
                     return []
 
+                # matches is already sorted by score descending — cap at the top N.
                 names = []
                 for name, score in matches:
+                    if len(names) >= MAX_AUTO_SKILLS_PER_CALL:
+                        break
                     if score < SKILL_MATCH_THRESHOLD:
                         continue
                     body = self.load_full_instructions(name, count_load=False)
