@@ -261,9 +261,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         """Periodically re-run the skill candidate decision gate (safety net)."""
         while not self._candidate_eval_stop.wait(interval):
             try:
-                # Skip the tick when no agent is active: a full re-scan is pointless
-                # while everything is idle/terminated (SLEEPING still counts as active,
-                # since it's just waiting on an async tool).
+                # Skip the tick when no agent is active — a full re-scan is pointless
+                # while everything is idle/terminated (see has_active_agent()).
                 if not self.has_active_agent():
                     continue
                 self.skill_manager.evaluate_candidates()
