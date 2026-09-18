@@ -594,9 +594,36 @@ class TestManagerGate:
         with mgr._index_lock:
             matches = mgr._matcher.match(job['query'])
         assert len(matches) >= 1
-        assert matches[0][1] >= FLOOR_MIN, f'top1 {matches[0][1]:.3f} below floor min'
+        floor = mgr._current_floor(0.0)
+        assert matches[0][1] >= floor, \
+            f'top1 {matches[0][1]:.3f} below adaptive floor {floor:.3f} — bad fixture'
         top2 = matches[1][1] if len(matches) > 1 else 0.0
         assert matches[0][1] - top2 >= GAP, 'fixture must be a clear winner'
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        assert 'compression-debug.md' in inst._tool_warnings[0]
+
+    def test_gate_single_match_fires(self, tmp_path):
+        """(f) Exactly ONE lesson in the vault with top1 ≥ floor fires (lone-match path).
+
+        With a single match there is no top-2: gap = top1 − 0.0 = top1 ≥ GAP always
+        holds, so the lone match is delivered whenever it clears the adaptive floor.
+        """
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(tmp_path, lessons,
+                                        'debugging a compression hang in the engine loop')
+        with mgr._index_lock:
+            matches = mgr._matcher.match(job['query'])
+        assert len(matches) == 1, f'expected exactly one match, got {matches}'
+        floor = mgr._current_floor(0.0)
+        top1 = matches[0][1]
+        assert top1 >= floor, \
+            f'top1 {top1:.3f} below adaptive floor {floor:.3f} — bad fixture'
+        assert top1 - 0.0 >= GAP, 'lone-match gap (top1 − 0) must clear GAP'
         mgr._process_job(job)
         assert len(inst._tool_warnings) == 1
         assert 'compression-debug.md' in inst._tool_warnings[0]
@@ -615,10 +642,12 @@ class TestManagerGate:
         with mgr._index_lock:
             matches = mgr._matcher.match(query)
         assert len(matches) == 2, f'expected both docs to match, got {matches}'
+        floor = mgr._current_floor(0.0)
         top1, top2 = matches[0][1], matches[1][1]
-        # The fixture must be a genuine near-tie above the floor (else the gap gate
-        # is not what is being exercised).
-        assert top1 >= FLOOR_MIN, f'top1 {top1:.3f} below floor min — bad fixture'
+        # The fixture must be a genuine near-tie above the EFFECTIVE adaptive floor
+        # (fresh manager → FLOOR_SEED, not just FLOOR_MIN — else the FLOOR gate would
+        # skip first and the gap gate is never exercised).
+        assert top1 >= floor, f'top1 {top1:.3f} below adaptive floor {floor:.3f} — bad fixture'
         assert top1 - top2 < GAP, f"fixture must be a tie: gap={top1 - top2:.4f} ≥ GAP={GAP}"
         mgr._process_job(job)
         assert inst._tool_warnings == []
@@ -677,7 +706,11 @@ class TestManagerGate:
         assert inst._tool_warnings == []
 
     def test_ewma_floor_stays_above_min_after_low_stream(self, tmp_path):
-        """(e) A stream of low top-1 scores can never push the floor below FLOOR_MIN."""
+        """(e) A stream of low top-1 scores can never push the EFFECTIVE floor below FLOOR_MIN.
+
+        The bound is applied at read time (``_current_floor``); ``_update_floor``
+        stores the unbounded EWMA value, so this test drives the full read path.
+        """
         lessons = [
             ('compression-debug.md', 'Compression Debug',
              'How to debug compression hangs in the engine loop',
@@ -688,13 +721,21 @@ class TestManagerGate:
         # Feed a long stream of weak scores (each below FLOOR_MIN).
         for _ in range(200):
             mgr._update_floor(0.01)
-        assert mgr._adaptive_floor >= FLOOR_MIN - 1e-9
-        assert abs(mgr._adaptive_floor - FLOOR_MIN) < 1e-9, \
-            f'floor should have settled at the bound: {mgr._adaptive_floor}'
-        # And a high score must be able to raise it again (EWMA is two-way).
-        mgr._update_floor(0.5)
-        expected = EWMA_ALPHA * 0.5 + (1.0 - EWMA_ALPHA) * FLOOR_MIN
-        assert abs(mgr._adaptive_floor - max(FLOOR_MIN, expected)) < 1e-9
+        floor = mgr._current_floor(0.0)
+        assert floor >= FLOOR_MIN - 1e-9, f'effective floor {floor:.6f} below FLOOR_MIN'
+        assert abs(floor - FLOOR_MIN) < 1e-9, \
+            f'effective floor should have settled at the bound: {floor}'
+        # And a high score must be able to raise it again (EWMA is two-way): after
+        # enough strong turns the STORED state climbs above FLOOR_MIN, and the
+        # effective floor then tracks that stored value (read-time bound no longer
+        # clamps it). With α=0.05, 60 updates of 0.5 drive the EWMA from its current
+        # low value (~0.03 after the weak stream) to ~0.48 — well above FLOOR_MIN.
+        for _ in range(60):
+            mgr._update_floor(0.5)
+        assert mgr._adaptive_floor > FLOOR_MIN, \
+            f'high scores must lift stored EWMA: {mgr._adaptive_floor}'
+        assert mgr._current_floor(0.0) == mgr._adaptive_floor, \
+            'effective floor should equal the stored value once it is above FLOOR_MIN'
 
     def test_threshold_override_raises_floor(self, tmp_path):
         """memory_hint_threshold > 0 acts as a MINIMUM floor (can only make hints rarer)."""

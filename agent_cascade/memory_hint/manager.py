@@ -216,30 +216,46 @@ class MemoryHintManager:
 
     def _settings(self) -> dict:
         cfg = getattr(self._pool, 'llm_cfg', None) or {}
-        # Cooldown is a live UI setting; fall back to the module default if absent.
+        # All numeric reads are live UI settings; each falls back to its module
+        # default when absent OR invalid (defensive — a bad persisted value must
+        # never crash the worker).
         try:
             cooldown = float(cfg.get('memory_hint_cooldown_seconds', HINT_COOLDOWN_SECONDS))
         except (TypeError, ValueError):
             cooldown = HINT_COOLDOWN_SECONDS
+        # ``memory_hint_threshold`` is now an optional OVERRIDE / kill-switch:
+        # the primary gate is the adaptive floor (EWMA of per-turn top-1 scores).
+        # A value > 0 is used as a MINIMUM floor (max(floor, threshold)) — it can
+        # only make hints rarer, never more frequent. 0 (or absent) = pure
+        # adaptive behavior. See the module docstring for the gate design.
+        try:
+            threshold = float(cfg.get('memory_hint_threshold', 0.0))
+        except (TypeError, ValueError):
+            threshold = 0.0
+        try:
+            max_entries = int(cfg.get('memory_hint_max_entries', 3))
+        except (TypeError, ValueError):
+            max_entries = 3
+        try:
+            query_chars = int(cfg.get('memory_hint_query_chars', 1000))
+        except (TypeError, ValueError):
+            query_chars = 1000
         return {
             'enabled': bool(cfg.get('memory_hint_enabled', False)),
-            # ``memory_hint_threshold`` is now an optional OVERRIDE / kill-switch:
-            # the primary gate is the adaptive floor (EWMA of per-turn top-1 scores).
-            # A value > 0 is used as a MINIMUM floor (max(floor, threshold)) — it can
-            # only make hints rarer, never more frequent. 0 (or absent) = pure
-            # adaptive behavior. See the module docstring for the gate design.
-            'threshold': float(cfg.get('memory_hint_threshold', 0.0)),
-            'max_entries': int(cfg.get('memory_hint_max_entries', 3)),
+            'threshold': threshold,
+            'max_entries': max_entries,
             'cooldown_seconds': cooldown,
-            'query_chars': int(cfg.get('memory_hint_query_chars', 1000)),
+            'query_chars': query_chars,
         }
 
     def _current_floor(self, override: float) -> float:
         """Effective signal floor for this turn.
 
-        The adaptive EWMA floor (bounded below by ``FLOOR_MIN``), optionally raised
-        by the user's ``memory_hint_threshold`` override — which can only make the
-        gate stricter, never looser.
+        The adaptive EWMA floor, optionally raised by the user's
+        ``memory_hint_threshold`` override — which can only make the gate stricter,
+        never looser. The ``FLOOR_MIN`` bound is applied HERE, in exactly one place
+        (the read path): ``_update_floor`` may store an unbounded EWMA value, and
+        the seed is always ≥ FLOOR_MIN, so this single clamp covers every case.
         """
         with self._floor_lock:
             floor = max(FLOOR_MIN, self._adaptive_floor)
@@ -248,16 +264,15 @@ class MemoryHintManager:
         return floor
 
     def _update_floor(self, top1: float) -> None:
-        """Feed one processed turn's top-1 score into the EWMA floor.
+        """Feed one processed turn's top-1 score into the EWMA floor (unbounded).
 
         Called on EVERY job that produced matches (fire or skip), so the floor
         tracks the corpus's own score distribution regardless of gate outcome.
-        Bounded below by ``FLOOR_MIN`` so a stream of weak scores can never push
-        the signal check to zero. In-memory only — no persistence by design.
+        No ``FLOOR_MIN`` clamp here — :meth:`_current_floor` applies the bound at
+        read time, in exactly one place. In-memory only — no persistence by design.
         """
         with self._floor_lock:
-            new = EWMA_ALPHA * top1 + (1.0 - EWMA_ALPHA) * self._adaptive_floor
-            self._adaptive_floor = max(FLOOR_MIN, new)
+            self._adaptive_floor = EWMA_ALPHA * top1 + (1.0 - EWMA_ALPHA) * self._adaptive_floor
 
     # ── Worker loop ──────────────────────────────────────────────────────────
 

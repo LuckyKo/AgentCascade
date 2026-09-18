@@ -734,7 +734,7 @@
                           <input type="checkbox" id="setting-memory-hint-enabled" />
                         </label>
                         <label class="setting-field">
-                          <span title="Override floor for the adaptive hint gate [0,1]. The primary gate is self-calibrating (EWMA of past top-1 scores + specificity gap); a value > 0 can only make hints rarer by raising the minimum score. 0 = pure adaptive behavior.">Hint Threshold (override, 0 = adaptive)</span>
+                          <span title="Override floor for the adaptive hint gate [0,1]. The primary gate is self-calibrating (EWMA of past top-1 scores + specificity gap); a value > 0 can only make hints rarer by raising the minimum score. 0 = pure adaptive behavior. Note: values below 0.12 are overridden by the adaptive floor minimum.">Hint Threshold (override, 0 = adaptive)</span>
                           <input type="number" id="setting-memory-hint-threshold" min="0" max="1" step="0.05" value="0" />
                         </label>
                         <label class="setting-field">
