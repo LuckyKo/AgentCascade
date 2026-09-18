@@ -120,8 +120,8 @@ class MemoryHintManager:
             self._pending[instance_name] = job
         try:
             self._job_queue.put_nowait(job)
-            logger.info('[MEMORY_HINT] %s: hint job submitted (turn=%d, query_len=%d)',
-                        instance_name, turn, len(query))
+            logger.debug('[MEMORY_HINT] %s: hint job submitted (turn=%d, query_len=%d)',
+                         instance_name, turn, len(query))
         except Exception as e:  # noqa: BLE001 — never block/raise on the main path
             logger.debug('[MEMORY_HINT] submit failed for %s: %s', instance_name, e)
 
@@ -162,8 +162,9 @@ class MemoryHintManager:
                     for rel, doc in idx.documents.items():
                         merged.setdefault(rel, doc)
                 self._matcher.set_documents(merged)
-            logger.debug('[MEMORY_HINT] rescan_vaults: %d vault(s), %d lesson(s), changed=%s',
-                         len(self._vault_indexes), len(merged), changed)
+            # Rescan completion is a meaningful state change (index rebuilt) — INFO.
+            logger.info('[MEMORY_HINT] rescan_vaults: %d vault(s), %d lesson(s), changed=%s',
+                        len(self._vault_indexes), len(merged), changed)
         except Exception as e:  # noqa: BLE001 — best-effort, never raise
             logger.debug('[MEMORY_HINT] rescan_vaults failed: %s', e)
 
@@ -233,25 +234,25 @@ class MemoryHintManager:
 
         # TTL drop: don't hint a turn the agent has long since passed.
         if time.monotonic() - job.get('submitted_at', 0.0) > JOB_TTL_SECONDS:
-            logger.info('[MEMORY_HINT] %s: dropped (job expired, ttl=%.0fs)', name, JOB_TTL_SECONDS)
+            logger.debug('[MEMORY_HINT] %s: dropped (job expired, ttl=%.0fs)', name, JOB_TTL_SECONDS)
             return
 
         settings = self._settings()
         if not settings['enabled']:
-            logger.info('[MEMORY_HINT] %s: skipped (feature disabled)', name)
+            logger.debug('[MEMORY_HINT] %s: skipped (feature disabled)', name)
             return
 
         # Re-resolve the instance (may be gone/dismissed by delivery time).
         inst = self._pool.get_instance(name)
         if inst is None:
-            logger.info('[MEMORY_HINT] %s: dropped (instance gone)', name)
+            logger.debug('[MEMORY_HINT] %s: dropped (instance gone)', name)
             return
 
         # State-change guard: skip sleeping instances (plan §4.3).
         try:
             from agent_cascade.agent_instance import AgentState
             if getattr(inst, 'state', None) == AgentState.SLEEPING:
-                logger.info('[MEMORY_HINT] %s: skipped (SLEEPING)', name)
+                logger.debug('[MEMORY_HINT] %s: skipped (SLEEPING)', name)
                 return
         except Exception:  # noqa: BLE001
             pass
@@ -260,20 +261,21 @@ class MemoryHintManager:
         with self._index_lock:
             matches = self._matcher.match(query)
         if not matches:
-            logger.info('[MEMORY_HINT] %s: no matches (query=%r...)', name, query[:80])
+            # Log only the query length — never the raw text (sensitive data).
+            logger.debug('[MEMORY_HINT] %s: no matches (query_len=%d)', name, len(query))
             return
 
         threshold = settings['threshold']
         strong = [(path, score) for path, score in matches if score >= threshold]
         # Noise gate: too many strong matches → query is generic; skip (plan §8).
         if len(strong) > MAX_HINTS_PER_TURN:
-            logger.info('[MEMORY_HINT] %s: noise gate — %d strong matches (threshold=%.2f), skipping',
-                        name, len(strong), threshold)
+            logger.debug('[MEMORY_HINT] %s: noise gate — %d strong matches (threshold=%.2f), skipping',
+                         name, len(strong), threshold)
             return
         if not strong:
             best = matches[0]
-            logger.info('[MEMORY_HINT] %s: %d match(es) below threshold %.2f (best=%.3f %s)',
-                        name, len(matches), threshold, best[1], best[0])
+            logger.debug('[MEMORY_HINT] %s: %d match(es) below threshold %.2f (best=%.3f %s)',
+                         name, len(matches), threshold, best[1], best[0])
             return
 
         # Dedup: skip memories already read or recently hinted (under the instance lock).
@@ -283,6 +285,13 @@ class MemoryHintManager:
         skipped_read: List[str] = []
         skipped_cooldown: List[str] = []
         with inst._compression_lock:
+            # Prune cooldown entries older than the cooldown window — they can no
+            # longer affect the gate, so dropping them bounds the dict's growth.
+            # (Same time.monotonic() clock as when entries were stamped.)
+            expired = [p for p, ts in inst._recently_hinted.items() if now - ts >= cooldown]
+            for path in expired:
+                del inst._recently_hinted[path]
+
             for path, _score in strong:
                 if path in inst._memories_read:
                     skipped_read.append(path)
@@ -294,9 +303,9 @@ class MemoryHintManager:
                 to_hint.append(path)
 
         if not to_hint:
-            logger.info('[MEMORY_HINT] %s: all %d strong match(es) filtered out '
-                        '(already_read=%s, in_cooldown=%s)',
-                        name, len(strong), skipped_read or '-', skipped_cooldown or '-')
+            logger.debug('[MEMORY_HINT] %s: all %d strong match(es) filtered out '
+                         '(already_read=%s, in_cooldown=%s)',
+                         name, len(strong), skipped_read or '-', skipped_cooldown or '-')
             return
 
         # ``strong`` is already score-descending (inherited from matcher.match), so the

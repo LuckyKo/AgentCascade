@@ -105,6 +105,31 @@ class TestMatcher:
         m.set_documents({})
         assert m.match('anything at all') == []
 
+    def test_match_frontmatter_only_doc_matches_nothing(self, vault):
+        """A degenerate lesson with identity text but an EMPTY body must not raise.
+
+        Guards the matcher's empty-body path (_chunk on '' and match() against a doc
+        whose vector comes only from the identity field). The doc is still indexable
+        via its identity (by design, W_ID), so the assertion is: no exception, scores
+        in range, and an unrelated query matches nothing.
+        """
+        (vault / 'frontmatter-only.md').write_text(
+            '---\nname: Frontmatter Only\ndescription: A lesson with no body text at all\n'
+            'tags: [test]\n---\n',
+            encoding='utf-8',
+        )
+        idx = VaultIndex(vault)
+        idx.rescan()
+        m = MemoryMatcher()
+        m.set_documents(idx.documents)
+        # Empty-body doc is indexed (identity-only vector) — no exception on rescan/index.
+        assert 'frontmatter-only.md' in idx.documents
+        # Query overlapping the identity text: no exception, scores stay in range.
+        for _path, score in m.match('frontmatter only lesson with no body text'):
+            assert 0.0 <= score <= 1.0 + 1e-9
+        # An unrelated query must not match the degenerate doc at all.
+        assert all(p != 'frontmatter-only.md' for p, _ in m.match('compression hang daemon'))
+
     def test_identity_weighting_boosts_name_match(self, vault):
         """A query matching ONLY a lesson's name/tags (not body) still scores it.
 
@@ -302,6 +327,23 @@ class TestManagerDedup:
                 'submitted_at': time.monotonic(), 'turn': 4}
         mgr._process_job(job2)
         assert len(inst._tool_warnings) == 1
+
+    def test_process_job_prunes_expired_recently_hinted(self, tmp_path):
+        """Entries in _recently_hinted older than the cooldown are pruned during dedup.
+
+        Bounds the dict: expired entries can no longer affect the gate.
+        """
+        mgr, inst = self._manager_with_lesson(tmp_path)
+        now = time.monotonic()
+        with inst._compression_lock:
+            # One long-expired (prunable) and one fresh (must survive) entry.
+            inst._recently_hinted['stale-lesson.md'] = now - 601.0  # > 600s cooldown
+            inst._recently_hinted['fresh-lesson.md'] = now - 1.0
+        job = {'instance_name': 'w', 'query': 'debugging a compression hang in the engine loop',
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        mgr._process_job(job)
+        assert 'stale-lesson.md' not in inst._recently_hinted
+        assert 'fresh-lesson.md' in inst._recently_hinted
 
     def test_process_job_disabled_no_hint(self, tmp_path):
         """memory_hint_enabled=False → no hint even on a strong match."""
