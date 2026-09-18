@@ -83,14 +83,15 @@ XML_MIN_LENGTH: int = 40
 DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 
 # --- Loop Detection Feedback ---
-# Injected as a USER message when the loop detector fires. Randomly selected per occurrence.
-# Tone: firm redirect. The agent already "tried different" and looped again — so the
-# message must explicitly forbid repeating the last action and demand a structural change.
+# Injected as a USER message AFTER a rollback (the repeated turns are gone from context).
+# The agent cannot see what it repeated — so the message must tell it to reconstruct
+# understanding first (re-read task, check notes/logs) before taking its next action.
+# Randomly selected per occurrence.
 LOOP_FEEDBACK_MESSAGES: List[str] = [
-    '[SYSTEM]: Loop detected — your last action is what caused this. Do NOT repeat it. Identify the specific thing that\'s blocking you (a missing file? wrong assumption? tool error?) and address THAT directly. If you\'re unsure what\'s wrong, read back the error or output from your last attempt before acting again.',
-    '[SYSTEM]: You\'re repeating yourself. The approach you just tried did not work — trying it again will not work either. Change your method: use a different tool, a different file, or break the problem into a smaller step. The task is still valid, but your current tactic is the problem.',
-    '[SYSTEM]: Repetition loop broken. You must take a structurally different action now — not the same command, edit, or read you just did. Ask yourself: what information am I missing that would let me move forward? Go get THAT, then continue the task.',
-    '[SYSTEM]: Stop. You\'ve been doing the same thing multiple times with no progress. Before your next action, explicitly state in one sentence what went wrong last time and what you will do differently. Then act on it. The goal hasn\'t changed — only your method must.',
+    '[SYSTEM]: You were stuck in a loop and your recent turns have been rolled back. Before acting again: re-read the original task/goal above, check your notes or plan if you have one, and figure out what step you should actually be on. Then continue with a concrete next action.',
+    '[SYSTEM]: Loop detected — your last few turns were removed to break the cycle. You may not remember exactly where you left off. Take a moment to re-read the task, scan your notes or earlier output, and reorient yourself. Then pick up from where you actually are, not where you think you are.',
+    '[SYSTEM]: You kept repeating yourself, so those turns were rolled back. Reconstruct your state: what was the goal? What have you already accomplished (check your files/notes)? What is the single next step that moves you forward? Then do that step.',
+    '[SYSTEM]: Repetition loop broken via rollback. Your recent actions are gone from context. Before continuing, briefly re-read the task and any notes or plan you\'ve written. Identify what you were trying to do and what\'s still outstanding. Then proceed with a fresh approach to that specific sub-task.',
 ]
 
 # --- Memory Compression ---
