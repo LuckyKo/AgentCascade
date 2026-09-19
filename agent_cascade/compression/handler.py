@@ -323,9 +323,9 @@ class CompressionHandler:
                 text = str(text)
             block = '\n\n'.join(str(i) for i in items)
             if prepend:
-                text = f"[TOOL WARNINGS]\n{block}\n\n{text}"
+                text = f"[SYSTEM NOTIFICATIONS]\n{block}\n\n{text}"
             else:
-                text = f"{text}\n\n[TOOL WARNINGS]\n{block}"
+                text = f"{text}\n\n[SYSTEM NOTIFICATIONS]\n{block}"
         return text
 
     @staticmethod
@@ -412,7 +412,7 @@ class CompressionHandler:
 
         if warnings:
             block = '\n\n'.join(str(w) for w in warnings)
-            text = f"[TOOL WARNINGS]\n{block}"
+            text = f"[SYSTEM NOTIFICATIONS]\n{block}"
             text_item = ContentItem(text=text)
             if prepend:
                 items.insert(0, text_item)
@@ -478,7 +478,7 @@ class CompressionHandler:
         Layout (in order):
           1. [CACHE INFO] block (if any) — prepended (appears at top)
           2. Main tool output (possibly truncated to char_limit)
-          3. [TOOL WARNINGS] block (if any) — appended after body
+          3. [SYSTEM NOTIFICATIONS] block (if any) — appended after body
           4. Pending compression notifications (if any) — appended after warnings
           5. [TRUNCATED ...] footer (if truncation occurred)
 

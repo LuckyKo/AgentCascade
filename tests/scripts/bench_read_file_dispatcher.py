@@ -208,7 +208,7 @@ def benchmark_drain_methods(mock_instance: MagicMock, full_result: str) -> Dict[
         warnings = list(mock_instance._tool_warnings)
         if warnings:
             warning_block = '\n\n'.join(str(w) for w in warnings)
-            text = f"{text}\n\n[TOOL WARNINGS]\n{warning_block}"
+            text = f"{text}\n\n[SYSTEM NOTIFICATIONS]\n{warning_block}"
         elapsed = (time.perf_counter() - t0) * 1000
         drain_warning_times.append(elapsed)
 
