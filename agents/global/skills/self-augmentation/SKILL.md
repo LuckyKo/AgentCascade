@@ -18,6 +18,7 @@ Discover and load specialized skills when a task needs domain expertise.
 - **Task mentions any technology/framework/library/tool** (Docker, React, TensorFlow, …) → invoke `scan_skills` with query='that technology' immediately.
 - **Delegating to sub-agents** → include `load_skill=[...]` in `call_agent`.
 - **You notice a recurring pattern worth capturing** (multi-step procedure, domain knowledge not covered by existing skills, ≥5 tool calls with a coherent workflow) → load the `skill-creator` skill for instructions, then create the new skill via `propose_skill`.
+- **You hit an unrelated bug/issue in the harness or project you're working on** (not part of your task) → don't fix it inline; log it via the `bug-tracker-entry-format` skill so it's tracked separately.
 
 ## Tool reference
 
@@ -40,6 +41,7 @@ Discover and load specialized skills when a task needs domain expertise.
 Skills are cross-project reusable procedures ("how to do X"). Project memories are facts specific to the current project ("what happened with Y", "architecture decision Z") — markdown files in `.agent_lessons/` (the standard per-project memory location).
 - **When debugging X** → grep for X and related terms in `.agent_lessons/` before starting fresh.
 - **Working on a known component** → check if past investigations exist before reinvestigating (e.g. grep "compression" when fixing compression bugs).
+- **You get `[MEMORY HINT]` hits** → actually read the referenced lesson files before proceeding; they usually contain the exact gotcha you're about to hit.
 - **Before saving a new memory** → load the `project-memory-writing` skill for formatting guidance.
 - Use Obsidian-style backlinks `[[memory-name]]` to connect related memories; they're lightweight and discoverable via plain-text search.
 
