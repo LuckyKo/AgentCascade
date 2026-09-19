@@ -53,6 +53,7 @@ POOL_SETTINGS_KEYS = frozenset({
     # Skills system
     'default_load_skill_mode',
     'auto_skill_enabled',
+    'auto_skill_min_turns',
     'auto_skill_mode',
     # Retry policy
     'retry_max_attempts',
@@ -414,6 +415,14 @@ def _handle_auto_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
         if val not in (AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED, AUTO_SKILL_MODE_NONE):
             val = DEFAULT_AUTO_SKILL_MODE
         agent_pool.settings.auto_skill_mode = val
+
+
+@register_config_handler('auto_skill_min_turns')
+def _handle_auto_skill_min_turns(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the minimum turns an agent must effectuate before a natural finish triggers auto-skill reflection."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('auto_skill_min_turns', 20))
+        agent_pool.settings.auto_skill_min_turns = max(1, min(500, val))
 
 
 @register_config_handler('loop_min_chars')

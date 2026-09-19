@@ -280,7 +280,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 return False
             if getattr(settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE) == LOAD_SKILL_NONE:
                 return False
-            if instance._current_turn <= AUTO_SKILL_MIN_TURNS:
+            # Live-read turn threshold (UI-editable, no restart). Shared by the gate below and
+            # passed to auto_skill_qualifies so BOTH gates agree on the same live value.
+            min_turns = getattr(settings, 'auto_skill_min_turns', AUTO_SKILL_MIN_TURNS)
+            if instance._current_turn <= min_turns:
                 return False
 
             # ── One-shot flag + snapshot capture (under the compression lock) ─
@@ -325,7 +328,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # ── Qualification + prompt build (pure; no conversation/flag mutation) ─
             prompt = skill_manager.auto_skill_qualifies(instance,
                                                         instance._current_turn,
-                                                        loaded_skill_names=loaded_skill_names)
+                                                        loaded_skill_names=loaded_skill_names,
+                                                        min_turns=min_turns)
             if not prompt:
                 return False
 

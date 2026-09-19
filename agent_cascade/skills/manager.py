@@ -1310,8 +1310,8 @@ class SkillManager:
 
                 # 2. Gate on minimum ratings.
                 if cand_n < CANDIDATE_MIN_RATINGS:
-                    logger.debug("[SKILLS] Candidate '%s' pending decision (%d/%d ratings)", name, cand_n,
-                                 CANDIDATE_MIN_RATINGS)
+                    # logger.debug("[SKILLS] Candidate '%s' pending decision (%d/%d ratings)", name, cand_n,
+                    #             CANDIDATE_MIN_RATINGS)
                     continue
 
                 # 3-5. Compare averages (2dp): better or equal → promote; worse → discard.
@@ -1341,6 +1341,7 @@ class SkillManager:
         inst,
         turns_effectuated: int,
         loaded_skill_names: Optional[List[str]] = None,
+        min_turns: Optional[int] = None,
     ) -> Optional[str]:
         """Pure qualification check + prompt builder for the in-loop auto-skill trigger.
 
@@ -1352,30 +1353,40 @@ class SkillManager:
 
         Gates (all must pass):
           - ``not inst._auto_skill_proposed`` (one-shot; never reset).
-          - ``turns_effectuated > AUTO_SKILL_MIN_TURNS`` (strictly greater — the turns-based
-            gate that replaced the legacy tool-call-count and match-score gates).
+          - ``turns_effectuated > min_turns`` (strictly greater — the turns-based gate that
+            replaced the legacy tool-call-count and match-score gates). ``min_turns`` is the
+            live UI-editable threshold when supplied by core.py, else the import-time
+            ``AUTO_SKILL_MIN_TURNS`` constant.
           - skill-creator is loadable from the registry.
 
         Args:
             inst: The agent instance (flag read under its compression lock).
             turns_effectuated: Number of turns effectuated on this run (inst._current_turn).
             loaded_skill_names: Names of skills loaded for this run (for the prompt's list).
+            min_turns: Live turn threshold from pool.settings (UI-editable, no restart).
+                ``None`` → fall back to the import-time ``AUTO_SKILL_MIN_TURNS`` constant.
 
         Returns:
             The reflection prompt string when qualified, else None.
         """
+        # Live-read threshold: core.py passes the pool.settings value so a UI change takes
+        # effect without restart. Falls back to the import-time constant when not supplied
+        # (direct callers / tests that patch the module constant).
+        if min_turns is None:
+            min_turns = AUTO_SKILL_MIN_TURNS
+
         with inst._compression_lock:
             if getattr(inst, '_auto_skill_proposed', False):
                 return None
 
         # Gate: strictly greater than the configured turn threshold. Independent of loaded skills
         # and match score (the old tool-call + top-match conditions are intentionally removed).
-        if turns_effectuated <= AUTO_SKILL_MIN_TURNS:
+        if turns_effectuated <= min_turns:
             return None
 
         creator = self.load_full_instructions('skill-creator', count_load=False)
         if not creator:
             return None
 
-        logger.debug('[AUTO-SKILL] Qualification passed: turns=%d (min=%d)', turns_effectuated, AUTO_SKILL_MIN_TURNS)
+        logger.debug('[AUTO-SKILL] Qualification passed: turns=%d (min=%d)', turns_effectuated, min_turns)
         return _build_auto_skill_reflection_prompt(loaded_skill_names, creator, self)

@@ -20,7 +20,7 @@ from typing import Any, Callable, List, Optional
 from agent_cascade.llm.schema import Message
 from agent_cascade.settings import (
     AGENT_IDLE_CHECK_INTERVAL, AGENT_IDLE_TIMEOUT, AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
-    AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL, CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
+    AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL, AUTO_SKILL_MIN_TURNS, CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
     CI_EXECUTION_TIMEOUT, CI_STALE_CONTAINER_TTL, CI_WATCHDOG_TIMEOUT, COMPRESSION_FORCE_THRESHOLD,
     COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
@@ -850,6 +850,7 @@ class PoolSettings:
     # Skills system settings
     default_load_skill_mode: str = DEFAULT_LOAD_SKILL_MODE  # "AUTO" (default) or "NONE" — controls whether skills auto-load on call_agent
     auto_skill_enabled: bool = False  # Controls whether auto-skill generation/proposal is allowed
+    auto_skill_min_turns: int = AUTO_SKILL_MIN_TURNS  # Min turns effectuated before a natural finish triggers auto-skill reflection (strictly-greater gate)
     # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == "AUTO"):
     #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior)
     #   "advanced" — invokes the Skill Advisor (Security agent) for semantic matching + validation

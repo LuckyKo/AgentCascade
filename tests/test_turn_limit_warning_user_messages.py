@@ -56,7 +56,9 @@ class _FakeSkillManager:
     trigger fire. Only ``auto_skill_qualifies`` is exercised by the gate chain; it returns
     a non-empty prompt so ``_try_auto_skill_extension`` reports a successful trigger."""
 
-    def auto_skill_qualifies(self, instance, current_turn, loaded_skill_names=None):
+    def auto_skill_qualifies(self, instance, current_turn, loaded_skill_names=None, min_turns=None):
+        # min_turns accepted to mirror the real SkillManager.auto_skill_qualifies signature
+        # (core.py now passes the live pool.settings value); the fake ignores it.
         return '[AUTO-SKILL] Reflect on your completed task and propose any reusable skill.'
 
 

@@ -180,6 +180,7 @@ const POOL_SETTINGS_MAP = [
     transform: (v) => v === 'AUTO' },
   { id: '#setting-auto-skill-mode', prop: 'value', key: 'auto_skill_mode', localKey: 'auto-skill-mode' },
   { id: '#setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
+  { id: '#setting-auto-skill-min-turns', prop: 'value', key: 'auto_skill_min_turns', localKey: 'auto-skill-min-turns' },
   // Retry policy settings (Phase 6)
   { id: '#setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts', localKey: 'retry-max-attempts' },
   { id: '#setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
@@ -1175,6 +1176,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
   if ($('#setting-auto-skill-mode')) s['auto-skill-mode'] = $('#setting-auto-skill-mode').value;
   if ($('#setting-auto-skill-gen')) s['auto-skill-gen'] = $('#setting-auto-skill-gen').checked;
+  if ($('#setting-auto-skill-min-turns')) s['auto-skill-min-turns'] = $('#setting-auto-skill-min-turns').value;
   if ($('#setting-inner-loop-detect')) s['inner-loop-detect'] = $('#setting-inner-loop-detect').checked;
   // Save Agent Budgeting toggle state
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
@@ -1340,6 +1342,7 @@ function loadSettings() {
     if (_present(s['enable-skills'])) $('#setting-enable-skills').checked = s['enable-skills'];
     if (_present(s['auto-skill-mode'])) $('#setting-auto-skill-mode').value = s['auto-skill-mode'];
     if (_present(s['auto-skill-gen'])) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
+    if (_isFiniteRestore(s['auto-skill-min-turns'])) $('#setting-auto-skill-min-turns').value = s['auto-skill-min-turns'];
     if (_present(s['inner-loop-detect'])) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state
     if (_present(s['enable_agent_budgeting'])) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
@@ -5599,6 +5602,7 @@ function getGenerateCfg() {
   if ($('#setting-enable-skills')) cfg.default_load_skill_mode = $('#setting-enable-skills').checked ? 'AUTO' : 'NONE';
   if ($('#setting-auto-skill-mode')) cfg.auto_skill_mode = $('#setting-auto-skill-mode').value;
   if ($('#setting-auto-skill-gen')) cfg.auto_skill_enabled = $('#setting-auto-skill-gen').checked;
+  if ($('#setting-auto-skill-min-turns')) cfg.auto_skill_min_turns = parseInt($('#setting-auto-skill-min-turns').value) || 20;
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;

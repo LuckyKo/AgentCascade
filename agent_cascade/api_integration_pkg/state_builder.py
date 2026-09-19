@@ -424,6 +424,8 @@ def build_state_from_pool(
                 getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled':
                 getattr(ps, 'auto_skill_enabled', True),
+            'auto_skill_min_turns':
+                getattr(ps, 'auto_skill_min_turns', 20),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
             # Retry policy settings (Phase 6)
@@ -648,6 +650,8 @@ def build_stream_update_from_pool(
                 getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled':
                 getattr(ps, 'auto_skill_enabled', True),
+            'auto_skill_min_turns':
+                getattr(ps, 'auto_skill_min_turns', 20),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
             # Retry policy settings (Phase 6)

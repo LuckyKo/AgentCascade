@@ -603,6 +603,10 @@
                           <span title="When enabled, agents can automatically propose and generate new skills based on task context. Requires 'Enable Skills' to be active.">Enable Auto-Skill Generation</span>
                           <input type="checkbox" id="setting-auto-skill-gen" checked />
                         </label>
+                        <label class="setting-field">
+                          <span title="Minimum turns an agent must complete before a natural finish triggers auto-skill reflection.">Auto-Skill Min Turns</span>
+                          <input type="number" id="setting-auto-skill-min-turns" min="1" max="500" value="20" />
+                        </label>
                       </div>
                     </details>
 
