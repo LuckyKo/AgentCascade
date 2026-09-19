@@ -1829,10 +1829,10 @@ class TestReflectionPrompt:
         assert isinstance(prompt, str) and prompt
         assert '(none)' in prompt
 
-    def test_prompt_lines_carry_rating_info(self, fresh_manager):
-        """Loaded-skill lines show the current average rating (or 'unrated')."""
+    def test_prompt_lines_show_names_only_no_rating(self, fresh_manager):
+        """Loaded-skill lines show ONLY the name — ratings are omitted to avoid anchoring bias."""
         inst = self._make_inst(fresh_manager)
-        # Rate one skill so it renders with an average; leave the other unrated.
+        # Rate one skill so a pre-existing average exists; it must NOT leak into the prompt.
         fresh_manager.record_rating('docker-best-practices', 8.0)
         fresh_manager.record_rating('docker-best-practices', 7.0)  # avg 7.5, count 2
         prompt = fresh_manager.auto_skill_qualifies(
@@ -1841,8 +1841,13 @@ class TestReflectionPrompt:
             loaded_skill_names=['docker-best-practices', 'code-review'],
         )
         assert isinstance(prompt, str) and prompt
-        assert '- docker-best-practices (avg 7.5/10, rated 2×)' in prompt
-        assert '- code-review (unrated)' in prompt
+        # Names present, rendered as bare lines.
+        assert '- docker-best-practices' in prompt
+        assert '- code-review' in prompt
+        # No rating/count/avg/unrated markers on the loaded-skill lines.
+        assert 'avg 7.5/10' not in prompt
+        assert 'rated 2×' not in prompt
+        assert '(unrated)' not in prompt
 
 
 class TestProposeSkillRatingModes:

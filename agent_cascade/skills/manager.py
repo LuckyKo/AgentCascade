@@ -134,20 +134,13 @@ def _build_auto_skill_reflection_prompt(loaded_skill_names: Optional[List[str]],
     """Render the auto-skill reflection prompt (dna.py template) for injection.
 
     ``loaded_skill_names`` is rendered as one line per entry, or "(none)" when empty/None.
-    Each line carries the skill's current average rating (looked up via ``skill_manager``,
-    when provided): "- name (avg 7.5/10, rated 4×)" when rated, or "- name (unrated)"
-    otherwise. Without a manager every skill renders as "(unrated)".
+    Each line shows ONLY the skill name ("- name") — ratings are deliberately omitted so
+    the model rates each skill on its actual performance this run rather than anchoring on
+    a pre-existing average (see user directive to avoid rating bias in the reflection prompt).
     The full skill-creator body is embedded verbatim (same as the previous inline prompt).
     """
     if loaded_skill_names:
-        lines = []
-        for name in loaded_skill_names:
-            rating, count = skill_manager.get_rating_info(name) if skill_manager is not None else (None, 0)
-            if rating is not None:
-                lines.append(f'- {name} (avg {rating}/10, rated {count}×)')
-            else:
-                lines.append(f'- {name} (unrated)')
-        loaded_list = '\n'.join(lines)
+        loaded_list = '\n'.join(f'- {name}' for name in loaded_skill_names)
     else:
         loaded_list = '(none)'
     # Two-pass replacement instead of str.format(): the embedded skill-creator body
