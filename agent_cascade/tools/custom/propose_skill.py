@@ -271,7 +271,7 @@ class ProposeSkill(BaseTool):
 
         if success:
             # If a rating was supplied alongside content, record it after successful
-            # registration/update. New skills already got an initial 0.5 in the manager; this
+            # registration/update. New skills already got an initial 5.0 in the manager; this
             # records the caller's explicit assessment on top of that.
             if content_rating is not None:
                 try:

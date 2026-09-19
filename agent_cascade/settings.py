@@ -529,9 +529,9 @@ AUTO_SKILL_EXTRA_TURNS: int = int(
               25))  # Fresh turn budget granted at in-loop trigger time (added on top of the exhausted budget)
 AUTO_SKILL_MIN_TOOL_CALLS: int = 5  # (legacy) minimum tool calls; superseded by AUTO_SKILL_MIN_TURNS gate
 AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
-                                          40))  # Fire reflection when turns effectuated > N (strictly greater)
+                                          20))  # Fire reflection when turns effectuated > N (strictly greater)
 SKILL_RATING_INITIAL: float = float(os.getenv('AGENT_CASCADE_SKILL_RATING_INITIAL',
-                                              0.5))  # Initial rating auto-recorded for newly-registered skills
+                                              5.0))  # Initial rating auto-recorded for newly-registered skills
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for auto-promotion
 # Applies to NEW skills only: a newly-registered skill is moved straight from the pending
 # staging dir into agents/global/skills/. Upgrade proposals (name == existing production skill)

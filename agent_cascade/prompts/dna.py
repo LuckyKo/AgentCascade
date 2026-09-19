@@ -199,7 +199,7 @@ AUTO_SKILL_REFLECTION_PROMPT = (
     'If you noticed a reusable pattern, procedure, or gap the loaded skills did not cover, propose '
     'a new skill (or an update) by calling `propose_skill` with its `name` and full `skill_content`. '
     'The `name` argument is authoritative — it becomes the registered name. New skills start at '
-    'rating 0.5 automatically.\n\n'
+    'rating 5.0 automatically.\n\n'
     '### 3. Optionally leave a project memory for any non-obvious failure or gotcha worth avoiding next time (see Self-Augmentation)\n'
     '### Skill creation guide\n\n{skill_creator_body}\n')
 

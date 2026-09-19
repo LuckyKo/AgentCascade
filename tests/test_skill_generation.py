@@ -1196,15 +1196,18 @@ class TestInLoopTrigger:
         #   [5] reflection prompt  (injected at trigger)
         #   [6] reply 4            (extended)
         #   [7] reply 5            (extended)
-        #   [8] halfway warning    (extended budget, iter5)
-        #   [9] reply 6            (extended)
-        #   [10] turn-limit-approaching warning (iter6)
-        #   [11] reply 7           (extended)
-        #   [12] final-turn warning (iter7 — the extended tail's last turn)
-        #   [13] reply 8 + 'Turn limit reached' notice (tail exhausted its budget)
-        # = 14 messages. We assert the exact count so a regression that drops/loses any of
-        # these (the rollback this test guards against) is caught.
-        assert len(inst.conversation) == 14
+        #   [8] reply 6            (extended)
+        #   [9] reply 7            (extended)
+        #   [10] final-turn warning (iter7 — the extended tail's last turn)
+        #   [11] reply 8 + 'Turn limit reached' notice (tail exhausted its budget)
+        # = 12 messages. NOTE: the 50%/90% budget warnings are SUPPRESSED during the
+        # reflection extension (stale-threshold fix — they describe the already-exhausted
+        # ORIGINAL budget and would otherwise print a misleading "N remaining out of
+        # {extended}" text). The original-budget halfway warning at [3] still fires; only the
+        # two extended-budget warnings that previously sat between replies 5/6 and 6/7 are
+        # gone. We assert the exact count so a regression that drops/loses any of these real
+        # messages (the rollback this test guards against) is caught.
+        assert len(inst.conversation) == 12
         pool._rollback_instance.assert_not_called()
 
     def test_one_shot_flag(self, fresh_manager, tmp_path):
@@ -1631,7 +1634,7 @@ class TestRatingMetrics:
 
 
 class TestNewSkillInitialRating:
-    """Newly-registered skills get an initial rating of SKILL_RATING_INITIAL (0.5)."""
+    """Newly-registered skills get an initial rating of SKILL_RATING_INITIAL (5.0)."""
 
     @pytest.fixture(autouse=True)
     def _isolated_metrics(self, fresh_manager, tmp_path):
@@ -1639,7 +1642,7 @@ class TestNewSkillInitialRating:
         _isolate_metrics(fresh_manager, tmp_path)
         yield
 
-    def test_new_skill_gets_initial_0_5(self, fresh_manager):
+    def test_new_skill_gets_initial_5_0(self, fresh_manager):
         from agent_cascade.settings import SKILL_RATING_INITIAL
         m = self.manager
         name = f"test-initial-rating-{_uid()}"
@@ -1756,7 +1759,7 @@ class TestProposeSkillRatingModes:
         on_disk = Path(m.get_skill_metadata(name)['file_path']).read_text(encoding='utf-8')
         assert re.search(r'(?m)^name:\s*%s\s*$' % re.escape(name), on_disk)
         entry = m.get_metrics(name)
-        # Initial 0.5 + this 7.5 → count 2, latest 7.5
+        # Initial 5.0 + this 7.5 → count 2, latest 7.5
         assert entry['ratings']['latest'] == 7.5
         assert entry['ratings']['count'] == 2
         # Rating-only must NOT request approval.
@@ -1870,7 +1873,7 @@ class TestProposeSkillRatingModes:
         result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j', 'rating': 9.0}))
         assert 'registered successfully' in result
         entry = m.get_metrics(name)
-        # Initial 0.5 + explicit 9.0 → latest 9.0, count 2
+        # Initial 5.0 + explicit 9.0 → latest 9.0, count 2
         assert entry['ratings']['latest'] == 9.0
         assert entry['ratings']['count'] == 2
 
