@@ -322,8 +322,13 @@ class TestSkillManager:
     """Test SkillManager discovery, metadata queries, loading and resolution."""
 
     @pytest.fixture(autouse=True)
-    def _fresh_manager(self):
+    def _fresh_manager(self, tmp_path):
         self.manager = SkillManager()
+        # Isolate metrics writes: SkillManager.__init__ loads the REAL
+        # agents/global/skills-metrics.json into memory and defaults _metrics_file to it.
+        # Tests here call load_full_instructions() (which increments load counts) over the
+        # real skills dir; without redirection a flush would clobber the production file.
+        self.manager._metrics_file = tmp_path / 'skills-metrics.json'
 
     # -- Discovery --
 

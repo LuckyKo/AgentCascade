@@ -154,10 +154,20 @@ def _cleanup_test_artifacts():
 
 
 @pytest.fixture(autouse=True)
-def fresh_manager():
-    """Create a fresh SkillManager and clean up test artifacts after each test."""
+def fresh_manager(tmp_path):
+    """Create a fresh SkillManager and clean up test artifacts after each test.
+
+    CRITICAL: redirect ``_metrics_file`` to a temp path. ``SkillManager.__init__`` loads the
+    REAL agents/global/skills-metrics.json into memory and defaults ``_metrics_file`` to it, so
+    any test that triggers a metrics flush (load counts, ratings, or prune_stale_metrics via
+    evaluate_candidates) would otherwise clobber the production file. Tests that need their own
+    isolated path still set ``manager._metrics_file`` explicitly (which simply overrides this);
+    tests that derive a tree from ``Path(manager._metrics_file).parent`` now get a temp dir,
+    which is the intended isolation behavior.
+    """
     _cleanup_test_artifacts()
     manager = SkillManager()
+    manager._metrics_file = tmp_path / 'skills-metrics.json'
     yield manager
     _cleanup_test_artifacts()
 
@@ -2171,7 +2181,12 @@ class TestCandidateFlow:
         # manually staged registry entries survive (discover() would clear them).
         # _skill_paths=[] alone is not enough: invalidate_cache() resets the TTL and
         # _ensure_discovered() may still call discover([]) which clears the registry.
-        fresh_manager._skill_paths = []
+        # Point _skill_paths at the real tmp production + candidate dirs (mirroring the pool
+        # tier list) so prune_stale_metrics() — now called at the end of evaluate_candidates()
+        # — sees the incumbent on disk and does NOT prune it after a discard. With [] the
+        # live set would be registry-only, and a just-discarded candidate's name (already
+        # removed from the registry) would look stale even though its incumbent still exists.
+        fresh_manager._skill_paths = [fresh_manager._production_skills_dir, fresh_manager._candidates_dir]
         fresh_manager.invalidate_cache = lambda *a, **k: None
         fresh_manager._ensure_discovered = lambda *a, **k: None
         yield
@@ -2791,3 +2806,226 @@ class TestCandidateFlow:
         m.record_rating('legacy-skill', 7.0)
         data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
         assert data['schema_version'] == '1.2'
+
+
+# ===========================================================================
+# Skill-metrics pruning: prune_stale_metrics + evaluate_candidates wiring
+# ===========================================================================
+
+
+def _platform_excluded_list():
+    """Return a platforms frontmatter list that excludes the CURRENT OS (cross-platform).
+
+    ``_skill_matches_platform`` maps macos→darwin, linux→linux, windows→win32 and matches
+    when ``sys.platform.startswith(mapped)``. To make a skill incompatible we must exclude
+    the current platform's MAPPED value (so its startswith check fails). We list the other
+    two mapped values as harmless extras — they never match the current OS. Excluding all
+    three would NOT work: on Windows, 'win32'.startswith('win32') still matches.
+    """
+    import sys as _sys
+    from agent_cascade.skills.manager import _PLATFORM_MAP
+    cur = _sys.platform
+    # The mapped value for the current OS is the one that must be excluded.
+    all_mapped = {'darwin', 'linux', 'win32'}
+    for friendly, mapped in _PLATFORM_MAP.items():
+        if cur.startswith(mapped):
+            return sorted(all_mapped - {mapped})  # exclude only the current platform's value
+    # Unknown platform: exclude everything (safe default — skill is incompatible).
+    return sorted(all_mapped)
+
+
+def _seed_metrics(m, name):
+    """Insert a minimal metrics entry for ``name`` (mimics an old on-disk record)."""
+    with m._metrics_lock:
+        m._metrics[name] = {'total_loads': 1, 'by_version': {'1.0.0': 1}}
+
+
+def _write_skill_md(path: Path, name: str, platforms=None):
+    """Write a minimal SKILL.md at ``path`` (frontmatter name + optional platforms)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fm = f'---\nname: {name}\ndescription: Prune test skill with enough characters here\n'
+    if platforms is not None:
+        fm += 'platforms:\n' + ''.join(f'  - {p}\n' for p in platforms)
+    fm += 'triggers:\n  - prune\n---\n\nPRUNE_BODY\n'
+    path.write_text(fm, encoding='utf-8')
+
+
+class TestPruneStaleMetrics:
+    """prune_stale_metrics() + its evaluate_candidates() wiring.
+
+    The autouse ``fresh_manager`` fixture does NOT redirect ``_metrics_file``, so every
+    test here points it at a temp path (via the class-level fixture) to avoid clobbering
+    the real production agents/global/skills-metrics.json.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _prune_env(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        self.metrics_file = tmp_path / 'skills-metrics.json'
+        # CRITICAL: redirect the metrics file (fresh_manager does not do this for us).
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    def test_pruned_when_deleted(self, fresh_manager):
+        """A skill with a metrics entry but no SKILL.md anywhere is pruned."""
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'alive' / 'SKILL.md', 'alive')
+        m.discover([root])
+        assert set(m._skills_registry) == {'alive'}
+
+        with m._metrics_lock:
+            m._metrics = {'alive': {'total_loads': 1, 'by_version': {'1.0.0': 1}},
+                          'deleted-skill': {'total_loads': 3, 'by_version': {'1.0.0': 3}}}
+
+        m.evaluate_candidates()
+
+        assert 'deleted-skill' not in m._metrics, 'deleted skill metrics must be pruned'
+        assert 'alive' in m._metrics, 'live skill metrics must be kept'
+        import json as _json
+        data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
+        assert 'deleted-skill' not in data['skills']
+        assert 'alive' in data['skills']
+
+    def test_inactive_subfolder_kept(self, fresh_manager):
+        """SKILL.md under <root>/INACTIVE/foo/ is NOT in the registry (discover is 1-level)
+        but the recursive prune walk finds it → metrics KEPT."""
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'INACTIVE' / 'foo' / 'SKILL.md', 'foo')
+        m.discover([root])
+        assert 'foo' not in m._skills_registry, 'discover() is one level deep — INACTIVE not registered'
+
+        _seed_metrics(m, 'foo')
+        m.evaluate_candidates()
+
+        assert 'foo' in m._metrics, 'INACTIVE-subfolder skill metrics must be KEPT (artifact on disk)'
+
+    def test_disabled_kept(self, fresh_manager):
+        """A disabled skill (on disk but excluded from the registry) keeps its metrics."""
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'disabled-skill' / 'SKILL.md', 'disabled-skill')
+        m._disabled_names.add('disabled-skill')
+        m.discover([root])
+        assert 'disabled-skill' not in m._skills_registry, 'disabled skill must be skipped by discover()'
+
+        _seed_metrics(m, 'disabled-skill')
+        m.evaluate_candidates()
+
+        assert 'disabled-skill' in m._metrics, 'disabled skill metrics must be KEPT (artifact on disk)'
+
+    def test_platform_incompatible_kept(self, fresh_manager):
+        """A SKILL.md whose platforms exclude the current OS is skipped by discover() but
+        still on disk → metrics KEPT."""
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'plat-skill' / 'SKILL.md', 'plat-skill', platforms=_platform_excluded_list())
+        m.discover([root])
+        assert 'plat-skill' not in m._skills_registry, 'platform-incompatible skill must be skipped by discover()'
+
+        _seed_metrics(m, 'plat-skill')
+        m.evaluate_candidates()
+
+        assert 'plat-skill' in m._metrics, 'platform-incompatible skill metrics must be KEPT (artifact on disk)'
+
+    def test_name_mismatch_kept_both_keys(self, fresh_manager):
+        """Dir name differs from frontmatter name; metrics keyed by BOTH are kept."""
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        # dir 'dirname-skill', frontmatter name 'realname-skill'.
+        _write_skill_md(root / 'dirname-skill' / 'SKILL.md', 'realname-skill')
+        m.discover([root])
+        assert 'realname-skill' in m._skills_registry
+
+        _seed_metrics(m, 'dirname-skill')   # keyed by dir name
+        _seed_metrics(m, 'realname-skill')  # keyed by frontmatter name
+        m.evaluate_candidates()
+
+        assert 'dirname-skill' in m._metrics, 'dir-name key must be KEPT (walk adds the containing dir)'
+        assert 'realname-skill' in m._metrics, 'frontmatter-name key must be KEPT (walk adds the fm name)'
+
+    def test_case_insensitive_retention(self, fresh_manager):
+        """Metrics keyed by mixed-case 'MySkill' while disk has 'myskill' → KEPT."""
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'myskill' / 'SKILL.md', 'myskill')
+        m.discover([root])
+
+        _seed_metrics(m, 'MySkill')  # mixed-case key, lowercases to the live 'myskill'
+        m.evaluate_candidates()
+
+        assert 'MySkill' in m._metrics, 'mixed-case metrics key must be KEPT (case-insensitive match)'
+
+    def test_failed_scan_aborts_no_pruning(self, fresh_manager):
+        """A scan error on an EXISTING root aborts the prune: nothing deleted, warning logged."""
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'alive' / 'SKILL.md', 'alive')
+        m.discover([root])
+
+        _seed_metrics(m, 'stale-entry')  # would be pruned on a normal scan
+        _seed_metrics(m, 'alive')
+
+        import agent_cascade.skills.manager as mgr_mod
+        with patch.object(Path, 'rglob', side_effect=OSError('simulated I/O error')):
+            with patch.object(mgr_mod.logger, 'warning') as mock_warn:
+                m.evaluate_candidates()
+
+        assert 'stale-entry' in m._metrics, 'prune must be aborted on scan error (nothing deleted)'
+        assert 'alive' in m._metrics
+        # A warning about the aborted prune must have been logged.
+        assert any('Metrics prune aborted' in str(c.args[0]) for c in mock_warn.call_args_list), \
+            'expected an abort warning to be logged on scan error'
+
+    def test_candidate_not_pruned_pre_decision(self, fresh_manager):
+        """A pending candidate (below CANDIDATE_MIN_RATINGS) still exists on disk after the
+        gate → its metrics are KEPT (prune runs after the gate)."""
+        m = self.manager
+        # The candidate root must sit under an `agents/` ancestor so _priority_for_root()
+        # classifies it as the CANDIDATE tier (4); a bare tmp/.../candidates is SYSTEM (1).
+        cand_root = Path(m._metrics_file).parent / 'agents' / 'global' / 'candidates'
+        prod_root = Path(m._metrics_file).parent / 'agents' / 'global' / 'skills'
+        # An incumbent production file so the candidate is NOT orphaned (the orphan check
+        # runs before the rating gate and would otherwise discard it); with zero ratings the
+        # candidate stays PENDING (below CANDIDATE_MIN_RATINGS) and survives on disk.
+        _write_skill_md(prod_root / 'pend-cand' / 'SKILL.md', 'pend-cand')
+        # Candidate dir under the candidates root (discover registers it at CANDIDATE priority).
+        _write_skill_md(cand_root / 'pend-cand' / 'SKILL.md', 'pend-cand')
+        m.discover([prod_root, cand_root])
+        assert 'pend-cand' in m._skills_registry
+        assert m.get_candidate_names() == ['pend-cand']
+
+        _seed_metrics(m, 'pend-cand')
+        # No ratings → below CANDIDATE_MIN_RATINGS → the gate never promotes or discards it,
+        # so its dir stays on disk. (In this isolated env evaluate_candidates()'s forced
+        # discovery refresh may clear the in-memory registry, but the on-disk candidate file
+        # — which is what prune sees — is unchanged.)
+        m.evaluate_candidates()
+
+        assert (cand_root / 'pend-cand' / 'SKILL.md').exists(), \
+            'pending candidate dir must still exist on disk after the gate (not discarded)'
+        assert 'pend-cand' in m._metrics, 'pending candidate metrics must be KEPT (still on disk)'
+
+    def test_idempotent_noop_does_not_rewrite(self, fresh_manager):
+        """Running prune with nothing stale is a no-op: second run removes nothing and does
+        NOT rewrite the metrics file."""
+        import json as _json
+        m = self.manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'alive' / 'SKILL.md', 'alive')
+        m.discover([root])
+
+        _seed_metrics(m, 'alive')
+        # First run: nothing stale → no flush. Write the file once so we can compare.
+        m._flush_metrics_to_disk()
+        first_content = self.metrics_file.read_text(encoding='utf-8')
+        first_mtime = self.metrics_file.stat().st_mtime_ns
+
+        with patch.object(m, '_flush_metrics_to_disk') as mock_flush:
+            m.prune_stale_metrics()  # second run — nothing stale
+
+        assert mock_flush.call_count == 0, 'no-op prune must NOT flush/rewrite the file'
+        assert self.metrics_file.read_text(encoding='utf-8') == first_content, 'file content must be unchanged'
+        assert self.metrics_file.stat().st_mtime_ns == first_mtime, 'file mtime must be unchanged (no rewrite)'
+        assert _json.loads(first_content)['skills'].keys() == {'alive'}

@@ -243,6 +243,68 @@ class SkillManager:
             except Exception:
                 pass
 
+    def prune_stale_metrics(self) -> None:
+        """Remove metrics entries for skills that no longer exist anywhere.
+
+        Builds the live set of skill names (registry keys + a recursive walk of every
+        configured root, capturing both each SKILL.md's frontmatter name and its
+        containing directory name), then deletes any ``_metrics`` key whose lowercase
+        form is not in that live set. Disabled, platform-incompatible, INACTIVE-subfolder
+        and candidate skills are all KEPT because their on-disk artifacts still exist.
+
+        Safe to call when nothing is stale: it is a no-op and does NOT flush. A scan
+        error while walking an EXISTING root aborts the prune entirely (nothing deleted)
+        so a partial scan can never trigger deletion.
+        """
+        # Step 1: build the live name set. The registry snapshot is taken under the write
+        # lock; the I/O-bound disk walk runs OUTSIDE it (before steps 2-3 acquire it again).
+        live_set_lower = set()
+        with self._write_lock:
+            # Registry snapshot (names as registered, incl. candidates/disabled survivors).
+            for name in self._skills_registry.keys():
+                live_set_lower.add(str(name).lower())
+
+        for root in self._skill_paths:
+            if not root.exists():
+                logger.debug('[SKILLS] Metrics prune: skill root missing, skipping: %s', root)
+                continue
+            try:
+                # Recursive walk (rglob follows symlinks via is_dir()/exists(), matching
+                # discover() behavior). A real I/O error aborts the whole prune.
+                for skill_file in root.rglob('SKILL.md'):
+                    if not skill_file.is_file():
+                        continue
+                    try:
+                        parsed = parse_skill_file(skill_file)
+                    except Exception as e:  # noqa: BLE001 — one bad file must not abort the scan
+                        logger.warning('[SKILLS] Metrics prune: failed to parse %s: %s', skill_file, e)
+                        continue
+                    frontmatter = parsed.get('frontmatter', {})
+                    dir_name = skill_file.parent.name
+                    fm_name = frontmatter.get('name') or dir_name
+                    live_set_lower.add(str(fm_name).lower())
+                    live_set_lower.add(dir_name.lower())
+            except OSError as e:
+                logger.warning('[SKILLS] Metrics prune aborted — scan error on %s: %s', root, e)
+                return
+
+        # Steps 2-3: determine stale keys + delete. The compute AND the deletion must both
+        # run under _metrics_lock (nested inside _write_lock, preserving the established
+        # _write_lock -> _metrics_lock order): other methods mutate _metrics under
+        # _metrics_lock only, so iterating self._metrics.keys() without it risks a
+        # "dictionary changed size during iteration" RuntimeError in production.
+        stale_keys = []
+        with self._write_lock:
+            with self._metrics_lock:
+                stale_keys = [k for k in self._metrics.keys() if str(k).lower() not in live_set_lower]
+                for key in stale_keys:
+                    del self._metrics[key]
+                    logger.info("[SKILLS] Pruned stale metrics for skill '%s'", key)
+
+        # Step 4: flush only if something was removed.
+        if stale_keys:
+            self._flush_metrics_to_disk()
+
     def _increment_load_count(self, skill_name: str, version: str) -> None:
         """Increment load counter for a skill+version combo (buffered).
 
@@ -1333,6 +1395,13 @@ class SkillManager:
                                     avg_prod, prod_n)
             except Exception as e:  # noqa: BLE001 — one bad candidate must not stop the rest
                 logger.warning('[SKILLS] Candidate evaluation failed for %s: %s', name, e)
+
+        # Best-effort cleanup of metrics entries for skills that no longer exist anywhere.
+        # Runs AFTER the gate so a pending candidate (still on disk) is never pruned.
+        try:
+            self.prune_stale_metrics()
+        except Exception as e:  # noqa: BLE001 — cleanup must never break the gate
+            logger.warning('[SKILLS] Metrics prune failed (non-critical): %s', e)
 
     # ── Auto-skill trigger hook ──────────────────────────────────────────────
 
