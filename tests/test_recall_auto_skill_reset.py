@@ -11,11 +11,11 @@ Run: pytest tests/test_recall_auto_skill_reset.py -v
 """
 
 import threading
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
+from agent_cascade.compression.helpers import extract_instance_output
+from agent_cascade.lifecycle_manager import AgentLifecycleManager
 
 
 def _make_pool_mock():
@@ -45,56 +45,40 @@ def _make_idle_instance(name='test-agent'):
     return inst
 
 
+def _find_or_create(pool, name):
+    """Call find_or_create_instance on a fresh manager backed by the given pool."""
+    lm = AgentLifecycleManager.__new__(AgentLifecycleManager)
+    lm.pool = pool
+    return lm.find_or_create_instance(
+        agent_class='coder',
+        instance_name=name,
+        caller='root',
+        nest_depth=1,
+    )
+
+
 class TestRecallAutoSkillReset:
     """Verify auto-skill state is cleared on instance reuse."""
 
-    def test_stale_snapshot_cleared_on_reuse(self):
-        """After reuse, _auto_skill_task_output must be None (not the old answer)."""
-        from agent_cascade.lifecycle_manager import AgentLifecycleManager
+    def test_auto_skill_state_cleared_on_reuse(self):
+        """After reuse, both stale auto-skill fields must be reset.
 
+        _auto_skill_task_output (the pre-reflection snapshot) shadows the new
+        task's answer in extract_instance_output(); _auto_skill_proposed is the
+        one-shot flag that would otherwise permanently disable skill reflection.
+        """
         inst = _make_idle_instance()
         pool = _make_pool_mock()
         pool.instances[inst.instance_name] = inst
 
-        lm = AgentLifecycleManager.__new__(AgentLifecycleManager)
-        lm.pool = pool
-
-        # Simulate find_or_create_instance reusing this instance
-        result_inst, is_reuse, session_loaded = lm.find_or_create_instance(
-            agent_class='coder',
-            instance_name='test-agent',
-            caller='root',
-            nest_depth=1,
-        )
+        result_inst, is_reuse, _ = _find_or_create(pool, 'test-agent')
 
         assert is_reuse is True
         assert result_inst is inst  # same object reused
-        # The stale snapshot must be cleared:
         assert result_inst._auto_skill_task_output is None, (
             f"Stale _auto_skill_task_output not cleared on reuse: "
             f"{result_inst._auto_skill_task_output!r}"
         )
-
-    def test_one_shot_flag_reset_on_reuse(self):
-        """After reuse, _auto_skill_proposed must be False (per-run one-shot)."""
-        from agent_cascade.lifecycle_manager import AgentLifecycleManager
-
-        inst = _make_idle_instance()
-        pool = _make_pool_mock()
-        pool.instances[inst.instance_name] = inst
-
-        lm = AgentLifecycleManager.__new__(AgentLifecycleManager)
-        lm.pool = pool
-
-        result_inst, is_reuse, session_loaded = lm.find_or_create_instance(
-            agent_class='coder',
-            instance_name='test-agent',
-            caller='root',
-            nest_depth=1,
-        )
-
-        assert is_reuse is True
-        # The one-shot flag must be reset so reflection can fire again:
         assert result_inst._auto_skill_proposed is False, (
             '_auto_skill_proposed not reset on reuse — skill reflection '
             'would be permanently disabled for this instance'
@@ -102,10 +86,7 @@ class TestRecallAutoSkillReset:
 
     def test_extract_output_falls_back_to_messages_after_reuse(self):
         """After reuse clears the snapshot, extract_instance_output returns
-        messages[-1] instead of the stale snapshot."""
-        from agent_cascade.lifecycle_manager import AgentLifecycleManager
-        from agent_cascade.compression.helpers import extract_instance_output
-
+        messages[-1] instead of the stale pre-reflection snapshot."""
         inst = _make_idle_instance()
         # Add a new assistant response (simulating the new task's answer):
         inst.conversation.append({'role': 'assistant', 'content': 'NEW ANSWER'})
@@ -113,15 +94,7 @@ class TestRecallAutoSkillReset:
         pool = _make_pool_mock()
         pool.instances[inst.instance_name] = inst
 
-        lm = AgentLifecycleManager.__new__(AgentLifecycleManager)
-        lm.pool = pool
-
-        result_inst, is_reuse, _ = lm.find_or_create_instance(
-            agent_class='coder',
-            instance_name='test-agent',
-            caller='root',
-            nest_depth=1,
-        )
+        result_inst, is_reuse, _ = _find_or_create(pool, 'test-agent')
 
         assert is_reuse is True
         # Now extract_instance_output should return the NEW answer, not the old snapshot:
@@ -139,21 +112,8 @@ class TestRecallAutoSkillReset:
         """A brand-new instance (not reused) should have default auto-skill state."""
         pool = _make_pool_mock()
         # No existing instance → find_or_create creates a new one
-        result_inst, is_reuse, session_loaded = lm_find_or_create(pool, 'fresh-agent')
+        result_inst, is_reuse, _ = _find_or_create(pool, 'fresh-agent')
 
         assert is_reuse is False
         assert result_inst._auto_skill_task_output is None
         assert result_inst._auto_skill_proposed is False
-
-
-def lm_find_or_create(pool, name):
-    """Helper to call find_or_create_instance with a fresh AgentLifecycleManager."""
-    from agent_cascade.lifecycle_manager import AgentLifecycleManager
-    lm = AgentLifecycleManager.__new__(AgentLifecycleManager)
-    lm.pool = pool
-    return lm.find_or_create_instance(
-        agent_class='coder',
-        instance_name=name,
-        caller='root',
-        nest_depth=1,
-    )
