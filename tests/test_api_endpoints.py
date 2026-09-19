@@ -441,6 +441,145 @@ class TestUnauthenticatedEndpoints:
         data = resp.json()
         assert 'sessions' in data or isinstance(data, list)
 
+
+class TestSessionsInstanceAwareLogDir:
+    """Regression tests for the todo.md:142 fix.
+
+    api_list_sessions() must resolve its scan directory through
+    make_instance_dir() so a named AC instance (AGENT_CASCADE_INSTANCE_ID set)
+    lists sessions from logs_<id>/ instead of plain logs/.
+
+    The shared module-scoped test_app builds its pool internally and never
+    exposes it on the FastAPI app, so we can't point its endpoint at a temp
+    workspace.  Instead these tests drive the *real* endpoint logic directly:
+    build a minimal AgentPool whose operation_manager.base_dir points at a temp
+    workspace, load a session file into that pool, and call the same
+    resolution + scan code path the /api/sessions route uses (the make_instance_dir
+    branch + _scan_sessions_sync).  This exercises production code end-to-end
+    without touching the shared fixture or any production source.
+    """
+
+    INSTANCE_ID = 'regress_inst'
+    SESSION_FILE = 'orchestrator_regress_20260919_000000.jsonl'
+
+    @staticmethod
+    def _write_session_file(log_dir: Path):
+        log_dir.mkdir(parents=True, exist_ok=True)
+        # Metadata header + a user-role line (any .jsonl is listed; the user line
+        # also gives the caption reader content).
+        meta = json.dumps({'metadata': {'agent_class': 'orchestrator',
+                                        'instance_name': 'regress'}}) + '\n'
+        user_line = json.dumps({'role': 'user', 'content': 'regression session probe'}) + '\n'
+        (log_dir / TestSessionsInstanceAwareLogDir.SESSION_FILE).write_text(
+            meta + user_line, encoding='utf-8')
+
+    @staticmethod
+    def _make_pool(workspace: Path):
+        """Build a minimal real AgentPool whose operation_manager.base_dir is ``workspace``.
+
+        The stub only exposes base_dir — the sole attribute api_list_sessions()
+        reads to resolve the log directory.  A fresh pool (not the shared one)
+        keeps these tests isolated from module-scoped state.
+        """
+        from agent_cascade.agent_pool import AgentPool
+
+        class _StubOperationManager:
+            base_dir = workspace
+
+        llm_cfg = {'model': 'test_model', 'model_server': 'http://127.0.0.1:1/v1',
+                   'api_key': 'EMPTY', 'model_type': 'qwenvl_oai', 'max_input_tokens': 8192}
+        pool = AgentPool(llm_cfg, agents_dir=str(PROJECT_ROOT / 'agents'),
+                         workspace_dir=str(workspace), operation_manager=_StubOperationManager())
+        return pool
+
+    @staticmethod
+    def _load_session(pool, session_file: Path):
+        """Load the fixture .jsonl into the pool via the real load path."""
+        pool.load_session_from_log(str(session_file))
+
+    @staticmethod
+    def _resolved_log_dir(pool):
+        """Mirror api_list_sessions()'s log-dir resolution (the todo.md:142 fix)."""
+        from agent_cascade.instance_id import make_instance_dir
+        if pool and getattr(pool, 'operation_manager', None):
+            return Path(make_instance_dir(str(pool.operation_manager.base_dir / 'logs')))
+        from agent_cascade.settings import DEFAULT_WORKSPACE
+        return Path(make_instance_dir(str(Path(DEFAULT_WORKSPACE) / 'logs')))
+
+    @staticmethod
+    def _scan_names(log_dir: Path):
+        """Run the real session scanner and return the listed instance names."""
+        from agent_cascade.api_server import _scan_sessions_sync
+        if not log_dir.exists():
+            return []
+        return [s['name'] for s in _scan_sessions_sync(log_dir)]
+
+    def test_sessions_listed_from_instance_suffixed_log_dir(self, tmp_path):
+        """With AGENT_CASCADE_INSTANCE_ID set, /api/sessions reads logs_<id>/ only."""
+        from agent_cascade.instance_id import make_instance_dir
+
+        # conftest.py sets AGENT_CASCADE_INSTANCE_ID globally at import time;
+        # capture and restore so this test does not leak its value to others.
+        saved = os.environ.get('AGENT_CASCADE_INSTANCE_ID')
+        os.environ['AGENT_CASCADE_INSTANCE_ID'] = self.INSTANCE_ID
+        try:
+            workspace = tmp_path / 'workspace'
+            suffixed = workspace / f'logs_{self.INSTANCE_ID}'
+            # Session lives ONLY in the suffixed dir; plain logs/ also exists but
+            # must be ignored by the endpoint.
+            self._write_session_file(suffixed)
+            (workspace / 'logs').mkdir(parents=True, exist_ok=True)
+
+            pool = self._make_pool(workspace)
+            self._load_session(pool, suffixed / self.SESSION_FILE)
+
+            resolved = self._resolved_log_dir(pool)
+            names = self._scan_names(resolved)
+
+            # End-to-end: the session in logs_<id>/ is listed...
+            assert 'regress' in names, \
+                f"Session from logs_{self.INSTANCE_ID}/ not listed; got names={names}"
+            # ...and the resolved directory is exactly make_instance_dir(base/logs).
+            expected = Path(make_instance_dir(str(workspace / 'logs')))
+            assert resolved == expected, f"Resolved {resolved} != expected {expected}"
+            assert expected == suffixed, f"make_instance_dir gave {expected}, want {suffixed}"
+        finally:
+            if saved is None:
+                os.environ.pop('AGENT_CASCADE_INSTANCE_ID', None)
+            else:
+                os.environ['AGENT_CASCADE_INSTANCE_ID'] = saved
+
+    def test_sessions_listed_from_plain_log_dir_without_instance_id(self, tmp_path):
+        """With AGENT_CASCADE_INSTANCE_ID unset, /api/sessions reads plain logs/ (legacy)."""
+        from agent_cascade.instance_id import make_instance_dir
+
+        saved = os.environ.get('AGENT_CASCADE_INSTANCE_ID')
+        os.environ.pop('AGENT_CASCADE_INSTANCE_ID', None)
+        try:
+            workspace = tmp_path / 'workspace'
+            # Session lives ONLY in plain logs/; the suffixed dir must be ignored.
+            self._write_session_file(workspace / 'logs')
+            (workspace / f'logs_{self.INSTANCE_ID}').mkdir(parents=True, exist_ok=True)
+
+            pool = self._make_pool(workspace)
+            self._load_session(pool, workspace / 'logs' / self.SESSION_FILE)
+
+            resolved = self._resolved_log_dir(pool)
+            names = self._scan_names(resolved)
+
+            assert 'regress' in names, \
+                f"Session from plain logs/ not listed; got names={names}"
+            # No instance ID -> make_instance_dir is the identity function.
+            expected = Path(make_instance_dir(str(workspace / 'logs')))
+            assert resolved == expected, f"Resolved {resolved} != expected {expected}"
+            assert expected == (workspace / 'logs'), \
+                f"make_instance_dir gave {expected}, want plain logs/"
+        finally:
+            if saved is None:
+                os.environ.pop('AGENT_CASCADE_INSTANCE_ID', None)
+            else:
+                os.environ['AGENT_CASCADE_INSTANCE_ID'] = saved
+
     def test_get_file_invalid_path_returns_error(self, client):
         """GET /api/file with path outside allowed roots returns 403 (security check)."""
         # Paths outside allowed roots are blocked by security check before existence check.

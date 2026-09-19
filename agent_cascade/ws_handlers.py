@@ -474,10 +474,11 @@ class WsMessageHandler:
                             if logger_inst and hasattr(logger_inst, 'log_path') and logger_inst.log_path:
                                 actual_log_path = logger_inst.log_path
                             else:
+                                from agent_cascade.instance_id import make_instance_dir
                                 if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-                                    log_dir = self.agent_pool.operation_manager.base_dir / 'logs'
+                                    log_dir = Path(make_instance_dir(str(self.agent_pool.operation_manager.base_dir / 'logs')))
                                 else:
-                                    log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
+                                    log_dir = Path(make_instance_dir(str(Path(DEFAULT_WORKSPACE) / 'logs')))
                                 pattern = f"{agent_class}_{sa_name}_*.jsonl"
                                 import glob
                                 matches = sorted(glob.glob(str(log_dir / pattern)), reverse=True)
