@@ -243,6 +243,31 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         if llm_messages is not instance._cached_llm_messages:
             llm_messages.append(msg)
 
+    def _auto_skill_gates_met(self, instance) -> bool:
+        """Cheap, pre-LLM auto-skill trigger gates (settings + one-shot flag only).
+
+        Returns True iff the in-loop reflection extension COULD fire this run. Used both to
+        decide whether to skip last-turn tool-disable (prefix stability) and as the fast-path
+        gate at the top of _try_auto_skill_extension, so the two can never drift.
+        Deliberately excludes auto_skill_qualifies (skill-creator/prompt build) — that is a
+        deeper qualification checked later and must not be re-run on every final turn.
+        """
+        skill_manager = getattr(self.pool, 'skill_manager', None)
+        if skill_manager is None:
+            return False
+        settings = getattr(self.pool, 'settings', None)
+        if not getattr(settings, 'auto_skill_enabled', AUTO_SKILL_ENABLED):
+            return False
+        if getattr(settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE) == LOAD_SKILL_NONE:
+            return False
+        min_turns = getattr(settings, 'auto_skill_min_turns', AUTO_SKILL_MIN_TURNS)
+        if instance._current_turn <= min_turns:
+            return False
+        with instance._compression_lock:
+            if getattr(instance, '_auto_skill_proposed', False):
+                return False
+        return True
+
     def _try_auto_skill_extension(self, instance, messages, llm_messages, loaded_skill_names=None) -> bool:
         """In-loop auto-skill trigger (replaces the post-run two-run helper).
 
@@ -272,25 +297,22 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         """
         try:
             # ── Gates (fast path, no locks) ────────────────────────────────
-            skill_manager = getattr(self.pool, 'skill_manager', None)
-            if skill_manager is None:
+            # Same cheap gates as the final-turn tool-disable decision in run() — one
+            # shared helper so the two can never drift.
+            if not self._auto_skill_gates_met(instance):
                 return False
             settings = getattr(self.pool, 'settings', None)
-            if not getattr(settings, 'auto_skill_enabled', AUTO_SKILL_ENABLED):
-                return False
-            if getattr(settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE) == LOAD_SKILL_NONE:
-                return False
-            # Live-read turn threshold (UI-editable, no restart). Shared by the gate below and
+            skill_manager = self.pool.skill_manager
+            # Live-read turn threshold (UI-editable, no restart). Shared by the gate above and
             # passed to auto_skill_qualifies so BOTH gates agree on the same live value.
             min_turns = getattr(settings, 'auto_skill_min_turns', AUTO_SKILL_MIN_TURNS)
-            if instance._current_turn <= min_turns:
-                return False
 
-            # ── One-shot flag + snapshot capture (under the compression lock) ─
+            # ── Snapshot capture (under the compression lock) ────────────────
+            # The one-shot _auto_skill_proposed flag was already checked in the
+            # _auto_skill_gates_met fast-path above; it cannot change within this
+            # synchronous call, so no re-check is needed here. The lock below is
+            # still required for the instance state mutation (task_output).
             with instance._compression_lock:
-                if getattr(instance, '_auto_skill_proposed', False):
-                    return False
-
                 # Find the last ASSISTANT message with text content — same
                 # dict/Message branching as the turn-limit notice in run() — and
                 # extract its text. If none exists, fall back to the current
@@ -847,6 +869,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     warn_user = self._make_user_message(warn_msg)
                     self._append_and_log_to_llm(instance, warn_user, llm_messages)
                 if turns_available == 1:
+                    # If the auto-skill reflection extension is going to fire, keep tools enabled:
+                    # disabling them changes the request function schema -> KV full reprocess, and
+                    # the extension would force a second one on the first reflection turn. Keeping
+                    # tools on keeps the prefix stable so this "last turn" behaves like a normal
+                    # mid-run turn. (The trigger itself fires later at Phase 5; these cheap gates
+                    # are fully knowable here, before the LLM call.)
+                    _auto_skill_will_extend = self._auto_skill_gates_met(instance)
+
                     # Final-turn handling for a run that is genuinely ending on its last
                     # turn. The auto-skill reflection trigger no longer lives here — it
                     # now fires at the natural-completion point (Phase 5, below), which is
@@ -859,7 +889,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # Muted for max_turns=1 agents: this is their only turn and
                     # tools are being disabled below regardless, so the warning
                     # adds no information — just noise in the transcript.
-                    if max_turns != 1:
+                    if max_turns != 1 and not _auto_skill_will_extend:
                         final_msg = self._make_user_message(
                             f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
                             f"Wrap up and deliver your results now.]")
@@ -867,15 +897,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
                     # Disable ALL tools on the last turn so agent is forced to
                     # return a final answer
-                    template = self.pool.get_template(instance.agent_class)
-                    if template and hasattr(template, 'function_map'):
-                        all_tools = list(template.function_map.keys())
-                        if all_tools:
-                            if not hasattr(instance,
-                                           '_generate_cfg_override') or instance._generate_cfg_override is None:
-                                instance._generate_cfg_override = {}
-                            instance._generate_cfg_override['disabled_tools'] = all_tools
-                            final_turn_tools_disabled = True
+                    if not _auto_skill_will_extend:
+                        template = self.pool.get_template(instance.agent_class)
+                        if template and hasattr(template, 'function_map'):
+                            all_tools = list(template.function_map.keys())
+                            if all_tools:
+                                if not hasattr(instance,
+                                               '_generate_cfg_override') or instance._generate_cfg_override is None:
+                                    instance._generate_cfg_override = {}
+                                instance._generate_cfg_override['disabled_tools'] = all_tools
+                                final_turn_tools_disabled = True
 
                 turns_available = self._consume_turn(instance, turns_available)
 

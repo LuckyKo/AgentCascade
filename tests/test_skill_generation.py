@@ -1495,6 +1495,117 @@ class TestInLoopTrigger:
         # No extension: only the turns up to (and including) the natural-end turn ran.
         assert engine._call_llm_with_injection.call_count == 3
 
+    # ------------------------------------------------------------------ #
+    # todo.md:149 — last-turn tool-disable vs skill-reflection extension
+    # ------------------------------------------------------------------ #
+    # The agent ends NATURALLY on its exact LAST turn (turns_available == 1) with all
+    # cheap extension gates passing. Pre-fix, the final-turn block disabled ALL tools
+    # for that LLM call (function schema [] -> KV full reprocess #1) and the extension's
+    # first reflection turn re-enabled them (schema restored -> KV full reprocess #2).
+    # Post-fix, _auto_skill_gates_met() lets the final-turn block skip both the warning
+    # and the tool-disable, keeping the prefix stable across the trigger boundary.
+
+    @staticmethod
+    def _trace_disabled_tools(engine):
+        """Wrap engine._call_llm_with_injection to record instance._generate_cfg_override's
+        disabled_tools at each LLM call (the value actually sent in the request schema)."""
+        orig = engine._call_llm_with_injection
+        seen = []
+
+        def _tracer(inst, msgs):
+            ovr = getattr(inst, '_generate_cfg_override', None)
+            seen.append(ovr.get('disabled_tools') if isinstance(ovr, dict) else None)
+            return orig(inst, msgs)
+
+        engine._call_llm_with_injection = MagicMock(side_effect=_tracer)
+        return seen
+
+    def test_last_turn_natural_end_extension_keeps_tools_enabled(self, fresh_manager, tmp_path):
+        """REGRESSION (todo.md:149): natural end on the EXACT last turn with gates passing
+        must NOT disable tools for the triggering LLM call. MUST fail pre-fix (tools were
+        disabled -> full reprocess) and pass post-fix."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5).__next__()  # natural_end_at defaults to max_turns
+        seen = self._trace_disabled_tools(engine)
+        _run()
+        assert inst._auto_skill_proposed is True, 'trigger should have fired'
+        # Triggering turn is LLM call #3 (turns_available == 1). Pre-fix it saw all tools
+        # disabled; post-fix the override was never set for that call.
+        assert seen[2] is None, \
+            f'triggering turn must keep tools enabled, got disabled_tools={seen[2]!r} (full reprocess)'
+
+    def test_last_turn_no_extension_disables_tools(self, fresh_manager, tmp_path):
+        """Control: with a gate failing (auto_skill_enabled=False), the last turn behaves
+        exactly as before — tools ARE disabled for the final LLM call and the final-turn
+        warning is injected. Guards against over-suppression by the fix."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5, auto_skill_enabled=False).__next__()
+        seen = self._trace_disabled_tools(engine)
+        _run()
+        assert not getattr(inst, '_auto_skill_proposed', False), 'trigger must NOT fire'
+        # Last (and only) turn: all template tools disabled for the final LLM call.
+        assert seen[-1] == ['tool_a', 'tool_b'], \
+            f'gate-failing last turn must disable all tools, got {seen[-1]!r}'
+        # Final-turn warning still injected (max_turns != 1).
+        contents = self._conv_contents(inst.conversation)
+        assert any('[SYSTEM WARNING: Final turn' in str(c) for c in contents), \
+            'final-turn warning must be injected when no extension fires'
+
+    def test_last_turn_extension_suppresses_final_warning(self, fresh_manager, tmp_path):
+        """With gates passing + natural end on the last turn, the '[SYSTEM WARNING: Final
+        turn...]' message must NOT appear for the ORIGINAL budget (it would be misleading —
+        extra turns are about to be granted). The extended tail's own final warning (harness
+        exhausts the EXTRA budget) is expected and allowed."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5).__next__()
+        _run()
+        assert inst._auto_skill_proposed is True
+        # Original-budget final warning must be suppressed: it would sit between the
+        # triggering turn's reply and the reflection prompt. Post-fix the conversation goes
+        # straight from 'reply 3' (triggering turn) to the reflection prompt.
+        contents = [str(c) for c in self._conv_contents(inst.conversation)]
+        assert 'reply 3' in contents, 'sanity: triggering turn reply must be committed'
+        idx_reply = contents.index('reply 3')
+        # The original-budget final warning is injected in the SAME iteration as the
+        # triggering turn (before its LLM call), so it sits immediately BEFORE 'reply 3'
+        # (or, if appended after, immediately after). Either slot must be free of it — the
+        # extended tail's OWN final warning (harness exhausts EXTRA) is expected and allowed
+        # further down the run. Post-fix neither adjacent slot carries a final-turn warning.
+        neighbours = [contents[idx_reply - 1], contents[idx_reply + 1]]
+        assert not any('[SYSTEM WARNING: Final turn' in c for c in neighbours), \
+            f'original-budget final warning leaked at the extension boundary: {neighbours!r}'
+
+    def test_reflection_final_turn_still_disables_tools(self, fresh_manager, tmp_path):
+        """The REFLECTION's own last turn must still disable tools (clean final answer):
+        by then the one-shot _auto_skill_proposed flag is set, so _auto_skill_gates_met
+        returns False and the normal final-turn path runs. The fix only skips the disable at
+        the trigger boundary, not throughout the reflection."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5).__next__()
+        seen = self._trace_disabled_tools(engine)
+        _run()
+        assert inst._auto_skill_proposed is True
+        # Trigger fired at LLM call #3; the harness keeps the tail looping until its EXTRA
+        # budget (5) exhausts, so the LAST LLM call is the reflection's real final turn.
+        assert seen[-1] == ['tool_a', 'tool_b'], \
+            f'reflection final turn must disable all tools, got {seen[-1]!r}'
+
+    def test_tool_disable_prefix_stability_across_trigger(self, fresh_manager, tmp_path):
+        """No function-schema toggle across the trigger boundary: the set of active
+        functions (what actually goes in the request) is identical for the triggering turn
+        and the first reflection turn. This directly encodes 'no double full reprocess'."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5).__next__()
+        seen = self._trace_disabled_tools(engine)
+        _run()
+        assert inst._auto_skill_proposed is True
+        # Triggering turn (#3) and first reflection turn (#4) must see the SAME function set.
+        assert seen[2] == seen[3], \
+            f'function schema toggled across trigger boundary: {seen[2]!r} -> {seen[3]!r}'
+        # And that shared set is the FULL tool set (nothing disabled on either side).
+        assert seen[2] is None and seen[3] is None, \
+            f'both sides of the trigger boundary must keep tools enabled: {seen[2:4]!r}'
+
 
 # ===========================================================================
 # 9. Skill Rating — metrics writer, prompt, and propose_skill modes
