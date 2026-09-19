@@ -137,6 +137,11 @@ class _Engine:
         self._make_user_message = ExecutionEngine._make_user_message  # staticmethod: returns Message(role=USER, content=text)
         self._rebuild_working_set = _Rebuilder()
         self._append_and_log = _Appender()
+        # Real helper so _inject_soft_continue_nudge's _append_and_log_to_llm(...) resolves;
+        # its internal self._append_and_log(...) hits the _Appender stub above. The harness's
+        # fresh llm_messages diverges from instance._cached_llm_messages, so the helper mirrors
+        # the nudge into it — reproducing the old explicit llm_messages.append behavior.
+        self._append_and_log_to_llm = ExecutionEngine._append_and_log_to_llm.__get__(self, type(self))
 
 
 class _Rebuilder:

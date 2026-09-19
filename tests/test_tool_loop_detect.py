@@ -691,6 +691,11 @@ class TestPreLlmChecksIntegration:
 
             def __init__(self, instance_name):
                 self.instance_name = instance_name
+                # The real _append_and_log_to_llm helper identity-checks against this. Give the
+                # fake a distinct list so it diverges from the llm_messages passed to
+                # _pre_llm_checks — the helper then mirrors the warning into llm_messages, as
+                # production would (no test asserts on llm_messages contents).
+                self._cached_llm_messages = []
                 # Fuzzy state machine fields (defaults mirror AgentInstance)
                 self._fuzzy_warn_armed = True
                 self._fuzzy_warn_last_turn = -10**9
@@ -735,6 +740,10 @@ class TestPreLlmChecksIntegration:
         tel = MagicMock()
         engine._telemetry = MagicMock(return_value=tel)
         engine._append_and_log = MagicMock()
+        # Bind the REAL helper so the fuzzy-warning path's _append_and_log_to_llm(...) runs actual
+        # logic (a spec'd mock would auto-create a no-op child and skip it). Its internal
+        # self._append_and_log(...) hits the MagicMock above, which the assertions target.
+        engine._append_and_log_to_llm = ExecutionEngine._append_and_log_to_llm.__get__(engine, ExecutionEngine)
         engine._inline_rollback_and_hint = MagicMock()
         return engine
 
