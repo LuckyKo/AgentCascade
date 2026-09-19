@@ -162,6 +162,23 @@ class TestSelfAugSeedsNames:
         assert injected is True
         assert inst._loaded_skill_names == ['self-augmentation']
 
+    def test_seeds_even_when_injection_skipped_by_idempotency_guard(self):
+        """Session restore: system msg already has '## Active Skills' → injection is skipped
+        (returns False) but the seed must still run so the reflection list isn't '(none)'."""
+        inst = AgentInstance(
+            instance_name='Main',
+            agent_class='Orchestrator',
+            conversation=[Message(role='system', content=(
+                '# Base system prompt\n\n## Active Skills\n\n### Skill self-augmentation\nsome body'))],
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            latest_marker_index=-1,
+            _loaded_skill_names=None,
+        )
+        injected = _inject_self_augmentation_skill(_make_self_aug_pool(), inst)
+        assert injected is False          # idempotency guard skipped the injection
+        assert inst._loaded_skill_names == ['self-augmentation']   # but the seed still ran
+
     def test_field_untouched_when_skills_disabled(self):
         """NONE mode skips injection entirely; the field must be left exactly as-is."""
         inst = _make_root_inst(['init-skill'])

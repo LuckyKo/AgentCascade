@@ -562,23 +562,26 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
     skills_to_inject.append(('self-augmentation', self_augmentation_instructions))
 
     injected = _inject_skills_to_system_message(pool, instance, skills_to_inject)
+
+    # Seed the reflection list so the root/main agent's "Skills loaded this run" is
+    # accurate: self-augmentation IS in its system message on every path that reaches
+    # here. This must run even when `injected` is False — on session restore the system
+    # message already carries '## Active Skills', so _inject_skills_to_system_message's
+    # idempotency guard skips (returns False) yet the skill is still active and must be
+    # listed. Preserve any existing names and dedupe; runtime load_skill loads append later.
+    try:
+        # Build a fresh list (don't mutate the existing one in case it's shared),
+        # preserving order — same pattern as load_skill.py.
+        existing = instance._loaded_skill_names or []
+        instance._loaded_skill_names = list(dict.fromkeys(existing + ['self-augmentation']))
+    except Exception as e:
+        logger.debug('[SKILLS] _inject_self_augmentation_skill: failed to seed _loaded_skill_names: %s', e)
+
     # Telemetry: capture Self-Augmentation for the restore/runner paths. The fresh-init
     # path records it in core.py (_create_and_run_agent) instead — these are mutually
     # exclusive code paths, so each self-aug injection is counted exactly once. Only
     # record when injection actually happened (idempotency guard may have skipped).
     if injected:
-        # Seed the reflection list so the root/main agent's "Skills loaded this run" is
-        # accurate: self-augmentation IS injected into its system message but was never
-        # recorded before (only the sub-agent spawn path in core.py set this field). Preserve
-        # any existing names and dedupe; runtime load_skill loads will append to it later.
-        try:
-            # Build a fresh deduped list (don't mutate the existing one in case it's
-            # shared), preserving order — same pattern as load_skill.py.
-            existing = instance._loaded_skill_names or []
-            instance._loaded_skill_names = list(dict.fromkeys(existing + ['self-augmentation']))
-        except Exception as e:
-            logger.debug('[SKILLS] _inject_self_augmentation_skill: failed to seed _loaded_skill_names: %s', e)
-
         _tel = getattr(pool, 'telemetry', None)
         if _tel is not None:
             _tel.record_skills_loaded(instance.agent_class, ['self-augmentation'], 'self-augmentation')
