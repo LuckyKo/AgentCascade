@@ -255,7 +255,7 @@ class AgentInstance:
 
     # ── Auto-Skill Tracking ────────────────────────────────────────────────
     _auto_skill_proposed: bool = field(
-        default=False)  # Tracks if the in-loop auto-skill trigger fired for this instance (one-shot, never reset)
+        default=False)  # Tracks if the in-loop auto-skill trigger fired for this run (one-shot per run; reset on instance reuse/recall)
     _auto_skill_task_output: Optional[
         str] = None  # Pre-reflection task output snapshot taken when the in-loop trigger fires (read by extract_instance_output(instance=...))
     _auto_skill_orig_max_turns: Optional[

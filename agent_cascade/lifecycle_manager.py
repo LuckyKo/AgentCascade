@@ -151,6 +151,13 @@ class AgentLifecycleManager:
                     inst.parent_instance = caller
                     inst._child_instances.clear()
 
+                # Clear stale auto-skill state from the previous run. The snapshot
+                # (_auto_skill_task_output) shadows the new task's answer in
+                # extract_instance_output(), and the one-shot flag would permanently
+                # disable skill reflection for this instance on all future recalls.
+                inst._auto_skill_task_output = None
+                inst._auto_skill_proposed = False
+
                 # Remove from old parent's tracking even if new caller is None
                 if old_parent is not None:
                     self.pool._update_child_relationship(old_parent, instance_name, add=False)
