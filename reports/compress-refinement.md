@@ -48,12 +48,12 @@ All other aspects of the code are in good shape—no critical bugs, no security 
 ### Re-judgment
 I re-read both success blocks in detail:
 
-- **`execute_force_compression`** (lines 815-893):  
+- **`execute_force_compression`** (lines 815-893):
   - Calls `compress_context()` **directly**, receives a `CompressResult` object with accurate token counts (`result.tokens_before`, `result.tokens_after`).
   - Performs **unique forced-compression work**: sets `instance.compression_summary`, scans for marker to set `instance.latest_marker_index`, includes BUG-7 fail-streak bookkeeping, and calls `self.pool.resume_all_instances()` in the finally block.
   - Designed as a system-level operation that halts other agents and tracks failure patterns.
 
-- **`handle_compress_command`** (lines 1096-1161):  
+- **`handle_compress_command`** (lines 1096-1161):
   - Calls `compress_tool.call()` via template, receives a **string** (success message or error).
   - Estimates tokens from character counts for telemetry; **skips** summary/marker updates and BUG-7 bookkeeping.
   - Designed as a user-triggered manual action without forced-compression semantics.
@@ -61,9 +61,8 @@ I re-read both success blocks in detail:
 The orchestrator correctly notes that the two blocks share **leaf helpers** (`_sync_logger_after_compression`, `_recover_or_halt`, `_format_compression_feedback`, `_invalidate_token_cache`, `validate_message_pool`), which provides DRY at the right level. Forcing a shared top-level helper would require boolean flags to control divergent behavior (“do marker scan?”, “reset streak?”, “resume all instances?”), creating a Swiss-army method that is **harder to reason about** than the current explicit composition.
 
 ### Cheap fixes confirmation
-✅ **(a) `str()` wrap removed:** Line 1099 now reads `result_str = compress_tool.call(...)` without redundant `str()`.  
+✅ **(a) `str()` wrap removed:** Line 1099 now reads `result_str = compress_tool.call(...)` without redundant `str()`.
 ✅ **(b) Stale comment updated:** Line 1113 now says `# --- Success side effects (same post-compression sequence as forced compression) ---` instead of referencing deleted `apply_approved_compression`.
 
 ### Final verdict
 **CLEAN PASS** — The orchestrator's rejection is justified. The two success blocks are genuinely different in purpose and implementation; abstracting them together would introduce over-engineering. The minor code quality improvements (str wrap removal, comment cleanup) have been applied. No other issues require action.
-

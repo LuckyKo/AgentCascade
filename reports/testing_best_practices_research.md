@@ -1,7 +1,7 @@
 # Testing Best Practices Research Report for Agent Cascade
 
-**Date:** 2026-08-13  
-**Prepared for:** Skill creation team  
+**Date:** 2026-08-13
+**Prepared for:** Skill creation team
 **Purpose:** Provide evidence-based recommendations for creating a reusable "Testing Best Practices" skill for the Agent Cascade system.
 
 ---
@@ -99,7 +99,7 @@ def test_with_mock(mock_class):
     """Mock the dependency completely."""
     mock_instance = mock_class.return_value
     mock_instance.method.return_value = "mocked"
-    
+
     # Test code
 ```
 
@@ -176,7 +176,7 @@ def test_with_faked_time():
 ```python
 def test_issue_123_nested_call_timeout():
     """Regression: nested agent calls should not exceed timeout.
-    
+
     Related: #123
     Bug: Parent call would hang indefinitely when child failed.
     Fix: Added timeout check in _execute_llm_call.
@@ -252,11 +252,11 @@ def test_t2_async_spawn_reservation_regression():
 ```python
 class MockLLM:
     """Minimal LLM interface for unit tests."""
-    
+
     def __init__(self, responses=None):
         self.responses = responses or ["mock response"]
         self.call_count = 0
-        
+
     def chat(self, messages):
         self.call_count += 1
         return self.responses.pop(0)
@@ -288,10 +288,10 @@ def _make_mock_agent(name, responses=None):
 def test_agent_communication():
     agent_a = _make_mock_agent("researcher")
     agent_b = _make_mock_agent("reviewer")
-    
+
     orchestrator = Orchestrator()
     orchestrator.connect(agent_a, agent_b)
-    
+
     # Simulate message passing
     orchestrator.send_message(agent_a, "task")
     assert agent_b.run.called
@@ -311,17 +311,17 @@ def test_agent_communication():
 def test_retry_on_network_error():
     """Retry policy should retry on network errors."""
     policy = RetryPolicy()
-    
+
     # Simulate a function that fails then succeeds
     call_count = 0
-    
+
     def flaky_function():
         nonlocal call_count
         call_count += 1
         if call_count < 3:
             raise ConnectionError("Network failed")
         return "success"
-    
+
     result = with_retry(flaky_function, policy)
     assert result == "success"
     assert call_count == 3
@@ -351,9 +351,9 @@ def test_settings_merge_disabled_tools():
     """Merging settings should combine disabled_tools instead of overwriting."""
     base_settings = {"disabled_tools": {"agent1": ["tool_a"]}}
     override_settings = {"disabled_tools": {"agent2": ["tool_b"]}}
-    
+
     merged = merge_settings(base_settings, override_settings)
-    
+
     assert "agent1" in merged["disabled_tools"]
     assert "agent2" in merged["disabled_tools"]
 
@@ -362,7 +362,7 @@ def test_import_export_preserves_data():
     settings = Settings(...)
     exported = settings.to_json()
     imported = Settings.from_json(exported)
-    
+
     assert imported == settings
 ```
 
@@ -523,7 +523,7 @@ The skill should be practical, with code snippets directly applicable to the Age
 
 ## 7. References
 
-- Agent Cascade test suite: 
+- Agent Cascade test suite:
   - `tests/conftest.py` (lines 325-472 for MockAgentPool warning)
   - `tests/test_agent_pool.py` (mocking pattern)
   - `tests/test_e2e_agent_calls.py` (lines 46-58 for e2e_config_isolation, lines 75-160 for programmable mock server)

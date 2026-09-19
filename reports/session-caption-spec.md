@@ -57,7 +57,7 @@ New behavior (must be robust — do NOT corrupt the summary or break retry valid
 2. Validate that everything **before** that marker is non-empty (the actual summary). If not → raise the existing "empty summary" error.
 3. Everything **after** the marker is the optional caption region:
    - Expected form: ` CAPTION: <text>` (space then literal `CAPTION:` then a single line of text).
-   - Parse with a tolerant regex anchored to the marker, e.g. match `(?:^|\n)\s*--- END SUMMARY ---\s*(?:CAPTION:\s*(?P<caption>[^\n]*))?\s*$` against the stripped text. 
+   - Parse with a tolerant regex anchored to the marker, e.g. match `(?:^|\n)\s*--- END SUMMARY ---\s*(?:CAPTION:\s*(?P<caption>[^\n]*))?\s*$` against the stripped text.
    - If a `CAPTION:` line is present and non-empty → `caption = <text>.strip()`. Otherwise `caption = ""`.
    - **If the region after the marker is present but does NOT match `CAPTION: ...`** (e.g. stray text), treat it as malformed: log a warning, set `caption = ""`, and do NOT let stray text leak into the summary. The summary body is everything before the marker regardless.
 4. Summary body = text **before** the last marker, stripped. This replaces the old `[ :-len(MARKER) ]` slice and is safe whether or not a caption was present.

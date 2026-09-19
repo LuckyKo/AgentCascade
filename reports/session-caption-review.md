@@ -1,6 +1,6 @@
 # Session Caption Feature Review
 
-**Verdict:** PASS (final) — the one finding was fixed and re-verified.  
+**Verdict:** PASS (final) — the one finding was fixed and re-verified.
 **Original verdict:** PASS-WITH-NITS — implementation sound, but the compression prompt contained an ambiguous instruction (implied two markers). All critical areas verified: parse/strip logic, metadata persistence, API fallback, UI rendering, and test mocks are correct.
 
 > **Resolution (orchestrator):** The MAJOR finding (ambiguous prompt in `dna.py`) was fixed by rewording both `COMPRESSION_PROMPT` and `CONSOLIDATION_PROMPT` to state a single unambiguous final-line format (`--- END SUMMARY --- CAPTION: <text>` on one line, marker emitted nowhere else). Prompt-text-only change; re-ran `tests/test_session_caption.py tests/compression/` → **89 passed**, no prompt-content assertions broken. Cleared for commit.
@@ -41,13 +41,13 @@
 ### 🔴 MAJOR: Ambiguous compression prompt instruction
 **File:** `agent_cascade/prompts/dna.py` lines 100-103 (and 128-131 for consolidation)
 
-**Problem:**  
+**Problem:**
 The prompt instructs the compressor LLM to:
 > "Immediately after that marker, on the SAME line (no newline), append a one-line caption in this EXACT format: `{COMPRESSION_END_MARKER} CAPTION: <text>`"
 
 This is logically inconsistent: it tells the model to first terminate with `--- END SUMMARY ---`, then immediately on the same line append another copy of `--- END SUMMARY --- CAPTION: ...`. This could result in two markers or unpredictable formatting, relying on the parser's defensive fallbacks rather than clear guidance.
 
-**Suggested Fix:**  
+**Suggested Fix:**
 Rewrite the instruction to be explicit about what follows the marker. Replace lines 101-103 with:
 ```python
 "Immediately after that marker, on the SAME line (no newline), append a caption in this EXACT format: ` CAPTION: <one short sentence describing what this session was about>`. "
@@ -62,10 +62,10 @@ Or if you want to show the full resulting line:
 ### 🟡 MINOR: Prompt consistency check needed
 **File:** `agent_cascade/prompts/dna.py` lines 128-131 (CONSOLIDATION_PROMPT)
 
-**Problem:**  
+**Problem:**
 The consolidation prompt has the same ambiguous instruction. Should be fixed in both places simultaneously.
 
-**Suggested Fix:**  
+**Suggested Fix:**
 Apply identical correction as above to lines 129-131.
 
 ---

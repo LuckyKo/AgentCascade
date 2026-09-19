@@ -35,7 +35,7 @@
 ## Discrepancies / Corrections
 
 ### 🔴 Log Scale — location error (RESOLVED, not fabrication)
-The planning document originally stated:  
+The planning document originally stated:
 > "The workspace `logs/` dir holds **499 `.jsonl` files / ~157 MB**"
 
 Initial inspection of `N:\work\WD\AgentCascade\logs\` found **0 session `.jsonl`** there (only `console.log`, shell spillover, media). This looked like fabrication — but it was a **wrong-directory check**. Agent session logs are **workspace-scoped**: they live in `<workspace>/logs/` (e.g. `N:\work\WD\AgentWorkspace\logs/`). Direct listing of that dir confirms **~507 per-agent `.jsonl` files / ~150 MB** (`orchestrator_*`, `coder_*`, `researcher_*`, `reviewer_*`), growing with every session.
