@@ -14,8 +14,6 @@ ARCHITECTURE NOTE (documenting current state):
   decoupled in the retry refactoring.
 """
 
-import time
-
 import pytest
 
 import agent_cascade.api_router_pkg.router as router_mod
@@ -28,6 +26,26 @@ from agent_cascade.llm.base import BaseChatModel, ModelServiceError
 def disable_sanity_probe(monkeypatch):
     """These baseline tests measure in-memory router dispatch overhead with dummy URLs."""
     monkeypatch.setattr(router_mod, 'SANITY_PROBE_ENABLED', False)
+
+
+@pytest.fixture
+def record_backoff_delays(monkeypatch):
+    """Patch ``router._interruptible_sleep`` to RECORD requested backoff delays instead of
+    sleeping. Makes backoff assertions deterministic — no wall-clock dependence (a GIL-starved
+    worker under xdist parallel load can be descheduled so measured elapsed collapses).
+
+    ``_interruptible_sleep`` is called as a module-global inside router.py, so it must be
+    patched in router's namespace (NOT helpers). Returns the list of requested delays in
+    call order; monkeypatch auto-reverts on teardown. The fake does not sleep, so tests run
+    in milliseconds.
+    """
+    delays = []
+
+    def fake_interruptible_sleep(duration, pool, instance_name, interval=0.5):
+        delays.append(duration)  # record only — no actual sleep
+
+    monkeypatch.setattr(router_mod, '_interruptible_sleep', fake_interruptible_sleep)
+    return delays
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -418,8 +436,14 @@ class TestSubAgentRetryBehavior:
 class TestPerformanceBaseline:
     """Measure latency for different retry scenarios."""
 
-    def test_latency_zero_retries(self):
-        """Baseline: successful call on first attempt."""
+    def test_latency_zero_retries(self, record_backoff_delays):
+        """Baseline: successful call on first attempt → NO backoff should occur.
+
+        Deterministic: asserts that no backoff delay was requested (via patched
+        _interruptible_sleep) instead of a wall-clock upper bound, which is flaky under
+        xdist parallel load (a slow worker can exceed the budget). Zero retries means the
+        call succeeds on the first attempt, so zero backoffs must be recorded.
+        """
         router = make_router()
         ep = APIEndpoint(
             id='ep-perf',
@@ -437,18 +461,22 @@ class TestPerformanceBaseline:
             list(result)
             return True
 
-        start = time.time()
         router.call_with_fallback('coder', do_call, agent_instance_name='perf-test')
-        elapsed = time.time() - start
 
         assert llm.call_count == 1
-        print(f"[BASELINE] Zero retries: {elapsed:.3f}s (expected <0.5s)")
-        # NOTE: budget kept at <0.5s — verified fast with probe stubbed; relax to <2s only if
-        # xdist load makes this flaky under parallel workers.
-        assert elapsed < 0.5, f"Zero-retry call too slow: {elapsed:.3f}s"
+        # Zero retries → the call succeeds on the first attempt → NO backoff may occur.
+        assert record_backoff_delays == [], \
+            (f"Zero-retry success must not back off, but "
+             f"{len(record_backoff_delays)} delay(s) recorded: {record_backoff_delays}")
+        print(f"[BASELINE] Zero retries: no backoff (delays={record_backoff_delays})")
 
-    def test_latency_one_retry(self):
-        """One failure then success → measure total time including backoff."""
+    def test_latency_one_retry(self, record_backoff_delays):
+        """One failure then success → verify exactly one backoff delay is applied.
+
+        Deterministic: asserts on the REQUESTED backoff delay (via patched
+        _interruptible_sleep) instead of wall-clock elapsed time, which is flaky under
+        xdist parallel load. POLICY_DEFAULT: base_delay=1.0, max_delay=8.0.
+        """
         router = make_router()
         ep = APIEndpoint(
             id='ep-perf2',
@@ -466,16 +494,25 @@ class TestPerformanceBaseline:
             list(result)
             return True
 
-        start = time.time()
         router.call_with_fallback('coder', do_call, agent_instance_name='perf-test')
-        elapsed = time.time() - start
 
         assert llm.call_count == 2
-        print(f"[BASELINE] One retry: {elapsed:.3f}s (expected ~0.1s with base_delay=0.05)")
-        assert elapsed >= 0.05, f"One-retry call too fast: {elapsed:.3f}s (should include backoff)"
+        # Exactly one backoff: after the single failure, before the successful retry.
+        delays = record_backoff_delays
+        assert len(delays) == 1, f"Expected exactly 1 backoff delay, got {len(delays)}: {delays}"
+        # First-retry backoff ≈ base_delay * 2^0 = 1.0s (jitter adds up to +10%). Tolerant
+        # bound absorbs jitter; deterministic (no wall clock).
+        assert delays[0] >= 0.9 and delays[0] <= 1.2, \
+            f"First-retry backoff {delays[0]:.3f}s outside expected [0.9, 1.2]s"
+        print(f"[BASELINE] One retry: backoff={delays[0]:.3f}s")
 
-    def test_latency_max_retries_exhausted(self):
-        """All retries exhausted → measure total time until failure."""
+    def test_latency_max_retries_exhausted(self, record_backoff_delays):
+        """All retries exhausted → verify backoff delays were applied before giving up.
+
+        Deterministic: asserts on REQUESTED backoff delays (via patched
+        _interruptible_sleep) instead of wall-clock elapsed time. POLICY_DEFAULT:
+        base_delay=1.0, max_delay=8.0.
+        """
         router = make_router()
         ep = APIEndpoint(
             id='ep-perf3',
@@ -495,14 +532,19 @@ class TestPerformanceBaseline:
             list(result)
             return True
 
-        start = time.time()
         with pytest.raises(RuntimeError):
             router.call_with_fallback('coder', do_call, agent_instance_name='perf-test')
-        elapsed = time.time() - start
 
-        # Custom endpoint: 3 attempts. Default fallback: also tried (with its own retries).
+        # Custom endpoint: 3 attempts (initial + 2 retries) → up to 2 per-endpoint backoffs.
+        # The default fallback is also tried (with its own retries), so total >= 2 delays.
+        delays = record_backoff_delays
         assert llm.call_count >= 3
-        print(f"[BASELINE] Max retries exhausted: {elapsed:.3f}s, total calls={llm.call_count}")
+        assert len(delays) >= 2, f"Expected at least 2 backoff delays, got {len(delays)}: {delays}"
+        # Every requested delay must respect the policy bounds [0.1, max_delay].
+        assert all(0.1 <= d <= router.policy.max_delay for d in delays), \
+            f"Backoff delay outside [0.1, {router.policy.max_delay}]: {delays}"
+        print(f"[BASELINE] Max retries exhausted: backoffs={[round(d, 3) for d in delays]}, "
+              f"total calls={llm.call_count}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -559,8 +601,13 @@ class TestLLayerRetryBehavior:
 class TestBackoffTiming:
     """Verify exponential backoff behavior."""
 
-    def test_router_backoff_exponential(self):
-        """Router uses exponential backoff: base_delay * 2^attempt, capped at max_delay."""
+    def test_router_backoff_exponential(self, record_backoff_delays):
+        """Router uses exponential backoff: base_delay * 2^(attempt-1), capped at max_delay.
+
+        Deterministic: asserts on REQUESTED backoff delays (via patched
+        _interruptible_sleep) instead of wall-clock elapsed time. POLICY_DEFAULT:
+        base_delay=1.0, max_delay=8.0, jitter_factor=0.1.
+        """
         router = make_router()
         ep = APIEndpoint(
             id='ep-backoff',
@@ -570,6 +617,12 @@ class TestBackoffTiming:
             max_retries=3,
         )
         router.add_endpoint(ep)
+        # Explicitly put the endpoint in 'coder's chain. add_endpoint() alone does NOT reliably
+        # place it for an agent with no configured priorities (the router may fall back to the
+        # global default only — see "no effective endpoints" log), which would skip the
+        # max_retries=3 endpoint this test is meant to exercise. set_agent_priorities makes the
+        # chain deterministic regardless of config/api_endpoints.json state.
+        router.set_agent_priorities('coder', [ep.id])
 
         llm = MockLLM(fail_count=10, fail_type=ConnectionError)
 
@@ -578,13 +631,30 @@ class TestBackoffTiming:
             list(result)
             return True
 
-        start = time.time()
         with pytest.raises(RuntimeError):
             router.call_with_fallback('coder', do_call, agent_instance_name='backoff-test')
-        elapsed = time.time() - start
 
-        # 4 attempts (initial + 3 retries), backoff: 0.1 + 0.2 + 0.4 = 0.7s theoretical
-        # But capped at max_delay=0.5 per delay, so: 0.1 + 0.2 + 0.5 = 0.8s theoretical
-        # Plus default fallback adds more time.
-        print(f"[BASELINE] Backoff timing: {elapsed:.3f}s (expected >=0.3s with delays)")
-        assert elapsed >= 0.3, f"Backoff not being applied: {elapsed:.3f}s is too fast"
+        delays = record_backoff_delays
+        base = router.policy.base_delay      # 1.0 (POLICY_DEFAULT)
+        max_delay = router.policy.max_delay  # 8.0 (POLICY_DEFAULT)
+
+        # The max_retries=3 endpoint alone contributes 3 per-endpoint backoffs (~1, ~2, ~4s);
+        # a default-fallback endpoint may add more (it resets its own attempt counter).
+        assert len(delays) >= 3, \
+            f"Expected at least 3 backoff delays for max_retries=3, got {len(delays)}: {delays}"
+
+        # Cap respected: no requested delay exceeds policy.max_delay.
+        assert all(d <= max_delay for d in delays), \
+            f"Backoff delay exceeded cap {max_delay}s: {delays}"
+
+        # Exponential growth: the 3rd retry of a max_retries=3 endpoint must reach
+        # ~base * 2^(3-1) = base*4. Jitter only ADDS (never subtracts), so the largest
+        # recorded delay is deterministically >= that value. This proves exponential growth
+        # without depending on exact counts or cross-endpoint ordering (the fallback resets
+        # its counter, so the flat list is NOT globally non-decreasing).
+        expected_third_retry = base * (2 ** 2)  # attempt index 2 → calculate_backoff(3) = base*4
+        assert max(delays) >= expected_third_retry, \
+            (f"Backoff did not grow exponentially: max delay {max(delays):.3f}s < "
+             f"{expected_third_retry:.3f}s; delays={[round(d, 3) for d in delays]}")
+        print(f"[BASELINE] Backoff exponential: {[round(d, 3) for d in delays]} "
+              f"(base={base}, cap={max_delay})")
