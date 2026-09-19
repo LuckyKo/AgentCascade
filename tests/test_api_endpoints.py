@@ -24,6 +24,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent_cascade.instance_id import make_instance_dir
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi.testclient import TestClient
@@ -516,8 +517,6 @@ class TestSessionsInstanceAwareLogDir:
 
     def test_sessions_listed_from_instance_suffixed_log_dir(self, tmp_path):
         """With AGENT_CASCADE_INSTANCE_ID set, /api/sessions reads logs_<id>/ only."""
-        from agent_cascade.instance_id import make_instance_dir
-
         # conftest.py sets AGENT_CASCADE_INSTANCE_ID globally at import time;
         # capture and restore so this test does not leak its value to others.
         saved = os.environ.get('AGENT_CASCADE_INSTANCE_ID')
@@ -551,8 +550,6 @@ class TestSessionsInstanceAwareLogDir:
 
     def test_sessions_listed_from_plain_log_dir_without_instance_id(self, tmp_path):
         """With AGENT_CASCADE_INSTANCE_ID unset, /api/sessions reads plain logs/ (legacy)."""
-        from agent_cascade.instance_id import make_instance_dir
-
         saved = os.environ.get('AGENT_CASCADE_INSTANCE_ID')
         os.environ.pop('AGENT_CASCADE_INSTANCE_ID', None)
         try:

@@ -450,7 +450,6 @@ class WsMessageHandler:
 
                     # ── Fix 3: Restore agent instance conversations from JSONL logs if corrupted ──
                     from agent_cascade.log import logger as _logger
-                    from agent_cascade.settings import DEFAULT_WORKSPACE
                     from agent_cascade.utils.pool_validation import validate_message_pool
 
                     for sa_name, agent_class in list(self.agent_pool.instance_classes.items()):
@@ -474,11 +473,8 @@ class WsMessageHandler:
                             if logger_inst and hasattr(logger_inst, 'log_path') and logger_inst.log_path:
                                 actual_log_path = logger_inst.log_path
                             else:
-                                from agent_cascade.instance_id import make_instance_dir
-                                if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-                                    log_dir = Path(make_instance_dir(str(self.agent_pool.operation_manager.base_dir / 'logs')))
-                                else:
-                                    log_dir = Path(make_instance_dir(str(Path(DEFAULT_WORKSPACE) / 'logs')))
+                                from agent_cascade.instance_id import get_session_log_dir
+                                log_dir = get_session_log_dir(self.agent_pool)
                                 pattern = f"{agent_class}_{sa_name}_*.jsonl"
                                 import glob
                                 matches = sorted(glob.glob(str(log_dir / pattern)), reverse=True)

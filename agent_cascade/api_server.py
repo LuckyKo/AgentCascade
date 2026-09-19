@@ -370,12 +370,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             if not agent_pool:
                 return False
 
-            from agent_cascade.instance_id import make_instance_dir
-
-            if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                log_dir = Path(make_instance_dir(str(agent_pool.operation_manager.base_dir / 'logs')))
-            else:
-                log_dir = Path(make_instance_dir(str(Path(DEFAULT_WORKSPACE) / 'logs')))
+            from agent_cascade.instance_id import get_session_log_dir
+            log_dir = get_session_log_dir(agent_pool)
 
             # Orchestrator logs might be named session_NAME.jsonl or follow the agent instance pattern
             path = log_dir / f"session_{name}.jsonl"
@@ -1062,11 +1058,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.get('/api/sessions')
     async def api_list_sessions():
-        from agent_cascade.instance_id import make_instance_dir
-        if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-            log_dir = Path(make_instance_dir(str(agent_pool.operation_manager.base_dir / 'logs')))
-        else:
-            log_dir = Path(make_instance_dir(str(Path(DEFAULT_WORKSPACE) / 'logs')))
+        from agent_cascade.instance_id import get_session_log_dir
+        log_dir = get_session_log_dir(agent_pool)
 
         if not log_dir.exists():
             return {'sessions': []}

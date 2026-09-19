@@ -74,3 +74,24 @@ def make_instance_dir(base_path: str) -> str:
     p = Path(base_path)
     result = str(p.parent / f"{p.name}{suffix}")
     return result.replace('\\', '/')
+
+
+def get_session_log_dir(agent_pool):
+    """Return the instance-aware session log directory for the given pool.
+
+    Resolves <base>/logs where base is operation_manager.base_dir (if available)
+    or DEFAULT_WORKSPACE, then routes through make_instance_dir() so named
+    instances read from logs_<id>. Returns a Path.
+
+    Args:
+        agent_pool: The AgentPool instance (may be None or lack operation_manager).
+
+    Returns:
+        Path to the resolved session log directory.
+    """
+    from agent_cascade.settings import DEFAULT_WORKSPACE
+    if agent_pool and getattr(agent_pool, 'operation_manager', None):
+        base = agent_pool.operation_manager.base_dir / 'logs'
+    else:
+        base = Path(DEFAULT_WORKSPACE) / 'logs'
+    return Path(make_instance_dir(str(base)))
