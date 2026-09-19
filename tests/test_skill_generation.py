@@ -2853,16 +2853,19 @@ def _write_skill_md(path: Path, name: str, platforms=None):
 class TestPruneStaleMetrics:
     """prune_stale_metrics() + its evaluate_candidates() wiring.
 
-    The autouse ``fresh_manager`` fixture does NOT redirect ``_metrics_file``, so every
-    test here points it at a temp path (via the class-level fixture) to avoid clobbering
-    the real production agents/global/skills-metrics.json.
+    The autouse ``fresh_manager`` fixture already redirects ``_metrics_file`` to a temp path,
+    so no test here can clobber the real production agents/global/skills-metrics.json. The
+    class-level ``_prune_env`` fixture additionally resets the in-memory ``_metrics`` dict so
+    each test starts from a clean slate (fresh_manager only redirects the file, it does not
+    clear loaded state).
     """
 
     @pytest.fixture(autouse=True)
     def _prune_env(self, fresh_manager, tmp_path):
         self.manager = fresh_manager
         self.metrics_file = tmp_path / 'skills-metrics.json'
-        # CRITICAL: redirect the metrics file (fresh_manager does not do this for us).
+        # Reset the in-memory metrics dict so each test starts clean (file path is already
+        # redirected to a temp location by fresh_manager).
         _isolate_metrics(fresh_manager, tmp_path, reset=True)
         yield
 
