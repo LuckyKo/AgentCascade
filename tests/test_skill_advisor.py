@@ -52,6 +52,26 @@ class MockSkillManager:
         return None
 
 
+class FilteringMockSkillManager(MockSkillManager):
+    """MockSkillManager + a deterministic match_skills() for pre-filter tests.
+
+    ``matches`` maps skill name -> score; match_skills() returns them sorted by
+    score desc (mirrors SkillMatcher.match()). Names not in ``matches`` score 0.
+    """
+
+    def __init__(self, names, matches=None):
+        super().__init__(names)
+        self._matches = dict(matches or {})
+
+    def _ensure_discovered(self):
+        pass  # no-op; advisor wraps this in try/except anyway
+
+    def match_skills(self, query):
+        scored = [(n, s) for n, s in self._matches.items() if s > 0]
+        scored.sort(key=lambda x: (-x[1], x[0]))
+        return scored
+
+
 def _make_pool(**overrides):
     pool = MagicMock()
     pool.stopped = False
@@ -220,6 +240,137 @@ class TestBuildSkillAdvisorPrompt:
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         assert 'ordered by quality rating' in prompt
         assert 'advisory' in prompt
+
+
+# ===========================================================================
+# 2a-filter. Loose keyword pre-filter — top-N by score, fallback-to-all otherwise
+# ===========================================================================
+
+
+class TestBuildSkillAdvisorPromptFiltering:
+    """Loose keyword pre-filter: top-N by score, rating order preserved,
+    overflow note only when the list was actually trimmed; fallback-to-all otherwise."""
+
+    def _names(self, n):
+        return [f"skill-{i:02d}" for i in range(n)]
+
+    def test_no_filter_when_corpus_under_cap(self):
+        """total (10) <= N (20) → all skills shown, no overflow note."""
+        names = self._names(10)
+        sm = FilteringMockSkillManager(names, matches={n: 1.0 for n in names})
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        assert len(skill_lines) == 10
+        assert 'additional skills exist but were filtered' not in prompt
+
+    def test_no_filter_when_matches_sparse(self):
+        """total (30) > N but only 5 match (< N=20) → fallback to ALL, no note."""
+        names = self._names(30)
+        matches = {f"skill-{i:02d}": 1.0 for i in range(5)}  # only 5 confident matches
+        sm = FilteringMockSkillManager(names, matches=matches)
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        assert len(skill_lines) == 30  # fallback to all
+        assert 'additional skills exist but were filtered' not in prompt
+
+    def test_no_filter_when_zero_matches(self):
+        names = self._names(30)
+        sm = FilteringMockSkillManager(names, matches={})  # empty → zero scores
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        assert len(skill_lines) == 30
+        assert 'additional skills exist but were filtered' not in prompt
+
+    def test_filters_to_top_n_by_score(self):
+        """total (30) > N=20 and 25 match → show exactly 20 (the top-20 by score)."""
+        names = self._names(30)
+        # Scores rise with index: skill-24 has the highest, skill-00 the lowest. So the top-20
+        # by score are skill-05..skill-24 and the 5 lowest-scored matched (skill-00..skill-04) drop.
+        matches = {f"skill-{i:02d}": (i + 1) / 25.0 for i in range(25)}
+        sm = FilteringMockSkillManager(names, matches=matches)
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        shown = {l[2:].split(' ')[0] for l in skill_lines}
+        assert len(shown) == 20
+        # The 5 dropped skills are the lowest-scored matched ones (skill-00..skill-04).
+        for i in range(0, 5):
+            assert f"skill-{i:02d}" not in shown
+        # All top-20 by score are present.
+        for i in range(5, 25):
+            assert f"skill-{i:02d}" in shown
+
+    def test_overflow_note_count_is_correct(self):
+        """total=30, N=20 → note reports 10 filtered."""
+        names = self._names(30)
+        matches = {f"skill-{i:02d}": 1.0 for i in range(25)}
+        sm = FilteringMockSkillManager(names, matches=matches)
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        assert 'Note: 10 additional skills exist but were filtered' in prompt
+        assert '[SKILLS] none' in prompt  # the note's escape-hatch hint
+
+    def test_rating_order_preserved_within_filtered_subset(self):
+        """Among the top-N by score, the list is still ordered by rating desc (unrated last)."""
+
+        class RatedFilteringMock(FilteringMockSkillManager):
+            _ratings = {'skill-01': 9.0, 'skill-02': 6.5}  # two rated skills in the matched set
+
+            def get_rating_average(self, name):
+                return self._ratings.get(name)
+
+        names = self._names(30)
+        matches = {f"skill-{i:02d}": 1.0 for i in range(25)}  # all 25 tied on score
+        sm = RatedFilteringMock(names, matches=matches)
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        ordered_names = [l[2:].split(' ')[0] for l in skill_lines]
+        # Rated skills must come before any unrated one; highest rating first.
+        assert ordered_names.index('skill-01') < ordered_names.index('skill-02')
+        assert ordered_names.index('skill-02') < ordered_names.index('skill-03')  # skill-03 is unrated
+
+    def test_self_augmentation_never_occupies_candidate_slot(self):
+        """self-augmentation may match but must not consume a top-N slot or appear in the list."""
+        names = ['self-augmentation'] + self._names(30)
+        # self-aug scores highest; if it weren't stripped, one real skill would be pushed out.
+        matches = {'self-augmentation': 1.0}
+        matches.update({f"skill-{i:02d}": (i + 1) / 30.0 for i in range(30)})
+        sm = FilteringMockSkillManager(names, matches=matches)
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        shown = {l[2:].split(' ')[0] for l in skill_lines}
+        assert 'self-augmentation' not in shown
+        # 30 real skills, N=20 → exactly 20 real candidates (not 19).
+        assert len(shown) == 20
+
+    def test_fallback_when_match_skills_missing(self):
+        """A manager without match_skills (e.g. base MockSkillManager) → fallback to all, no crash."""
+        names = self._names(30)
+        sm = MockSkillManager(names)  # no match_skills attr
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        assert len(skill_lines) == 30
+        assert 'additional skills exist but were filtered' not in prompt
+
+    def test_fallback_when_match_skills_raises(self):
+        """A raising match_skills must not break prompt building → fallback to all."""
+        names = self._names(30)
+
+        class Broken(FilteringMockSkillManager):
+            def match_skills(self, query):
+                raise RuntimeError('boom')
+
+        sm = Broken(names, matches={n: 1.0 for n in names})
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        assert len(skill_lines) == 30
+
+    def test_n_boundary_exact(self):
+        """total == N exactly (20) → NOT filtered (condition is total > N), no note."""
+        names = self._names(20)
+        sm = FilteringMockSkillManager(names, matches={n: 1.0 for n in names})
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        assert len(skill_lines) == 20
+        assert 'additional skills exist but were filtered' not in prompt
 
 
 # ===========================================================================

@@ -33,6 +33,13 @@ SECURITY_AGENT_MAX_TURNS: int = int(os.getenv('AGENT_CASCADE_SECURITY_AGENT_MAX_
 SKILL_ADVISOR_MAX_TURNS: int = int(
     os.getenv('AGENT_CASCADE_SKILL_ADVISOR_MAX_TURNS',
               10))  # Turn limit for the system-launched Skill Advisor (semantic skill matcher)
+# Skill Advisor pre-filter cap: max candidate skills passed into the advisor prompt.
+# Coarse keyword pre-filter (SkillMatcher) ranks skills against task+context; when fewer than
+# this many match, ALL skills are passed instead (safe fallback — no regression). Raise if the
+# corpus grows well past ~100 and token budget demands a tighter cap.
+SKILL_ADVISOR_MAX_CANDIDATES: int = int(
+    os.getenv('AGENT_CASCADE_SKILL_ADVISOR_MAX_CANDIDATES',
+              20))  # Top-N skill candidates in the advisor prompt (keyword pre-filter)
 # Compressor: all tools are disabled by default (DEFAULT_COMPRESSOR_DISABLED_TOOLS) — it only
 # performs compression internally. A single turn forces no tool calls, guaranteeing a pure
 # one-shot summary. Bump only if the Compressor is ever given tools back.

@@ -169,7 +169,7 @@ SKILL_ADVISOR_PROMPT = (
     'Context: {context_text}\n\n'
     '## AVAILABLE SKILLS (ordered by quality rating, highest first; unrated skills last):\n'
     'Ratings are advisory signals only — relevance to the task still decides which skills to pick.\n'
-    '{skills_metadata}\n\n'
+    '{skills_metadata}\n{overflow_note}\n'
     '## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n'
     '[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n'
     '[NOTES] <additional task notes or "none">\n'

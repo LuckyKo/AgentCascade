@@ -73,7 +73,7 @@ def build_skill_advisor_prompt(
     except Exception as e:  # noqa: BLE001 — never block the advisor over a discovery hiccup
         logger.warning('[SKILL-ADVISOR] _ensure_discovered failed (using cached list): %s', e)
 
-    # Build (sort_key, line) pairs; sort by average rating desc, unrated last, name asc tiebreak.
+    # Build (sort_key, name, line) tuples; sort by average rating desc, unrated last, name asc tiebreak.
     entries = []
     for meta in skill_manager.get_all_metadata():
         name = (meta.get('name') or '').strip()
@@ -87,10 +87,33 @@ def build_skill_advisor_prompt(
             rating_tag = f'(rating {rating}/10)'
         sort_key = rating_sort_key(name, rating)
         line = f"- {name} {rating_tag}: {description}" if description else f"- {name} {rating_tag}"
-        entries.append((sort_key, line))
+        entries.append((sort_key, name, line))
 
     entries.sort(key=lambda e: e[0])
-    metadata_lines = [line for _, line in entries]
+
+    # ── Loose keyword pre-filter (coarse rank-and-truncate, NOT a gate) ────────────
+    # Trims to top-N by score only when enough confident matches exist; otherwise falls back
+    # to passing all skills → zero regression risk.
+    overflow_note = ''
+    try:
+        from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES
+        query_text = f"{task_text or ''} {context_text or ''}"
+        matches = skill_manager.match_skills(query_text)  # [(name, score)] sorted desc; score > 0 only
+        # self-augmentation is always injected by the engine — it must never occupy a candidate slot.
+        matched_names = [n for n, _ in matches if n.lower() != _SELF_AUGMENTATION]
+        total = len(entries)  # registered non-self-aug skills (disabled already excluded upstream)
+        if total > SKILL_ADVISOR_MAX_CANDIDATES and len(matched_names) >= SKILL_ADVISOR_MAX_CANDIDATES:
+            shown_set = set(matched_names[:SKILL_ADVISOR_MAX_CANDIDATES])  # top-N by score
+            entries = [e for e in entries if e[1] in shown_set]
+            entries.sort(key=lambda e: e[0])  # keep rating order within the filtered subset
+            overflow_note = (
+                f"Note: {total - len(entries)} additional skills exist but were filtered "
+                f"for relevance. If none of the above seem applicable, say [SKILLS] none.\n"
+            )
+    except Exception as e:  # noqa: BLE001 — filter is an optimization; never block the advisor
+        logger.warning('[SKILL-ADVISOR] skill pre-filter failed (passing all skills): %s', e)
+
+    metadata_lines = [line for _, _, line in entries]
     skills_metadata = '\n'.join(metadata_lines) if metadata_lines else '(none)'
 
     # Escape braces in user-provided content to prevent .format() injection.
@@ -102,6 +125,7 @@ def build_skill_advisor_prompt(
 
     return SKILL_ADVISOR_PROMPT.format(
         skills_metadata=skills_metadata,
+        overflow_note=overflow_note,
         task_text=_esc(task_text or '(no task text provided)'),
         context_text=_esc(context_text or '(no additional context)'),
         agent_class=agent_class,
