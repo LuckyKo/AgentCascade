@@ -119,6 +119,15 @@ class LoadSkill(BaseTool):
         # Load each skill and inject as user message
         loaded = []
         failed = []
+        already_loaded = []
+
+        # Dedup guard: a skill must be injected as a USER message at most once per
+        # instance. Track the case-normalized name of every skill resolved so far, seeded
+        # from inst._loaded_skill_names so skills already active on this instance
+        # (init-time self-augmentation / AUTO-matched, or prior runtime loads) are not
+        # re-injected. That list may carry mixed casing (it stores the exact name of each
+        # prior load), so we lowercase on both sides and compare case-insensitively.
+        seen = {n.lower() for n in (inst._loaded_skill_names or []) if isinstance(n, str)}
 
         for raw_name in skill_names:
             # Validate skill name (Fix #3)
@@ -146,6 +155,17 @@ class LoadSkill(BaseTool):
                 logger.warning("[SKILLS] Runtime load: skill '%s' not found", name)  # Fix #6
                 failed.append(name)
                 continue
+
+            # Dedup guard: skip skills already active on this instance (or repeated within
+            # this call). The body resolved above corresponds to a canonical registry entry,
+            # so comparing `name.lower()` case-insensitively is robust to LLM casing.
+            # Recorded as "already loaded", NOT failed.
+            if name.lower() in seen:
+                logger.info("[SKILLS] Runtime load: skill '%s' already loaded for instance '%s', skipping re-injection",
+                            name, agent_name)
+                already_loaded.append(name)
+                continue
+            seen.add(name.lower())
 
             # Sanitize skill name in message content (Fix #5)
             safe_name = _sanitize_for_text(name)
@@ -182,6 +202,9 @@ class LoadSkill(BaseTool):
         lines = []
         if loaded:
             lines.append(f"Successfully loaded {len(loaded)} skill(s): {', '.join(loaded)}")
+        if already_loaded:
+            # Dedupe (a skill may be listed multiple times in one call) while keeping order.
+            lines.append(f"Already loaded (skipped): {', '.join(dict.fromkeys(already_loaded))}")
         if failed:
             lines.append(f"Failed to load {len(failed)} skill(s) (not found): {', '.join(failed)}")
 

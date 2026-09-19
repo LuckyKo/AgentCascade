@@ -38,9 +38,21 @@ def _make_pool(inst, skill_bodies):
     found" so the tool routes it to the failed list. Returns ``(pool, enqueued)`` where
     ``enqueued`` records every ``(agent_name, content)`` passed to ``enqueue_message``.
     """
+    def _load_full(name):
+        """Mirror SkillManager.load_full_instructions: exact match first, then a
+        case-insensitive fallback (manager.py:716-723). Returns the body for the
+        canonical registry name, or None if not found."""
+        if name in skill_bodies:
+            return skill_bodies[name]
+        lower = name.lower()
+        for key, body in skill_bodies.items():
+            if key.lower() == lower:
+                return body
+        return None
+
     skill_manager = SimpleNamespace(
         _ensure_discovered=lambda: None,
-        load_full_instructions=lambda name: skill_bodies.get(name),
+        load_full_instructions=_load_full,
     )
     enqueued = []
     pool = SimpleNamespace(
@@ -105,6 +117,84 @@ class TestLoadSkillRecordsNames:
         _, enqueued = _call_load_skill(inst, ['skill-a', 'missing'], {'skill-a': 'BODY-A'})
         assert len(enqueued) == 1
         assert enqueued[0][0] == 'Main'
+
+
+# ===========================================================================
+# Change C — runtime load_skill dedups: no double-injection of the same skill
+# ===========================================================================
+
+
+class TestLoadSkillDedup:
+    """A skill must be injected as a USER message at most once per instance.
+
+    Regression for the duplicate "Apply the above guidelines to your current task."
+    line: the closing line is appended once per loop iteration with no dedup guard, so
+    re-loading an already-active skill (or listing it twice in one call) produced two
+    copies of the same user message. The fix keys on ``inst._loaded_skill_names``
+    (seeded at init for self-augmentation / AUTO-matched skills and appended by prior
+    runtime loads) plus a per-call ``seen`` set, comparing case-insensitively against
+    the resolved canonical name.
+    """
+
+    def test_same_skill_twice_in_one_call_injected_once(self):
+        """(a) Listing the same skill twice in one call must enqueue exactly once."""
+        inst = _make_inst(None)
+        result, enqueued = _call_load_skill(inst, ['skill-a', 'skill-a'], {'skill-a': 'BODY-A'})
+        assert len(enqueued) == 1
+        # The closing line appears exactly once across all injected messages.
+        total_closing = sum(content.count('Apply the above guidelines to your current task.')
+                            for _, content in enqueued)
+        assert total_closing == 1
+        # Second occurrence is reported as already-loaded, not failed or loaded.
+        assert 'Successfully loaded 1 skill(s)' in result
+        assert 'Already loaded (skipped): skill-a' in result
+        assert 'Failed to load' not in result
+
+    def test_already_loaded_at_init_not_reinjected(self):
+        """(b) A skill already in _loaded_skill_names must NOT be re-enqueued."""
+        inst = _make_inst(['skill-a'])  # e.g. injected at init-time (self-augmentation / AUTO)
+        result, enqueued = _call_load_skill(inst, ['skill-a'], {'skill-a': 'BODY-A'})
+        assert len(enqueued) == 0  # no second user message
+        assert 'Already loaded (skipped): skill-a' in result
+        assert 'Failed to load' not in result
+        assert inst._loaded_skill_names == ['skill-a']  # field untouched, no dup
+
+    def test_already_loaded_summary_dedupes_repeats(self):
+        """A skill listed multiple times while already active must appear once in the summary."""
+        inst = _make_inst(['skill-a'])
+        result, enqueued = _call_load_skill(inst, ['skill-a', 'skill-a'], {'skill-a': 'BODY-A'})
+        assert len(enqueued) == 0
+        # Exactly one occurrence of skill-a in the skipped list (not "skill-a, skill-a").
+        assert result.count('skill-a') == 1
+
+    def test_case_insensitive_dedup(self):
+        """(c) Casing variations of the same skill dedup (Self-Augmentation vs self-augmentation)."""
+        inst = _make_inst(['self-augmentation'])  # canonical name seeded at init
+        result, enqueued = _call_load_skill(
+            inst, ['Self-Augmentation'], {'self-augmentation': 'BODY-SA'})
+        assert len(enqueued) == 0  # case-insensitive match against the active skill
+        assert 'Already loaded (skipped)' in result
+        assert 'Failed to load' not in result
+
+    def test_case_insensitive_dedup_within_one_call(self):
+        """(c, within-call) Different casings of the same skill in one call → injected once."""
+        inst = _make_inst(None)
+        result, enqueued = _call_load_skill(
+            inst, ['Code-Review', 'code-review'], {'code-review': 'BODY-CR'})
+        assert len(enqueued) == 1
+        total_closing = sum(content.count('Apply the above guidelines to your current task.')
+                            for _, content in enqueued)
+        assert total_closing == 1
+        assert 'Already loaded (skipped)' in result
+
+    def test_distinct_skills_still_all_load(self):
+        """Guard: dedup must not over-suppress genuinely different skills."""
+        inst = _make_inst(None)
+        result, enqueued = _call_load_skill(
+            inst, ['skill-a', 'skill-b'], {'skill-a': 'BODY-A', 'skill-b': 'BODY-B'})
+        assert len(enqueued) == 2
+        assert 'Successfully loaded 2 skill(s)' in result
+        assert 'Already loaded' not in result
 
 
 # ===========================================================================
