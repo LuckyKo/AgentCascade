@@ -1494,3 +1494,287 @@ class TestSkillInvalidationScanMarker:
         names = [l.split('**')[1] for l in lines]
         assert 'bravo' not in names
         assert 'alpha' in names
+
+
+# ===========================================================================
+# 9. Skill Invalidation Phase 2 — adaptive count-cap rebalance pass
+# ===========================================================================
+
+def _rebalance_manager(tmp_path, skill_names):
+    """Fresh manager + hermetic one-level skills tree (all servable)."""
+    m = SkillManager()
+    m._metrics_file = tmp_path / 'skills-metrics.json'
+    with m._metrics_lock:
+        m._metrics = {}
+    root = tmp_path / 'skills'
+    for name in skill_names:
+        _write_skill_file(root, name)
+    m._cache_ttl = 0.0
+    m.discover([root])
+    return m
+
+
+def _migrate_once(m):
+    """Run the schema-1.3 migration once so a later rebalance's internal migration is a
+    no-op (it only fills *missing* fields) and will not clobber statuses we set afterwards."""
+    m.rebalance_active_skills(k=1.0, min_cap=len(_active_names(m)), max_cap=len(_active_names(m)))
+
+
+def _disable_after_migration(m, name):
+    """Disable a skill via the public API AFTER migration so the flip survives rebalance's
+    internal no-op migration (rebalance re-derives status from disk first; a post-migration
+    disable sets both ``_disabled_names`` and the metrics status to inactive)."""
+    ok, _ = m.disable_skill(name)
+    assert ok
+
+
+def _set_metrics(m, mapping):
+    """Replace the metrics store under the lock (exact-case keys, lowercase names).
+
+    NOTE: rebalance_active_skills() runs the schema-1.3 migration first, which re-derives
+    ``status`` from disk for standard-location skills (D-A → active). Use this only to set
+    *ranking* fields (loads/ratings/last_used) or non-servable statuses; use
+    _disable_after_migration() to set an inactive status that must survive the pass.
+    """
+    with m._metrics_lock:
+        m._metrics = {k: dict(v) for k, v in mapping.items()}
+
+
+def _active_names(m):
+    with m._write_lock:
+        return set(m._skills_registry.keys())
+
+
+def _status_of(m, name):
+    with m._metrics_lock:
+        entry = m._metrics.get(name) or {}
+        return entry.get('status', 'active') if isinstance(entry, dict) else 'active'
+
+
+class TestSkillInvalidationRebalance:
+    """Phase 2: adaptive count-cap pass (target math, determinism, D-A, never-raises)."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    def test_rebalance_target_clamp_min_and_max(self):
+        """Target is clamped to [min_cap, max_cap]: floor at MIN_CAP, ceiling at MAX_CAP.
+
+        Each metrics entry needs a real on-disk file (orphan prune) and the store must be at
+        schema 1.3 before we inject qualified entries — so: create files, migrate once, then
+        inject. rebalance's internal migration is then a no-op that won't clobber our data.
+        """
+        # Floor: N_qualified=1, k=1.0 → 1 < min_cap(20) → target == 20.
+        m = _rebalance_manager(self.tmp, ['a'])
+        _migrate_once(m)
+        _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active'}})
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_qualified'] == 1
+        assert s['target'] == 20
+
+        # Ceiling: N_qualified=300, k=1.0 → 300 > max_cap(200) → target == 200.
+        ceiling_names = [f's{i}' for i in range(300)]
+        m2 = _rebalance_manager(self.tmp, ceiling_names)
+        _migrate_once(m2)
+        _set_metrics(m2, {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in ceiling_names})
+        s2 = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s2['n_qualified'] == 300
+        assert s2['target'] == 200
+
+    def test_rebalance_evicts_over_cap(self):
+        """Over-cap: evict exactly (active - target) lowest-ranked; highest-rated survive."""
+        names = [f's{i:02d}' for i in range(30)]
+        m = _rebalance_manager(self.tmp, names)
+        # 15 rated high (survive), 15 unrated (evicted). N_qualified=15 → target=15.
+        entries = {}
+        for i in range(15):
+            entries[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
+                                 'ratings': {'count': 2, 'sum': 18.0}}  # avg 9.0
+        for i in range(15, 30):
+            entries[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}  # unrated
+        _set_metrics(m, entries)
+
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_qualified'] == 15
+        assert s['target'] == 20  # floor clamps 15 → 20
+        assert s['active_before'] == 30
+        assert len(s['evicted']) == 10
+        # Unrated (worst) evicted; rated survive.
+        for nm in names[:15]:
+            assert _status_of(m, nm) == 'active'
+        for nm in s['evicted']:
+            assert _status_of(m, nm) == 'inactive'
+        # Exactly 20 active remain (the 15 rated + 5 unrated that the floor keeps).
+        assert len(_active_names(m)) == 20
+
+    def test_rebalance_reenables_under_cap(self):
+        """Under-cap: re-enable highest-ranked servable inactive skills up to target."""
+        names = ['a', 'b', 'c', 'd', 'e']
+        m = _rebalance_manager(self.tmp, names)  # all 5 files exist → d/e not pruned as orphans
+        _migrate_once(m)  # schema 1.3 so rebalance's internal migration is a no-op
+
+        # Set ranking fields (loads/ratings). All 5 are qualified → N_qualified=5 → target=min_cap=5.
+        entries = {
+            'a': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 1, 'sum': 8.0}},
+            'b': {'total_loads': 1, 'by_version': {}, 'status': 'active'},
+            'c': {'total_loads': 1, 'by_version': {}, 'status': 'active'},
+            'd': {'total_loads': 2, 'by_version': {}, 'status': 'active', 'ratings': {'count': 1, 'sum': 9.0}},
+            'e': {'total_loads': 5, 'by_version': {}, 'status': 'active'},  # unrated but high loads
+        }
+        _set_metrics(m, entries)
+        # Deactivate d and e via the public API (post-migration → survives rebalance's no-op
+        # migration). They are now inactive servable re-enable candidates.
+        _disable_after_migration(m, 'd')
+        _disable_after_migration(m, 'e')
+
+        s = m.rebalance_active_skills(k=1.0, min_cap=5, max_cap=200)
+        assert s['target'] == 5
+        assert s['active_before'] == 3
+        # Re-enable the best inactive (d: rated 9.0) then next (e) to reach target 5.
+        assert set(s['reenabled']) == {'d', 'e'}
+        assert _status_of(m, 'd') == 'active'
+        assert _status_of(m, 'e') == 'active'
+        assert len(_active_names(m)) == 5
+
+    def test_rebalance_min_cap_floor(self):
+        """Q4 edge: N_qualified < min_cap → target == min_cap (floor)."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active'}})
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_qualified'] == 1
+        assert s['target'] == 20
+
+    def test_rebalance_full_corpus_no_ratchet(self):
+        """Deactivating a batch must not shrink N_qualified → target stays stable."""
+        names = [f's{i:02d}' for i in range(30)]
+        m = _rebalance_manager(self.tmp, names)
+        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in names}
+        _set_metrics(m, entries)
+
+        s1 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
+        # N_qualified=30, k=0.5 → 15 < min_cap(20) → target=20; evict 10 to reach 20.
+        assert s1['n_qualified'] == 30
+        assert s1['target'] == 20
+
+        # Second run on the same store: inactive skills still count in N_qualified.
+        s2 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
+        assert s2['n_qualified'] == 30, 'N_qualified must not ratchet down after eviction'
+        assert s2['target'] == s1['target']
+
+    def test_rebalance_deterministic_ordering(self):
+        """Ties (equal rating/loads/last_used) resolve by name; identical on re-run.
+
+        40 fully-tied active skills, k=0.5 → N_qualified=40, target=round(0.5×40)=20 → evict 20.
+        Since the rank key is a complete tie except for name, the 20 lexicographically smallest
+        names are evicted (worst-first ascending). A second identical run must produce the same set.
+        """
+        names = [f's{i:02d}' for i in range(40)]
+        m = _rebalance_manager(self.tmp, names)  # all 40 files exist → no orphan pruning
+        _migrate_once(m)  # schema 1.3 so rebalance's internal migration is a no-op
+        entries = {nm: {'total_loads': 5, 'by_version': {}, 'status': 'active',
+                        'last_used': '2026-01-01T00:00:00+00:00',
+                        'ratings': {'count': 1, 'sum': 8.0}} for nm in names}
+        _set_metrics(m, entries)
+
+        s1 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
+        assert s1['n_qualified'] == 40
+        assert s1['target'] == 20
+        # Worst-first ascending by name → evict the 20 lexicographically smallest names.
+        expected_evicted = sorted(names)[:20]
+        assert s1['evicted'] == expected_evicted
+
+        # Re-run on an identical fresh store must yield the exact same evicted set.
+        m2 = _rebalance_manager(self.tmp, names)
+        _migrate_once(m2)
+        _set_metrics(m2, entries)
+        s2 = m2.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
+        assert s2['evicted'] == s1['evicted']
+
+    def test_unrated_ranks_before_rated(self):
+        """An unrated skill (-1.0) is evicted before any rated one, even a 0.0-rated one."""
+        m = _rebalance_manager(self.tmp, ['unrated', 'zero'])
+        # N_qualified=2 → target=min_cap=1. Only one slot: the rated (0.0) survives.
+        entries = {
+            'unrated': {'total_loads': 0, 'by_version': {}, 'status': 'active'},  # no ratings → -1.0
+            'zero': {'total_loads': 0, 'by_version': {}, 'status': 'active',
+                     'ratings': {'count': 1, 'sum': 0.0}},  # rated exactly 0.0
+        }
+        _set_metrics(m, entries)
+
+        s = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200)
+        assert s['target'] == 1
+        assert 'unrated' in s['evicted']
+        assert 'zero' not in s['evicted']
+        assert _status_of(m, 'unrated') == 'inactive'
+        assert _status_of(m, 'zero') == 'active'
+
+    def test_da_non_servable_counts_in_qualified_but_not_reenabled(self):
+        """D-A: an INACTIVE/-located skill counts in N_qualified but is never auto-re-enabled."""
+        m = SkillManager()
+        m._metrics_file = self.tmp / 'skills-metrics.json'
+        with m._metrics_lock:
+            m._metrics = {}
+        root = self.tmp / 'skills'
+        _write_skill_file(root, 'servable-a')                 # one-level → servable
+        _write_skill_file(root, 'retired-b', subdir='INACTIVE')  # deeper → non-servable
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        entries = {
+            'servable-a': {'total_loads': 1, 'by_version': {}, 'status': 'active'},
+            'retired-b': {'total_loads': 1, 'by_version': {}, 'status': 'inactive'},
+        }
+        _set_metrics(m, entries)
+
+        s = m.rebalance_active_skills(k=1.0, min_cap=2, max_cap=200)
+        # N_qualified counts BOTH (full corpus) → 2 → target=2.
+        assert s['n_qualified'] == 2
+        assert s['target'] == 2
+        # The non-servable retired-b is excluded from re-enable candidates (needs a file move).
+        assert 'retired-b' not in s['reenabled']
+        assert _status_of(m, 'retired-b') == 'inactive'
+
+    def test_env_disabled_never_reenabled(self):
+        """SKILLS_DISABLED (env) skills are never auto-re-enabled, even as top candidates."""
+        m = _rebalance_manager(self.tmp, ['a', 'b'])
+        _migrate_once(m)
+        # Both qualified + active; then disable 'b' via the public API.
+        entries = {
+            'a': {'total_loads': 3, 'by_version': {}, 'status': 'active'},
+            'b': {'total_loads': 9, 'by_version': {}, 'status': 'active'},  # top-ranked
+        }
+        _set_metrics(m, entries)
+        _disable_after_migration(m, 'b')
+
+        # Monkeypatch the module-level SKILLS_DISABLED so rebalance treats 'b' as env-disabled.
+        import agent_cascade.skills.manager as mgr_mod
+        original = list(mgr_mod.SKILLS_DISABLED)
+        try:
+            mgr_mod.SKILLS_DISABLED = ['b']
+            s = m.rebalance_active_skills(k=1.0, min_cap=2, max_cap=200)
+        finally:
+            mgr_mod.SKILLS_DISABLED = original
+
+        # 'b' is the only inactive candidate but is env-disabled → never re-enabled.
+        assert 'b' not in s['reenabled']
+        assert _status_of(m, 'b') == 'inactive'
+
+    def test_rebalance_never_raises(self):
+        """Any internal failure is swallowed: rebalance returns a dict and never raises."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        # Force an internal step to blow up.
+        m._migrate_metrics_to_v13 = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
+        result = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)  # must not raise
+        assert isinstance(result, dict)
+        assert 'target' in result and 'evicted' in result
+
+    def test_rebalance_disabled_flag_noop(self):
+        """When nothing to evict/re-enable (already at target), the pass is a no-op."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active'}})
+        # min_cap=1, N_qualified=1 → target=1 == active count. No flips.
+        s = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200)
+        assert s['evicted'] == [] and s['reenabled'] == []
+        assert _status_of(m, 'a') == 'active'

@@ -168,6 +168,11 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'memory_hint_query_chars',
     'memory_hint_cooldown_seconds',
     'memory_hint_skill_suggestions',
+    # Skill invalidation (adaptive count-cap) — propagated so tool-level reads see them.
+    'skill_auto_invalidate_enabled',
+    'skill_active_target_k',
+    'skill_active_min_cap',
+    'skill_active_max_cap',
 )
 
 # Default value for max_images_for_llm when not explicitly configured.

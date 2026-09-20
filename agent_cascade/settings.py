@@ -539,6 +539,13 @@ AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
                                           20))  # Fire reflection when turns effectuated > N (strictly greater)
 SKILL_RATING_INITIAL: float = float(os.getenv('AGENT_CASCADE_SKILL_RATING_INITIAL',
                                               5.0))  # Initial rating auto-recorded for newly-registered skills
+
+# ── Skill invalidation (adaptive count-cap) ────────────────────────────────
+# Defaults for the startup rebalance pass: target = clamp(K × N_qualified, MIN_CAP, MAX_CAP).
+SKILL_ACTIVE_TARGET_K: float = float(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_TARGET_K', '1.0'))
+SKILL_ACTIVE_MIN_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MIN_CAP', '20'))
+SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', '200'))
+
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for auto-promotion
 # Applies to NEW skills only: a newly-registered skill is moved straight from the pending
 # staging dir into agents/global/skills/. Upgrade proposals (name == existing production skill)

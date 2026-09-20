@@ -28,6 +28,7 @@ from agent_cascade.log import logger
 from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
 from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURNS, CANDIDATE_EVAL_INTERVAL_SECONDS,
                                     CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL,
+                                    SKILL_ACTIVE_MAX_CAP, SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K,
                                     SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD, SKILL_RATING_INITIAL, SKILLS_DISABLED)
 
 from .cache_helper import compute_scan_signature
@@ -515,6 +516,105 @@ class SkillManager:
                 'rating_avg': rating_avg,
             })
         return result
+
+    def _rank_key(self, entry: Dict[str, Any], name: str) -> Tuple:
+        """Composite rank key for the count-cap rebalance pass (ascending = worst-first).
+
+        Order of preference: rating average (desc), total loads (desc), last-used ISO
+        timestamp (desc), then name (asc) as a final tiebreak so the order is fully
+        deterministic. An unrated skill (no ratings recorded) sorts below any rated one
+        because its rating component is ``-1.0`` (below the 0..10 rating range). A missing
+        ``last_used`` becomes ``''`` which sorts first = oldest/unknown.
+        """
+        r = (entry.get('ratings') or {}) if isinstance(entry, dict) else {}
+        n = r.get('count', 0)
+        avg = (r['sum'] / n) if n else None
+        rating_num = avg if avg is not None else -1.0
+        loads = entry.get('total_loads', 0) if isinstance(entry, dict) else 0
+        last_used = (entry.get('last_used') or '') if isinstance(entry, dict) else ''
+        return (rating_num, loads, last_used, str(name).lower())
+
+    def rebalance_active_skills(self, k: float = SKILL_ACTIVE_TARGET_K,
+                                min_cap: int = SKILL_ACTIVE_MIN_CAP,
+                                max_cap: int = SKILL_ACTIVE_MAX_CAP) -> dict:
+        """One-shot adaptive count-cap pass (plan §7). Best-effort; never raises.
+
+        Brings the number of *active* (served) skills to ``target = clamp(k × N_qualified,
+        min_cap, max_cap)`` where ``N_qualified`` is counted over the FULL corpus (active +
+        inactive), so deactivating a skill cannot ratchet the target down. Evicts the
+        lowest-ranked active skills and re-enables the highest-ranked *servable* inactive
+        ones (D-A: non-servable-location skills count toward N_qualified but are never
+        auto-re-enabled — they need a file move, not a status flip).
+
+        Runs in a background thread at startup (post-discover). Returns a summary dict for
+        logging; any internal exception is caught and logged so it can never break startup.
+        """
+        summary = {'evicted': [], 'reenabled': [], 'n_qualified': 0, 'target': 0, 'active_before': 0}
+        try:
+            # (0) one-time porting + orphan cleanup (post-discover; registry/_skill_paths ready).
+            self._migrate_metrics_to_v13()
+
+            # (a) READ-ONLY SNAPSHOT before any mutation (stability guarantee, Q5).
+            with self._metrics_lock:
+                metrics_snap = _copy.deepcopy(self._metrics)
+            servable = self._servable_skill_names()  # one-level walk (I/O, outside locks)
+            env_disabled = set(SKILLS_DISABLED)      # never auto-re-enable these
+
+            # "Active" is derived from the durable metrics status, NOT the live registry:
+            # disable/enable flips mutate _disabled_names and invalidate the discovery cache
+            # (which removes disabled skills from the registry), so the registry would under-
+            # count active skills after any flip. Metrics status is stable across a pass.
+            active_names = [nm for nm, m in metrics_snap.items()
+                            if isinstance(m, dict) and m.get('status') == 'active']
+
+            # (b) target over the FULL corpus (active + inactive) → cannot ratchet (Q4).
+            n_qualified = sum(
+                1 for m in metrics_snap.values()
+                if isinstance(m, dict) and (
+                    m.get('total_loads', 0) >= 1 or (m.get('ratings') or {}).get('count', 0) >= 1))
+            target = max(min_cap, min(max_cap, round(k * n_qualified)))
+
+            # (c) deterministic ordering (no randomness; name is the final tiebreak).
+            active_ranked = sorted(active_names, key=lambda nm: self._rank_key(metrics_snap.get(nm, {}), nm))
+            inactive_cands = [nm for nm, m in metrics_snap.items()
+                              if isinstance(m, dict) and m.get('status') == 'inactive'
+                              and str(nm).lower() in servable and str(nm).lower() not in env_disabled]
+            inactive_ranked = sorted(inactive_cands, key=lambda nm: self._rank_key(metrics_snap[nm], nm), reverse=True)
+
+            active_before = len(active_names)
+            to_evict = active_ranked[:max(0, active_before - target)]  # lowest-ranked active
+            remaining_after_evict = active_before - len(to_evict)
+            to_reenable = inactive_ranked[:max(0, target - remaining_after_evict)]  # highest-ranked inactive
+
+            # (d) APPLY in bulk under nested locks, then ONE flush + ONE invalidate + ONE re-scan (D-F).
+            if to_evict or to_reenable:
+                with self._write_lock:
+                    for nm in to_evict:
+                        self._disabled_names.add(str(nm).lower())
+                    for nm in to_reenable:
+                        self._disabled_names.discard(str(nm).lower())
+                    with self._metrics_lock:
+                        for nm in to_evict:
+                            self._metrics.setdefault(
+                                nm, {'total_loads': 0, 'by_version': {}, 'status': 'active'})['status'] = 'inactive'
+                        for nm in to_reenable:
+                            self._metrics.setdefault(
+                                nm, {'total_loads': 0, 'by_version': {}, 'status': 'active'})['status'] = 'active'
+                self._flush_metrics_to_disk()
+                self.invalidate_cache()
+                self._ensure_discovered()  # refresh registry: evicted dropped, re-enabled registered
+
+            summary.update(n_qualified=n_qualified, target=target, active_before=active_before,
+                           evicted=to_evict, reenabled=to_reenable)
+            logger.info('[SKILLS] Rebalance: N_qualified=%d target=%d active=%d evicted=%d reenabled=%d',
+                        n_qualified, target, active_before, len(to_evict), len(to_reenable))
+            for nm in to_evict:
+                logger.info("[SKILLS] Auto-inactivated '%s' (count-cap)", nm)  # E2 audit log
+            for nm in to_reenable:
+                logger.info("[SKILLS] Auto-activated   '%s' (count-cap)", nm)
+        except Exception as e:  # noqa: BLE001 — must NEVER break startup/discovery
+            logger.warning('[SKILLS] rebalance_active_skills failed (non-critical): %s', e)
+        return summary
 
     def _increment_load_count(self, skill_name: str, version: str) -> None:
         """Increment load counter for a skill+version combo (buffered).

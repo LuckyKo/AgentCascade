@@ -83,6 +83,11 @@ POOL_SETTINGS_KEYS = frozenset({
     'memory_hint_query_chars',
     'memory_hint_cooldown_seconds',
     'memory_hint_skill_suggestions',
+    # Skill invalidation (adaptive count-cap) — persisted via pool_settings.json.
+    'skill_auto_invalidate_enabled',
+    'skill_active_target_k',
+    'skill_active_min_cap',
+    'skill_active_max_cap',
     # Image base64 management
     'max_images_for_llm',
     # Image caption mode (auto/always/off)
@@ -702,6 +707,48 @@ def _handle_memory_hint_skill_suggestions(ui_cfg: dict, agent_pool: Optional[Any
     """
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         agent_pool.llm_cfg['memory_hint_skill_suggestions'] = bool(ui_cfg.get('memory_hint_skill_suggestions', True))
+
+
+# ── Skill invalidation handlers (adaptive count-cap, plan §7) ───────────────
+@register_config_handler('skill_auto_invalidate_enabled')
+def _handle_skill_auto_invalidate_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle the startup adaptive count-cap rebalance pass (default ON)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        agent_pool.llm_cfg['skill_auto_invalidate_enabled'] = bool(ui_cfg.get('skill_auto_invalidate_enabled', True))
+
+
+@register_config_handler('skill_active_target_k')
+def _handle_skill_active_target_k(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Multiplier K for target = clamp(K × N_qualified, MIN_CAP, MAX_CAP). Clamped to [0.1, 5.0]."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = float(ui_cfg.get('skill_active_target_k', 1.0))
+        except (TypeError, ValueError):
+            val = 1.0
+        agent_pool.llm_cfg['skill_active_target_k'] = min(max(0.1, val), 5.0)
+
+
+@register_config_handler('skill_active_min_cap')
+def _handle_skill_active_min_cap(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Floor on the active-skill target. Clamped to [1, 200]."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = int(ui_cfg.get('skill_active_min_cap', 20))
+        except (TypeError, ValueError):
+            val = 20
+        agent_pool.llm_cfg['skill_active_min_cap'] = min(max(1, val), 200)
+
+
+@register_config_handler('skill_active_max_cap')
+def _handle_skill_active_max_cap(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Ceiling on the active-skill target. Clamped to [min_cap, 1000]; enforced >= min_cap."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = int(ui_cfg.get('skill_active_max_cap', 200))
+        except (TypeError, ValueError):
+            val = 200
+        min_cap = int(agent_pool.llm_cfg.get('skill_active_min_cap', 20) or 1)
+        agent_pool.llm_cfg['skill_active_max_cap'] = min(max(min_cap, val), 1000)
 
 
 @register_config_handler('grep_char_limit')

@@ -74,7 +74,10 @@ class ConfigPersistMixin:
                                 # Memory-hint feature (plan §7)
                                 'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_entries',
                                 'memory_hint_query_chars', 'memory_hint_cooldown_seconds',
-                                'memory_hint_skill_suggestions'):
+                                'memory_hint_skill_suggestions',
+                                # Skill invalidation (adaptive count-cap)
+                                'skill_auto_invalidate_enabled', 'skill_active_target_k',
+                                'skill_active_min_cap', 'skill_active_max_cap'):
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 
@@ -270,6 +273,33 @@ class ConfigPersistMixin:
                 val = data.pop('memory_hint_skill_suggestions', None)
                 if val is not None:
                     self.llm_cfg['memory_hint_skill_suggestions'] = bool(val)
+
+                # ── Skill invalidation (adaptive count-cap) — restore 4 keys into llm_cfg ──
+                val = data.pop('skill_auto_invalidate_enabled', None)
+                if val is not None:
+                    self.llm_cfg['skill_auto_invalidate_enabled'] = bool(val)
+
+                val = data.pop('skill_active_target_k', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_active_target_k'] = min(max(0.1, float(val)), 5.0)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_active_min_cap', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_active_min_cap'] = min(max(1, int(val)), 200)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_active_max_cap', None)
+                if val is not None:
+                    try:
+                        _min_cap = int(self.llm_cfg.get('skill_active_min_cap', 20) or 1)
+                        self.llm_cfg['skill_active_max_cap'] = min(max(_min_cap, int(val)), 1000)
+                    except (ValueError, TypeError):
+                        pass
 
         except Exception as e:
             logger.error(

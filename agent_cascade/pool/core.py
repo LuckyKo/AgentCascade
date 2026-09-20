@@ -229,6 +229,25 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         except Exception as e:  # noqa: BLE001 — never block pool init on the migration
             logger.warning(f"Skill metrics migration to schema 1.3 failed (non-critical): {e}")
 
+        # ── Skill invalidation: adaptive count-cap rebalance (feature: skill_invalidation) ──
+        # One-shot, background, AFTER discover()+candidate-gate+migration so it sees a
+        # consistent registry and an already-migrated store. Best-effort; gated by the UI
+        # setting (default ON). Never blocks pool init.
+        try:
+            if (self.llm_cfg or {}).get('skill_auto_invalidate_enabled', True):
+                _k = float((self.llm_cfg or {}).get('skill_active_target_k', 1.0))
+                _min_cap = int((self.llm_cfg or {}).get('skill_active_min_cap', 20))
+                _max_cap = int((self.llm_cfg or {}).get('skill_active_max_cap', 200))
+                self._skill_rebalance_thread = threading.Thread(
+                    target=self.skill_manager.rebalance_active_skills,
+                    kwargs={'k': _k, 'min_cap': _min_cap, 'max_cap': _max_cap},
+                    name='skill-rebalance',
+                    daemon=True,
+                )
+                self._skill_rebalance_thread.start()
+        except Exception as e:  # noqa: BLE001 — never block pool init on the rebalance pass
+            logger.warning(f"Skill rebalance launch failed (non-critical): {e}")
+
         # Safety-net timer: re-runs the gate every CANDIDATE_EVAL_INTERVAL_SECONDS to catch
         # orphaned candidates (manual file deletions) and out-of-band rating changes.
         from agent_cascade.settings import CANDIDATE_EVAL_INTERVAL_SECONDS

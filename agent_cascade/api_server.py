@@ -1506,6 +1506,11 @@ if __name__ == '__main__':
         'memory_hint_cooldown_seconds': 600,
         # Skill suggestions within memory hints (sub-toggle under memory_hint_enabled).
         'memory_hint_skill_suggestions': True,
+        # Skill invalidation (adaptive count-cap) — the startup rebalance pass runs by default.
+        'skill_auto_invalidate_enabled': True,
+        'skill_active_target_k': 1.0,
+        'skill_active_min_cap': 20,
+        'skill_active_max_cap': 200,
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)

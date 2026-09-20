@@ -755,6 +755,29 @@
                         </label>
                       </div>
                     </details>
+
+                    <!-- Skill Invalidation (adaptive count-cap) — ON by default -->
+                    <details class="settings-section">
+                      <summary class="settings-section-title">Skill Invalidation</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span title="At startup, auto-retire (soft-inactivate) the lowest-ranked active skills to keep the active count near the adaptive target. On by default.">Enable Auto-Invalidate</span>
+                          <input type="checkbox" id="setting-skill-invalidate-enabled" checked />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Multiplier K for the target: clamp(K × N_qualified, min, max). Clamped 0.1–5.0.">Target Multiplier (K)</span>
+                          <input type="number" id="setting-skill-target-k" min="0.1" max="5" step="0.1" value="1.0" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Floor on the active-skill target (clamped 1–200).">Min Cap</span>
+                          <input type="number" id="setting-skill-min-cap" min="1" max="200" step="1" value="20" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Ceiling on the active-skill target (clamped ≥ Min Cap, ≤ 1000).">Max Cap</span>
+                          <input type="number" id="setting-skill-max-cap" min="1" max="1000" step="1" value="200" />
+                        </label>
+                      </div>
+                    </details>
                   </div>
                 </div>
 

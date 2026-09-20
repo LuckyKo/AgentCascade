@@ -206,6 +206,11 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-memory-hint-max-entries', prop: 'value', key: 'memory_hint_max_entries', localKey: 'memory_hint_max_entries' },
   { id: '#setting-memory-hint-query-chars', prop: 'value', key: 'memory_hint_query_chars', localKey: 'memory_hint_query_chars' },
   { id: '#setting-memory-hint-cooldown', prop: 'value', key: 'memory_hint_cooldown_seconds', localKey: 'memory_hint_cooldown_seconds' },
+  // Skill invalidation (adaptive count-cap) — underscore keys via getGenerateCfg().
+  { id: '#setting-skill-invalidate-enabled', prop: 'checked', key: 'skill_auto_invalidate_enabled', localKey: 'skill_auto_invalidate_enabled' },
+  { id: '#setting-skill-target-k', prop: 'value', key: 'skill_active_target_k', localKey: 'skill_active_target_k' },
+  { id: '#setting-skill-min-cap', prop: 'value', key: 'skill_active_min_cap', localKey: 'skill_active_min_cap' },
+  { id: '#setting-skill-max-cap', prop: 'value', key: 'skill_active_max_cap', localKey: 'skill_active_max_cap' },
   // Approval timeout settings
   { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
   { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
@@ -1188,6 +1193,11 @@ function saveSettings(sendToServer) {
   if ($('#setting-memory-hint-max-entries')) s['memory_hint_max_entries'] = $('#setting-memory-hint-max-entries').value;
   if ($('#setting-memory-hint-query-chars')) s['memory_hint_query_chars'] = $('#setting-memory-hint-query-chars').value;
   if ($('#setting-memory-hint-cooldown')) s['memory_hint_cooldown_seconds'] = $('#setting-memory-hint-cooldown').value;
+  // Skill invalidation (adaptive count-cap): persist toggle + 3 numeric settings under underscore keys.
+  if ($('#setting-skill-invalidate-enabled')) s['skill_auto_invalidate_enabled'] = $('#setting-skill-invalidate-enabled').checked;
+  if ($('#setting-skill-target-k')) s['skill_active_target_k'] = $('#setting-skill-target-k').value;
+  if ($('#setting-skill-min-cap')) s['skill_active_min_cap'] = $('#setting-skill-min-cap').value;
+  if ($('#setting-skill-max-cap')) s['skill_active_max_cap'] = $('#setting-skill-max-cap').value;
   if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
   if ($('#setting-system-idle-timeout')) s['system-idle-timeout'] = $('#setting-system-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
@@ -1394,6 +1404,20 @@ function loadSettings() {
     }
     if (_isFiniteRestore(s['memory_hint_cooldown_seconds'])) {
       $('#setting-memory-hint-cooldown').value = s['memory_hint_cooldown_seconds'];
+    }
+    // Skill invalidation (adaptive count-cap): restore toggle + 3 numeric settings.
+    if (typeof s['skill_auto_invalidate_enabled'] === 'boolean') {
+      const _skInval = $('#setting-skill-invalidate-enabled');
+      if (_skInval) _skInval.checked = s['skill_auto_invalidate_enabled'];
+    }
+    if (_isFiniteRestore(s['skill_active_target_k'])) {
+      $('#setting-skill-target-k').value = s['skill_active_target_k'];
+    }
+    if (_isFiniteRestore(s['skill_active_min_cap'])) {
+      $('#setting-skill-min-cap').value = s['skill_active_min_cap'];
+    }
+    if (_isFiniteRestore(s['skill_active_max_cap'])) {
+      $('#setting-skill-max-cap').value = s['skill_active_max_cap'];
     }
     if (_isFiniteRestore(s['idle-timeout'])) {
       $('#setting-idle-timeout').value = s['idle-timeout'];
@@ -5653,6 +5677,11 @@ function getGenerateCfg() {
   if ($('#setting-memory-hint-max-entries')) { const _mme = parseInt($('#setting-memory-hint-max-entries').value); cfg.memory_hint_max_entries = Number.isNaN(_mme) ? 3 : Math.min(4, Math.max(1, _mme)); }
   if ($('#setting-memory-hint-query-chars')) { const _mqc = parseInt($('#setting-memory-hint-query-chars').value); cfg.memory_hint_query_chars = Number.isNaN(_mqc) ? 1000 : Math.min(4000, Math.max(100, _mqc)); }
   if ($('#setting-memory-hint-cooldown')) { const _mcd = parseFloat($('#setting-memory-hint-cooldown').value); cfg.memory_hint_cooldown_seconds = Number.isNaN(_mcd) ? 600 : Math.min(86400, Math.max(0, _mcd)); }
+  // Skill invalidation (adaptive count-cap) — clamped to match the server-side config handlers.
+  if ($('#setting-skill-invalidate-enabled')) cfg.skill_auto_invalidate_enabled = $('#setting-skill-invalidate-enabled').checked;
+  if ($('#setting-skill-target-k')) { const _stk = parseFloat($('#setting-skill-target-k').value); cfg.skill_active_target_k = Number.isNaN(_stk) ? 1.0 : Math.min(5.0, Math.max(0.1, _stk)); }
+  if ($('#setting-skill-min-cap')) { const _smc = parseInt($('#setting-skill-min-cap').value); cfg.skill_active_min_cap = Number.isNaN(_smc) ? 20 : Math.min(200, Math.max(1, _smc)); }
+  if ($('#setting-skill-max-cap')) { const _smx = parseInt($('#setting-skill-max-cap').value); const _smin = cfg.skill_active_min_cap ?? 20; cfg.skill_active_max_cap = Number.isNaN(_smx) ? 200 : Math.min(1000, Math.max(_smin, _smx)); }
 
   // Compression threshold settings (PoolSettings fields) — clamped to match saveSettings() validation
   if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = Math.min(99, Math.max(50, parseFloat($('#setting-compression-warning-threshold').value) || 90));
