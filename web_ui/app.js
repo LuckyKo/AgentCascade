@@ -587,6 +587,7 @@ const ActivityBar = {
   // Queue banner refs
   queueBanner: null,       // DOM ref to #queueBanner
   queueMessageList: null,  // DOM ref to #queueMessageList
+  _queueSig: null,         // Signature of the last rendered queue (dirty check)
 
   // Cached values for pushImmediate dedup (avoids JSON.stringify overhead)
   _dedupInstance: null,
@@ -735,8 +736,7 @@ render(streamingText) {
       return;
     }
 
-    // Dirty check: skip teardown/rebuild when the queue is unchanged and the
-    // banner is already shown (avoids O(queue-length) DOM churn on every tick).
+    // Dirty check: skip teardown/rebuild when the queue is unchanged and the banner is already shown.
     const sig = queuedMessages.join('\n');
     if (sig === this._queueSig && this.queueBanner.style.display !== 'none') return;
     this._queueSig = sig;
@@ -5118,8 +5118,7 @@ function getActivityPreview(msg) {
     return `✅ ${name} completed`;
   }
 
-  // Regular content or reasoning
-  // O(300): only pull the needed tail instead of concatenating the full strings.
+  // Regular content or reasoning — slice only the last 300 chars (avoids full-string concat).
   const c = msg.content || '';
   const r = msg.reasoning_content || '';
   let text;
