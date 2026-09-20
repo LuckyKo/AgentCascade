@@ -300,16 +300,16 @@ class TestHelpCommand:
 
         assert '[NORMAL MODE]' in result
         assert '[RESTRICTED MODE]' not in result
-        # Section headers (counts are derived from the live allow-list sets so they can't drift)
+        # Section headers (no per-section counts — they added no value and were a drift risk)
         for header in [
             'shell_cmd auto-approval reference',
-            f'Primary read-only commands ({len(ShellMixin._SAFE_PRIMARY_COMMANDS)}):',
-            f'Git subcommands ({len(ShellMixin._SAFE_GIT_SUBCOMMANDS)})',
+            'Primary read-only commands:',
+            "Git subcommands — run as 'git <subcommand> ...':",
             'Allowed git flags before the subcommand:',
             'Dangerous git args that are BLOCKED (per subcommand):',
-            f"Safe pipe/filter stages (anything after a '|') ({len(ShellMixin._SAFE_PIPE_COMMANDS)}):",
+            "Safe pipe/filter stages (anything after a '|'):",
             'Allowed patterns:',
-            f'Async shell control commands ({len(ShellMixin._CONTROL_COMMANDS)}):',
+            'Async shell control commands:',
             'NOT allowed:',
         ]:
             assert header in result, f"missing section header: {header!r}"
@@ -323,17 +323,28 @@ class TestHelpCommand:
         assert '[RESTRICTED MODE]' in result
         assert '[NORMAL MODE]' not in result
 
-    def test_help_counts_match_sets(self, shell_cmd_tool):
-        """Counts rendered by __help must match the actual allow-list sizes (no drift)."""
+    def test_help_has_no_section_counts(self, shell_cmd_tool):
+        """__help section headers must NOT carry per-section counts (removed: no value, drift risk)."""
         pool = _FakePool({'normal': _make_instance(False)})
         shell_cmd_tool.agent_pool = pool
         shell_cmd_tool.agent_name = 'normal'
         result = shell_cmd_tool.call('{"command": "__help"}')
 
-        assert f"Primary read-only commands ({len(ShellMixin._SAFE_PRIMARY_COMMANDS)}):" in result
-        assert f"Git subcommands ({len(ShellMixin._SAFE_GIT_SUBCOMMANDS)})" in result
-        assert f"Safe pipe/filter stages (anything after a '|') ({len(ShellMixin._SAFE_PIPE_COMMANDS)}):" in result
-        assert f"Async shell control commands ({len(ShellMixin._CONTROL_COMMANDS)}):" in result
+        for header in [
+            'Primary read-only commands:',
+            "Git subcommands — run as 'git <subcommand> ...':",
+            "Safe pipe/filter stages (anything after a '|'):",
+            'Async shell control commands:',
+        ]:
+            assert header in result, f"missing count-free section header: {header!r}"
+        # Guard against counts being re-introduced on the headers.
+        for bad in [
+            f'Primary read-only commands ({len(ShellMixin._SAFE_PRIMARY_COMMANDS)})',
+            f'Git subcommands ({len(ShellMixin._SAFE_GIT_SUBCOMMANDS)})',
+            f"Safe pipe/filter stages (anything after a '|') ({len(ShellMixin._SAFE_PIPE_COMMANDS)})",
+            f'Async shell control commands ({len(ShellMixin._CONTROL_COMMANDS)})',
+        ]:
+            assert bad not in result, f"unexpected count reintroduced: {bad!r}"
 
     def test_help_lists_every_entry(self, shell_cmd_tool):
         """Every allow-list entry must appear in the output."""

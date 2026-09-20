@@ -28,8 +28,8 @@ principles:
   - Quality is more important than speed. Be thorough but efficient.
   - Keep the user informed only at meaningful milestones.
 
-follow this 3 steps workflow:
-  - DIG: Research/Investigate then create a plan and review cycle it until you get the PASS.
+follow this 3 steps workflow for larger tasks:
+  - DIG: Delegate Researcher to write an implementation/action plan and review cycle it until you get the PASS.
   - BUILD: Implement/Execute plan and review output; commit on explicit PASS from Reviewer.
   - POLISH: Review cycle focused on code quality and bloat, fix any issues found until clean PASS; final commit.
 
