@@ -1852,3 +1852,70 @@ class TestSkillInvalidationRebalance:
         s = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200)
         assert s['evicted'] == [] and s['reenabled'] == []
         assert _status_of(m, 'a') == 'active'
+
+    def test_compute_rebalance_preview_matches_and_is_side_effect_free(self):
+        """compute_rebalance_preview returns the SAME threshold math as a real rebalance pass AND
+        mutates nothing (no status flips, no _disabled_names change, no metrics flush to disk)."""
+        names = [f's{i:02d}' for i in range(30)]
+        m = _rebalance_manager(self.tmp, names)
+        # 15 rated high (qualified), 15 unrated → N_qualified=15, raw=round(1.0*15)=15 < min_cap(20).
+        entries = {}
+        for i in range(15):
+            entries[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
+                                 'ratings': {'count': 2, 'sum': 18.0}}  # avg 9.0
+        for i in range(15, 30):
+            entries[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
+        _set_metrics(m, entries)
+
+        # Snapshot state BEFORE the preview so we can prove it is side-effect-free.
+        with m._metrics_lock:
+            metrics_before = _copy.deepcopy(m._metrics)
+        disabled_before = set(m._disabled_names)
+        store_file = m._metrics_file
+        store_before = store_file.read_text(encoding='utf-8') if store_file.exists() else None
+
+        # READ-ONLY preview (no migration, no mutation).
+        p = m.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)
+        assert p['ok'] is True and 'error' not in p
+        assert p['n_qualified'] == 15
+        assert p['raw'] == 15
+        assert p['evict_threshold'] == 20   # floored at min_cap (not raw=15)
+        assert p['reenable_target'] == 15   # min(max_cap, raw, n_servable)=min(200,15,30)=15
+        assert p['n_servable'] == 30
+        assert p['active_count'] == 30      # all 30 start active
+
+        # Prove the preview left EVERYTHING untouched (the core "read-only" guarantee).
+        with m._metrics_lock:
+            metrics_after = _copy.deepcopy(m._metrics)
+        assert metrics_after == metrics_before          # no status flip, no counter change
+        assert set(m._disabled_names) == disabled_before  # no disable/enable side effect
+        store_after = store_file.read_text(encoding='utf-8') if store_file.exists() else None
+        assert store_after == store_before              # no flush to disk
+
+        # Now run a REAL pass on an identical fresh manager and confirm the preview's numbers
+        # match exactly what rebalance_active_skills would compute (the "always matches" guarantee).
+        m2 = _rebalance_manager(self.tmp / 'real', names)
+        entries2 = {}
+        for i in range(15):
+            entries2[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
+                                  'ratings': {'count': 2, 'sum': 18.0}}
+        for i in range(15, 30):
+            entries2[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
+        _set_metrics(m2, entries2)
+        s = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_qualified'] == p['n_qualified']
+        assert s['raw'] == p['raw']
+        assert s['evict_threshold'] == p['evict_threshold']
+        assert s['reenable_target'] == p['reenable_target']
+        assert s['n_servable'] == p['n_servable']
+        assert s['active_before'] == p['active_count']
+
+    def test_compute_rebalance_preview_never_raises(self):
+        """Any internal failure is swallowed: preview returns a dict with ok=False and never raises."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        # Force the servable walk (the one I/O step) to blow up.
+        m._servable_skill_names = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
+        p = m.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)  # must not raise
+        assert isinstance(p, dict)
+        assert p['ok'] is False
+        assert 'error' in p

@@ -1008,6 +1008,60 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
         return {'skills': sm.list_skills_with_status()}
 
+    @app.get('/api/skills/threshold')
+    async def api_skill_threshold(request: Request):
+        """READ-ONLY preview of the current rebalance threshold. No apply/mutation.
+
+        Reads k/min_cap/max_cap from ``agent_pool.llm_cfg`` (same keys/defaults as pool/core.py),
+        but accepts optional ``?k=&min_cap=&max_cap=`` overrides so the UI can preview live as the
+        user types. Overrides are clamped EXACTLY like the config handlers (k→[0.1,5],
+        min_cap→[1,200], max_cap→[min_cap,1000]) so a displayed number always matches what a real
+        save+pass would compute. Returns the preview dict directly (200) or 503 if no skill_manager.
+        """
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        cfg = (agent_pool.llm_cfg or {}) if hasattr(agent_pool, 'llm_cfg') else {}
+
+        # Base values from the server-side config (same defaults as pool/core.py L238-240).
+        try:
+            k = float(cfg.get('skill_active_target_k', 1.0))
+        except (TypeError, ValueError):
+            k = 1.0
+        try:
+            min_cap = int(cfg.get('skill_active_min_cap', 20))
+        except (TypeError, ValueError):
+            min_cap = 20
+        try:
+            max_cap = int(cfg.get('skill_active_max_cap', 200))
+        except (TypeError, ValueError):
+            max_cap = 200
+
+        # Optional unsaved overrides from the input boxes — parse only if present.
+        qp = request.query_params
+        if 'k' in qp:
+            try:
+                k = float(qp['k'])
+            except (TypeError, ValueError):
+                pass
+        if 'min_cap' in qp:
+            try:
+                min_cap = int(qp['min_cap'])
+            except (TypeError, ValueError):
+                pass
+        if 'max_cap' in qp:
+            try:
+                max_cap = int(qp['max_cap'])
+            except (TypeError, ValueError):
+                pass
+
+        # Clamp identically to config_handlers so out-of-range input matches a real save+pass.
+        k = min(max(0.1, k), 5.0)
+        min_cap = min(max(1, min_cap), 200)
+        max_cap = min(max(min_cap, max_cap), 1000)
+
+        return sm.compute_rebalance_preview(k=k, min_cap=min_cap, max_cap=max_cap)
+
     @app.post('/api/skills/toggle')
     async def api_toggle_skill(data: dict):
         """Toggle one skill's status. Body: {"name": str, "status": "active"|"inactive"}."""

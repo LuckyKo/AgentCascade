@@ -645,6 +645,53 @@ class SkillManager:
             logger.warning('[SKILLS] rebalance_active_skills failed (non-critical): %s', e)
         return summary
 
+    def compute_rebalance_preview(self, k: float = SKILL_ACTIVE_TARGET_K,
+                                  min_cap: int = SKILL_ACTIVE_MIN_CAP,
+                                  max_cap: int = SKILL_ACTIVE_MAX_CAP) -> dict:
+        """READ-ONLY preview of what a rebalance pass WOULD compute. Never mutates state.
+
+        Runs the exact same read-only math as :meth:`rebalance_active_skills` (deepcopy snapshot
+        under ``_metrics_lock`` + one servable walk + the pure target math) so the displayed number
+        always matches a real pass — but applies NOTHING: no migration, no ``_disabled_names``
+        mutation, no metrics flush, no cache invalidation, no re-scan. Safe to call at any time and
+        never raises (any internal failure is caught and reported via an ``'error'`` key).
+
+        Return keys: ``n_qualified``, ``raw``, ``evict_threshold``, ``reenable_target``,
+        ``n_servable``, ``active_count``, ``ok`` (plus ``k``/``min_cap``/``max_cap`` echoed back for
+        the UI, and ``error`` on failure).
+        """
+        result = {'ok': False, 'n_qualified': 0, 'raw': 0, 'evict_threshold': 0,
+                  'reenable_target': 0, 'n_servable': 0, 'active_count': 0,
+                  'k': k, 'min_cap': min_cap, 'max_cap': max_cap}
+        try:
+            # READ-ONLY SNAPSHOT — identical to rebalance_active_skills (a), but we deliberately
+            # SKIP _migrate_metrics_to_v13() here: that is a one-time porting step with side
+            # effects and would be wrong for a pure preview.
+            with self._metrics_lock:
+                metrics_snap = _copy.deepcopy(self._metrics)
+            n_servable = len(self._servable_skill_names())  # one-level walk (I/O, outside locks)
+
+            # "Active" derived from the durable metrics status (same derivation as rebalance).
+            active_count = sum(1 for m in metrics_snap.values()
+                               if isinstance(m, dict) and m.get('status') == 'active')
+
+            # Same pure math as rebalance_active_skills (b): raw over the FULL corpus.
+            n_qualified = sum(
+                1 for m in metrics_snap.values()
+                if isinstance(m, dict) and (
+                    m.get('total_loads', 0) >= 1 or (m.get('ratings') or {}).get('count', 0) >= 1))
+            raw = round(k * n_qualified)
+            evict_threshold = max(min_cap, min(max_cap, raw))
+            reenable_target = min(max_cap, raw, n_servable)
+
+            result.update(n_qualified=n_qualified, raw=raw, evict_threshold=evict_threshold,
+                          reenable_target=reenable_target, n_servable=n_servable,
+                          active_count=active_count, ok=True)
+        except Exception as e:  # noqa: BLE001 — preview must never raise
+            logger.warning('[SKILLS] compute_rebalance_preview failed (non-critical): %s', e)
+            result['error'] = str(e)
+        return result
+
     def _increment_load_count(self, skill_name: str, version: str) -> None:
         """Increment load counter for a skill+version combo (buffered).
 

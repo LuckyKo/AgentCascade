@@ -1601,6 +1601,49 @@ if (sidePanel) {
   sidePanel.addEventListener('input', debouncedSaveSettings);
 }
 
+// ── Skill Invalidation: read-only "current threshold" preview ──────────────
+// Fetches the server-computed rebalance threshold and renders it as muted text.
+// Passes the current input-box values as query params so typing updates live;
+// the endpoint clamps them exactly like a real save, so the number always matches.
+let _skillThresholdTimer = null;
+function refreshSkillThreshold() {
+  const el = $('#skill-threshold-status');
+  if (!el) return;
+  // Build query string from the current (possibly unsaved) input boxes.
+  const params = new URLSearchParams();
+  const kEl = $('#setting-skill-target-k'), minEl = $('#setting-skill-min-cap'), maxEl = $('#setting-skill-max-cap');
+  if (kEl && kEl.value !== '') params.set('k', kEl.value);
+  if (minEl && minEl.value !== '') params.set('min_cap', minEl.value);
+  if (maxEl && maxEl.value !== '') params.set('max_cap', maxEl.value);
+  const qs = params.toString();
+  fetch(qs ? `/api/skills/threshold?${qs}` : '/api/skills/threshold')
+    .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+    .then(data => {
+      if (data && data.ok) {
+        const kTxt = Number.isFinite(parseFloat(data.k)) ? parseFloat(data.k).toString() : '';
+        el.textContent = `Threshold: evict-below ${data.evict_threshold} · enable-up-to ${data.reenable_target}` +
+          ` · ${data.active_count} active / ${data.n_qualified} qualified` +
+          (kTxt ? ` (K=${kTxt})` : '');
+      } else {
+        el.textContent = 'Threshold: n/a';
+      }
+    })
+    .catch(err => {
+      console.warn('Failed to fetch skill threshold:', err);
+      el.textContent = 'Threshold: n/a';
+    });
+}
+function debouncedRefreshSkillThreshold() {
+  clearTimeout(_skillThresholdTimer);
+  _skillThresholdTimer = setTimeout(refreshSkillThreshold, 300);
+}
+// Initial load + live update as the user types in any of the three numeric settings.
+refreshSkillThreshold();
+['#setting-skill-target-k', '#setting-skill-min-cap', '#setting-skill-max-cap'].forEach(sel => {
+  const el = $(sel);
+  if (el) el.addEventListener('input', debouncedRefreshSkillThreshold);
+});
+
 // Work folder textareas use explicit save button instead of auto-sync
 const saveWorkFoldersBtn = $('#saveWorkFolders');
 
