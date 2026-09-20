@@ -539,15 +539,22 @@ class SkillManager:
                                 max_cap: int = SKILL_ACTIVE_MAX_CAP) -> dict:
         """One-shot adaptive count-cap pass (plan §7). Best-effort; never raises.
 
-        Brings the number of *active* (served) skills to ``target = clamp(k × N_qualified,
-        min_cap, max_cap)`` where ``N_qualified`` is counted over the FULL corpus (active +
-        inactive), so deactivating a skill cannot ratchet the target down. Evicts the
-        lowest-ranked active skills and re-enables the highest-ranked *servable* inactive
-        ones (D-A: non-servable-location skills count toward N_qualified but are never
-        auto-re-enabled — they need a file move, not a status flip).
+        ``N_qualified`` is counted over the FULL corpus (active + inactive) so deactivating a
+        skill cannot ratchet the desired count down. The raw desired count is ``raw = round(k ×
+        N_qualified)``. Two independent bounds are applied:
 
-        Runs in a background thread at startup (post-discover). Returns a summary dict for
-        logging; any internal exception is caught and logged so it can never break startup.
+        - **Eviction** is floored at ``min_cap`` — it is a LOWER BOUND ON EVICTION, never a
+          force-enable mandate. We evict lowest-ranked active skills only down to
+          ``evict_threshold = max(min_cap, min(max_cap, raw))``; a tiny corpus can therefore sit
+          far below min_cap without being pruned.
+        - **Re-enable** is bounded by the actual servable corpus — we raise the active count back
+          toward ``raw`` but never beyond ``reenable_target = min(max_cap, raw, n_servable)``, so a
+          small corpus is never pushed to enable up to min_cap/max_cap.
+
+        D-A: non-servable-location skills count toward N_qualified but are never auto-re-enabled
+        (they need a file move, not a status flip). Runs in a background thread at startup
+        (post-discover). Returns a summary dict for logging; any internal exception is caught and
+        logged so it can never break startup.
         """
         summary = {'evicted': [], 'reenabled': [], 'n_qualified': 0, 'target': 0, 'active_before': 0}
         try:
@@ -558,6 +565,7 @@ class SkillManager:
             with self._metrics_lock:
                 metrics_snap = _copy.deepcopy(self._metrics)
             servable = self._servable_skill_names()  # one-level walk (I/O, outside locks)
+            n_servable = len(servable)               # hard ceiling on what can be active
             env_disabled = set(SKILLS_DISABLED)      # never auto-re-enable these
 
             # "Active" is derived from the durable metrics status, NOT the live registry:
@@ -567,12 +575,23 @@ class SkillManager:
             active_names = [nm for nm, m in metrics_snap.items()
                             if isinstance(m, dict) and m.get('status') == 'active']
 
-            # (b) target over the FULL corpus (active + inactive) → cannot ratchet (Q4).
+            # (b) raw desired count over the FULL corpus (active + inactive) → cannot ratchet (Q4).
             n_qualified = sum(
                 1 for m in metrics_snap.values()
                 if isinstance(m, dict) and (
                     m.get('total_loads', 0) >= 1 or (m.get('ratings') or {}).get('count', 0) >= 1))
-            target = max(min_cap, min(max_cap, round(k * n_qualified)))
+            raw = round(k * n_qualified)
+
+            # min_cap is a LOWER BOUND ON EVICTION, not a force-enable floor: we never evict
+            # active skills below min_cap regardless of how low `raw` goes. The eviction
+            # threshold is therefore clamped to [min_cap, max_cap]. (A tiny corpus can thus
+            # legitimately sit far below min_cap — min_cap only stops us from pruning it.)
+            evict_threshold = max(min_cap, min(max_cap, raw))
+
+            # Re-enable is bounded by the ACTUAL servable corpus so a small corpus is never
+            # pushed to enable up to min_cap/max_cap: we only ever raise the active count back
+            # toward `raw`, and never beyond what can actually be served.
+            reenable_target = min(max_cap, raw, n_servable)
 
             # (c) deterministic ordering (no randomness; name is the final tiebreak).
             active_ranked = sorted(active_names, key=lambda nm: self._rank_key(metrics_snap.get(nm, {}), nm))
@@ -582,9 +601,9 @@ class SkillManager:
             inactive_ranked = sorted(inactive_cands, key=lambda nm: self._rank_key(metrics_snap[nm], nm), reverse=True)
 
             active_before = len(active_names)
-            to_evict = active_ranked[:max(0, active_before - target)]  # lowest-ranked active
+            to_evict = active_ranked[:max(0, active_before - evict_threshold)]  # lowest-ranked active
             remaining_after_evict = active_before - len(to_evict)
-            to_reenable = inactive_ranked[:max(0, target - remaining_after_evict)]  # highest-ranked inactive
+            to_reenable = inactive_ranked[:max(0, reenable_target - remaining_after_evict)]  # highest-ranked inactive
 
             # (d) APPLY in bulk under nested locks, then ONE flush + ONE invalidate + ONE re-scan (D-F).
             if to_evict or to_reenable:
@@ -604,10 +623,15 @@ class SkillManager:
                 self.invalidate_cache()
                 self._ensure_discovered()  # refresh registry: evicted dropped, re-enabled registered
 
-            summary.update(n_qualified=n_qualified, target=target, active_before=active_before,
+            summary.update(n_qualified=n_qualified, raw=raw, evict_threshold=evict_threshold,
+                           reenable_target=reenable_target, n_servable=n_servable,
+                           target=remaining_after_evict + len(to_reenable), active_before=active_before,
                            evicted=to_evict, reenabled=to_reenable)
-            logger.info('[SKILLS] Rebalance: N_qualified=%d target=%d active=%d evicted=%d reenabled=%d',
-                        n_qualified, target, active_before, len(to_evict), len(to_reenable))
+            logger.info('[SKILLS] Rebalance: N_qualified=%d raw=%d evict_threshold=%d reenable_target=%d '
+                        'n_servable=%d active_before=%d active_after=%d evicted=%d reenabled=%d',
+                        n_qualified, raw, evict_threshold, reenable_target, n_servable,
+                        active_before, remaining_after_evict + len(to_reenable),
+                        len(to_evict), len(to_reenable))
             for nm in to_evict:
                 logger.info("[SKILLS] Auto-inactivated '%s' (count-cap)", nm)  # E2 audit log
             for nm in to_reenable:

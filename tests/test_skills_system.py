@@ -1560,27 +1560,45 @@ class TestSkillInvalidationRebalance:
         yield
 
     def test_rebalance_target_clamp_min_and_max(self):
-        """Target is clamped to [min_cap, max_cap]: floor at MIN_CAP, ceiling at MAX_CAP.
+        """Eviction is floored at MIN_CAP (never evict below it) and ceiling-bounded at MAX_CAP.
 
-        Each metrics entry needs a real on-disk file (orphan prune) and the store must be at
-        schema 1.3 before we inject qualified entries — so: create files, migrate once, then
-        inject. rebalance's internal migration is then a no-op that won't clobber our data.
+        min_cap is a LOWER BOUND ON EVICTION, not a force-enable floor: a tiny corpus can sit far
+        below min_cap without being pruned or padded up to 20. Each metrics entry needs a real
+        on-disk file (orphan prune) and the store must be at schema 1.3 before we inject qualified
+        entries — so: create files, migrate once, then inject. rebalance's internal migration is
+        then a no-op that won't clobber our data.
         """
-        # Floor: N_qualified=1, k=1.0 → 1 < min_cap(20) → target == 20.
-        m = _rebalance_manager(self.tmp, ['a'])
+        # Eviction floor: 25 active, N_qualified=10, k=1.0 → raw=10 < min_cap(20). The eviction
+        # threshold is max(min_cap, min(max_cap, raw)) = 20, so we evict down to 20 (only 5), NOT
+        # down to raw=10 — min_cap protects the corpus from being pruned below it.
+        floor_tmp = self.tmp / 'floor'
+        floor_names = [f'f{i}' for i in range(25)]
+        m = _rebalance_manager(floor_tmp, floor_names)
         _migrate_once(m)
-        _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active'}})
+        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in floor_names[:10]}
+        for nm in floor_names[10:]:
+            entries[nm] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}  # active but unqualified
+        _set_metrics(m, entries)
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
-        assert s['n_qualified'] == 1
-        assert s['target'] == 20
+        assert s['n_qualified'] == 10
+        assert s['raw'] == 10
+        assert s['evict_threshold'] == 20  # floored at min_cap, not raw(10)
+        assert len(s['evicted']) == 5      # evict only down to 20, not to raw=10
+        assert s['target'] == 20           # post-pass active count
 
-        # Ceiling: N_qualified=300, k=1.0 → 300 > max_cap(200) → target == 200.
+        # Ceiling: N_qualified=300, k=1.0 → raw=300 > max_cap(200) → evict_threshold==200.
+        # Isolated to its own subdir so the floor sub-case's on-disk files don't leak into this
+        # corpus (the shared self.tmp skills dir would otherwise inflate n_servable + metrics).
+        ceiling_tmp = self.tmp / 'ceiling'
         ceiling_names = [f's{i}' for i in range(300)]
-        m2 = _rebalance_manager(self.tmp, ceiling_names)
+        m2 = _rebalance_manager(ceiling_tmp, ceiling_names)
         _migrate_once(m2)
         _set_metrics(m2, {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in ceiling_names})
         s2 = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s2['n_qualified'] == 300
+        assert s2['raw'] == 300
+        assert s2['evict_threshold'] == 200  # ceiling-bounded at max_cap
+        assert len(s2['evicted']) == 100     # evict down to 200
         assert s2['target'] == 200
 
     def test_rebalance_evicts_over_cap(self):
@@ -1598,7 +1616,9 @@ class TestSkillInvalidationRebalance:
 
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == 15
-        assert s['target'] == 20  # floor clamps 15 → 20
+        # raw=15 < min_cap(20) → evict_threshold floored at 20 (min_cap protects the corpus).
+        assert s['evict_threshold'] == 20
+        assert s['target'] == 20  # post-pass active count (15 rated + 5 unrated kept by the floor)
         assert s['active_before'] == 30
         assert len(s['evicted']) == 10
         # Unrated (worst) evicted; rated survive.
@@ -1606,7 +1626,7 @@ class TestSkillInvalidationRebalance:
             assert _status_of(m, nm) == 'active'
         for nm in s['evicted']:
             assert _status_of(m, nm) == 'inactive'
-        # Exactly 20 active remain (the 15 rated + 5 unrated that the floor keeps).
+        # Exactly 20 active remain (the 15 rated + 5 unrated that the eviction floor keeps).
         assert len(_active_names(m)) == 20
 
     def test_rebalance_reenables_under_cap(self):
@@ -1639,12 +1659,50 @@ class TestSkillInvalidationRebalance:
         assert len(_active_names(m)) == 5
 
     def test_rebalance_min_cap_floor(self):
-        """Q4 edge: N_qualified < min_cap → target == min_cap (floor)."""
+        """min_cap is a LOWER BOUND ON EVICTION, not a force-enable floor.
+
+        With a tiny corpus (1 active, N_qualified=1 → raw=1 < min_cap=20), the pass must NOT
+        pad the active count up to 20 — there are no inactive candidates anyway, so nothing is
+        re-enabled. min_cap only matters when evicting: it stops us from pruning below it.
+        """
         m = _rebalance_manager(self.tmp, ['a'])
         _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active'}})
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == 1
-        assert s['target'] == 20
+        assert s['raw'] == 1
+        # Eviction is floored at min_cap (never evict below 20), but re-enable is bounded by the
+        # servable corpus (n_servable=1) and raw(1) — so we never force-enable up to 20.
+        assert s['evict_threshold'] == 20
+        assert s['reenable_target'] == 1
+        assert s['n_servable'] == 1
+        assert s['evicted'] == [] and s['reenabled'] == []
+        assert s['target'] == 1  # post-pass active count stays at the real corpus size
+
+    def test_rebalance_tiny_corpus_not_forced_to_min_cap(self):
+        """Regression: a 2-skill corpus must NOT be padded to min_cap=20 nor pruned.
+
+        This directly encodes "min_cap is a lower bound on eviction, not a force-enable cap":
+        with only 2 active skills and no inactive candidates, the pass must be a complete no-op
+        even though min_cap(20) >> corpus size. The OLD floor-as-mandate math would have tried to
+        re-enable up to 20 (impossible here, but it also set target=20); the new math leaves the
+        active count exactly where it is.
+        """
+        m = _rebalance_manager(self.tmp, ['a', 'b'])
+        _migrate_once(m)
+        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in ('a', 'b')}
+        _set_metrics(m, entries)
+
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_qualified'] == 2
+        assert s['raw'] == 2
+        # evict_threshold floored at min_cap(20), but active_before(2) < 20 → nothing evicted.
+        assert s['evict_threshold'] == 20
+        # reenable_target bounded by the servable corpus (2) and raw(2) → never 20.
+        assert s['reenable_target'] == 2
+        assert s['n_servable'] == 2
+        assert s['evicted'] == []      # no eviction (2 < evict_threshold=20)
+        assert s['reenabled'] == []    # no force-enable up to min_cap
+        assert s['target'] == 2        # post-pass active count stays at the real corpus size
 
     def test_rebalance_full_corpus_no_ratchet(self):
         """Deactivating a batch must not shrink N_qualified → target stays stable."""
@@ -1654,14 +1712,24 @@ class TestSkillInvalidationRebalance:
         _set_metrics(m, entries)
 
         s1 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
-        # N_qualified=30, k=0.5 → 15 < min_cap(20) → target=20; evict 10 to reach 20.
+        # N_qualified=30, k=0.5 → raw=15. Eviction is floored at min_cap(20): we evict down to 20
+        # (not to raw=15), so the corpus never drops below min_cap. The 10 just-evicted skills are
+        # inactive+servable re-enable candidates, but remaining_after_evict(20) is already >=
+        # reenable_target(min(max_cap,raw,n_servable)=15), so nothing is re-enabled — the pass
+        # settles at the eviction floor of 20.
         assert s1['n_qualified'] == 30
+        assert s1['raw'] == 15
+        assert s1['evict_threshold'] == 20
+        assert len(s1['evicted']) == 10
+        assert s1['reenabled'] == []
         assert s1['target'] == 20
 
-        # Second run on the same store: inactive skills still count in N_qualified.
+        # Second run on the same store: inactive skills still count in N_qualified (no ratchet),
+        # and the pass is a no-op (already at 20, which equals evict_threshold → nothing to do).
         s2 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
         assert s2['n_qualified'] == 30, 'N_qualified must not ratchet down after eviction'
-        assert s2['target'] == s1['target']
+        assert s2['evicted'] == [] and s2['reenabled'] == []
+        assert s2['target'] == s1['target'] == 20
 
     def test_rebalance_deterministic_ordering(self):
         """Ties (equal rating/loads/last_used) resolve by name; identical on re-run.
@@ -1729,10 +1797,16 @@ class TestSkillInvalidationRebalance:
         _set_metrics(m, entries)
 
         s = m.rebalance_active_skills(k=1.0, min_cap=2, max_cap=200)
-        # N_qualified counts BOTH (full corpus) → 2 → target=2.
+        # N_qualified counts BOTH (full corpus, incl. the non-servable retired-b) → 2 → raw=2.
         assert s['n_qualified'] == 2
-        assert s['target'] == 2
-        # The non-servable retired-b is excluded from re-enable candidates (needs a file move).
+        assert s['raw'] == 2
+        # Only servable-a is at a servable location (n_servable=1); reenable_target is bounded by
+        # n_servable so the pass can never push the active count above what's actually servable.
+        assert s['n_servable'] == 1
+        assert s['reenable_target'] == 1
+        # The non-servable retired-b is excluded from re-enable candidates (needs a file move), so
+        # the post-pass active count is just servable-a → target=1.
+        assert s['target'] == 1
         assert 'retired-b' not in s['reenabled']
         assert _status_of(m, 'retired-b') == 'inactive'
 
