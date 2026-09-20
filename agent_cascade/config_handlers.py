@@ -719,7 +719,9 @@ def _handle_skill_auto_invalidate_enabled(ui_cfg: dict, agent_pool: Optional[Any
 
 @register_config_handler('skill_active_target_k')
 def _handle_skill_active_target_k(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Multiplier K for target = clamp(K × N_qualified, MIN_CAP, MAX_CAP). Clamped to [0.1, 5.0]."""
+    """Multiplier K: raw target = round(K × N_qualified). Raw is clamped to [MIN_CAP, MAX_CAP]
+    for the eviction threshold (never evict below MIN_CAP); re-enable is bounded by the servable
+    corpus. Clamped to [0.1, 5.0]."""
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         try:
             val = float(ui_cfg.get('skill_active_target_k', 1.0))

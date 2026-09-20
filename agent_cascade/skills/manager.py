@@ -67,6 +67,13 @@ def _iso_utc(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
 
 
+def _default_metrics_entry(status: str = 'active') -> dict:
+    """Fresh per-skill metrics record (schema 1.3). Single source for the default shape so
+    a future field addition happens in one place instead of being copy-pasted at every
+    ``setdefault`` site."""
+    return {'total_loads': 0, 'by_version': {}, 'status': status}
+
+
 def _priority_for_root(root: Path) -> int:
     """Map a scan root directory to its skill-tier priority.
 
@@ -452,9 +459,9 @@ class SkillManager:
                 self._disabled_names.discard(key)
 
             with self._metrics_lock:
-                entry = self._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}, 'status': 'active'})
+                entry = self._metrics.setdefault(name, _default_metrics_entry('active'))
                 if not isinstance(entry, dict):
-                    entry = {'total_loads': 0, 'by_version': {}, 'status': new_status}
+                    entry = _default_metrics_entry(new_status)
                     self._metrics[name] = entry
                 entry['status'] = new_status
 
@@ -614,11 +621,9 @@ class SkillManager:
                         self._disabled_names.discard(str(nm).lower())
                     with self._metrics_lock:
                         for nm in to_evict:
-                            self._metrics.setdefault(
-                                nm, {'total_loads': 0, 'by_version': {}, 'status': 'active'})['status'] = 'inactive'
+                            self._metrics.setdefault(nm, _default_metrics_entry('active'))['status'] = 'inactive'
                         for nm in to_reenable:
-                            self._metrics.setdefault(
-                                nm, {'total_loads': 0, 'by_version': {}, 'status': 'active'})['status'] = 'active'
+                            self._metrics.setdefault(nm, _default_metrics_entry('active'))['status'] = 'active'
                 self._flush_metrics_to_disk()
                 self.invalidate_cache()
                 self._ensure_discovered()  # refresh registry: evicted dropped, re-enabled registered
