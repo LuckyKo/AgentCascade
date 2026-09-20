@@ -3809,6 +3809,17 @@ function cancelEdit(index, instanceName = null) {
   const bubble = Array.from(bubbles).find(b => b.dataset.index === String(index));
   if (!bubble) return;
 
+  // Invalidate bookkeeping so updateBubbleContent's early-exit guard cannot
+  // short-circuit: startEdit() clobbered the DOM but left _prevContent holding
+  // the original content, which would make prevContent === curContent and skip
+  // the re-render that restores the rendered content over the textarea.
+  // Use `undefined` (not null): fast path 2 at ~L3257 gates on
+  // `prevContent !== undefined` before reading `prevContent.length`, so a null
+  // sentinel would slip past the guard and throw a TypeError if isGenerating
+  // is true at cancel time.
+  bubble._prevContent = undefined;
+  bubble._wasGenerating = undefined;
+
   // All agents use the same config now — no special handling needed
   const config = getAgentConfig(instanceName);
   bubble.querySelector('.' + contentClass()).classList.remove('editing');
@@ -4411,6 +4422,10 @@ function renderSubAgentPanel(panel, agentData, name) {
 
   if (currentCount < lastCount || lastCount === 0) {
     scrollContainer.innerHTML = '';
+    // Full rebuild destroyed any in-progress edit UI — clear stale editing
+    // indices so later Save/Cancel don't mis-target a rebuilt bubble.
+    state.editingIndex = null;
+    state.editingInstance = null;
     // Pass isGenerating via config override so all messages know the streaming state
     const subConfig = getAgentConfig(name);
     subConfig.isGenerating = isActive;
@@ -4435,6 +4450,10 @@ function renderSubAgentPanel(panel, agentData, name) {
     if (actualChildCount !== lastCount) {
       // DOM is out of sync — do a full re-render instead of append
       scrollContainer.innerHTML = '';
+      // Full rebuild destroyed any in-progress edit UI — clear stale editing
+      // indices so later Save/Cancel don't mis-target a rebuilt bubble.
+      state.editingIndex = null;
+      state.editingInstance = null;
       const subConfig = getAgentConfig(name);
       subConfig.isGenerating = isActive;
       scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
