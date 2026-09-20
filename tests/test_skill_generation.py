@@ -1645,15 +1645,15 @@ class TestRatingMetrics:
         # Average computable: sum / count
         assert abs(r['sum'] / r['count'] - 7.0) < 1e-9
 
-    def test_record_rating_flushes_to_disk_schema_1_2(self, fresh_manager):
+    def test_record_rating_flushes_to_disk_schema_1_3(self, fresh_manager):
         m = self.manager
         m.record_rating('my-skill', 5.5)
         m._flush_metrics_to_disk()
         assert self.metrics_file.exists()
         import json as _json
         data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
-        # Schema bumped to 1.2 (per-version rating history); older files are still tolerated on load.
-        assert data['schema_version'] == '1.2'
+        # Schema bumped to 1.3 (status/last_used invalidation fields); older files are still tolerated on load.
+        assert data['schema_version'] == '1.3'
         r = data['skills']['my-skill']['ratings']
         assert r['count'] == 1
         assert abs(r['sum'] - 5.5) < 1e-9
@@ -2904,8 +2904,8 @@ class TestCandidateFlow:
 
     # -- Metrics schema -----------------------------------------------------------------
 
-    def test_flush_bumps_schema_to_1_2(self, fresh_manager):
-        """A 1.1 metrics file is tolerated on load and bumped to 1.2 on flush."""
+    def test_flush_bumps_schema_to_1_3(self, fresh_manager):
+        """A 1.1 metrics file is tolerated on load and bumped to 1.3 on flush."""
         import json as _json
         m = self.manager
         self.metrics_file.write_text(_json.dumps({
@@ -2931,7 +2931,7 @@ class TestCandidateFlow:
 
         m.record_rating('legacy-skill', 7.0)
         data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
-        assert data['schema_version'] == '1.2'
+        assert data['schema_version'] == '1.3'
 
 
 # ===========================================================================

@@ -9,6 +9,7 @@ Handles:
 """
 
 import copy as _copy
+import datetime
 import json as _json
 import os as _os
 import sys as _sys
@@ -58,6 +59,11 @@ def _atomic_write_text(dst: Path, content: str) -> None:
     tmp_out = dst.with_suffix('.tmp')
     tmp_out.write_text(content, encoding='utf-8')
     _os.replace(str(tmp_out), str(dst))
+
+
+def _iso_utc(ts: float) -> str:
+    """Render a POSIX timestamp as an ISO-8601 UTC string (schema 1.3 ``last_used``)."""
+    return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
 
 
 def _priority_for_root(root: Path) -> int:
@@ -188,7 +194,18 @@ class SkillManager:
             # Tolerate older schema versions (1.0/1.1): entries without
             # ratings_by_version fall back to the aggregate ratings at read time;
             # the next flush bumps the stored file to 1.2.
-            self._metrics = data.get('skills', {})
+            # Schema 1.3: a persisted status=active entry supersedes the legacy 1.2-era
+            # status=inactive for the same name (e.g. re-enabled after a manual edit of
+            # the store) — keep only the latest record per lowercase name.
+            _by_lower: Dict[str, Any] = {}
+            for _name, _m in data.get('skills', {}).items():
+                _by_lower[str(_name).lower()] = (_name, _m)
+            self._metrics = {_orig: _m for _orig, _m in _by_lower.values()}
+            # Persisted status=inactive (schema 1.3) → exclude from discovery this startup.
+            # (Env-var SKILLS_DISABLED already seeded _disabled_names in __init__; both are lowercase.)
+            for _name, _m in self._metrics.items():
+                if isinstance(_m, dict) and _m.get('status') == 'inactive':
+                    self._disabled_names.add(str(_name).lower())
             logger.debug('[SKILLS] Loaded metrics for %d skills (schema %s)', len(self._metrics),
                          data.get('schema_version', 'unknown'))
         except Exception as e:
@@ -210,9 +227,10 @@ class SkillManager:
             # Snapshot under lock (deep copy: nested per-skill dicts are shared with live state).
             # The tree is small JSON; copying is far cheaper than risking a torn write.
             with self._metrics_lock:
-                # Schema 1.2 adds per-version rating history (ratings_by_version) so the
-                # candidate decision gate can compare versions; older files are bumped here.
-                data = {'schema_version': '1.2', 'skills': _copy.deepcopy(self._metrics)}
+                # Schema 1.3 adds per-skill status (active|inactive) + last_used for skill
+                # invalidation; 1.2 added per-version rating history (ratings_by_version).
+                # Older files are bumped to 1.3 on the first flush.
+                data = {'schema_version': '1.3', 'skills': _copy.deepcopy(self._metrics)}
 
             # Open temp file for writing with exclusive lock (POSIX only)
             fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
@@ -298,6 +316,206 @@ class SkillManager:
         if stale_keys:
             self._flush_metrics_to_disk()
 
+    # ── Skill Invalidation (status toggle + schema 1.3 migration) ───────────
+
+    def _servable_skill_names(self) -> set:
+        """Return the names of skills at a servable one-level location on disk.
+
+        Mirrors ``discover()``'s scan depth (one level deep per root:
+        ``<root>/<subdir>/SKILL.md``) but WITHOUT the ``_disabled_names`` filter —
+        these are the names that *could* be served if not disabled. Skills only
+        reachable deeper (e.g. under an ``INACTIVE/`` subfolder) are NOT included.
+
+        Used by the status toggles (existence validation) and the schema 1.3
+        migration (status default: servable → active, non-servable → inactive).
+        """
+        names = set()
+        for root in self._skill_paths:
+            if not root.exists():
+                continue
+            try:
+                for skill_dir in root.iterdir():
+                    if not skill_dir.is_dir():
+                        continue
+                    skill_file = skill_dir / 'SKILL.md'
+                    if not skill_file.exists():
+                        continue
+                    try:
+                        parsed = parse_skill_file(skill_file)
+                    except (FileNotFoundError, OSError):
+                        names.add(skill_dir.name.lower())
+                        continue
+                    frontmatter = parsed.get('frontmatter', {})
+                    name = frontmatter.get('name') or skill_dir.name
+                    names.add(str(name).lower())
+            except OSError as e:
+                logger.warning('[SKILLS] Servable-skill scan error on %s: %s', root, e)
+        return names
+
+    def _migrate_metrics_to_v13(self) -> None:
+        """One-time port of the metrics store from schema 1.2 to 1.3 (idempotent).
+
+        Adds ``status`` (active|inactive) and ``last_used`` (ISO-8601 UTC) per skill,
+        creating fresh records for on-disk skills that have no entry yet. Only fills
+        *missing* fields — never overwrites an existing status or non-null last_used —
+        so a second run is a no-op. Best-effort: callers wrap in try/except; the store
+        stays usable (read-side defaults) even if this fails.
+
+        MUST run post-discover (registry + ``_skill_paths`` populated) and prunes
+        orphans first so every remaining entry has a backing file somewhere on disk.
+        """
+        # 1. Prune orphans first (best-effort): afterwards every metrics entry has a
+        #    backing file somewhere (served, disabled, INACTIVE/, or candidate).
+        try:
+            self.prune_stale_metrics()
+        except Exception as e:  # noqa: BLE001 — proceed with the current entries on failure
+            logger.warning('[SKILLS] Metrics migration prune failed (non-critical): %s', e)
+
+        # 2. Servable set (one-level, no disabled filter) + registry snapshot under lock.
+        servable = self._servable_skill_names()
+        with self._write_lock:
+            registry_paths = {str(name): str(data.get('file_path') or '')
+                              for name, data in self._skills_registry.items()}
+
+        # 3. mtime seeds (I/O outside locks): SKILL.md mtime of the servable/registry file
+        #    (D-B — no history artifacts exist; schema 1.2 stored no load timestamps).
+        seed_last_used: Dict[str, str] = {}
+        for name in set(servable) | {str(n).lower() for n in registry_paths}:
+            path_str = registry_paths.get(name) or ''
+            if not path_str:
+                continue
+            try:
+                mtime = Path(path_str).stat().st_mtime
+            except OSError:
+                continue
+            seed_last_used[name] = _iso_utc(mtime)
+
+        # 4. Apply under the established lock order (_write_lock -> _metrics_lock).
+        with self._write_lock:
+            with self._metrics_lock:
+                for name, entry in list(self._metrics.items()):
+                    if not isinstance(entry, dict):
+                        continue
+                    key = str(name).lower()
+                    # Status default (D-A): servable location → active; backing file only
+                    # reachable deeper (e.g. INACTIVE/) → inactive (manually retired).
+                    if 'status' not in entry:
+                        entry['status'] = 'active' if key in servable else 'inactive'
+                    # last_used seed: fill missing/null only, never overwrite a real value.
+                    if entry.get('last_used') is None and key in seed_last_used:
+                        entry['last_used'] = seed_last_used[key]
+                # Fresh records for on-disk servable skills with no metrics entry yet.
+                for name in sorted(servable):
+                    if name not in self._metrics:
+                        self._metrics[name] = {
+                            'total_loads': 0,
+                            'by_version': {},
+                            'status': 'active',
+                            'last_used': seed_last_used.get(name),
+                        }
+                # Invariant (D-E): every status=inactive entry must be excluded from
+                # discovery this process — sync _disabled_names with the final state.
+                for name, entry in self._metrics.items():
+                    if isinstance(entry, dict) and entry.get('status') == 'inactive':
+                        self._disabled_names.add(str(name).lower())
+
+        # 5. Flush once (writes schema 1.3).
+        self._flush_metrics_to_disk()
+
+    def _apply_status_flip(self, name: str, new_status: str) -> Tuple[bool, str]:
+        """Shared core for ``disable_skill``/``enable_skill``: flip one skill's status.
+
+        Validates the name (registry, servable backing file, or metrics entry), mutates
+        ``_disabled_names`` + the metrics ``status`` under nested locks
+        (_write_lock -> _metrics_lock), then persists + invalidates the discovery cache
+        OUTSIDE the write lock (mirrors prune_stale_metrics) so the very next scan
+        excludes/includes the skill.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return False, "skill 'name' is required"
+        key = name.lower()
+
+        # Validate: served (registry), servable on disk, or has a metrics entry.
+        with self._write_lock:
+            in_registry = any(n.lower() == key for n in self._skills_registry)
+        with self._metrics_lock:
+            has_metrics = any(n.lower() == key for n in self._metrics)
+        if not (in_registry or has_metrics or key in self._servable_skill_names()):
+            return False, f"skill '{name}' not found"
+
+        # Mutate under nested locks (established order; never reversed).
+        with self._write_lock:
+            if new_status == 'inactive':
+                self._disabled_names.add(key)
+            else:
+                self._disabled_names.discard(key)
+
+            with self._metrics_lock:
+                entry = self._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}, 'status': 'active'})
+                if not isinstance(entry, dict):
+                    entry = {'total_loads': 0, 'by_version': {}, 'status': new_status}
+                    self._metrics[name] = entry
+                entry['status'] = new_status
+
+        # Persist + invalidate OUTSIDE the write lock (flush takes _metrics_lock itself).
+        self._flush_metrics_to_disk()
+        self.invalidate_cache()  # CRITICAL — else discovery won't re-scan until TTL expiry
+        return True, f"skill '{name}' is now {new_status}"
+
+    def disable_skill(self, name: str) -> Tuple[bool, str]:
+        """Soft-retire a skill (reversible): mark it inactive and stop serving it.
+
+        Returns ``(ok, message)``. The skill's metrics are kept (status=inactive) so it
+        can be re-enabled later; discovery, registration, scan_skills and the advisor all
+        honor ``_disabled_names``, so no downstream changes are needed.
+        """
+        return self._apply_status_flip(name, 'inactive')
+
+    def enable_skill(self, name: str) -> Tuple[bool, str]:
+        """Re-activate a previously disabled skill. Returns ``(ok, message)``."""
+        return self._apply_status_flip(name, 'active')
+
+    def get_inactive_names(self) -> set:
+        """Lowercase names of skills persisted as status=inactive (schema 1.3)."""
+        with self._metrics_lock:
+            return {str(name).lower() for name, m in self._metrics.items()
+                    if isinstance(m, dict) and m.get('status') == 'inactive'}
+
+    def list_skills_with_status(self) -> List[Dict[str, Any]]:
+        """Union of registry skills + inactive metrics entries, with status fields.
+
+        For the API list endpoint: each entry is ``{name, status, active, total_loads,
+        rating_avg}``. Registry read under _write_lock, then metrics under _metrics_lock
+        (established order; never reversed).
+        """
+        with self._write_lock:
+            registry_names = {str(n) for n in self._skills_registry}
+        with self._metrics_lock:
+            metrics_snap = _copy.deepcopy(self._metrics)
+
+        all_names = set(registry_names)
+        for name, m in metrics_snap.items():
+            if isinstance(m, dict) and m.get('status') == 'inactive':
+                all_names.add(str(name))
+
+        result: List[Dict[str, Any]] = []
+        for name in sorted(all_names):
+            entry = metrics_snap.get(name) or {}
+            status = entry.get('status', 'active') if isinstance(entry, dict) else 'active'
+            ratings = (entry.get('ratings') or {}) if isinstance(entry, dict) else {}
+            rating_avg = round(ratings['sum'] / ratings['count'], 2) if ratings.get('count') else None
+            # Exact-case key: metrics keys are the frontmatter/dir names as discovered.
+            exact_key = next((k for k in metrics_snap if str(k).lower() == name.lower()), None)
+            entry = metrics_snap.get(exact_key, {}) if exact_key is not None else {}
+            result.append({
+                'name': name,
+                'status': status,
+                'active': status != 'inactive',
+                'total_loads': int(entry.get('total_loads', 0)) if isinstance(entry, dict) else 0,
+                'rating_avg': rating_avg,
+            })
+        return result
+
     def _increment_load_count(self, skill_name: str, version: str) -> None:
         """Increment load counter for a skill+version combo (buffered).
 
@@ -307,6 +525,9 @@ class SkillManager:
             entry = self._metrics.setdefault(skill_name, {'total_loads': 0, 'by_version': {}})
             entry['total_loads'] += 1
             entry['by_version'][version] = entry['by_version'].get(version, 0) + 1
+            # Real "last used" supersedes any migration seed (schema 1.3). Multi-instance
+            # last-writer-wins = most recently used; runs under _metrics_lock like the counters.
+            entry['last_used'] = _iso_utc(time.time())
 
             self._pending_flush_count += 1
             now = time.monotonic()
@@ -1380,6 +1601,13 @@ class SkillManager:
                     if not cand_file.exists():
                         del self._skills_registry[name]
                         self._rebuild_index()
+                        continue
+                    # Q7/E4 guard: an inactive (disabled) incumbent must not be silently
+                    # replaced by its candidate. Hold the candidate pending (no promote, no
+                    # discard) until the user re-activates the skill.
+                    if name.lower() in self._disabled_names:
+                        logger.info("[SKILLS] Candidate '%s' held — incumbent is inactive; "
+                                    're-activate to allow promotion', name)
                         continue
                     parsed = parse_skill_file(cand_file)
                     if avg_cand is None or avg_cand >= avg_prod:

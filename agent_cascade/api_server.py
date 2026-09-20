@@ -998,6 +998,42 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             for i, a in enumerate(agents)
         ]
 
+    # ── Skill invalidation endpoints (feature: skill_invalidation, Phase 1) ──
+
+    @app.get('/api/skills')
+    async def api_list_skills():
+        """List all skills with their active/inactive status (schema 1.3)."""
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        return {'skills': sm.list_skills_with_status()}
+
+    @app.post('/api/skills/toggle')
+    async def api_toggle_skill(data: dict):
+        """Toggle one skill's status. Body: {"name": str, "status": "active"|"inactive"}."""
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        name = (data or {}).get('name')
+        status = (data or {}).get('status')          # "active" | "inactive"
+        if not name or status not in ('active', 'inactive'):
+            return JSONResponse(status_code=400, content={'message': "'name' and 'status' (active|inactive) required"})
+        ok, msg = sm.enable_skill(name) if status == 'active' else sm.disable_skill(name)
+        code = 200 if ok else 404
+        return JSONResponse(status_code=code, content={'ok': ok, 'name': name, 'status': status if ok else None, 'message': msg})
+
+    @app.post('/api/skills/migrate')
+    async def api_migrate_skills():
+        """Manually (re)run the one-time metrics migration to schema 1.3 (idempotent)."""
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        try:
+            sm._migrate_metrics_to_v13()
+            return {'ok': True, 'message': 'metrics migrated to schema 1.3 (idempotent)'}
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(status_code=500, content={'ok': False, 'message': str(e)})
+
     @app.get('/api/state')
     async def api_get_state():
         try:

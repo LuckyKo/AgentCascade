@@ -5,6 +5,9 @@ Uses real SKILL.md files from agents/global/skills/ as test data where possible.
 """
 
 import asyncio
+import copy as _copy
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,6 +33,44 @@ _SKILLS_DIR = _PROJECT_ROOT / 'agents' / 'global' / 'skills'
 def _skill_path(name: str) -> Path:
     """Return path to a SKILL.md inside agents/global/skills/<name>/"""
     return _SKILLS_DIR / name / 'SKILL.md'
+
+
+# ===========================================================================
+# Skill Invalidation (Phase 1) — helpers for hermetic skill trees
+# ===========================================================================
+
+def _write_skill_file(root: Path, name: str, version: str = '1.0.0', subdir: str = None) -> Path:
+    """Write a minimal valid SKILL.md under ``root`` and return its path.
+
+    Default location is the servable one-level layout ``<root>/<name>/SKILL.md``;
+    pass ``subdir`` to place it deeper (e.g. ``'INACTIVE'`` → ``<root>/INACTIVE/<name>``).
+    """
+    skill_dir = root / subdir / name if subdir else root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    path = skill_dir / 'SKILL.md'
+    path.write_text(
+        f'---\nname: {name}\ndescription: fixture skill for invalidation tests\n'
+        f'version: "{version}"\ntriggers:\n  - test\n---\n# Body\n',
+        encoding='utf-8')
+    return path
+
+
+def _seed_v12_store(metrics_file: Path, entries: dict) -> None:
+    """Write a legacy schema 1.2 metrics store (no status/last_used fields)."""
+    metrics_file.parent.mkdir(parents=True, exist_ok=True)
+    metrics_file.write_text(json.dumps({'schema_version': '1.2', 'skills': entries}, indent=2),
+                            encoding='utf-8')
+
+
+def _iso_utc(ts: float) -> str:
+    """ISO-8601 UTC string — mirrors manager._iso_utc for seed comparisons."""
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).isoformat()
+
+
+def _read_store(metrics_file: Path) -> dict:
+    """Load the on-disk metrics JSON store."""
+    return json.loads(metrics_file.read_text(encoding='utf-8'))
 
 
 @pytest.fixture(scope='module')
@@ -1092,3 +1133,364 @@ class TestScanSkillsRatingDisplay:
         assert 'rating: 9.0' in alpha_line
         charlie_line = next(l for l in lines if '**charlie**' in l)
         assert 'rating: n/a' in charlie_line
+
+
+# ===========================================================================
+# Skill Invalidation — Phase 1 (manual toggle + schema 1.3 + migration + Q7 guard)
+# ===========================================================================
+
+
+def _invalidation_manager(tmp_path, skill_names=('inv-a', 'inv-b')):
+    """Fresh SkillManager with isolated metrics + a hermetic one-level skills tree."""
+    m = SkillManager()
+    # Isolate metrics (the production store loaded at __init__ must not leak in).
+    m._metrics_file = tmp_path / 'skills-metrics.json'
+    with m._metrics_lock:
+        m._metrics = {}
+    root = tmp_path / 'skills'
+    for name in skill_names:
+        _write_skill_file(root, name)
+    # discover() is the canonical way to set _skill_paths (prune/servable scans read it);
+    # also force a real scan so the cache signature matches the current tree.
+    m._cache_ttl = 0.0
+    m.discover([root])
+    return m
+
+
+class TestSkillInvalidationToggle:
+    """disable_skill/enable_skill: status flips, persistence, cache invalidation."""
+
+    @pytest.fixture(autouse=True)
+    def _toggle_manager(self, tmp_path):
+        self.manager = _invalidation_manager(tmp_path)
+        yield
+
+    def test_disable_skill_flips_status_and_disables(self):
+        m = self.manager
+        ok, msg = m.disable_skill('inv-a')
+        assert ok, msg
+        with m._metrics_lock:
+            assert m._metrics['inv-a']['status'] == 'inactive'
+        assert 'inv-a' in m._disabled_names
+        # Persisted on disk at schema 1.3 with the status field.
+        store = _read_store(m._metrics_file)
+        assert store['schema_version'] == '1.3'
+        assert store['skills']['inv-a']['status'] == 'inactive'
+
+    def test_enable_skill_reverses(self):
+        m = self.manager
+        ok, _ = m.disable_skill('inv-a')
+        assert ok
+        ok, msg = m.enable_skill('inv-a')
+        assert ok, msg
+        with m._metrics_lock:
+            assert m._metrics['inv-a']['status'] == 'active'
+        assert 'inv-a' not in m._disabled_names
+        store = _read_store(m._metrics_file)
+        assert store['skills']['inv-a']['status'] == 'active'
+
+    def test_toggle_invalidates_cache_immediately(self, tmp_path):
+        """Regression: a toggle must force the very next discover() to re-scan (E1).
+
+        Without invalidate_cache(), discover() short-circuits on TTL+signature and the
+        toggled skill stays in (or out of) the registry until the TTL expires.
+        """
+        m = self.manager
+        root = Path(m._skill_paths[0])
+        m._cache_ttl = 0.0  # force the TTL branch to age out immediately (no sleeping)
+
+        m.discover([root])
+        assert 'inv-a' in m._skills_registry
+        assert m._cache_signature is not None  # cache primed by the real scan
+
+        ok, _ = m.disable_skill('inv-a')
+        assert ok
+        # Cache must be invalidated so the next scan re-reads from disk.
+        assert m._cache_signature is None
+        assert m._cache_timestamp == 0.0
+
+        m.discover([root])
+        assert 'inv-a' not in m._skills_registry, ('disabled skill must be absent after the '
+                                                   'immediate post-toggle re-scan')
+        assert 'inv-b' in m._skills_registry
+
+        ok, _ = m.enable_skill('inv-a')
+        assert ok
+        m.discover([root])
+        assert 'inv-a' in m._skills_registry, ('re-enabled skill must be back after the '
+                                               'immediate post-toggle re-scan')
+
+    def test_disable_unknown_name_returns_error(self):
+        m = self.manager
+        before_metrics = _copy.deepcopy(m._metrics)
+        ok, msg = m.disable_skill('nope-does-not-exist')
+        assert not ok
+        assert 'not found' in msg
+        assert 'nope-does-not-exist' not in m._disabled_names
+        assert m._metrics == before_metrics
+
+    def test_get_inactive_names_and_list_skills_with_status(self):
+        m = self.manager
+        assert m.get_inactive_names() == set()
+        m.disable_skill('inv-a')
+        assert m.get_inactive_names() == {'inv-a'}
+
+        listing = {s['name']: s for s in m.list_skills_with_status()}
+        assert listing['inv-a']['status'] == 'inactive'
+        assert listing['inv-a']['active'] is False
+        assert listing['inv-b']['status'] == 'active'
+        assert listing['inv-b']['active'] is True
+        assert listing['inv-a']['total_loads'] == 0
+        assert listing['inv-a']['rating_avg'] is None
+
+
+class TestSkillInvalidationMigration:
+    """One-time schema 1.2 → 1.3 migration (orphan guard + servable-set logic)."""
+
+    @pytest.fixture(autouse=True)
+    def _mig_manager(self, tmp_path):
+        self.tmp = tmp_path
+        self.root = tmp_path / 'skills'
+        self.metrics_file = tmp_path / 'skills-metrics.json'
+        yield
+
+    def _make_manager(self):
+        m = SkillManager()
+        m._metrics_file = self.metrics_file
+        with m._metrics_lock:
+            m._metrics = {}
+        # Load the seeded legacy store (fresh manager → __init__'s _load_metrics read
+        # whatever was on disk at construction; re-point + reload to be explicit).
+        m._load_metrics()
+        m._cache_ttl = 0.0
+        return m
+
+    def test_migration_defaults_present_skills_active(self):
+        _write_skill_file(self.root, 'mig-active')
+        time.sleep(0.02)  # ensure a distinct mtime is observable
+        _seed_v12_store(self.metrics_file, {
+            'mig-active': {'total_loads': 3, 'by_version': {'1.0.0': 3}},
+        })
+        m = self._make_manager()
+        m.discover([self.root])
+        m._migrate_metrics_to_v13()
+
+        with m._metrics_lock:
+            entry = m._metrics['mig-active']
+        assert entry['status'] == 'active'
+        # last_used seeded from the SKILL.md mtime (D-B).
+        expected_seed = _iso_utc((self.root / 'mig-active' / 'SKILL.md').stat().st_mtime)
+        assert entry['last_used'] == expected_seed
+        store = _read_store(self.metrics_file)
+        assert store['schema_version'] == '1.3'
+        assert store['skills']['mig-active']['status'] == 'active'
+
+    def test_migration_marks_inactive_location_skills(self):
+        """D-A: file only under <root>/INACTIVE/<name>/ → inactive; standard location → active."""
+        _write_skill_file(self.root, 'mig-servable')
+        _write_skill_file(self.root, 'mig-retired', subdir='INACTIVE')
+        # NOTE: the frontmatter name must match the directory name — prune_stale_metrics'
+        # live set contains BOTH the frontmatter name and the dir name (rglob walk), so a
+        # mismatched frontmatter name would keep the entry alive as an "orphan" of its own.
+        _seed_v12_store(self.metrics_file, {
+            'mig-servable': {'total_loads': 1, 'by_version': {}},
+            'mig-retired': {'total_loads': 7, 'by_version': {}},
+        })
+        m = self._make_manager()
+        m.discover([self.root])
+        m._migrate_metrics_to_v13()
+
+        with m._metrics_lock:
+            assert m._metrics['mig-servable']['status'] == 'active'
+            assert m._metrics['mig-retired']['status'] == 'inactive'
+        # The retired skill's name also joins _disabled_names (it must not be served).
+        assert 'mig-retired' in m._disabled_names
+
+    def test_migration_creates_record_for_disk_skill_without_entry(self):
+        _write_skill_file(self.root, 'mig-fresh')
+        _seed_v12_store(self.metrics_file, {})  # empty legacy store
+        m = self._make_manager()
+        m.discover([self.root])
+        m._migrate_metrics_to_v13()
+
+        with m._metrics_lock:
+            entry = m._metrics['mig-fresh']
+        assert entry == {
+            'total_loads': 0,
+            'by_version': {},
+            'status': 'active',
+            'last_used': _iso_utc((self.root / 'mig-fresh' / 'SKILL.md').stat().st_mtime),
+        }
+
+    def test_migration_orphan_guard(self):
+        """A metrics entry whose file was deleted out-of-band is pruned, never resurrected."""
+        skill_file = _write_skill_file(self.root, 'mig-orphan')
+        _seed_v12_store(self.metrics_file, {
+            'mig-orphan': {'total_loads': 5, 'by_version': {}},
+        })
+        # Delete the backing file out-of-band (simulates manual removal).
+        skill_file.unlink()
+
+        m = self._make_manager()
+        m.discover([self.root])
+        m._migrate_metrics_to_v13()
+
+        with m._metrics_lock:
+            assert 'mig-orphan' not in m._metrics, ('orphaned entry must be pruned by the '
+                                                    'migration pre-pass, never resurrected as active')
+        store = _read_store(self.metrics_file)
+        assert 'mig-orphan' not in store['skills']
+
+    def test_migration_idempotent(self):
+        _write_skill_file(self.root, 'mig-idem-a')
+        _write_skill_file(self.root, 'mig-idem-b', subdir='INACTIVE')
+        _seed_v12_store(self.metrics_file, {
+            'mig-idem-a': {'total_loads': 2, 'by_version': {}},
+            'mig-idem-b': {'total_loads': 1, 'by_version': {}},
+        })
+        m = self._make_manager()
+        m.discover([self.root])
+        m._migrate_metrics_to_v13()
+        with m._metrics_lock:
+            first_run = _copy.deepcopy(m._metrics)
+
+        # Second run (fresh manager, same on-disk store) must change nothing.
+        m2 = self._make_manager()
+        m2.discover([self.root])
+        m2._migrate_metrics_to_v13()
+        with m2._metrics_lock:
+            second_run = _copy.deepcopy(m2._metrics)
+
+        assert first_run == second_run, 'migration must be idempotent (fill-if-missing only)'
+
+
+class TestSkillInvalidationQ7Guard:
+    """Candidate promotion guard: an inactive incumbent holds its candidate pending."""
+
+    @pytest.fixture(autouse=True)
+    def _q7_manager(self, tmp_path):
+        self.manager = SkillManager()
+        base = tmp_path / 'agents' / 'global'
+        self.manager._metrics_file = tmp_path / 'skills-metrics.json'
+        with self.manager._metrics_lock:
+            self.manager._metrics = {}
+        # Isolate the candidate flow roots (mirrors test_skill_generation.fresh_manager).
+        self.manager._pending_dir = base / 'pending-skills'
+        self.manager._candidates_dir = base / 'candidates'
+        self.manager._production_skills_dir = base / 'skills'
+        yield
+
+    def _write_incumbent(self, name: str, version: str = '1.0.0'):
+        """Write a production SKILL.md to the manager's production root and register it."""
+        _, prod_root = self.manager._candidate_dirs()
+        d = prod_root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: Incumbent skill for Q7 guard test\n'
+            f'version: "{version}"\ntriggers:\n  - candidate\n  - test\n---\n\nINCUMBENT_BODY\n',
+            encoding='utf-8')
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+        from agent_cascade.skills.parser import parse_skill_file
+        parsed = parse_skill_file(d / 'SKILL.md')
+        self.manager._skills_registry[name] = {
+            'name': name,
+            'description': parsed.get('frontmatter', {}).get('description', ''),
+            'source': 'system',
+            'triggers': parsed.get('frontmatter', {}).get('triggers', []),
+            'version': version,
+            'file_path': str(d / 'SKILL.md'),
+            '_priority': _PRIORITY_SYSTEM,
+            '_parsed_data': parsed,
+        }
+
+    def test_candidate_held_when_incumbent_inactive(self):
+        m = self.manager
+        name = f'q7-guard-skill-{os.getpid()}'
+        self._write_incumbent(name, '1.0.0')
+
+        # Upgrade proposal → live-serving candidate (distinct version 2.0.0).
+        # Body must clear MIN_SKILL_BODY_LENGTH (validator.py) — keep it comfortably long.
+        content = ('---\nname: %s\n'
+                   'description: Better candidate version for the Q7 guard test\n'
+                   'version: "2.0.0"\ntriggers:\n  - candidate\n  - test\n---\n\n'
+                   '## Instructions\n'
+                   'Candidate body with enough characters to pass validation. This paragraph '
+                   'exists purely so the body length clears the validator minimum; the actual '
+                   'behavior under test is the Q7 hold-when-inactive promotion guard.\n') % name
+        success, errors = m.register_skill_from_content(content, task_text='candidate test upgrade')
+        assert success, f'candidate registration failed: {errors}'
+
+        # Rated candidate that would normally promote over the unrated incumbent.
+        for r in (9.0, 9.0, 9.0, 9.0, 10.0):
+            m.record_rating(name, r)
+
+        # Disable the incumbent → the gate must HOLD the candidate (no promote/discard).
+        ok, _ = m.disable_skill(name)
+        assert ok
+        m.evaluate_candidates()
+
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        reg = m._skills_registry.get(name)
+        assert reg is not None and reg['_priority'] == _PRIORITY_CANDIDATE, (
+            'candidate must stay pending while the incumbent is inactive')
+        assert (m._candidates_dir / name / 'SKILL.md').exists(), (
+            'candidate file must remain on disk while held')
+
+        # Re-activate → the gate now promotes.
+        ok, _ = m.enable_skill(name)
+        assert ok
+        m.evaluate_candidates()
+
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+        reg = m._skills_registry.get(name)
+        assert reg is not None and reg['_priority'] == _PRIORITY_SYSTEM, (
+            'candidate must promote after the incumbent is re-activated')
+        assert reg['version'] == '2.0.0'
+        assert not (m._candidates_dir / name).exists(), 'candidate dir must be deleted on promote'
+
+
+class TestSkillInvalidationScanMarker:
+    """scan_skills no-query listing marks status=inactive skills with " (inactive)"."""
+
+    @pytest.fixture(autouse=True)
+    def _marker_tool(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+
+        manager = SkillManager()
+        manager._metrics_file = tmp_path / 'skills-metrics.json'
+        with manager._metrics_lock:
+            manager._metrics = {}
+        # Deterministic registry (bypasses disk discovery) + one inactive skill.
+        for name in ('alpha', 'bravo'):
+            manager._skills_registry[name] = {
+                'name': name,
+                'description': f'desc {name}',
+                'source': 'system',
+                'version': '1.0.2',
+            }
+        # A status=inactive skill is also in _disabled_names (that is what makes the
+        # all=False filter hide it — see scan_skills L72-77).
+        manager._metrics['bravo'] = {'total_loads': 0, 'by_version': {}, 'status': 'inactive'}
+        manager._disabled_names.add('bravo')
+        pool = MagicMock()
+        pool.skill_manager = manager
+        self.manager = manager
+        self.tool = ScanSkills(agent_pool=pool)
+
+    def test_no_query_marks_inactive_skills(self):
+        out = self.tool.call({'query': '', 'all': True})
+        lines = [l for l in out.splitlines() if l.startswith('- **')]
+        bravo_line = next(l for l in lines if '**bravo**' in l)
+        alpha_line = next(l for l in lines if '**alpha**' in l)
+        assert ' (inactive)' in bravo_line
+        assert ' (inactive)' not in alpha_line
+
+    def test_default_filter_hides_inactive_skills(self):
+        """all=False already hides disabled/inactive skills via the disabled filter."""
+        out = self.tool.call({'query': ''})
+        lines = [l for l in out.splitlines() if l.startswith('- **')]
+        names = [l.split('**')[1] for l in lines]
+        assert 'bravo' not in names
+        assert 'alpha' in names

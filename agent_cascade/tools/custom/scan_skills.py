@@ -97,6 +97,10 @@ class ScanSkills(BaseTool):
                 except (OSError, FileNotFoundError):
                     return '?'
 
+            # Inactive marker data (no-query mode only): skills persisted as status=inactive.
+            # all=False already hides them via the disabled filter above; all=True shows them marked.
+            inactive = skill_manager.get_inactive_names()
+
             lines = ['## Available Skills']
             for skill in sorted(all_skills, key=_sort_key):
                 source = skill.get('source', 'system')
@@ -106,8 +110,10 @@ class ScanSkills(BaseTool):
                 rating_str = f'{rating}' if rating is not None else 'n/a'
                 candidate_note = (f" (candidate, pending decision vs v{_incumbent_version(skill['name'])})"
                                   if skill['name'] in candidate_names else '')
+                inactive_note = ' (inactive)' if skill['name'].lower() in inactive else ''
                 lines.append(f"- **{skill['name']}** [{source}] v{version} "
-                             f"(rating: {rating_str}, ~{chars // 1000}.{'0' if chars % 1000 < 500 else '5'}k chars){candidate_note}: "
+                             f"(rating: {rating_str}, ~{chars // 1000}.{'0' if chars % 1000 < 500 else '5'}k chars)"
+                             f"{candidate_note}{inactive_note}: "
                              f"{skill.get('description', 'No description')}")
             return '\n'.join(lines)
 
