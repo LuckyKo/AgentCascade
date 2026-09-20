@@ -1620,10 +1620,7 @@ function refreshSkillThreshold() {
     .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
     .then(data => {
       if (data && data.ok) {
-        const kTxt = Number.isFinite(parseFloat(data.k)) ? parseFloat(data.k).toString() : '';
-        el.textContent = `Threshold: evict-below ${data.evict_threshold} · enable-up-to ${data.reenable_target}` +
-          ` · ${data.active_count} active / ${data.n_qualified} qualified` +
-          (kTxt ? ` (K=${kTxt})` : '');
+        el.textContent = `Threshold: evict-above ${data.evict_threshold} · ${data.active_count} active / ${data.n_qualified} qualified`;
       } else {
         el.textContent = 'Threshold: n/a';
       }
