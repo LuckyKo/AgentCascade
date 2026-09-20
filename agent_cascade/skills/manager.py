@@ -937,7 +937,10 @@ class SkillManager:
         logger.info('[SKILLS] Registering skill from content (source=%s)', source)
 
         skill_id = uuid.uuid4().hex
-        pending_dir = Path(f"agents/global/pending-skills/{skill_id}")
+        # Overridable pending root (mirrors _candidates_dir / _production_skills_dir): tests point
+        # this at a per-test tmp dir so xdist workers never share/blanket-delete the same tree.
+        pending_root = getattr(self, '_pending_dir', None) or Path('agents/global/pending-skills')
+        pending_dir = pending_root / skill_id
         pending_dir.mkdir(parents=True, exist_ok=True)
         pending_file = pending_dir / 'SKILL.md'
         pending_file.write_text(skill_content, encoding='utf-8')

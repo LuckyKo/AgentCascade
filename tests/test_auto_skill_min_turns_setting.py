@@ -70,11 +70,12 @@ class TestPoolSettingsField:
 class TestLiveGate:
     """Prove core.py::_try_auto_skill_extension reads the LIVE pool.settings value.
 
-    The turn gate (core.py:283) must respect ``pool.settings.auto_skill_min_turns`` —
-    not the import-time constant — so a UI edit takes effect without a restart. We detect
-    whether execution PASSES the turn gate by checking that the compression lock is
-    entered (core.py:287), which only happens after the gate succeeds. ``_auto_skill_proposed``
-    is set True so a passed gate returns cleanly at the one-shot flag (core.py:288-289).
+    The turn gate lives inside the shared helper ``_auto_skill_gates_met`` (turn check at
+    core.py:264) and must respect ``pool.settings.auto_skill_min_turns`` — not the
+    import-time constant — so a UI edit takes effect without a restart. We detect whether
+    execution PASSES the gate by checking that the compression lock is entered in
+    ``_try_auto_skill_extension`` (core.py:315), which only happens after the gate succeeds.
+    ``_auto_skill_proposed`` is kept False so the turn gate is the sole pass/fail decider.
     """
 
     def _make_engine(self, pool):
@@ -84,22 +85,27 @@ class TestLiveGate:
         engine.pool = pool
         # Bind the REAL gate method so its live-read logic actually runs.
         engine._try_auto_skill_extension = ExecutionEngine._try_auto_skill_extension.__get__(engine, ExecutionEngine)
+        # The turn gate moved into this helper; a bare spec-MagicMock would auto-mock it to truthy
+        # and bypass the gate entirely (see .agent_lessons/magicmock-spec-hides-new-methods.md).
+        engine._auto_skill_gates_met = ExecutionEngine._auto_skill_gates_met.__get__(engine, ExecutionEngine)
         return engine
 
     def _gate_passed(self, min_turns, current_turn):
         """Drive the gate with a LIVE ``auto_skill_min_turns``; report whether it passed."""
         pool = MagicMock()
-        pool.skill_manager = MagicMock()          # not None → passes gate 1 (core.py:276)
+        pool.skill_manager = MagicMock()          # not None → passes gate 1 (core.py:256, in _auto_skill_gates_met)
         ps = PoolSettings()
-        ps.auto_skill_enabled = True             # passes gate 2 (core.py:279)
-        ps.default_load_skill_mode = 'AUTO'      # passes gate 3 (core.py:281); not LOAD_SKILL_NONE ('NONE')
+        ps.auto_skill_enabled = True             # passes gate 2 (core.py:259); enabled by default anyway
+        ps.default_load_skill_mode = 'AUTO'      # passes gate 3 (core.py:261); not LOAD_SKILL_NONE ('NONE')
         ps.auto_skill_min_turns = min_turns      # LIVE value under test
         pool.settings = ps
 
         inst = MagicMock()
         inst._current_turn = current_turn
-        inst._auto_skill_proposed = True         # passed gate → clean early return at core.py:288-289
-        # inst._compression_lock is a MagicMock → `with` triggers __enter__ only if core.py:287 was reached.
+        # Flag check now lives inside _auto_skill_gates_met; keep it False so the turn gate is the
+        # ONLY thing deciding pass/fail. (The one-shot flag is orthogonal to the live-read under test.)
+        inst._auto_skill_proposed = False
+        # inst._compression_lock is a MagicMock → `with` triggers __enter__ only if core.py:315 was reached.
 
         engine = self._make_engine(pool)
         engine._try_auto_skill_extension(inst, [], [], None)

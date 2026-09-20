@@ -165,9 +165,15 @@ def fresh_manager(tmp_path):
     tests that derive a tree from ``Path(manager._metrics_file).parent`` now get a temp dir,
     which is the intended isolation behavior.
     """
-    _cleanup_test_artifacts()
+    _cleanup_test_artifacts()                      # legacy sweep of any pre-existing shared artifacts (harmless)
     manager = SkillManager()
     manager._metrics_file = tmp_path / 'skills-metrics.json'
+    # Isolate ALL THREE skill roots to a unique per-test tmp dir. tmp_path is function-scoped and
+    # unique even across xdist workers, so no two tests share a tree → the shared-tree race disappears.
+    base = tmp_path / 'agents' / 'global'
+    manager._pending_dir = base / 'pending-skills'
+    manager._candidates_dir = base / 'candidates'
+    manager._production_skills_dir = base / 'skills'
     yield manager
     _cleanup_test_artifacts()
 
@@ -423,8 +429,10 @@ class TestProposeValidatePromote:
 
         assert name in fresh_manager._skills_registry
 
-        target = Path('agents/global/skills') / name / 'SKILL.md'
-        assert target.exists(), f"Skill was not promoted to agents/global/skills/{name}/"
+        # Assert against the manager's isolated production root (set by fresh_manager), NOT the
+        # CWD-relative shared tree — under xdist that tree is no longer where this test promotes.
+        target = fresh_manager._production_skills_dir / name / 'SKILL.md'
+        assert target.exists(), f"Skill was not promoted to {target.parent}/"
 
         reg = fresh_manager._skills_registry[name]
         assert name in reg['file_path']
@@ -537,7 +545,9 @@ class TestRateLimiting:
         success, _ = fresh_manager.register_skill_from_content(content)
         assert not success
 
-        pending_root = Path('agents/global/pending-skills')
+        # Assert against the isolated pending dir where register_skill_from_content actually
+        # wrote/cleaned up (set by fresh_manager), NOT the CWD-relative shared tree.
+        pending_root = fresh_manager._pending_dir
         if pending_root.exists():
             for entry in list(pending_root.iterdir()):
                 skill_file = entry / 'SKILL.md'
