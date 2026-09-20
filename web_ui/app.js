@@ -117,7 +117,6 @@ const state = {
         lastSubAgentRender: 0,      // For renderSubAgents throttling (~150ms during streaming)
         lastSubAgentRenderDuration: 0, // Track render duration for adaptive throttling
     lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
-    lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
   lastTelemetryUpdate: 0,     // updateTelemetryPanel throttling (~2s)
   },
@@ -581,7 +580,6 @@ const ActivityBar = {
   el: null,          // DOM ref to #globalActivityBar
   fifoEl: null,      // DOM ref to .activity-fifo
   queuedEl: null,    // DOM ref to .activity-queued
-  queueBanner: null, // DOM ref to queue banner container
   lastRenderTime: 0, // Throttle timer for render()
   _lastPushTime: 0,      // Throttle timer for pushImmediate()
   _initialized: false,   // Guard against duplicate init calls
@@ -629,11 +627,6 @@ const ActivityBar = {
         send({ type: 'dismiss_queue', instance_name: getActiveInstanceName(), message_index: -1 });
       });
     }
-  },
-
-  push(instanceName, text) {
-    if (instanceName !== this.getFilterInstance()) return;
-    this.render(text);
   },
 
   /** Build the status string for an agent from agentData and optional streaming text.
@@ -705,7 +698,7 @@ const ActivityBar = {
     return getActiveInstanceName();
   },
 
-  setActiveTab(tabId) {
+  setActiveTab() {
     this.render();
   },
 
@@ -738,8 +731,15 @@ render(streamingText) {
     // Hide banner if no queued messages
     if (!queuedMessages || queuedMessages.length === 0) {
       this.queueBanner.style.display = 'none';
+      this._queueSig = null;
       return;
     }
+
+    // Dirty check: skip teardown/rebuild when the queue is unchanged and the
+    // banner is already shown (avoids O(queue-length) DOM churn on every tick).
+    const sig = queuedMessages.join('\n');
+    if (sig === this._queueSig && this.queueBanner.style.display !== 'none') return;
+    this._queueSig = sig;
 
     this.queueBanner.style.display = 'flex';
     this.queueMessageList.innerHTML = '';
@@ -4311,7 +4311,7 @@ function renderSubAgents() {
       scrollPanelToBottom(panel, tabName, false);
     }
 
-    ActivityBar.setActiveTab(tabId);
+    ActivityBar.setActiveTab();
   }
 
   // Diagnostic: warn on slow renders
@@ -4570,7 +4570,7 @@ function switchMainTab(tabId) {
   }
 
   state.activeSubTab = tabId;
-  ActivityBar.setActiveTab(tabId);
+  ActivityBar.setActiveTab();
 
   // Invalidate target panel's content key cache to force a full re-render.
   // Without this, if the agent didn't receive new messages while hidden,
@@ -5013,7 +5013,6 @@ function resetGenStats() {
     lastSubAgentRender: 0,
     lastSubAgentRenderDuration: 0,
     lastContextBarUpdate: 0,
-    lastUiUpdate: 0,
     lastControlsUpdate: 0,
     lastTelemetryUpdate: 0,
   };
@@ -5120,7 +5119,15 @@ function getActivityPreview(msg) {
   }
 
   // Regular content or reasoning
-  const text = ((msg.reasoning_content || '') + (msg.content || '')).slice(-300);
+  // O(300): only pull the needed tail instead of concatenating the full strings.
+  const c = msg.content || '';
+  const r = msg.reasoning_content || '';
+  let text;
+  if (c.length >= 300) {
+    text = c.slice(-300);
+  } else {
+    text = r.slice(-(300 - c.length)) + c;
+  }
   return getLastWords(text, 20) || 'Streaming...';
 }
 
