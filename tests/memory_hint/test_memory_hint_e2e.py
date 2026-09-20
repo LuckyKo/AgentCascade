@@ -65,6 +65,9 @@ class TestMemoryHintE2E:
         inst._memories_read = set()
         inst._recently_hinted = {}
         inst._last_memory_hint_turn = -1
+        # Skill-hint state (feature: skills-in-memory-hints).
+        inst._recently_skill_hinted = {}
+        inst._last_skill_hint_turn = -1
         return inst
 
     @staticmethod
@@ -87,12 +90,13 @@ class TestMemoryHintE2E:
         return bool(inst._tool_warnings)
 
     @staticmethod
-    def _make_pool(tmp_path, max_turns=2, enabled=True, natural_end_at=None):
+    def _make_pool(tmp_path, max_turns=2, enabled=True, natural_end_at=None, skill_manager=None):
         """Build a real ExecutionEngine + instance wired to a stubbed LLM.
 
         Returns (engine, inst, pool, run) where ``run()`` drives the generator to
         completion and returns it. The memory-hint manager is REAL (started as a daemon
-        thread); only the LLM and turn-machinery guards are stubbed.
+        thread); only the LLM and turn-machinery guards are stubbed. ``skill_manager``
+        injects a skill matcher for the skills-in-memory-hints sub-pipeline (None = off).
         """
         from agent_cascade.execution_engine import ExecutionEngine
         from agent_cascade.memory_hint.manager import MemoryHintManager
@@ -138,6 +142,8 @@ class TestMemoryHintE2E:
         # REAL manager: daemon worker + real vault index. get_instance resolves the fake.
         om = SimpleNamespace(base_dir=str(v.parent), extra_work_folders_ro=[], extra_work_folders_rw=[])
         pool.operation_manager = om
+        # Skill sub-pipeline (feature: skills-in-memory-hints): None by default.
+        pool.skill_manager = skill_manager
         inst = TestMemoryHintE2E._make_inst(max_turns)
         pool.get_instance.return_value = inst
 
@@ -280,3 +286,27 @@ class TestMemoryHintE2E:
         run()
         time.sleep(0.3)  # settle: give the worker a chance (it must NOT hint an already-read memory)
         assert inst._tool_warnings == [], 'an already-read memory must not be re-hinted'
+
+    # ------------------------------------------------------------------ #
+    # 6. Skill suggestion rides the same tool-warning queue (skills-in-memory-hints)
+    # ------------------------------------------------------------------ #
+
+    def test_skill_suggestion_rides_tool_warning_queue(self, tmp_path):
+        """A turn whose text matches a registered skill delivers the skill line on
+        _tool_warnings via the SAME single-message path as memory hints."""
+        from unittest.mock import MagicMock
+        sm = MagicMock()
+        # Score comfortably above SKILL_HINT_MIN_SCORE (0.15).
+        sm.match_skills.return_value = [('docker-best-practices', 0.30)]
+        engine, inst, pool, run, mgr = self._make_pool(
+            tmp_path, max_turns=2, skill_manager=sm).__next__()
+        run()
+
+        # Wait for the daemon worker to deliver (no tool result follows to drain it).
+        assert self._wait_for_hint(inst), 'expected a hint on _tool_warnings'
+        hint = inst._tool_warnings[0]
+        assert '[MEMORY HINT]' in hint
+        assert 'Skills you may want to load' in hint
+        assert 'docker-best-practices' in hint
+        # The memory lesson still rides the SAME single message (combined hint).
+        assert 'compression-debug.md' in hint

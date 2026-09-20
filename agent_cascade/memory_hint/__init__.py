@@ -19,6 +19,8 @@ from .manager import (
     HINT_ENTRY_MAX_CHARS,
     JOB_TTL_SECONDS,
     MAX_HINTS_PER_TURN,
+    SKILL_HINT_MAX_ENTRIES,
+    SKILL_HINT_MIN_SCORE,
 )
 from .matcher import MemoryMatcher
 from .vault import VaultIndex, discover_vaults, parse_frontmatter, identity_text, is_under_vault
@@ -34,6 +36,8 @@ __all__ = [
     'HINT_ENTRY_MAX_CHARS',
     'JOB_TTL_SECONDS',
     'MAX_HINTS_PER_TURN',
+    'SKILL_HINT_MAX_ENTRIES',
+    'SKILL_HINT_MIN_SCORE',
     'MemoryMatcher',
     'VaultIndex',
     'discover_vaults',

@@ -82,6 +82,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'memory_hint_max_entries',
     'memory_hint_query_chars',
     'memory_hint_cooldown_seconds',
+    'memory_hint_skill_suggestions',
     # Image base64 management
     'max_images_for_llm',
     # Image caption mode (auto/always/off)
@@ -689,6 +690,18 @@ def _handle_memory_hint_cooldown_seconds(ui_cfg: dict, agent_pool: Optional[Any]
         except (TypeError, ValueError):
             val = 600.0
         agent_pool.llm_cfg['memory_hint_cooldown_seconds'] = min(max(0.0, val), 86400.0)
+
+
+@register_config_handler('memory_hint_skill_suggestions')
+def _handle_memory_hint_skill_suggestions(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Master sub-toggle for skill suggestions within memory hints (default ON).
+
+    A sub-toggle under ``memory_hint_enabled``: when memory hints are off this is
+    moot; when on, the user can independently disable just the skill part. The
+    manager reads it live each cycle via _settings() — no other wiring needed.
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        agent_pool.llm_cfg['memory_hint_skill_suggestions'] = bool(ui_cfg.get('memory_hint_skill_suggestions', True))
 
 
 @register_config_handler('grep_char_limit')

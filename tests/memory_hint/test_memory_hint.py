@@ -273,10 +273,13 @@ class _FakeInst:
         self._memories_read = set()
         self._recently_hinted = {}
         self._last_memory_hint_turn = -1
+        # Skill-hint state (feature: skills-in-memory-hints).
+        self._recently_skill_hinted = {}
+        self._last_skill_hint_turn = -1
 
 
 class TestManagerDedup:
-    def _manager_with_lesson(self, tmp_path, enabled=True):
+    def _manager_with_lesson(self, tmp_path, enabled=True, skill_manager=None):
         v = tmp_path / 'proj' / '.agent_lessons'
         v.mkdir(parents=True)
         # Two lessons with DISJOINT topic words: the compression query must make
@@ -296,6 +299,8 @@ class TestManagerDedup:
                         'memory_hint_max_entries': 3,
                         'memory_hint_cooldown_seconds': 600,
                         'memory_hint_query_chars': 1000}
+        # Explicit memory-only intent: no skill manager unless one is injected.
+        pool.skill_manager = skill_manager
         pool.operation_manager = _make_om(v.parent)
         pool.get_instance.return_value = inst
         mgr = MemoryHintManager(pool)
@@ -822,6 +827,312 @@ class TestManagerGate:
         assert inst2._tool_warnings == [], 'override above top1 must suppress the hint'
 
 
+# ── 4c. Manager: skill sub-pipeline (feature: skills-in-memory-hints) ───────
+
+class TestManagerSkillHints:
+    """The independent skill gate merged into the memory-hint delivery path."""
+
+    @staticmethod
+    def _stub_skill_manager(matches):
+        sm = MagicMock()
+        sm.match_skills.return_value = matches
+        return sm
+
+    def _make_mgr(self, tmp_path, lessons, query, skill_manager=None, **cfg_over):
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        for rel, name, desc, body in lessons:
+            _write_lesson(v, rel, name, desc, body)
+        inst = _FakeInst()
+        pool = MagicMock()
+        cfg = {'memory_hint_enabled': True,
+               'memory_hint_max_entries': 3,
+               'memory_hint_cooldown_seconds': 600,
+               'memory_hint_query_chars': 1000}
+        cfg.update(cfg_over)
+        pool.llm_cfg = cfg
+        # Explicit memory-only intent unless a skill manager is injected.
+        pool.skill_manager = skill_manager
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+        job = {'instance_name': 'w', 'query': query,
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        return mgr, inst, job
+
+    def test_skill_hint_fires_on_strong_match(self, tmp_path):
+        """A query whose top skill score ≥ SKILL_HINT_MIN_SCORE delivers a skill hint."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.05)]))
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert '[MEMORY HINT]' in hint
+        assert 'Skills you may want to load' in hint
+        assert 'docker-best-practices' in hint
+        # Cooldown recorded for the suggested skill.
+        assert 'docker-best-practices' in inst._recently_skill_hinted
+
+    def test_skill_hint_below_min_score_suppressed(self, tmp_path):
+        """A generic/diffuse query whose top skill score < min-score → NO skill section."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE - 0.05)]))
+        mgr._process_job(job)
+        # The memory hint still fires (clear winner), but with NO skill section.
+        assert len(inst._tool_warnings) == 1
+        assert 'Skills you may want to load' not in inst._tool_warnings[0]
+        assert inst._recently_skill_hinted == {}
+
+    def test_skill_only_when_no_memory_match(self, tmp_path):
+        """No memory match but a strong skill match → the skill hint is still delivered.
+
+        Verifies the removed early-return: a turn with no memory match can now fire
+        on skills alone (plan §3.1c).
+        """
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        # Query shares nothing with the lesson → memory matcher returns [].
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'zebra quokka falcon totally unrelated words',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]))
+        # Sanity: the memory sub-pipeline really has no match for this query.
+        with mgr._index_lock:
+            assert mgr._matcher.match(job['query']) == []
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert '[MEMORY HINT]' in hint
+        assert 'Skills you may want to load' in hint
+        assert 'docker-best-practices' in hint
+        # Skill-only hints carry the umbrella tag; no memory section.
+        assert 'Relevant memories' not in hint
+
+    def test_skill_hint_excludes_already_loaded(self, tmp_path):
+        """A skill already active this run (_loaded_skill_names) is NOT suggested."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]))
+        with inst._compression_lock:
+            inst._loaded_skill_names = ['docker-best-practices']
+        mgr._process_job(job)
+        # Memory hint fires; the loaded skill is excluded (no skill section at all).
+        assert len(inst._tool_warnings) == 1
+        assert 'Skills you may want to load' not in inst._tool_warnings[0]
+        assert 'docker-best-practices' not in inst._recently_skill_hinted
+
+    def test_skill_hint_cooldown_blocks_repeat(self, tmp_path):
+        """Processing twice within the cooldown → the second adds no skill hint."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]))
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        assert 'Skills you may want to load' in inst._tool_warnings[0]
+        # Immediately re-process: skill still in cooldown → no new skill section.
+        job2 = {'instance_name': 'w', 'query': job['query'], 'agent_class': 'test_agent',
+                'submitted_at': time.monotonic(), 'turn': 4}
+        mgr._process_job(job2)
+        assert len(inst._tool_warnings) == 1, 'second process must not queue another hint'
+
+    def test_skill_hint_prunes_expired_recently_skill_hinted(self, tmp_path):
+        """After the cooldown elapses, the entry is pruned and re-suggestion allowed."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]))
+        now = time.monotonic()
+        with inst._compression_lock:
+            # One long-expired (prunable) and one fresh (must survive) entry.
+            inst._recently_skill_hinted['stale-skill'] = now - 601.0   # > 600s cooldown
+            inst._recently_skill_hinted['fresh-skill'] = now - 1.0
+        mgr._process_job(job)
+        assert 'stale-skill' not in inst._recently_skill_hinted, 'expired entry must be pruned'
+        assert 'fresh-skill' in inst._recently_skill_hinted, 'fresh entry must survive'
+        # The strong match itself is suggested (not in cooldown).
+        assert 'docker-best-practices' in inst._recently_skill_hinted
+
+    def test_skill_hint_max_entries_caps(self, tmp_path):
+        """4+ skills above the floor → capped to SKILL_HINT_MAX_ENTRIES, top-scored kept."""
+        from agent_cascade.memory_hint import SKILL_HINT_MAX_ENTRIES, SKILL_HINT_MIN_SCORE
+        assert SKILL_HINT_MAX_ENTRIES == 3  # cap under test
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        matches = [(f'skill-{i}', SKILL_HINT_MIN_SCORE + 0.1 * (5 - i)) for i in range(4)]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager(matches))
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        # Top-3 by score are listed; the lowest (skill-3) is capped out.
+        for n in ('skill-0', 'skill-1', 'skill-2'):
+            assert n in hint, f'{n} (top-3) missing from hint: {hint}'
+        assert 'skill-3' not in hint, '4th skill must be capped out of the hint'
+        assert '(3)' in hint  # section header count reflects the cap
+
+    def test_skill_and_memory_combined_format(self, tmp_path):
+        """Both fire → ONE message: memory block (byte-format preserved) + skill section."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]))
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        # Exact combined shape: memory block first, skill section appended.
+        mem_block = mgr._build_hint([mgr._display_path('compression-debug.md')])
+        expected = (mem_block + '\n'
+                    + 'Skills you may want to load (1):\n'
+                    + '  - docker-best-practices')
+        assert hint == expected, f'combined hint shape mismatch:\n{hint!r}\nvs\n{expected!r}'
+
+    def test_memory_only_output_byte_identical(self, tmp_path):
+        """Only memories fire → the hint equals the legacy _build_hint output exactly."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop')
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        expected = mgr._build_hint([mgr._display_path('compression-debug.md')])
+        assert inst._tool_warnings[0] == expected, \
+            'memory-only hint must be byte-identical to the legacy _build_hint output'
+
+    def test_skill_manager_missing_no_crash(self, tmp_path):
+        """pool.skill_manager = None → no exception; memory-only behavior preserved."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop')  # skill_manager=None
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert 'compression-debug.md' in hint
+        assert 'Skills you may want to load' not in hint
+
+    def test_skill_manager_magicmock_noop(self, tmp_path):
+        """A bare MagicMock pool (no explicit skill_manager) → the skill sub-pipeline
+        no-ops deterministically via the isinstance guard; memory path unaffected."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop')
+        # Deliberately set pool.skill_manager to a bare MagicMock (truthy) to exercise
+        # the isinstance guard: match_skills returns a MagicMock, NOT a list → skip.
+        mgr._pool.skill_manager = MagicMock()
+        assert isinstance(mgr._pool.skill_manager, MagicMock)
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert 'compression-debug.md' in hint
+        assert 'Skills you may want to load' not in hint
+        assert inst._recently_skill_hinted == {}
+
+    def test_skill_suggestions_toggle_off(self, tmp_path):
+        """memory_hint_skill_suggestions=False + strong match → NO skill section."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]),
+            memory_hint_skill_suggestions=False)
+        mgr._process_job(job)
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert 'compression-debug.md' in hint
+        assert 'Skills you may want to load' not in hint
+
+    def test_skill_failure_isolated_from_memory(self, tmp_path):
+        """skill_manager.match_skills raising → memory hint still delivered; no exception."""
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        sm = MagicMock()
+        sm.match_skills.side_effect = RuntimeError('boom')
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=sm)
+        mgr._process_job(job)  # must not raise
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert 'compression-debug.md' in hint
+        assert 'Skills you may want to load' not in hint
+
+    def test_feature_disabled_skips_both(self, tmp_path):
+        """memory_hint_enabled=False → neither memory nor skill hints."""
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop',
+            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]),
+            memory_hint_enabled=False)
+        mgr._process_job(job)
+        assert inst._tool_warnings == []
+
+
 # ── 5. Instance reset helper + defaults ─────────────────────────────────────
 
 class TestInstanceReset:
@@ -832,10 +1143,15 @@ class TestInstanceReset:
         inst._memories_read = {'a.md'}
         inst._recently_hinted = {'a.md': 123.0}
         inst._last_memory_hint_turn = 7
+        # Skill-hint state (feature: skills-in-memory-hints) is cleared too.
+        inst._recently_skill_hinted = {'docker-best-practices': 456.0}
+        inst._last_skill_hint_turn = 9
         inst._reset_memory_hint_state()
         assert inst._memories_read == set()
         assert inst._recently_hinted == {}
         assert inst._last_memory_hint_turn == -1
+        assert inst._recently_skill_hinted == {}
+        assert inst._last_skill_hint_turn == -1
 
     def test_reset_never_raises_on_broken_lock(self):
         """Best-effort: a broken lock must not propagate (swallowed at debug)."""
@@ -854,6 +1170,9 @@ class TestInstanceReset:
         assert hasattr(AgentInstance, '_memories_read')
         assert hasattr(AgentInstance, '_recently_hinted')
         assert hasattr(AgentInstance, '_last_memory_hint_turn')
+        # Skill-hint state fields (feature: skills-in-memory-hints).
+        assert hasattr(AgentInstance, '_recently_skill_hinted')
+        assert hasattr(AgentInstance, '_last_skill_hint_turn')
 
 
 # ── 6. Engine query-extraction helper ───────────────────────────────────────
@@ -967,6 +1286,22 @@ class TestConstants:
         # Invariants the gate logic depends on:
         assert 0.0 < EWMA_ALPHA < 1.0
         assert FLOOR_MIN <= FLOOR_SEED
+
+    def test_skill_gate_constants_reuse_settings(self):
+        """The skill-hint gate constants reuse the AUTO-mode settings values (plan §D2/§D3)."""
+        from agent_cascade.memory_hint import SKILL_HINT_MAX_ENTRIES, SKILL_HINT_MIN_SCORE
+        from agent_cascade.settings import MAX_AUTO_SKILLS_PER_CALL, SKILL_MATCH_THRESHOLD
+        assert SKILL_HINT_MIN_SCORE == SKILL_MATCH_THRESHOLD
+        assert SKILL_HINT_MAX_ENTRIES == MAX_AUTO_SKILLS_PER_CALL
+
+    def test_settings_skill_suggestions_default_on(self):
+        """memory_hint_skill_suggestions defaults to True when absent; live when present."""
+        pool = MagicMock()
+        mgr = MemoryHintManager(pool)
+        pool.llm_cfg = {}
+        assert mgr._settings()['skill_suggestions'] is True
+        pool.llm_cfg = {'memory_hint_skill_suggestions': False}
+        assert mgr._settings()['skill_suggestions'] is False
 
     def test_settings_threshold_defaults_to_adaptive(self, tmp_path):
         """Absent memory_hint_threshold → 0.0 (pure adaptive), not the retired 0.35."""

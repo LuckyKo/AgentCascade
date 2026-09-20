@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from agent_cascade.log import logger
+from agent_cascade.settings import SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_CALL
 
 from .matcher import MemoryMatcher
 from .vault import VaultIndex, discover_vaults
@@ -71,6 +72,12 @@ FLOOR_MIN = 0.12
 # (1−α)·floor). Small on purpose: the floor tracks the corpus's own score
 # distribution slowly and must not chase a single spike.
 EWMA_ALPHA = 0.05
+
+# ── Skill-hint gate (feature: skills-in-memory-hints) ───────────────────────
+# INDEPENDENT of the memory cosine floor (plan §D1): skill scores are
+# keyword-fraction (0..1), a different scale than TF-IDF cosine — never mix them.
+SKILL_HINT_MIN_SCORE = SKILL_MATCH_THRESHOLD      # 0.15 — data-derived floor (plan §D2)
+SKILL_HINT_MAX_ENTRIES = MAX_AUTO_SKILLS_PER_CALL # 3    — max skills listed (plan §D3)
 
 
 class MemoryHintManager:
@@ -254,12 +261,17 @@ class MemoryHintManager:
             query_chars = int(cfg.get('memory_hint_query_chars', 1000))
         except (TypeError, ValueError):
             query_chars = 1000
+        # Master sub-toggle for skill suggestions within memory hints (plan §D7):
+        # ON by default; a user who finds skill spam can silence just the skill part
+        # without disabling memory hints entirely.
+        skill_suggestions = bool(cfg.get('memory_hint_skill_suggestions', True))
         return {
             'enabled': bool(cfg.get('memory_hint_enabled', False)),
             'threshold': threshold,
             'max_entries': max_entries,
             'cooldown_seconds': cooldown,
             'query_chars': query_chars,
+            'skill_suggestions': skill_suggestions,
         }
 
     def _current_floor(self, override: float) -> float:
@@ -350,6 +362,49 @@ class MemoryHintManager:
         except Exception:  # noqa: BLE001
             pass
 
+        # ── Memory sub-pipeline (existing gate; returns bare + display paths) ──
+        memory_bare, memory_display = self._match_memories(job, settings, inst)
+
+        # ── Skill sub-pipeline (NEW independent gate; returns skill names) ──
+        skill_names = self._match_skills_for_hint(job, settings, inst)
+
+        if not memory_bare and not skill_names:
+            return
+
+        hint_text = self._build_combined(memory_display, skill_names)
+        if not hint_text:
+            return
+
+        # Record cooldowns BEFORE delivery (only for what we actually deliver), so a
+        # fast re-match is throttled. Memory and skill state are recorded together in
+        # one lock block — they must never be partially updated.
+        now = time.monotonic()
+        with inst._compression_lock:
+            for path in memory_bare:
+                inst._recently_hinted[path] = now
+            if memory_bare:
+                inst._last_memory_hint_turn = job.get('turn', -1)
+            for skill_name in skill_names:
+                inst._recently_skill_hinted[skill_name] = now
+            if skill_names:
+                inst._last_skill_hint_turn = job.get('turn', -1)
+
+        self._deliver(inst, name, hint_text)
+
+    def _match_memories(self, job: dict, settings: dict, inst) -> 'tuple[List[str], List[str]]':
+        """Memory sub-pipeline: the existing specificity gate over the lesson index.
+
+        Returns ``(bare_paths, display_paths)`` — both empty when nothing fires. The
+        bare paths are the vault-relative identities used for bookkeeping (dedup /
+        cooldown); the display paths are the ABSOLUTE strings shown in the hint. This
+        method is a VERBATIM move of the former inline gate in ``_process_job``: every
+        early ``return`` became ``return [], []`` so a strong skill match can still fire
+        on a turn with no memory match (plan §3.1c/§D1). The skill score scale is NEVER
+        fed into the floor/gap/noise arithmetic here.
+        """
+        name = job['instance_name']
+        query = job['query']
+
         # Match against the current index snapshot, and capture an ORDERED snapshot of
         # the vault roots in the SAME lock block. Display resolution later uses this
         # snapshot (not the live dict) so a concurrent rescan can't change iteration
@@ -361,7 +416,7 @@ class MemoryHintManager:
         if not matches:
             # Log only the query length — never the raw text (sensitive data).
             logger.debug('[MEMORY_HINT] %s: no matches (query_len=%d)', name, len(query))
-            return
+            return [], []
 
         # Self-calibrating specificity gate (replaces the fixed-threshold check):
         #   1) signal floor — is there ANY real signal? (top1 < floor → skip)
@@ -382,17 +437,17 @@ class MemoryHintManager:
         if top1 < floor:
             logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → skip(floor)',
                          name, top1, top2, gap, floor)
-            return
+            return [], []
         if gap < GAP:
             logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → skip(gap)',
                          name, top1, top2, gap, floor)
-            return
+            return [], []
 
         strong = [(path, score) for path, score in matches if score >= floor]
         if len(strong) > MAX_HINTS_PER_TURN:
             logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → skip(noise) (%d strong)',
                          name, top1, top2, gap, floor, len(strong))
-            return
+            return [], []
 
         logger.debug('[MEMORY_HINT] %s: gate top1=%.3f top2=%.3f gap=%.3f floor=%.3f → fire',
                      name, top1, top2, gap, floor)
@@ -425,7 +480,7 @@ class MemoryHintManager:
             logger.debug('[MEMORY_HINT] %s: all %d strong match(es) filtered out '
                          '(already_read=%s, in_cooldown=%s)',
                          name, len(strong), skipped_read or '-', skipped_cooldown or '-')
-            return
+            return [], []
 
         # ``strong`` is already score-descending (inherited from matcher.match), so the
         # post-cooldown ``to_hint`` list keeps that order. Cap to the top-N entries
@@ -441,18 +496,93 @@ class MemoryHintManager:
         # changes here. Pass the match-time root snapshot so display resolves against
         # the same vault set/order that produced the scores (see roots_snapshot above).
         display = [self._display_path(p, roots=roots_snapshot) for p in to_hint]
+        return to_hint, display
 
-        hint_text = self._build_hint(display)
-        if not hint_text:
-            return
+    def _match_skills_for_hint(self, job: dict, settings: dict, inst) -> List[str]:
+        """Skill sub-pipeline: an INDEPENDENT gate over ``SkillManager.match_skills``.
 
-        # Record the hint for cooldown BEFORE delivery (so a fast re-match is throttled).
+        Returns the skill names to suggest (score-descending, capped), or ``[]``. The
+        gate is deliberately simpler than the memory one — a min-score floor plus a
+        max-count cap (plan §D2/§D3) — because skill scores are keyword-fraction on a
+        different scale and multiple relevant skills are legitimate. A failure here can
+        never break the memory path (plan §D6).
+        """
+        name = job['instance_name']
+        if not settings['skill_suggestions']:          # master sub-toggle (plan §D7)
+            return []
+        sm = getattr(self._pool, 'skill_manager', None)
+        if sm is None or not hasattr(sm, 'match_skills'):   # missing manager (defensive / tests)
+            return []
+        try:
+            matches = sm.match_skills(job['query'])     # [(name, score)] desc; keyword-fraction 0..1
+        except Exception as e:                          # plan §D6 — never break the memory path
+            logger.debug('[MEMORY_HINT] %s: skill match failed: %s', name, e)
+            return []
+        # Deterministic no-op guard for `MagicMock` pools (existing tests): a bare MagicMock's
+        # match_skills returns a MagicMock, NOT a list → skip. If a test stubs match_skills to
+        # return a REAL list, that is intentional and SHOULD be processed (the guard correctly passes).
+        if not isinstance(matches, list):
+            return []
+        if not matches:
+            return []
+
+        strong = [(n, s) for n, s in matches if s >= SKILL_HINT_MIN_SCORE]   # plan §D2 floor
+        if not strong:                                   # generic/noise query → no skill spam
+            logger.debug('[MEMORY_HINT] %s: skills all below min_score=%.2f → skip', name, SKILL_HINT_MIN_SCORE)
+            return []
+
+        now = time.monotonic(); cooldown = settings['cooldown_seconds']      # reuse memory cooldown (§D4)
+        to_hint, skipped_loaded, skipped_cd = [], [], []
         with inst._compression_lock:
-            for path in to_hint:
-                inst._recently_hinted[path] = now
-            inst._last_memory_hint_turn = job.get('turn', -1)
+            # Read _loaded_skill_names UNDER the lock: the engine main loop writes it cross-thread
+            # (engine/core.py), so an unlocked read from this worker thread is a data race.
+            # Matches how _memories_read / _recently_hinted are always accessed here.
+            loaded = {str(x).lower() for x in (getattr(inst, '_loaded_skill_names', None) or [])}
+            expired = [n for n, ts in inst._recently_skill_hinted.items() if now - ts >= cooldown]
+            for n in expired:
+                del inst._recently_skill_hinted[n]
+            for n, _s in strong:
+                if n.lower() in loaded:                 # already active this run (§D4)
+                    skipped_loaded.append(n); continue
+                last = inst._recently_skill_hinted.get(n)
+                if last is not None and (now - last) < cooldown:
+                    skipped_cd.append(n); continue
+                to_hint.append(n)
+        if not to_hint:
+            logger.debug('[MEMORY_HINT] %s: all %d skill(s) filtered (loaded=%s, cooldown=%s)',
+                         name, len(strong), skipped_loaded or '-', skipped_cd or '-')
+            return []
 
-        self._deliver(inst, name, hint_text)
+        max_entries = SKILL_HINT_MAX_ENTRIES            # plan §D3 cap (after dedup/cooldown)
+        if max_entries > 0:
+            to_hint = to_hint[:max_entries]
+        logger.debug('[MEMORY_HINT] %s: skill hint fire → %s', name, to_hint)
+        return to_hint
+
+    def _skill_block(self, names: List[str]) -> str:
+        """Skill section of a combined hint ('' when empty). Skill names are short
+        snake_case strings — no per-entry clipping needed."""
+        if not names:
+            return ''
+        lines = [f"  - {n}" for n in names]
+        return f"Skills you may want to load ({len(names)}):\n" + '\n'.join(lines)
+
+    def _build_combined(self, memory_display: List[str], skill_names: List[str]) -> str:
+        """Merge the two sub-pipelines into ONE hint string (plan §D5).
+
+        Memory-only output is BYTE-IDENTICAL to the legacy ``_build_hint`` result; a
+        skill-only hint gets the ``[MEMORY HINT]`` umbrella tag so log/UI filtering keyed
+        on that tag still catches it.
+        """
+        mem_block = self._build_hint(memory_display)   # UNCHANGED method; '' if empty
+        skill_block = self._skill_block(skill_names)   # '' if empty
+        if mem_block and skill_block:
+            return mem_block + '\n' + skill_block      # both sections, memory first (stable order)
+        if mem_block:
+            return mem_block                           # memory-only → BYTE-IDENTICAL to today's output
+        if skill_block:
+            return '[MEMORY HINT] ' + skill_block      # skill-only → umbrella tag + skill block
+        return ''
 
     def _display_path(self, rel: str, roots: Optional[List[Path]] = None) -> str:
         """Resolve a vault-relative lesson path to an ABSOLUTE display string.

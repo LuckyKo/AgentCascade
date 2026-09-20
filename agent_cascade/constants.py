@@ -167,6 +167,7 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'memory_hint_max_entries',
     'memory_hint_query_chars',
     'memory_hint_cooldown_seconds',
+    'memory_hint_skill_suggestions',
 )
 
 # Default value for max_images_for_llm when not explicitly configured.

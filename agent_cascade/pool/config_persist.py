@@ -73,7 +73,8 @@ class ConfigPersistMixin:
                                 'max_images_for_llm',
                                 # Memory-hint feature (plan §7)
                                 'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_entries',
-                                'memory_hint_query_chars', 'memory_hint_cooldown_seconds'):
+                                'memory_hint_query_chars', 'memory_hint_cooldown_seconds',
+                                'memory_hint_skill_suggestions'):
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 
@@ -265,6 +266,10 @@ class ConfigPersistMixin:
                         self.llm_cfg['memory_hint_cooldown_seconds'] = min(max(0.0, float(val)), 86400.0)
                     except (ValueError, TypeError):
                         pass
+
+                val = data.pop('memory_hint_skill_suggestions', None)
+                if val is not None:
+                    self.llm_cfg['memory_hint_skill_suggestions'] = bool(val)
 
         except Exception as e:
             logger.error(

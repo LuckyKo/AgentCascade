@@ -374,13 +374,18 @@ class AgentInstance:
 
     # ── Memory-Hint State (feature: memory_hint) ──────────────────────────────
     # Vault-relative paths of lessons already read via read_file; never re-hint a
-    # memory in this set. All three fields are mutated under _compression_lock and
+    # memory in this set. All five fields are mutated under _compression_lock and
     # reset together by _reset_memory_hint_state() (L1/L2 compression + session reset).
     _memories_read: set = field(default_factory=set)
     # Vault-relative path -> last-hint monotonic timestamp (cooldown guard).
     _recently_hinted: dict = field(default_factory=dict)
     # Last turn a hint was issued (secondary throttle; diagnostics).
     _last_memory_hint_turn: int = field(default=-1)
+    # Skill-hint cooldown map: skill name -> last-hint monotonic timestamp
+    # (feature: skills-in-memory-hints; mirrors _recently_hinted).
+    _recently_skill_hinted: dict = field(default_factory=dict)
+    # Last turn a skill hint was issued (diagnostics; mirrors _last_memory_hint_turn).
+    _last_skill_hint_turn: int = field(default=-1)
 
     # ── Cache Notification Queue ──────────────────────────────────────────────
     # Parallel to _tool_warnings but for cache pool events. Drained into tool
@@ -625,19 +630,26 @@ class AgentInstance:
             self._memories_read = set()
             self._recently_hinted = {}
             self._last_memory_hint_turn = -1
+            # Skill-hint cooldown state resets with the session (skills-in-memory-hints).
+            self._recently_skill_hinted = {}
+            self._last_skill_hint_turn = -1
 
     def _reset_memory_hint_state(self) -> None:
         """Clear all memory-hint tracking state under _compression_lock.
 
         Called on L1/L2 compression success (plan §5.2) and session reset. Resets
         the WHOLE read-set + cooldown map (not a reconstruction of which files were
-        in the compressed window — see plan §5.3). Best-effort: never raises.
+        in the compressed window — see plan §5.3), including the skill-hint cooldown
+        state (_recently_skill_hinted / _last_skill_hint_turn, feature:
+        skills-in-memory-hints). Best-effort: never raises.
         """
         try:
             with self._compression_lock:
                 self._memories_read = set()
                 self._recently_hinted = {}
                 self._last_memory_hint_turn = -1
+                self._recently_skill_hinted = {}
+                self._last_skill_hint_turn = -1
         except Exception as e:  # noqa: BLE001 — best-effort, never affect the caller
             logging.getLogger(__name__).debug('[MEMORY_HINT] _reset_memory_hint_state failed: %s', e)
 

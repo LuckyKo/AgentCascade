@@ -1468,6 +1468,8 @@ if __name__ == '__main__':
         'memory_hint_max_entries': 3,
         'memory_hint_query_chars': 1000,
         'memory_hint_cooldown_seconds': 600,
+        # Skill suggestions within memory hints (sub-toggle under memory_hint_enabled).
+        'memory_hint_skill_suggestions': True,
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)
