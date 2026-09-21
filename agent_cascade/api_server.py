@@ -45,7 +45,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-export)
 from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE,
-                                    SKILL_SCORE_SETTINGS, clamp_skill_setting)
+                                    SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting)
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
 
@@ -1624,6 +1624,9 @@ if __name__ == '__main__':
         # (config handlers, frontend inputs) lands in Phase E — seeding here keeps the keys
         # visible to any consumer before then. Defaults come from the single source-of-truth table.
         **{key: spec['default'] for key, spec in SKILL_SCORE_SETTINGS.items()},
+        # Always-protected (unremovable) meta-skill set — STRING setting; seeded as its default
+        # comma-separated string so an old config that never persisted it still protects the four.
+        'skill_always_protected': SKILL_ALWAYS_PROTECTED_DEFAULT,
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)

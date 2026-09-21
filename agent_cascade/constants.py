@@ -185,6 +185,8 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'skill_score_nmin',
     'skill_fair_window_turns',
     'skill_max_evictions_per_pass',
+    # Always-protected (unremovable) meta-skill set — STRING setting, propagated to the frontend.
+    'skill_always_protected',
 )
 
 # Default value for max_images_for_llm when not explicitly configured.

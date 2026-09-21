@@ -82,7 +82,9 @@ class ConfigPersistMixin:
                                 'skill_score_q0', 'skill_score_kq', 'skill_score_nhalf',
                                 'skill_score_ghalf', 'skill_score_rflood', 'skill_score_tau_turns',
                                 'skill_score_dq', 'skill_score_nmin', 'skill_fair_window_turns',
-                                'skill_max_evictions_per_pass'):
+                                'skill_max_evictions_per_pass',
+                                # Always-protected (unremovable) meta-skill set — STRING setting.
+                                'skill_always_protected'):
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 
@@ -321,6 +323,16 @@ class ConfigPersistMixin:
                             self.llm_cfg[_key] = clamp_skill_setting(_key, SKILL_SCORE_SETTINGS[_key]['type'](val))
                         except (ValueError, TypeError):
                             pass
+
+                # ── Always-protected (unremovable) meta-skill set — restore into llm_cfg ──
+                # STRING setting: parse to a lowercase frozenset (case-insensitive, empty tokens
+                # ignored). A MISSING key leaves llm_cfg unset so the manager falls back to the
+                # DEFAULT four skills (backward-compat, no crash); a blank value is normalized by
+                # parse_skill_always_protected() back to that same default.
+                from agent_cascade.settings import parse_skill_always_protected
+                val = data.pop('skill_always_protected', None)
+                if val is not None:
+                    self.llm_cfg['skill_always_protected'] = parse_skill_always_protected(val)
 
         except Exception as e:
             logger.error(

@@ -184,3 +184,44 @@ class TestSixSeamWiring:
             # index.html input id: 'setting-' + key with underscores → hyphens.
             dom_id = 'setting-' + key.replace('_', '-')
             assert f'id="{dom_id}"' in index_html, f"{key}: missing input id {dom_id} in index.html"
+
+
+class TestAlwaysProtectedWiring:
+    """The ``skill_always_protected`` STRING setting (unremovable meta-skill set) is wired through
+    the same non-clamped pattern as ``skill_auto_invalidate_enabled`` — NOT the numeric
+    SKILL_SCORE_SETTINGS clamp table. It must be present in every Python seam that carries it."""
+
+    KEY = 'skill_always_protected'
+
+    def test_handler_registered_and_parses_to_lowercase_set(self):
+        from agent_cascade.config_handlers import CONFIG_HANDLERS
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        assert self.KEY in CONFIG_HANDLERS, f"missing handler for {self.KEY}"
+        CONFIG_HANDLERS[self.KEY]({self.KEY: 'Self-Augmentation, x'}, pool, [])
+        assert pool.llm_cfg[self.KEY] == {'self-augmentation', 'x'}
+
+    def test_in_persist_list_and_broadcast(self):
+        from agent_cascade.config_handlers import POOL_SETTINGS_KEYS
+        from agent_cascade.constants import POOL_SETTINGS_TO_BROADCAST
+        assert self.KEY in POOL_SETTINGS_KEYS, f"{self.KEY} missing from POOL_SETTINGS_KEYS"
+        assert self.KEY in POOL_SETTINGS_TO_BROADCAST, f"{self.KEY} missing from broadcast tuple"
+
+    def test_persist_save_list_and_restore_block(self):
+        src = Path('agent_cascade/pool/config_persist.py').read_text(encoding='utf-8')
+        assert f"'{self.KEY}'" in src, f"{self.KEY} missing from config_persist save/restore"
+
+    def test_initial_llm_cfg_seed(self):
+        src = Path('agent_cascade/api_server.py').read_text(encoding='utf-8')
+        assert f"'{self.KEY}'" in src, f"{self.KEY} missing from api_server.py (initial_llm_cfg seed)"
+
+    def test_settings_default_constant_and_parser_exist(self):
+        import agent_cascade.settings as s
+        assert s.SKILL_ALWAYS_PROTECTED_DEFAULT == (
+            'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator')
+        assert callable(s.parse_skill_always_protected)
+
+    def test_not_in_numeric_clamp_table(self):
+        """It is a STRING setting — deliberately NOT in the numeric-only SKILL_SCORE_SETTINGS table."""
+        import agent_cascade.settings as s
+        assert self.KEY not in s.SKILL_SCORE_SETTINGS

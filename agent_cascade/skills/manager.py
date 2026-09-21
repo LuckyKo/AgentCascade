@@ -29,8 +29,9 @@ from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
 from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURNS, CANDIDATE_EVAL_INTERVAL_SECONDS,
                                     CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL,
                                     SKILL_ACTIVE_MAX_CAP, SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K,
-                                    SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD, SKILL_RATING_INITIAL,
-                                    SKILL_WALLCLOCK_SECONDS_PER_TURN, SKILLS_DISABLED)
+                                    SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
+                                    SKILL_RATING_INITIAL, SKILL_WALLCLOCK_SECONDS_PER_TURN, SKILLS_DISABLED,
+                                    parse_skill_always_protected)
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher
@@ -643,9 +644,25 @@ class SkillManager:
         last_used = (entry.get('last_used') or '') if isinstance(entry, dict) else ''
         return (rating_num, loads, last_used, str(name).lower())
 
+    def _always_protected_set(self) -> frozenset:
+        """Resolve the always-protected (unremovable) meta-skill set as a lowercase name set.
+
+        Reads ``skill_always_protected`` from the pool's llm_cfg when available (set by the config
+        handler / persistence restore, already normalized to a lowercase frozenset); otherwise parses
+        the raw string defensively. Falls back to the DEFAULT four meta-skills on any missing/blank
+        value so they are always protected. Case-insensitive on both sides by construction.
+        """
+        pool = getattr(self, 'pool', None)
+        cfg = getattr(pool, 'llm_cfg', None) if pool is not None else None
+        val = cfg.get('skill_always_protected') if isinstance(cfg, dict) else None
+        if val is None:
+            return parse_skill_always_protected(SKILL_ALWAYS_PROTECTED_DEFAULT)
+        return parse_skill_always_protected(val)
+
     def _classify_active(self, metrics_snap: Dict[str, Any], active_names: List[str],
                          global_turns_snap: int, now: float,
-                         score_kw: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]:
+                         score_kw: Dict[str, Any],
+                         always_protected: Optional[frozenset] = None) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]:
         """One read-only pass over the snapshot classifying every ACTIVE skill (plan §4.3).
 
         Pure over the already-deepcopied snapshot — no locks re-acquired per skill
@@ -664,6 +681,14 @@ class SkillManager:
             L = m.get('total_loads', 0) if isinstance(m, dict) else 0
             A = self._activity_age(m, global_turns_snap, now)
             cls = skill_classify(n, avg, A, **score_kw['classify'])
+            # Always-protected (unremovable) meta-skills are FORCED to PROTECTED here — this single
+            # override beats BAD (which normally wins the §7 precedence) and everything else. Because
+            # both the real pass and the read-only preview build their eviction candidate set from
+            # ``class != CLASS_PROTECTED``, a forced-PROTECTED skill is unreachable by EITHER gate
+            # (absolute OR count-cap). The score stays as computed (only used for within-class
+            # ordering; PROTECTED is excluded from eviction anyway). Case-insensitive on both sides.
+            if always_protected is not None and str(nm).lower() in always_protected:
+                cls = CLASS_PROTECTED
             sc = skill_score(n, avg, L, A, **score_kw['score'])['score']
             info[nm] = {'class': cls, 'score': sc}
             counts[cls] = counts.get(cls, 0) + 1
@@ -758,7 +783,9 @@ class SkillManager:
                                             tau_turns=tau_turns, dq=dq, n_min=n_min,
                                             fair_window_turns=fair_window_turns)
             now = time.time()
-            info, class_counts = self._classify_active(metrics_snap, active_names, global_turns_snap, now, score_kw)
+            always_protected = self._always_protected_set()
+            info, class_counts = self._classify_active(metrics_snap, active_names, global_turns_snap, now, score_kw,
+                                                       always_protected=always_protected)
 
             # (b) raw desired count over the FULL corpus (active + inactive) → cannot ratchet (Q4).
             n_qualified = sum(
@@ -915,7 +942,9 @@ class SkillManager:
                                             tau_turns=tau_turns, dq=dq, n_min=n_min,
                                             fair_window_turns=fair_window_turns)
             now = time.time()
-            info, class_counts = self._classify_active(metrics_snap, active_names, global_turns_snap, now, score_kw)
+            always_protected = self._always_protected_set()
+            info, class_counts = self._classify_active(metrics_snap, active_names, global_turns_snap, now, score_kw,
+                                                       always_protected=always_protected)
 
             rows = []
             for nm in active_names:

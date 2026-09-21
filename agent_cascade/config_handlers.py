@@ -14,7 +14,8 @@ from typing import Any, Callable, Dict, Optional
 
 from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.settings import (CI_MIN_EXECUTION_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL, CI_MIN_WATCHDOG_TIMEOUT,
-                                    SKILL_SCORE_SETTINGS, clamp_skill_setting)
+                                    SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting,
+                                    parse_skill_always_protected)
 
 # ── LLM config key set (defined locally to avoid circular import with api_server) ────
 LLM_CONFIG_KEYS = frozenset({
@@ -100,6 +101,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'skill_score_nmin',
     'skill_fair_window_turns',
     'skill_max_evictions_per_pass',
+    # Always-protected (unremovable) meta-skill set — a STRING setting, persisted via pool_settings.json.
+    'skill_always_protected',
     # Image base64 management
     'max_images_for_llm',
     # Image caption mode (auto/always/off)
@@ -727,6 +730,19 @@ def _handle_skill_auto_invalidate_enabled(ui_cfg: dict, agent_pool: Optional[Any
     """Toggle the startup adaptive count-cap rebalance pass (default ON)."""
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         agent_pool.llm_cfg['skill_auto_invalidate_enabled'] = bool(ui_cfg.get('skill_auto_invalidate_enabled', True))
+
+
+@register_config_handler('skill_always_protected')
+def _handle_skill_always_protected(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Comma-separated set of meta/process skills that are NEVER evicted by the rebalance pass.
+
+    Parsed into a lowercase frozenset (empty/whitespace tokens ignored; case-insensitive on both
+    sides). A missing/blank value falls back to the DEFAULT four meta-skills, so an old config or a
+    cleared field always keeps them protected. Non-clamped STRING setting — modeled on
+    ``skill_auto_invalidate_enabled`` (not the numeric SKILL_SCORE_SETTINGS table)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        raw = ui_cfg.get('skill_always_protected', SKILL_ALWAYS_PROTECTED_DEFAULT)
+        agent_pool.llm_cfg['skill_always_protected'] = parse_skill_always_protected(raw)
 
 
 @register_config_handler('skill_active_target_k')

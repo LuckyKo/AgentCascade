@@ -2657,3 +2657,226 @@ class TestSkillScoringRebalance:
         p = m.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)  # must not raise
         assert isinstance(p, dict)
         assert p['ok'] is False and 'error' in p
+
+
+# ===========================================================================
+# Always-protected (unremovable) meta-skill set — feature: skill_always_protected
+# ===========================================================================
+
+def _bad_metrics_entry(n=10, avg=2.0):
+    """A metrics entry whose metrics classify BAD under default scoring (n>=n_min=5 and q̂<=4.5).
+
+    With n=10, avg=2.0: q̂=(10*2 + 5*5)/(10+5)=(20+25)/15≈3.33 ≤ 4.5 → BAD even if young.
+    """
+    return {'total_loads': n, 'by_version': {}, 'status': 'active',
+            'ratings': {'count': n, 'sum': round(avg * n, 4), 'latest': avg, 'last_version': ''}}
+
+
+def _fake_pool(llm_cfg):
+    """A minimal stand-in for the pool back-reference (SkillManager.pool)."""
+    p = type('_FakePool', (), {})()
+    p.llm_cfg = llm_cfg
+    return p
+
+
+class TestAlwaysProtectedSkills:
+    """Meta/process skills that must NEVER be evicted, even when their metrics classify BAD.
+
+    The single injection point is ``_classify_active`` (shared by the real rebalance pass AND the
+    read-only preview), which forces ``cls = CLASS_PROTECTED`` for any name in the always-protected
+    set. Because both paths build their eviction candidate set from ``class != CLASS_PROTECTED``, a
+    forced-PROTECTED skill is unreachable by EITHER gate (absolute OR count-cap)."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    # ------------------------------------------------------------------ parser
+    def test_parse_default_is_exactly_the_four(self):
+        from agent_cascade.settings import parse_skill_always_protected, SKILL_ALWAYS_PROTECTED_DEFAULT
+        got = parse_skill_always_protected(None)
+        assert got == {'self-augmentation', 'project-memory-writing',
+                       'bug-tracker-entry-format', 'skill-creator'}
+        # The default constant is the comma-separated seed string.
+        assert SKILL_ALWAYS_PROTECTED_DEFAULT.split(',') == [
+            'self-augmentation', 'project-memory-writing', 'bug-tracker-entry-format', 'skill-creator']
+
+    def test_parse_case_insensitive_and_strips_whitespace(self):
+        from agent_cascade.settings import parse_skill_always_protected
+        got = parse_skill_always_protected('  Self-Augmentation , BUG-Tracker-Entry-Format ,')
+        assert got == {'self-augmentation', 'bug-tracker-entry-format'}
+
+    def test_parse_empty_tokens_ignored(self):
+        from agent_cascade.settings import parse_skill_always_protected
+        # Only one real token survives the empty/whitespace ones.
+        assert parse_skill_always_protected('my-skill,,,  ,other') == {'my-skill', 'other'}
+
+    def test_parse_blank_falls_back_to_default(self):
+        from agent_cascade.settings import parse_skill_always_protected
+        # A cleared/blank value must NOT unprotect the meta-skills — it falls back to the default four.
+        assert parse_skill_always_protected('') == {'self-augmentation', 'project-memory-writing',
+                                                    'bug-tracker-entry-format', 'skill-creator'}
+        assert parse_skill_always_protected('   ') == {'self-augmentation', 'project-memory-writing',
+                                                       'bug-tracker-entry-format', 'skill-creator'}
+
+    def test_parse_empty_collection_falls_back_to_default(self):
+        from agent_cascade.settings import parse_skill_always_protected
+        # A pre-parsed empty collection (e.g. a stored frozenset) must also fall back to the default
+        # four — uniform with the blank-string case, so it can never silently unprotect them.
+        expected = {'self-augmentation', 'project-memory-writing',
+                    'bug-tracker-entry-format', 'skill-creator'}
+        assert parse_skill_always_protected(frozenset()) == expected
+        assert parse_skill_always_protected([]) == expected
+        # A non-empty collection is normalized (case-insensitive, whitespace-stripped).
+        assert parse_skill_always_protected(['My-Skill', '  other ', '']) == {'my-skill', 'other'}
+
+    # ------------------------------------------------------------------ config handler
+    def test_handler_parses_to_lowercase_set(self):
+        from agent_cascade.config_handlers import CONFIG_HANDLERS
+        pool = _fake_pool({})
+        CONFIG_HANDLERS['skill_always_protected']({'skill_always_protected': 'Self-Augmentation, x'}, pool, [])
+        assert pool.llm_cfg['skill_always_protected'] == {'self-augmentation', 'x'}
+
+    def test_handler_missing_key_uses_default(self):
+        from agent_cascade.config_handlers import CONFIG_HANDLERS
+        pool = _fake_pool({})
+        CONFIG_HANDLERS['skill_always_protected']({}, pool, [])
+        assert pool.llm_cfg['skill_always_protected'] == {'self-augmentation', 'project-memory-writing',
+                                                          'bug-tracker-entry-format', 'skill-creator'}
+
+    # ------------------------------------------------------------------ backward-compat (persistence)
+    def test_persist_missing_key_leaves_unset(self, tmp_path):
+        """Old config missing the key → llm_cfg unset → manager falls back to the default four."""
+        from agent_cascade.pool.config_persist import ConfigPersistMixin
+
+        class _Pool(ConfigPersistMixin):
+            def __init__(self, path: Path):
+                self.llm_cfg = {}
+                self._pool_settings_path = path
+                self.settings = None
+
+        f = tmp_path / 'pool_settings.json'
+        f.write_text(json.dumps({'idle_timeout_seconds': 900}), encoding='utf-8')
+        pool = _Pool(f)
+        pool._load_pool_settings()  # must not raise
+        assert 'skill_always_protected' not in pool.llm_cfg
+
+    def test_persist_restores_parsed_set(self, tmp_path):
+        from agent_cascade.pool.config_persist import ConfigPersistMixin
+
+        class _Pool(ConfigPersistMixin):
+            def __init__(self, path: Path):
+                self.llm_cfg = {}
+                self._pool_settings_path = path
+                self.settings = None
+
+        f = tmp_path / 'pool_settings.json'
+        f.write_text(json.dumps({'skill_always_protected': 'My-Skill, other'}), encoding='utf-8')
+        pool = _Pool(f)
+        pool._load_pool_settings()
+        assert pool.llm_cfg['skill_always_protected'] == {'my-skill', 'other'}
+
+    # ------------------------------------------------------------------ override: BAD → PROTECTED
+    def test_bad_meta_skill_forced_protected_not_evicted(self):
+        """KEY regression: an always-protected skill with BAD-level metrics is forced PROTECTED and
+        NOT evicted — proving the override beats BAD (which normally wins §7 precedence)."""
+        m = _rebalance_manager(self.tmp, ['self-augmentation', 'evil'])
+        _bump_to(m, 200)  # counter=200 ⇒ last_activity_turn=0 → A=200 ≥ fair_window(50) (aged out)
+        entries = {
+            'self-augmentation': _bad_metrics_entry(),  # BAD-level metrics, but a default meta-skill
+            'evil': _bad_metrics_entry(),               # identical BAD metrics, NOT listed → evicted
+        }
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['class_counts'][CLASS_PROTECTED] == 1   # the meta-skill is forced PROTECTED
+        assert s['class_counts'][CLASS_BAD] == 1         # the unlisted twin stays BAD
+        assert 'self-augmentation' not in s['evicted']   # immune to BOTH gates
+        assert s['evicted'] == ['evil']                  # the non-listed BAD skill IS evicted
+        assert _status_of(m, 'self-augmentation') == 'active'
+        assert _status_of(m, 'evil') == 'inactive'
+
+    def test_default_four_protected_out_of_the_box(self):
+        """With NO pool/llm_cfg (fresh manager) the DEFAULT four meta-skills are protected."""
+        names = ['self-augmentation', 'project-memory-writing',
+                 'bug-tracker-entry-format', 'skill-creator']
+        m = _rebalance_manager(self.tmp, names)  # no .pool set → defaults apply
+        _bump_to(m, 200)
+        _set_metrics(m, {nm: _bad_metrics_entry() for nm in names})
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['class_counts'][CLASS_PROTECTED] == 4
+        assert s['evicted'] == []                      # none of the four evicted
+        for nm in names:
+            assert _status_of(m, nm) == 'active'
+
+    def test_user_can_add_skill_via_config(self):
+        """A user ADDS a skill to the set via llm_cfg → it becomes protected; an identical-metrics
+        non-listed skill is still evicted (proves no over-protection)."""
+        m = _rebalance_manager(self.tmp, ['my-meta', 'other-bad'])
+        m.pool = _fake_pool({'skill_always_protected': {'my-meta'}})  # user-configured set
+        _bump_to(m, 200)
+        _set_metrics(m, {'my-meta': _bad_metrics_entry(), 'other-bad': _bad_metrics_entry()})
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['class_counts'][CLASS_PROTECTED] == 1   # my-meta forced PROTECTED
+        assert s['evicted'] == ['other-bad']             # the unlisted twin is evicted
+        assert _status_of(m, 'my-meta') == 'active'
+
+    def test_case_insensitive_matching(self):
+        """Setting "Self-Augmentation" protects a live skill stored as "self-augmentation"."""
+        m = _rebalance_manager(self.tmp, ['self-augmentation', 'evil'])
+        m.pool = _fake_pool({'skill_always_protected': {'Self-Augmentation'}})  # mixed case in config
+        _bump_to(m, 200)
+        _set_metrics(m, {'self-augmentation': _bad_metrics_entry(), 'evil': _bad_metrics_entry()})
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['class_counts'][CLASS_PROTECTED] == 1
+        assert 'self-augmentation' not in s['evicted']   # matched case-insensitively
+        assert s['evicted'] == ['evil']
+
+    # ------------------------------------------------------------------ preview parity
+    def test_preview_protected_and_absent_from_all_eviction_lists(self):
+        """Preview reflects the override: an always-protected BAD skill shows PROTECTED in `skills`
+        rows AND is absent from ALL THREE projected-eviction lists (would_evict, absolute-gate, cap)."""
+        m = _rebalance_manager(self.tmp / 'preview', ['self-augmentation', 'evil'])
+        _bump_to(m, 200)
+        _set_metrics(m, {'self-augmentation': _bad_metrics_entry(), 'evil': _bad_metrics_entry()})
+        p = m.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)
+        assert p['ok'] is True and 'error' not in p
+
+        by_name = {row['name']: row for row in p['skills']}
+        assert by_name['self-augmentation']['class'] == CLASS_PROTECTED  # forced PROTECTED
+        assert by_name['evil']['class'] == CLASS_BAD
+        assert p['class_counts'][CLASS_PROTECTED] == 1
+
+        # Absent from ALL THREE projected-eviction lists.
+        assert 'self-augmentation' not in p['would_evict']
+        assert 'self-augmentation' not in p['would_evict_absolute_gate']
+        assert 'self-augmentation' not in p['would_evict_cap_only']
+        # And the unlisted BAD skill IS projected for eviction.
+        assert p['would_evict'] == ['evil']
+
+    def test_preview_and_real_pass_agree_on_protection(self):
+        """Parity: an identical fresh manager run through the REAL pass evicts exactly what the
+        preview projected — the always-protected skill survives both."""
+        m1 = _rebalance_manager(self.tmp / 'pv', ['skill-creator', 'bad2'])
+        _bump_to(m1, 200)
+        _set_metrics(m1, {'skill-creator': _bad_metrics_entry(), 'bad2': _bad_metrics_entry()})
+        p = m1.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)
+
+        m2 = _rebalance_manager(self.tmp / 'rl', ['skill-creator', 'bad2'])
+        _bump_to(m2, 200)
+        _set_metrics(m2, {'skill-creator': _bad_metrics_entry(), 'bad2': _bad_metrics_entry()})
+        s = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+
+        assert p['would_evict'] == s['evicted'] == ['bad2']
+        assert 'skill-creator' not in s['evicted']
+        assert _status_of(m2, 'skill-creator') == 'active'
+
+    # ------------------------------------------------------------------ no over-protection
+    def test_non_listed_skill_unchanged(self):
+        """A skill NOT in the set classifies exactly as before (BAD) — no behavior change for it."""
+        m = _rebalance_manager(self.tmp, ['regular'])
+        _bump_to(m, 200)
+        _set_metrics(m, {'regular': _bad_metrics_entry()})
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['class_counts'][CLASS_BAD] == 1          # still BAD (not forced PROTECTED)
+        assert s['evicted'] == ['regular']                # still evictable

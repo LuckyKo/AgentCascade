@@ -568,6 +568,44 @@ SKILL_SCORE_NMIN: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_NMIN', '5'))  #
 SKILL_FAIR_WINDOW_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_FAIR_WINDOW_TURNS', '50'))  # PROTECTED window
 SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICTIONS_PER_PASS', '25'))  # D-SAFE cap
 
+# Meta/process skills that must NEVER be evicted by the rebalance pass, even if their metrics
+# would classify them BAD (BAD normally overrides the fair-window PROTECTED). This is a STRING
+# setting (comma-separated names), NOT one of the clamped numeric SKILL_SCORE_SETTINGS above — it
+# is parsed into a lowercase set via parse_skill_always_protected() at load time. The four defaults
+# are the process skills the system itself depends on; a user can add/remove without code changes.
+SKILL_ALWAYS_PROTECTED_DEFAULT: str = (
+    'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator')
+
+
+def parse_skill_always_protected(value) -> frozenset:
+    """Parse the ``skill_always_protected`` setting into a lowercase name set.
+
+    Accepts a comma-separated string (or an already-parsed list/tuple/set). Empty and whitespace-only
+    tokens are ignored; every surviving token is stripped + lowercased so matching against live skill
+    names is case-insensitive on both sides. On ``None``/empty/unparseable input the DEFAULT four
+    skills are returned, so a missing or blank config always protects the meta-skill set (safe).
+    """
+    _DEFAULT_SET = frozenset(t.strip().lower() for t in SKILL_ALWAYS_PROTECTED_DEFAULT.split(','))
+    if value is None:
+        raw = SKILL_ALWAYS_PROTECTED_DEFAULT
+    elif isinstance(value, str):
+        raw = value
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        # A pre-parsed collection (e.g. a stored frozenset) — normalize the same way; an empty
+        # collection falls back to the default so it can never silently unprotect the meta-skills.
+        # NOTE: frozenset is NOT a subclass of set, so it must be listed explicitly here.
+        result = frozenset(str(v).strip().lower() for v in value if str(v).strip())
+        return result or _DEFAULT_SET
+    else:
+        try:
+            raw = str(value)
+        except Exception:  # noqa: BLE001 — never let a bad setting break config load
+            raw = SKILL_ALWAYS_PROTECTED_DEFAULT
+    tokens = [t.strip().lower() for t in raw.split(',')]
+    result = frozenset(t for t in tokens if t)
+    return result or _DEFAULT_SET
+
+
 # ── Single source of truth for the skill-scoring clamp ranges (POLISH dedup) ─
 # Each setting's (default, lo, hi, type) lives HERE exactly once. config_handlers.py,
 # pool/config_persist.py, pool/core.py and api_server.py all derive their clamps from this table

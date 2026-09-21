@@ -179,6 +179,9 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # ── Skills System: Initialize SkillManager and discover skills ────────
         from agent_cascade.skills import SkillManager
         self.skill_manager = SkillManager()
+        # Back-reference so the manager can read pool-level llm_cfg (e.g. skill_always_protected)
+        # without a circular import; set immediately after construction, before any rebalance pass.
+        self.skill_manager.pool = self
 
         # Discover skills from ALL declared tiers (priority: system < agent < user).
         _project_root = Path(__file__).resolve().parent.parent.parent
