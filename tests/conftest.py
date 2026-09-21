@@ -200,6 +200,7 @@ def _find_vl_model():
 
 def pytest_configure(config):
     """Auto-probe for local LLM servers when the test session starts."""
+    _enable_worker_faulthandler()
     config.addinivalue_line(
         'markers',
         'skip_if_no_local: skip when no local LLM server is available or not opted in',
@@ -213,6 +214,37 @@ def pytest_configure(config):
                   f"live tests SKIPPED (set AGENT_CASCADE_RUN_LOCAL_TESTS=1 to run them)")
     else:
         print('\n[conftest] No local LLM server detected — integration tests will be skipped')
+
+
+def _enable_worker_faulthandler() -> None:
+    """Enable faulthandler in every xdist worker so a native crash (segfault / fatal
+    Python error) writes a real stack dump to a per-worker log file.
+
+    Why: the suite intermittently loses an xdist worker mid-run (xdist reports
+    INTERNALERROR `assert not crashitem` on a random in-flight test that passes fine
+    in isolation — the named test is a victim, not the cause). Without faulthandler,
+    a worker that dies from a native-level fault leaves NO traceback, making the root
+    cause impossible to diagnose. With it, the next crash dumps every thread's stack
+    (including the offending C frame) to `tests/_crash_dumps/<worker>.log`, turning an
+    opaque flake into a diagnosable one.
+
+    Diagnostic instrumentation only — changes no test behavior and has no effect when
+    no crash occurs. faulthandler is stdlib; enabling it is safe in both the controller
+    and each forked worker (PYTEST_XDIST_WORKER distinguishes them).
+    """
+    import faulthandler
+
+    worker = os.environ.get('PYTEST_XDIST_WORKER', 'main')
+    dump_dir = Path(__file__).resolve().parent / '_crash_dumps'
+    try:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        log_path = dump_dir / f'{worker}.log'
+        # Append mode so repeated runs accumulate; faulthandler keeps the fd open.
+        log_file = open(log_path, 'a', buffering=1)  # line-buffered
+        faulthandler.enable(file=log_file)
+    except Exception:
+        # Never let diagnostic setup break test collection/run.
+        pass
 
 
 def pytest_collection_modifyitems(config, items):
@@ -231,6 +263,118 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if 'skip_if_no_local' in item.keywords:
                 item.add_marker(skip_marker)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: real-AgentPool background-thread cleanup (prevents xdist worker crash)
+# ---------------------------------------------------------------------------
+#
+# ROOT CAUSE of the intermittent "xdist worker crashed" INTERNALERROR:
+# A real `AgentPool` (agent_cascade/pool/core.py) starts daemon background threads in
+# __init__ — `_candidate_eval_thread` (skill-candidate-eval loop) and, when skill
+# rebalancing is enabled, `_skill_rebalance_thread`. Tests that construct a REAL pool
+# (API-server / e2e-security harnesses) often don't stop it, so the daemon threads keep
+# running and ACCUMULATE across the many tests one xdist worker runs sequentially. After
+# enough leaked loops pile up, one of them ticks against a half-torn-down resource and
+# raises a native access violation (Windows 0xC0000005) that KILLS the whole worker
+# process — faulthandler can't always flush, xdist reports `assert not crashitem` on a
+# random in-flight test (a victim, not the cause), and the named test passes fine in
+# isolation. Capping `-n` does NOT help (each worker leaks independently).
+#
+# FIX: an autouse fixture that records every real AgentPool created during a test (by
+# wrapping __init__) and stops each on teardown, so no background threads leak between
+# tests. This is test-layer only — it changes no production behavior.
+
+@pytest.fixture(autouse=True)
+def _stop_real_agent_pools():
+    """Stop every real AgentPool created during this test so its daemon background
+    threads (candidate-eval loop, rebalance pass) don't leak and accumulate across the
+    tests a single xdist worker runs — the source of the intermittent worker crash.
+
+    Wraps AgentPool.__init__ for the duration of the test to capture instances; on
+    teardown sets pool.stopped = True (which signals the candidate-eval loop to exit)
+    and briefly joins the threads so they're actually gone before the next test. All
+    cleanup is best-effort and bounded — it must never fail or hang a test.
+    """
+    import threading
+
+    created: list = []
+    try:
+        from agent_cascade.pool.core import AgentPool
+    except Exception:
+        # Pool not importable in this worker (e.g. secrets_loader unavailable) — nothing
+        # to clean up; behave as a no-op fixture.
+        yield
+        return
+
+    original_init = AgentPool.__init__
+
+    def _tracking_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    AgentPool.__init__ = _tracking_init
+    try:
+        yield
+    finally:
+        AgentPool.__init__ = original_init
+        for pool in created:
+            try:
+                pool.stopped = True  # signals candidate-eval loop + idle/async shutdown
+            except Exception:
+                pass
+            # Bounded join so a stuck thread can't hang teardown (daemon threads die
+            # with the process anyway; this just reclaims them promptly between tests).
+            for attr in ('_candidate_eval_thread', '_skill_rebalance_thread'):
+                t = getattr(pool, attr, None)
+                if isinstance(t, threading.Thread) and t.is_alive():
+                    try:
+                        t.join(timeout=2.0)
+                    except Exception:
+                        pass
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic: per-test live-thread counter (gated by AC_TRACE_HANDLES=1)
+# ---------------------------------------------------------------------------
+# Investigates the intermittent xdist worker crash. Leaked daemon background threads
+# (one per real AgentPool / agent instance) are the leading suspect, so this logs the
+# process's live thread count after each test to tests/_crash_dumps/<worker>_threads.log
+# ("<seq> <thread_count> <test_id>"). A monotonic rise across a worker's run = thread
+# leak; a flat line = threads are being cleaned up. Off by default (zero overhead).
+
+@pytest.fixture(autouse=True)
+def _trace_handle_count(request):
+    if not os.environ.get('AC_TRACE_HANDLES'):
+        yield
+        return
+    import threading as _threading
+
+    def _threads() -> int:
+        # Thread count is a reliable proxy for leaked background resources (each leaked
+        # daemon thread holds handles/FDs). Win32 GetProcessHandleCount via ctypes is
+        # unreliable on this setup, so we track live threads instead.
+        return _threading.active_count()
+
+    worker = os.environ.get('PYTEST_XDIST_WORKER', 'main')
+    log_path = Path(__file__).resolve().parent / '_crash_dumps' / f'{worker}_threads.log'
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    seq_file = log_path.with_suffix('.seq')
+    try:
+        seq = int(seq_file.read_text().strip()) if seq_file.exists() else 0
+    except Exception:
+        seq = 0
+    yield
+    seq += 1
+    try:
+        with open(log_path, 'a', buffering=1) as f:
+            f.write(f"{seq} {_threads()} {request.node.name}\n")
+        seq_file.write_text(str(seq))
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

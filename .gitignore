@@ -111,3 +111,6 @@ agents/global/skills-metrics.json
 
 # Backup files (editor/tool .bak artifacts — do not track)
 *.bak
+
+# xdist worker crash dumps (faulthandler diagnostics, see tests/conftest.py)
+tests/_crash_dumps/
