@@ -35,7 +35,7 @@ from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURN
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher
-from .parser import parse_skill_file
+from .parser import parse_frontmatter, parse_skill_file
 from .scoring import (CLASS_BAD, CLASS_PROTECTED, CLASS_UNPROVEN, CLASS_USEFUL, CLASS_USELESS,
                       eviction_rank_key, skill_classify, skill_score)
 from .validator import validate_skill
@@ -1678,6 +1678,37 @@ class SkillManager:
         return self._load_skill_bodies(load_skill_value, task_text, context_text)
 
     # ── Dynamic Registration ─────────────────────────────────────────────
+
+    def prevalidate_skill(self, skill_content: str, task_text: str = '') -> Tuple[bool, List[str]]:
+        """Pre-approval health check mirroring register_skill_from_content's validate_skill.
+
+        Best-effort screen that runs BEFORE the user-approval prompt so an invalid proposal
+        never wastes an approval/security call. Reads the registry under lock (no writes, no
+        pending file) and reuses the SAME name derivation + validation_task derivation + upgrade
+        name-exclusion as register_skill_from_content's validate_skill path. The authoritative
+        re-validation still runs under lock inside register_skill_from_content; this only
+        pre-screens.
+
+        Args:
+            skill_content: Full SKILL.md content, with the frontmatter name already patched to the
+                           authoritative name (as propose_skill passes it).
+            task_text: Optional generating-task text for Tier 2 self-match. When empty, falls back
+                       to the frontmatter's generated_from_task field — identical to register's
+                       `task_text or frontmatter.get('generated_from_task','')`.
+
+        Returns:
+            Tuple of (passed, error_messages) — same shape as validate_skill.
+        """
+        frontmatter, _ = parse_frontmatter(skill_content)
+        name = frontmatter.get('name', '')
+        # Mirror register's validation_task derivation exactly so Tier 2 self-match behaves
+        # identically pre/post approval.
+        validation_task = task_text or frontmatter.get('generated_from_task', '')
+        with self._write_lock:
+            existing = set(self._skills_registry.keys())
+        if name and name in existing:
+            existing.discard(name)  # upgrade exclusion — mirror register's validate_skill path
+        return validate_skill(skill_content, name, existing, validation_task, check_injection=True)
 
     def register_skill_from_content(
         self,

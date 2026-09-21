@@ -232,6 +232,28 @@ class ProposeSkill(BaseTool):
                 fm_text = _patch_field(fm_text, 'version', effective_version)
             skill_content = skill_content[:fm_match.start(1)] + fm_text + skill_content[fm_match.end(1):]
 
+        # ── Pre-approval health check (NEW) ─────────────────────────────────────
+        # Screen invalid proposals BEFORE the user-approval prompt so a bad skill never wastes an
+        # approval/security call. Mirrors register's validate_skill (name derivation + upgrade
+        # exclusion + generated_from_task task derivation); register re-runs it under lock as the
+        # authoritative check, so no drift can slip through. Runs on the patched content (the
+        # authoritative name is already applied). Rating-only mode (above) and the similarity gate
+        # are unaffected. Defensive: a pre-check error must not break propose — fall through to the
+        # authoritative register validation.
+        try:
+            passed, health_errors = skill_manager.prevalidate_skill(skill_content)
+        except Exception as e:  # pragma: no cover - defensive; pre-check must not break propose
+            logger.warning('[PROPOSE-SKILL] pre-approval health check skipped (error): %s: %r',
+                           type(e).__name__, e)
+            passed, health_errors = True, []
+        if not passed:
+            lines = [f"  - {err}" for err in health_errors]
+            logger.warning('[PROPOSE-SKILL] REJECTED health check %s (%d issues)',
+                           proposed_name, len(health_errors))
+            return (f"REJECTED: proposed skill '{proposed_name}' failed pre-approval health checks:\n"
+                    + '\n'.join(lines) +
+                    '\nFix the issues and re-propose.')
+
         if is_update:
             # Approval for UPDATE — content for an existing name is always an update;
             # the patch version above makes effective_version differ from existing_version.

@@ -2258,6 +2258,111 @@ class TestProposeSkillSimilarityGate:
         assert 'registered successfully' in result
 
 
+class TestProposeSkillPreApprovalHealthCheck:
+    """Pre-approval health check in propose_skill (validate_skill BEFORE request_user_approval)."""
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        # Auto-approve by default so the NEW-skill path reaches registration when not rejected.
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    def test_invalid_skill_rejected_before_approval(self, fresh_manager):
+        """A Tier-1-invalid proposal is hard-rejected BEFORE any approval request (no wasted call)."""
+        m = self.manager
+        import json as _json
+        name = f"test-precheck-invalid-{_uid()}"
+        # Empty triggers list → Tier-1 "Missing or empty 'triggers' list" failure.
+        content = _make_skill_content(name=name,
+                                      description='Invalid skill with an empty triggers list here',
+                                      triggers=[],
+                                      generated_from_task='test precheck invalid')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content,
+                                        'justification': 'j'}))
+        assert result.startswith('REJECTED:'), f'expected health-check reject, got: {result!r}'
+        assert 'health check' in result
+        # The fix under test: the approval/security call must never have been consumed.
+        pool.operation_manager.request_user_approval.assert_not_called()
+        assert m.get_skill_metadata(name) is None
+
+    def test_valid_content_still_goes_to_approval(self, fresh_manager):
+        """A fully valid proposal passes the pre-check and reaches approval + registration."""
+        m = self.manager
+        import json as _json
+        name = f"test-precheck-valid-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Valid skill that must not be over-rejected',
+                                      triggers=['valid', 'precheck'],
+                                      generated_from_task='test precheck valid')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content,
+                                        'justification': 'j'}))
+        assert not result.startswith('REJECTED:'), f'valid skill must pass pre-check, got: {result!r}'
+        pool.operation_manager.request_user_approval.assert_called_once()
+        assert 'registered successfully' in result
+
+    def test_update_of_own_name_not_rejected_by_precheck(self, fresh_manager):
+        """An UPDATE of an existing name is not rejected by the pre-check's uniqueness check."""
+        m = self.manager
+        import json as _json
+        # Same isolation as TestProposeSkillSimilarityGate.test_update_of_own_name_not_self_rejected:
+        # isolated candidate/production dirs + neutralized discovery refresh so the update's
+        # candidate-flow registration (which runs AFTER the pre-check) succeeds in this test.
+        tmp_path = Path(m._metrics_file).parent
+        m._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
+        m._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
+        m._skill_paths = []
+        m.invalidate_cache = lambda *a, **k: None
+        m._ensure_discovered = lambda *a, **k: None
+
+        name = f"test-precheck-update-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Pre-check update target skill body',
+                                      triggers=['precheck', 'update'],
+                                      generated_from_task='test precheck update')
+        assert m.register_skill_from_content(content, task_text='test precheck update')[0]
+
+        updated = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        tool, _ = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        assert not result.startswith('REJECTED:'), f'update must pass pre-check (upgrade exclusion), got: {result!r}'
+        assert 'updated' in result.lower()
+
+    def test_generated_from_task_tier2_replicated(self, fresh_manager):
+        """DRIFT GUARD: the pre-check derives its Tier-2 task from generated_from_task, not ''.
+
+        A skill whose generated_from_task does NOT self-match (score < 0.3) but is otherwise
+        valid must be REJECTED before approval. If the pre-check hardcoded task_text='' instead of
+        mirroring register's `task_text or frontmatter.get('generated_from_task','')`, Tier 2 would
+        be skipped and this proposal would reach approval (wasting it) only to fail in register.
+        """
+        m = self.manager
+        import json as _json
+        name = f"test-precheck-tier2-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Unrelated topic about weather forecasting and seasonal climate patterns',
+            triggers=['weather', 'forecast'],
+            generated_from_task='docker kubernetes deployment',
+        )
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content,
+                                        'justification': 'j'}))
+        assert result.startswith('REJECTED:'), f'tier-2-failing skill must be pre-rejected, got: {result!r}'
+        assert 'health check' in result
+        pool.operation_manager.request_user_approval.assert_not_called()
+        assert m.get_skill_metadata(name) is None
+
+
 # ===========================================================================
 # Candidate flow — live-serving upgrade candidates (Phase 2 of skill evolution)
 # ===========================================================================
