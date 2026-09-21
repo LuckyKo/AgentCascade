@@ -1512,6 +1512,10 @@ def _rebalance_manager(tmp_path, skill_names):
     m._metrics_file = tmp_path / 'skills-metrics.json'
     with m._metrics_lock:
         m._metrics = {}
+    # __init__ → _load_metrics() already read the REAL production store, leaking its
+    # global_activity_turns counter (e.g. 120) into this hermetic manager. These tests assume a
+    # fresh clock frozen at 0 (see _age_out_all's precondition), so clear the leaked field too.
+    m._global_activity_turns = 0
     root = tmp_path / 'skills'
     for name in skill_names:
         _write_skill_file(root, name)
@@ -1859,6 +1863,9 @@ class TestSkillInvalidationRebalance:
         m._metrics_file = self.tmp / 'skills-metrics.json'
         with m._metrics_lock:
             m._metrics = {}
+        # Same clock leak as _rebalance_manager: __init__ read the real production store, so
+        # reset the leaked counter to 0 (this test ages out via _age_out_all, which needs a frozen clock).
+        m._global_activity_turns = 0
         root = self.tmp / 'skills'
         _write_skill_file(root, 'servable-a')                 # one-level → servable
         _write_skill_file(root, 'retired-b', subdir='INACTIVE')  # deeper → non-servable
