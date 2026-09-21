@@ -22,6 +22,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 from agent_cascade.skills.manager import SkillManager
 from agent_cascade.skills.matcher import SkillMatcher
 from agent_cascade.skills.parser import parse_frontmatter, parse_skill_file
+from agent_cascade.skills.scoring import (CLASS_BAD, CLASS_ORDINAL, CLASS_PROTECTED, CLASS_UNPROVEN,
+                                          CLASS_USEFUL, CLASS_USELESS, eviction_rank_key, skill_classify,
+                                          skill_score)
 
 # ===========================================================================
 # Fixtures — paths to real skill files in the repo
@@ -1315,11 +1318,14 @@ class TestSkillInvalidationMigration:
 
         with m._metrics_lock:
             entry = m._metrics['mig-fresh']
+            gt = m._global_activity_turns
         assert entry == {
             'total_loads': 0,
             'by_version': {},
             'status': 'active',
             'last_used': _iso_utc((self.root / 'mig-fresh' / 'SKILL.md').stat().st_mtime),
+            # D-SEED: freshly-created records get a fresh activity window (counter here is 0).
+            'last_activity_turn': gt,
         }
 
     def test_migration_orphan_guard(self):
@@ -1520,6 +1526,27 @@ def _migrate_once(m):
     m.rebalance_active_skills(k=1.0, min_cap=len(_active_names(m)), max_cap=len(_active_names(m)))
 
 
+def _age_out_all(m: 'SkillManager', age_days: float = 400.0) -> None:
+    """Age out every metrics entry's activity clock so NO skill is PROTECTED (Phase C).
+
+    Phase C makes the fair window a hard eviction floor: an entry with no explicit
+    ``last_activity_turn`` gets one stamped to the current counter at migration (D-SEED), which
+    keeps it PROTECTED for one window. These legacy count-cap fixtures assert cap-driven
+    eviction of freshly-migrated skills, so they must first age the store past the window — via
+    the wall-clock fallback (counter stays 0) with a far-past ``last_used``. Idempotent; call
+    after _migrate_once / _set_metrics, before the pass under test.
+
+    NOTE: this only works when the turns clock is frozen at 0 (fresh manager). If the counter has
+    been bumped, entries whose last_activity_turn < counter age by TURNS and stay PROTECTED —
+    use explicit last_activity_turn stamps in that case (see _aged_entry).
+    """
+    now = time.time()
+    with m._metrics_lock:
+        for entry in m._metrics.values():
+            if isinstance(entry, dict):
+                entry['last_used'] = _iso_utc(now - age_days * 86400.0)
+
+
 def _disable_after_migration(m, name):
     """Disable a skill via the public API AFTER migration so the flip survives rebalance's
     internal no-op migration (rebalance re-derives status from disk first; a post-migration
@@ -1532,12 +1559,19 @@ def _set_metrics(m, mapping):
     """Replace the metrics store under the lock (exact-case keys, lowercase names).
 
     NOTE: rebalance_active_skills() runs the schema-1.3 migration first, which re-derives
-    ``status`` from disk for standard-location skills (D-A → active). Use this only to set
+    ``status`` from disk for standard-location skills (D-A → active) and D-SEEDs any missing
+    ``last_activity_turn`` to the current counter (Phase C fair window). Use this only to set
     *ranking* fields (loads/ratings/last_used) or non-servable statuses; use
     _disable_after_migration() to set an inactive status that must survive the pass.
+
+    Phase C: entries with no explicit ``last_activity_turn`` are stamped to the current counter
+    here so a later _age_out_all() (wall-clock fallback) can age them past the fair window —
+    mirroring what migration's D-SEED does on the real path.
     """
     with m._metrics_lock:
-        m._metrics = {k: dict(v) for k, v in mapping.items()}
+        counter = m._global_activity_turns
+        m._metrics = {k: dict(v, last_activity_turn=v.get('last_activity_turn', counter))
+                      for k, v in mapping.items()}
 
 
 def _active_names(m):
@@ -1568,66 +1602,91 @@ class TestSkillInvalidationRebalance:
         entries — so: create files, migrate once, then inject. rebalance's internal migration is
         then a no-op that won't clobber our data.
         """
-        # Eviction floor: 25 active, N_qualified=10, k=1.0 → raw=10 < min_cap(20). The eviction
-        # threshold is max(min_cap, min(max_cap, raw)) = 20, so we evict down to 20 (only 5), NOT
-        # down to raw=10 — min_cap protects the corpus from being pruned below it.
+        # Eviction floor: min_cap is a LOWER BOUND ON EVICTION, not a force-enable mandate. Here
+        # 30 active with only 25 qualified (loads≥1) → raw=round(1.0×25)=25 ≥ min_cap(20), so
+        # evict_threshold = max(min_cap, min(max_cap, raw)) = 25 (the ACTIVE count to evict DOWN TO).
+        # The 5 unqualified skills (no loads, no ratings) are USELESS once past the fair window and
+        # get evicted by the absolute gate; the cap budget (active_before - threshold = 30 - 25 = 5)
+        # independently selects the same 5 worst-ranked. A tiny corpus can still sit far below min_cap
+        # without being pruned or padded up; min_cap only stops us from evicting below it.
+        # fair_window_turns=1 keeps every skill non-PROTECTED (aged past a 1-turn window).
         floor_tmp = self.tmp / 'floor'
-        floor_names = [f'f{i}' for i in range(25)]
+        floor_names = [f'f{i}' for i in range(30)]
         m = _rebalance_manager(floor_tmp, floor_names)
         _migrate_once(m)
-        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in floor_names[:10]}
-        for nm in floor_names[10:]:
-            entries[nm] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}  # active but unqualified
+        entries = {}
+        for nm in floor_names[:25]:
+            # Qualified (loads≥1) → counts toward N_qualified. Rated n=2 (UNPROVEN) so the gate is silent.
+            entries[nm] = {'total_loads': 1, 'by_version': {}, 'status': 'active',
+                           'ratings': {'count': 2, 'sum': 3.0}}
+        for nm in floor_names[25:]:
+            # Unqualified (no loads, no ratings) → USELESS past the window → absolute-gate evicted.
+            entries[nm] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
         _set_metrics(m, entries)
-        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
-        assert s['n_qualified'] == 10
-        assert s['raw'] == 10
-        assert s['evict_threshold'] == 20  # floored at min_cap, not raw(10)
-        assert len(s['evicted']) == 5      # evict only down to 20, not to raw=10
-        assert s['target'] == 20           # post-pass active count
+        _age_out_all(m)  # age past the fair window so the cap/gate may evict (not PROTECTED)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, fair_window_turns=1)
+        assert s['n_qualified'] == 25
+        assert s['raw'] == 25
+        assert s['evict_threshold'] == 25  # raw(25) ≥ min_cap → threshold = raw (clamped into [min,max])
+        assert len(s['evicted']) == 5      # evict down to 25 (active_before - threshold = 30 - 25)
+        assert s['target'] == 25           # post-pass active count
 
-        # Ceiling: N_qualified=300, k=1.0 → raw=300 > max_cap(200) → evict_threshold==200.
+        # Ceiling: N_qualified=300, k=1.0 → raw=300 > max_cap(200) → evict_threshold==200 (ceiling).
         # Isolated to its own subdir so the floor sub-case's on-disk files don't leak into this
         # corpus (the shared self.tmp skills dir would otherwise inflate n_servable + metrics).
+        # All UNPROVEN-rated (n=2) so only the count-cap evicts — no absolute-gate interference.
+        # max_evictions_per_pass raised to 1000 so the D-SAFE cap doesn't truncate the 100 evictions
+        # this sub-case is meant to exercise (the default of 25 would bound it).
         ceiling_tmp = self.tmp / 'ceiling'
         ceiling_names = [f's{i}' for i in range(300)]
         m2 = _rebalance_manager(ceiling_tmp, ceiling_names)
         _migrate_once(m2)
-        _set_metrics(m2, {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in ceiling_names})
-        s2 = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        _set_metrics(m2, {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active',
+                               'ratings': {'count': 2, 'sum': 3.0}} for nm in ceiling_names})
+        _age_out_all(m2)
+        s2 = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
         assert s2['n_qualified'] == 300
         assert s2['raw'] == 300
         assert s2['evict_threshold'] == 200  # ceiling-bounded at max_cap
-        assert len(s2['evicted']) == 100     # evict down to 200
+        assert len(s2['evicted']) == 100     # evict down to 200 (300 - 200)
         assert s2['target'] == 200
 
     def test_rebalance_evicts_over_cap(self):
-        """Over-cap: evict exactly (active - target) lowest-ranked; highest-rated survive."""
-        names = [f's{i:02d}' for i in range(30)]
-        m = _rebalance_manager(self.tmp, names)
-        # 15 rated high (survive), 15 unrated (evicted). N_qualified=15 → target=15.
-        entries = {}
-        for i in range(15):
-            entries[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
-                                 'ratings': {'count': 2, 'sum': 18.0}}  # avg 9.0
-        for i in range(15, 30):
-            entries[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}  # unrated
-        _set_metrics(m, entries)
+        """Over-cap: evict exactly (active - threshold) lowest-ranked; highest-scored survive.
 
-        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
-        assert s['n_qualified'] == 15
-        # raw=15 < min_cap(20) → evict_threshold floored at 20 (min_cap protects the corpus).
-        assert s['evict_threshold'] == 20
-        assert s['target'] == 20  # post-pass active count (15 rated + 5 unrated kept by the floor)
-        assert s['active_before'] == 30
-        assert len(s['evicted']) == 10
-        # Unrated (worst) evicted; rated survive.
-        for nm in names[:15]:
+        Phase C: 40 active with only 30 qualified (loads≥1) → raw=round(1.0×30)=30,
+        evict_threshold=max(min_cap,min(max_cap,raw))=30 (the ACTIVE count to evict DOWN TO). The
+        10 unqualified skills (no loads, no ratings) are USELESS past the fair window and get
+        evicted by the absolute gate; the cap budget (active_before - threshold = 40 - 30 = 10)
+        independently selects the same 10 worst-ranked. All 30 qualified survive.
+        fair_window_turns=1 keeps every skill non-PROTECTED (aged past a 1-turn window).
+        """
+        names = [f's{i:02d}' for i in range(40)]
+        m = _rebalance_manager(self.tmp, names)
+        # 30 qualified (survive), 10 unqualified (evicted). N_qualified=30.
+        entries = {}
+        for i in range(30):
+            entries[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
+                                 'ratings': {'count': 2, 'sum': 18.0}}  # avg 9.0 → q̂≈6.14, S>0
+        for i in range(30, 40):
+            entries[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}  # USELESS
+        _set_metrics(m, entries)
+        _age_out_all(m)
+
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, fair_window_turns=1)
+        assert s['n_qualified'] == 30
+        # raw=30 ≥ min_cap(20) → evict_threshold = 30 (the ACTIVE count to evict DOWN TO).
+        # Items removed = active_before - threshold = 40 - 30 = 10: the 10 unqualified (USELESS, worst).
+        assert s['evict_threshold'] == 30
+        assert s['active_before'] == 40
+        assert len(s['evicted']) == 10  # evict the 10 lowest-ranked (unqualified) down to threshold 30
+        # The qualified (higher-scored) skills all survive.
+        for nm in names[:30]:
             assert _status_of(m, nm) == 'active'
         for nm in s['evicted']:
             assert _status_of(m, nm) == 'inactive'
-        # Exactly 20 active remain (the 15 rated + 5 unrated that the eviction floor keeps).
-        assert len(_active_names(m)) == 20
+        # Exactly 30 active remain (the qualified corpus the cap evicts down to).
+        assert len(_active_names(m)) == 30
 
     def test_rebalance_reenables_under_cap(self):
         """Under-cap: re-enable highest-ranked servable inactive skills up to target."""
@@ -1636,14 +1695,17 @@ class TestSkillInvalidationRebalance:
         _migrate_once(m)  # schema 1.3 so rebalance's internal migration is a no-op
 
         # Set ranking fields (loads/ratings). All 5 are qualified → N_qualified=5 → target=min_cap=5.
+        # Phase C: every skill is rated n=2 (UNPROVEN — out of the absolute gate) so nothing is
+        # evicted by the quality gate; only the cap budget and re-enable logic run.
         entries = {
-            'a': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 1, 'sum': 8.0}},
-            'b': {'total_loads': 1, 'by_version': {}, 'status': 'active'},
-            'c': {'total_loads': 1, 'by_version': {}, 'status': 'active'},
-            'd': {'total_loads': 2, 'by_version': {}, 'status': 'active', 'ratings': {'count': 1, 'sum': 9.0}},
-            'e': {'total_loads': 5, 'by_version': {}, 'status': 'active'},  # unrated but high loads
+            'a': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
+            'b': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
+            'c': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
+            'd': {'total_loads': 2, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 18.0}},
+            'e': {'total_loads': 5, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
         }
         _set_metrics(m, entries)
+        _age_out_all(m)
         # Deactivate d and e via the public API (post-migration → survives rebalance's no-op
         # migration). They are now inactive servable re-enable candidates.
         _disable_after_migration(m, 'd')
@@ -1666,7 +1728,10 @@ class TestSkillInvalidationRebalance:
         re-enabled. min_cap only matters when evicting: it stops us from pruning below it.
         """
         m = _rebalance_manager(self.tmp, ['a'])
-        _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active'}})
+        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so nothing is evicted.
+        _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active',
+                               'ratings': {'count': 2, 'sum': 3.0}}})
+        _age_out_all(m)
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == 1
         assert s['raw'] == 1
@@ -1689,8 +1754,11 @@ class TestSkillInvalidationRebalance:
         """
         m = _rebalance_manager(self.tmp, ['a', 'b'])
         _migrate_once(m)
-        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in ('a', 'b')}
+        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so nothing is evicted.
+        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active',
+                        'ratings': {'count': 2, 'sum': 3.0}} for nm in ('a', 'b')}
         _set_metrics(m, entries)
+        _age_out_all(m)
 
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == 2
@@ -1708,8 +1776,11 @@ class TestSkillInvalidationRebalance:
         """Deactivating a batch must not shrink N_qualified → target stays stable."""
         names = [f's{i:02d}' for i in range(30)]
         m = _rebalance_manager(self.tmp, names)
-        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active'} for nm in names}
+        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so only the cap evicts.
+        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active',
+                        'ratings': {'count': 2, 'sum': 3.0}} for nm in names}
         _set_metrics(m, entries)
+        _age_out_all(m)
 
         s1 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
         # N_qualified=30, k=0.5 → raw=15. Eviction is floored at min_cap(20): we evict down to 20
@@ -1741,11 +1812,13 @@ class TestSkillInvalidationRebalance:
         names = [f's{i:02d}' for i in range(40)]
         m = _rebalance_manager(self.tmp, names)  # all 40 files exist → no orphan pruning
         _migrate_once(m)  # schema 1.3 so rebalance's internal migration is a no-op
+        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so only the cap evicts.
         entries = {nm: {'total_loads': 5, 'by_version': {}, 'status': 'active',
                         'last_used': '2026-01-01T00:00:00+00:00',
-                        'ratings': {'count': 1, 'sum': 8.0}} for nm in names}
+                        'ratings': {'count': 2, 'sum': 3.0}} for nm in names}
         _set_metrics(m, entries)
-
+        # last_used is far past (2026-01-01) → wall-clock A > fair window even if the turns clock
+        # is 0 → nothing is PROTECTED; all 40 are cap candidates.
         s1 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
         assert s1['n_qualified'] == 40
         assert s1['target'] == 20
@@ -1757,6 +1830,7 @@ class TestSkillInvalidationRebalance:
         m2 = _rebalance_manager(self.tmp, names)
         _migrate_once(m2)
         _set_metrics(m2, entries)
+        # Same far-past last_used as the first run → same (non-PROTECTED) classification.
         s2 = m2.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
         assert s2['evicted'] == s1['evicted']
 
@@ -1765,11 +1839,12 @@ class TestSkillInvalidationRebalance:
         m = _rebalance_manager(self.tmp, ['unrated', 'zero'])
         # N_qualified=2 → target=min_cap=1. Only one slot: the rated (0.0) survives.
         entries = {
-            'unrated': {'total_loads': 0, 'by_version': {}, 'status': 'active'},  # no ratings → -1.0
+            'unrated': {'total_loads': 0, 'by_version': {}, 'status': 'active'},  # no ratings → USELESS (abs gate)
             'zero': {'total_loads': 0, 'by_version': {}, 'status': 'active',
-                     'ratings': {'count': 1, 'sum': 0.0}},  # rated exactly 0.0
+                     'ratings': {'count': 2, 'sum': 3.0}},  # n=2 avg 1.5 → UNPROVEN (cap-only)
         }
         _set_metrics(m, entries)
+        _age_out_all(m)
 
         s = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200)
         assert s['target'] == 1
@@ -1790,11 +1865,14 @@ class TestSkillInvalidationRebalance:
         m._cache_ttl = 0.0
         m.discover([root])
 
+        # Phase C: servable-a rated n=2 (UNPROVEN — out of the absolute gate) so it isn't evicted.
         entries = {
-            'servable-a': {'total_loads': 1, 'by_version': {}, 'status': 'active'},
+            'servable-a': {'total_loads': 1, 'by_version': {}, 'status': 'active',
+                           'ratings': {'count': 2, 'sum': 3.0}},
             'retired-b': {'total_loads': 1, 'by_version': {}, 'status': 'inactive'},
         }
         _set_metrics(m, entries)
+        _age_out_all(m)
 
         s = m.rebalance_active_skills(k=1.0, min_cap=2, max_cap=200)
         # N_qualified counts BOTH (full corpus, incl. the non-servable retired-b) → 2 → raw=2.
@@ -1866,6 +1944,7 @@ class TestSkillInvalidationRebalance:
         for i in range(15, 30):
             entries[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
         _set_metrics(m, entries)
+        _age_out_all(m)
 
         # Snapshot state BEFORE the preview so we can prove it is side-effect-free.
         with m._metrics_lock:
@@ -1902,6 +1981,7 @@ class TestSkillInvalidationRebalance:
         for i in range(15, 30):
             entries2[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
         _set_metrics(m2, entries2)
+        _age_out_all(m2)
         s = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == p['n_qualified']
         assert s['raw'] == p['raw']
@@ -1919,3 +1999,661 @@ class TestSkillInvalidationRebalance:
         assert isinstance(p, dict)
         assert p['ok'] is False
         assert 'error' in p
+
+
+# ===========================================================================
+# Phase B — Score + Classify as PURE functions (research §5/§7/§8/§17)
+# ===========================================================================
+
+class TestSkillScoringPure:
+    """skill_score / skill_classify / eviction_rank_key are pure, side-effect-free, and reproduce
+    the research-doc worked numbers (§8) exactly. No fixtures needed — these take plain scalars."""
+
+    # ------------------------------------------------------------------ score
+    def test_score_reproduces_research_section8(self):
+        """Regression anchor: every §8 worked case reproduces q̂, S (and class) to ~3 decimals."""
+        # (name, n, avg, L, A) — A chosen so the documented class holds (fresh for case1, aged for the rest).
+        cases = [
+            ('brand-new',           1, 5.0,   1, 0),    # q̂≈5.000  S≈0.0588  PROTECTED
+            ('perfect-rare',        2, 10.0,  2, 60),   # q̂≈6.429  S≈0.1422  UNPROVEN
+            ('popular-bad',         30, 3.0,  30, 60),  # q̂≈3.286  S≈0.3208  BAD
+            ('loaded-never-rated',  0, None,  50, 60),  # q̂=5.000  S==0.0    USELESS
+            ('high-count-nearbase', 40, 5.1,  40, 60),  # q̂≈5.089  S≈0.5055  USELESS
+            ('good-rare',           5, 8.0,   5, 60),   # q̂==6.5    S≈0.3021  USEFUL
+            ('clearly-bad-low-n',   3, 2.0,   3, 60),   # q̂≈3.875  S≈0.1212  UNPROVEN
+        ]
+        expected = {
+            'brand-new':           (5.000, 0.0588, CLASS_PROTECTED),
+            'perfect-rare':        (6.429, 0.1422, CLASS_UNPROVEN),
+            'popular-bad':         (3.286, 0.3208, CLASS_BAD),
+            'loaded-never-rated':  (5.000, 0.0000, CLASS_USELESS),
+            'high-count-nearbase': (5.089, 0.5055, CLASS_USELESS),
+            'good-rare':           (6.500, 0.3021, CLASS_USEFUL),
+            'clearly-bad-low-n':   (3.875, 0.1212, CLASS_UNPROVEN),
+        }
+        for name, n, avg, L, A in cases:
+            sc = skill_score(n, avg, L, A)
+            cls = skill_classify(n, avg, A)
+            eq, es, ec = expected[name]
+            assert round(sc['qhat'], 3) == eq, f"{name}: q̂ {sc['qhat']} != {eq}"
+            assert round(sc['S'], 4) == es, f"{name}: S {sc['S']} != {es}"
+            assert cls == ec, f"{name}: class {cls} != {ec}"
+
+    def test_neutral_point_is_half(self):
+        """Fully used (u→1), no waste (L<=n), fresh (A=0), q̂≈5 ⇒ S ≈ 0.5 (neutral midpoint)."""
+        sc = skill_score(200, 5.0, 0, 0)   # u≈1-4e-11, w=1, r=1, q̂=(1000+25)/205≈4.976→S≈0.498
+        assert abs(sc['S'] - 0.5) < 0.01
+        # Exact neutral: pick n so q̂ is exactly 5 (avg=5) and u is effectively 1.
+        sc2 = skill_score(1000, 5.0, 0, 0)
+        assert abs(sc2['S'] - 0.5) < 1e-6
+
+    def test_brand_new_low_score_and_loaded_never_zero(self):
+        """Brand-new (n=1,avg=5,L=1,A=0) → low score; loaded-never-rated (n=0,L=50) → S==0.0."""
+        assert 0.0 <= skill_score(1, 5.0, 1, 0)['score'] < 0.1
+        assert skill_score(0, None, 50, 60)['S'] == 0.0   # u=0 ⇒ core is exactly zero
+
+    def test_monotonic_in_n_for_fixed_quality(self):
+        """For fixed quality (avg=5) and no waste, S is non-decreasing in n (usage drives the core)."""
+        prev = -1.0
+        for n in range(0, 61):
+            s = skill_score(n, 5.0, n, 0)['S']
+            assert s >= prev - 1e-12, f"S decreased at n={n}"
+            prev = s
+
+    def test_score_bounded_0_to_1(self):
+        """Random grid over the full input space ⇒ score ∈ [0,1] and r_floor <= r <= 1."""
+        import random
+        rng = random.Random(20260921)
+        for _ in range(5000):
+            n = rng.randint(0, 60)
+            avg = round(rng.uniform(0.0, 10.0), 1) if n > 0 else None
+            L = rng.randint(0, 80)
+            A = rng.randint(0, 1000)
+            sc = skill_score(n, avg, L, A)
+            assert 0.0 <= sc['score'] <= 1.0
+            assert 0.5 <= sc['r'] <= 1.0          # r_floor=0.5 default
+            assert 0.0 <= sc['u'] <= 1.0
+            assert 0.0 < sc['w'] <= 1.0           # w>0 (exp never hits 0), ==1 when L<=n
+
+    def test_recency_is_minor_tiebreaker(self):
+        """r ∈ [0.5,1] only reduces the score; identical S with different A keeps class stable (§8 note)."""
+        fresh = skill_score(1, 5.0, 1, 10)
+        idle = skill_score(1, 5.0, 1, 400)
+        assert fresh['S'] == idle['S']                       # core is time-stable
+        assert fresh['score'] > idle['score']                # recency lowers the stale one
+        assert fresh['score'] / idle['score'] <= (1.0 / 0.5) + 1e-9  # bounded by r_floor
+
+    def test_pure_no_side_effects(self):
+        """Repeated calls are deterministic and read only their arguments (no shared/global state)."""
+        for _ in range(3):
+            a = skill_score(7, 4.0, 9, 30)
+            b = skill_classify(7, 4.0, 30)
+            assert a == {'score': a['score'], 'S': a['S'], 'qhat': a['qhat'], 'u': a['u'], 'w': a['w'], 'r': a['r']}
+            assert b in (CLASS_BAD, CLASS_PROTECTED, CLASS_USEFUL, CLASS_USELESS, CLASS_UNPROVEN)
+        # Same inputs → byte-identical outputs across calls.
+        assert skill_score(7, 4.0, 9, 30) == skill_score(7, 4.0, 9, 30)
+        assert skill_classify(7, 4.0, 30) == skill_classify(7, 4.0, 30)
+
+    # -------------------------------------------------------------- classify
+    def test_each_class_hit_by_concrete_input(self):
+        """Each of the 5 classes is reachable by a concrete (n, avg, A)."""
+        assert skill_classify(1, 5.0, 0) == CLASS_PROTECTED       # fresh, no signal
+        assert skill_classify(30, 3.0, 60) == CLASS_BAD           # high-n clearly-bad
+        assert skill_classify(5, 8.0, 60) == CLASS_USEFUL         # q̂=6.5≥5.5 & n≥5
+        assert skill_classify(1, 5.0, 60) == CLASS_USELESS        # neutral past window
+        assert skill_classify(3, 2.0, 60) == CLASS_UNPROVEN       # bad but n<5
+
+    def test_classify_precedence_bad_over_protected(self):
+        """A young-but-proven-harmful skill (n≥5, q̂≤4.5, A<window) is BAD, not PROTECTED."""
+        assert skill_classify(10, 3.0, 0) == CLASS_BAD            # A=0 < 50 but still BAD
+        # Brand-new (n=1) can never be BAD — it fails n>=n_min regardless of quality/age.
+        assert skill_classify(1, 1.0, 0) == CLASS_PROTECTED
+
+    def test_useless_covers_low_and_high_count_neutral(self):
+        """Both low-count-neutral and high-count-near-baseline are USELESS once past the window."""
+        assert skill_classify(1, 5.0, 60) == CLASS_USELESS        # canonical (n=1, r=5) aged out
+        assert skill_classify(40, 5.1, 60) == CLASS_USELESS       # confidently neutral
+
+    def test_canonical_useless_baseline_window_flip(self):
+        """The same (n=1, q̂=5) state is PROTECTED when fresh and USELESS once past the fair window."""
+        assert skill_classify(1, 5.0, 20) == CLASS_PROTECTED      # A < 50
+        assert skill_classify(1, 5.0, 50) == CLASS_USELESS        # A >= 50 (boundary)
+        assert skill_classify(1, 5.0, 500) == CLASS_USELESS
+
+    def test_classify_handles_none_avg_at_zero_n(self):
+        """avg=None is valid when n==0 (shrinkage falls back to the pure prior q0)."""
+        assert skill_classify(0, None, 60) == CLASS_USELESS       # q̂=q0=5 → neutral, aged out
+
+    # ------------------------------------------------------- rank key ordering
+    def test_rank_key_class_ordinal_ordering(self):
+        """BAD(0) < USELESS(1) < UNPROVEN(2) < USEFUL(3) regardless of the score component."""
+        # Give each class a deliberately "wrong" score to prove the ordinal dominates.
+        keys = [
+            eviction_rank_key(CLASS_BAD, 0.99, 'bad'),
+            eviction_rank_key(CLASS_USELESS, 0.50, 'useless'),
+            eviction_rank_key(CLASS_UNPROVEN, 0.25, 'unproven'),
+            eviction_rank_key(CLASS_USEFUL, 0.01, 'useful'),
+        ]
+        assert keys == sorted(keys)
+        # Explicit ordinal table.
+        assert CLASS_ORDINAL == {CLASS_BAD: 0, CLASS_USELESS: 1, CLASS_UNPROVEN: 2, CLASS_USEFUL: 3}
+
+    def test_rank_key_within_class_lower_score_first(self):
+        """Within a single class, the lower score sorts first (score breaks intra-class ties)."""
+        assert eviction_rank_key(CLASS_BAD, 0.10, 'a') < eviction_rank_key(CLASS_BAD, 0.40, 'b')
+        # Name is the final stable tiebreak when scores are equal.
+        assert eviction_rank_key(CLASS_USELESS, 0.3, 'alpha') < eviction_rank_key(CLASS_USELESS, 0.3, 'beta')
+
+    def test_bad_below_useless_ordering_across_counts(self):
+        """§17 guarantee: BAD ALWAYS ranks before USELESS across an n-grid (ordinal dominates)."""
+        for n_bad in (5, 10, 20, 30, 40):
+            bad = skill_score(n_bad, 3.0, n_bad, 0)              # high-n, clearly-bad
+            assert skill_classify(n_bad, 3.0, 60) == CLASS_BAD
+            for n_neut in (1, 2, 3):
+                neut = skill_score(n_neut, 5.0, n_neut, 0)       # low-n, neutral
+                assert skill_classify(n_neut, 5.0, 60) == CLASS_USELESS
+                kb = eviction_rank_key(CLASS_BAD, bad['score'], f'bad{n_bad}')
+                ku = eviction_rank_key(CLASS_USELESS, neut['score'], f'neut{n_neut}')
+                assert kb < ku, f"BAD(n={n_bad}) must rank before USELESS(n={n_neut})"
+
+    def test_section17_counterexample(self):
+        """The exact §17 counterexample: S(BAD)=0.3208 > S(USELESS)=0.1106, yet BAD still ranks first."""
+        bad = skill_score(30, 3.0, 30, 0)
+        use = skill_score(2, 5.0, 2, 0)
+        assert round(bad['S'], 4) == 0.3208
+        assert round(use['S'], 4) == 0.1106
+        assert bad['S'] > use['S']                              # raw score says the WRONG order...
+        kb = eviction_rank_key(CLASS_BAD, bad['score'], 'bad')
+        ku = eviction_rank_key(CLASS_USELESS, use['score'], 'useless')
+        assert kb < ku                                          # ...but the rank key fixes it
+
+    def test_protected_rejected_by_rank_key(self):
+        """PROTECTED has no ordinal — handing it to eviction_rank_key raises KeyError by design."""
+        with pytest.raises(KeyError):
+            eviction_rank_key(CLASS_PROTECTED, 0.1, 'protected')
+
+
+# ===========================================================================
+# Phase A — Persisted Cumulative Activity-Turn Counter (research §15)
+# ===========================================================================
+
+class TestActivityClock:
+    """Durable global_activity_turns + per-skill last_activity_turn + conservative age helper."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    def test_bump_advances_persisted_counter(self):
+        """bump increments the durable counter and it survives a reload (restart persistence)."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        for _ in range(7):
+            m.bump_activity_turn()
+        assert m._global_activity_turns == 7
+
+        # Force a flush, then simulate a restart by loading the on-disk store into a fresh manager.
+        m._flush_metrics_to_disk()
+        store = _read_store(m._metrics_file)
+        assert store['global_activity_turns'] == 7
+
+        m2 = SkillManager()
+        m2._metrics_file = m._metrics_file
+        m2._load_metrics()
+        assert m2._global_activity_turns == 7  # survived restart
+
+    def test_record_rating_stamps_last_activity_turn(self):
+        """A rating resets the skill's clock to the current global counter (D-ACT)."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        for _ in range(10):
+            m.bump_activity_turn()
+        assert m._global_activity_turns == 10
+
+        m.record_rating('a', 8.0)
+        with m._metrics_lock:
+            lat = m._metrics['a'].get('last_activity_turn')
+        assert lat == 10
+
+    def test_load_does_not_stamp_clock(self):
+        """D-ACT: a load must NOT reset the activity clock (only ratings do)."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        for _ in range(4):
+            m.bump_activity_turn()
+        # No rating yet → last_activity_turn is None; a load leaves it unchanged.
+        m._increment_load_count('a', '1.0.0')
+        with m._metrics_lock:
+            lat = m._metrics['a'].get('last_activity_turn')
+        assert lat is None
+
+    def test_age_idle_break_invariance(self):
+        """Idle adds zero turns (A frozen); bumping advances A by exactly the bumped count."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        for _ in range(30):
+            m.bump_activity_turn()
+        m.record_rating('a', 5.0)  # A == 0 (rated at counter=30)
+
+        now = time.time()
+        with m._metrics_lock:
+            entry = dict(m._metrics['a'])
+            gt = m._global_activity_turns
+        assert m._activity_age(entry, gt, now) == 0  # idle → frozen at 0
+
+        for _ in range(50):
+            m.bump_activity_turn()
+        with m._metrics_lock:
+            entry = dict(m._metrics['a'])
+            gt = m._global_activity_turns
+        assert m._activity_age(entry, gt, now) == 50  # +50 turns → A == 50
+
+    def test_rollout_seed_gives_fresh_window(self):
+        """D-SEED: pre-existing skills with last_activity_turn=None are seeded to the counter."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        for _ in range(12):
+            m.bump_activity_turn()
+        # Pre-existing skill record with no activity stamp yet (old schema shape).
+        with m._metrics_lock:
+            m._metrics['a'] = {'total_loads': 3, 'by_version': {}, 'status': 'active'}
+
+        m._migrate_metrics_to_v13()  # first-upgrade migration seeds the missing clock
+
+        now = time.time()
+        with m._metrics_lock:
+            entry = dict(m._metrics['a'])
+            gt = m._global_activity_turns
+        assert entry.get('last_activity_turn') == 12
+        assert m._activity_age(entry, gt, now) == 0  # fresh window → PROTECTED
+
+    def test_rollout_seed_is_idempotent(self):
+        """D-SEED re-run must not clobber an existing last_activity_turn."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        for _ in range(5):
+            m.bump_activity_turn()
+        m.record_rating('a', 6.0)  # stamps last_activity_turn == 5
+        with m._metrics_lock:
+            first = m._metrics['a']['last_activity_turn']
+        assert first == 5
+
+        for _ in range(9):
+            m.bump_activity_turn()  # counter now 14
+        m._migrate_metrics_to_v13()  # second migration run
+
+        with m._metrics_lock:
+            lat = m._metrics['a']['last_activity_turn']
+        assert lat == first  # NOT re-seeded to the new (14) counter
+
+    def test_wallclock_fallback_when_counter_zero(self):
+        """D-FALLBACK: counter==0 + past last_used → bounded wall-clock age (>0, rate-bounded)."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        assert m._global_activity_turns == 0  # never bumped
+        # last_used 2 hours in the past; no activity stamp (old-shape record).
+        with m._metrics_lock:
+            m._metrics['a'] = {'total_loads': 1, 'by_version': {}, 'status': 'active',
+                               'last_used': _iso_utc(time.time() - 2 * 3600)}
+
+        now = time.time()
+        from agent_cascade.settings import SKILL_WALLCLOCK_SECONDS_PER_TURN
+        age = m._activity_age(dict(m._metrics['a']), 0, now)
+        assert age > 0  # wall-clock path engaged
+        assert age <= int((2 * 3600) / SKILL_WALLCLOCK_SECONDS_PER_TURN) + 1  # bounded by rate
+
+    def test_age_protected_when_counter_zero_and_no_last_used(self):
+        """Safest case: counter==0 and no last_used → A == 0 (PROTECTED, never mass-evict)."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        now = time.time()
+        assert m._activity_age({'total_loads': 0}, 0, now) == 0
+
+    def test_bump_no_per_turn_io_and_reaches_threshold(self):
+        """A single sub-threshold bump does no disk I/O; the counter still advances in-memory.
+
+        The "never breaks the loop" guarantee lives at the engine hook (try/except around
+        ``sm.bump_activity_turn()``), not inside the manager — _flush_metrics_to_disk already
+        swallows its own I/O errors internally, so we verify the no-hot-path contract here.
+        """
+        m = _rebalance_manager(self.tmp, ['a'])
+        assert not m._metrics_file.exists()  # fresh store
+        for i in range(1, 5):  # below threshold (4 < 5) → no flush, no file written
+            m.bump_activity_turn()
+        assert not m._metrics_file.exists()  # no per-turn I/O
+        assert m._global_activity_turns == 4
+
+        m.bump_activity_turn()  # 5th bump hits threshold → flushes (writes the file)
+        assert m._global_activity_turns == 5
+        assert m._metrics_file.exists()  # batched flush fired exactly at threshold
+
+
+# ===========================================================================
+# Phase D — Soft-Eviction Loadability Prerequisite (research §16 / plan §5)
+# ===========================================================================
+
+class TestSoftEvictionLoadability:
+    """An evicted (registry-removed, inactive) skill stays loadable via the servable-disk
+    fallback in ``load_full_instructions`` — without being re-added to the active registry."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    def _evicted_manager(self, skill_names):
+        """Hermetic manager whose named skills are all SOFT-EVICTED: on disk at a servable
+        location but excluded from the active registry (``_disabled_names`` + status=inactive),
+        exactly as ``disable_skill`` leaves them after discovery filters them out."""
+        m = _rebalance_manager(self.tmp, skill_names)  # discover → all in registry
+        for name in skill_names:
+            ok, _ = m.disable_skill(name)  # adds to _disabled_names + status=inactive
+            assert ok
+            m._cache_ttl = 0.0
+            m.discover([m._skill_paths[0]])  # re-scan → evicted skills dropped from registry
+        return m
+
+    def test_evicted_skill_still_loadable_from_disk(self):
+        """A soft-evicted skill (absent from registry, present in servable corpus) loads."""
+        m = self._evicted_manager(['bravo'])
+        with m._write_lock:
+            assert 'bravo' not in m._skills_registry  # confirms it is actually evicted
+        body = m.load_full_instructions('bravo')
+        assert body is not None
+        assert '# Body' in body
+
+    def test_evicted_skill_counts_a_load(self):
+        """Loading an evicted skill with count_load=True increments total_loads (plan §5.3)."""
+        m = self._evicted_manager(['charlie'])
+        with m._metrics_lock:
+            before = (m._metrics.get('charlie') or {}).get('total_loads', 0)
+        body = m.load_full_instructions('charlie', count_load=True)
+        assert body is not None
+        with m._metrics_lock:
+            after = (m._metrics.get('charlie') or {}).get('total_loads', 0)
+        assert after == before + 1
+
+    def test_evicted_skill_not_readded_to_registry(self):
+        """The fallback only loads instructions — it must NOT re-add the skill to the registry."""
+        m = self._evicted_manager(['delta'])
+        body = m.load_full_instructions('delta')
+        assert body is not None
+        with m._write_lock:
+            assert 'delta' not in m._skills_registry  # still absent after load
+        assert 'delta' in m._disabled_names  # still disabled
+        assert _status_of(m, 'delta') == 'inactive'  # status unchanged
+
+    def test_unknown_skill_still_returns_none(self):
+        """A name that is neither in the registry nor in the servable corpus → None (no over-broadening)."""
+        m = self._evicted_manager(['echo'])
+        assert m.load_full_instructions('does-not-exist-anywhere') is None
+
+    def test_case_insensitive_evicted_fallback(self):
+        """The disk fallback matches case-insensitively, like the registry path."""
+        m = self._evicted_manager(['Foxtrot'])
+        body = m.load_full_instructions('fOxTrot')  # mixed case, not in registry
+        assert body is not None
+        assert '# Body' in body
+
+    def test_non_servable_evicted_skill_returns_none(self):
+        """A skill only reachable deeper (e.g. under INACTIVE/) is NOT servable → still None."""
+        m = _rebalance_manager(self.tmp, ['golf'])
+        root = m._skill_paths[0]
+        # Move golf out of the one-level servable location into a deeper subfolder.
+        (root / 'INACTIVE' / 'golf').mkdir(parents=True, exist_ok=True)
+        import shutil as _shutil
+        _shutil.move(str(root / 'golf'), str(root / 'INACTIVE' / 'golf'))
+        m._cache_ttl = 0.0
+        m.discover([root])  # now golf is not discovered at all (deeper than one level)
+        with m._write_lock:
+            assert 'golf' not in m._skills_registry
+        assert 'golf' not in m._servable_skill_names()  # deeper → not servable
+        assert m.load_full_instructions('golf') is None  # no over-broadening to deep locations
+
+
+# ===========================================================================
+# Phase C — OR-composition + class-ordinal eviction ordering + PROTECTED exclusion
+#             + D-SAFE safety cap + read-only per-skill preview parity
+# ===========================================================================
+
+def _aged_entry(n: int, avg, L: int = None, last_activity_turn: int = 0, age_days: float = 400.0):
+    """Build a schema-1.3 metrics entry with an explicit activity clock stamp.
+
+    ``last_activity_turn=0`` + counter advanced past the fair window ⇒ A ≥ window (aged out);
+    pass ``last_activity_turn=<counter>`` for PROTECTED (A < window). ``last_used`` is set far in
+    the past so that EVEN IF the turns clock is unavailable (counter == 0 → wall-clock fallback),
+    A still exceeds the fair window and the entry is NOT PROTECTED — the fixtures stay robust to
+    either clock path.
+    """
+    ratings = {'count': n, 'sum': round(avg * n, 4), 'latest': avg, 'last_version': ''} if n else None
+    return {
+        'total_loads': L if L is not None else n,
+        'by_version': {},
+        'status': 'active',
+        'ratings': ratings,
+        'last_used': _iso_utc(time.time() - age_days * 86400.0),
+        'last_activity_turn': last_activity_turn,
+    }
+
+
+def _bump_to(m, n: int) -> None:
+    """Advance the durable activity counter to exactly ``n`` (from its current value)."""
+    for _ in range(n - m._global_activity_turns):
+        m.bump_activity_turn()
+
+
+class TestSkillScoringRebalance:
+    """Phase C: OR-composition, PROTECTED exclusion, class-ordinal ordering, D-SAFE cap, preview parity."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    # ------------------------------------------------------------------ OR-composition
+    def test_bad_evicted_under_cap_headroom(self):
+        """§9 gap fix: at K=1.0 the cap evicts NOTHING (active ≤ threshold), yet a BAD skill is
+        still removed by the absolute gate."""
+        names = ['bad', 'good']
+        m = _rebalance_manager(self.tmp, names)
+        _bump_to(m, 200)  # counter=200 ⇒ last_activity_turn=0 → A=200 ≥ fair_window(50)
+        entries = {
+            'bad': _aged_entry(10, 2.0),   # q̂=(20+25)/15≈3.33 ≤ 4.5, n≥5 → BAD (even if young)
+            'good': _aged_entry(5, 8.0),   # q̂=6.5 ≥ 5.5, n≥5 → USEFUL
+        }
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_qualified'] == 2 and s['raw'] == 2
+        assert s['evict_threshold'] == 20          # min_cap floor ⇒ cap budget = 0
+        assert s['evicted'] == ['bad']             # absolute gate, not the cap
+        assert s['evicted_absolute_gate'] == ['bad']
+        assert s['evicted_cap_only'] == []
+        assert _status_of(m, 'bad') == 'inactive'
+        assert _status_of(m, 'good') == 'active'
+
+    def test_useless_past_window_evicted_under_headroom(self):
+        """A neutral (|q̂−5|≤δ_q) skill past its fair window is USELESS → absolute-gate eviction
+        even with full cap headroom."""
+        m = _rebalance_manager(self.tmp, ['neutral'])
+        _bump_to(m, 200)
+        _set_metrics(m, {'neutral': _aged_entry(3, 5.0)})  # q̂=5.0, A=200 → USELESS (not BAD: n<5)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['evicted'] == ['neutral']
+        assert s['evicted_absolute_gate'] == ['neutral']
+
+    # ------------------------------------------------------------------ PROTECTED exclusion
+    def test_protected_never_evicted_even_over_cap(self):
+        """A fresh skill (A < fair_window) is immune to BOTH gates: the cap draws from
+        non-PROTECTED candidates only, and the absolute gate skips it entirely."""
+        names = ['fresh', 'stale1', 'stale2']
+        m = _rebalance_manager(self.tmp, names)
+        _bump_to(m, 100)
+        entries = {
+            # Aged-out neutral skills (A=100 ≥ 50) → USELESS: absolute-gate candidates.
+            'stale1': _aged_entry(3, 5.0),
+            'stale2': _aged_entry(3, 5.0),
+            # Rated at counter=100 → A=0 < 50 → PROTECTED (neutral quality, not BAD).
+            'fresh': _aged_entry(3, 5.0, last_activity_turn=100),
+        }
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200)
+        assert 'fresh' not in s['evicted']          # PROTECTED: immune to cap AND absolute gate
+        assert set(s['evicted']) == {'stale1', 'stale2'}  # both USELESS-past-window evicted
+        assert _status_of(m, 'fresh') == 'active'
+
+    def test_young_but_bad_is_evicted(self):
+        """BAD beats PROTECTED (precedence §7): a young skill with n≥n_min and q̂≤4.5 is evicted
+        even though its fair window has not expired."""
+        m = _rebalance_manager(self.tmp, ['youngbad'])
+        _bump_to(m, 30)  # counter=30 < fair_window(50) ⇒ A=30 would be PROTECTED if not BAD
+        _set_metrics(m, {'youngbad': _aged_entry(6, 2.0)})  # q̂=(12+25)/11≈3.36 ≤ 4.5, n≥5 → BAD
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['evicted'] == ['youngbad']
+        assert s['class_counts'][CLASS_BAD] == 1
+
+    # ------------------------------------------------------------------ ordering
+    def test_bad_before_useless_ordering(self):
+        """§17 counterexample: BAD(n=30, S≈0.32) outscores USELESS(n=2, S≈0.11), yet the
+        class ordinal makes BAD evict FIRST in the ordered list."""
+        names = ['badhi', 'uselesslo']
+        m = _rebalance_manager(self.tmp, names)
+        _bump_to(m, 200)
+        entries = {
+            'badhi': _aged_entry(30, 3.0),     # BAD, high volume → higher raw score
+            'uselesslo': _aged_entry(2, 5.0),  # USELESS, low volume → lower raw score
+        }
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['evicted'] == ['badhi', 'uselesslo']  # BAD strictly before USELESS
+
+    def test_max_evictions_per_pass_caps_mass_eviction(self):
+        """D-SAFE: with many absolute-gate candidates and max_evictions_per_pass=2, exactly the
+        top-2 by rank key are evicted (BAD first, then lowest-scored USELESS)."""
+        names = [f'b{i}' for i in range(4)] + ['n1', 'n2']
+        m = _rebalance_manager(self.tmp, names)
+        _bump_to(m, 200)
+        entries = {nm: _aged_entry(10, 2.0) for nm in names[:4]}   # 4× BAD
+        entries['n1'] = _aged_entry(3, 5.0)                        # USELESS
+        entries['n2'] = _aged_entry(3, 5.0)                        # USELESS
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=2)
+        assert len(s['evicted']) == 2
+        assert s['evicted'][0] in ('b0', 'b1', 'b2', 'b3')         # a BAD is always first
+        assert all(nm.startswith('b') for nm in s['evicted'])      # both slots go to BADs
+
+    def test_max_evictions_per_pass_zero_disables_all_eviction(self):
+        """D-SAFE rollback gate (plan §7): max_evictions_per_pass=0 disables BOTH gates — the
+        absolute gate AND the cap — so a misconfigured corpus can never be mass-evicted. The
+        master switch ``skill_auto_invalidate_enabled`` (pool level) is the full-off gate; this
+        cap is the bounded gate."""
+        names = ['bad', 'neutral']
+        m = _rebalance_manager(self.tmp, names)
+        _bump_to(m, 200)
+        entries = {'bad': _aged_entry(10, 2.0), 'neutral': _aged_entry(3, 5.0)}
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=0)
+        assert s['evicted'] == []   # both gates bounded to zero evictions
+        assert _status_of(m, 'bad') == 'active'
+        assert _status_of(m, 'neutral') == 'active'
+
+    def test_master_switch_off_is_pool_level_gate(self):
+        """The master switch lives at pool/core.py (it decides whether to LAUNCH the rebalance
+        thread at all), not inside the manager — so "switch off" = the pass never runs. This
+        documents the gate location: the manager's absolute gate cannot be toggled independently;
+        max_evictions_per_pass=0 is the bounded alternative (see sibling test)."""
+        # The pool reads `skill_auto_invalidate_enabled` from llm_cfg before launching the thread
+        # (pool/core.py); when False, rebalance_active_skills is never called. We assert the
+        # branch exists in the source so a refactor that moves/removes the gate is caught here.
+        import agent_cascade.pool.core as core_mod
+        src = Path(core_mod.__file__).read_text(encoding='utf-8')
+        assert 'skill_auto_invalidate_enabled' in src
+
+    # ------------------------------------------------------------------ never-raises
+    def test_rebalance_never_raises_with_scoring(self):
+        """A scoring-path failure is swallowed: summary returned, no raise (extends the existing
+        never-raises contract to the Phase C code path)."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        _bump_to(m, 10)
+        _set_metrics(m, {'a': _aged_entry(3, 5.0)})
+        m._classify_active = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('boom'))
+        result = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)  # must not raise
+        assert isinstance(result, dict)
+        assert 'target' in result and 'evicted' in result
+
+    # ------------------------------------------------------------------ preview parity
+    def _parity_fixture(self, base: Path):
+        """Identical fresh manager + identical metrics (aged BAD/USELESS + PROTECTED)."""
+        names = ['bad', 'useless', 'protected']
+        m = _rebalance_manager(base, names)
+        _bump_to(m, 200)
+        entries = {
+            'bad': _aged_entry(10, 2.0),                        # BAD (q̂≈3.33)
+            'useless': _aged_entry(3, 5.0),                     # USELESS past window
+            'protected': _aged_entry(3, 5.0, last_activity_turn=200),  # A=0 → PROTECTED
+        }
+        _set_metrics(m, entries)
+        return m, names
+
+    def test_preview_per_skill_matches_real_pass(self):
+        """Preview == real pass: same per-skill class/score and the SAME projected eviction list
+        (OR-composition + D-SAFE cap included), on identical fresh managers."""
+        m1, _ = self._parity_fixture(self.tmp / 'preview')
+        p = m1.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)
+        assert p['ok'] is True and 'error' not in p
+
+        # Per-skill breakdown present + correct classes.
+        by_name = {row['name']: row for row in p['skills']}
+        assert set(by_name) == {'bad', 'useless', 'protected'}
+        assert by_name['bad']['class'] == CLASS_BAD
+        assert by_name['useless']['class'] == CLASS_USELESS
+        assert by_name['protected']['class'] == CLASS_PROTECTED
+        assert p['class_counts'][CLASS_BAD] == 1
+        assert p['class_counts'][CLASS_PROTECTED] == 1
+
+        # Now a REAL pass on an identical fresh manager.
+        m2, _ = self._parity_fixture(self.tmp / 'real')
+        s = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+
+        # Projected evictions == actual evictions (order included: BAD before USELESS).
+        assert p['would_evict'] == s['evicted'] == ['bad', 'useless']
+        assert p['would_evict_absolute_gate'] == s['evicted_absolute_gate']
+        assert p['would_evict_cap_only'] == s['evicted_cap_only']
+
+        # Per-skill class/score match between preview and the real pass's inputs.
+        with m2._metrics_lock:
+            for nm, row in by_name.items():
+                r_ = (m2._metrics[nm].get('ratings') or {})
+                n = r_.get('count', 0)
+                avg = (r_['sum'] / n) if n else None
+                L = m2._metrics[nm].get('total_loads', 0)
+                A = m2._activity_age(m2._metrics[nm], m2._global_activity_turns, time.time())
+                assert row['class'] == skill_classify(n, avg, A)
+                assert abs(row['score'] - round(skill_score(n, avg, L, A)['score'], 4)) < 1e-9
+
+    def test_preview_is_side_effect_free(self):
+        """The Phase C preview mutates NOTHING: no status flips, no _disabled_names change, no
+        flush to disk (no migration ran — parity holds because migration is idempotent over an
+        already-migrated store; the fixtures here are migrated via _bump_to's flush cadence)."""
+        m, names = self._parity_fixture(self.tmp / 'side')
+        # Ensure a real on-disk store exists so "no flush" is observable.
+        m._flush_metrics_to_disk()
+
+        with m._metrics_lock:
+            metrics_before = _copy.deepcopy(m._metrics)
+        disabled_before = set(m._disabled_names)
+        counter_before = m._global_activity_turns
+        store_before = m._metrics_file.read_text(encoding='utf-8')
+
+        p = m.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)
+        assert p['ok'] is True and p['would_evict'] == ['bad', 'useless']
+
+        with m._metrics_lock:
+            metrics_after = _copy.deepcopy(m._metrics)
+        assert metrics_after == metrics_before                # no status flip, no counter change
+        assert set(m._disabled_names) == disabled_before      # no disable/enable side effect
+        assert m._global_activity_turns == counter_before     # clock untouched
+        store_after = m._metrics_file.read_text(encoding='utf-8')
+        assert store_after == store_before                    # no flush to disk
+
+    def test_preview_never_raises_with_scoring(self):
+        """Any scoring-path failure in the preview is swallowed (ok=False + error, no raise)."""
+        m = _rebalance_manager(self.tmp / 'boom', ['a'])
+        _bump_to(m, 10)
+        _set_metrics(m, {'a': _aged_entry(3, 5.0)})
+        m._classify_active = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('boom'))
+        p = m.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)  # must not raise
+        assert isinstance(p, dict)
+        assert p['ok'] is False and 'error' in p

@@ -777,6 +777,48 @@
                           <input type="number" id="setting-skill-max-cap" min="1" max="1000" step="1" value="200" />
                         </label>
                         <div id="skill-threshold-status" style="font-size:11px;color:var(--text-muted);margin-top:6px;"></div>
+                        <!-- Skill-scoring constants (research §5/§7/§18 + D-SAFE) — formula/gate knobs -->
+                        <label class="setting-field">
+                          <span title="Neutral quality baseline / prior mean q0 (clamped 0–10). Keep equal to the initial rating (5.0).">Score Baseline (q0)</span>
+                          <input type="number" id="setting-skill-score-q0" min="0" max="10" step="0.1" value="5.0" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Shrinkage prior strength K_q (clamped 0–20). Higher keeps quality near q0 longer at low counts.">Prior Strength (Kq)</span>
+                          <input type="number" id="setting-skill-score-kq" min="0" max="20" step="1" value="5" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Usage half-saturation n_half (clamped 1–50). Higher saturates popularity slower.">Usage Half-Sat (n½)</span>
+                          <input type="number" id="setting-skill-score-nhalf" min="1" max="50" step="1" value="8" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Load-waste half-scale g_half (clamped 1–100). Higher loosens the waste penalty.">Waste Scale (g½)</span>
+                          <input type="number" id="setting-skill-score-ghalf" min="1" max="100" step="1" value="20" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Recency floor r_floor (clamped 0–0.99, must stay &lt;1). Lower lets recency penalize more.">Recency Floor (r&#8202;floor)</span>
+                          <input type="number" id="setting-skill-score-rflood" min="0" max="0.99" step="0.01" value="0.5" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Activity-recency decay constant τ in user-turns (clamped 10–5000). Higher decays slower.">Recency Decay (τ)</span>
+                          <input type="number" id="setting-skill-score-tau-turns" min="10" max="5000" step="10" value="200" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Quality margin δ_q (clamped 0.1–3.0). Wider neutral/USELESS band (fewer USEFUL/BAD).">Quality Margin (δq)</span>
+                          <input type="number" id="setting-skill-score-dq" min="0.1" max="3" step="0.1" value="0.5" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="Meaningful-use bar n_min (clamped 1–20). Ratings needed before a confident USEFUL/BAD call.">Min Uses (n&#8321;ₙ)</span>
+                          <input type="number" id="setting-skill-score-nmin" min="1" max="20" step="1" value="5" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="PROTECTED window in user-turns (clamped 0–1000). Skills younger than this are shielded from retirement.">Fair Window (turns)</span>
+                          <input type="number" id="setting-skill-fair-window-turns" min="0" max="1000" step="5" value="50" />
+                        </label>
+                        <label class="setting-field">
+                          <span title="D-SAFE safety cap: max total evictions in one pass (clamped 0–1000). 0 disables both gates.">Max Evictions / Pass</span>
+                          <input type="number" id="setting-skill-max-evictions-per-pass" min="0" max="1000" step="1" value="25" />
+                        </label>
+                        <div id="skill-score-preview" style="font-size:11px;color:var(--text-muted);margin-top:6px;"></div>
                       </div>
                     </details>
                   </div>

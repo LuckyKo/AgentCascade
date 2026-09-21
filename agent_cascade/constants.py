@@ -173,6 +173,18 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'skill_active_target_k',
     'skill_active_min_cap',
     'skill_active_max_cap',
+    # Skill-scoring constants (research §5/§7/§18 + D-SAFE) — propagated so the frontend settings
+    # response carries current values (mirrors how SKILL_ACTIVE_* reach the UI).
+    'skill_score_q0',
+    'skill_score_kq',
+    'skill_score_nhalf',
+    'skill_score_ghalf',
+    'skill_score_rflood',
+    'skill_score_tau_turns',
+    'skill_score_dq',
+    'skill_score_nmin',
+    'skill_fair_window_turns',
+    'skill_max_evictions_per_pass',
 )
 
 # Default value for max_images_for_llm when not explicitly configured.

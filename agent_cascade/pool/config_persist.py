@@ -77,7 +77,12 @@ class ConfigPersistMixin:
                                 'memory_hint_skill_suggestions',
                                 # Skill invalidation (adaptive count-cap)
                                 'skill_auto_invalidate_enabled', 'skill_active_target_k',
-                                'skill_active_min_cap', 'skill_active_max_cap'):
+                                'skill_active_min_cap', 'skill_active_max_cap',
+                                # Skill-scoring constants (research §5/§7/§18 + D-SAFE)
+                                'skill_score_q0', 'skill_score_kq', 'skill_score_nhalf',
+                                'skill_score_ghalf', 'skill_score_rflood', 'skill_score_tau_turns',
+                                'skill_score_dq', 'skill_score_nmin', 'skill_fair_window_turns',
+                                'skill_max_evictions_per_pass'):
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 
@@ -298,6 +303,79 @@ class ConfigPersistMixin:
                     try:
                         _min_cap = int(self.llm_cfg.get('skill_active_min_cap', 20) or 1)
                         self.llm_cfg['skill_active_max_cap'] = min(max(_min_cap, int(val)), 1000)
+                    except (ValueError, TypeError):
+                        pass
+
+                # ── Skill-scoring constants (research §5/§7/§18 + D-SAFE) — restore into llm_cfg ──
+                # Clamps are byte-identical to the config handlers / preview endpoint. Missing keys
+                # simply fall through (pool/core.py reads .get() with defaults), so old files are safe.
+                val = data.pop('skill_score_q0', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_q0'] = min(max(0.0, float(val)), 10.0)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_score_kq', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_kq'] = min(max(0, int(val)), 20)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_score_nhalf', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_nhalf'] = min(max(1.0, float(val)), 50.0)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_score_ghalf', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_ghalf'] = min(max(1.0, float(val)), 100.0)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_score_rflood', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_rflood'] = min(max(0.0, float(val)), 0.99)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_score_tau_turns', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_tau_turns'] = min(max(10, int(val)), 5000)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_score_dq', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_dq'] = min(max(0.1, float(val)), 3.0)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_score_nmin', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_score_nmin'] = min(max(1, int(val)), 20)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_fair_window_turns', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_fair_window_turns'] = min(max(0, int(val)), 1000)
+                    except (ValueError, TypeError):
+                        pass
+
+                val = data.pop('skill_max_evictions_per_pass', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['skill_max_evictions_per_pass'] = min(max(0, int(val)), 1000)
                     except (ValueError, TypeError):
                         pass
 

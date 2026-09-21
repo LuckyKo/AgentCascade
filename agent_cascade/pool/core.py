@@ -238,9 +238,26 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 _k = float((self.llm_cfg or {}).get('skill_active_target_k', 1.0))
                 _min_cap = int((self.llm_cfg or {}).get('skill_active_min_cap', 20))
                 _max_cap = int((self.llm_cfg or {}).get('skill_active_max_cap', 200))
+                # Phase C scoring constants (research §5/§7): read from llm_cfg with the same
+                # defaults as manager.py so the pass works before Phase E lands the named
+                # settings; once E adds the keys, saved values flow through unchanged.
+                _score_kwargs = {
+                    'q0': float((self.llm_cfg or {}).get('skill_score_q0', 5.0)),
+                    'kq': int((self.llm_cfg or {}).get('skill_score_kq', 5)),
+                    'n_half': float((self.llm_cfg or {}).get('skill_score_nhalf', 8)),
+                    'g_half': float((self.llm_cfg or {}).get('skill_score_ghalf', 20)),
+                    'r_floor': float((self.llm_cfg or {}).get('skill_score_rflood', 0.5)),
+                    'tau_turns': int((self.llm_cfg or {}).get('skill_score_tau_turns', 200)),
+                    'dq': float((self.llm_cfg or {}).get('skill_score_dq', 0.5)),
+                    'n_min': int((self.llm_cfg or {}).get('skill_score_nmin', 5)),
+                    'fair_window_turns': int((self.llm_cfg or {}).get('skill_fair_window_turns', 50)),
+                    # D-SAFE safety cap: bounds total evictions per pass so a bad config
+                    # cannot nuke the corpus (clamped [0,1000] in the manager as well).
+                    'max_evictions_per_pass': int((self.llm_cfg or {}).get('skill_max_evictions_per_pass', 25)),
+                }
                 self._skill_rebalance_thread = threading.Thread(
                     target=self.skill_manager.rebalance_active_skills,
-                    kwargs={'k': _k, 'min_cap': _min_cap, 'max_cap': _max_cap},
+                    kwargs={'k': _k, 'min_cap': _min_cap, 'max_cap': _max_cap, **_score_kwargs},
                     name='skill-rebalance',
                     daemon=True,
                 )

@@ -29,12 +29,40 @@ from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
 from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURNS, CANDIDATE_EVAL_INTERVAL_SECONDS,
                                     CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL,
                                     SKILL_ACTIVE_MAX_CAP, SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K,
-                                    SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD, SKILL_RATING_INITIAL, SKILLS_DISABLED)
+                                    SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD, SKILL_RATING_INITIAL,
+                                    SKILL_WALLCLOCK_SECONDS_PER_TURN, SKILLS_DISABLED)
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher
 from .parser import parse_skill_file
+from .scoring import (CLASS_BAD, CLASS_PROTECTED, CLASS_UNPROVEN, CLASS_USEFUL, CLASS_USELESS,
+                      eviction_rank_key, skill_classify, skill_score)
 from .validator import validate_skill
+
+# Scoring-gate constants (research §5/§7/§18). Phase C reads these as DEFAULTS for the rebalance
+# and preview kwargs; the named settings + 6-seam exposure land in Phase E. Kept here (not in
+# scoring.py) so a future settings module can override them without touching the pure functions.
+_SKILL_SCORE_DEFAULTS = {
+    'q0': 5.0,            # baseline quality (neutral midpoint of [0,10])
+    'kq': 5,              # shrinkage strength K_q (= CANDIDATE_MIN_RATINGS)
+    'n_half': 8,          # saturating-usage half-count
+    'g_half': 20,         # load-waste penalty scale
+    'r_floor': 0.5,       # recency floor (bounded tiebreaker, must stay < 1)
+    'tau_turns': 200,     # activity-recency half-life in user-turns
+    'dq': 0.5,            # quality gate width δ_q
+    'n_min': 5,           # minimum ratings for a confident BAD/USEFUL call
+    'fair_window_turns': 50,  # PROTECTED window: turns since last chance
+}
+_SKILL_MAX_EVICTIONS_PER_PASS_DEFAULT = 25  # D-SAFE safety cap; clamp [0, 1000]
+
+# Phase C: absolute-gate classes. The absolute gate (research §9) evicts a skill when its class is
+# one of these — regardless of cap headroom. This is the load-bearing "OR" in OR-composition and it
+# is DELIBERATELY narrow: only BAD (clearly harmful + confident) and USELESS-past-window (neutral,
+# not earning its keep). UNPROVEN is EXCLUDED on purpose — it means "not enough evidence to call
+# either way" and the design's default for such skills is KEEP (exploration); mass-evicting them
+# would defeat the fair-chance window. USEFUL obviously never evicts. If the gate ever needs to
+# widen, this tuple + its tests are the single change point.
+_ABSOLUTE_GATE_CLASSES = frozenset({CLASS_BAD, CLASS_USELESS})
 
 # Priority levels for duplicate skill name resolution:
 # Higher number = higher priority (wins over lower)
@@ -67,11 +95,23 @@ def _iso_utc(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
 
 
+def _iso_to_epoch(iso: str) -> float:
+    """Parse an ISO-8601 timestamp (as stored in schema 1.3 ``last_used``) to a POSIX epoch.
+
+    Naive values are assumed UTC (matching ``_iso_utc`` output). Raises on malformed input —
+    callers that want best-effort behaviour wrap it in try/except.
+    """
+    dt = datetime.datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
 def _default_metrics_entry(status: str = 'active') -> dict:
     """Fresh per-skill metrics record (schema 1.3). Single source for the default shape so
     a future field addition happens in one place instead of being copy-pasted at every
     ``setdefault`` site."""
-    return {'total_loads': 0, 'by_version': {}, 'status': status}
+    return {'total_loads': 0, 'by_version': {}, 'status': status, 'last_activity_turn': None}
 
 
 def _priority_for_root(root: Path) -> int:
@@ -189,6 +229,10 @@ class SkillManager:
         self._last_flush_time = time.monotonic()  # for timer-based flush
         self._FLUSH_THRESHOLD = 5  # flush after N pending increments
         self._FLUSH_INTERVAL = 30.0  # flush every N seconds (whichever comes first)
+        # Durable cumulative user-turn clock (activity clock, research §15). Top-level field
+        # in the metrics store; bumped once per user turn via bump_activity_turn() and read
+        # back in _load_metrics(). Survives restart + session boundaries.
+        self._global_activity_turns: int = 0
         self._load_metrics()  # load on startup
 
     # ── Metrics Persistence (Batched Writes) ────────────────────────────────
@@ -209,6 +253,10 @@ class SkillManager:
             for _name, _m in data.get('skills', {}).items():
                 _by_lower[str(_name).lower()] = (_name, _m)
             self._metrics = {_orig: _m for _orig, _m in _by_lower.values()}
+            # Durable activity clock (research §15): top-level cumulative user-turn counter.
+            # Missing/absent (old files) → 0; the age helper treats 0 as "clock never advanced"
+            # and degrades to wall-clock / PROTECTED rather than mass-evicting.
+            self._global_activity_turns = int(data.get('global_activity_turns', 0) or 0)
             # Persisted status=inactive (schema 1.3) → exclude from discovery this startup.
             # (Env-var SKILLS_DISABLED already seeded _disabled_names in __init__; both are lowercase.)
             for _name, _m in self._metrics.items():
@@ -237,8 +285,13 @@ class SkillManager:
             with self._metrics_lock:
                 # Schema 1.3 adds per-skill status (active|inactive) + last_used for skill
                 # invalidation; 1.2 added per-version rating history (ratings_by_version).
-                # Older files are bumped to 1.3 on the first flush.
-                data = {'schema_version': '1.3', 'skills': _copy.deepcopy(self._metrics)}
+                # Older files are bumped to 1.3 on the first flush. The durable activity clock
+                # (global_activity_turns, research §15) is a NEW top-level field — no schema bump:
+                # it's read via .get(..., 0) so old files load cleanly and per-skill
+                # last_activity_turn rides along as an optional key. Snapshot under the lock.
+                data = {'schema_version': '1.3',
+                        'skills': _copy.deepcopy(self._metrics),
+                        'global_activity_turns': self._global_activity_turns}
 
             # Open temp file for writing with exclusive lock (POSIX only)
             fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
@@ -360,6 +413,47 @@ class SkillManager:
                 logger.warning('[SKILLS] Servable-skill scan error on %s: %s', root, e)
         return names
 
+    def _find_servable_skill_path(self, name: str) -> Optional[Path]:
+        """Resolve a skill's SKILL.md path from the servable corpus (one-level disk walk).
+
+        Companion to :meth:`_servable_skill_names` (which returns *names only*): this
+        returns the actual ``<root>/<subdir>/SKILL.md`` path for a given name, so a
+        registry-absent (soft-evicted) skill can still be loaded on demand. Matches
+        ``discover()``'s scan depth — one level deep per root — and is case-insensitive
+        against both the frontmatter ``name`` and the directory name.
+
+        Only fires for names NOT in the active registry; it does not consult
+        ``_disabled_names`` (that is what makes an evicted skill resolvable) and does
+        not touch the registry. Returns None when no servable backing file exists.
+        """
+        target = str(name).lower()
+        for root in self._skill_paths:
+            if not root.exists():
+                continue
+            try:
+                entries = list(root.iterdir())
+            except OSError as e:
+                logger.warning('[SKILLS] Servable-path scan error on %s: %s', root, e)
+                continue
+            for skill_dir in entries:
+                if not skill_dir.is_dir():
+                    continue
+                skill_file = skill_dir / 'SKILL.md'
+                if not skill_file.exists():
+                    continue
+                try:
+                    parsed = parse_skill_file(skill_file)
+                except (FileNotFoundError, OSError):
+                    # Unparseable file — fall back to the directory name only.
+                    if skill_dir.name.lower() == target:
+                        return skill_file
+                    continue
+                frontmatter = parsed.get('frontmatter', {})
+                fm_name = str(frontmatter.get('name') or '').lower()
+                if fm_name == target or skill_dir.name.lower() == target:
+                    return skill_file
+        return None
+
     def _migrate_metrics_to_v13(self) -> None:
         """One-time port of the metrics store from schema 1.2 to 1.3 (idempotent).
 
@@ -412,6 +506,12 @@ class SkillManager:
                     # last_used seed: fill missing/null only, never overwrite a real value.
                     if entry.get('last_used') is None and key in seed_last_used:
                         entry['last_used'] = seed_last_used[key]
+                    # D-SEED (rollout safety): stamp every pre-existing skill's activity clock to
+                    # the current global counter so nothing mass-evicts immediately after ship —
+                    # each gets a fresh fair window. Fills missing/None only (idempotent, like the
+                    # status/last_used seeds above); never overwrites a real last_activity_turn.
+                    if entry.get('last_activity_turn') is None:
+                        entry['last_activity_turn'] = self._global_activity_turns
                 # Fresh records for on-disk servable skills with no metrics entry yet.
                 for name in sorted(servable):
                     if name not in self._metrics:
@@ -420,6 +520,8 @@ class SkillManager:
                             'by_version': {},
                             'status': 'active',
                             'last_used': seed_last_used.get(name),
+                            # Freshly-seeded record gets a fresh activity window (D-SEED).
+                            'last_activity_turn': self._global_activity_turns,
                         }
                 # Invariant (D-E): every status=inactive entry must be excluded from
                 # discovery this process — sync _disabled_names with the final state.
@@ -541,10 +643,62 @@ class SkillManager:
         last_used = (entry.get('last_used') or '') if isinstance(entry, dict) else ''
         return (rating_num, loads, last_used, str(name).lower())
 
+    def _classify_active(self, metrics_snap: Dict[str, Any], active_names: List[str],
+                         global_turns_snap: int, now: float,
+                         score_kw: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]:
+        """One read-only pass over the snapshot classifying every ACTIVE skill (plan §4.3).
+
+        Pure over the already-deepcopied snapshot — no locks re-acquired per skill
+        (``_activity_age`` is lock-free; it reads only its args). Returns ``(info, counts)`` where
+        ``info[nm] = {'class', 'score'}`` and ``counts`` tallies each class. Shared by the real
+        pass and the read-only preview so their per-skill numbers can never drift.
+        """
+        info: Dict[str, Dict[str, Any]] = {}
+        counts: Dict[str, int] = {CLASS_BAD: 0, CLASS_PROTECTED: 0, CLASS_USEFUL: 0,
+                                  CLASS_USELESS: 0, CLASS_UNPROVEN: 0}
+        for nm in active_names:
+            m = metrics_snap.get(nm) or {}
+            r_ = (m.get('ratings') or {}) if isinstance(m, dict) else {}
+            n = r_.get('count', 0)
+            avg = (r_['sum'] / n) if n else None
+            L = m.get('total_loads', 0) if isinstance(m, dict) else 0
+            A = self._activity_age(m, global_turns_snap, now)
+            cls = skill_classify(n, avg, A, **score_kw['classify'])
+            sc = skill_score(n, avg, L, A, **score_kw['score'])['score']
+            info[nm] = {'class': cls, 'score': sc}
+            counts[cls] = counts.get(cls, 0) + 1
+        return info, counts
+
+    @staticmethod
+    def _scoring_kwargs(q0: float = None, kq: int = None, n_half: float = None, g_half: float = None,
+                        r_floor: float = None, tau_turns: int = None, dq: float = None,
+                        n_min: int = None, fair_window_turns: int = None) -> Dict[str, Any]:
+        """Resolve scoring constants (None → research defaults). Shared by pass + preview so the
+        two read the SAME values — the "preview always matches a real pass" guarantee."""
+        d = _SKILL_SCORE_DEFAULTS
+        return {
+            'score': {'q0': q0 if q0 is not None else d['q0'],
+                      'kq': kq if kq is not None else d['kq'],
+                      'n_half': n_half if n_half is not None else d['n_half'],
+                      'g_half': g_half if g_half is not None else d['g_half'],
+                      'r_floor': r_floor if r_floor is not None else d['r_floor'],
+                      'tau_turns': tau_turns if tau_turns is not None else d['tau_turns']},
+            'classify': {'q0': q0 if q0 is not None else d['q0'],
+                         'kq': kq if kq is not None else d['kq'],
+                         'dq': dq if dq is not None else d['dq'],
+                         'n_min': n_min if n_min is not None else d['n_min'],
+                         'fair_window_turns': fair_window_turns if fair_window_turns is not None
+                         else d['fair_window_turns']},
+        }
+
     def rebalance_active_skills(self, k: float = SKILL_ACTIVE_TARGET_K,
                                 min_cap: int = SKILL_ACTIVE_MIN_CAP,
-                                max_cap: int = SKILL_ACTIVE_MAX_CAP) -> dict:
-        """One-shot adaptive count-cap pass (plan §7). Best-effort; never raises.
+                                max_cap: int = SKILL_ACTIVE_MAX_CAP,
+                                q0: float = None, kq: int = None, n_half: float = None,
+                                g_half: float = None, r_floor: float = None, tau_turns: int = None,
+                                dq: float = None, n_min: int = None, fair_window_turns: int = None,
+                                max_evictions_per_pass: int = _SKILL_MAX_EVICTIONS_PER_PASS_DEFAULT) -> dict:
+        """One-shot adaptive rebalance pass (plan §7 + Phase C OR-composition). Best-effort; never raises.
 
         ``N_qualified`` is counted over the FULL corpus (active + inactive) so deactivating a
         skill cannot ratchet the desired count down. The raw desired count is ``raw = round(k ×
@@ -558,19 +712,33 @@ class SkillManager:
           toward ``raw`` but never beyond ``reenable_target = min(max_cap, raw, n_servable)``, so a
           small corpus is never pushed to enable up to min_cap/max_cap.
 
+        Phase C (research §9/§17): eviction is **OR-composed** — a skill is evicted if the cap
+        budget selects it OR its class is BAD / USELESS-past-window (the absolute gate; fixes the
+        K=1.0 "nothing ever evicted" gap). PROTECTED skills are EXCLUDED from the candidate set
+        entirely (immune to both gates while A < fair_window_turns). The final list is ordered by
+        ``eviction_rank_key`` so BAD evicts before USELESS, and bounded by
+        ``max_evictions_per_pass`` (D-SAFE) so a bad config cannot nuke the corpus.
+
         D-A: non-servable-location skills count toward N_qualified but are never auto-re-enabled
         (they need a file move, not a status flip). Runs in a background thread at startup
         (post-discover). Returns a summary dict for logging; any internal exception is caught and
         logged so it can never break startup.
+
+        Phase C note: the absolute gate (BAD/USELESS-past-window) is NOT independently toggleable
+        from inside the manager — the master switch ``skill_auto_invalidate_enabled`` gates the
+        whole pass at the pool level (pool/core.py). Setting ``max_evictions_per_pass=0`` disables
+        BOTH gates (cap-only-off = full no-op; see plan §7 rollback table).
         """
         summary = {'evicted': [], 'reenabled': [], 'n_qualified': 0, 'target': 0, 'active_before': 0}
         try:
             # (0) one-time porting + orphan cleanup (post-discover; registry/_skill_paths ready).
             self._migrate_metrics_to_v13()
 
-            # (a) READ-ONLY SNAPSHOT before any mutation (stability guarantee, Q5).
+            # (a) READ-ONLY SNAPSHOT before any mutation (stability guarantee, Q5). The durable
+            # activity counter is captured in the SAME lock block — one pass, no re-acquire.
             with self._metrics_lock:
                 metrics_snap = _copy.deepcopy(self._metrics)
+                global_turns_snap = self._global_activity_turns
             servable = self._servable_skill_names()  # one-level walk (I/O, outside locks)
             n_servable = len(servable)               # hard ceiling on what can be active
             env_disabled = set(SKILLS_DISABLED)      # never auto-re-enable these
@@ -581,6 +749,16 @@ class SkillManager:
             # count active skills after any flip. Metrics status is stable across a pass.
             active_names = [nm for nm, m in metrics_snap.items()
                             if isinstance(m, dict) and m.get('status') == 'active']
+
+            # (b-pre) Phase C: resolve scoring constants + classify every ACTIVE skill ONCE, so
+            # PROTECTED (fair window still open) skills can be excluded from the eviction candidate
+            # set. N_qualified itself stays over the FULL corpus — the cap's budget is what honors
+            # the PROTECTED floor, not the threshold math (see below).
+            score_kw = self._scoring_kwargs(q0=q0, kq=kq, n_half=n_half, g_half=g_half, r_floor=r_floor,
+                                            tau_turns=tau_turns, dq=dq, n_min=n_min,
+                                            fair_window_turns=fair_window_turns)
+            now = time.time()
+            info, class_counts = self._classify_active(metrics_snap, active_names, global_turns_snap, now, score_kw)
 
             # (b) raw desired count over the FULL corpus (active + inactive) → cannot ratchet (Q4).
             n_qualified = sum(
@@ -600,16 +778,43 @@ class SkillManager:
             # toward `raw`, and never beyond what can actually be served.
             reenable_target = min(max_cap, raw, n_servable)
 
-            # (c) deterministic ordering (no randomness; name is the final tiebreak).
-            active_ranked = sorted(active_names, key=lambda nm: self._rank_key(metrics_snap.get(nm, {}), nm))
+            active_before = len(active_names)
+
+            # PROTECTED is immune to ALL eviction (absolute gate + count-cap) — excluded from the
+            # candidate set entirely (§9/§17); it joins ordering only after its window expires.
+            candidates = [nm for nm in active_names if info[nm]['class'] != CLASS_PROTECTED]
+
+            # (b') OR-composition: absolute gate ∪ cap budget, ordered by eviction_rank_key so
+            # BAD(0) < USELESS(1) < UNPROVEN(2) < USEFUL(3) evicts first (research §17).
+            abs_evict = {nm for nm in candidates if info[nm]['class'] in _ABSOLUTE_GATE_CLASSES}
+            # Cap budget is measured against the ACTIVE total: evict_threshold bounds the active
+            # count, and PROTECTED skills — excluded from being evicted — still occupy slots, so
+            # they reduce how many candidates the cap can remove.
+            cap_target = max(0, active_before - evict_threshold)
+            ordered_cands = sorted(candidates,
+                                   key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
+            cap_evict = set(ordered_cands[:cap_target])  # cap draws worst-first from candidates
+
+            # (b'') D-SAFE: never evict more than max_evictions_per_pass in one pass — the top-N by
+            # rank key survive a bad config. Clamped to [0, 1000] like the Phase E config handler.
+            try:
+                max_ev = int(max_evictions_per_pass)
+            except (TypeError, ValueError):
+                max_ev = _SKILL_MAX_EVICTIONS_PER_PASS_DEFAULT
+            max_ev = min(max(0, max_ev), 1000)
+
+            to_evict_list = sorted(abs_evict | cap_evict,
+                                   key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
+            to_evict_list = to_evict_list[:max_ev]
+            to_evict = set(to_evict_list)
+
+            # Re-enable ranking stays on the legacy _rank_key (cap-driven, unchanged this phase).
             inactive_cands = [nm for nm, m in metrics_snap.items()
                               if isinstance(m, dict) and m.get('status') == 'inactive'
                               and str(nm).lower() in servable and str(nm).lower() not in env_disabled]
             inactive_ranked = sorted(inactive_cands, key=lambda nm: self._rank_key(metrics_snap[nm], nm), reverse=True)
 
-            active_before = len(active_names)
-            to_evict = active_ranked[:max(0, active_before - evict_threshold)]  # lowest-ranked active
-            remaining_after_evict = active_before - len(to_evict)
+            remaining_after_evict = active_before - len(to_evict_list)
             to_reenable = inactive_ranked[:max(0, reenable_target - remaining_after_evict)]  # highest-ranked inactive
 
             # (d) APPLY in bulk under nested locks, then ONE flush + ONE invalidate + ONE re-scan (D-F).
@@ -631,14 +836,20 @@ class SkillManager:
             summary.update(n_qualified=n_qualified, raw=raw, evict_threshold=evict_threshold,
                            reenable_target=reenable_target, n_servable=n_servable,
                            target=remaining_after_evict + len(to_reenable), active_before=active_before,
-                           evicted=to_evict, reenabled=to_reenable)
+                           evicted=list(to_evict_list), reenabled=to_reenable,
+                           class_counts=class_counts,
+                           evicted_absolute_gate=[nm for nm in to_evict_list if nm in abs_evict],
+                           evicted_cap_only=[nm for nm in to_evict_list if nm not in abs_evict])
             logger.info('[SKILLS] Rebalance: N_qualified=%d raw=%d evict_threshold=%d reenable_target=%d '
-                        'n_servable=%d active_before=%d active_after=%d evicted=%d reenabled=%d',
+                        'n_servable=%d active_before=%d active_after=%d evicted=%d (abs=%d cap=%d) '
+                        'max_evictions_per_pass=%d reenabled=%d classes=%s',
                         n_qualified, raw, evict_threshold, reenable_target, n_servable,
                         active_before, remaining_after_evict + len(to_reenable),
-                        len(to_evict), len(to_reenable))
-            for nm in to_evict:
-                logger.info("[SKILLS] Auto-inactivated '%s' (count-cap)", nm)  # E2 audit log
+                        len(to_evict_list), len(summary['evicted_absolute_gate']),
+                        len(summary['evicted_cap_only']), max_ev, len(to_reenable), class_counts)
+            for nm in to_evict_list:  # E2 audit log (now with class + gate attribution)
+                src = 'absolute-gate' if nm in abs_evict else 'count-cap'
+                logger.info("[SKILLS] Auto-inactivated '%s' (%s, %s)", nm, info[nm]['class'], src)
             for nm in to_reenable:
                 logger.info("[SKILLS] Auto-activated   '%s' (count-cap)", nm)
         except Exception as e:  # noqa: BLE001 — must NEVER break startup/discovery
@@ -647,14 +858,25 @@ class SkillManager:
 
     def compute_rebalance_preview(self, k: float = SKILL_ACTIVE_TARGET_K,
                                   min_cap: int = SKILL_ACTIVE_MIN_CAP,
-                                  max_cap: int = SKILL_ACTIVE_MAX_CAP) -> dict:
+                                  max_cap: int = SKILL_ACTIVE_MAX_CAP,
+                                  q0: float = None, kq: int = None, n_half: float = None,
+                                  g_half: float = None, r_floor: float = None, tau_turns: int = None,
+                                  dq: float = None, n_min: int = None, fair_window_turns: int = None,
+                                  max_evictions_per_pass: int = _SKILL_MAX_EVICTIONS_PER_PASS_DEFAULT) -> dict:
         """READ-ONLY preview of what a rebalance pass WOULD compute. Never mutates state.
 
-        Runs the exact same read-only math as :meth:`rebalance_active_skills` (deepcopy snapshot
-        under ``_metrics_lock`` + one servable walk + the pure target math) so the displayed number
-        always matches a real pass — but applies NOTHING: no migration, no ``_disabled_names``
-        mutation, no metrics flush, no cache invalidation, no re-scan. Safe to call at any time and
-        never raises (any internal failure is caught and reported via an ``'error'`` key).
+        Runs the exact same read-only math as :meth:`rebalance_active_skills` (deepcopy snapshot +
+        activity-counter capture under ``_metrics_lock`` + one servable walk + the pure target math)
+        so the displayed numbers always match a real pass — but applies NOTHING: no migration, no
+        ``_disabled_names`` mutation, no metrics flush, no cache invalidation, no re-scan. Safe to
+        call at any time and never raises (any internal failure is caught and reported via an
+        ``'error'`` key).
+
+        Phase C additions: a per-active-skill breakdown (``skills`` rows with class/score/n/L/A),
+        aggregate ``class_counts``, and the projected eviction lists — ``would_evict_absolute_gate``
+        (BAD / USELESS-past-window), ``would_evict_cap_only`` (cap budget only) and their union
+        ``would_evict`` ordered by ``eviction_rank_key`` and bounded by ``max_evictions_per_pass``
+        — exactly mirroring the real pass's OR-composition so the UI shows what a save+pass would do.
 
         Return keys: ``n_qualified``, ``raw``, ``evict_threshold``, ``reenable_target``,
         ``n_servable``, ``active_count``, ``ok`` (plus ``k``/``min_cap``/``max_cap`` echoed back for
@@ -666,14 +888,17 @@ class SkillManager:
         try:
             # READ-ONLY SNAPSHOT — identical to rebalance_active_skills (a), but we deliberately
             # SKIP _migrate_metrics_to_v13() here: that is a one-time porting step with side
-            # effects and would be wrong for a pure preview.
+            # effects and would be wrong for a pure preview. The activity counter is captured in
+            # the SAME lock block as the snapshot (one pass, no re-acquire).
             with self._metrics_lock:
                 metrics_snap = _copy.deepcopy(self._metrics)
+                global_turns_snap = self._global_activity_turns
             n_servable = len(self._servable_skill_names())  # one-level walk (I/O, outside locks)
 
             # "Active" derived from the durable metrics status (same derivation as rebalance).
-            active_count = sum(1 for m in metrics_snap.values()
-                               if isinstance(m, dict) and m.get('status') == 'active')
+            active_names = [nm for nm, m in metrics_snap.items()
+                            if isinstance(m, dict) and m.get('status') == 'active']
+            active_count = len(active_names)
 
             # Same pure math as rebalance_active_skills (b): raw over the FULL corpus.
             n_qualified = sum(
@@ -684,9 +909,49 @@ class SkillManager:
             evict_threshold = max(min_cap, min(max_cap, raw))
             reenable_target = min(max_cap, raw, n_servable)
 
+            # Phase C: per-skill class/score — the SAME pure functions + inputs as the real pass
+            # (shared _classify_active helper), still purely over the snapshot.
+            score_kw = self._scoring_kwargs(q0=q0, kq=kq, n_half=n_half, g_half=g_half, r_floor=r_floor,
+                                            tau_turns=tau_turns, dq=dq, n_min=n_min,
+                                            fair_window_turns=fair_window_turns)
+            now = time.time()
+            info, class_counts = self._classify_active(metrics_snap, active_names, global_turns_snap, now, score_kw)
+
+            rows = []
+            for nm in active_names:
+                m = metrics_snap.get(nm) or {}
+                r_ = (m.get('ratings') or {}) if isinstance(m, dict) else {}
+                n = r_.get('count', 0)
+                avg = (r_['sum'] / n) if n else None
+                rows.append({'name': nm, 'class': info[nm]['class'], 'score': round(info[nm]['score'], 4),
+                             'n': n, 'avg': (round(avg, 3) if avg is not None else None),
+                             'L': m.get('total_loads', 0) if isinstance(m, dict) else 0,
+                             'A': self._activity_age(m, global_turns_snap, now)})
+
+            # Mirror the real pass's OR-composition EXACTLY (same candidate set, same gates, same
+            # D-SAFE cap) so `would_evict` == what a real pass would evict.
+            candidates = [nm for nm in active_names if info[nm]['class'] != CLASS_PROTECTED]
+            abs_evict = {nm for nm in candidates if info[nm]['class'] in _ABSOLUTE_GATE_CLASSES}
+            # Same cap-budget semantics as the real pass.
+            cap_target = max(0, active_count - evict_threshold)
+            ordered_cands = sorted(candidates,
+                                   key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
+            cap_evict = set(ordered_cands[:cap_target])
+            try:
+                max_ev = int(max_evictions_per_pass)
+            except (TypeError, ValueError):
+                max_ev = _SKILL_MAX_EVICTIONS_PER_PASS_DEFAULT
+            max_ev = min(max(0, max_ev), 1000)
+            would_evict_list = sorted(abs_evict | cap_evict,
+                                      key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))[:max_ev]
+
             result.update(n_qualified=n_qualified, raw=raw, evict_threshold=evict_threshold,
                           reenable_target=reenable_target, n_servable=n_servable,
-                          active_count=active_count, ok=True)
+                          active_count=active_count, ok=True,
+                          skills=rows, class_counts=class_counts,
+                          would_evict_absolute_gate=[nm for nm in would_evict_list if nm in abs_evict],
+                          would_evict_cap_only=[nm for nm in would_evict_list if nm not in abs_evict],
+                          would_evict=list(would_evict_list))
         except Exception as e:  # noqa: BLE001 — preview must never raise
             logger.warning('[SKILLS] compute_rebalance_preview failed (non-critical): %s', e)
             result['error'] = str(e)
@@ -749,6 +1014,10 @@ class SkillManager:
                 vr['latest'] = rating
                 by_version_ratings[version] = vr
             entry['ratings'] = ratings
+            # D-ACT: a rating is a deliberate applied use — reset this skill's activity clock to
+            # the current global counter (activity-age A → 0). Loads do NOT reset it. This also
+            # covers the initial SKILL_RATING_INITIAL at registration → brand-new skills get A≈0.
+            entry['last_activity_turn'] = self._global_activity_turns
 
             self._pending_flush_count += 1
             now = time.monotonic()
@@ -764,6 +1033,55 @@ class SkillManager:
 
         if flush_needed:
             self._flush_metrics_to_disk()
+
+    def bump_activity_turn(self) -> None:
+        """Advance the persisted cumulative user-turn clock by one (activity clock, research §15).
+
+        In-memory increment under _metrics_lock; disk write only on the existing batched flush
+        cadence (_FLUSH_THRESHOLD / _FLUSH_INTERVAL) — same path as load/rating writes, so a single
+        turn never forces I/O. Best-effort: never raises (callers wrap in try/except "must never
+        break the agent loop"). The counter survives restart/session via the metrics store.
+        """
+        with self._metrics_lock:
+            self._global_activity_turns += 1
+            self._pending_flush_count += 1
+            now = time.monotonic()
+            should_flush = (self._pending_flush_count >= self._FLUSH_THRESHOLD or
+                            (now - self._last_flush_time) >= self._FLUSH_INTERVAL)
+            if should_flush:
+                self._pending_flush_count = 0
+                self._last_flush_time = now
+                flush_needed = True
+            else:
+                flush_needed = False
+
+        if flush_needed:
+            self._flush_metrics_to_disk()
+
+    def _activity_age(self, entry: dict, global_turns: int, now: float) -> int:
+        """Activity-age A in user-turns since the skill last had a chance (research §15).
+
+        Primary: turns clock — ``A = global_turns - last_activity_turn``. Fallback (D-FALLBACK):
+        if the durable counter never advanced (``global_turns == 0``) or this skill has no turn
+        stamp yet, degrade to wall-clock via ``last_used``; if neither is available return 0.
+
+        Conservative-by-construction: a frozen/missed clock must keep skills PROTECTED longer,
+        NEVER mass-evict. When the turns clock is unusable we fall back (bounded by the rate
+        constant); when nothing is available we return 0 → A≈0 → PROTECTED.
+        """
+        lat = entry.get('last_activity_turn') if isinstance(entry, dict) else None
+        if global_turns > 0 and isinstance(lat, int):
+            return max(0, global_turns - lat)
+        # Wall-clock fallback (rate is an open decision — plan §8 OD-1). Only used when the
+        # turns clock is unavailable; a stale last_used still bounds A so it can't spike.
+        lu = entry.get('last_used') if isinstance(entry, dict) else None
+        if lu:
+            try:
+                age_s = max(0.0, now - _iso_to_epoch(lu))
+                return int(age_s / SKILL_WALLCLOCK_SECONDS_PER_TURN)
+            except Exception:
+                return 0
+        return 0
 
     def record_rating(self, skill_name: str, rating: float) -> None:
         """Public wrapper: validate a 0-10 rating and persist it via ``_record_rating``.
@@ -1112,8 +1430,30 @@ class SkillManager:
                                      key)
                         break
             if reg is None:
-                logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry (registry has %d skills)",
-                             skill_name, len(self._skills_registry))
+                # Soft-eviction fallback (research §16): an evicted skill is absent from the
+                # active registry but still on disk at a servable location — load it on demand
+                # so "evict" = soft inactivation, not deletion. STRICTLY WIDENING: this only
+                # fires where the registry lookup already failed (previously returned None),
+                # and it does NOT re-add the skill to the registry (it stays inactive). A name
+                # that is also not in the servable corpus still returns None (no over-broadening).
+                sp = self._find_servable_skill_path(skill_name)
+                if sp is not None:
+                    try:
+                        parsed = parse_skill_file(sp)
+                        body = parsed.get('body', '')
+                        version = parsed.get('version', '1.0.0')
+                        if count_load:
+                            # §5.3: the fallback counts a real load — using an evicted skill
+                            # should give it a chance to be re-rated / re-enabled.
+                            self._increment_load_count(skill_name, version)
+                        logger.debug("[SKILLS] Loaded evicted skill '%s' from servable disk (%d chars)",
+                                     skill_name, len(body))
+                        return body or None
+                    except (FileNotFoundError, OSError) as e:
+                        logger.debug("[SKILLS] Failed to load evicted skill '%s' from %s: %s",
+                                     skill_name, sp, e)
+                logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry or on disk "
+                             '(registry has %d skills)', skill_name, len(self._skills_registry))
                 return None
 
             version = reg.get('version', '1.0.0')

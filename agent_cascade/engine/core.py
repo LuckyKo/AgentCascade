@@ -170,6 +170,15 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     tel.record_user_turn(instance.instance_name)
                 except Exception:
                     pass  # telemetry must never break the agent loop
+            # Durable activity clock (research §15): advance the persisted cumulative
+            # user-turn counter once per turn. Same guard as telemetry → fires exactly once
+            # per run(). Best-effort — a skill-manager failure must never break the loop.
+            sm = getattr(self.pool, 'skill_manager', None) if hasattr(self, 'pool') else None
+            if sm is not None:
+                try:
+                    sm.bump_activity_turn()
+                except Exception:
+                    pass  # activity clock must never break the agent loop
         return turns - 1
 
     # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────

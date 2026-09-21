@@ -1060,7 +1060,52 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         min_cap = min(max(1, min_cap), 200)
         max_cap = min(max(min_cap, max_cap), 1000)
 
-        return sm.compute_rebalance_preview(k=k, min_cap=min_cap, max_cap=max_cap)
+        # Phase C scoring constants: base values from llm_cfg (same keys/defaults as pool/core.py),
+        # optional ?q0=&kq=&... overrides for live preview. Each is clamped IDENTICALLY to the
+        # Phase E config handlers (min(max(lo, v), hi)) so a displayed number always matches what a
+        # real save+pass would compute. Out-of-range typed values are bounded exactly as they
+        # would be after saving.
+        def _cfg_float(key: str, default: float) -> float:
+            try:
+                return float(cfg.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        def _cfg_int(key: str, default: int) -> int:
+            try:
+                return int(cfg.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        score_overrides = {
+            'q0': (_cfg_float('skill_score_q0', 5.0), 0.0, 10.0),
+            'kq': (_cfg_int('skill_score_kq', 5), 0, 20),
+            'nhalf': (_cfg_float('skill_score_nhalf', 8), 1.0, 50.0),
+            'ghalf': (_cfg_float('skill_score_ghalf', 20), 1.0, 100.0),
+            'rflood': (_cfg_float('skill_score_rflood', 0.5), 0.0, 0.99),
+            'tau_turns': (_cfg_int('skill_score_tau_turns', 200), 10, 5000),
+            'dq': (_cfg_float('skill_score_dq', 0.5), 0.1, 3.0),
+            'nmin': (_cfg_int('skill_score_nmin', 5), 1, 20),
+            'fair_window_turns': (_cfg_int('skill_fair_window_turns', 50), 0, 1000),
+            'max_evictions_per_pass': (_cfg_int('skill_max_evictions_per_pass', 25), 0, 1000),
+        }
+        # Optional unsaved overrides from the input boxes — parse only if present + parseable.
+        for key, (val, lo, hi) in score_overrides.items():
+            if key in qp:
+                try:
+                    val = float(qp[key]) if '.' in qp[key] else int(qp[key])
+                except (TypeError, ValueError):
+                    pass  # keep the cfg value on unparseable input
+            score_overrides[key] = (min(max(lo, val), hi), lo, hi)
+
+        return sm.compute_rebalance_preview(
+            k=k, min_cap=min_cap, max_cap=max_cap,
+            q0=score_overrides['q0'][0], kq=score_overrides['kq'][0],
+            n_half=score_overrides['nhalf'][0], g_half=score_overrides['ghalf'][0],
+            r_floor=score_overrides['rflood'][0], tau_turns=score_overrides['tau_turns'][0],
+            dq=score_overrides['dq'][0], n_min=score_overrides['nmin'][0],
+            fair_window_turns=score_overrides['fair_window_turns'][0],
+            max_evictions_per_pass=score_overrides['max_evictions_per_pass'][0])
 
     @app.post('/api/skills/toggle')
     async def api_toggle_skill(data: dict):
@@ -1565,6 +1610,20 @@ if __name__ == '__main__':
         'skill_active_target_k': 1.0,
         'skill_active_min_cap': 20,
         'skill_active_max_cap': 200,
+        # Skill-scoring constants (research §5/§7/§18 + D-SAFE). Phase C reads these from llm_cfg
+        # with identical defaults in pool/core.py and manager.py; the full 6-seam exposure
+        # (config handlers, frontend inputs) lands in Phase E — seeding here keeps the keys
+        # visible to any consumer before then.
+        'skill_score_q0': 5.0,
+        'skill_score_kq': 5,
+        'skill_score_nhalf': 8,
+        'skill_score_ghalf': 20,
+        'skill_score_rflood': 0.5,
+        'skill_score_tau_turns': 200,
+        'skill_score_dq': 0.5,
+        'skill_score_nmin': 5,
+        'skill_fair_window_turns': 50,
+        'skill_max_evictions_per_pass': 25,
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)

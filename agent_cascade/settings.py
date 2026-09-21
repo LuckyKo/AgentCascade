@@ -539,12 +539,36 @@ AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
                                           20))  # Fire reflection when turns effectuated > N (strictly greater)
 SKILL_RATING_INITIAL: float = float(os.getenv('AGENT_CASCADE_SKILL_RATING_INITIAL',
                                               5.0))  # Initial rating auto-recorded for newly-registered skills
+# Activity-clock wall-clock fallback rate (research §15 / D-FALLBACK, open decision OD-1):
+# seconds of real time mapped to one "activity turn" when the durable turns counter is
+# unavailable (global_activity_turns == 0). Only used as a bounded fallback; the primary
+# clock is the persisted cumulative user-turn counter. A larger value ages skills SLOWER
+# (more conservative — keeps them PROTECTED longer on a stuck clock).
+SKILL_WALLCLOCK_SECONDS_PER_TURN: int = int(
+    os.getenv('AGENT_CASCADE_SKILL_WALLCLOCK_SECONDS_PER_TURN', '3600'))  # 1h ~ 1 turn
 
 # ── Skill invalidation (adaptive count-cap) ────────────────────────────────
 # Defaults for the startup rebalance pass: target = clamp(K × N_qualified, MIN_CAP, MAX_CAP).
 SKILL_ACTIVE_TARGET_K: float = float(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_TARGET_K', '1.0'))
 SKILL_ACTIVE_MIN_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MIN_CAP', '20'))
 SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', '200'))
+
+# ── Skill-scoring constants (research §5/§7/§18 + D-SAFE) ──────────────────
+# Every formula/gate constant in the Phase B/C scoring is a named setting (Refinement 4, §18).
+# Each default mirrors the research values AND the hard-coded fallbacks already read by pool/core.py
+# and skills/manager.py (_SKILL_SCORE_DEFAULTS), so exposing them changes no behavior at defaults.
+# The clamp for each is applied IDENTICALLY in config_handlers.py, api_server.py (preview endpoint)
+# and web_ui/app.js (getGenerateCfg) — see the per-setting "Clamped [lo,hi]" notes.
+SKILL_SCORE_Q0: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_Q0', '5.0'))  # neutral baseline; keep == SKILL_RATING_INITIAL
+SKILL_SCORE_KQ: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_KQ', '5'))  # shrinkage prior strength (Clamped [0,20])
+SKILL_SCORE_NHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_NHALF', '8'))  # usage saturation (Clamped [1,50])
+SKILL_SCORE_GHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_GHALF', '20'))  # load-waste scale (Clamped [1,100])
+SKILL_SCORE_RFLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_RFLOOR', '0.5'))  # recency floor; must stay <1 (Clamped [0,0.99])
+SKILL_SCORE_TAU_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_TAU_TURNS', '200'))  # activity-recency decay (Clamped [10,5000])
+SKILL_SCORE_DQ: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_DQ', '0.5'))  # quality margin / neutral-band width (Clamped [0.1,3.0])
+SKILL_SCORE_NMIN: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_NMIN', '5'))  # meaningful-use bar (Clamped [1,20])
+SKILL_FAIR_WINDOW_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_FAIR_WINDOW_TURNS', '50'))  # PROTECTED window (Clamped [0,1000])
+SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICTIONS_PER_PASS', '25'))  # D-SAFE cap (Clamped [0,1000])
 
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for auto-promotion
 # Applies to NEW skills only: a newly-registered skill is moved straight from the pending

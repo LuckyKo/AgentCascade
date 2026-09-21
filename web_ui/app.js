@@ -211,6 +211,17 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-skill-target-k', prop: 'value', key: 'skill_active_target_k', localKey: 'skill_active_target_k' },
   { id: '#setting-skill-min-cap', prop: 'value', key: 'skill_active_min_cap', localKey: 'skill_active_min_cap' },
   { id: '#setting-skill-max-cap', prop: 'value', key: 'skill_active_max_cap', localKey: 'skill_active_max_cap' },
+  // Skill-scoring constants (research §5/§7/§18 + D-SAFE) — underscore keys via getGenerateCfg().
+  { id: '#setting-skill-score-q0', prop: 'value', key: 'skill_score_q0', localKey: 'skill_score_q0' },
+  { id: '#setting-skill-score-kq', prop: 'value', key: 'skill_score_kq', localKey: 'skill_score_kq' },
+  { id: '#setting-skill-score-nhalf', prop: 'value', key: 'skill_score_nhalf', localKey: 'skill_score_nhalf' },
+  { id: '#setting-skill-score-ghalf', prop: 'value', key: 'skill_score_ghalf', localKey: 'skill_score_ghalf' },
+  { id: '#setting-skill-score-rflood', prop: 'value', key: 'skill_score_rflood', localKey: 'skill_score_rflood' },
+  { id: '#setting-skill-score-tau-turns', prop: 'value', key: 'skill_score_tau_turns', localKey: 'skill_score_tau_turns' },
+  { id: '#setting-skill-score-dq', prop: 'value', key: 'skill_score_dq', localKey: 'skill_score_dq' },
+  { id: '#setting-skill-score-nmin', prop: 'value', key: 'skill_score_nmin', localKey: 'skill_score_nmin' },
+  { id: '#setting-skill-fair-window-turns', prop: 'value', key: 'skill_fair_window_turns', localKey: 'skill_fair_window_turns' },
+  { id: '#setting-skill-max-evictions-per-pass', prop: 'value', key: 'skill_max_evictions_per_pass', localKey: 'skill_max_evictions_per_pass' },
   // Approval timeout settings
   { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
   { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
@@ -1198,6 +1209,17 @@ function saveSettings(sendToServer) {
   if ($('#setting-skill-target-k')) s['skill_active_target_k'] = $('#setting-skill-target-k').value;
   if ($('#setting-skill-min-cap')) s['skill_active_min_cap'] = $('#setting-skill-min-cap').value;
   if ($('#setting-skill-max-cap')) s['skill_active_max_cap'] = $('#setting-skill-max-cap').value;
+  // Skill-scoring constants (research §5/§7/§18 + D-SAFE): persist under underscore keys.
+  if ($('#setting-skill-score-q0')) s['skill_score_q0'] = $('#setting-skill-score-q0').value;
+  if ($('#setting-skill-score-kq')) s['skill_score_kq'] = $('#setting-skill-score-kq').value;
+  if ($('#setting-skill-score-nhalf')) s['skill_score_nhalf'] = $('#setting-skill-score-nhalf').value;
+  if ($('#setting-skill-score-ghalf')) s['skill_score_ghalf'] = $('#setting-skill-score-ghalf').value;
+  if ($('#setting-skill-score-rflood')) s['skill_score_rflood'] = $('#setting-skill-score-rflood').value;
+  if ($('#setting-skill-score-tau-turns')) s['skill_score_tau_turns'] = $('#setting-skill-score-tau-turns').value;
+  if ($('#setting-skill-score-dq')) s['skill_score_dq'] = $('#setting-skill-score-dq').value;
+  if ($('#setting-skill-score-nmin')) s['skill_score_nmin'] = $('#setting-skill-score-nmin').value;
+  if ($('#setting-skill-fair-window-turns')) s['skill_fair_window_turns'] = $('#setting-skill-fair-window-turns').value;
+  if ($('#setting-skill-max-evictions-per-pass')) s['skill_max_evictions_per_pass'] = $('#setting-skill-max-evictions-per-pass').value;
   if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
   if ($('#setting-system-idle-timeout')) s['system-idle-timeout'] = $('#setting-system-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
@@ -1419,6 +1441,17 @@ function loadSettings() {
     if (_isFiniteRestore(s['skill_active_max_cap'])) {
       $('#setting-skill-max-cap').value = s['skill_active_max_cap'];
     }
+    // Skill-scoring constants (research §5/§7/§18 + D-SAFE): restore numerics.
+    if (_isFiniteRestore(s['skill_score_q0'])) $('#setting-skill-score-q0').value = s['skill_score_q0'];
+    if (_isFiniteRestore(s['skill_score_kq'])) $('#setting-skill-score-kq').value = s['skill_score_kq'];
+    if (_isFiniteRestore(s['skill_score_nhalf'])) $('#setting-skill-score-nhalf').value = s['skill_score_nhalf'];
+    if (_isFiniteRestore(s['skill_score_ghalf'])) $('#setting-skill-score-ghalf').value = s['skill_score_ghalf'];
+    if (_isFiniteRestore(s['skill_score_rflood'])) $('#setting-skill-score-rflood').value = s['skill_score_rflood'];
+    if (_isFiniteRestore(s['skill_score_tau_turns'])) $('#setting-skill-score-tau-turns').value = s['skill_score_tau_turns'];
+    if (_isFiniteRestore(s['skill_score_dq'])) $('#setting-skill-score-dq').value = s['skill_score_dq'];
+    if (_isFiniteRestore(s['skill_score_nmin'])) $('#setting-skill-score-nmin').value = s['skill_score_nmin'];
+    if (_isFiniteRestore(s['skill_fair_window_turns'])) $('#setting-skill-fair-window-turns').value = s['skill_fair_window_turns'];
+    if (_isFiniteRestore(s['skill_max_evictions_per_pass'])) $('#setting-skill-max-evictions-per-pass').value = s['skill_max_evictions_per_pass'];
     if (_isFiniteRestore(s['idle-timeout'])) {
       $('#setting-idle-timeout').value = s['idle-timeout'];
     }
@@ -1639,6 +1672,68 @@ refreshSkillThreshold();
 ['#setting-skill-target-k', '#setting-skill-min-cap', '#setting-skill-max-cap'].forEach(sel => {
   const el = $(sel);
   if (el) el.addEventListener('input', debouncedRefreshSkillThreshold);
+});
+
+// ── Read-only skill-scoring preview row (research §18 / Phase E) ────────────
+// Shows the class distribution + projected evictions from compute_rebalance_preview.
+// Display-only: no input/button, never throws, muted "n/a" on any failure/503. Passes the
+// current scoring input boxes as query params so typing updates live; the endpoint clamps them
+// exactly like a real save, so the numbers always match what a save+pass would compute.
+let _skillScorePreviewTimer = null;
+function refreshSkillScorePreview() {
+  const el = $('#skill-score-preview');
+  if (!el) return;
+  const params = new URLSearchParams();
+  // Map input-box id → query-param key (same keys the preview endpoint accepts).
+  const fields = [
+    ['#setting-skill-target-k', 'k'],
+    ['#setting-skill-min-cap', 'min_cap'],
+    ['#setting-skill-max-cap', 'max_cap'],
+    ['#setting-skill-score-q0', 'q0'],
+    ['#setting-skill-score-kq', 'kq'],
+    ['#setting-skill-score-nhalf', 'nhalf'],
+    ['#setting-skill-score-ghalf', 'ghalf'],
+    ['#setting-skill-score-rflood', 'rflood'],
+    ['#setting-skill-score-tau-turns', 'tau_turns'],
+    ['#setting-skill-score-dq', 'dq'],
+    ['#setting-skill-score-nmin', 'nmin'],
+    ['#setting-skill-fair-window-turns', 'fair_window_turns'],
+    ['#setting-skill-max-evictions-per-pass', 'max_evictions_per_pass'],
+  ];
+  for (const [sel, key] of fields) {
+    const box = $(sel);
+    if (box && box.value !== '') params.set(key, box.value);
+  }
+  const qs = params.toString();
+  fetch(qs ? `/api/skills/threshold?${qs}` : '/api/skills/threshold')
+    .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+    .then(data => {
+      if (data && data.ok) {
+        const cc = data.class_counts || {};
+        const classes = `BAD ${cc.BAD ?? 0} · USELESS ${cc.USELESS ?? 0} · UNPROVEN ${cc.UNPROVEN ?? 0} · USEFUL ${cc.USEFUL ?? 0} · PROTECTED ${cc.PROTECTED ?? 0}`;
+        el.textContent = `Preview: ${classes} · would-evict ${(data.would_evict || []).length} (cap-only ${(data.would_evict_cap_only || []).length})`;
+      } else {
+        el.textContent = 'Preview: n/a';
+      }
+    })
+    .catch(err => {
+      console.warn('Failed to fetch skill score preview:', err);
+      el.textContent = 'Preview: n/a';
+    });
+}
+function debouncedRefreshSkillScorePreview() {
+  clearTimeout(_skillScorePreviewTimer);
+  _skillScorePreviewTimer = setTimeout(refreshSkillScorePreview, 300);
+}
+// Initial load + live update as the user types in any scoring / cap setting.
+refreshSkillScorePreview();
+['#setting-skill-target-k', '#setting-skill-min-cap', '#setting-skill-max-cap',
+ '#setting-skill-score-q0', '#setting-skill-score-kq', '#setting-skill-score-nhalf',
+ '#setting-skill-score-ghalf', '#setting-skill-score-rflood', '#setting-skill-score-tau-turns',
+ '#setting-skill-score-dq', '#setting-skill-score-nmin', '#setting-skill-fair-window-turns',
+ '#setting-skill-max-evictions-per-pass'].forEach(sel => {
+  const el = $(sel);
+  if (el) el.addEventListener('input', debouncedRefreshSkillScorePreview);
 });
 
 // Work folder textareas use explicit save button instead of auto-sync
@@ -5722,6 +5817,17 @@ function getGenerateCfg() {
   if ($('#setting-skill-target-k')) { const _stk = parseFloat($('#setting-skill-target-k').value); cfg.skill_active_target_k = Number.isNaN(_stk) ? 1.0 : Math.min(5.0, Math.max(0.1, _stk)); }
   if ($('#setting-skill-min-cap')) { const _smc = parseInt($('#setting-skill-min-cap').value); cfg.skill_active_min_cap = Number.isNaN(_smc) ? 20 : Math.min(200, Math.max(1, _smc)); }
   if ($('#setting-skill-max-cap')) { const _smx = parseInt($('#setting-skill-max-cap').value); const _smin = cfg.skill_active_min_cap ?? 20; cfg.skill_active_max_cap = Number.isNaN(_smx) ? 200 : Math.min(1000, Math.max(_smin, _smx)); }
+  // Skill-scoring constants (research §5/§7/§18 + D-SAFE) — clamps byte-identical to the config handlers.
+  if ($('#setting-skill-score-q0')) { const _v = parseFloat($('#setting-skill-score-q0').value); cfg.skill_score_q0 = Number.isNaN(_v) ? 5.0 : Math.min(10.0, Math.max(0.0, _v)); }
+  if ($('#setting-skill-score-kq')) { const _v = parseInt($('#setting-skill-score-kq').value); cfg.skill_score_kq = Number.isNaN(_v) ? 5 : Math.min(20, Math.max(0, _v)); }
+  if ($('#setting-skill-score-nhalf')) { const _v = parseFloat($('#setting-skill-score-nhalf').value); cfg.skill_score_nhalf = Number.isNaN(_v) ? 8 : Math.min(50.0, Math.max(1.0, _v)); }
+  if ($('#setting-skill-score-ghalf')) { const _v = parseFloat($('#setting-skill-score-ghalf').value); cfg.skill_score_ghalf = Number.isNaN(_v) ? 20 : Math.min(100.0, Math.max(1.0, _v)); }
+  if ($('#setting-skill-score-rflood')) { const _v = parseFloat($('#setting-skill-score-rflood').value); cfg.skill_score_rflood = Number.isNaN(_v) ? 0.5 : Math.min(0.99, Math.max(0.0, _v)); }
+  if ($('#setting-skill-score-tau-turns')) { const _v = parseInt($('#setting-skill-score-tau-turns').value); cfg.skill_score_tau_turns = Number.isNaN(_v) ? 200 : Math.min(5000, Math.max(10, _v)); }
+  if ($('#setting-skill-score-dq')) { const _v = parseFloat($('#setting-skill-score-dq').value); cfg.skill_score_dq = Number.isNaN(_v) ? 0.5 : Math.min(3.0, Math.max(0.1, _v)); }
+  if ($('#setting-skill-score-nmin')) { const _v = parseInt($('#setting-skill-score-nmin').value); cfg.skill_score_nmin = Number.isNaN(_v) ? 5 : Math.min(20, Math.max(1, _v)); }
+  if ($('#setting-skill-fair-window-turns')) { const _v = parseInt($('#setting-skill-fair-window-turns').value); cfg.skill_fair_window_turns = Number.isNaN(_v) ? 50 : Math.min(1000, Math.max(0, _v)); }
+  if ($('#setting-skill-max-evictions-per-pass')) { const _v = parseInt($('#setting-skill-max-evictions-per-pass').value); cfg.skill_max_evictions_per_pass = Number.isNaN(_v) ? 25 : Math.min(1000, Math.max(0, _v)); }
 
   // Compression threshold settings (PoolSettings fields) — clamped to match saveSettings() validation
   if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = Math.min(99, Math.max(50, parseFloat($('#setting-compression-warning-threshold').value) || 90));
