@@ -20,6 +20,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from agent_cascade.skills.manager import SkillManager
+from tests.conftest import make_hermetic_skill_manager  # shared hermetic factory (test isolation)
 from agent_cascade.skills.matcher import SkillMatcher
 from agent_cascade.skills.parser import parse_frontmatter, parse_skill_file
 from agent_cascade.skills.scoring import (CLASS_BAD, CLASS_ORDINAL, CLASS_PROTECTED, CLASS_UNPROVEN,
@@ -366,13 +367,13 @@ class TestSkillManager:
     """Test SkillManager discovery, metadata queries, loading and resolution."""
 
     @pytest.fixture(autouse=True)
-    def _fresh_manager(self, tmp_path):
-        self.manager = SkillManager()
-        # Isolate metrics writes: SkillManager.__init__ loads the REAL
-        # agents/global/skills-metrics.json into memory and defaults _metrics_file to it.
-        # Tests here call load_full_instructions() (which increments load counts) over the
-        # real skills dir; without redirection a flush would clobber the production file.
-        self.manager._metrics_file = tmp_path / 'skills-metrics.json'
+    def _fresh_manager(self, hermetic_skill_manager):
+        # Shared hermetic factory (tests/conftest.py): redirects all four write roots to a
+        # per-test tmp tree AND resets the __init__-loaded _metrics/_disabled_names/
+        # _global_activity_turns. Resetting _disabled_names is what makes discover([_SKILLS_DIR])
+        # see the full real registry regardless of production status=inactive entries — so these
+        # discovery tests are order-independent (see plans/test_isolation_AUDIT_PLAN.md §3.1).
+        self.manager = hermetic_skill_manager
 
     # -- Discovery --
 
@@ -1143,13 +1144,9 @@ class TestScanSkillsRatingDisplay:
 # ===========================================================================
 
 
-def _invalidation_manager(tmp_path, skill_names=('inv-a', 'inv-b')):
-    """Fresh SkillManager with isolated metrics + a hermetic one-level skills tree."""
-    m = SkillManager()
-    # Isolate metrics (the production store loaded at __init__ must not leak in).
-    m._metrics_file = tmp_path / 'skills-metrics.json'
-    with m._metrics_lock:
-        m._metrics = {}
+def _invalidation_manager(hermetic_skill_manager, tmp_path, skill_names=('inv-a', 'inv-b')):
+    """Fresh SkillManager (shared hermetic factory) + a hermetic one-level skills tree."""
+    m = hermetic_skill_manager
     root = tmp_path / 'skills'
     for name in skill_names:
         _write_skill_file(root, name)
@@ -1164,8 +1161,8 @@ class TestSkillInvalidationToggle:
     """disable_skill/enable_skill: status flips, persistence, cache invalidation."""
 
     @pytest.fixture(autouse=True)
-    def _toggle_manager(self, tmp_path):
-        self.manager = _invalidation_manager(tmp_path)
+    def _toggle_manager(self, hermetic_skill_manager, tmp_path):
+        self.manager = _invalidation_manager(hermetic_skill_manager, tmp_path)
         yield
 
     def test_disable_skill_flips_status_and_disables(self):
@@ -1374,16 +1371,11 @@ class TestSkillInvalidationQ7Guard:
     """Candidate promotion guard: an inactive incumbent holds its candidate pending."""
 
     @pytest.fixture(autouse=True)
-    def _q7_manager(self, tmp_path):
-        self.manager = SkillManager()
-        base = tmp_path / 'agents' / 'global'
-        self.manager._metrics_file = tmp_path / 'skills-metrics.json'
-        with self.manager._metrics_lock:
-            self.manager._metrics = {}
-        # Isolate the candidate flow roots (mirrors test_skill_generation.fresh_manager).
-        self.manager._pending_dir = base / 'pending-skills'
-        self.manager._candidates_dir = base / 'candidates'
-        self.manager._production_skills_dir = base / 'skills'
+    def _q7_manager(self, hermetic_skill_manager):
+        # Shared hermetic factory: redirects all four roots (incl. the candidate-flow roots
+        # this guard exercises) and resets __init__-loaded state. Behavior identical to the old
+        # inline body; see plans/test_isolation_AUDIT_PLAN.md §3.1.
+        self.manager = hermetic_skill_manager
         yield
 
     def _write_incumbent(self, name: str, version: str = '1.0.0'):
@@ -1507,15 +1499,13 @@ class TestSkillInvalidationScanMarker:
 # ===========================================================================
 
 def _rebalance_manager(tmp_path, skill_names):
-    """Fresh manager + hermetic one-level skills tree (all servable)."""
-    m = SkillManager()
-    m._metrics_file = tmp_path / 'skills-metrics.json'
-    with m._metrics_lock:
-        m._metrics = {}
-    # __init__ → _load_metrics() already read the REAL production store, leaking its
-    # global_activity_turns counter (e.g. 120) into this hermetic manager. These tests assume a
-    # fresh clock frozen at 0 (see _age_out_all's precondition), so clear the leaked field too.
-    m._global_activity_turns = 0
+    """Fresh manager (shared hermetic factory) + hermetic one-level skills tree (all servable).
+
+    The factory resets the leaked ``_global_activity_turns`` clock to 0 (these tests assume a
+    fresh frozen clock — see _age_out_all's precondition) and clears ``_metrics``/``_disabled_names``,
+    matching the prior inline body. See plans/test_isolation_AUDIT_PLAN.md §3.1.
+    """
+    m = make_hermetic_skill_manager(tmp_path)
     root = tmp_path / 'skills'
     for name in skill_names:
         _write_skill_file(root, name)

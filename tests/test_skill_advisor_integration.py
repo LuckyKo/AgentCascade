@@ -38,6 +38,44 @@ from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.schema import ASSISTANT, SYSTEM, Message
 from agent_cascade.skills.advisor import SkillAdvisorResult
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_real_skill_managers(tmp_path):
+    """Isolate every REAL SkillManager built in this file from production state.
+
+    Most tests use FakeSkillManager (write-safe), but the gate-refresh test builds a real
+    ``SkillManager()`` and calls discover()/invalidate_cache(). Those are read-only today, but any
+    future flush would clobber the REAL production metrics file — the construction-before-redirect
+    leak. This autouse fixture redirects every real manager's write roots to a per-test tmp tree and
+    resets the __init__-loaded fields. See [[constructor-loads-state-before-redirect-leak]] and
+    plans/test_isolation_AUDIT_PLAN.md §3.2 (Tier 1).
+    """
+    from agent_cascade.skills.manager import SkillManager
+
+    def _hermetize(m):
+        base = tmp_path / 'agents' / 'global'
+        m._metrics_file = base / 'skills-metrics.json'
+        m._pending_dir = base / 'pending-skills'
+        m._candidates_dir = base / 'candidates'
+        m._production_skills_dir = base / 'skills'
+        with m._metrics_lock:
+            m._metrics = {}
+        from agent_cascade.settings import SKILLS_DISABLED
+        m._disabled_names = set(SKILLS_DISABLED)
+        m._global_activity_turns = 0
+
+    orig_init = SkillManager.__init__
+
+    def _patched_init(self, *a, **k):
+        orig_init(self, *a, **k)
+        _hermetize(self)
+
+    with patch.object(SkillManager, '__init__', _patched_init):
+        yield
+
+
 # Sentinel for _run_gate(load_skill_value=...) meaning "omit the key from args"
 # so the gate falls back to pool.settings.default_load_skill_mode.
 _OMIT_LOAD_SKILL = object()

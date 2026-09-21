@@ -136,12 +136,21 @@ class TestManagerGateLiveRead:
     ``load_full_instructions`` (skill-creator always loadable) and the prompt builder.
     """
 
-    def _qualifies(self, turns_effectuated, min_turns=None):
+    def _qualifies(self, tmp_path, turns_effectuated, min_turns=None):
         import threading
         from unittest.mock import patch
         from agent_cascade.skills.manager import SkillManager
 
         mgr = SkillManager()
+        # Test isolation: __init__ already loaded the REAL production metrics file into memory.
+        # auto_skill_qualifies is side-effect-free today, but redirect _metrics_file (and reset the
+        # leaked fields) so a future flush can never clobber production. See [[constructor-loads-state-before-redirect-leak]].
+        mgr._metrics_file = tmp_path / 'skills-metrics.json'
+        with mgr._metrics_lock:
+            mgr._metrics = {}
+        from agent_cascade.settings import SKILLS_DISABLED
+        mgr._disabled_names = set(SKILLS_DISABLED)
+        mgr._global_activity_turns = 0
         # Isolate to the turn gate: skill-creator always "loadable" (sentinel creator).
         mgr.load_full_instructions = lambda name, count_load=False: 'CREATOR' if name == 'skill-creator' else None
 
@@ -153,18 +162,18 @@ class TestManagerGateLiveRead:
         with patch('agent_cascade.skills.manager._build_auto_skill_reflection_prompt', return_value='PROMPT'):
             return mgr.auto_skill_qualifies(_Inst(), turns_effectuated, min_turns=min_turns)
 
-    def test_low_live_threshold_passes_below_constant(self):
+    def test_low_live_threshold_passes_below_constant(self, tmp_path):
         # Constant AUTO_SKILL_MIN_TURNS is 20. Live threshold 5 → turn 6 must PASS (6 > 5),
         # even though 6 <= 20 would fail against the constant.
-        assert self._qualifies(6, min_turns=5) == 'PROMPT'
+        assert self._qualifies(tmp_path, 6, min_turns=5) == 'PROMPT'
 
-    def test_high_live_threshold_blocks_above_constant(self):
+    def test_high_live_threshold_blocks_above_constant(self, tmp_path):
         # Live threshold 100 → turn 30 must FAIL (30 <= 100), even though 30 > 20 would pass
         # against the constant.
-        assert self._qualifies(30, min_turns=100) is None
+        assert self._qualifies(tmp_path, 30, min_turns=100) is None
 
-    def test_none_falls_back_to_constant(self):
+    def test_none_falls_back_to_constant(self, tmp_path):
         # min_turns=None → import-time constant (20). turn 21 passes, turn 20 fails.
         from agent_cascade.settings import AUTO_SKILL_MIN_TURNS
-        assert self._qualifies(AUTO_SKILL_MIN_TURNS + 1) == 'PROMPT'
-        assert self._qualifies(AUTO_SKILL_MIN_TURNS) is None
+        assert self._qualifies(tmp_path, AUTO_SKILL_MIN_TURNS + 1) == 'PROMPT'
+        assert self._qualifies(tmp_path, AUTO_SKILL_MIN_TURNS) is None

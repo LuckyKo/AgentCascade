@@ -522,6 +522,52 @@ def isolated_instance_id():
 
 
 # ---------------------------------------------------------------------------
+# Fixtures: hermetic SkillManager (test isolation — see plans/test_isolation_AUDIT_PLAN.md)
+# ---------------------------------------------------------------------------
+
+from agent_cascade.settings import SKILLS_DISABLED  # noqa: E402
+from agent_cascade.skills.manager import SkillManager  # noqa: E402
+
+
+def make_hermetic_skill_manager(tmp_path):
+    """Build a SkillManager fully isolated from every production artifact.
+
+    ``SkillManager.__init__`` reads the REAL ``agents/global/skills-metrics.json`` into
+    ``_metrics`` / ``_disabled_names`` (every status==inactive name) and sets the durable
+    ``_global_activity_turns`` clock BEFORE a test can redirect the path — so those fields
+    leak production state. Redirect all four write roots to a per-test tmp tree and reset
+    the __init__-loaded fields tests assume start clean:
+
+    - ``_metrics = {}``            → no production ratings leak into assertions
+    - ``_disabled_names = SKILLS_DISABLED`` → drop production status=inactive names so
+      ``discover()`` sees the full real registry regardless of what the live file says
+      (this is what makes the discovery tests order-independent)
+    - ``_global_activity_turns = 0`` → frozen clock at 0
+
+    Tests that need a specific disabled name re-add it via ``disable_skill()`` / seeding.
+    See [[skill-manager-hermetic-test-fixture]] and [[constructor-loads-state-before-redirect-leak]].
+    """
+    m = SkillManager()
+    base = tmp_path / 'agents' / 'global'
+    m._metrics_file = base / 'skills-metrics.json'
+    m._pending_dir = base / 'pending-skills'
+    m._candidates_dir = base / 'candidates'
+    m._production_skills_dir = base / 'skills'
+    # Reset fields __init__ populated from the REAL file (tests need a frozen/clean default):
+    with m._metrics_lock:
+        m._metrics = {}                       # don't leak production ratings into tests
+    m._disabled_names = set(SKILLS_DISABLED)  # drop production status=inactive names so discover() sees all real skills
+    m._global_activity_turns = 0              # frozen clock at 0 (mirrors _rebalance_manager)
+    return m
+
+
+@pytest.fixture
+def hermetic_skill_manager(tmp_path):
+    """Fixture wrapper around :func:`make_hermetic_skill_manager` for tests that take a manager."""
+    return make_hermetic_skill_manager(tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # Fixtures: token_cache tests
 # ---------------------------------------------------------------------------
 

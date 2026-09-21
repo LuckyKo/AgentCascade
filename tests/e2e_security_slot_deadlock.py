@@ -213,6 +213,8 @@ def slot_harness(tmp_path, request):
 
     cfg_dir = tmp_path / request.node.name.replace('/', '_')
     cfg_dir.mkdir(parents=True, exist_ok=True)
+    # Save prior value so teardown can restore it (previously set without a restore — env leak).
+    old_cfg_dir = _os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
     _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(cfg_dir)
 
     # Shorten the shared-slot acquire timeout (module constants, captured at import time).
@@ -288,6 +290,11 @@ def slot_harness(tmp_path, request):
         pass
     _sq_mod.QUEUE_WAIT_TIMEOUT = old_sq
     _ar_mod.QUEUE_WAIT_TIMEOUT = old_ar
+    # Restore the config-dir env var to its prior value (or drop it if it was unset).
+    if old_cfg_dir is None:
+        _os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
+    else:
+        _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = old_cfg_dir
 
 
 # ── Test 1: normal yield path (caller holds a live _slot_release) ────────────

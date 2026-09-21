@@ -51,9 +51,15 @@ def e2e_config_isolation(tmp_path_factory):
     Must be autouse + module scope so it runs before ac_server fixture.
     """
     test_config = tmp_path_factory.mktemp('e2e_test_config')
+    # Save prior value so teardown can restore it (previously set without a restore — env leak).
+    old_cfg_dir = _os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
     _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(test_config)
     yield test_config
-    # pytest auto-cleans tmp_path_factory dirs
+    # Restore the config-dir env var to its prior value (or drop it if it was unset).
+    if old_cfg_dir is None:
+        _os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
+    else:
+        _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = old_cfg_dir
 
 
 # ── Programmable Mock LLM Server ───────────────────────────────────────────────
@@ -1257,7 +1263,9 @@ class TestSecuritySlotYieldOnSharedSlot:
         from agent_cascade.execution_engine import ExecutionEngine
         from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
-        # Isolate config dir for the router's api_endpoints.json.
+        # Isolate config dir for the router's api_endpoints.json. Save prior value so the
+        # finally-block can restore it (previously set without a restore — env leak).
+        _OLD_CFG_DIR = _os2.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
         _os2.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(tmp_path)
 
         # The shared-slot acquire timeout is a module-level constant captured at
@@ -1464,3 +1472,8 @@ class TestSecuritySlotYieldOnSharedSlot:
         finally:
             _sq_mod.QUEUE_WAIT_TIMEOUT = _OLD_QWT
             _ar_mod.QUEUE_WAIT_TIMEOUT = _OLD_AR_QWT
+            # Restore the config-dir env var to its prior value (or drop it if it was unset).
+            if _OLD_CFG_DIR is None:
+                _os2.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
+            else:
+                _os2.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = _OLD_CFG_DIR

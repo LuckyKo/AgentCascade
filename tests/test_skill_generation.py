@@ -88,64 +88,18 @@ def _isolate_metrics(manager, tmp_path, reset=False):
 
 
 def _cleanup_test_artifacts():
-    """Remove test-specific artifacts left by the skill generation tests.
+    """No-op legacy sweep of shared test artifacts (kept for backward compatibility).
 
-    - pending-skills/: deletes all entries (these are always test artifacts).
-    - candidates/: only deletes directories whose names match test patterns
-      ("test-*", "tmp-*"). Production skills must never be deleted here; we
-      cannot rely on a hardcoded whitelist of canonical skills because new
-      production skills get added over time.
-    - agents/global/skills/: same test-pattern rule as above.
+    Historically this blanket-deleted the SHARED CWD-relative trees
+    ``agents/global/pending-skills/``, ``candidates/`` and ``skills/``. That was an xdist
+    race: a sibling worker (or Defender) could hold a freshly-written file → WinError 32 /
+    Permission denied, while the manager's own writes were already redirected to a unique
+    per-test ``tmp_path`` (see ``fresh_manager``). Since every write root is now isolated to
+    ``tmp_path`` (auto-cleaned by pytest), there is nothing production to sweep — so this is
+    intentionally empty. See [[xdist-shared-tree-test-isolation]] and
+    plans/test_isolation_AUDIT_PLAN.md §3.3.
     """
-
-    def _is_test_skill(name: str) -> bool:
-        return (name.startswith('test-') or name.startswith('tmp-') or '-test-skill-' in name or
-                name.endswith('-testing'))
-
-    def _remove_empty_dir(entry: Path) -> None:
-        """Remove a skill directory if empty after deleting its SKILL.md.
-
-        Best-effort: on Windows, xdist sibling workers or Defender may briefly
-        hold a lock on the file. Retry with backoff; never raise from cleanup.
-        """
-        skill_file = entry / 'SKILL.md'
-        if skill_file.exists():
-            for attempt in range(3):
-                try:
-                    skill_file.unlink()
-                    break
-                except (PermissionError, OSError):
-                    if attempt < 2:
-                        time.sleep(0.1 * (attempt + 1))
-            else:
-                return  # give up silently; leftover is harmless
-        try:
-            if not list(entry.iterdir()):
-                entry.rmdir()
-        except (PermissionError, OSError):
-            pass
-
-    pending_root = Path('agents/global/pending-skills')
-    if pending_root.exists():
-        for entry in list(pending_root.iterdir()):
-            if entry.is_dir():
-                _remove_empty_dir(entry)
-
-    # Candidate-flow artifacts: test-named candidates left by the decision-gate tests.
-    candidates_root = Path('agents/global/candidates')
-    if candidates_root.exists():
-        for entry in list(candidates_root.iterdir()):
-            if entry.is_dir() and _is_test_skill(entry.name):
-                _remove_empty_dir(entry)
-
-    skills_root = Path('agents/global/skills')
-    if skills_root.exists():
-        for entry in list(skills_root.iterdir()):
-            # Only remove directories that look like test artifacts.
-            # Never blindly delete non-canonical skills: production skills
-            # are added over time and a whitelist would always lag behind.
-            if entry.is_dir() and _is_test_skill(entry.name):
-                _remove_empty_dir(entry)
+    return
 
 
 # ===========================================================================

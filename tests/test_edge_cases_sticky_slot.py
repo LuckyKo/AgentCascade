@@ -147,6 +147,8 @@ def edge_harness(tmp_path, request):
 
     cfg_dir = tmp_path / request.node.name.replace('/', '_')
     cfg_dir.mkdir(parents=True, exist_ok=True)
+    # Save prior value so teardown can restore it (previously set without a restore — env leak).
+    old_cfg_dir = _os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
     _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(cfg_dir)
 
     old_sq = _sq_mod.QUEUE_WAIT_TIMEOUT
@@ -173,6 +175,11 @@ def edge_harness(tmp_path, request):
     _ar_mod.QUEUE_WAIT_TIMEOUT = old_ar
     _rmod.ENDPOINT_COOLDOWN_SECONDS = old_cool
     _core_mod.REACQUIRE_TIMEOUT = old_reacq
+    # Restore the config-dir env var to its prior value (or drop it if it was unset).
+    if old_cfg_dir is None:
+        _os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
+    else:
+        _os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = old_cfg_dir
 
 
 # ── Shared introspection helpers ─────────────────────────────────────────────
