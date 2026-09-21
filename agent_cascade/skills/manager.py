@@ -30,7 +30,7 @@ from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURN
                                     CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL,
                                     SKILL_ACTIVE_MAX_CAP, SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K,
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
-                                    SKILL_RATING_INITIAL, SKILL_WALLCLOCK_SECONDS_PER_TURN, SKILLS_DISABLED,
+                                    SKILL_WALLCLOCK_SECONDS_PER_TURN, SKILLS_DISABLED,
                                     parse_skill_always_protected)
 
 from .cache_helper import compute_scan_signature
@@ -79,6 +79,10 @@ _CANDIDATES_DIR = Path('agents/global/candidates')
 
 # Retries for deleting a candidate dir (Windows file-lock scenarios).
 _CANDIDATE_DIR_RETRIES = 3
+
+# Empty per-version rating entry (schema 1.2 ratings_by_version values). MUTABLE — every site that
+# will mutate the entry must copy it (dict(_EMPTY_VERSION_RATING)) before writing to it.
+_EMPTY_VERSION_RATING = {'count': 0, 'sum': 0.0, 'latest': None}
 
 
 def _atomic_write_text(dst: Path, content: str) -> None:
@@ -1037,15 +1041,16 @@ class SkillManager:
                 ratings['last_version'] = version
                 # Per-version history (schema 1.2): the serving version is what gets rated.
                 by_version_ratings = entry.setdefault('ratings_by_version', {})
-                vr = by_version_ratings.get(version) or {'count': 0, 'sum': 0.0, 'latest': None}
+                # dict() copy: the shared _EMPTY_VERSION_RATING constant must never be mutated in place.
+                vr = by_version_ratings.get(version) or dict(_EMPTY_VERSION_RATING)
                 vr['count'] += 1
                 vr['sum'] = round(vr['sum'] + rating, 4)
                 vr['latest'] = rating
                 by_version_ratings[version] = vr
             entry['ratings'] = ratings
             # D-ACT: a rating is a deliberate applied use — reset this skill's activity clock to
-            # the current global counter (activity-age A → 0). Loads do NOT reset it. This also
-            # covers the initial SKILL_RATING_INITIAL at registration → brand-new skills get A≈0.
+            # the current global counter (activity-age A → 0). Loads do NOT reset it. A brand-new
+            # skill has no rating until its first real one, so its first rating also seeds A≈0.
             entry['last_activity_turn'] = self._global_activity_turns
 
             self._pending_flush_count += 1
@@ -1837,12 +1842,10 @@ class SkillManager:
                 # Rebuild index
                 self._rebuild_index()
 
-            # Record the initial rating (single source of truth in the manager). New skills start
-            # at SKILL_RATING_INITIAL so they have a baseline before any agent rates them.
-            try:
-                self._record_rating(name, SKILL_RATING_INITIAL)
-            except Exception as e:
-                logger.warning('[SKILLS] Failed to record initial rating for %s: %s', name, e)
+            # New skills start with NO rating (no synthetic initial-rating seed). A fresh
+            # skill/candidate must not begin with a baseline it never earned; its metrics entry is
+            # created lazily on the first real rating/load. A rating-less skill has no
+            # last_activity_turn, so _activity_age returns 0 → PROTECTED (fair window preserved).
 
             return True, []
 
@@ -1880,26 +1883,29 @@ class SkillManager:
                                     source: str) -> bool:
         """Register an upgrade proposal as a live-serving candidate (caller holds _write_lock).
 
-        Writes/replace agents/global/candidates/<name>/SKILL.md atomically, registers the
-        candidate at _PRIORITY_CANDIDATE (so it immediately takes over serving), backfills
-        the incumbent's legacy metrics with ratings_by_version[<incumbent version>], and
-        triggers evaluate_candidates() immediately.
+        If a candidate A is already pending for this name, resolves O-vs-A FIRST via
+        evaluate_candidates() (while A's file + registry are intact), then seats the new version
+        B as the fresh pending candidate. Writes/replace agents/global/candidates/<name>/SKILL.md
+        atomically, registers the candidate at _PRIORITY_CANDIDATE (so it immediately takes over
+        serving), backfills the incumbent's legacy metrics with ratings_by_version[<incumbent
+        version>], and seats B with NO rating (no default seed, no inheritance).
 
-        Called while the caller holds _write_lock; evaluate_candidates() re-acquires it
-        via RLock reentrancy, so no deadlock risk.
+        Called while the caller holds _write_lock; evaluate_candidates() re-acquires it via RLock
+        reentrancy, so no deadlock risk.
 
-        Returns True on success (caller returns early); False means the candidate file
-        write failed — the caller must NOT fall through to the new-skill path.
+        Returns True on success (caller returns early); False means the candidate file write
+        failed — the caller must NOT fall through to the new-skill path.
         """
         candidates_root, production_root = self._candidate_dirs()
         candidate_dir = candidates_root / name
         candidate_file = candidate_dir / 'SKILL.md'
-        try:
-            candidate_dir.mkdir(parents=True, exist_ok=True)
-            _atomic_write_text(candidate_file, pending_file.read_text(encoding='utf-8'))
-        except OSError as e:
-            logger.warning('[SKILLS] Failed to write candidate file for %s: %s', name, e)
-            return False
+
+        # NEW (D-1): detect a pending candidate A BEFORE overwriting anything. If A is already
+        # the live-serving candidate for this name, its file + registry entry must stay intact
+        # while O-vs-A is resolved — otherwise B's write clobbers A and orphans A's ratings.
+        # (Caller holds _write_lock, so direct access needs no re-acquisition.)
+        reg = self._skills_registry.get(name)
+        a_pending = reg is not None and reg.get('_priority') == _PRIORITY_CANDIDATE
 
         # Resolve the incumbent version from its PRODUCTION file (the registry entry is
         # about to be replaced by the candidate, so the registry alone can't provide it).
@@ -1912,6 +1918,27 @@ class SkillManager:
                 prod_version = parse_skill_file(prod_file).get('version', prod_version)
             except (FileNotFoundError, OSError):
                 pass
+
+        # NEW (D-1): if a candidate A is already pending, resolve O-vs-A FIRST — while A's file
+        # and registry entry are still intact — so the decision runs on A's own accumulated
+        # ratings. Reusing evaluate_candidates() keeps every gate invariant (orphan-first,
+        # min-ratings hold, disabled-incumbent hold, concurrency re-verification). The caller's
+        # _write_lock is held; evaluate_candidates() re-enters it via RLock. A gate hiccup must
+        # not fail registration: log and continue to seat B (B then stays pending — over-protective).
+        if a_pending:
+            try:
+                self.evaluate_candidates()
+            except Exception as e:  # noqa: BLE001 — a gate hiccup must not fail registration
+                logger.warning('[SKILLS] Pre-seat O-vs-A evaluation failed for %s: %s', name, e)
+
+        # Write/replace B's candidate file (now AFTER the O-vs-A decision, so A is never clobbered
+        # before it has been judged).
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(candidate_file, pending_file.read_text(encoding='utf-8'))
+        except OSError as e:
+            logger.warning('[SKILLS] Failed to write candidate file for %s: %s', name, e)
+            return False
 
         # Legacy incumbent backfill (D4): a schema-1.1 metrics entry lacks
         # ratings_by_version — seed it with the aggregate so the comparison baseline and
@@ -1948,6 +1975,11 @@ class SkillManager:
         }
         self._rebuild_index()
 
+        # NEW (D-2/D-3): seat B fresh — NO default rating, NO inheritance of A's or O's history.
+        # Sets an explicit empty per-version entry so B starts unrated and is held pending until
+        # it accrues its own real ratings. Skips the reset on a version collision with O (D-3).
+        self._reset_candidate_rating_state(name, new_version, prod_version)
+
         # Clean up the (now moved) pending staging dir.
         try:
             if pending_file.exists():
@@ -1957,16 +1989,13 @@ class SkillManager:
         except OSError:
             pass  # Best-effort cleanup
 
-        logger.info("[SKILLS] Registered '%s' as candidate v%s, now serving in place of v%s "
+        logger.info('[SKILLS] Registered \'%s\' as candidate v%s, now serving in place of v%s '
                     '(decision gate active)', name, new_version, old_winner)
 
-        # Immediate decision trigger (D5b): a pending candidate + new proposal must be
-        # decided without waiting for the timer. The caller's _write_lock is still held;
-        # evaluate_candidates() re-enters it via RLock and is idempotent.
-        try:
-            self.evaluate_candidates()
-        except Exception as e:  # noqa: BLE001 — a gate hiccup must not fail registration
-            logger.warning('[SKILLS] Immediate candidate evaluation failed for %s: %s', name, e)
+        # NOTE (D-1): the trailing self.evaluate_candidates() was REMOVED. When A was pending it
+        # is already resolved above (O-vs-A); re-running would only see B (count=0 < min = no-op).
+        # On the non-pending path B is fresh (count=0 < min) = guaranteed no-op. The next
+        # timer/registration trigger decides B once it has accrued real ratings of its own.
 
         return True
 
@@ -1985,6 +2014,29 @@ class SkillManager:
             if not count:
                 return None, 0
             return round(history['sum'] / count, 2), count
+
+    def _reset_candidate_rating_state(self, name: str, version: str, prod_version: str) -> None:
+        """Seat a freshly-registered candidate with NO rating (no default seed, no inheritance).
+
+        Unconditionally sets ratings_by_version[version] to an empty {count:0, sum:0.0, latest:None}
+        entry so the candidate starts unrated and does NOT inherit any prior per-version history on
+        that key. The explicit empty entry (not an absent key) is REQUIRED: _version_rating_avg
+        falls back to the aggregate `ratings` when a per-version key is missing, which would
+        mis-attribute the incumbent's sample to the fresh candidate (D-2).
+
+        Skipped when version == prod_version (collision with the incumbent — clobbering that key
+        would destroy the incumbent's baseline; D-3 / §6). Caller does NOT hold _metrics_lock.
+        """
+        if version == prod_version:
+            return  # collision guard (D-3)
+        with self._metrics_lock:
+            entry = self._metrics.get(name)
+            if entry is None:
+                return
+            by_version = entry.setdefault('ratings_by_version', {})
+            # dict() copy: never store the shared _EMPTY_VERSION_RATING constant itself (a later
+            # _record_rating would mutate it in place).
+            by_version[version] = dict(_EMPTY_VERSION_RATING)
 
     def _remove_candidate_dir(self, name: str) -> None:
         """Delete candidates/<name>/ (best-effort; Windows-safe retries)."""

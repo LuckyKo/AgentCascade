@@ -537,8 +537,6 @@ AUTO_SKILL_EXTRA_TURNS: int = int(
 AUTO_SKILL_MIN_TOOL_CALLS: int = 5  # (legacy) minimum tool calls; superseded by AUTO_SKILL_MIN_TURNS gate
 AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
                                           20))  # Fire reflection when turns effectuated > N (strictly greater)
-SKILL_RATING_INITIAL: float = float(os.getenv('AGENT_CASCADE_SKILL_RATING_INITIAL',
-                                              5.0))  # Initial rating auto-recorded for newly-registered skills
 # Activity-clock wall-clock fallback rate (research §15 / D-FALLBACK, open decision OD-1):
 # seconds of real time mapped to one "activity turn" when the durable turns counter is
 # unavailable (global_activity_turns == 0). Only used as a bounded fallback; the primary
@@ -557,7 +555,7 @@ SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', 
 # Every formula/gate constant in the Phase B/C scoring is a named setting (Refinement 4, §18).
 # Each default mirrors the research values AND the hard-coded fallbacks already read by pool/core.py
 # and skills/manager.py (_SKILL_SCORE_DEFAULTS), so exposing them changes no behavior at defaults.
-SKILL_SCORE_Q0: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_Q0', '5.0'))  # neutral baseline; keep == SKILL_RATING_INITIAL
+SKILL_SCORE_Q0: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_Q0', '5.0'))  # neutral quality baseline (5.0)
 SKILL_SCORE_KQ: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_KQ', '5'))  # shrinkage prior strength
 SKILL_SCORE_NHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_NHALF', '8'))  # usage saturation
 SKILL_SCORE_GHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_GHALF', '20'))  # load-waste scale

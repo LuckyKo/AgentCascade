@@ -1765,7 +1765,11 @@ class TestRatingMetrics:
 
 
 class TestNewSkillInitialRating:
-    """Newly-registered skills get an initial rating of SKILL_RATING_INITIAL (5.0)."""
+    """Newly-registered skills start with NO rating (no synthetic initial seed).
+
+    A fresh skill must not begin with a baseline it never earned; its metrics entry is created
+    lazily on the first real rating/load. This class asserts the ABSENCE of any synthetic rating.
+    """
 
     @pytest.fixture(autouse=True)
     def _isolated_metrics(self, fresh_manager, tmp_path):
@@ -1773,21 +1777,21 @@ class TestNewSkillInitialRating:
         _isolate_metrics(fresh_manager, tmp_path)
         yield
 
-    def test_new_skill_gets_initial_5_0(self, fresh_manager):
-        from agent_cascade.settings import SKILL_RATING_INITIAL
+    def test_new_skill_has_no_initial_rating(self, fresh_manager):
         m = self.manager
-        name = f"test-initial-rating-{_uid()}"
+        name = f"test-no-initial-rating-{_uid()}"
         content = _make_skill_content(
             name=name,
-            description='Skill to verify initial rating is recorded at registration',
-            triggers=['initial', 'rating'],
-            generated_from_task='Verify initial rating',
+            description='Skill to verify no initial rating is recorded at registration',
+            triggers=['noinitial', 'rating'],
+            generated_from_task='Verify no initial rating',
         )
-        success, _ = m.register_skill_from_content(content, task_text='Verify initial rating')
+        success, _ = m.register_skill_from_content(content, task_text='Verify no initial rating')
         assert success
         entry = m.get_metrics(name)
-        assert entry['ratings']['latest'] == SKILL_RATING_INITIAL
-        assert entry['ratings']['count'] == 1
+        # No synthetic rating recorded at registration: either the entry is absent entirely, or it
+        # exists (e.g. from a load) but carries zero ratings.
+        assert 'ratings' not in entry or entry['ratings'].get('count', 0) == 0
 
 
 class TestReflectionPrompt:
@@ -1895,9 +1899,9 @@ class TestProposeSkillRatingModes:
         on_disk = Path(m.get_skill_metadata(name)['file_path']).read_text(encoding='utf-8')
         assert re.search(r'(?m)^name:\s*%s\s*$' % re.escape(name), on_disk)
         entry = m.get_metrics(name)
-        # Initial 5.0 + this 7.5 → count 2, latest 7.5
+        # No initial seed; only the explicit 7.5 is recorded → count 1, latest 7.5.
         assert entry['ratings']['latest'] == 7.5
-        assert entry['ratings']['count'] == 2
+        assert entry['ratings']['count'] == 1
         # Rating-only must NOT request approval.
         pool.operation_manager.request_user_approval.assert_not_called()
 
@@ -2009,9 +2013,9 @@ class TestProposeSkillRatingModes:
         result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j', 'rating': 9.0}))
         assert 'registered successfully' in result
         entry = m.get_metrics(name)
-        # Initial 5.0 + explicit 9.0 → latest 9.0, count 2
+        # No initial seed; only the explicit 9.0 is recorded → latest 9.0, count 1.
         assert entry['ratings']['latest'] == 9.0
-        assert entry['ratings']['count'] == 2
+        assert entry['ratings']['count'] == 1
 
     def test_content_for_existing_name_is_implicit_update(self, fresh_manager):
         """Content for an existing skill name is always an update (no flag needed)."""
@@ -2902,6 +2906,10 @@ class TestCandidateFlow:
         # Old per-version history kept as evidence.
         entry = m.get_metrics(name)
         assert v1 in entry['ratings_by_version'] and entry['ratings_by_version'][v1]['count'] == 2
+        # Under the fix, seating B runs an O-vs-A evaluate_candidates() FIRST (a no-op here: A has
+        # only 2 < CANDIDATE_MIN_RATINGS ratings) and then seats B FRESH — its per-version key is
+        # explicitly empty (D-2), not inherited from A.
+        assert entry['ratings_by_version'][v2] == {'count': 0, 'sum': 0.0, 'latest': None}
 
     # -- Idempotency ---------------------------------------------------------------
 
@@ -3037,6 +3045,205 @@ class TestCandidateFlow:
         m.record_rating('legacy-skill', 7.0)
         data = _json.loads(self.metrics_file.read_text(encoding='utf-8'))
         assert data['schema_version'] == '1.3'
+
+    # -- Registration-flow fix: judge O-vs-A first, seat B fresh (no default rating) ------
+    # Scenarios 1-7 of the approved plan (§8). All use distinct versions so per-version keys
+    # never collide; each asserts B is seated with an explicit empty per-version entry (D-2).
+
+    def _register_candidate(self, m, name, version, body_marker):
+        """Register an upgrade proposal for ``name`` at the given explicit version.
+
+        The generated-from-task / task_text deliberately overlaps the description so Tier-2
+        self-match (threshold 0.3) passes — otherwise registration is rejected before we ever
+        reach the candidate flow under test.
+        """
+        task = f'{body_marker} candidate version for registration-flow test'
+        content = _make_skill_content(
+            name=name,
+            description=task,
+            triggers=['regflow', 'candidate'],
+            generated_from_task=task,
+        ).replace('---\n', f'---\nversion: {version}\n', 1)
+        success, errors = m.register_skill_from_content(content, task_text=task)
+        assert success, f'candidate registration failed for {version}: {errors}'
+
+    def test_a_wins_promoted_b_seated_fresh(self, fresh_manager):
+        """Scenario 1: A wins → promoted; B seated fresh with an empty per-version key."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE, _PRIORITY_SYSTEM
+        m = self.manager
+        name = f"test-regflow-awin-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        # A (v2.0.0) pending; seed O's baseline + A with >= CANDIDATE_MIN_RATINGS ratings above O.
+        self._register_candidate(m, name, '2.0.0', 'A-win')
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 10.0, 'latest': 6.0}
+        for r in (9.0,) * CANDIDATE_MIN_RATINGS:
+            m.record_rating(name, r)  # lands on A's serving key (2.0.0), avg 9.0 > O avg 5.0
+
+        # B (v3.0.0) arrives → O-vs-A resolved first (A promoted), then B seated fresh.
+        self._register_candidate(m, name, '3.0.0', 'B-fresh')
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_CANDIDATE, 'B must now be the pending candidate'
+        assert reg['version'] == '3.0.0'
+        # Candidate file on disk is B's content (A was promoted away).
+        on_disk = (m._candidates_dir / name / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'B-fresh candidate version for registration-flow test' in on_disk
+        # A's ratings carried to production: aggregate mirrors A's winner history.
+        entry = m.get_metrics(name)
+        assert entry['ratings']['count'] == CANDIDATE_MIN_RATINGS
+        assert abs(entry['ratings']['sum'] - 9.0 * CANDIDATE_MIN_RATINGS) < 1e-9
+        # B is seated fresh: explicit empty per-version key (D-2).
+        assert entry['ratings_by_version']['3.0.0'] == {'count': 0, 'sum': 0.0, 'latest': None}
+
+    def test_a_loses_discarded_b_seated_fresh(self, fresh_manager):
+        """Scenario 2: A loses → discarded; B seated fresh."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        m = self.manager
+        name = f"test-regflow-alose-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        # A (v2.0.0) pending; O baseline high, A rated below it → A discarded when B arrives.
+        self._register_candidate(m, name, '2.0.0', 'A-lose')
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 16.0, 'latest': 9.0}
+        for r in (4.0,) * CANDIDATE_MIN_RATINGS:
+            m.record_rating(name, r)  # A avg 4.0 < O avg 8.0 → discard
+
+        self._register_candidate(m, name, '3.0.0', 'B-fresh-lose')
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_CANDIDATE and reg['version'] == '3.0.0'
+        on_disk = (m._candidates_dir / name / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'B-fresh-lose candidate version for registration-flow test' in on_disk
+        entry = m.get_metrics(name)
+        # A's per-version history retained as evidence; B fresh; aggregate reverted to O.
+        assert entry['ratings_by_version']['2.0.0']['count'] == CANDIDATE_MIN_RATINGS
+        assert entry['ratings_by_version']['3.0.0'] == {'count': 0, 'sum': 0.0, 'latest': None}
+        assert entry['ratings']['count'] == 2 and abs(entry['ratings']['sum'] - 16.0) < 1e-9
+
+    def test_canonical_log_scenario_b_becomes_candidate(self, fresh_manager):
+        """Scenario 3: canonical v1.0.3/v1.0.2 log → 'B becomes candidate', NOT 'B discarded'."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        m = self.manager
+        name = f"test-regflow-canonical-{_uid()}"
+        # Production O = v1.0.2 with 2 ratings (avg 7.5), mirroring the real log baseline.
+        _write_incumbent(m, name, '1.0.2')
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.2'] = {'count': 2, 'sum': 15.0, 'latest': 8.0}
+
+        # A (v1.0.1) pending against O; unrated/under-minimum so O-vs-A is NOT decided.
+        self._register_candidate(m, name, '1.0.1', 'A-pending')
+        # B = v1.0.3 arrives. Under the OLD flow this was judged B-vs-O and discarded; under the
+        # fix it is seated fresh as the new pending candidate (no discard of v1.0.3 at registration).
+        self._register_candidate(m, name, '1.0.3', 'B-canonical')
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_CANDIDATE, 'v1.0.3 must become the candidate, not be discarded'
+        assert reg['version'] == '1.0.3'
+        entry = m.get_metrics(name)
+        # B not judged against O: its per-version key is empty (no inherited sample).
+        assert entry['ratings_by_version']['1.0.3'] == {'count': 0, 'sum': 0.0, 'latest': None}
+
+    def test_a_ratings_carried_and_total_loads_unchanged(self, fresh_manager):
+        """Scenario 4: A's ratings carried to production on win; total_loads unchanged."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        m = self.manager
+        name = f"test-regflow-loads-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        # Seed a nonzero global total_loads (cumulative across versions) before any transition.
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry['total_loads'] = 42
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 10.0, 'latest': 6.0}
+
+        self._register_candidate(m, name, '2.0.0', 'A-win-loads')
+        for r in (9.0,) * CANDIDATE_MIN_RATINGS:
+            m.record_rating(name, r)
+        self._register_candidate(m, name, '3.0.0', 'B-fresh-loads')
+
+        entry = m.get_metrics(name)
+        assert entry['total_loads'] == 42, 'total_loads must stay global/untouched across the transition'
+        # Production aggregate mirrors A's winner history (A promoted).
+        assert entry['ratings']['count'] == CANDIDATE_MIN_RATINGS
+        assert abs(entry['ratings']['sum'] - 9.0 * CANDIDATE_MIN_RATINGS) < 1e-9
+        assert m._skills_registry[name]['_priority'] == _PRIORITY_CANDIDATE
+
+    def test_unrated_a_replaced_by_b(self, fresh_manager):
+        """Scenario 5 (D-4): an unrated/under-minimum A is replaced by B unconditionally."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        m = self.manager
+        name = f"test-regflow-unrated-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        # Seed O's baseline so the metrics entry exists (the real flow always has one); this is
+        # what lets B's freshly-seated empty per-version key be observable (D-2).
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 10.0, 'latest': 6.0}
+
+        # A (v2.0.0) registered with 0 ratings; B (v3.0.0) arrives and takes the slot.
+        self._register_candidate(m, name, '2.0.0', 'A-unrated')
+        self._register_candidate(m, name, '3.0.0', 'B-replace')
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_CANDIDATE and reg['version'] == '3.0.0'
+        on_disk = (m._candidates_dir / name / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'B-replace candidate version for registration-flow test' in on_disk
+        entry = m.get_metrics(name)
+        assert entry['ratings_by_version']['3.0.0'] == {'count': 0, 'sum': 0.0, 'latest': None}
+
+    def test_disabled_incumbent_hold_preserved(self, fresh_manager):
+        """Scenario 6: disabled-incumbent hold preserved — A held while O inactive; B then pending."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        m = self.manager
+        name = f"test-regflow-disabled-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+
+        # A (v2.0.0) pending with enough ratings to promote over O — but O is disabled → held.
+        self._register_candidate(m, name, '2.0.0', 'A-disabled')
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {'count': 2, 'sum': 10.0, 'latest': 6.0}
+        for r in (9.0,) * CANDIDATE_MIN_RATINGS:
+            m.record_rating(name, r)
+
+        ok, _ = m.disable_skill(name)
+        assert ok
+        # B (v3.0.0) arrives: O-vs-A pre-seat honors the disabled hold (A NOT promoted), then B seated.
+        self._register_candidate(m, name, '3.0.0', 'B-disabled')
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_CANDIDATE and reg['version'] == '3.0.0'
+        # A was held (not promoted) while O disabled: O's file still on disk, no promotion happened.
+        assert (m._production_skills_dir / name / 'SKILL.md').exists()
+        entry = m.get_metrics(name)
+        assert entry['ratings_by_version']['3.0.0'] == {'count': 0, 'sum': 0.0, 'latest': None}
+
+    def test_version_collision_guard_skips_reset(self, fresh_manager):
+        """Scenario 7 (D-3): B-version == O-version → collision guard skips the reset."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+        m = self.manager
+        name = f"test-regflow-collide-{_uid()}"
+        # O at v2.0.0 with a baseline on that key (avg 7.5 × 2).
+        _write_incumbent(m, name, '2.0.0')
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {'total_loads': 0, 'by_version': {}})
+            entry.setdefault('ratings_by_version', {})['2.0.0'] = {'count': 2, 'sum': 15.0, 'latest': 8.0}
+
+        # B reuses O's version (2.0.0). The collision guard must NOT clobber O's baseline key.
+        self._register_candidate(m, name, '2.0.0', 'B-collide')
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_CANDIDATE and reg['version'] == '2.0.0'
+        entry = m.get_metrics(name)
+        # D-3: the reset was skipped, so O's baseline key is intact (NOT reset to count 0).
+        assert entry['ratings_by_version']['2.0.0'] == {'count': 2, 'sum': 15.0, 'latest': 8.0}, (
+            'collision guard must not clobber the incumbent baseline key')
 
 
 # ===========================================================================
