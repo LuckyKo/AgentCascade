@@ -557,18 +557,55 @@ SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', 
 # Every formula/gate constant in the Phase B/C scoring is a named setting (Refinement 4, §18).
 # Each default mirrors the research values AND the hard-coded fallbacks already read by pool/core.py
 # and skills/manager.py (_SKILL_SCORE_DEFAULTS), so exposing them changes no behavior at defaults.
-# The clamp for each is applied IDENTICALLY in config_handlers.py, api_server.py (preview endpoint)
-# and web_ui/app.js (getGenerateCfg) — see the per-setting "Clamped [lo,hi]" notes.
 SKILL_SCORE_Q0: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_Q0', '5.0'))  # neutral baseline; keep == SKILL_RATING_INITIAL
-SKILL_SCORE_KQ: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_KQ', '5'))  # shrinkage prior strength (Clamped [0,20])
-SKILL_SCORE_NHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_NHALF', '8'))  # usage saturation (Clamped [1,50])
-SKILL_SCORE_GHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_GHALF', '20'))  # load-waste scale (Clamped [1,100])
-SKILL_SCORE_RFLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_RFLOOR', '0.5'))  # recency floor; must stay <1 (Clamped [0,0.99])
-SKILL_SCORE_TAU_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_TAU_TURNS', '200'))  # activity-recency decay (Clamped [10,5000])
-SKILL_SCORE_DQ: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_DQ', '0.5'))  # quality margin / neutral-band width (Clamped [0.1,3.0])
-SKILL_SCORE_NMIN: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_NMIN', '5'))  # meaningful-use bar (Clamped [1,20])
-SKILL_FAIR_WINDOW_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_FAIR_WINDOW_TURNS', '50'))  # PROTECTED window (Clamped [0,1000])
-SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICTIONS_PER_PASS', '25'))  # D-SAFE cap (Clamped [0,1000])
+SKILL_SCORE_KQ: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_KQ', '5'))  # shrinkage prior strength
+SKILL_SCORE_NHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_NHALF', '8'))  # usage saturation
+SKILL_SCORE_GHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_GHALF', '20'))  # load-waste scale
+SKILL_SCORE_RFLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_RFLOOR', '0.5'))  # recency floor; must stay <1
+SKILL_SCORE_TAU_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_TAU_TURNS', '200'))  # activity-recency decay
+SKILL_SCORE_DQ: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_DQ', '0.5'))  # quality margin / neutral-band width
+SKILL_SCORE_NMIN: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_NMIN', '5'))  # meaningful-use bar
+SKILL_FAIR_WINDOW_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_FAIR_WINDOW_TURNS', '50'))  # PROTECTED window
+SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICTIONS_PER_PASS', '25'))  # D-SAFE cap
+
+# ── Single source of truth for the skill-scoring clamp ranges (POLISH dedup) ─
+# Each setting's (default, lo, hi, type) lives HERE exactly once. config_handlers.py,
+# pool/config_persist.py, pool/core.py and api_server.py all derive their clamps from this table
+# via clamp_skill_setting() instead of hardcoding min(max(lo, val), hi) in four places. The per-key
+# "Clamped [lo,hi]" notes that used to sit on the constants above are now consolidated here.
+SKILL_SCORE_SETTINGS = {
+    'skill_score_q0':            {'default': SKILL_SCORE_Q0,             'lo': 0.0,  'hi': 10.0,  'type': float},
+    'skill_score_kq':            {'default': SKILL_SCORE_KQ,             'lo': 0,    'hi': 20,    'type': int},
+    'skill_score_nhalf':         {'default': SKILL_SCORE_NHALF,          'lo': 1.0,  'hi': 50.0,  'type': float},
+    'skill_score_ghalf':         {'default': SKILL_SCORE_GHALF,          'lo': 1.0,  'hi': 100.0, 'type': float},
+    # NOTE: the llm_cfg key is deliberately 'skill_score_rflood' (matches pool/core.py's read), but it
+    # maps to the r_floor recency factor in the scoring formula — so its clamp must stay < 1.
+    'skill_score_rflood':        {'default': SKILL_SCORE_RFLOOR,         'lo': 0.0,  'hi': 0.99,  'type': float},
+    'skill_score_tau_turns':     {'default': SKILL_SCORE_TAU_TURNS,      'lo': 10,   'hi': 5000,  'type': int},
+    'skill_score_dq':            {'default': SKILL_SCORE_DQ,             'lo': 0.1,  'hi': 3.0,   'type': float},
+    'skill_score_nmin':          {'default': SKILL_SCORE_NMIN,           'lo': 1,    'hi': 20,    'type': int},
+    'skill_fair_window_turns':   {'default': SKILL_FAIR_WINDOW_TURNS,    'lo': 0,    'hi': 1000,  'type': int},
+    'skill_max_evictions_per_pass': {'default': SKILL_MAX_EVICTIONS_PER_PASS, 'lo': 0, 'hi': 1000, 'type': int},
+}
+
+
+def clamp_skill_setting(key: str, value):
+    """Clamp one skill-scoring setting to its [lo, hi] range (single source of truth).
+
+    Uses the SKILL_SCORE_SETTINGS table. Returns the typed clamped value (int for int settings,
+    float for float settings); on an unparseable/None input it returns the setting's default (already
+    within range). Raises KeyError if ``key`` is not in the table. This is the one place where a
+    skill-scoring clamp is computed, so every call site (config handlers, persistence restore,
+    pool/core.py reads, api_server preview) stays byte-identical. Callers that must *skip* an
+    unparseable value (e.g. the persistence restore path) should cast the raw value themselves first.
+    """
+    spec = SKILL_SCORE_SETTINGS[key]
+    cast = spec['type']
+    try:
+        val = cast(value)
+    except (TypeError, ValueError):
+        val = cast(spec['default'])
+    return min(max(spec['lo'], val), spec['hi'])
 
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3  # Self-match score threshold for auto-promotion
 # Applies to NEW skills only: a newly-registered skill is moved straight from the pending

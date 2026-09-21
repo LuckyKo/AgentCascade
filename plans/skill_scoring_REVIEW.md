@@ -109,3 +109,22 @@ No blocking issues found. The implementation does not require any changes before
 **Should-fix count:** 2 (minor quality)
 **Nit count:** 2 (non-blocking observations)
 **Single most important finding:** The multi-layered safety design (frozen clock → PROTECTED, per-pass D-SAFE cap, master switch, D-SEED) successfully prevents mass-eviction under all failure modes.
+
+---
+
+## POLISH — Code Quality & Bloat Review
+
+**Verdict:** NEEDS CHANGES (one major bloat issue; no critical bugs)
+
+1. **🟠 Major: Duplicate clamp logic across 4 Python files**
+   **Location:** `config_handlers.py:775-882`, `pool/config_persist.py:340-380`, `pool/core.py:244-257`, `api_server.py:1080-1091`
+   **Issue:** The 10 settings each have their own `min(max(lo, val), hi)` clamping code repeated in four places. This is bloat and a maintenance risk — any future change to clamp ranges requires editing four separate locations.
+   **Fix:** Centralize the clamp logic into a single helper function (e.g., `_clamp(val, lo, hi)`) or a constants table that defines `(default, lo, hi)` for each setting, then use that across all four files. This reduces ~40 lines of repetitive code and guarantees consistency.
+
+2. **🔵 Nit: Frontend clamp duplication**
+   **Location:** `web_ui/app.js:5821-5830`
+   **Issue:** The same clamping ranges are hardcoded in JavaScript, mirroring the Python duplication. While not critical, it adds to the surface area for divergence.
+   **Fix:** Consider moving the 10 setting definitions (default/lo/hi) into a shared `constants.js` module and import them in both the UI settings registry and `getGenerateCfg()`. Optional; low priority.
+
+**Counts:** Must-fix: 1 | Nice-to-have: 0 | Nit: 1
+**Highest-value cleanup:** Centralize the Python clamp logic into one helper function to eliminate duplication and ensure future consistency.

@@ -14,9 +14,7 @@ from typing import Any, Callable, Dict, Optional
 
 from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.settings import (CI_MIN_EXECUTION_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL, CI_MIN_WATCHDOG_TIMEOUT,
-                                    SKILL_FAIR_WINDOW_TURNS, SKILL_MAX_EVICTIONS_PER_PASS, SKILL_SCORE_DQ,
-                                    SKILL_SCORE_GHALF, SKILL_SCORE_KQ, SKILL_SCORE_NHALF, SKILL_SCORE_NMIN,
-                                    SKILL_SCORE_Q0, SKILL_SCORE_RFLOOR, SKILL_SCORE_TAU_TURNS)
+                                    SKILL_SCORE_SETTINGS, clamp_skill_setting)
 
 # ── LLM config key set (defined locally to avoid circular import with api_server) ────
 LLM_CONFIG_KEYS = frozenset({
@@ -768,118 +766,22 @@ def _handle_skill_active_max_cap(ui_cfg: dict, agent_pool: Optional[Any], agents
 
 
 # ── Skill-scoring constant handlers (research §5/§7/§18 + D-SAFE) ────────────
-# Each clamp is BYTE-IDENTICAL to the preview endpoint in api_server.py
-# (score_overrides table) and to web_ui/app.js getGenerateCfg, so a displayed
-# number always matches what a real save+pass would compute. Defaults mirror
-# settings.py SKILL_SCORE_* / pool/core.py / manager._SKILL_SCORE_DEFAULTS.
-@register_config_handler('skill_score_q0')
-def _handle_skill_score_q0(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Neutral quality baseline / prior mean q0. Clamped to [0, 10]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = float(ui_cfg.get('skill_score_q0', SKILL_SCORE_Q0))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_Q0
-        agent_pool.llm_cfg['skill_score_q0'] = min(max(0.0, val), 10.0)
+# One handler per setting, all generated from the single source-of-truth table
+# settings.SKILL_SCORE_SETTINGS via clamp_skill_setting(). Each clamp is therefore
+# BYTE-IDENTICAL to the preview endpoint in api_server.py (score_overrides) and to
+# web_ui/app.js getGenerateCfg, so a displayed number always matches what a real
+# save+pass would compute. The per-key docstrings live on the table itself.
+def _make_skill_score_handler(key: str):
+    """Build the config handler for one skill-scoring setting from the shared clamp table."""
+    def _handler(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+        if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+            agent_pool.llm_cfg[key] = clamp_skill_setting(key, ui_cfg.get(key))
+    _handler.__name__ = f'_handle_{key}'
+    return _handler
 
 
-@register_config_handler('skill_score_kq')
-def _handle_skill_score_kq(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Shrinkage prior strength K_q (int). Clamped to [0, 20]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = int(ui_cfg.get('skill_score_kq', SKILL_SCORE_KQ))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_KQ
-        agent_pool.llm_cfg['skill_score_kq'] = min(max(0, val), 20)
-
-
-@register_config_handler('skill_score_nhalf')
-def _handle_skill_score_nhalf(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Saturating-usage half-count n_half. Clamped to [1, 50]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = float(ui_cfg.get('skill_score_nhalf', SKILL_SCORE_NHALF))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_NHALF
-        agent_pool.llm_cfg['skill_score_nhalf'] = min(max(1.0, val), 50.0)
-
-
-@register_config_handler('skill_score_ghalf')
-def _handle_skill_score_ghalf(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Load-waste penalty scale g_half. Clamped to [1, 100]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = float(ui_cfg.get('skill_score_ghalf', SKILL_SCORE_GHALF))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_GHALF
-        agent_pool.llm_cfg['skill_score_ghalf'] = min(max(1.0, val), 100.0)
-
-
-@register_config_handler('skill_score_rflood')
-def _handle_skill_score_rflood(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Recency floor r_floor (key name 'rflood' matches pool/core.py read). Clamped to [0, 0.99] — must stay <1."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = float(ui_cfg.get('skill_score_rflood', SKILL_SCORE_RFLOOR))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_RFLOOR
-        agent_pool.llm_cfg['skill_score_rflood'] = min(max(0.0, val), 0.99)
-
-
-@register_config_handler('skill_score_tau_turns')
-def _handle_skill_score_tau_turns(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Activity-recency decay constant tau_turns (int). Clamped to [10, 5000]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = int(ui_cfg.get('skill_score_tau_turns', SKILL_SCORE_TAU_TURNS))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_TAU_TURNS
-        agent_pool.llm_cfg['skill_score_tau_turns'] = min(max(10, val), 5000)
-
-
-@register_config_handler('skill_score_dq')
-def _handle_skill_score_dq(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Quality margin / neutral-band width delta_q. Clamped to [0.1, 3.0]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = float(ui_cfg.get('skill_score_dq', SKILL_SCORE_DQ))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_DQ
-        agent_pool.llm_cfg['skill_score_dq'] = min(max(0.1, val), 3.0)
-
-
-@register_config_handler('skill_score_nmin')
-def _handle_skill_score_nmin(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Meaningful-use bar n_min (int). Clamped to [1, 20]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = int(ui_cfg.get('skill_score_nmin', SKILL_SCORE_NMIN))
-        except (TypeError, ValueError):
-            val = SKILL_SCORE_NMIN
-        agent_pool.llm_cfg['skill_score_nmin'] = min(max(1, val), 20)
-
-
-@register_config_handler('skill_fair_window_turns')
-def _handle_skill_fair_window_turns(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """PROTECTED window in user-turns (int). Clamped to [0, 1000]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = int(ui_cfg.get('skill_fair_window_turns', SKILL_FAIR_WINDOW_TURNS))
-        except (TypeError, ValueError):
-            val = SKILL_FAIR_WINDOW_TURNS
-        agent_pool.llm_cfg['skill_fair_window_turns'] = min(max(0, val), 1000)
-
-
-@register_config_handler('skill_max_evictions_per_pass')
-def _handle_skill_max_evictions_per_pass(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """D-SAFE safety cap on total evictions per pass (int). Clamped to [0, 1000]."""
-    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        try:
-            val = int(ui_cfg.get('skill_max_evictions_per_pass', SKILL_MAX_EVICTIONS_PER_PASS))
-        except (TypeError, ValueError):
-            val = SKILL_MAX_EVICTIONS_PER_PASS
-        agent_pool.llm_cfg['skill_max_evictions_per_pass'] = min(max(0, val), 1000)
+for _skill_score_key in SKILL_SCORE_SETTINGS:
+    register_config_handler(_skill_score_key)(_make_skill_score_handler(_skill_score_key))
 
 
 @register_config_handler('grep_char_limit')

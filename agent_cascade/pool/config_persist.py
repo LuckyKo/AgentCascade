@@ -307,77 +307,20 @@ class ConfigPersistMixin:
                         pass
 
                 # ── Skill-scoring constants (research §5/§7/§18 + D-SAFE) — restore into llm_cfg ──
-                # Clamps are byte-identical to the config handlers / preview endpoint. Missing keys
-                # simply fall through (pool/core.py reads .get() with defaults), so old files are safe.
-                val = data.pop('skill_score_q0', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_q0'] = min(max(0.0, float(val)), 10.0)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_score_kq', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_kq'] = min(max(0, int(val)), 20)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_score_nhalf', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_nhalf'] = min(max(1.0, float(val)), 50.0)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_score_ghalf', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_ghalf'] = min(max(1.0, float(val)), 100.0)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_score_rflood', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_rflood'] = min(max(0.0, float(val)), 0.99)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_score_tau_turns', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_tau_turns'] = min(max(10, int(val)), 5000)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_score_dq', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_dq'] = min(max(0.1, float(val)), 3.0)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_score_nmin', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_score_nmin'] = min(max(1, int(val)), 20)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_fair_window_turns', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_fair_window_turns'] = min(max(0, int(val)), 1000)
-                    except (ValueError, TypeError):
-                        pass
-
-                val = data.pop('skill_max_evictions_per_pass', None)
-                if val is not None:
-                    try:
-                        self.llm_cfg['skill_max_evictions_per_pass'] = min(max(0, int(val)), 1000)
-                    except (ValueError, TypeError):
-                        pass
+                # Clamps come from the single source-of-truth table (settings.SKILL_SCORE_SETTINGS),
+                # byte-identical to the config handlers / preview endpoint. Missing keys simply fall
+                # through (pool/core.py reads .get() with defaults), so old files are safe. Unparseable
+                # values are SKIPPED (key left unset) exactly as before — hence the explicit cast here:
+                # clamp_skill_setting() swallows parse errors and returns the default, which would be a
+                # behavior change for this restore path.
+                from agent_cascade.settings import SKILL_SCORE_SETTINGS, clamp_skill_setting
+                for _key in SKILL_SCORE_SETTINGS:
+                    val = data.pop(_key, None)
+                    if val is not None:
+                        try:
+                            self.llm_cfg[_key] = clamp_skill_setting(_key, SKILL_SCORE_SETTINGS[_key]['type'](val))
+                        except (ValueError, TypeError):
+                            pass
 
         except Exception as e:
             logger.error(

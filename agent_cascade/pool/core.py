@@ -240,20 +240,25 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 _max_cap = int((self.llm_cfg or {}).get('skill_active_max_cap', 200))
                 # Phase C scoring constants (research §5/§7): read from llm_cfg with the same
                 # defaults as manager.py so the pass works before Phase E lands the named
-                # settings; once E adds the keys, saved values flow through unchanged.
+                # settings; once E adds the keys, saved values flow through unchanged. Each value is
+                # re-clamped via the single source-of-truth table (settings.SKILL_SCORE_SETTINGS) so
+                # a stray out-of-range llm_cfg entry can't escape its [lo,hi] range. The llm_cfg key
+                # 'skill_score_rflood' maps to the r_floor recency factor (must stay < 1).
+                from agent_cascade.settings import SKILL_SCORE_SETTINGS, clamp_skill_setting
+                _cfg = self.llm_cfg or {}
                 _score_kwargs = {
-                    'q0': float((self.llm_cfg or {}).get('skill_score_q0', 5.0)),
-                    'kq': int((self.llm_cfg or {}).get('skill_score_kq', 5)),
-                    'n_half': float((self.llm_cfg or {}).get('skill_score_nhalf', 8)),
-                    'g_half': float((self.llm_cfg or {}).get('skill_score_ghalf', 20)),
-                    'r_floor': float((self.llm_cfg or {}).get('skill_score_rflood', 0.5)),
-                    'tau_turns': int((self.llm_cfg or {}).get('skill_score_tau_turns', 200)),
-                    'dq': float((self.llm_cfg or {}).get('skill_score_dq', 0.5)),
-                    'n_min': int((self.llm_cfg or {}).get('skill_score_nmin', 5)),
-                    'fair_window_turns': int((self.llm_cfg or {}).get('skill_fair_window_turns', 50)),
+                    'q0': clamp_skill_setting('skill_score_q0', _cfg.get('skill_score_q0')),
+                    'kq': clamp_skill_setting('skill_score_kq', _cfg.get('skill_score_kq')),
+                    'n_half': clamp_skill_setting('skill_score_nhalf', _cfg.get('skill_score_nhalf')),
+                    'g_half': clamp_skill_setting('skill_score_ghalf', _cfg.get('skill_score_ghalf')),
+                    'r_floor': clamp_skill_setting('skill_score_rflood', _cfg.get('skill_score_rflood')),
+                    'tau_turns': clamp_skill_setting('skill_score_tau_turns', _cfg.get('skill_score_tau_turns')),
+                    'dq': clamp_skill_setting('skill_score_dq', _cfg.get('skill_score_dq')),
+                    'n_min': clamp_skill_setting('skill_score_nmin', _cfg.get('skill_score_nmin')),
+                    'fair_window_turns': clamp_skill_setting('skill_fair_window_turns', _cfg.get('skill_fair_window_turns')),
                     # D-SAFE safety cap: bounds total evictions per pass so a bad config
                     # cannot nuke the corpus (clamped [0,1000] in the manager as well).
-                    'max_evictions_per_pass': int((self.llm_cfg or {}).get('skill_max_evictions_per_pass', 25)),
+                    'max_evictions_per_pass': clamp_skill_setting('skill_max_evictions_per_pass', _cfg.get('skill_max_evictions_per_pass')),
                 }
                 self._skill_rebalance_thread = threading.Thread(
                     target=self.skill_manager.rebalance_active_skills,

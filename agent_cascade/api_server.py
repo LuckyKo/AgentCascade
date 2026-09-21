@@ -44,7 +44,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-export)
-from agent_cascade.settings import DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE
+from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE,
+                                    SKILL_SCORE_SETTINGS, clamp_skill_setting)
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
 
@@ -1062,9 +1063,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         # Phase C scoring constants: base values from llm_cfg (same keys/defaults as pool/core.py),
         # optional ?q0=&kq=&... overrides for live preview. Each is clamped IDENTICALLY to the
-        # Phase E config handlers (min(max(lo, v), hi)) so a displayed number always matches what a
-        # real save+pass would compute. Out-of-range typed values are bounded exactly as they
-        # would be after saving.
+        # Phase E config handlers via the single source-of-truth table (settings.SKILL_SCORE_SETTINGS)
+        # so a displayed number always matches what a real save+pass would compute. Out-of-range typed
+        # values are bounded exactly as they would be after saving.
         def _cfg_float(key: str, default: float) -> float:
             try:
                 return float(cfg.get(key, default))
@@ -1077,18 +1078,26 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except (TypeError, ValueError):
                 return default
 
-        score_overrides = {
-            'q0': (_cfg_float('skill_score_q0', 5.0), 0.0, 10.0),
-            'kq': (_cfg_int('skill_score_kq', 5), 0, 20),
-            'nhalf': (_cfg_float('skill_score_nhalf', 8), 1.0, 50.0),
-            'ghalf': (_cfg_float('skill_score_ghalf', 20), 1.0, 100.0),
-            'rflood': (_cfg_float('skill_score_rflood', 0.5), 0.0, 0.99),
-            'tau_turns': (_cfg_int('skill_score_tau_turns', 200), 10, 5000),
-            'dq': (_cfg_float('skill_score_dq', 0.5), 0.1, 3.0),
-            'nmin': (_cfg_int('skill_score_nmin', 5), 1, 20),
-            'fair_window_turns': (_cfg_int('skill_fair_window_turns', 50), 0, 1000),
-            'max_evictions_per_pass': (_cfg_int('skill_max_evictions_per_pass', 25), 0, 1000),
+        # (llm_cfg key, formula kwarg name) for the 10 scoring settings — single source of truth.
+        _score_kwarg_names = {
+            'skill_score_q0': 'q0',
+            'skill_score_kq': 'kq',
+            'skill_score_nhalf': 'nhalf',
+            'skill_score_ghalf': 'ghalf',
+            'skill_score_rflood': 'rflood',
+            'skill_score_tau_turns': 'tau_turns',
+            'skill_score_dq': 'dq',
+            'skill_score_nmin': 'nmin',
+            'skill_fair_window_turns': 'fair_window_turns',
+            'skill_max_evictions_per_pass': 'max_evictions_per_pass',
         }
+        # Base value from llm_cfg (typed via the table), then clamped to [lo, hi] from the table.
+        score_overrides = {}
+        for cfg_key, kwarg in _score_kwarg_names.items():
+            spec = SKILL_SCORE_SETTINGS[cfg_key]
+            val = _cfg_float(cfg_key, spec['default']) if spec['type'] is float else _cfg_int(cfg_key, spec['default'])
+            score_overrides[kwarg] = (clamp_skill_setting(cfg_key, val), spec['lo'], spec['hi'])
+
         # Optional unsaved overrides from the input boxes — parse only if present + parseable.
         for key, (val, lo, hi) in score_overrides.items():
             if key in qp:
@@ -1613,17 +1622,8 @@ if __name__ == '__main__':
         # Skill-scoring constants (research §5/§7/§18 + D-SAFE). Phase C reads these from llm_cfg
         # with identical defaults in pool/core.py and manager.py; the full 6-seam exposure
         # (config handlers, frontend inputs) lands in Phase E — seeding here keeps the keys
-        # visible to any consumer before then.
-        'skill_score_q0': 5.0,
-        'skill_score_kq': 5,
-        'skill_score_nhalf': 8,
-        'skill_score_ghalf': 20,
-        'skill_score_rflood': 0.5,
-        'skill_score_tau_turns': 200,
-        'skill_score_dq': 0.5,
-        'skill_score_nmin': 5,
-        'skill_fair_window_turns': 50,
-        'skill_max_evictions_per_pass': 25,
+        # visible to any consumer before then. Defaults come from the single source-of-truth table.
+        **{key: spec['default'] for key, spec in SKILL_SCORE_SETTINGS.items()},
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)
