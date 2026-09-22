@@ -36,6 +36,12 @@ from .vault import VaultIndex, discover_vaults
 # only the fallback default when the setting is absent/invalid.
 HINT_COOLDOWN_SECONDS = 600.0
 
+# NOTE: this worker thread's stack size is set process-wide by AgentPool.__init__ via
+# threading.stack_size() (see BACKGROUND_THREAD_STACKSIZE in pool/core.py) before the
+# thread is created — Windows' 32KB default is too small for the deep C-extension chains
+# this worker runs, and a 32KB thread overflowing its stack kills the process with an
+# uncatchable hard access violation. No per-thread kwarg exists for this.
+
 # A job older than this (monotonic seconds) is dropped on drain so we never hint
 # a turn the agent has long since passed (plan §4.3).
 JOB_TTL_SECONDS = 30.0

@@ -27,6 +27,32 @@ from .rollback import RollbackMixin
 from .session_io import SessionIOMixin
 from .slots import SlotsMixin
 
+# Stack size (bytes) applied to this process's threads via threading.stack_size() at
+# pool init. Windows' default per-thread stack is only 32KB, which is too small for the
+# deep C-extension call chains the pool's background workers run (skill candidate
+# evaluation, rebalance scoring, memory-hint matching — each touches pydantic/JSON/
+# LLM-client code). A 32KB thread running such a chain can overflow its stack and kill
+# the whole process with a hard access violation that Python's faulthandler cannot catch
+# (observed as an intermittent xdist worker death). 1MB is 32x the default yet still
+# modest per thread. NOTE: threading.stack_size() is process-global and only affects
+# threads created AFTER the call, so it's set once at the top of AgentPool.__init__ —
+# before any background thread is started. (threading.Thread has NO per-thread stacksize
+# kwarg; that was a bug.)
+BACKGROUND_THREAD_STACKSIZE = 1048576
+
+
+def _apply_background_thread_stacksize() -> None:
+    """Set the process-wide thread stack size for subsequently-created threads.
+
+    Best-effort and idempotent: threading.stack_size() may raise on platforms/limits
+    where the requested size is unsupported; a failure here must never block pool init
+    (it just leaves threads at the platform default).
+    """
+    try:
+        threading.stack_size(BACKGROUND_THREAD_STACKSIZE)
+    except Exception as e:  # noqa: BLE001 — non-critical tuning, never break init
+        logger.debug(f"Failed to set background thread stack size (non-critical): {e}")
+
 
 class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin, ConfigPersistMixin, RollbackMixin,
                 SessionIOMixin):
@@ -61,6 +87,12 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             telemetry: TelemetryCollector for performance tracking (injected, not owned).
             operation_manager: OperationManager for blocking approvals (injected, not owned).
         """
+        # Set the process-wide thread stack size BEFORE any background thread is
+        # created below (threading.stack_size() only affects threads started after the
+        # call). Prevents a 32KB-default worker thread from overflowing on deep C-extension
+        # chains and killing the process with an uncatchable hard access violation.
+        _apply_background_thread_stacksize()
+
         # ── Injected dependencies (not owned by pool) ────────────────────────
         # If api_router is not injected, create one (matches main branch behavior).
         # This ensures agents loaded during _discover_agents() get their correct endpoints.
