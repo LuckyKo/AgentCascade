@@ -14,6 +14,11 @@ from agent_cascade.tools.utils import parse_tool_params
 logger = logging.getLogger(__name__)
 
 
+def _format_chars(chars: int) -> str:
+    """Format a character count as a rounded '~N.Nk chars' display string."""
+    return f"~{chars // 1000}.{'0' if chars % 1000 < 500 else '5'}k chars"
+
+
 @register_tool('scan_skills', allow_overwrite=True)
 class ScanSkills(BaseTool):
     """Read-only tool to query available skills and their relevance scores."""
@@ -101,9 +106,10 @@ class ScanSkills(BaseTool):
                 except (OSError, FileNotFoundError):
                     return '?'
 
-            # Inactive marker data (no-query mode only): skills persisted as status=inactive.
-            # The default listing includes them (marked " (inactive)"); active=True hides them.
-            inactive = skill_manager.get_inactive_names()
+            # Inactive marker (no-query mode): mark every disabled/inactive skill. Driven by
+            # _disabled_names via is_skill_disabled() — the SAME source the match filter uses,
+            # so a SKILLS_DISABLED-style disable (in _disabled_names but with no metrics entry)
+            # is marked here too, keeping marker and filter in agreement. active=True hides them.
 
             lines = ['## Available Skills']
             for skill in sorted(all_skills, key=_sort_key):
@@ -114,34 +120,46 @@ class ScanSkills(BaseTool):
                 rating_str = f'{rating}' if rating is not None else 'n/a'
                 candidate_note = (f" (candidate, pending decision vs v{_incumbent_version(skill['name'])})"
                                   if skill['name'] in candidate_names else '')
-                inactive_note = ' (inactive)' if skill['name'].lower() in inactive else ''
+                inactive_note = ' (inactive)' if skill_manager.is_skill_disabled(skill['name']) else ''
                 lines.append(f"- **{skill['name']}** [{source}] v{version} "
-                             f"(rating: {rating_str}, ~{chars // 1000}.{'0' if chars % 1000 < 500 else '5'}k chars)"
+                             f"(rating: {rating_str}, {_format_chars(chars)})"
                              f"{candidate_note}{inactive_note}: "
                              f"{skill.get('description', 'No description')}")
             return '\n'.join(lines)
 
-        # Use public API to score skills against the query
-        matches = skill_manager.match_skills(query)
+        # Use public API to score skills against the query. When the caller wants the
+        # DEFAULT (active=False) view, match over the SAME full set the listing uses
+        # (include_inactive=True) so an exact match on a retired skill surfaces here
+        # instead of "No skills matched". active=True keeps matching active-only.
+        matches = skill_manager.match_skills(query, include_inactive=not active_only)
         if not matches:
             return (f"No skills matched the query '{query}'.\n\n"
                     'Available skills:\n' +
-                    '\n'.join(f"- **{s['name']}** [{s.get('source', 'system')}]: {s.get('description', '')}"
-                              for s in all_skills))
+                    '\n'.join(
+                        f"- **{s['name']}** [{s.get('source', 'system')}]"
+                        f"{' (inactive)' if skill_manager.is_skill_disabled(s['name']) else ''}: "
+                        f"{s.get('description', '')}"
+                        for s in all_skills))
 
-        # Build response with scores
+        # Build response with scores.
+        # Resolve display fields from the already-fetched full listing (``all_skills``)
+        # rather than the registry, so registry-absent (inactive) matches still show a
+        # real description/source/version/chars. ``all_skills`` carries name/description/
+        # source/version/chars for both active and inactive skills.
+        meta_by_name = {s['name'].lower(): s for s in all_skills}
         lines = [f"## Skills Matching Query: '{query}'"]
         for name, score in matches:
-            meta = skill_manager.get_skill_metadata(name)
+            meta = meta_by_name.get(name.lower())
             desc = meta.get('description', 'No description') if meta else 'Unknown'
             source = meta.get('source', 'system') if meta else 'unknown'
             version = meta.get('version', '1.0.0') if meta else '1.0.0'
+            chars = meta.get('chars', 0) if meta else 0
             metrics = skill_manager.get_metrics(name)
             loads = metrics.get('total_loads', 0)
             rating = skill_manager.get_rating_average(name)
             rating_str = f'{rating}' if rating is not None else 'n/a'
-            chars = skill_manager.get_skill_chars(name)
+            inactive_note = ' (inactive)' if skill_manager.is_skill_disabled(name) else ''
             lines.append(f"- **{name}** [{source}] v{version} (score: {score:.2f}, loads: {loads}, "
-                         f"rating: {rating_str}, ~{chars // 1000}.{'0' if chars % 1000 < 500 else '5'}k chars): {desc}")
+                         f"rating: {rating_str}, {_format_chars(chars)}){inactive_note}: {desc}")
 
         return '\n'.join(lines)

@@ -1325,10 +1325,19 @@ class SkillManager:
     # ── Index Management ─────────────────────────────────────────────────────
 
     def _rebuild_index(self) -> None:
-        """Rebuild the SkillMatcher inverted index from current registry."""
+        """Rebuild the SkillMatcher inverted index from the full skill set.
+
+        The index is built from the FULL metadata set (active registry skills PLUS
+        disabled/inactive skills that still have a servable on-disk file) so that
+        ``match_skills(query, include_inactive=True)`` can surface retired skills.
+        The historical active-only behavior is preserved by post-filtering in
+        ``match_skills`` (see there). Adding disabled skills to the inverted index
+        never changes any active skill's score, so the default path stays byte-identical.
+        The disk re-surface walk inside ``get_all_metadata`` runs OUTSIDE the registry
+        lock (only the registry snapshot is under ``_write_lock``), so this is lock-safe.
+        """
         try:
-            # Registry-only (active) skills — disabled skills must not enter the match index.
-            metadata = self.get_all_metadata(include_active_only=True)
+            metadata = self.get_all_metadata(include_active_only=False)
             self._matcher.build_index(metadata)
         except Exception as e:
             logger.debug('[SKILLS] Failed to rebuild matcher index: %s', e)
@@ -1373,13 +1382,20 @@ class SkillManager:
         with self._write_lock:
             return list(self._skills_registry.keys())
 
-    def match_skills(self, query: str) -> List[Tuple[str, float]]:
+    def match_skills(self, query: str, include_inactive: bool = False) -> List[Tuple[str, float]]:
         """Public interface for matching skills against a query.
 
         Rebuilds the matcher index if no skills are registered yet (lazy init).
 
         Args:
             query: The task text or context to match against.
+            include_inactive: When True, retired/disabled skills (persisted
+                status=inactive with a servable on-disk file) are included in the
+                results. When False (default) only active registry skills are returned —
+                the historical behavior. The default path is byte-identical to the
+                pre-change behavior: the index is built from the full set, but disabled
+                names are filtered out after scoring, and adding disabled skills to the
+                inverted index never changes any active skill's score.
 
         Returns:
             List of (skill_name, relevance_score) tuples sorted by score descending.
@@ -1387,7 +1403,17 @@ class SkillManager:
         with self._write_lock:
             if not self._skills_registry and not self._matcher._inverted_index:
                 self._rebuild_index()
-            return self._matcher.match(query)
+            results = self._matcher.match(query)
+            if not include_inactive:
+                # Preserve the historical active-only contract: the full index now also
+                # contains disabled/inactive skills, so drop them. _disabled_names is the
+                # live set get_all_metadata uses to re-surface inactive skills, so
+                # (full index - _disabled_names) == active registry == old behavior.
+                # _disabled_names stores lowercase names at every write site, so match
+                # each result's lowercased name against it directly (no temp set needed).
+                results = [(name, score) for name, score in results
+                           if name.lower() not in self._disabled_names]
+            return results
 
     def get_all_metadata(self, include_active_only: bool = False) -> List[Dict[str, Any]]:
         """Return Tier 1 metadata for the scan_skills tool.

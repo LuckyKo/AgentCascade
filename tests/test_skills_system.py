@@ -1126,7 +1126,7 @@ class TestScanSkillsRatingDisplay:
         """Query mode keeps matcher ordering; rating is appended to each line."""
         self.manager.record_rating('alpha', 9.0)
         # Force a deterministic matcher order (charlie first, alpha second).
-        self.manager.match_skills = lambda q: [('charlie', 0.9), ('alpha', 0.5)]
+        self.manager.match_skills = lambda q, include_inactive=False: [('charlie', 0.9), ('alpha', 0.5)]
 
         out = self.tool.call({'query': 'some query'})
         lines = [l for l in out.splitlines() if l.startswith('- **')]
@@ -1139,6 +1139,122 @@ class TestScanSkillsRatingDisplay:
         assert 'rating: 9.0' in alpha_line
         charlie_line = next(l for l in lines if '**charlie**' in l)
         assert 'rating: n/a' in charlie_line
+
+
+def _write_named_skill(root: Path, name: str, desc: str, trigger: str) -> None:
+    """Write a SKILL.md with a distinctive trigger token (for match tests)."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / 'SKILL.md').write_text(
+        f'---\nname: {name}\ndescription: {desc}\nversion: "1.0.0"\n'
+        f'triggers:\n  - {trigger}\n---\n# Body\n',
+        encoding='utf-8')
+
+
+class TestScanSkillsInactiveMatch:
+    """Fix: an INACTIVE skill that exactly matches a query must appear in scan_skills
+    match output (marked '(inactive)') while advisor / AUTO-mode still exclude it."""
+
+    @pytest.fixture(autouse=True)
+    def _mgr(self, hermetic_skill_manager, tmp_path):
+        from unittest.mock import MagicMock
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_named_skill(root, 'active-zebra',   'zebra quantum fixture', 'zebraquantum')
+        _write_named_skill(root, 'inactive-zebra', 'zebra quantum fixture', 'zebraquantum')
+        m._cache_ttl = 0.0
+        m.discover([root])
+        ok, _ = m.disable_skill('inactive-zebra')
+        assert ok
+        # Re-scan so discover() drops the disabled skill from the registry (it stays
+        # servable on disk, so get_all_metadata(False) re-surfaces it).
+        m._cache_ttl = 0.0
+        m.discover([root])
+        assert 'inactive-zebra' not in m.get_skill_names()
+        assert 'active-zebra' in m.get_skill_names()
+
+        pool = MagicMock()
+        pool.skill_manager = m
+        self.m = m
+        self.tool = ScanSkills(agent_pool=pool)
+        yield
+
+    def test_inactive_match_appears_and_is_marked(self):
+        out = self.tool.call({'query': 'zebraquantum'})
+        lines = out.splitlines()
+        names = [l.split('**')[1] for l in lines if l.startswith('- **')]
+        assert 'active-zebra' in names
+        assert 'inactive-zebra' in names
+        inactive_line = next(l for l in lines if '**inactive-zebra**' in l)
+        active_line = next(l for l in lines if '**active-zebra**' in l)
+        assert '(inactive)' in inactive_line
+        assert '(inactive)' not in active_line
+
+    def test_active_only_flag_excludes_inactive(self):
+        out = self.tool.call({'query': 'zebraquantum', 'active': True})
+        names = [l.split('**')[1] for l in out.splitlines() if l.startswith('- **')]
+        assert 'active-zebra' in names
+        assert 'inactive-zebra' not in names
+
+    def test_match_skills_default_stays_active_only(self):
+        names = [n for n, _ in self.m.match_skills('zebraquantum')]
+        assert 'active-zebra' in names
+        assert 'inactive-zebra' not in names
+
+    def test_match_skills_include_inactive_adds_retired(self):
+        names = [n for n, _ in self.m.match_skills('zebraquantum', include_inactive=True)]
+        assert 'active-zebra' in names
+        assert 'inactive-zebra' in names
+
+    def test_auto_mode_load_skill_excludes_inactive(self):
+        names = self.m.resolve_load_skill_names('AUTO', task_text='zebraquantum', context_text='')
+        assert 'active-zebra' in names
+        assert 'inactive-zebra' not in names
+
+    def test_advisor_prompt_excludes_inactive(self):
+        from agent_cascade.skills.advisor import build_skill_advisor_prompt
+        prompt = build_skill_advisor_prompt(self.m, 'zebraquantum', '', 'coder', 'test')
+        assert 'active-zebra' in prompt
+        assert 'inactive-zebra' not in prompt
+
+    def test_settings_disabled_marker_agrees_with_filter(self):
+        """A skill disabled via _disabled_names WITHOUT a metrics status=inactive entry
+        (mimics a SKILLS_DISABLED-style disable) must be marked '(inactive)' by the SAME
+        source the match filter uses — is_skill_disabled()/_disabled_names, NOT the
+        metrics-based get_inactive_names().
+
+        Pre-fix this diverged: such a skill was filtered out of default matches yet left
+        unmarked (get_inactive_names() saw no metrics entry). The assertions below only
+        hold when the marker reads _disabled_names.
+        """
+        m = self.m
+        # A servable, registry-present skill with NO metrics status=inactive entry:
+        assert 'active-zebra' in m.get_skill_names()
+        assert 'active-zebra' not in m.get_inactive_names()  # no metrics-based inactive entry
+
+        # Mimic a SKILLS_DISABLED-style disable: add to _disabled_names only.
+        m._disabled_names.add('active-zebra')
+        assert m.is_skill_disabled('active-zebra')            # marker source sees it
+        assert 'active-zebra' not in m.get_inactive_names()   # metrics source still does NOT
+
+        # (1) No-query listing marks it '(inactive)' via is_skill_disabled.
+        noq = self.tool.call({'query': ''})
+        noq_line = next(l for l in noq.splitlines() if '**active-zebra**' in l)
+        assert '(inactive)' in noq_line
+
+        # (2) "No skills matched" fallback also marks it (non-matching query).
+        fb = self.tool.call({'query': 'zzznomatch'})
+        assert fb.startswith('No skills matched')
+        fb_line = next(l for l in fb.splitlines() if '**active-zebra**' in l)
+        assert '(inactive)' in fb_line
+
+        # (3) Filter: default match_skills excludes it; include_inactive=True includes it.
+        default_names = [n for n, _ in m.match_skills('zebraquantum')]
+        full_names = [n for n, _ in m.match_skills('zebraquantum', include_inactive=True)]
+        assert 'active-zebra' not in default_names
+        assert 'active-zebra' in full_names
 
 
 # ===========================================================================
