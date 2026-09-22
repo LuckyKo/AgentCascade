@@ -8,6 +8,7 @@ created in the pool with agent_class="Orchestrator".
 See DESIGN_REWRITE.md §2.1 for design rationale.
 """
 
+import datetime
 import json  # NEW: for serializing non-string values in cache preview
 import logging
 import threading
@@ -246,6 +247,7 @@ class AgentInstance:
         default=False
     )  # True once a run() consumes its first turn; reset at each run() start so the first consumption counts as one user turn in telemetry
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
+    system_started_at: Optional[str] = None  # Wall-clock start (YYYY-MM-DD HH:MM); set at creation, refreshed on reuse; rendered in Session Metadata
     _child_instances: List[str] = field(
         default_factory=list
     )  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
@@ -396,6 +398,10 @@ class AgentInstance:
     # Initialized lazily by execution engine on first access to avoid issues with
     # dataclass default_factory and threading. Each instance gets its own pool.
     cache_pool: Optional['ArgumentCachePool'] = None
+
+    def __post_init__(self):
+        if self.system_started_at is None:
+            self.system_started_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
     # ── Centralized Message Mutation API (Phase 3) ───────────────────────
     # These methods encapsulate ALL conversation mutations, keeping cached lists

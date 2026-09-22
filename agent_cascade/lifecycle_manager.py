@@ -142,6 +142,9 @@ class AgentLifecycleManager:
                 # timer starts from reuse event
                 inst.last_activity = now
 
+                # Refresh the per-instance startup timestamp on reuse (Session Metadata)
+                inst.system_started_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+
                 # Clear old child tracking — reused instances start fresh with no children
                 # Track old parent for cleanup, then update to new caller (thread-safe).
                 # Use _children_lock for pool.children and _state_lock for instance state.

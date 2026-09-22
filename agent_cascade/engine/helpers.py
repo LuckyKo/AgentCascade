@@ -7,11 +7,13 @@ module scope in the original file; they keep their names and bodies unchanged.
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
 from enum import Enum, auto
 from typing import Any, List, Optional
 
+from agent_cascade import __version__ as AC_VERSION
 from agent_cascade.llm.schema import ASSISTANT, SYSTEM, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE
@@ -637,6 +639,12 @@ def _build_session_metadata(pool, instance) -> str:
             meta_lines.append(f"- Supervisor: {supervisor} ({log_filename})")
         else:
             meta_lines.append(f"- Supervisor: {supervisor}")
+
+    # System line: product + version + per-instance startup time (stable across turns)
+    ts = getattr(instance, 'system_started_at', None)
+    if not isinstance(ts, str) or not ts:
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    meta_lines.append(f"- System: AgentCascade v{AC_VERSION} — {ts}")
 
     # Get workspace config from operation_manager (live source of truth),
     # falling back to logger metadata
