@@ -179,7 +179,9 @@ class ProposeSkill(BaseTool):
         # version), but still compare against every OTHER skill so an update cannot
         # silently collide with a different one. Frontmatter fields only — cheap.
         try:
-            all_metadata = skill_manager.get_all_metadata()
+            # Registry-only (active) skills for the similarity gate — disabled skills are not
+            # live candidates and should not block a proposal on name/description similarity.
+            all_metadata = skill_manager.get_all_metadata(include_active_only=True)
         except (TypeError, AttributeError) as e:  # pragma: no cover - defensive; gate must not break propose
             # get_all_metadata() is a pure in-memory dict-building loop (no I/O), so the only
             # realistic failures are malformed registry entries. Narrowed from bare Exception.

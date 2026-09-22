@@ -111,7 +111,8 @@ class FakeSkillManager:
     def get_skill_names(self):
         return list(self._names)
 
-    def get_all_metadata(self):
+    def get_all_metadata(self, include_active_only=False):
+        # Mock has no disabled skills, so the flag is a no-op; accepted to match the real signature.
         return [{'name': n, 'description': f"desc for {n}"} for n in self._names]
 
     def load_full_instructions(self, name):

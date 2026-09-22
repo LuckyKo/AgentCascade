@@ -31,9 +31,13 @@ class ScanSkills(BaseTool):
                 'description':
                     'Search query or task description to match against available skills. Leave empty to list all registered skills.',
             },
-            'all': {
+            'active': {
                 'type': 'boolean',
-                'description': 'If true, include disabled skills in results. Default: false.',
+                'description': (
+                    'If true, restrict the no-query listing to ACTIVE skills only (exclude disabled/'
+                    'inactive ones). Default: false — the default listing includes disabled/inactive '
+                    'skills, each marked with an " (inactive)" suffix.'
+                ),
             },
         },
         'required': [],
@@ -55,7 +59,7 @@ class ScanSkills(BaseTool):
         """
         parsed = parse_tool_params(params)
         query = parsed.get('query', '')
-        show_all = parsed.get('all', False)
+        active_only = parsed.get('active', False)
 
         # Get SkillManager from pool
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
@@ -65,16 +69,16 @@ class ScanSkills(BaseTool):
         # Trigger a fresh discovery (cache-respecting) so new skills appear
         skill_manager._ensure_discovered()
 
-        all_skills = skill_manager.get_all_metadata()
+        # Data path: the DEFAULT listing includes disabled/inactive skills (each marked " (inactive)"
+        # below); active=True restricts to the active registry only. In production disabled skills are
+        # absent from the registry (discover drops them), so get_all_metadata re-surfaces them on the
+        # default path via a servable-disk walk.
+        # get_all_metadata(include_active_only=...) already enforces the range: active=True returns
+        # registry-only skills (discover() guarantees disabled ones are absent from the registry),
+        # active=False additionally re-surfaces disabled-but-servable skills. No manual filter needed.
+        all_skills = skill_manager.get_all_metadata(include_active_only=active_only)
         if not all_skills:
             return 'No skills are currently registered in the system.'
-
-        # Filter disabled skills when all=False
-        if not show_all:
-            disabled = getattr(skill_manager, '_disabled_names', set())
-            all_skills = [s for s in all_skills if s['name'] not in disabled]
-            if not all_skills:
-                return 'No skills are currently registered in the system.'
 
         # If no query, list everything sorted by average rating (desc); unrated last, name asc tiebreak.
         if not query.strip():
@@ -98,7 +102,7 @@ class ScanSkills(BaseTool):
                     return '?'
 
             # Inactive marker data (no-query mode only): skills persisted as status=inactive.
-            # all=False already hides them via the disabled filter above; all=True shows them marked.
+            # The default listing includes them (marked " (inactive)"); active=True hides them.
             inactive = skill_manager.get_inactive_names()
 
             lines = ['## Available Skills']

@@ -88,8 +88,8 @@ DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 # understanding first (re-read task, check notes/logs) before taking its next action.
 # Randomly selected per occurrence.
 LOOP_FEEDBACK_MESSAGES: List[str] = [
-    '[SYSTEM]: You were stuck in a loop and your recent turns have been rolled back. Before acting again: re-read the original task/goal above, check your notes or plan if you have one, and figure out what step you should actually be on. Then continue with a concrete next action.',
-    '[SYSTEM]: Loop detected — your last few turns were removed to break the cycle. You may not remember exactly where you left off. Take a moment to re-read the task, scan your notes or earlier output, and reorient yourself. Then pick up from where you actually are, not where you think you are.',
+    '[SYSTEM]: Stop. You were stuck in a loop and your recent turns have been rolled back. Before acting again: re-read the original task/goal above, check your notes or plan if you have one, and figure out what step you should actually be on. Then continue with a concrete next action.',
+    '[SYSTEM]: STOP. Loop detected! — your last few turns were removed to break the cycle. You may not remember exactly where you left off. Take a moment to re-read the task, scan your notes or earlier output, and reorient yourself. Then pick up from where you actually are, not where you think you are.',
     '[SYSTEM]: You kept repeating yourself, so those turns were rolled back. Reconstruct your state: what was the goal? What have you already accomplished (check your files/notes)? What is the single next step that moves you forward? Then do that step.',
     '[SYSTEM]: Repetition loop broken via rollback. Your recent actions are gone from context. Before continuing, briefly re-read the task and any notes or plan you\'ve written. Identify what you were trying to do and what\'s still outstanding. Then proceed with a fresh approach to that specific sub-task.',
 ]
@@ -697,7 +697,9 @@ TOOL_METADATA = {
                         'Returns skill names, descriptions, match scores, and quality ratings for the given query.'),
         'parameters': {
             'query':
-                'Search query or task description to match against available skills. Leave empty to list all registered skills.'
+                'Search query or task description to match against available skills. Leave empty to list all registered skills.',
+            'active':
+                'If true, restrict the no-query listing to ACTIVE skills only (exclude disabled/inactive ones). Default: false — the default listing includes disabled/inactive skills, each marked with an " (inactive)" suffix.'
         }
     },
     'propose_skill': {
@@ -721,7 +723,9 @@ TOOL_METADATA = {
     'load_skill': {
         'description': ('Load registered skill instructions into your current context at runtime. '
                         'Use this when you need specialized expertise for your task. '
-                        'Takes one or more skill names and injects their full instructions as guidelines.'),
+                        'Takes one or more skill names and injects their full instructions as guidelines. '
+                        'Loading a skill that is currently disabled re-activates it; the re-enable is '
+                        'reported in the output.'),
         'parameters': {
             'skill_names': {
                 'oneOf': [{

@@ -120,6 +120,7 @@ class LoadSkill(BaseTool):
         loaded = []
         failed = []
         already_loaded = []
+        re_enabled = []  # NEW: previously-disabled skills re-activated by this load
 
         # Dedup guard: a skill must be injected as a USER message at most once per
         # instance. Track the case-normalized name of every skill resolved so far, seeded
@@ -152,9 +153,35 @@ class LoadSkill(BaseTool):
                 continue
 
             if body is None:
-                logger.warning("[SKILLS] Runtime load: skill '%s' not found", name)  # Fix #6
+                # Distinguish a disabled-but-not-servable skill from a plain "not found".
+                # A disabled skill whose file is NOT at a servable one-level location cannot be
+                # loaded, so we must NOT flip its status (a status flip alone can't make a
+                # non-servable file servable). Report it distinctly; still count as failed.
+                if skill_manager.is_skill_disabled(name):
+                    logger.info("[SKILLS] Runtime load: '%s' is disabled and not loadable "
+                                '(file not at a servable location)', name)
+                else:
+                    logger.warning("[SKILLS] Runtime load: skill '%s' not found", name)  # Fix #6
                 failed.append(name)
                 continue
+
+            # NEW (Part 1): re-activate a previously-disabled skill as part of loading. Placed
+            # BEFORE the injection dedup so the system-level enabled state is corrected even when
+            # the body was already injected on this instance (O1: re-enable is independent of the
+            # dedup). Only reached when the body actually resolved, so non-servable INACTIVE/
+            # skills (body None) never flip status. enable_skill persists status=active to disk
+            # and invalidates the discovery cache; on failure we log and continue without breaking.
+            # The check-then-enable is not atomic, but enable_skill is idempotent (enabling an
+            # already-active skill is a no-op), so the tiny window where status could flip between
+            # the check and the call is harmless — no lock needed here.
+            if skill_manager.is_skill_disabled(name):
+                ok, msg = skill_manager.enable_skill(name)
+                if ok:
+                    re_enabled.append(name)
+                    logger.info("[SKILLS] Runtime load: re-enabled previously-disabled skill '%s' (%s)",
+                                name, msg)
+                else:
+                    logger.warning("[SKILLS] Runtime load: could not re-enable '%s': %s", name, msg)
 
             # Dedup guard: skip skills already active on this instance (or repeated within
             # this call). The body resolved above corresponds to a canonical registry entry,
@@ -205,6 +232,10 @@ class LoadSkill(BaseTool):
         if already_loaded:
             # Dedupe (a skill may be listed multiple times in one call) while keeping order.
             lines.append(f"Already loaded (skipped): {', '.join(dict.fromkeys(already_loaded))}")
+        if re_enabled:
+            # A re-enabled skill is also reported in `loaded`/`already_loaded`; this line is the
+            # distinct signal that its disabled state was corrected as a side effect of loading.
+            lines.append(f"Re-enabled (was disabled): {', '.join(dict.fromkeys(re_enabled))}")
         if failed:
             lines.append(f"Failed to load {len(failed)} skill(s) (not found): {', '.join(failed)}")
 

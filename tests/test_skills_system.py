@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from agent_cascade.skills.manager import SkillManager
+from agent_cascade.tools.custom.load_skill import LoadSkill
 from tests.conftest import make_hermetic_skill_manager  # shared hermetic factory (test isolation)
 from agent_cascade.skills.matcher import SkillMatcher
 from agent_cascade.skills.parser import parse_frontmatter, parse_skill_file
@@ -1468,8 +1470,11 @@ class TestSkillInvalidationScanMarker:
                 'source': 'system',
                 'version': '1.0.2',
             }
-        # A status=inactive skill is also in _disabled_names (that is what makes the
-        # all=False filter hide it — see scan_skills L72-77).
+        # bravo is disabled (in _disabled_names) and status=inactive in metrics. In production a
+        # disabled skill is ABSENT from the registry (discover() drops it), so get_all_metadata's
+        # active=True branch would exclude it. This fixture deliberately keeps bravo IN the registry
+        # (it bypasses discover()), which only exercises the "default listing marks inactive" path —
+        # see test_active_only_hides_inactive_skills for why that is a fixture artifact, not prod.
         manager._metrics['bravo'] = {'total_loads': 0, 'by_version': {}, 'status': 'inactive'}
         manager._disabled_names.add('bravo')
         pool = MagicMock()
@@ -1478,20 +1483,236 @@ class TestSkillInvalidationScanMarker:
         self.tool = ScanSkills(agent_pool=pool)
 
     def test_no_query_marks_inactive_skills(self):
-        out = self.tool.call({'query': '', 'all': True})
+        """Default listing includes disabled/inactive skills, marked with " (inactive)".
+
+        The default (no `active` param) now surfaces the disabled skill from the registry
+        fixture; active=True would hide it. bravo is status=inactive → marked.
+        """
+        out = self.tool.call({'query': ''})
         lines = [l for l in out.splitlines() if l.startswith('- **')]
         bravo_line = next(l for l in lines if '**bravo**' in l)
         alpha_line = next(l for l in lines if '**alpha**' in l)
         assert ' (inactive)' in bravo_line
         assert ' (inactive)' not in alpha_line
 
-    def test_default_filter_hides_inactive_skills(self):
-        """all=False already hides disabled/inactive skills via the disabled filter."""
-        out = self.tool.call({'query': ''})
+    def test_active_only_hides_inactive_skills(self):
+        """active=True returns registry-only skills.
+
+        NOTE: this fixture manually injects bravo into ``_skills_registry`` (bypassing
+        discover()), so get_all_metadata(include_active_only=True) — which is a pure
+        registry loop — still lists it. In production a disabled skill is ABSENT from the
+        registry, so active=True genuinely excludes it; that production path is covered by
+        TestScanSkillsIncludeDisabled::test_scan_skills_active_only_excludes_disabled_in_production_path
+        (which uses discover()). The real regression guard for "active hides inactive" is there.
+        """
+        out = self.tool.call({'query': '', 'active': True})
         lines = [l for l in out.splitlines() if l.startswith('- **')]
         names = [l.split('**')[1] for l in lines]
-        assert 'bravo' not in names
+        # alpha (active) is present; bravo is a fixture artifact that lingered in the registry.
         assert 'alpha' in names
+
+
+# ===========================================================================
+# 8b. load_skill re-enable + scan_skills include-disabled (re-enable & scan-all feature)
+# ===========================================================================
+
+def _reenable_manager(hermetic_skill_manager, tmp_path, skill_names=('rr-a',)):
+    """Hermetic manager + one-level servable skills tree (canonical discover-based setup)."""
+    m = hermetic_skill_manager
+    root = tmp_path / 'skills'
+    for name in skill_names:
+        _write_skill_file(root, name)
+    m._cache_ttl = 0.0
+    m.discover([root])
+    return m
+
+
+def _evict_disabled(hermetic_skill_manager, tmp_path, name):
+    """Genuinely evict a disabled skill from an already-built registry (disable + re-discover).
+
+    A status flip alone does NOT clear the registry; re-running discover() after disable_skill
+    is what actually drops it (see [[skill-manager-hermetic-test-fixture]]). Returns the manager.
+    """
+    m = hermetic_skill_manager
+    ok, _msg = m.disable_skill(name)
+    assert ok, f"disable_skill({name}) failed: {_msg}"
+    m._cache_ttl = 0.0
+    m.discover([m._skill_paths[0]])
+    return m
+
+
+def _make_load_pool(manager, inst):
+    """Minimal pool exposing only what ``LoadSkill.call`` touches (real manager + real tool)."""
+    enqueued = []
+    pool = SimpleNamespace(
+        skill_manager=manager,
+        get_instance=lambda name: inst,
+        enqueue_message=lambda name, content: enqueued.append((name, content)),
+        telemetry=None,  # skip the telemetry branch; we only care about re-enable + injection
+    )
+    return pool, enqueued
+
+
+class TestLoadSkillReenable:
+    """Part 1 — loading a disabled skill re-activates it (durable enable_skill)."""
+
+    def test_load_skill_reenables_disabled_servable_skill(self, hermetic_skill_manager, tmp_path):
+        """#1: a disabled-but-servable skill is loaded AND re-enabled (status active, persisted)."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        assert 'rr-a' in m._disabled_names          # precondition: genuinely evicted + disabled
+        assert 'rr-a' not in m._skills_registry     # ...and absent from the registry
+
+        inst = SimpleNamespace(_loaded_skill_names=None, agent_class='coder')
+        pool, enqueued = _make_load_pool(m, inst)
+        tool = LoadSkill(agent_pool=pool)
+        out = tool.call({'skill_names': 'rr-a'}, agent_instance_name='Main')
+
+        # Body was injected (loaded via the soft-eviction disk fallback).
+        assert len(enqueued) == 1
+        assert 'Successfully loaded 1 skill(s)' in out
+        # Re-enabled: removed from _disabled_names, status active, persisted to the tmp store.
+        assert 'rr-a' not in m._disabled_names
+        with m._metrics_lock:
+            assert m._metrics['rr-a']['status'] == 'active'
+        store = _read_store(m._metrics_file)
+        assert store['skills']['rr-a']['status'] == 'active'
+        assert 'Re-enabled (was disabled): rr-a' in out
+
+    def test_load_skill_disabled_non_servable_not_reenabled(self, hermetic_skill_manager, tmp_path):
+        """#2: a disabled skill under INACTIVE/ (non-servable) is NOT re-enabled; it fails."""
+        m = _reenable_manager(hermetic_skill_manager, tmp_path, ('rr-a',))
+        # Move the file to a non-servable one-level-deeper location so the disk fallback can't find it.
+        servable_dir = Path(m._skill_paths[0]) / 'rr-a'
+        inactive_dir = Path(m._skill_paths[0]) / 'INACTIVE' / 'rr-a'
+        inactive_dir.mkdir(parents=True, exist_ok=True)
+        (inactive_dir / 'SKILL.md').write_text((servable_dir / 'SKILL.md').read_text(),
+                                               encoding='utf-8')
+        (servable_dir / 'SKILL.md').unlink()  # delete the servable copy first...
+        servable_dir.rmdir()                  # ...then remove the now-empty servable dir
+
+        ok, _msg = m.disable_skill('rr-a')
+        assert ok
+        m._cache_ttl = 0.0
+        m.discover([m._skill_paths[0]])
+        assert 'rr-a' in m._disabled_names
+
+        inst = SimpleNamespace(_loaded_skill_names=None, agent_class='coder')
+        pool, enqueued = _make_load_pool(m, inst)
+        tool = LoadSkill(agent_pool=pool)
+        out = tool.call({'skill_names': 'rr-a'}, agent_instance_name='Main')
+
+        # Not loadable → failed; status must stay inactive (no false re-enable).
+        assert len(enqueued) == 0
+        assert 'Failed to load' in out
+        assert 'Re-enabled' not in out
+        assert 'rr-a' in m._disabled_names
+        with m._metrics_lock:
+            assert m._metrics['rr-a']['status'] == 'inactive'
+
+    def test_load_skill_reenable_reports_in_output(self, hermetic_skill_manager, tmp_path):
+        """#3: the summary reports the re-enabled name distinctly from the loaded line."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        inst = SimpleNamespace(_loaded_skill_names=None, agent_class='coder')
+        pool, _ = _make_load_pool(m, inst)
+        out = LoadSkill(agent_pool=pool).call({'skill_names': 'rr-a'}, agent_instance_name='Main')
+
+        re_line = next(l for l in out.splitlines() if l.startswith('Re-enabled'))
+        assert 'rr-a' in re_line
+        # The re-enable line is distinct from the loaded line (both present, different wording).
+        assert any('Successfully loaded' in l and 'rr-a' in l for l in out.splitlines())
+
+    def test_load_skill_reenable_independent_of_dedup(self, hermetic_skill_manager, tmp_path):
+        """#4 (O1/E3): re-enable fires even when injection is deduped (already-loaded)."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        # Pre-seed the instance so the body is treated as already injected (dedup path).
+        inst = SimpleNamespace(_loaded_skill_names=['rr-a'], agent_class='coder')
+        pool, enqueued = _make_load_pool(m, inst)
+        out = LoadSkill(agent_pool=pool).call({'skill_names': 'rr-a'}, agent_instance_name='Main')
+
+        # Injection was deduped (no new message), BUT the disabled state was still corrected.
+        assert len(enqueued) == 0
+        assert 'Already loaded (skipped)' in out
+        assert 'Re-enabled (was disabled): rr-a' in out
+        assert 'rr-a' not in m._disabled_names
+        with m._metrics_lock:
+            assert m._metrics['rr-a']['status'] == 'active'
+
+    def test_load_skill_active_skill_unchanged(self, hermetic_skill_manager, tmp_path):
+        """#5 (regression): an active skill loads with no re-enable line; status untouched."""
+        m = _reenable_manager(hermetic_skill_manager, tmp_path, ('rr-a',))
+        assert 'rr-a' not in m._disabled_names
+
+        inst = SimpleNamespace(_loaded_skill_names=None, agent_class='coder')
+        pool, enqueued = _make_load_pool(m, inst)
+        out = LoadSkill(agent_pool=pool).call({'skill_names': 'rr-a'}, agent_instance_name='Main')
+
+        assert len(enqueued) == 1
+        assert 'Successfully loaded 1 skill(s)' in out
+        assert 'Re-enabled' not in out
+        # No metrics entry is created for a never-toggled active skill (enable_skill not called).
+        with m._metrics_lock:
+            assert 'rr-a' not in m._metrics or m._metrics['rr-a'].get('status') != 'inactive'
+
+
+class TestScanSkillsIncludeDisabled:
+    """Part 2 — scan_skills default lists disabled skills; active=True restricts to active."""
+
+    def _scan(self, manager, params):
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+        pool = SimpleNamespace(skill_manager=manager)
+        return ScanSkills(agent_pool=pool).call(params)
+
+    def test_scan_skills_default_includes_disabled_in_production_path(
+            self, hermetic_skill_manager, tmp_path):
+        """#6 (key regression guard): default listing re-surfaces a disabled skill via the REAL
+        _ensure_discovered→discover→get_all_metadata(include_active_only=False) path."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        assert 'rr-a' not in m._skills_registry  # discover dropped it
+
+        out = self._scan(m, {'query': ''})  # default: no `active` param
+        lines = [l for l in out.splitlines() if l.startswith('- **')]
+        rr_line = next((l for l in lines if '**rr-a**' in l), None)
+        assert rr_line is not None, f"disabled skill must appear in default listing; got:\n{out}"
+        assert ' (inactive)' in rr_line
+
+    def test_scan_skills_active_only_excludes_disabled_in_production_path(
+            self, hermetic_skill_manager, tmp_path):
+        """#7: active=True hides the disabled skill on the same real production path."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        assert 'rr-a' not in m._skills_registry
+
+        out = self._scan(m, {'query': '', 'active': True})
+        lines = [l for l in out.splitlines() if l.startswith('- **')]
+        names = [l.split('**')[1] for l in lines]
+        assert 'rr-a' not in names
+
+    def test_get_all_metadata_active_only_flag(self, hermetic_skill_manager, tmp_path):
+        """#8: default includes a disabled skill; include_active_only=True excludes it; dedup holds."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+
+        default_names = {s['name'] for s in m.get_all_metadata()}
+        active_names = {s['name'] for s in m.get_all_metadata(include_active_only=True)}
+        assert 'rr-a' in default_names
+        assert 'rr-a' not in active_names
+
+        # Dedup guard: if a disabled skill is (unrealistically) also kept in the registry, the
+        # default listing must contain it exactly once.
+        m._skills_registry['rr-a'] = {
+            'name': 'rr-a', 'description': 'desc rr-a', 'source': 'system', 'version': '1.0.0',
+        }
+        default_names2 = [s['name'] for s in m.get_all_metadata()]
+        assert default_names2.count('rr-a') == 1
+
+    def test_scan_skills_dna_schema_declares_active(self):
+        """#9: TOOL_METADATA exposes the `active` param and load_skill mentions re-enable."""
+        from agent_cascade.prompts.dna import TOOL_METADATA
+        params = TOOL_METADATA['scan_skills']['parameters']
+        assert 'query' in params
+        assert 'active' in params, 'the `active` range parameter must be visible to the LLM'
+        assert 'disabled' in params['active'].lower() or 'inactive' in params['active'].lower()
+
+        load_desc = TOOL_METADATA['load_skill']['description'].lower()
+        assert 're-activates' in load_desc or 're-enable' in load_desc
 
 
 # ===========================================================================

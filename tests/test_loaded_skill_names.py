@@ -53,6 +53,9 @@ def _make_pool(inst, skill_bodies):
     skill_manager = SimpleNamespace(
         _ensure_discovered=lambda: None,
         load_full_instructions=_load_full,
+        # Stub must expose every attribute the real LoadSkill.call path touches. No skill in
+        # these fixtures is disabled, so this always returns False (mirrors SkillManager).
+        is_skill_disabled=lambda name: False,
     )
     enqueued = []
     pool = SimpleNamespace(
@@ -207,6 +210,8 @@ def _make_self_aug_pool(load_result='SELF-AUG-BODY', load_skill_mode='AUTO'):
     skill_manager = SimpleNamespace(
         _ensure_discovered=lambda: None,
         load_full_instructions=lambda name: load_result if name == 'self-augmentation' else None,
+        # Stub must expose every attribute the real LoadSkill.call path touches (see _make_pool).
+        is_skill_disabled=lambda name: False,
     )
     return SimpleNamespace(
         settings=SimpleNamespace(default_load_skill_mode=load_skill_mode),

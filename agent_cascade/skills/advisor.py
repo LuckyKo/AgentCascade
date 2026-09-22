@@ -74,8 +74,9 @@ def build_skill_advisor_prompt(
         logger.warning('[SKILL-ADVISOR] _ensure_discovered failed (using cached list): %s', e)
 
     # Build (sort_key, name, line) tuples; sort by average rating desc, unrated last, name asc tiebreak.
+    # Registry-only (active) skills: the advisor must not suggest disabled/inactive skills.
     entries = []
-    for meta in skill_manager.get_all_metadata():
+    for meta in skill_manager.get_all_metadata(include_active_only=True):
         name = (meta.get('name') or '').strip()
         if not name or name.lower() == _SELF_AUGMENTATION:
             continue

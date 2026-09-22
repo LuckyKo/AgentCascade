@@ -596,6 +596,14 @@ class SkillManager:
             return {str(name).lower() for name, m in self._metrics.items()
                     if isinstance(m, dict) and m.get('status') == 'inactive'}
 
+    def is_skill_disabled(self, name: str) -> bool:
+        """Return True if the skill (by any casing) is currently disabled/inactive.
+
+        Public accessor for ``_disabled_names`` so tools (e.g. ``load_skill``) can check a
+        skill's enabled state without reaching into a private field.
+        """
+        return str(name).lower() in self._disabled_names
+
     def list_skills_with_status(self) -> List[Dict[str, Any]]:
         """Union of registry skills + inactive metrics entries, with status fields.
 
@@ -1319,7 +1327,8 @@ class SkillManager:
     def _rebuild_index(self) -> None:
         """Rebuild the SkillMatcher inverted index from current registry."""
         try:
-            metadata = self.get_all_metadata()
+            # Registry-only (active) skills — disabled skills must not enter the match index.
+            metadata = self.get_all_metadata(include_active_only=True)
             self._matcher.build_index(metadata)
         except Exception as e:
             logger.debug('[SKILLS] Failed to rebuild matcher index: %s', e)
@@ -1380,14 +1389,25 @@ class SkillManager:
                 self._rebuild_index()
             return self._matcher.match(query)
 
-    def get_all_metadata(self) -> List[Dict[str, Any]]:
-        """Return all Tier 1 metadata (for scan_skills tool).
+    def get_all_metadata(self, include_active_only: bool = False) -> List[Dict[str, Any]]:
+        """Return Tier 1 metadata for the scan_skills tool.
 
         Returns a list of dicts with 'name', 'description', and 'chars' keys, suitable
         for display or matching. Internal fields (_priority, _parsed_data) are excluded.
+
+        ``include_active_only`` (default False): when False (the default) the result is the
+        FULL listing — every active registry skill PLUS any disabled/inactive skill that still
+        has a servable on-disk file (in production these are absent from the registry because
+        ``discover()`` drops them, so they must be re-surfaced here). When True only the active
+        registry skills are returned.
+
+        NOTE: existing callers (advisor.py, propose_skill.py, _rebuild_index) rely on the
+        pre-change behavior of "registry-only". They now pass ``include_active_only=True`` to
+        keep that exact behavior — see those call sites.
         """
         with self._write_lock:
             result = []
+            present = set()
             for name, data in self._skills_registry.items():
                 parsed = data.get('_parsed_data')
                 body_len = len(parsed.get('body', '')) if parsed else 0
@@ -1399,7 +1419,36 @@ class SkillManager:
                     'version': data.get('version', '1.0.0'),
                     'chars': body_len,
                 })
-            return result
+                present.add(str(data.get('name', name)).lower())
+        if not include_active_only:
+            # Append disabled/inactive skills that still have a servable on-disk file so the
+            # default listing is complete. Dedup by lowercase name to avoid the test-fixture
+            # case where a disabled skill is manually kept in the registry. Disk reads happen
+            # OUTSIDE the registry lock (only the snapshot above is under _write_lock);
+            # _servable_skill_names/_find_servable_skill_path do no locking and read
+            # _disabled_names as a plain set (consistent with scan_skills).
+            disabled = {n.lower() for n in self._disabled_names}
+            servable = self._servable_skill_names()  # one-level walk, NO disabled filter
+            for nm in sorted(servable):
+                if nm in present or nm not in disabled:
+                    continue
+                path = self._find_servable_skill_path(nm)
+                if path is None:
+                    continue
+                try:
+                    parsed = parse_skill_file(path)
+                except (FileNotFoundError, OSError):
+                    continue
+                fm = parsed.get('frontmatter', {})
+                result.append({
+                    'name': nm,
+                    'description': fm.get('description', ''),
+                    'triggers': fm.get('triggers', []),
+                    'source': fm.get('source', 'system'),
+                    'version': parsed.get('version', '1.0.0'),
+                    'chars': len(parsed.get('body', '')),
+                })
+        return result
 
     def get_metrics(self, skill_name: Optional[str] = None) -> Dict[str, Any]:
         """Return activation metrics.
