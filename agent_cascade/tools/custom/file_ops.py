@@ -909,8 +909,6 @@ class WriteFile(BaseTool, PathResolutionMixin):
     def call(self, params: str, **kwargs) -> str:
         import re
 
-        from agent_cascade.utils.utils import extract_code
-
         # --- Robust Fallback for Non-JSON Input ---
         # Handles the case where the model emits "path\n```code```" instead of JSON
         if isinstance(params, str) and not params.strip().startswith('{'):
@@ -932,12 +930,9 @@ class WriteFile(BaseTool, PathResolutionMixin):
         content = params_json.get('content', '')
         justification = params_json.get('justification', '')
 
-        # Only strip markdown wrappers if content looks like it was JSON-embedded
-        # (i.e., starts with ``` — this is a legacy fallback for when XML extraction
-        # didn't happen and the model put a code block inside the JSON string)
-        if isinstance(content, str) and content.strip().startswith('```'):
-            content = extract_code(content)
-
+        # Content is written exactly as delivered (raw parsed value). A leading ``` fence
+        # is legitimate content and must be preserved. The legacy "path\n```code```"
+        # non-JSON case is handled by the fallback path above.
         agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.write_file(
             path=path,
@@ -995,8 +990,6 @@ class EditFile(BaseTool, PathResolutionMixin):
         self.agent_name = kwargs.get('agent_name')
 
     def call(self, params: str, **kwargs) -> str:
-        from agent_cascade.utils.utils import extract_code
-
         # Normalize legacy parameter names to current schema
         try:
             if isinstance(params, str):
@@ -1028,11 +1021,8 @@ class EditFile(BaseTool, PathResolutionMixin):
         if not new_content and params_json.get('new_string'):
             new_content = params_json.get('new_string')
 
-        # Only strip markdown wrappers as a legacy fallback (when content was
-        # JSON-embedded instead of XML-extracted)
-        if new_content and isinstance(new_content, str) and new_content.strip().startswith('```'):
-            new_content = extract_code(new_content)
-
+        # new_content is used exactly as delivered (raw parsed value). A leading ``` fence
+        # is legitimate content and must be preserved.
         if not path:
             return "ERROR: Missing 'path'."
 
