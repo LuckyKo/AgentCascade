@@ -417,6 +417,18 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                     logger.debug('Async registry resize skipped (missing or failed, non-critical)')
             except Exception as e:
                 logger.debug(f"Async registry restart (non-critical): {e}")
+            # Restart the memory-hint worker on resume — it was stopped by the value=True
+            # branch above. Without this, every stop→resume cycle permanently kills the
+            # daemon thread and no further hints are ever delivered until a full process
+            # restart (todo162). start() is now liveness-aware: idempotent if somehow still
+            # alive, revives it if dead. Mirrors the idle-checker restart above. Best-effort:
+            # never block resume on the hint system.
+            try:
+                if self.memory_hint_manager is not None and (self.llm_cfg or {}).get('memory_hint_enabled', False):
+                    self.memory_hint_manager.start()
+                    logger.debug('Memory-hint worker restarted on resume')
+            except Exception as e:
+                logger.debug(f"Memory-hint manager restart (non-critical): {e}")
             logger.debug('Stopped flag cleared — ready for new execution')
 
     def _update_child_relationship(self, parent_name: str, child_name: str, add: bool = True) -> None:

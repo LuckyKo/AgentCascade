@@ -310,3 +310,139 @@ class TestMemoryHintE2E:
         assert 'docker-best-practices' in hint
         # The memory lesson still rides the SAME single message (combined hint).
         assert 'compression-debug.md' in hint
+
+
+class TestMemoryHintPoolStopResume:
+    """E2E regression (todo162): the memory-hint worker must SURVIVE a real pool
+    stop→resume cycle. This drives a REAL ``AgentPool`` through the exact resume
+    sequence ws_handlers.py performs (``stopped = True`` → ``stopped = False``) and
+    asserts hints keep flowing afterwards.
+
+    Pre-fix: the value=True branch called ``memory_hint_manager.stop()`` (worker dies),
+    and the value=False branch never re-called ``start()`` — so the second job was never
+    processed and this test FAILED. Post-fix: resume revives the worker → PASSES.
+    """
+
+    @staticmethod
+    def _make_pool_instance():
+        """A minimal AgentInstance (via __new__) exposing only what the hint path needs."""
+        inst = AgentInstance.__new__(AgentInstance)
+        inst.instance_name = 'w'
+        inst.agent_class = 'test_agent'
+        inst.state = AgentState.RUNNING  # not SLEEPING → hint is allowed to fire
+        inst._compression_lock = threading.RLock()
+        inst._tool_warnings = []
+        inst._memories_read = set()
+        inst._recently_hinted = {}
+        inst._last_memory_hint_turn = -1
+        inst._recently_skill_hinted = {}
+        inst._last_skill_hint_turn = -1
+        # parent_instance: the idle checker reads it for every registered instance; a
+        # __new__ instance lacks dataclass defaults, so set it to keep the (unrelated)
+        # idle-checker thread from logging AttributeError noise during the test.
+        inst.parent_instance = None
+        return inst
+
+    @staticmethod
+    def _wait_for_delivery(inst, timeout=4.0):
+        """Bounded polling for a tool-warning delivery (no fixed sleeps → no flakes)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if inst._tool_warnings:
+                return True
+            time.sleep(0.02)
+        return bool(inst._tool_warnings)
+
+    def test_memory_hint_survives_pool_stop_resume_cycle(self, tmp_path):
+        """Submit a job (delivered), drive pool.stopped=True then =False (the exact resume
+        sequence), submit another job → it must STILL be delivered. FAILS pre-fix."""
+        from agent_cascade.agent_pool import AgentPool
+
+        # A real vault with two DISJOINT-topic lessons. Job 1 matches compression-debug;
+        # job 2 (post stop→resume) matches skill-creator-notes — a lesson NOT hinted by
+        # job 1, so the per-memory cooldown can't suppress it and delivery is purely a
+        # function of worker liveness (the regression under test).
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        _write_lesson(v, 'compression-debug.md', 'Compression Debug',
+                      'How to debug compression hangs in the engine loop daemon thread lock ordering',
+                      'Debugging a compression hang in the engine loop: check the daemon '
+                      'thread and lock ordering first.')
+        _write_lesson(v, 'skill-creator-notes.md', 'Skill Creator Notes',
+                      'Notes on writing reusable skills with frontmatter tags body section',
+                      'Skills need a name description tags and a clear body section.')
+
+        llm_cfg = {
+            'model': 'mock',
+            'api_base': 'http://127.0.0.1:9/v1',
+            'model_server': 'http://127.0.0.1:9/v1',
+            'api_key': 'EMPTY',
+            'memory_hint_enabled': True,
+            'memory_hint_max_entries': 3,
+            'memory_hint_cooldown_seconds': 600,
+            'memory_hint_query_chars': 1000,
+        }
+        # Empty agents dir → _discover_agents is a no-op; no real LLM/agents involved.
+        pool = AgentPool(llm_cfg, agents_dir=str(tmp_path / 'agents'))
+
+        # Point vault discovery at our temp vault (base_dir + extra RW folders).
+        om = SimpleNamespace(base_dir=str(v.parent), extra_work_folders_ro=[], extra_work_folders_rw=[])
+        pool.operation_manager = om
+
+        # A real (hermetic) SkillManager so the skill sub-pipeline runs on real code.
+        from tests.conftest import make_hermetic_skill_manager
+        pool.skill_manager = make_hermetic_skill_manager(tmp_path)
+
+        # Stop the idle checker BEFORE registering our minimal instance so its loop
+        # never touches it (keeps the test focused on the hint worker + clean logs).
+        try:
+            pool._idle.stop()
+        except Exception:  # noqa: BLE001 — best-effort; irrelevant to the assertion
+            pass
+
+        # Register a live instance the manager can resolve via pool.get_instance().
+        inst = self._make_pool_instance()
+        with pool._pool_lock:
+            pool.instances[inst.instance_name] = inst
+
+        mgr = pool.memory_hint_manager
+        assert mgr is not None, 'memory_hint_enabled=True must create the manager in __init__'
+        # Ensure the worker + index are up (mirrors __init__ when enabled).
+        mgr.rescan_vaults()
+        mgr.start()
+
+        query1 = 'debugging a compression hang in the engine loop daemon thread lock ordering'
+
+        # ── Job 1: before any stop/resume — must be delivered. ────────────────
+        mgr.submit(inst.instance_name, query1, inst.agent_class, turn=1)
+        assert self._wait_for_delivery(inst), 'job 1 (pre-cycle) must be delivered'
+        assert '[MEMORY HINT]' in inst._tool_warnings[0]
+
+        # ── The EXACT resume sequence ws_handlers.py:441/449 performs. ─────────
+        pool.stopped = True    # → memory_hint_manager.stop() (worker dies)
+        pool.stopped = False   # → resume: must re-start the worker (the fix)
+
+        # Give the stopped worker a moment to observe its sentinel and exit, so the
+        # respawn assertion below is meaningful. Bounded — no fixed long sleep.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and mgr._worker is not None and mgr._worker.is_alive():
+            time.sleep(0.01)
+
+        # ── Job 2: after the cycle — must STILL be delivered (the regression). ─
+        # A DIFFERENT query matching a lesson job 1 never hinted, so cooldown can't mask
+        # worker liveness. Pre-fix the dead worker delivers nothing → this assertion fails.
+        inst._tool_warnings.clear()
+        query2 = 'writing reusable skills with frontmatter tags body section'
+        mgr.submit(inst.instance_name, query2, inst.agent_class, turn=2)
+        assert self._wait_for_delivery(inst), (
+            'job 2 (post stop→resume) was never delivered — the memory-hint worker died '
+            'on resume and was not restarted (pre-fix signature: start() after stop() no-op)'
+        )
+        assert '[MEMORY HINT]' in inst._tool_warnings[0]
+
+        # Teardown: stop background threads so they don't linger across tests.
+        try:
+            pool.stopped = True
+            mgr.stop()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass

@@ -125,14 +125,24 @@ class MemoryHintManager:
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Lazily start the daemon worker (idempotent)."""
+        """Start the daemon worker.
+
+        Idempotent while the worker is alive, but able to RESPAWN a dead one. The
+        original implementation guarded purely on ``self._started`` — once set, a later
+        ``start()`` was a no-op even after the thread had died (e.g. a pool stop→resume
+        cycle calls :meth:`stop` and never brings the worker back). Now we also check
+        liveness: if the flag is set but the thread object is gone or not alive, reset
+        state and spawn a fresh thread. This makes ``start()`` safe to call repeatedly —
+        idempotent when alive, reviving when dead. Guarded by ``_start_lock`` so the
+        liveness check + respawn are atomic under concurrent calls (plan §2.1/§2.3).
+        """
         with self._start_lock:
-            if self._started:
-                return
+            if self._started and self._worker is not None and self._worker.is_alive():
+                return  # already running — idempotent no-op
+            # Dead (or never started): reset state and respawn a fresh worker.
             self._started = True
-            t = threading.Thread(target=self._run, name='memory-hint-worker', daemon=True)
-            self._worker = t
-            t.start()
+            self._worker = threading.Thread(target=self._run, name='memory-hint-worker', daemon=True)
+            self._worker.start()
 
     def stop(self) -> None:
         """Best-effort stop (daemon threads die with the process anyway)."""
@@ -141,6 +151,11 @@ class MemoryHintManager:
             self._job_queue.put_nowait(None)
         except Exception:  # noqa: BLE001
             pass
+        # Reset the lifecycle flag so a later start() is NOT blocked by the stale
+        # ``_started`` flag (see :meth:`start` liveness check). The thread object is left
+        # as-is — start()'s ``is_alive()`` check decides whether to respawn.
+        with self._start_lock:
+            self._started = False
 
     # ── Producer (turn-loop hook) ────────────────────────────────────────────
 

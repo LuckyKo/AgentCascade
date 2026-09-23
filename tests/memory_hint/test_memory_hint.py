@@ -1133,6 +1133,262 @@ class TestManagerSkillHints:
         assert inst._tool_warnings == []
 
 
+# ── Worker lifecycle: respawn after stop (todo162 regression) ───────────────
+#
+# The memory-hint worker is a single bare daemon thread with NO supervisor. It was
+# started once in pool init and permanently killed by any pool stop→resume cycle
+# (stop() sent a sentinel the worker broke on; start() was idempotent via the stale
+# _started flag, so it never respawned). These tests encode the fix contract:
+# start() must be idempotent while alive AND able to revive a dead worker.
+
+def _wait_until(pred, timeout=3.0, interval=0.01):
+    """Bounded polling helper (no fixed sleeps) — avoids flaky thread-timing asserts."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(interval)
+    return bool(pred())
+
+
+class TestWorkerRestart:
+    """start()/stop() lifecycle of the daemon worker (real manager, stub pool)."""
+
+    @staticmethod
+    def _make_mgr(tmp_path):
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        # Two DISJOINT-topic lessons: each is a clear winner for its own query. The
+        # compression lesson is hinted by job 1; the skill-creator lesson is reserved
+        # for job 2 (post stop→start) so it is NOT in cooldown and must be delivered —
+        # proving the respawned worker actually processes new jobs.
+        _write_lesson(v, 'compression-debug.md', 'Compression Debug',
+                      'How to debug compression hangs in the engine loop',
+                      'When compression hangs check the daemon thread and lock ordering.')
+        _write_lesson(v, 'skill-creator-notes.md', 'Skill Creator Notes',
+                      'Notes on writing reusable skills with frontmatter',
+                      'Skills need a name description tags and a clear body section.')
+        inst = _FakeInst()
+        pool = MagicMock()
+        pool.llm_cfg = {'memory_hint_enabled': True,
+                        'memory_hint_max_entries': 3,
+                        'memory_hint_cooldown_seconds': 600,
+                        'memory_hint_query_chars': 1000}
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+        return mgr, inst
+
+    @staticmethod
+    def _hint_worker_threads():
+        """Count live threads named 'memory-hint-worker' (guards against double-spawn)."""
+        import threading as _t
+        return [th for th in _t.enumerate() if th.name == 'memory-hint-worker' and th.is_alive()]
+
+    def test_start_is_idempotent_when_alive(self, tmp_path):
+        """Calling start() twice while the worker is alive spawns exactly ONE thread."""
+        mgr, _ = self._make_mgr(tmp_path)
+        mgr.start()
+        assert mgr._worker is not None and mgr._worker.is_alive(), 'first start() must spawn a live worker'
+        first = mgr._worker
+        mgr.start()  # idempotent — must NOT spawn a second thread
+        assert mgr._worker is first, 'idempotent start() must keep the same (alive) worker object'
+        assert len(self._hint_worker_threads()) == 1, \
+            f'expected exactly one live memory-hint-worker thread, got {len(self._hint_worker_threads())}'
+        mgr.stop()
+
+    def test_stop_then_start_respawns_worker(self, tmp_path):
+        """After stop() the worker thread dies; a later start() spawns a NEW live worker."""
+        mgr, inst = self._make_mgr(tmp_path)
+        mgr.start()
+        # Submit one job and wait for delivery to prove the first worker is functional.
+        mgr.submit('w', 'debugging a compression hang in the engine loop', 'test_agent', turn=1)
+        assert _wait_until(lambda: len(inst._tool_warnings) >= 1), \
+            'first worker must deliver a hint before we stop it'
+        first = mgr._worker
+        mgr.stop()
+        # The sentinel makes the worker break out of its loop → thread dies.
+        assert _wait_until(lambda: not first.is_alive()), \
+            'stopped worker thread should no longer be alive'
+        # A later start() must RESPAWN a fresh, live worker (the fix contract).
+        mgr.start()
+        assert mgr._worker is not None and mgr._worker is not first, \
+            'start() after stop() must spawn a NEW worker object'
+        assert mgr._worker.is_alive(), 'respawned worker must be alive'
+        mgr.stop()
+
+    def test_start_after_stop_processes_new_jobs(self, tmp_path):
+        """LOAD-BEARING regression test (todo162): start→stop→start, then a fresh job
+        MUST still be delivered. Pre-fix the re-start was a no-op (stale _started flag)
+        so the worker stayed dead and the job was never processed → this FAILS pre-fix."""
+        mgr, inst = self._make_mgr(tmp_path)
+        mgr.start()
+        # Establish the first worker is functional: submit + wait for delivery.
+        mgr.submit('w', 'debugging a compression hang in the engine loop', 'test_agent', turn=1)
+        assert _wait_until(lambda: len(inst._tool_warnings) >= 1), \
+            'first worker must deliver before the stop→resume cycle'
+        # The exact resume sequence: stop() then start().
+        mgr.stop()
+        assert _wait_until(lambda: not mgr._worker.is_alive()), 'worker should be dead after stop()'
+        mgr.start()
+        assert mgr._worker is not None and mgr._worker.is_alive(), \
+            'start() after stop() must leave a live worker (fix)'
+        # Fresh job AFTER the cycle — this is what was silently dropped pre-fix. Use a
+        # DIFFERENT query so it matches a lesson that job 1 never hinted (otherwise the
+        # per-memory cooldown would suppress the second delivery regardless of worker
+        # liveness). A dead worker delivers NOTHING; a live one delivers this new match.
+        inst._tool_warnings.clear()
+        mgr.submit('w', 'writing reusable skills with frontmatter tags body section',
+                   'test_agent', turn=2)
+        assert _wait_until(lambda: len(inst._tool_warnings) >= 1), \
+            ('job submitted after stop→start was never delivered — worker is dead '
+             '(pre-fix signature: start() after stop() was a no-op)')
+        mgr.stop()
+
+
+# ── Skill sub-pipeline with a REAL hermetic SkillManager (not MagicMock) ─────
+#
+# The existing TestManagerSkillHints injects a MagicMock skill manager, so the real
+# match_skills() disk-walk / lock / parse path is never exercised. These tests drive
+# _process_job against a REAL hermetic SkillManager (shared factory in tests/conftest.py)
+# with on-disk SKILL.md files, closing that logic gap.
+
+class TestSkillSubpipelineRealManager:
+    """_process_job skill gate against a real SkillManager + real on-disk skills."""
+
+    @staticmethod
+    def _write_skill(root: Path, name: str, description: str) -> None:
+        d = root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: {description}\ntriggers:\n  - test\n---\n# Body\n',
+            encoding='utf-8')
+
+    def _make_mgr(self, tmp_path, lessons, query, skill_manager=None):
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        for rel, name, desc, body in lessons:
+            _write_lesson(v, rel, name, desc, body)
+        inst = _FakeInst()
+        pool = MagicMock()
+        pool.llm_cfg = {'memory_hint_enabled': True,
+                        'memory_hint_max_entries': 3,
+                        'memory_hint_cooldown_seconds': 600,
+                        'memory_hint_query_chars': 1000}
+        pool.skill_manager = skill_manager
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+        job = {'instance_name': 'w', 'query': query,
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        return mgr, inst, job
+
+    def test_skill_subpipeline_real_skillmanager_delivers(self, tmp_path):
+        """A REAL hermetic SkillManager with an active + a disabled on-disk skill:
+        a strong query delivers the ACTIVE skill hint and EXCLUDES the disabled one.
+        Exercises the real match_skills() disk-walk / lock / parse path."""
+        from tests.conftest import make_hermetic_skill_manager
+
+        sm = make_hermetic_skill_manager(tmp_path)
+        skills_root = tmp_path / 'skills'
+        # Active skill: description overlaps the query → strong keyword-fraction score.
+        self._write_skill(skills_root, 'docker-best-practices',
+                          'Docker container networking and image build best practices')
+        # Disabled skill: also matches the query, but must be excluded from results.
+        self._write_skill(skills_root, 'kubernetes-deploy-notes',
+                          'Kubernetes deployment rollout and scaling notes')
+        sm.discover([skills_root])
+        ok, _ = sm.disable_skill('kubernetes-deploy-notes')
+        assert ok, 'disable_skill must succeed on a discovered skill'
+
+        # Sanity: the real matcher sees BOTH skills (full index) but the public API
+        # filters out the disabled one — this is exactly what the hint gate consumes.
+        raw = sm.match_skills('docker container networking best practices', include_inactive=True)
+        assert any(n == 'docker-best-practices' for n, _ in raw), f'active skill not matched: {raw}'
+        public = sm.match_skills('docker container networking best practices')
+        assert any(n == 'docker-best-practices' for n, _ in public), \
+            f'docker-best-practices missing from active results: {public}'
+        assert all(n != 'kubernetes-deploy-notes' for n, _ in public), \
+            f'disabled skill must be excluded from active results: {public}'
+
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'docker container networking best practices', skill_manager=sm)
+        mgr._process_job(job)  # must not raise; real match_skills runs under _write_lock
+        assert len(inst._tool_warnings) == 1, f'expected a hint, got {inst._tool_warnings!r}'
+        hint = inst._tool_warnings[0]
+        assert '[MEMORY HINT]' in hint
+        assert 'Skills you may want to load' in hint
+        assert 'docker-best-practices' in hint
+        # The disabled skill must NOT be suggested.
+        assert 'kubernetes-deploy-notes' not in hint
+        # Cooldown recorded for the delivered (active) skill only.
+        assert 'docker-best-practices' in inst._recently_skill_hinted
+        assert 'kubernetes-deploy-notes' not in inst._recently_skill_hinted
+
+    def test_skill_subpipeline_real_manager_parse_error_isolated(self, tmp_path):
+        """A REAL hermetic SkillManager whose parse_skill_file raises a non-OSError:
+        _process_job still completes, the worker stays alive, and memory-only hints
+        still deliver. Guards the narrow-except latent issue without touching prod code."""
+        from unittest.mock import patch
+        # parse_skill_file is a module-level function imported into manager.py's namespace —
+        # patch it THERE (the call site), not as a SkillManager method.
+        from agent_cascade.skills import manager as _skill_manager_mod
+        from tests.conftest import make_hermetic_skill_manager
+
+        sm = make_hermetic_skill_manager(tmp_path)
+        # Plant a valid active skill so the index is non-trivial, then force parse to fail.
+        skills_root = tmp_path / 'skills'
+        self._write_skill(skills_root, 'docker-best-practices',
+                          'Docker container networking and image build best practices')
+        sm.discover([skills_root])
+
+        lessons = [
+            ('compression-debug.md', 'Compression Debug',
+             'How to debug compression hangs in the engine loop',
+             'When compression hangs check the daemon thread and lock ordering.'),
+            # Second disjoint-topic lesson: reserved for the "worker stays alive" re-check
+            # below (a fresh, non-cooldown query) so cooldown can't mask continued processing.
+            ('skill-creator-notes.md', 'Skill Creator Notes',
+             'Notes on writing reusable skills with frontmatter',
+             'Skills need a name description tags and a clear body section.'),
+        ]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, lessons, 'debugging a compression hang in the engine loop', skill_manager=sm)
+
+        # Force parse_skill_file to raise a NON-OSError (the narrow except only catches
+        # FileNotFoundError/OSError) on the servable-surface disk read.
+        def _boom(path):
+            raise ValueError('simulated non-OSError parse failure')
+
+        with patch.object(_skill_manager_mod, 'parse_skill_file', side_effect=_boom):
+            mgr._process_job(job)  # must NOT propagate — memory path is independent (plan §D6)
+
+        assert len(inst._tool_warnings) == 1, \
+            f'memory-only hint must still deliver despite the skill parse error: {inst._tool_warnings!r}'
+        hint = inst._tool_warnings[0]
+        assert '[MEMORY HINT]' in hint
+        assert 'compression-debug.md' in hint
+        # No skill section was produced (the real match path failed / returned nothing).
+        assert 'Skills you may want to load' not in hint
+
+        # The worker loop itself is unaffected: a FRESH, non-cooldown job still processes
+        # cleanly. Use a different query (skill-creator-notes) so the compression lesson's
+        # cooldown from the first job can't mask whether processing continued.
+        inst._tool_warnings.clear()
+        fresh_job = dict(job)
+        fresh_job['query'] = 'writing reusable skills with frontmatter tags body section'
+        with patch.object(_skill_manager_mod, 'parse_skill_file', side_effect=_boom):
+            mgr._process_job(fresh_job)  # must not raise; worker keeps processing
+        assert len(inst._tool_warnings) >= 1, 'worker must stay alive and keep processing after the error'
+
+
 # ── 5. Instance reset helper + defaults ─────────────────────────────────────
 
 class TestInstanceReset:
