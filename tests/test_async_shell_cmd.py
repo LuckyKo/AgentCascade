@@ -668,6 +668,23 @@ class TestOptionalJustification:
         # The concrete pid must be embedded in the helper so `pid` resolves to it.
         assert 'pid = 12345' in helper
 
+    def test_windows_ctrl_c_rejects_invalid_pid(self):
+        """Defense-in-depth: _send_windows_ctrl_c must short-circuit on a zero/invalid
+        pid and NEVER build/run the helper subprocess that would call
+        GenerateConsoleCtrlEvent with group 0 (a whole-console broadcast that kills AC).
+
+        Mirrors the fake-subprocess pattern above so we can assert no subprocess is
+        spawned at all for an invalid pid.
+        """
+        from agent_cascade.async_shell_pkg import windows as _win_mod
+
+        def _fake_run(cmd, *args, **kwargs):
+            raise AssertionError('subprocess.run must NOT be called for an invalid pid')
+
+        with patch.object(_win_mod.subprocess, 'run', side_effect=_fake_run):
+            assert _win_mod._send_windows_ctrl_c(0) is False
+            assert _win_mod._send_windows_ctrl_c(-1) is False
+
     def test_heartbeat_update_without_justification(self, shell_cmd_tool):
         tracker = self._tracker_with_task(tool_id=4, heartbeat_interval=10.0)
         _make_tool_with_tracker(shell_cmd_tool, tracker)
@@ -773,6 +790,19 @@ class TestOptionalJustification:
             result = shell_cmd_tool.call('{"command": "ls -la", "justification": "listing files"}')
             mock_exec.assert_called_once()
             assert 'file1' in result
+
+    def test_sync_control_command_without_tool_id_rejected(self, shell_cmd_tool):
+        """Regression: a control command issued in sync mode WITHOUT tool_id must be
+        rejected (same as the async branch), not fall through to real shell execution.
+        Before the fix, `shell_cmd(command="__kill")` with no tool_id ran `__kill` as a
+        literal shell command."""
+        _make_tool_with_tracker(shell_cmd_tool, MagicMock())
+        with patch.object(shell_cmd_tool, '_execute_sync') as mock_exec:
+            result = shell_cmd_tool.call(
+                '{"command": "__kill", "execution_mode": "sync", "justification": "test"}'
+            )
+        assert 'requires a tool_id' in result
+        mock_exec.assert_not_called()
 
     def test_async_launch_without_justification_raises(self, shell_cmd_tool, mock_tracker):
         _make_tool_with_tracker(shell_cmd_tool, mock_tracker)

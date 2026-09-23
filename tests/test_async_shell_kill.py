@@ -145,6 +145,44 @@ class TestKillTaskWithMockedProcess:
 
         assert 'No running shell found' in result
 
+    # ── Dead-shell (non-existent tool_id) coverage for ALL control commands ──
+    # Regression: every control method must return the graceful dead-shell message
+    # for a non-existent ID and never touch an OS kill/ctrl helper.
+
+    def test_ctrl_c_nonexistent_task(self):
+        """send_ctrl_c returns error for nonexistent task and never calls the Windows ctrl helper."""
+        tracker = AsyncShellTracker(pool=None)
+
+        with patch('agent_cascade.async_shell_pkg.windows._send_windows_ctrl_c') as mock_ctrl:
+            result = tracker.send_ctrl_c('test_agent', 999)
+
+        assert 'No running shell found' in result
+        mock_ctrl.assert_not_called()
+
+    def test_get_status_nonexistent_task(self):
+        """get_status returns error for nonexistent task."""
+        tracker = AsyncShellTracker(pool=None)
+
+        result = tracker.get_status('test_agent', 999)
+
+        assert 'No running shell found' in result
+
+    def test_update_heartbeat_nonexistent_task(self):
+        """update_heartbeat returns error for nonexistent task."""
+        tracker = AsyncShellTracker(pool=None)
+
+        result = tracker.update_heartbeat('test_agent', 999, 5.0)
+
+        assert 'No running shell found' in result
+
+    def test_send_input_nonexistent_task(self):
+        """send_input returns error for nonexistent task."""
+        tracker = AsyncShellTracker(pool=None)
+
+        result = tracker.send_input('test_agent', 999, 'echo hi')
+
+        assert 'No running shell found' in result
+
 
 # ============================================================================
 # kill_task integration tests (real processes)

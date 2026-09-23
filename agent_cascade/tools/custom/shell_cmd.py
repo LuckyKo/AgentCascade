@@ -286,6 +286,10 @@ class ShellCmd(BaseTool):
             )
 
         # ── Sync mode (default): blocking execution ────────────────
+        # Mirror the async-branch guard: a control command without tool_id must not
+        # fall through to real shell execution (e.g. `__kill` would run as a literal).
+        if command in ShellMixin._CONTROL_COMMANDS or command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX):
+            return f"[shell_cmd] Control command '{command}' requires a tool_id. Launch a shell first, then use the returned tool_id."
         return self._execute_sync(
             agent_name=agent_name,
             command=command,

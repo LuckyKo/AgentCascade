@@ -40,6 +40,11 @@ def _send_windows_ctrl_c(pid: int) -> bool:
         True if Ctrl+C was sent successfully, False on failure.
     """
     import sys as _sys
+    if not pid or pid <= 0:
+        # A zero/invalid group ID would broadcast Ctrl+C to the whole shared console
+        # and kill the Agent Cascade server. Refuse rather than risk a regression.
+        print(f"_send_windows_ctrl_c: refusing invalid pid={pid!r} (would broadcast to console)", file=_sys.stderr)
+        return False
     # Launch helper that attaches to target's console and sends CTRL_C_EVENT
     # Uses a proper no-op handler so the helper itself doesn't get killed by Ctrl+C
     helper_code = f"""
