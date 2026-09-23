@@ -135,12 +135,30 @@ class FailingStreamLLM(BaseChatModel):
 
 
 def make_router(default_llm_cfg=None):
-    """Create an APIRouter instance with minimal default config."""
+    """Create an APIRouter instance with minimal default config.
+
+    Isolation: ``APIRouter.__init__`` loads persisted state (agent_priorities, endpoint
+    cooldowns, etc.) from ``config/api_endpoints.json`` — the shared per-session temp dir
+    under xdist. Prior tests in this file register 'coder' priorities and mark endpoints as
+    failed, so a fresh router here would INHERIT that state: e.g. a test that only calls
+    ``add_endpoint()`` (without ``set_agent_priorities``) silently resolves to the Tier-4
+    default fallback instead of its own endpoint, making per-endpoint retry/backoff counts
+    nondeterministic. Wipe the persisted file before construction so every router in this
+    module starts from a clean slate regardless of what other tests did earlier in the
+    same worker process.
+    """
     cfg = default_llm_cfg or {
         'model': 'default-model',
         'api_base': 'http://localhost:1111/v1',
         'model_type': 'qwenvl_oai',
     }
+    import os
+    from pathlib import Path
+    test_config_dir = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
+    if test_config_dir:
+        stale = Path(test_config_dir) / 'api_endpoints.json'
+        if stale.exists():
+            stale.unlink()
     return APIRouter(default_llm_cfg=cfg)
 
 
