@@ -28,6 +28,23 @@ def _path_is_contained_cached(path_str: str, container_str: str) -> bool:
         return False
 
 
+# ─── Path normalization helpers ─────────────────────────────────────────────
+
+
+def _normalize_separators(path: str) -> str:
+    """Normalize backslash path separators to forward slashes.
+
+    pathlib accepts '/' on every platform (``WindowsPath('a/b') == WindowsPath('a\\b')``), so this
+    makes downstream resolution platform-independent. Pure string transform — no filesystem access,
+    safe to unit-test in isolation on any OS.
+
+    No-op for inputs that contain no backslashes (forward-slash / relative / absolute). It does NOT
+    weaken containment: it runs before resolution and the ``commonpath``-based containment check is
+    applied to the fully-resolved path regardless of separator form (UNC and ``..`` escapes stay blocked).
+    """
+    return path.replace('\\', '/')
+
+
 # ─── Thread-local instance name helpers ───────────────────────────────────
 
 
@@ -163,6 +180,11 @@ class PathSecurityMixin:
         # Resolve instance name: explicit param > thread-local > None
         if instance_name is None:
             instance_name = _get_current_instance_name()
+
+        # Normalize backslash separators to forward slashes so the virtual-prefix guards and the
+        # absolute check below behave identically on Windows and POSIX. No-op for inputs without
+        # backslashes; does not weaken containment (see _normalize_separators).
+        path = _normalize_separators(path)
 
         # Track whether the original input was a direct absolute path.
         # Only direct absolute paths (e.g., N:\work\WD\AgentCascade\file.py) are silent.

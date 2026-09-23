@@ -307,6 +307,25 @@ def test_multi_path_delete_removes_all():
     print('[PASS] test_multi_path_delete_removes_all')
 
 
+def test_multi_backslash_paths_all_deleted():
+    """Backslash forms of the SAME two files are all deleted (todo.md:165).
+
+    End-to-end proof that multi-delete now handles backslashes. Pre-fix, ``workspace\\src\\a.py`` is
+    NOT FOUND on both OSes → result is partial / "No files matched" (not 2 of 2); post-fix it
+    normalizes + strips the virtual prefix and both files are deleted. Uses only hermetic temp paths.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        a = Path(d, 'src', 'a.py'); a.parent.mkdir(); a.write_text('a'); om._own(a.resolve(), 'coder')
+        b = Path(d, 'src', 'b.py'); b.write_text('b'); om._own(b.resolve(), 'coder')
+        # backslash forms of the SAME two files (relative virtual prefix + relative)
+        res = om.delete_file(None, 'coder',
+                             paths=[r'workspace\src\a.py', r'src\b.py'], justification='x')
+        assert res.startswith('OK: Deleted 2 of 2'), f"got: {res}"
+        assert not a.exists() and not b.exists()
+    print('[PASS] test_multi_backslash_paths_all_deleted')
+
+
 def test_include_filter_deletes_only_matching():
     """include='*.md' deletes only matching files within the base dir (B2)."""
     with tempfile.TemporaryDirectory() as d:
