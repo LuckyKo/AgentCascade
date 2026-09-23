@@ -952,6 +952,9 @@ class TestInLoopTrigger:
         inst._last_token_count_conversation_length = -1
         inst._continue_saved_msg = None
         inst._auto_skill_proposed = False
+        # Explicitly present for assertions: AgentInstance.__new__ bypasses the dataclass
+        # default, so set it here (todo149 Change 3) rather than relying on the field default.
+        inst._auto_skill_dirty_stop = False
         # run()'s Phase 3 streaming-tick path reads this (core.py:806).
         inst._streaming_responses = []
         return inst
@@ -966,7 +969,8 @@ class TestInLoopTrigger:
                    load_mode='AUTO',
                    with_creator=True,
                    natural_end_at=None,
-                   exhaust_at=None):
+                   exhaust_at=None,
+                   tool_call_at=None):
         """Build an engine + instance that drives the REAL ExecutionEngine.run().
 
         ``natural_end_at`` controls when _post_turn_checks reports a genuine natural
@@ -974,6 +978,14 @@ class TestInLoopTrigger:
         "completes" on its last turn — mirroring how real agents end naturally well
         before their large max_turns budget. Callers may pass a smaller value to make
         the agent finish earlier.
+
+        ``tool_call_at`` (default None) drives a TOOL CALL on a chosen LLM call: when set,
+        on LLM call #``tool_call_at`` ``fake_llm`` yields an assistant message carrying a tool
+        call and ``_execute_detected_tools`` returns True for exactly that call (False otherwise),
+        so _process_response returns True → Phase 4 `continue`s (no Phase 5 that iteration). Used
+        to exercise the todo149 last-turn-tool-call trigger path. For dirty-stop runs pass a large
+        ``natural_end_at`` (e.g. 99) so the reflection tail exhausts its EXTRA budget and ends on a
+        clean final answer (messages[-1] = last reflection reply + turn-limit notice).
 
         ``exhaust_at`` (default None) instead makes the run break by BUDGET EXHAUSTION at
         that turn: _post_turn_checks returns True for checks 1..(exhaust_at-1) and False
@@ -1058,14 +1070,31 @@ class TestInLoopTrigger:
             # assistant message. Mirrors a real LLM stream; run()'s Phase 3 loop
             # only appends Message/dict items to turn_output.
             _llm_call_count['n'] += 1
+            n = _llm_call_count['n']
             yield None
-            yield Message(role=ASSISTANT, content=f"reply {_llm_call_count['n']}")
+            if tool_call_at is not None and n == tool_call_at:
+                # todo149: emit a tool-call assistant message on the chosen LLM call so
+                # _process_response returns True (Phase 4 `continue`s, skipping Phase 5).
+                yield Message(role=ASSISTANT, content='', function_call={'name': 'tool_a', 'arguments': '{}'})
+            else:
+                yield Message(role=ASSISTANT, content=f"reply {n}")
 
         engine._call_llm_with_injection = MagicMock(side_effect=lambda inst, msgs: fake_llm(inst, msgs))
         # REAL _process_response (commits turn_output via _append_and_log_batch); its
         # tool-execution sub-path is stubbed to a no-tool answer so the loop exits
-        # each iteration at Phase 5.
-        engine._execute_detected_tools = MagicMock(return_value=False)
+        # each iteration at Phase 5. With ``tool_call_at`` set, return True for exactly that
+        # call (so _process_response → True → Phase 4 `continue`) and False otherwise — this
+        # drives the todo149 last-turn-tool-call trigger path without running a real tool.
+        if tool_call_at is None:
+            engine._execute_detected_tools = MagicMock(return_value=False)
+        else:
+            _tool_exec_calls = {'n': 0}
+
+            def _exec_tool_driver(*a, **k):
+                _tool_exec_calls['n'] += 1
+                return _tool_exec_calls['n'] == tool_call_at
+
+            engine._execute_detected_tools = MagicMock(side_effect=_exec_tool_driver)
         # Natural-end driver via a COUNTER FUNCTION (not a side_effect list). Design:
         #   - Return False on check N (natural_end_at) → the agent's genuine natural
         #     completion. Because turns_available is still > 0 at that point, run() takes
@@ -1515,29 +1544,23 @@ class TestInLoopTrigger:
         assert any('[SYSTEM WARNING: Final turn' in str(c) for c in contents), \
             'final-turn warning must be injected when no extension fires'
 
-    def test_last_turn_extension_suppresses_final_warning(self, fresh_manager, tmp_path):
-        """With gates passing + natural end on the last turn, the '[SYSTEM WARNING: Final
-        turn...]' message must NOT appear for the ORIGINAL budget (it would be misleading —
-        extra turns are about to be granted). The extended tail's own final warning (harness
-        exhausts the EXTRA budget) is expected and allowed."""
+    def test_last_turn_extension_injects_final_warning(self, fresh_manager, tmp_path):
+        """FLIPPED (Change 1, todo149): with gates passing + natural end on the last turn, the
+        '[SYSTEM WARNING: Final turn…]' message IS now injected for the ORIGINAL budget's
+        last turn (the fix always warns on the final turn regardless of _auto_skill_will_extend).
+        The warning is appended in the same iteration, before the triggering LLM call, so it
+        sits immediately BEFORE 'reply 3'. (The extended tail's own final warning — harness
+        exhausts EXTRA — is also present; we assert the boundary one specifically.)"""
         engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
                                                     extra_turns=5).__next__()
         _run()
         assert inst._auto_skill_proposed is True
-        # Original-budget final warning must be suppressed: it would sit between the
-        # triggering turn's reply and the reflection prompt. Post-fix the conversation goes
-        # straight from 'reply 3' (triggering turn) to the reflection prompt.
         contents = [str(c) for c in self._conv_contents(inst.conversation)]
         assert 'reply 3' in contents, 'sanity: triggering turn reply must be committed'
         idx_reply = contents.index('reply 3')
-        # The original-budget final warning is injected in the SAME iteration as the
-        # triggering turn (before its LLM call), so it sits immediately BEFORE 'reply 3'
-        # (or, if appended after, immediately after). Either slot must be free of it — the
-        # extended tail's OWN final warning (harness exhausts EXTRA) is expected and allowed
-        # further down the run. Post-fix neither adjacent slot carries a final-turn warning.
         neighbours = [contents[idx_reply - 1], contents[idx_reply + 1]]
-        assert not any('[SYSTEM WARNING: Final turn' in c for c in neighbours), \
-            f'original-budget final warning leaked at the extension boundary: {neighbours!r}'
+        assert any('[SYSTEM WARNING: Final turn' in c for c in neighbours), \
+            f'original-budget final warning missing at the extension boundary: {neighbours!r}'
 
     def test_reflection_final_turn_still_disables_tools(self, fresh_manager, tmp_path):
         """The REFLECTION's own last turn must still disable tools (clean final answer):
@@ -1569,6 +1592,114 @@ class TestInLoopTrigger:
         # And that shared set is the FULL tool set (nothing disabled on either side).
         assert seen[2] is None and seen[3] is None, \
             f'both sides of the trigger boundary must keep tools enabled: {seen[2:4]!r}'
+
+    # ------------------------------------------------------------------ #
+    # todo149 — LAST-TURN TOOL-CALL trigger + dirty-stop return path
+    # ------------------------------------------------------------------ #
+    # The run's ORIGINAL budget's last turn ends on a tool call with the cheap gates
+    # passing. Pre-fix, Phase 4 `continue`s and the loop exits at the top guard with NO
+    # reflection ever firing. Post-fix (Change 2) the trigger fires via _try_auto_skill_extension
+    # on that tool-call turn; Change 3 marks _auto_skill_dirty_stop so extract_instance_output
+    # returns the LAST reflection message, not the pre-reflection snapshot.
+
+    def test_last_turn_toolcall_fires_reflection_and_returns_last_msg(self, fresh_manager, tmp_path):
+        """Change 2+3 (todo149): the ORIGINAL budget's last turn ends on a tool call with gates
+        passing. Expect: (a) final-turn warning IS injected for that turn; (b) tools stay ENABLED
+        for the triggering LLM call (no full reprocess); (c) the reflection extension FIRES (budget
+        extended, _auto_skill_proposed set, _auto_skill_dirty_stop set); (d) the returned output is
+        the LAST REFLECTION message — NOT the dangling tool call and NOT the pre-reflection snapshot."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5, tool_call_at=3, natural_end_at=99).__next__()
+        seen = self._trace_disabled_tools(engine)
+        _run()
+        # (c) trigger fired via the tool-call path
+        assert inst._auto_skill_proposed is True
+        assert getattr(inst, '_auto_skill_dirty_stop', False) is True
+        # (b) triggering turn (LLM call #3 = index 2) kept tools enabled
+        assert seen[2] is None, f'triggering tool-call turn must keep tools enabled: {seen[2]!r}'
+        # (a) final-turn warning injected for the original last turn
+        contents = [str(c) for c in self._conv_contents(inst.conversation)]
+        assert any('[SYSTEM WARNING: Final turn' in c for c in contents), 'final-turn warning must be injected'
+        # (d) returned output = LAST reflection message, not snapshot / not the tool call
+        from agent_cascade.compression.helpers import extract_instance_output
+        out = extract_instance_output(list(inst.conversation), 'w', instance=inst)
+        # The tail exhausted its EXTRA budget → last reply is a plain 'reply N' (+ turn-limit notice).
+        assert out.startswith('reply '), f'expected last reflection reply, got: {out!r}'
+        assert inst._auto_skill_task_output != out, 'dirty stop must NOT return the pre-reflection snapshot'
+
+    def test_last_turn_natural_completion_still_returns_snapshot(self, fresh_manager, tmp_path):
+        """Control for Change 3 (todo149): natural end on the exact last turn with gates passing is
+        UNCHANGED — returns the pre-reflection snapshot, _auto_skill_dirty_stop stays False, and
+        (Change 1) the final-turn warning is present."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5).__next__()  # natural_end_at defaults to last turn
+        _run()
+        assert inst._auto_skill_proposed is True
+        assert getattr(inst, '_auto_skill_dirty_stop', False) is False, 'natural path must NOT mark dirty stop'
+        from agent_cascade.compression.helpers import extract_instance_output
+        out = extract_instance_output(list(inst.conversation), 'w', instance=inst)
+        assert out == 'reply 3', f'natural path must return the pre-reflection snapshot, got: {out!r}'
+        contents = [str(c) for c in self._conv_contents(inst.conversation)]
+        assert any('[SYSTEM WARNING: Final turn' in c for c in contents), 'final-turn warning must be present'
+
+    def test_mid_run_toolcall_does_not_trigger(self, fresh_manager, tmp_path):
+        """Control for Change 2 (todo149): a tool call on a NON-last turn must NOT fire the new
+        Phase-4 trigger. The extension still fires later via the natural-completion path (Phase 5)
+        with _auto_skill_dirty_stop left False — proving no mid-run misfire.
+
+        Harness note: tool-call turns hit Phase 4's `continue` and NEVER reach Phase 5, so turn 1
+        (a tool call at turns_available 3→2, NOT the last original turn) cannot fire either path.
+        The run then proceeds to turn 2 (text, turns_available 2→1) — still not last — and turn 3
+        (text, turns_available 1→0, the LAST original turn). We override _post_turn_checks to
+        report a genuine natural end on check 2 (turn 3), so Phase 5 fires the extension via the
+        NATURAL path. The key assertion — that the turn-1 tool call did NOT set
+        _auto_skill_dirty_stop and did NOT fire the Phase-4 trigger — is independent of this
+        driver detail."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5, tool_call_at=1).__next__()
+
+        def _ptc_driver(*a, **k):
+            # Check 1 = turn 2 (text reply, turns_available 2→1, not last) → keep looping.
+            # Check 2 = turn 3 (text reply, turns_available 1→0, LAST original turn) → report
+            # a genuine natural end so Phase 5 fires the extension via the natural path.
+            return inst._current_turn != 3
+
+        engine._post_turn_checks = MagicMock(side_effect=_ptc_driver)
+        _run()
+        # Turn 1 was a tool call (turns_available 3→2, not last) → new Phase-4 trigger must NOT have fired.
+        # The extension fires later via the natural-completion path (Phase 5) on turn 3.
+        assert inst._auto_skill_proposed is True, 'extension should still fire (via natural path)'
+        assert getattr(inst, '_auto_skill_dirty_stop', False) is False, \
+            'mid-run tool call must NOT set dirty stop / trigger the tool-call path'
+
+    def test_last_turn_toolcall_qualify_no_prompt_no_extension(self, fresh_manager, tmp_path):
+        """Edge E4 (todo149): gates pass but auto_skill_qualifies returns NO prompt on the
+        last-turn tool call. _try_auto_skill_extension writes the snapshot to
+        _auto_skill_task_output THEN hits `if not prompt: return False` BEFORE setting
+        _auto_skill_proposed, so: NO extension fires (_auto_skill_proposed stays False,
+        _auto_skill_dirty_stop stays False), the run exits on the tool call, and
+        extract_instance_output returns the pre-reflection SNAPSHOT (not the FUNCTION-result
+        warning). No flag poisoning — the one-shot flag was never set."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=3, min_turns=2,
+                                                    extra_turns=5, tool_call_at=3).__next__()
+        # Force the deeper qualification to return no prompt: stub the skill manager so
+        # auto_skill_qualifies returns None (the cheap gates still pass via _auto_skill_gates_met).
+        pool.skill_manager.auto_skill_qualifies = MagicMock(return_value=None)
+        _run()
+        # No extension fired: the one-shot flag was never set and no dirty stop was marked.
+        assert inst._auto_skill_proposed is False, 'no-prompt qualification must NOT set the one-shot flag'
+        assert getattr(inst, '_auto_skill_dirty_stop', False) is False, \
+            'failed trigger must NOT mark dirty stop'
+        # The run exited on the tool call (turns_available 1→0 at the top guard): exactly 3 LLM calls.
+        assert engine._call_llm_with_injection.call_count == 3, \
+            f'no extension → no reflection tail, expected 3 LLM calls, got {engine._call_llm_with_injection.call_count}'
+        # extract_instance_output returns the pre-reflection SNAPSHOT (last assistant text before
+        # the tool call), not the dangling FUNCTION result. dirty=False so the snapshot short-circuit applies.
+        from agent_cascade.compression.helpers import extract_instance_output
+        out = extract_instance_output(list(inst.conversation), 'w', instance=inst)
+        assert inst._auto_skill_task_output is not None, 'snapshot must be captured before the no-prompt return'
+        assert out == inst._auto_skill_task_output, \
+            f'dirty-stop=False must return the pre-reflection snapshot, got: {out!r}'
 
 
 # ===========================================================================

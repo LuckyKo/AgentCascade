@@ -611,7 +611,15 @@ def extract_instance_output(
     # task output snapshot captured at trigger time instead of messages[-1].
     if instance is not None:
         snap = getattr(instance, '_auto_skill_task_output', None)
-        if isinstance(snap, str):
+        # Change 3 (dirty stop, todo149): when the trigger fired via the last-turn-tool-call path the
+        # run did NOT end on a clean no-tool answer, so there is no meaningful pre-reflection "task
+        # output" to return. Fall through to messages[-1] — the LAST REFLECTION message. By the
+        # reflection's own final turn the one-shot _auto_skill_proposed flag is set, so
+        # _auto_skill_gates_met returns False, tools are disabled (core.py:909), and the tail ends on a
+        # clean text answer (NOT another tool call). Natural-completion runs leave _auto_skill_dirty_stop
+        # False → return the snapshot exactly as before.
+        dirty = getattr(instance, '_auto_skill_dirty_stop', False)
+        if isinstance(snap, str) and not dirty:
             return snap
 
     # Helper to get the best available log path hint

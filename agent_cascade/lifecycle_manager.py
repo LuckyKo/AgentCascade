@@ -160,6 +160,7 @@ class AgentLifecycleManager:
                 # disable skill reflection for this instance on all future recalls.
                 inst._auto_skill_task_output = None
                 inst._auto_skill_proposed = False
+                inst._auto_skill_dirty_stop = False
 
                 # Remove from old parent's tracking even if new caller is None
                 if old_parent is not None:

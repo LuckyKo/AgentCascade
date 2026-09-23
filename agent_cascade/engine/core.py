@@ -385,6 +385,23 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             logger.warning('[AUTO-SKILL] In-loop trigger failed for %s: %s', getattr(instance, 'instance_name', '?'), e)
             return False
 
+    def _grant_auto_skill_extension(self, instance) -> int:
+        """Shared budget-reset side-effects for a FIRED auto-skill reflection extension.
+
+        Called by BOTH trigger sites (the Phase-5 natural-completion path and the new
+        Phase-4 last-turn-tool-call path) after _try_auto_skill_extension returns True.
+        Snapshots the pre-trigger max_turns (R6 — restored in run()'s exit finally block)
+        and extends instance.max_turns by AUTO_SKILL_EXTRA_TURNS from the
+        current turn. Returns the new max_turns so the caller mirrors it into its loop-local
+        `max_turns` and sets ``turns_available = AUTO_SKILL_EXTRA_TURNS`` +
+        ``_suppress_budget_warnings = True`` (run() frame locals, as is the trailing
+        ``yield response; continue``). Does NOT re-run trigger/qualification logic.
+        """
+        instance._auto_skill_orig_max_turns = instance.max_turns   # R6 snapshot
+        new_max = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
+        instance.max_turns = new_max
+        return new_max
+
     def _maybe_submit_memory_hint(self, instance, turn_output) -> None:
         """Best-effort memory-hint submit at the Phase-3/Phase-4 boundary.
 
@@ -898,9 +915,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # Muted for max_turns=1 agents: this is their only turn and
                     # tools are being disabled below regardless, so the warning
                     # adds no information — just noise in the transcript.
-                    if max_turns != 1 and not _auto_skill_will_extend:
+                    # Change 1 (todo149): always warn on the final turn regardless of
+                    # _auto_skill_will_extend — when gates pass a reflection extension may be
+                    # granted this turn, and hiding the "you are out of turns" signal would be
+                    # misleading. The tool-disable gate below (core.py:909) is UNCHANGED, so
+                    # tools stay enabled in the gates-pass case; the "tools have been disabled"
+                    # clause is then slightly inaccurate but acceptable (all assertions match on
+                    # the '[SYSTEM WARNING: Final turn' prefix).
+                    if max_turns != 1:
                         final_msg = self._make_user_message(
-                            f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
+                            f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task and tools have been disabled. "
                             f"Wrap up and deliver your results now.]")
                         self._append_and_log_to_llm(instance, final_msg, llm_messages)
 
@@ -917,6 +941,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                 instance._generate_cfg_override['disabled_tools'] = all_tools
                                 final_turn_tools_disabled = True
 
+                # Change 2 gate signal (todo149): True exactly when turns_available was 1 at the
+                # top of this iteration (i.e. this is the last turn of the ORIGINAL budget).
+                # Computed BEFORE _consume_turn so it reflects the pre-decrement value. It can
+                # never be true mid-run (mid-run turns have turns_available > 1 here). After an
+                # extension resets turns_available to AUTO_SKILL_EXTRA_TURNS, a later `== 1` is
+                # the REFLECTION's last turn — but by then _auto_skill_proposed is set, so
+                # _auto_skill_gates_met returns False and it cannot re-fire (one-shot).
+                _is_last_original_turn = (turns_available == 1)
                 turns_available = self._consume_turn(instance, turns_available)
 
                 # ── Phase 3: LLM Call with Injection Points ────────────────
@@ -1024,6 +1056,32 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # per-iteration decrement (turns_available -= 1) already ran before this
                     # LLM call, so every auto-continue consumes exactly one real turn and
                     # max_turns stays a hard budget.
+                    # Change 2 (todo149): if THIS was the last turn of the original budget and the
+                    # cheap gates pass, grant the auto-skill reflection extension INSTEAD of letting
+                    # the loop exit on an exhausted budget. _process_response has ALREADY committed
+                    # the assistant tool-call + FUNCTION result before returning, so the reflection
+                    # prompt injected by _try_auto_skill_extension lands AFTER the FUNCTION message
+                    # (order: assistant tool-call → FUNCTION result → user reflection-prompt). A
+                    # tool-call turn `continue`s here and NEVER reaches Phase 5 in the same iteration,
+                    # so this path and the natural-completion path cannot double-fire; the one-shot
+                    # _auto_skill_proposed flag (checked inside _try_auto_skill_extension →
+                    # _auto_skill_gates_met) also guarantees at most one extension per run. On a
+                    # FAILED trigger (gates pass but auto_skill_qualifies returns no prompt) this
+                    # condition is False and control falls through to the normal `yield; continue`
+                    # below, so the loop exits on the exhausted budget with no flag poisoning.
+                    if _is_last_original_turn and \
+                            self._try_auto_skill_extension(
+                                instance, messages, llm_messages,
+                                loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
+                        # Change 3 marker (todo149): the run did not end on a clean no-tool answer
+                        # before reflecting → extract_instance_output must return the LAST reflection
+                        # message, not the pre-reflection snapshot.
+                        instance._auto_skill_dirty_stop = True
+                        max_turns = self._grant_auto_skill_extension(instance)
+                        _suppress_budget_warnings = True
+                        turns_available = AUTO_SKILL_EXTRA_TURNS
+                        yield response
+                        continue
                     # logger.debug("tool used - %s looping",
                     # instance.instance_name)
                     yield response
@@ -1039,11 +1097,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             self._try_auto_skill_extension(
                                 instance, messages, llm_messages,
                                 loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
-                        # Trigger fired: grant AUTO_SKILL_EXTRA_TURNS fresh turns for the reflection.
-                        # Loop-locals live in run()'s frame (NOT the instance), so the reset MUST stay here.
-                        instance._auto_skill_orig_max_turns = instance.max_turns   # R6 snapshot
-                        instance.max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
-                        max_turns = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
+                        # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh
+                        # turns for the reflection. Instance-state mutations are shared with the
+                        # Phase-4 tool-call path via _grant_auto_skill_extension; the loop-local
+                        # reset + yield/continue stay here (run() frame locals).
+                        max_turns = self._grant_auto_skill_extension(instance)
                         # 50%/90% warnings apply to the ORIGINAL budget, already exhausted here.
                         # The reflection is a fresh phase (turns_available counts down from
                         # AUTO_SKILL_EXTRA_TURNS while max_turns is extended), so those thresholds

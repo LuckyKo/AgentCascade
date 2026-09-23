@@ -262,6 +262,8 @@ class AgentInstance:
         str] = None  # Pre-reflection task output snapshot taken when the in-loop trigger fires (read by extract_instance_output(instance=...))
     _auto_skill_orig_max_turns: Optional[
         int] = None  # Pre-trigger max_turns snapshot; run()'s exit finally restores it (R6) so the extended budget never leaks into the next run
+    _auto_skill_dirty_stop: bool = field(
+        default=False)  # True when the in-loop trigger fired via the LAST-TURN-TOOL-CALL path — i.e. the run did not end on a clean no-tool answer before reflecting. extract_instance_output returns the LAST reflection message (not the pre-reflection snapshot) when this is set. Reset alongside _auto_skill_proposed/_auto_skill_task_output on instance reuse/recall (lifecycle_manager.py).
     _loaded_skill_names: Optional[List[str]] = field(
         default=None)  # This run's resolved skill names, set in _create_and_run_agent so the in-loop auto-skill trigger can render them in the reflection prompt
 
