@@ -1,7 +1,7 @@
 # Agent Cascade — System Documentation
 
-**Version:** 1.0 (based on DESIGN_REWRITE.md)  
-**Last Updated:** 2026-07-16  
+**Version:** 1.0 (based on DESIGN_REWRITE.md)
+**Last Updated:** 2026-07-16
 **Architecture:** Unified Single-Instance Model
 
 ---
@@ -16,6 +16,7 @@
 6. [Parallel Instance Separation](#6-parallel-instance-separation)
 7. [Agent Templates & DNA](#7-agent-templates--dna)
 8. [WebUI Architecture](#8-webui-architecture)
+9. [Memory-Hint System](#9-memory-hint-system)
 
 ---
 
@@ -452,7 +453,7 @@ Feed to compressor: [COMP1][U2][A2]
 
 After 2nd compress:  Memory: [SYS][U0][COMP1...][COMP2: "Summarized U2,A2"][U3][A3]
                        JSONL:  [SYS][U0][U1][A1][COMP1][U2][A2][COMP2][U3][A3]
-                       
+
 Working set feeds to LLM: [SYS][U0][COMP1...][COMP2...][recent messages...]
 ```
 
@@ -814,7 +815,7 @@ Halt:
     │
     ▼
   instance_name added to pool._halted_instances set
-  
+
   At next phase boundary, ExecutionEngine checks:
   if self.pool.is_instance_halted(instance.instance_name):
       yield final_response
@@ -828,7 +829,7 @@ Resume:
     │
     ▼
   instance_name removed from pool._halted_instances set
-  
+
   ExecutionEngine continues from where it paused
 ```
 
@@ -1110,6 +1111,157 @@ Clients handle both types transparently — full snapshots replace the current v
 
 ---
 
+## 9. Memory-Hint System
+
+The **memory-hint** feature proactively reminds an agent to re-read relevant project memories (`.agent_lessons/*.md` lessons) — and, optionally, to load relevant skills — when a turn's text strongly matches them. It is a **best-effort, non-critical** subsystem: everything runs off the main execution loop on a background daemon worker, every failure is swallowed, and a hint can never alter the agent's behavior except by surfacing a short advisory note.
+
+> Design source: `plans/memory_hint_PLAN.md` (original feature) and
+> `plans/skills_in_memory_hints_PLAN.md` (skill-suggestion extension). This section documents the implemented system as it stands.
+
+### 9.1 What It Does
+
+- **Memory hints:** When a turn's assistant text/reasoning strongly matches one or more lessons the agent has *not* recently read, a hint is queued telling the agent to re-read those specific lesson files (shown as absolute paths).
+- **Skill suggestions:** On the same delivery path, relevant skills that are *not* already loaded may be suggested so the agent can pick up expertise it hasn't activated yet.
+
+The hint rides the existing **tool-warning queue** (`_queue_tool_warning` → `_tool_warnings`) and is drained into the next tool result. There is **no USER-message injection**: if no tool result ever follows, the hint is simply dropped. This keeps KV-cache prefixes stable and avoids perturbing the conversation.
+
+### 9.2 Architecture Overview
+
+```
+Turn loop (engine/core.py)
+   │  _maybe_submit_memory_hint() — Phase-3/4 boundary, any turn with text/reasoning
+   │  (tool-only turns & SLEEPING instances skipped; query = first N chars of text+reasoning)
+   ▼
+MemoryHintManager.submit()          [non-blocking, most-recent-wins per instance]
+   │  job dict → queue.Queue  (stale duplicates filtered by generation counter)
+   ▼
+Daemon worker thread (_run / _process_job)     [background; never blocks main loop]
+   │
+   ├── Memory sub-pipeline  _match_memories()      TF-IDF cosine + self-calibrating gate
+   └── Skill  sub-pipeline  _match_skills_for_hint() keyword-fraction floor (INDEPENDENT)
+   ▼
+_build_combined() → ONE hint string (memory block + optional skill block)
+   ▼
+_deliver() → _queue_tool_warning(pool, instance, text)   [drained into next tool result]
+```
+
+**Key architectural constraint:** the memory matcher scores on **TF-IDF cosine similarity** while the skill matcher scores on **keyword-fraction (0..1)**. These are different scales and are *never* mixed into the same floor/gap arithmetic. Each sub-pipeline has its own independent gate; they are merged only at the text-building stage.
+
+### 9.3 Module Layout (`agent_cascade/memory_hint/`)
+
+| File | Responsibility |
+|------|----------------|
+| `manager.py` | `MemoryHintManager` — daemon worker, job queue, vault-index orchestration, both sub-pipelines, hint building & delivery, read-tracking callback. Owns the gate constants. |
+| `matcher.py` | `MemoryMatcher` — stdlib TF-IDF + cosine similarity over a merged per-vault lesson index (identity field weighted 3×). |
+| `vault.py` | Vault discovery (`.agent_lessons/` under base_dir + extra RO/RW folders), best-effort frontmatter parsing, and `VaultIndex` (per-vault mtime-cached rebuild). |
+| `stats.py` | `memory_stats.json` sidecar — per-lesson read counts, atomic (`os.replace`) best-effort diagnostics. |
+| `__init__.py` | Public exports (manager, matcher, vault helpers, stats, gate constants). |
+
+**Wiring points outside the package:**
+
+| Location | Role |
+|----------|------|
+| `pool/core.py` (~L240) | Creates `MemoryHintManager(pool)`; starts the worker + initial `rescan_vaults()` only when `memory_hint_enabled`. Always created so a runtime UI toggle takes effect without restart. |
+| `engine/core.py` `_maybe_submit_memory_hint` / `_extract_memory_hint_query` | Per-turn submit hook at the Phase-3/4 boundary; builds the query from assistant text + reasoning only (never tool calls). |
+| `tools/custom/file_ops.py` `_track_memory_read` | ReadFile hook: when a lesson under a vault is read, calls `on_memory_read` to record it in `_memories_read` and bump stats. |
+| `operation_manager/__init__.py` (~L127) | Triggers a vault rescan on work-folder change (`set_extra_work_folders`). |
+
+### 9.4 The Memory Gate (Self-Calibrating Specificity Check)
+
+The memory gate is **not** a fixed threshold; it is a self-calibrating *specificity* check designed to fire only on a single clear winner and stay silent on diffuse/generic turns:
+
+1. **Signal floor** — `top1 < floor` → skip (no real signal). The `floor` is an EWMA of per-turn top-1 scores, bounded below by `FLOOR_MIN`.
+2. **Specificity gap** — `top1 − top2 < GAP` → skip (a diffuse tie / multi-topic query).
+3. **Noise gate** — more than `MAX_HINTS_PER_TURN` docs at/above the floor → skip (query too generic).
+
+The EWMA floor is fed on *every* matched job (fire or skip) so it tracks the corpus's own score distribution; it is in-memory only (a fresh process re-seeds and re-calibrates). The `memory_hint_threshold` setting is an **optional override that can only RAISE the floor** (make hints rarer), never lower it — `0` = pure adaptive behavior.
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `GAP` | 0.03 | Minimum top1−top2 separation for a single clear winner |
+| `FLOOR_SEED` | 0.20 | Initial adaptive floor before any turns are seen |
+| `FLOOR_MIN` | 0.12 | Hard lower bound on the EWMA floor |
+| `EWMA_ALPHA` | 0.05 | Per-turn learning rate for the adaptive floor |
+| `MAX_HINTS_PER_TURN` | 4 | More than this many strong matches → treated as noise, skip |
+
+These were **tuned empirically** from a labeled replay of real agent queries through the actual matcher (see `plans/memory_hint_TUNING.md`) — not derived from first principles. Re-tune if the vault or query mix shifts materially.
+
+### 9.5 The Skill Gate (Independent)
+
+The skill sub-pipeline is deliberately simpler than the memory one: a **min-score floor + max-count cap** over `SkillManager.match_skills`. It has *no* specificity-gap requirement, because suggesting 2–3 relevant skills on a diffuse query is legitimate.
+
+- **Floor:** `SKILL_HINT_MIN_SCORE` = `settings.SKILL_MATCH_THRESHOLD` (0.15). This reuses the same source of truth as AUTO skill loading, so the hint suggests exactly the skills AUTO mode would load. The 0.15 value is data-derived: measured generic/diffuse queries top out around 0.13–0.14 (0% false-fires at 0.15), while strong-specific queries fire ~43%.
+- **Cap:** `SKILL_HINT_MAX_ENTRIES` = `settings.MAX_AUTO_SKILLS_PER_CALL` (3), applied after dedup/cooldown in score-descending order.
+- **Dedup:** skips skills already in the instance's `_loaded_skill_names` (read under `_compression_lock`).
+- **Cooldown:** per-instance `_recently_skill_hinted` map, reusing `memory_hint_cooldown_seconds`.
+
+### 9.6 Dedup, Cooldown & Per-Instance State
+
+All state is stored on `AgentInstance`, mutated under `_compression_lock`, and reset together by `_reset_memory_hint_state()` (on L1/L2 compression and session reset):
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `_memories_read` | `set` | Vault-relative lesson paths already read this session — never re-hint these. |
+| `_recently_hinted` | `dict` | Lesson path → last-hint monotonic ts (memory cooldown guard). |
+| `_last_memory_hint_turn` | `int` | Last turn a memory hint fired (diagnostics). |
+| `_recently_skill_hinted` | `dict` | Skill name → last-hint monotonic ts (skill cooldown guard). |
+| `_last_skill_hint_turn` | `int` | Last turn a skill hint fired (diagnostics). |
+
+Cooldown entries older than the window are pruned on each match, bounding dict growth. Cooldowns are recorded **before** delivery (only for what is actually delivered) so a fast re-match is throttled.
+
+### 9.7 Hint Text Format
+
+Deterministic ordering: memory entries (score-desc) first, then skills (score-desc). Memory-only output is **byte-identical** to the legacy format (regression-guarded by tests). The `[MEMORY HINT]` umbrella tag always leads so log/UI filtering keyed on that tag catches every variant.
+
+```
+[MEMORY HINT] Relevant memories you may want to re-read (2):
+  - N:\work\WD\AgentWorkspace\.agent_lessons\compression-debug.md
+  - N:\work\WD\AgentWorkspace\.agent_lessons\lock-ordering.md
+Skills you may want to load (2):
+  - docker-best-practices
+  - pytest-docker-subprocess-hang
+```
+
+Memory paths are clipped to `HINT_ENTRY_MAX_CHARS` (256, sized so absolute Windows vault paths survive); skill names are short and not clipped. A skill-only hint reads `[MEMORY HINT] Skills you may want to load (N):`.
+
+### 9.8 Concurrency & Failure Isolation
+
+- **Non-blocking submit:** `submit()` is a non-blocking queue put of a small dict; the main loop never waits.
+- **Most-recent-wins:** a per-instance generation counter means only the newest pending job per instance is processed; stale duplicates in the transport queue are filtered by generation on pop.
+- **TTL drop:** jobs older than `JOB_TTL_SECONDS` (30 s) are dropped so an agent is never hinted about a turn it has long since passed.
+- **Failure isolation:** each sub-pipeline is independently guarded (`try/except → []`, plus an `isinstance(matches, list)` guard for `MagicMock` test pools). A skill failure can never break the memory path or vice versa; any exception anywhere in the hint path is swallowed (best-effort, logged at debug).
+- **Locking:** the memory `_index_lock` and the skill manager's internal lock are **never nested**, so there is no lock-ordering hazard. Cooldown/read-state updates happen under a single `inst._compression_lock` block so memory + skill state are never partially updated.
+
+### 9.9 Vault Discovery & Rescan
+
+A "vault" is a `.agent_lessons/` directory directly under one of the working directories (base_dir ∪ extra RO/RW). Vaults are discovered at startup and rescanned:
+- on **work-folder change** (`set_extra_work_folders` callback), and
+- as a **safety net** each idle worker tick when `pool._config_version` advances.
+
+Each vault keeps an mtime map so `rescan()` rebuilds only changed files and drops deleted ones; the merged index is keyed by bare vault-relative path (first-vault-wins on cross-vault filename collisions). Display paths are resolved to absolute strings at match time using a root snapshot captured under the same lock, keeping "first vault wins" consistent between scoring and display.
+
+### 9.10 Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `memory_hint_enabled` | `False` | Master on/off switch for the whole feature (off by default). |
+| `memory_hint_threshold` | `0.0` | Optional floor override — can only RAISE the adaptive floor (make hints rarer). `0` = pure adaptive behavior. |
+| `memory_hint_max_entries` | `3` | Max memory entries listed per hint. |
+| `memory_hint_query_chars` | `1000` | How many leading chars of a turn's text/reasoning form the query. |
+| `memory_hint_cooldown_seconds` | `600` | Cooldown before the same memory/skill may be re-hinted to an instance. |
+| `memory_hint_skill_suggestions` | `True` | Sub-toggle under `memory_hint_enabled`: independently enable/disable skill suggestions within hints. (Config-only in v1; no dedicated UI checkbox.) |
+
+The gate internals (`GAP`, `FLOOR_*`, `EWMA_ALPHA`, `MAX_HINTS_PER_TURN`, `SKILL_HINT_MIN_SCORE`, `SKILL_HINT_MAX_ENTRIES`) are **module constants**, not user settings — matching the design philosophy of exposing only high-level knobs. Settings are read live each cycle from `pool.llm_cfg` with defensive fallbacks so a bad persisted value can never crash the worker.
+
+### 9.11 Testing
+
+- **Unit:** `tests/memory_hint/test_memory_hint.py` (gate behavior, both sub-pipelines, dedup/cooldown, byte-identical memory-only regression guard, failure isolation, toggle-off).
+- **E2E:** `tests/memory_hint/test_memory_hint_e2e.py` (submit → worker → tool-warning drain path).
+
+Run the full `tests/memory_hint/` suite serially (per lesson `pytest-docker-subprocess-hang`, host `shell_cmd` is reliable for pytest; avoid code_interpreter subprocesses).
+
+---
+
 ## Appendix: Quick Reference
 
 ### Configuration Defaults (`PoolSettings`)
@@ -1153,5 +1305,6 @@ Active Execution ──→ Phases 1-5 repeat until completion
 | API Server | `api_server.py` (single file, ~140KB) |
 | API Router | `api_router.py` |
 | Compression | `compression/core.py`, `compression/agent_invoker.py` |
+| Memory-Hint System | `memory_hint/manager.py`, `memory_hint/matcher.py`, `memory_hint/vault.py`, `memory_hint/stats.py` (see §9) |
 | Agent Base Classes | `agent_cascade/agent.py`, `agent_cascade/agent_instance.py`, `agent_cascade/agents/fncall_agent.py`, `agent_cascade/agents/assistant.py` |
 | Tools | `tools/*.py` (unchanged) |
