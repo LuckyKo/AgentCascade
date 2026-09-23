@@ -199,6 +199,126 @@ def test_heuristic_indentation_alignment():
         assert file_path_tabs.read_text(encoding='utf-8') == 'class Foo:\n\tdef bar(self):\n\t\tx = 2\n'
 
 
+def test_heuristic_added_nested_lines_indentation():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        # A: wrap a single deep line in an if-block (child must stay one level deeper)
+        fa = Path(tmpdir) / 'a.py'
+        fa.write_text('def foo():\n        x = 1\n', encoding='utf-8')
+        op_mgr._own(fa.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='a.py', agent_name='test_agent',
+                               old_content='x = 1',
+                               new_content='        if x:\n            y = 2\n        x = 1',
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        assert fa.read_text(encoding='utf-8') == (
+            'def foo():\n        if x:\n            y = 2\n        x = 1\n'), \
+            f"A: {fa.read_text(encoding='utf-8')!r}"
+
+        # B: insert a nested block between two existing lines
+        fb = Path(tmpdir) / 'b.py'
+        fb.write_text('def bar():\n        a = 1\n        b = 2\n', encoding='utf-8')
+        op_mgr._own(fb.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='b.py', agent_name='test_agent',
+                               old_content='a = 1\n        b = 2',
+                               new_content='        a = 1\n            if a:\n                c = 3\n        b = 2',
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        assert fb.read_text(encoding='utf-8') == (
+            'def bar():\n        a = 1\n            if a:\n                c = 3\n        b = 2\n'), \
+            f"B: {fb.read_text(encoding='utf-8')!r}"
+
+        # C: append nested lines below an existing block
+        fc = Path(tmpdir) / 'c.py'
+        fc.write_text('def end():\n        z = 0\n', encoding='utf-8')
+        op_mgr._own(fc.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='c.py', agent_name='test_agent',
+                               old_content='z = 0',
+                               new_content='        z = 0\n            if z:\n                w = 1',
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        assert fc.read_text(encoding='utf-8') == (
+            'def end():\n        z = 0\n            if z:\n                w = 1\n'), \
+            f"C: {fc.read_text(encoding='utf-8')!r}"
+
+        # D: control — equal line count must remain unchanged (no regression)
+        fd = Path(tmpdir) / 'd.py'
+        fd.write_text('def ctl():\n        x = 1\n        y = 2\n', encoding='utf-8')
+        op_mgr._own(fd.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='d.py', agent_name='test_agent',
+                               old_content='x = 1\n        y = 2',
+                               new_content='        x = 10\n        y = 20',
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        assert fd.read_text(encoding='utf-8') == (
+            'def ctl():\n        x = 10\n        y = 20\n'), \
+            f"D: {fd.read_text(encoding='utf-8')!r}"
+
+        # A-tabs: same as A but file uses tabs; nested line must get one extra tab.
+        fa_tab = Path(tmpdir) / 'a_tab.py'
+        fa_tab.write_text('def foo():\n\tx = 1\n', encoding='utf-8')
+        op_mgr._own(fa_tab.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='a_tab.py', agent_name='test_agent',
+                               old_content='x = 1',
+                               new_content='\tif x:\n\t\ty = 2\n\tx = 1',
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        assert fa_tab.read_text(encoding='utf-8') == (
+            'def foo():\n\tif x:\n\t\ty = 2\n\tx = 1\n'), \
+            f"A-tabs: {fa_tab.read_text(encoding='utf-8')!r}"
+
+        # A-agnostic: repeat Case A under heuristic_agnostic (shares the same branch).
+        fa_ag = Path(tmpdir) / 'a_ag.py'
+        fa_ag.write_text('def foo():\n        x = 1\n', encoding='utf-8')
+        op_mgr._own(fa_ag.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='a_ag.py', agent_name='test_agent',
+                               old_content='x = 1',
+                               new_content='        if x:\n            y = 2\n        x = 1',
+                               match_mode='heuristic_agnostic')
+        assert 'OK:' in res, res
+        assert fa_ag.read_text(encoding='utf-8') == (
+            'def foo():\n        if x:\n            y = 2\n        x = 1\n'), \
+            f"A-agnostic: {fa_ag.read_text(encoding='utf-8')!r}"
+
+        # Deep nesting (3 levels): multi-level deltas must survive re-anchoring.
+        fdeep = Path(tmpdir) / 'deep.py'
+        fdeep.write_text('def deep():\n        p = 0\n', encoding='utf-8')
+        op_mgr._own(fdeep.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='deep.py', agent_name='test_agent',
+                               old_content='p = 0',
+                               new_content=('        if p:\n'
+                                            '            if p > 1:\n'
+                                            '                if p > 2:\n'
+                                            '                    q = 3\n'
+                                            '        p = 0'),
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        assert fdeep.read_text(encoding='utf-8') == (
+            'def deep():\n'
+            '        if p:\n'
+            '            if p > 1:\n'
+            '                if p > 2:\n'
+            '                    q = 3\n'
+            '        p = 0\n'), \
+            f"Deep: {fdeep.read_text(encoding='utf-8')!r}"
+
+        # Blank line inside the added block: a truly empty line stays empty and does not
+        # disturb the relative nesting of the surrounding lines.
+        fblank = Path(tmpdir) / 'blank.py'
+        fblank.write_text('def blank():\n        x = 1\n', encoding='utf-8')
+        op_mgr._own(fblank.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='blank.py', agent_name='test_agent',
+                               old_content='x = 1',
+                               new_content='        if x:\n            y = 2\n\n            z = 3\n        x = 1',
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        assert fblank.read_text(encoding='utf-8') == (
+            'def blank():\n        if x:\n            y = 2\n\n            z = 3\n        x = 1\n'), \
+            f"Blank: {fblank.read_text(encoding='utf-8')!r}"
+
+
 def test_delete_and_insert_mode():
     """Test all 20 scenarios for the delete_and_insert match_mode."""
     with tempfile.TemporaryDirectory() as tmpdir:

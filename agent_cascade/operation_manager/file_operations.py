@@ -1098,75 +1098,7 @@ class FileOpsMixin:
             # Store at method scope for response construction
             delta_width = indent_delta
 
-            # Detect file type to choose appropriate normalization mode
-            _PYTHON_EXTENSIONS = frozenset(('.py', '.pyi', '.pyx'))
-            _is_python_file = resolved.suffix.lower() in _PYTHON_EXTENSIONS
-
-            def normalize_line_generic(line: str) -> str:
-                return line.strip()
-
-            def _normalize_line_python(line: str) -> str:
-                result = line
-                result = re.sub(r'"[^"]*"', '', result)
-                result = re.sub(r"'[^']*'", '', result)
-                result = re.sub(r'\[(\d+\.\d+)\]', '[]', result)
-                result = re.sub(r'\b\d+\.\d+\b', '', result)
-                result = re.sub(r'\b\d+\.?\d*[eE][+-]?\d+\b', '', result)
-                result = re.sub(r'(?<!\[)\b\d+\b(?!])', '', result)
-                result = re.sub(r'\b0[xX][0-9a-fA-F]+\b', '', result)
-                result = re.sub(r'\b0[bB][01]+\b', '', result)
-                result = re.sub(r'\b0[oO][0-7]+\b', '', result)
-                result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_.\[\]()]*\s*(<<=|>>=|\*=|/=|//=|%=|\+=|-=|\|=|&=|\^=)',
-                                'assign', result)
-                result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_.\[\]()]*\s*=(?!=)', 'assign', result)
-                result = re.sub(r'\breturn\b.*', 'return', result)
-                result = re.sub(r'\b(?:True|False)\b', '', result)
-                prev = None
-                while prev != result:
-                    prev = result
-                    result = re.sub(r'assign\s*[a-zA-Z_]\w*', 'assign', result)
-                return ''.join(result.split())
-
-            def normalize_line_for_alignment(line: str) -> str:
-                if _is_python_file and match_mode == 'heuristic':
-                    return _normalize_line_python(line)
-                else:
-                    return normalize_line_generic(line)
-
-            old_norm_lines = [normalize_line_for_alignment(l) for l in old_content.splitlines()]
-            file_norm_lines = [normalize_line_for_alignment(l) for l in actual_old_content.splitlines()]
-            new_norm_lines = [normalize_line_for_alignment(l) for l in new_content.splitlines()]
-
-            # Build alignment: old_content line index -> file block line index
-            matcher = difflib.SequenceMatcher(None, old_norm_lines, file_norm_lines)
-            old_to_file_map = {}
-            for tag, i1_start, i1_end, j1_start, j1_end in matcher.get_opcodes():
-                if tag == 'equal':
-                    for a, b in zip(range(i1_start, i1_end), range(j1_start, j1_end)):
-                        old_to_file_map[a] = b
-                elif tag == 'replace':
-                    sub_matcher = difflib.SequenceMatcher(None, old_norm_lines[i1_start:i1_end],
-                                                          file_norm_lines[j1_start:j1_end])
-                    for tag, a_s, a_e, b_s, b_e in sub_matcher.get_opcodes():
-                        if tag == 'equal':
-                            for a, b in zip(range(a_s, a_e), range(b_s, b_e)):
-                                old_to_file_map[i1_start + a] = j1_start + b
-
-            # Build alignment: new_content line index -> old_content line index
-            new_to_old_map = {}
-            matcher2 = difflib.SequenceMatcher(None, new_norm_lines, old_norm_lines)
-            for tag, i1_start, i1_end, j1_start, j1_end in matcher2.get_opcodes():
-                if tag == 'equal':
-                    for a, b in zip(range(i1_start, i1_end), range(j1_start, j1_end)):
-                        new_to_old_map[a] = b
-
-            # Combine: new_content line -> file block line (via old_content as bridge)
-            new_to_file_map = {}
-            for new_idx, old_idx in new_to_old_map.items():
-                if old_idx in old_to_file_map:
-                    new_to_file_map[new_idx] = old_to_file_map[old_idx]
-
-            # Record original indents from the file block
+            # Collect indent widths of non-blank lines in the matched block (used for base indent)
             file_block_lines = actual_old_content.splitlines(keepends=True)
             file_indent_by_line = {}
             for idx, fl in enumerate(file_block_lines):
@@ -1175,64 +1107,37 @@ class FileOpsMixin:
                     leading_ws = fl[:len(fl) - len(fl.lstrip())] if fl.strip() else ''
                     file_indent_by_line[idx] = leading_ws
 
-            def find_best_indent_for_unmapped_line(line_idx: int, new_content_lines: list, new_to_file_map: dict,
-                                                   file_indent_by_line: dict) -> str:
-                for check_idx in range(line_idx - 1, -1, -1):
-                    if check_idx in new_to_file_map:
-                        f_idx = new_to_file_map[check_idx]
-                        if f_idx in file_indent_by_line:
-                            return file_indent_by_line[f_idx]
-                for check_idx in range(line_idx + 1, len(new_content_lines)):
-                    if check_idx in new_to_file_map:
-                        f_idx = new_to_file_map[check_idx]
-                        if f_idx in file_indent_by_line:
-                            return file_indent_by_line[f_idx]
-                return file_indent if file_indent else ''
-
-            # Phase 2 — Preservation: apply file indents to new_content lines
+            # Phase 2 — Preservation: re-anchor new_content's RELATIVE indentation to the
+            # file block's actual base indent. This preserves the nesting structure of
+            # newly-added lines instead of flattening them to a neighbor's indent.
             new_content_lines = new_content.splitlines(keepends=True)
+
+            _new_ws = [l[:len(l) - len(l.lstrip())] for l in new_content_lines if l.strip()]
+            _file_ws = list(file_indent_by_line.values())
+            new_base = min((get_indent_width(w) for w in _new_ws), default=0)
+            file_base = min((get_indent_width(w) for w in _file_ws), default=0)
+            indent_offset = file_base - new_base
+            indent_char = detect_indent_char(file_indent)
+
+            def _render_indent(width: int) -> str:
+                """Render an indent of the given space-width using the file's indent char."""
+                width = max(0, int(round(width)))
+                if indent_char == '\t':
+                    return '\t' * (width // 4)
+                return ' ' * width
+
             adjusted_lines = []
-
-            for line_idx, line in enumerate(new_content_lines):
-                if not line.strip():
-                    if file_indent != old_indent and delta_width != 0:
-                        indent_char = detect_indent_char(file_indent)
-                        if indent_char == '\t':
-                            base_tabs = max(0, round(get_indent_width(file_indent) / 4))
-                            adjusted_lines.append(('\t' * base_tabs) + line.lstrip(' \t'))
-                        else:
-                            adjusted_lines.append((' ' * max(0, get_indent_width(file_indent))) + line.lstrip(' \t'))
-                    else:
-                        adjusted_lines.append(line)
-                    continue
-
-                if line_idx in new_to_file_map:
-                    f_idx = new_to_file_map[line_idx]
-                    if f_idx in file_indent_by_line:
-                        orig_leading_ws = file_indent_by_line[f_idx]
-                        adjusted_lines.append(orig_leading_ws + line.lstrip())
-                        continue
-
-                best_indent = find_best_indent_for_unmapped_line(line_idx, new_content_lines, new_to_file_map,
-                                                                 file_indent_by_line)
-                if best_indent:
-                    adjusted_lines.append(best_indent + line.lstrip())
-                elif file_indent != old_indent and delta_width != 0:
-                    current_indent = line[:len(line) - len(line.lstrip())]
-                    current_width = get_indent_width(current_indent)
-
-                    indent_char = detect_indent_char(file_indent)
-                    if indent_char == '\t':
-                        delta_tabs = round(delta_width / 4)
-                        new_tabs = max(0, (current_width // 4) + delta_tabs)
-                        adjusted_lines.append(('\t' * new_tabs) + line.lstrip())
-                    else:
-                        new_spaces = max(0, current_width + delta_width)
-                        adjusted_lines.append((' ' * new_spaces) + line.lstrip())
-                elif file_indent:
-                    adjusted_lines.append(file_indent + line.lstrip())
-                else:
-                    adjusted_lines.append(line)
+            for line in new_content_lines:
+                own_ws = line[:len(line) - len(line.lstrip())]
+                base_width = get_indent_width(own_ws) + indent_offset
+                body = line.lstrip()
+                if not body:
+                    # Blank/whitespace-only line: lstrip() strips the newline too (it is
+                    # leading whitespace), which would drop the line. Recover it so a truly
+                    # empty line stays empty instead of being flattened away. The slice
+                    # keeps the original ending (\n or \r\n); 'or' covers lines with no ending.
+                    body = line[len(own_ws.rstrip(' \t')):] or '\n'
+                adjusted_lines.append(_render_indent(base_width) + body)
 
             new_content = ''.join(adjusted_lines)
 
