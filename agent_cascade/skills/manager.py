@@ -1642,6 +1642,7 @@ class SkillManager:
             for name in load_skill_value:
                 body = self.load_full_instructions(name, count_load=False)
                 if body:
+                    self._reenable_if_disabled(name)  # NEW: re-activate a disabled-but-servable skill
                     names.append(name)
                 else:
                     logger.debug("[SKILLS] Skill '%s' not found — silently skipping", name)
@@ -1666,6 +1667,7 @@ class SkillManager:
                         continue
                     body = self.load_full_instructions(name, count_load=False)
                     if body:
+                        self._reenable_if_disabled(name)  # NEW: re-activate a disabled-but-servable skill
                         logger.debug("[SKILLS] AUTO loaded skill '%s' (score=%.2f)", name, score)
                         names.append(name)
 
@@ -1676,6 +1678,28 @@ class SkillManager:
             return []
 
         return []
+
+    def _reenable_if_disabled(self, name: str) -> None:
+        """Best-effort re-activation of a disabled skill whose body just resolved.
+
+        Mirrors the runtime ``load_skill`` tool's re-enable (the "Re-enabled" block in
+        tools/custom/load_skill.py) — a disabled skill that is explicitly requested is
+        re-activated as a side effect of loading rather than silently staying inactive.
+        Called from :meth:`_resolve_skill_names` after a successful ``count_load=False``
+        loadability check, so a disabled-but-servable skill that is explicitly requested
+        (or AUTO-matched) is re-activated instead of silently loading while staying inactive.
+        ``enable_skill`` persists status=active and invalidates the discovery cache; it does NOT
+        touch ``total_loads`` (the real count happens in :meth:`_load_skill_bodies`), so this
+        cannot double-count or corrupt metrics. Best-effort: any failure is logged and swallowed
+        so name resolution never breaks.
+        """
+        try:
+            if self.is_skill_disabled(name):
+                ok, msg = self.enable_skill(name)
+                if not ok:
+                    logger.warning("[SKILLS] Could not re-enable '%s' during resolution: %s", name, msg)
+        except Exception as e:  # noqa: BLE001 — never break resolution on a re-enable failure
+            logger.warning("[SKILLS] Re-enable of '%s' raised during resolution: %s", name, e)
 
     def resolve_load_skill_names(
         self,

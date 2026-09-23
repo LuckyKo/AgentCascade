@@ -1770,6 +1770,102 @@ class TestLoadSkillReenable:
             assert 'rr-a' not in m._metrics or m._metrics['rr-a'].get('status') != 'inactive'
 
 
+class TestResolveSkillPairsReenable:
+    """call_agent(load_skill=[...]) path — resolving a disabled-but-servable skill re-activates it.
+
+    Drives the manager entry point (resolve_load_skill_pairs / _resolve_skill_names) that
+    engine/core.py uses for sub-agent injection, NOT the runtime load_skill tool. Reuses the
+    same hermetic fixtures + helpers as TestLoadSkillReenable above.
+    """
+
+    def test_explicit_list_reenables_disabled_servable(self, hermetic_skill_manager, tmp_path):
+        """#1: disabled-but-servable skill in an explicit list -> body returned AND re-enabled."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        assert 'rr-a' in m._disabled_names and 'rr-a' not in m._skills_registry
+
+        pairs = m.resolve_load_skill_pairs(['rr-a'])
+        names = [n for n, _b in pairs]
+        assert 'rr-a' in names  # body resolved via the soft-eviction disk fallback
+        # Re-enabled: removed from _disabled_names, status active (in-mem + persisted).
+        assert 'rr-a' not in m._disabled_names
+        with m._metrics_lock:
+            assert m._metrics['rr-a']['status'] == 'active'
+            assert m._metrics['rr-a']['total_loads'] == 1  # exactly one count (no double-count)
+        store = _read_store(m._metrics_file)
+        assert store['skills']['rr-a']['status'] == 'active'
+
+    def test_explicit_list_disabled_non_servable_not_reenabled(self, hermetic_skill_manager, tmp_path):
+        """#2: disabled skill under INACTIVE/ (non-servable) -> dropped, NOT re-enabled."""
+        m = _reenable_manager(hermetic_skill_manager, tmp_path, ('rr-a',))
+        # Move the file to a non-servable two-level-deep location so the disk fallback can't find it.
+        servable_dir = Path(m._skill_paths[0]) / 'rr-a'
+        inactive_dir = Path(m._skill_paths[0]) / 'INACTIVE' / 'rr-a'
+        inactive_dir.mkdir(parents=True, exist_ok=True)
+        (inactive_dir / 'SKILL.md').write_text((servable_dir / 'SKILL.md').read_text(), encoding='utf-8')
+        (servable_dir / 'SKILL.md').unlink()
+        servable_dir.rmdir()
+
+        ok, _msg = m.disable_skill('rr-a'); assert ok
+        m._cache_ttl = 0.0
+        m.discover([m._skill_paths[0]])
+        assert 'rr-a' in m._disabled_names
+
+        pairs = m.resolve_load_skill_pairs(['rr-a'])
+        names = [n for n, _b in pairs]
+        assert 'rr-a' not in names          # body None -> guard never reached -> dropped
+        assert 'rr-a' in m._disabled_names  # status stays inactive (no false re-enable)
+        with m._metrics_lock:
+            assert m._metrics['rr-a']['status'] == 'inactive'
+
+    def test_auto_does_not_resurrect_disabled_by_default(self, hermetic_skill_manager, tmp_path):
+        """#3 (behavior-preservation): with the minimal fix, AUTO does NOT match a disabled skill.
+
+        match_skills(query) uses include_inactive=False (default), which filters _disabled_names
+        BEFORE the load loop -- so a disabled skill never reaches the AUTO guard and is neither
+        loaded nor re-enabled. This documents the current active-only AUTO contract. See open
+        decision O-AUTO for making AUTO actively resurrect disabled-but-relevant skills.
+        """
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        assert 'rr-a' in m._disabled_names and 'rr-a' not in m._skills_registry
+
+        # match_skills default filters it out (this is WHY AUTO never loads/re-enables it):
+        assert all(n.lower() != 'rr-a' for n, _s in m.match_skills('rr-a'))
+
+        pairs = m.resolve_load_skill_pairs('AUTO', task_text='rr-a')
+        names = [n for n, _b in pairs]
+        assert 'rr-a' not in names           # not matched -> not loaded
+        assert 'rr-a' in m._disabled_names   # still disabled (guard is defensive-only here)
+
+    def test_active_skill_no_reenable_side_effect(self, hermetic_skill_manager, tmp_path):
+        """#4 (regression): an already-active skill -> loads cleanly, no re-enable, no status flip."""
+        m = _reenable_manager(hermetic_skill_manager, tmp_path, ('rr-a',))
+        assert 'rr-a' not in m._disabled_names
+
+        pairs = m.resolve_load_skill_pairs(['rr-a'])
+        names = [n for n, _b in pairs]
+        assert 'rr-a' in names
+        # Guard did NOT fire (skill was active): no re-enable; status is active-or-absent, never inactive.
+        assert 'rr-a' not in m._disabled_names
+        with m._metrics_lock:
+            entry = m._metrics.get('rr-a', {})
+            assert entry.get('status') != 'inactive'   # enable_skill was never called
+            assert entry['total_loads'] == 1          # exactly one count, from _load_skill_bodies
+
+    def test_reenable_idempotent_second_resolve_ok(self, hermetic_skill_manager, tmp_path):
+        """#5: re-enable is idempotent; a second resolve does not error and stays consistent."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+
+        first = [n for n, _b in m.resolve_load_skill_pairs(['rr-a'])]
+        assert 'rr-a' in first and 'rr-a' not in m._disabled_names  # re-enabled on first pass
+
+        # Second resolve: skill is now active; guard sees is_skill_disabled False -> no-op. No error.
+        second = [n for n, _b in m.resolve_load_skill_pairs(['rr-a'])]
+        assert 'rr-a' in second
+        assert 'rr-a' not in m._disabled_names
+        with m._metrics_lock:
+            assert m._metrics['rr-a']['status'] == 'active'
+
+
 class TestScanSkillsIncludeDisabled:
     """Part 2 — scan_skills default lists disabled skills; active=True restricts to active."""
 
