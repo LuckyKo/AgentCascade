@@ -10,6 +10,7 @@ import json
 import logging
 import re
 
+from agent_cascade.engine.helpers import _SKILL_MSG_PREFIX
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
@@ -199,7 +200,7 @@ class LoadSkill(BaseTool):
 
             # Queue skill content as USER message via pool.
             # This ensures it's injected after the tool result (preserves OpenAI API ordering: A→F→U→A).
-            skill_content = f"## Loaded Skill: {safe_name}\n\n{body}\n\nApply the above guidelines to your current task."
+            skill_content = f"{_SKILL_MSG_PREFIX}{safe_name}\n\n{body}\n\nApply the above guidelines to your current task."
             self.agent_pool.enqueue_message(agent_name, skill_content)
             loaded.append(name)
 

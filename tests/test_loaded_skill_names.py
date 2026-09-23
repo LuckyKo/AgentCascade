@@ -21,7 +21,12 @@ import time
 from types import SimpleNamespace
 
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.engine.helpers import _inject_self_augmentation_skill
+from agent_cascade.engine.helpers import (
+    _SKILL_MSG_PREFIX,
+    _inject_self_augmentation_skill,
+    _merge_loaded_skill_names,
+    rederive_loaded_skill_names,
+)
 from agent_cascade.llm.schema import Message
 from agent_cascade.tools.custom.load_skill import LoadSkill
 
@@ -289,3 +294,165 @@ class TestSelfAugSeedsNames:
             _make_self_aug_pool(load_result=None), inst)
         assert injected is False
         assert inst._loaded_skill_names is None
+
+
+# ===========================================================================
+# todo.md:148 — restore/external-load dedup regression (root-cause fix §5.1–§5.3)
+# ===========================================================================
+#
+# Root cause: on session restore / external load a FRESH AgentInstance is built whose
+# conversation already contains prior runtime-injected skill user-messages, but
+# ``_loaded_skill_names`` is re-seeded with init-time/self-aug skills only. The runtime
+# dedup guard (load_skill.py) reads only that field, so it can't see the prior runtime
+# loads and re-injects a duplicate "Apply the above guidelines…" message. The fix
+# re-derives ``_loaded_skill_names`` from the conversation at the two restore chokepoints
+# via the shared helper ``rederive_loaded_skill_names``. These tests are revert-proof:
+# T1/T3/T4 assert the *absent* post-fix state, so they FAIL pre-fix and PASS post-fix.
+
+
+def _skill_user_msg(name, body='SKILL-BODY'):
+    """A runtime-injected skill USER message, built via the shared header constant so it
+    matches exactly what ``LoadSkill.call`` enqueues."""
+    return Message(role='user', content=(
+        f"{_SKILL_MSG_PREFIX}{name}\n\n{body}\n\nApply the above guidelines to your current task."))
+
+
+def _make_inst_with_history(existing, injected_user_msgs):
+    """A real AgentInstance whose conversation = [system] + ``injected_user_msgs`` and whose
+    ``_loaded_skill_names`` field is ``existing``. Models the post-restore state where the
+    history already holds runtime-injected skills but the field does NOT yet list them."""
+    return AgentInstance(
+        instance_name='Main',
+        agent_class='Orchestrator',
+        conversation=[Message(role='system', content='# Base system prompt\n\nSome content.')]
+                     + list(injected_user_msgs),
+        created_at=time.monotonic(),
+        last_activity=time.monotonic(),
+        latest_marker_index=-1,
+        _loaded_skill_names=existing,
+    )
+
+
+class TestRederiveHelper:
+    """T2 — unit tests for the pure ``rederive_loaded_skill_names`` helper (§5.1)."""
+
+    def test_extracts_user_injected_skills_only(self):
+        msgs = [
+            Message(role='system', content='## Active Skills\n### Skill a\nbody'),  # SYSTEM: ignored
+            _skill_user_msg('a'),
+            _skill_user_msg('b'),
+            Message(role='user', content='just a plain user message'),  # no header: ignored
+        ]
+        assert rederive_loaded_skill_names(msgs) == ['a', 'b']
+
+    def test_empty_and_none_safe(self):
+        assert rederive_loaded_skill_names([]) == []
+        assert rederive_loaded_skill_names(None) == []
+
+    def test_dedupes_repeats_preserving_order(self):
+        msgs = [_skill_user_msg('a'), _skill_user_msg('b'), _skill_user_msg('a')]
+        assert rederive_loaded_skill_names(msgs) == ['a', 'b']
+
+    def test_ignores_system_active_skills_block(self):
+        """Init-time skills live in the SYSTEM message and must never be picked up."""
+        msgs = [Message(role='system', content='## Active Skills\n### Skill self-augmentation\nbody')]
+        assert rederive_loaded_skill_names(msgs) == []
+
+    def test_prefix_collision_yields_both(self):
+        """Skills ``a`` and ``ab`` must BOTH be returned (guards against a startswith bug)."""
+        msgs = [_skill_user_msg('a'), _skill_user_msg('ab')]
+        assert rederive_loaded_skill_names(msgs) == ['a', 'ab']
+
+    def test_non_string_content_ignored(self):
+        """A USER message with non-str content (e.g. a list) must be skipped, not crash."""
+        # A raw dict stands in for a Message whose content is a non-str payload; the helper
+        # must skip it (isinstance(content, str) guard) without raising.
+        msgs = [{'role': 'user', 'content': [{'type': 'text', 'text': _SKILL_MSG_PREFIX + 'a'}]},
+                _skill_user_msg('b')]
+        assert rederive_loaded_skill_names(msgs) == ['b']
+
+
+class TestRestoreDedupRegression:
+    """T1/T3/T4/T6 — the restore/external-load dedup regression, revert-proof."""
+
+    def test_t1_runtime_reload_after_restore_not_reinjected(self):
+        """CORE REGRESSION. Post-restore state: the conversation already holds skill X's injected
+        user-msg, and the restore seed (chokepoint B) has populated ``_loaded_skill_names``. The
+        runtime tool then reads that field to dedup — so re-loading X must NOT re-enqueue and must
+        be reported as already loaded.
+
+        Revert-proof: pre-fix the seed produced only ['self-augmentation'] (X dropped), so the
+        guard can't see X and a 2nd copy is enqueued (FAIL). Post-fix the seed folds in X →
+        ['skill-x','self-augmentation'], the guard sees it, no re-injection (PASS)."""
+        inst = _make_inst_with_history(None, [_skill_user_msg('skill-x')])
+        # The restore boundary runs chokepoint B first — this is what populates the field that
+        # the runtime load_skill tool then reads for its dedup guard.
+        _inject_self_augmentation_skill(_make_self_aug_pool(), inst)
+        assert 'skill-x' in (inst._loaded_skill_names or [])  # seed recovered X from history
+        result, enqueued = _call_load_skill(inst, ['skill-x'], {'skill-x': 'BODY-X'})
+        assert len(enqueued) == 0, f"skill re-injected after restore: {enqueued}"
+        assert 'Already loaded (skipped): skill-x' in result
+        assert 'Successfully loaded' not in result
+
+    def test_t3_root_restore_seeds_conversation_skills(self):
+        """ROOT RESTORE. ``_inject_self_augmentation_skill`` on a restored instance (system has
+        '## Active Skills', conversation has runtime skill X, field=None) must seed the field to
+        ['X','self-augmentation'] in §5.3 order. FAILS pre-fix (['self-augmentation']), PASSES."""
+        inst = AgentInstance(
+            instance_name='Main',
+            agent_class='Orchestrator',
+            conversation=[Message(role='system', content=(
+                '# Base system prompt\n\n## Active Skills\n\n### Skill self-augmentation\nsome body'))]
+                         + [_skill_user_msg('skill-x')],
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            latest_marker_index=-1,
+            _loaded_skill_names=None,
+        )
+        injected = _inject_self_augmentation_skill(_make_self_aug_pool(), inst)
+        assert injected is False  # idempotency guard skipped the injection (restore)
+        assert inst._loaded_skill_names == ['skill-x', 'self-augmentation']
+
+    def test_t4_subagent_rebuild_merge_preserves_prior(self):
+        """SUB-AGENT REBUILD (§5.2). Drive the production merge helper: conversation has prior
+        runtime X, loaded_skills=[('self-augmentation',…)] → field preserves X + adds self-aug.
+        FAILS pre-fix (X dropped), PASSES post-fix."""
+        inst = _make_inst_with_history(None, [_skill_user_msg('skill-x')])
+        loaded_skills = [('self-augmentation', 'SELF-AUG-BODY')]
+        # Exact §5.2 expression as wired in engine/core.py:3435 (shared helper).
+        inst._loaded_skill_names = _merge_loaded_skill_names(
+            inst.conversation, [name for name, _body in loaded_skills])
+        assert inst._loaded_skill_names == ['skill-x', 'self-augmentation']
+
+    def test_t4_brand_new_instance_byte_identity(self):
+        """SUB-AGENT REBUILD byte-identity guard (§5.2). A brand-new instance (no runtime msgs in
+        conversation) must yield exactly [resolved] — identical to the pre-fix expression."""
+        inst = _make_inst_with_history(None, [])  # conversation = [system] only, no runtime msgs
+        loaded_skills = [('self-augmentation', 'SELF-AUG-BODY')]
+        new_value = _merge_loaded_skill_names(
+            inst.conversation, [name for name, _body in loaded_skills])
+        old_value = [name for name, _body in loaded_skills] if loaded_skills else None
+        assert new_value == old_value == ['self-augmentation']
+
+    def test_t4_brand_new_empty_resolved_is_none(self):
+        """Byte-identity guard: fresh instance with nothing resolved → field is None (as before)."""
+        inst = _make_inst_with_history(None, [])
+        assert _merge_loaded_skill_names(inst.conversation, []) is None
+
+    def test_t6_no_over_suppression_distinct_skills(self):
+        """NO OVER-SUPPRESSION. Distinct skills still all load after a restore."""
+        inst = _make_inst_with_history(None, [_skill_user_msg('skill-x')])
+        result, enqueued = _call_load_skill(
+            inst, ['skill-y', 'skill-z'], {'skill-y': 'BODY-Y', 'skill-z': 'BODY-Z'})
+        assert len(enqueued) == 2
+        assert 'Successfully loaded 2 skill(s)' in result
+
+    def test_t6_compressed_away_skill_reloadable(self):
+        """NO OVER-SUPPRESSION. A skill whose injected msg was compressed away (NOT in the
+        conversation) is correctly re-loadable — re-derivation returns nothing for it."""
+        # 'skill-gone' is NOT in the conversation (compressed away); only 'skill-x' is present.
+        inst = _make_inst_with_history(None, [_skill_user_msg('skill-x')])
+        result, enqueued = _call_load_skill(
+            inst, ['skill-gone'], {'skill-gone': 'BODY-GONE'})
+        assert len(enqueued) == 1  # legitimately re-injected (no longer in context)
+        assert 'Successfully loaded 1 skill(s)' in result

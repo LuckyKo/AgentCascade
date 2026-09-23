@@ -94,7 +94,8 @@ from agent_cascade.engine.helpers import (MAX_TEXT_LENGTH_FOR_REGEX, MIN_OUTPUT_
                                           _build_resources_block, _build_session_metadata, _check_message_truncation,
                                           _extract_tool_calls_from_text, _inject_skills_to_system_message,
                                           _is_incomplete_state, _normalize_gemma_thought_tags,
-                                          _normalize_thinking_blocks, _replace_resources_block, _replace_section)
+                                          _merge_loaded_skill_names, _normalize_thinking_blocks,
+                                          _replace_resources_block, _replace_section)
 from agent_cascade.engine.llm_call import LLMCallMixin
 from agent_cascade.engine.tool_execution import ToolExecMixin
 
@@ -3432,7 +3433,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # Record this run's resolved skill names on the instance so the
             # in-loop auto-skill trigger can render them in the reflection prompt
             # (plan §2.3). Recall path leaves it unset → prompt renders "(none)".
-            inst._loaded_skill_names = [name for name, _body in loaded_skills] if loaded_skills else None
+            # Merge prior (conversation-derived) names with this run's resolved skills so a
+            # restored / externally-loaded instance — whose conversation already holds prior
+            # runtime-injected skill user-messages — doesn't lose them on overwrite. A
+            # brand-new instance has an empty conversation → prior == [] → byte-identical to
+            # before this change (resolved only, or None when nothing resolved). The merge is a
+            # shared helper so the exact expression is unit-testable in isolation.
+            inst._loaded_skill_names = _merge_loaded_skill_names(
+                inst.conversation, [name for name, _body in loaded_skills])
 
         # Write augmented context (with advisor notes) into a COPY of args so
         # build_task_message picks it up without mutating the caller's dict.

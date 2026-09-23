@@ -14,7 +14,7 @@ from enum import Enum, auto
 from typing import Any, List, Optional
 
 from agent_cascade import __version__ as AC_VERSION
-from agent_cascade.llm.schema import ASSISTANT, SYSTEM, Message
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE
 from agent_cascade.utils.utils import msg_field, msg_set
@@ -26,6 +26,54 @@ from agent_cascade.utils.utils import msg_field, msg_set
 # already imports helpers, so no circular import is introduced).
 MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000  # Threshold to skip expensive regex ops
 MIN_OUTPUT_LENGTH = 200  # Minimum output length for broken-json detection
+
+# ── Skill runtime-injection header (shared constant, D3) ──────────────────────
+# The runtime ``load_skill`` tool injects a skill as a USER message whose content
+# STARTS with this header followed by the exact skill name on the first line. It is
+# the single source of truth for that header so the injector (tools/custom/
+# load_skill.py) and the re-deriver below (rederive_loaded_skill_names) cannot drift
+# apart. Keep it byte-identical to the header rendered by LoadSkill.call().
+_SKILL_MSG_PREFIX = '## Loaded Skill: '
+
+
+def rederive_loaded_skill_names(messages) -> List[str]:
+    """Return the deduped, order-preserved names of skills already injected as USER messages.
+
+    Matches USER-role messages whose content STARTS with the runtime-injection header
+    ``'## Loaded Skill: <name>'`` (see load_skill.py). Only such messages are produced by
+    the runtime load_skill tool; init-time skills live in the SYSTEM '## Active Skills'
+    block and are intentionally excluded. The exact name is taken from the first line, so
+    a skill ``a`` never matches a skill ``ab`` (no startswith prefix collision).
+
+    Empty/None-safe: returns ``[]`` when nothing matches. Pure read — no mutation, no locks.
+    """
+    names = []
+    for msg in messages or []:
+        role = getattr(msg, 'role', None)
+        content = getattr(msg, 'content', None)
+        if role != USER or not isinstance(content, str):
+            continue
+        if content.startswith(_SKILL_MSG_PREFIX):
+            name = content.split('\n', 1)[0][len(_SKILL_MSG_PREFIX):].strip()
+            if name:
+                names.append(name)
+    return list(dict.fromkeys(names))
+
+
+def _merge_loaded_skill_names(messages, resolved_names) -> Optional[List[str]]:
+    """Merge prior (conversation-derived) skill names with this run's resolved skills.
+
+    This is the chokepoint-A merge used by ``engine/core.py`` when an instance is (re)built —
+    it recovers any runtime-injected skills already present in the restored conversation so a
+    restore / external-load boundary does not drop them from ``_loaded_skill_names``. A
+    brand-new instance has no such messages → prior == [] → returns exactly ``resolved_names``
+    (or None when nothing resolved), byte-identical to the pre-fix behavior.
+
+    Pure: reads only; order-preserving dedup via ``dict.fromkeys``.
+    """
+    prior = rederive_loaded_skill_names(messages)
+    resolved = list(resolved_names) if resolved_names else []
+    return list(dict.fromkeys(prior + resolved)) or None
 
 
 # ── SleepAction Enum (Phase 3.1)
@@ -573,9 +621,13 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
     # listed. Preserve any existing names and dedupe; runtime load_skill loads append later.
     try:
         # Build a fresh list (don't mutate the existing one in case it's shared),
-        # preserving order — same pattern as load_skill.py.
+        # preserving order — same pattern as load_skill.py. Fold in names re-derived from
+        # the conversation so a restored instance (whose history already holds prior
+        # runtime-injected skill user-messages) doesn't lose them on re-seed. Fresh create
+        # has no such messages → prior == [] → byte-identical to before this change.
         existing = instance._loaded_skill_names or []
-        instance._loaded_skill_names = list(dict.fromkeys(existing + ['self-augmentation']))
+        prior = rederive_loaded_skill_names(instance.conversation)
+        instance._loaded_skill_names = list(dict.fromkeys(prior + existing + ['self-augmentation']))
     except Exception as e:
         logger.debug('[SKILLS] _inject_self_augmentation_skill: failed to seed _loaded_skill_names: %s', e)
 
