@@ -93,6 +93,9 @@ config/pool_settings*.json
 # Local todo list (personal, not shared)
 todo.md
 
+# Temp planning docs (local working notes, not shared)
+plans/
+
 # Playback data (large JSONL files)
 playback/
 
