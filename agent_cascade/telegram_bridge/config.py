@@ -33,6 +33,26 @@ def _load_bot_token() -> str:
     return os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
 
 
+def _load_allowed_users_raw() -> str:
+    """Return the raw ALLOWED_USERS string from secrets.json, else env, else ''.
+
+    Mirrors ``_load_bot_token`` so the AC-owned supervisor path (which spawns the
+    child WITHOUT an ALLOWED_USERS env var) still resolves the allowlist from
+    config/secrets.json. The value is a comma-separated list of Telegram user ids.
+    """
+    try:
+        from config.secrets_loader import get_secret
+        val = get_secret('telegram_allowed_users')
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        # Also accept a JSON list stored under the same key.
+        if isinstance(val, (list, tuple)):
+            return ','.join(str(v).strip() for v in val if str(v).strip())
+    except Exception:
+        pass
+    return os.environ.get('ALLOWED_USERS', '').strip()
+
+
 def _parse_bool(raw: str, default: bool = False) -> bool:
     if raw is None or raw == '':
         return default
@@ -78,7 +98,7 @@ def load_config() -> BridgeConfig:
     return BridgeConfig(
         enabled=_parse_bool(os.environ.get('TG_BRIDGE_ENABLED'), default=False),
         bot_token=_load_bot_token(),
-        allowed_users=_parse_allowed_users(os.environ.get('ALLOWED_USERS', '')),
+        allowed_users=_parse_allowed_users(_load_allowed_users_raw()),
         ac_base_url=os.environ.get('AC_BASE_URL', 'http://127.0.0.1:12345').rstrip('/'),
         target_agent=os.environ.get('TG_TARGET_AGENT', 'Maine') or 'Maine',
         poll_interval_sec=float(os.environ.get('TG_POLL_INTERVAL_SEC', '2.5') or 2.5),

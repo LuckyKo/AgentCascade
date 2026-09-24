@@ -603,6 +603,56 @@ def test_run_bridge_parser_defaults_and_flags():
     assert args.task_timeout_sec is None
 
 
+def test_load_config_resolves_allowed_users_from_secrets_when_env_absent(monkeypatch):
+    """Regression (supervisor path): when the AC-owned supervisor spawns the child,
+    it does NOT put ALLOWED_USERS in the child env. load_config() must therefore
+    resolve the allowlist from config/secrets.json (key 'telegram_allowed_users'),
+    exactly like the bot token — otherwise the child exits 2 (empty allowlist) and
+    the UI toggle can never start the bridge.
+    """
+    import agent_cascade.telegram_bridge.config as cfg_mod
+
+    # Ensure the env fallback is absent so only the secrets.json path can supply it.
+    monkeypatch.delenv('ALLOWED_USERS', raising=False)
+
+    fake_secrets = {'telegram_allowed_users': str(FAKE_ALLOWED_USER_ID)}
+    try:
+        from config import secrets_loader as _sl
+        real_get_secret = _sl.get_secret
+        monkeypatch.setattr(_sl, 'get_secret', lambda k: fake_secrets.get(k))
+        cfg = cfg_mod.load_config()
+        assert cfg.allowed_users == [FAKE_ALLOWED_USER_ID]
+    finally:
+        try:
+            from config import secrets_loader as _sl2
+            monkeypatch.setattr(_sl2, 'get_secret', real_get_secret)
+        except Exception:
+            pass
+
+
+def test_load_config_allowed_users_secrets_wins_over_env(monkeypatch):
+    """Precedence matches the bot-token pattern: config/secrets.json is the
+    authoritative store and wins when it has a value; env ALLOWED_USERS is only a
+    fallback (e.g. for ad-hoc manual launches outside the repo)."""
+    import agent_cascade.telegram_bridge.config as cfg_mod
+
+    monkeypatch.setenv('ALLOWED_USERS', str(FAKE_STRANGER_USER_ID))
+    try:
+        from config import secrets_loader as _sl
+        real_get_secret = _sl.get_secret
+        # secrets.json has the allowed id; env has a different (stranger) id.
+        monkeypatch.setattr(_sl, 'get_secret', lambda k: {'telegram_allowed_users': str(FAKE_ALLOWED_USER_ID)}.get(k))
+        cfg = cfg_mod.load_config()
+        # secrets.json value wins.
+        assert cfg.allowed_users == [FAKE_ALLOWED_USER_ID]
+    finally:
+        try:
+            from config import secrets_loader as _sl2
+            monkeypatch.setattr(_sl2, 'get_secret', real_get_secret)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # 8. Phase 2 — slash-command dispatcher (extensible COMMANDS registry)
 # ---------------------------------------------------------------------------
