@@ -61,6 +61,25 @@ async def send_chunked(bot, chat_id: int, text: str) -> None:
         await _send_one(bot, chat_id, part)
 
 
+def _retry_after_seconds(exc, fallback: float) -> float:
+    """Extract the 429 retry-after delay from a PTB ``RetryAfter`` as seconds.
+
+    Handles both the current int/float form and the upcoming ``timedelta`` form
+    (PTB >= v22.2 deprecates the int; a future major will switch to timedelta).
+    Falls back to ``fallback`` if the attribute is missing or unparseable, so an
+    unexpected shape never crashes the send loop.
+    """
+    val = getattr(exc, 'retry_after', None)
+    if val is None:
+        return fallback
+    try:
+        # timedelta has .total_seconds(); int/float go through float().
+        total = getattr(val, 'total_seconds', None)
+        return float(total()) if callable(total) else float(val)
+    except (TypeError, ValueError):
+        return fallback
+
+
 async def _send_one(bot, chat_id: int, text: str) -> None:
     """Send a single message, retrying on Telegram 429 per its retry_after."""
     backoff = 1.0
@@ -69,7 +88,7 @@ async def _send_one(bot, chat_id: int, text: str) -> None:
             await bot.send_message(chat_id=chat_id, text=text)
             return
         except RetryAfter as e:
-            wait = float(getattr(e, 'retry_after', backoff))
+            wait = _retry_after_seconds(e, backoff)
             logger.warning('Telegram 429; sleeping %.1fs before retry', wait)
             await asyncio.sleep(wait)
             backoff = min(backoff * 2, 30.0)

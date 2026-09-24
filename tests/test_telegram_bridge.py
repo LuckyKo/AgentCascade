@@ -406,6 +406,35 @@ def test_send_one_honors_retry_after_on_429():
     assert bot.send_message.call_args_list[0].kwargs.get('chat_id') == 7
 
 
+def test_retry_after_seconds_handles_int_float_and_timedelta():
+    """_retry_after_seconds must accept int, float, and timedelta forms of retry_after."""
+    import datetime as _dt
+    from agent_cascade.telegram_bridge.bot import _retry_after_seconds
+
+    class _Exc:
+        pass
+
+    # int form (current PTB)
+    e_int = _Exc(); e_int.retry_after = 5
+    assert _retry_after_seconds(e_int, fallback=1.0) == 5.0
+
+    # float form
+    e_float = _Exc(); e_float.retry_after = 2.5
+    assert _retry_after_seconds(e_float, fallback=1.0) == 2.5
+
+    # timedelta form (upcoming PTB major)
+    e_td = _Exc(); e_td.retry_after = _dt.timedelta(seconds=7, milliseconds=500)
+    assert _retry_after_seconds(e_td, fallback=1.0) == pytest.approx(7.5)
+
+    # missing attribute -> fallback
+    e_none = _Exc()
+    assert _retry_after_seconds(e_none, fallback=3.0) == 3.0
+
+    # unparseable garbage -> fallback (never raises)
+    e_bad = _Exc(); e_bad.retry_after = object()
+    assert _retry_after_seconds(e_bad, fallback=4.0) == 4.0
+
+
 def test_waiter_task_timeout_path_sends_timeout_notice():
     """When wait_for_completion times out, the waiter sends the timeout notice."""
     from agent_cascade.telegram_bridge.bot import _run_waiter
