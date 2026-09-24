@@ -773,6 +773,449 @@ class TestOperationControl:
         assert resp.status_code in (200, 500), f"Unexpected status: {resp.status_code}"
 
 
+class _StubOperationManager:
+    """Minimal OperationManager double for hermetic approval/AFK tests.
+
+    Mirrors the real setter/getter surface used by the REST endpoints
+    (set_enable_timeout / set_approval_timeout / list_pending_approvals) with the
+    same clamping semantics as operation_manager/approval.py so behaviour matches.
+    """
+
+    def __init__(self, pending=None):
+        self.enable_timeout = True
+        self.approval_timeout_seconds = 300
+        self._pending = list(pending or [])
+        # build_state()'s fallback path reads operation_manager.base_dir for default_workspace.
+        self.base_dir = Path(__file__).parent
+
+    def set_enable_timeout(self, enabled):
+        self.enable_timeout = bool(enabled)
+
+    def set_approval_timeout(self, seconds):
+        self.approval_timeout_seconds = max(10, min(int(seconds), 7200))
+
+    def list_pending_approvals(self):
+        return [dict(a) for a in self._pending]
+
+
+class _FakeInstance:
+    """Minimal AgentInstance double exposing the state attributes do_stop touches."""
+
+    def __init__(self, state):
+        import threading as _t
+        self.state = state
+        self._state_lock = _t.RLock()
+        self._compression_lock = _t.RLock()
+        self._continue_saved_msg = None
+
+    def _transition(self, new_state):
+        # Faithful to the real transition: only legal from an active state.
+        from agent_cascade.agent_instance import ACTIVE_STATES, InvalidStateTransition
+        if self.state not in ACTIVE_STATES:
+            raise InvalidStateTransition(self.state, new_state)
+        self.state = new_state
+
+
+class _FakePool:
+    """Minimal AgentPool double for the stop/restore/auto-security REST tests."""
+
+    def __init__(self, instances=None):
+        self.instances = dict(instances or {})
+        self._run_generation = 0
+        self.terminated_instances = set()
+        self.stopped = False
+        self.stop_session_calls = 0
+        self.save_pool_settings_calls = 0
+        self.restore_calls = []
+        self._loaded_auto_security = True
+        # build_state()'s fallback path reads operation_manager.base_dir for default_workspace.
+        self.operation_manager = _StubOperationManager()
+
+    def _mark_activity(self, name):
+        pass
+
+    def stop_session(self, release_slots=True):
+        self.stop_session_calls += 1
+
+    def _save_pool_settings(self):
+        self.save_pool_settings_calls += 1
+
+    def load_session_from_log(self, log_input, target_instance=None,
+                              clear_sub_agents_before_load=True, caller_name=None):
+        self.restore_calls.append((log_input, target_instance))
+        return f'Loaded session {target_instance}'
+
+
+# Attributes on the real AgentPool that the Phase 1 REST endpoints read/write. We swap these
+# onto the REAL pool object (the closure var inside create_app) so the endpoint's calls hit our
+# fakes, then restore them afterwards. Methods are instance-bound on the fake; state attrs copy.
+_POOL_PATCH_ATTRS = (
+    'instances', 'operation_manager', '_run_generation', 'terminated_instances', 'stopped',
+    '_mark_activity', 'stop_session', '_save_pool_settings', 'load_session_from_log',
+)
+
+
+class TestAuthenticatedCommandEndpoints:
+    """Phase 1 — authenticated REST command endpoints (Telegram bridge).
+
+    All use the session_token auth gate (401 on bad/missing token) and reuse the existing
+    internal paths via shared helpers in ws_handlers.WsMessageHandler, so the WS and REST
+    paths cannot drift.
+
+    Pool access: ``create_app()`` binds ``agent_pool`` as a *closure variable*, so it can't be
+    read back from ``client.app.state`` (that's Starlette request-state, not the pool). The
+    module-scoped ``test_app`` fixture builds the real ``AgentPool``; we attach it to the app
+    object once (``_test_pool``) and monkeypatch its attributes per-test, restoring them in a
+    ``finally`` so the shared module-scoped app/pool stays clean for other test classes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _attach_real_pool(self, test_app):
+        # Expose the closure-bound pool as a plain attr so tests can patch its attributes.
+        if not hasattr(test_app, '_test_pool'):
+            test_app._test_pool = self._recover_pool_from_closures(test_app)
+        yield
+
+    @staticmethod
+    def _recover_pool_from_closures(app):
+        """Pull the AgentPool object out of an endpoint's closure cells.
+
+        ``create_app`` binds ``agent_pool`` by reference into every route closure but never
+        exposes it on ``app.state``, so we scan the route endpoints' ``__closure__`` cells for
+        the first value that is an ``AgentPool`` instance — that is exactly the object the
+        endpoint code will call.
+        """
+        from agent_cascade.agent_pool import AgentPool
+        for route in app.router.routes:
+            fn = getattr(route, 'endpoint', None)
+            if fn is None or not fn.__closure__:
+                continue
+            for cell in fn.__closure__:
+                try:
+                    val = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(val, AgentPool):
+                    return val
+        raise RuntimeError('Could not recover AgentPool from app route closures')
+
+    def _real_pool(self, client):
+        return client.app._test_pool
+
+    def _patch_pool(self, client, fake):
+        """Swap the real pool's endpoint-relevant attributes for ``fake``'s; returns a restore map."""
+        real = self._real_pool(client)
+        saved = {}
+        for attr in _POOL_PATCH_ATTRS:
+            saved[attr] = getattr(real, attr, _MISSING)
+        for attr in _POOL_PATCH_ATTRS:
+            if hasattr(fake, attr):
+                setattr(real, attr, getattr(fake, attr))
+        return saved
+
+    def _restore_pool(self, client, saved):
+        real = self._real_pool(client)
+        for attr, val in saved.items():
+            if val is _MISSING:
+                try:
+                    delattr(real, attr)
+                except AttributeError:
+                    pass
+            else:
+                setattr(real, attr, val)
+
+    def _token(self, client):
+        return _do_handshake(client)[0]
+
+    # ── Shared-helper unit tests (mocked deps — prove the logic directly) ────
+
+    def test_do_stop_transitions_active_to_idle_and_stops(self):
+        """WsMessageHandler.do_stop: sets flags, IDLEs active agents, stops session."""
+        import threading
+        from agent_cascade.agent_instance import AgentState
+        from agent_cascade.ws_handlers import WsMessageHandler
+
+        lock = threading.Lock()
+        session = {'stop_requested': False, 'generating': True, 'generation_id': 5}
+        pool = _FakePool(instances={'a': _FakeInstance(AgentState.RUNNING),
+                                    'b': _FakeInstance(AgentState.IDLE)})
+
+        WsMessageHandler.do_stop(session, lock, pool)
+
+        assert session['stop_requested'] is True
+        assert session['generating'] is False
+        assert session['generation_id'] == 6
+        assert pool.instances['a'].state == AgentState.IDLE  # active -> IDLE
+        assert pool.instances['b'].state == AgentState.IDLE  # already idle, unchanged
+        assert pool.stop_session_calls == 1
+        assert pool._run_generation == 1
+
+    def test_apply_auto_security_sets_app_and_persists(self):
+        """WsMessageHandler.apply_auto_security: sets app flag + pool persistence."""
+        from agent_cascade.ws_handlers import WsMessageHandler
+
+        class _App:
+            current_auto_security = True
+
+        pool = _FakePool()
+        WsMessageHandler.apply_auto_security(_App(), pool, False)
+        assert pool._loaded_auto_security is False
+        assert pool.save_pool_settings_calls == 1
+
+    # ── /api/status now exposes pending approvals ───────────────────────────
+
+    def test_status_includes_pending_approvals(self, client):
+        """GET /api/status includes a pending_approvals list (mocked op manager)."""
+        token = self._token(client)
+        real = self._real_pool(client)
+        om = _StubOperationManager(pending=[{
+            'request_id': 'req-1', 'agent_name': 'Maine', 'tool_name': 'shell_cmd',
+            'tool_args': {}, 'description': 'run x', 'justification': '', 'timestamp': 't'}])
+        saved = self._patch_pool(client, _FakePool())
+        real.operation_manager = om
+        try:
+            resp = client.get(f'/api/status?token={token}')
+        finally:
+            self._restore_pool(client, saved)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'pending_approvals' in data
+        assert data['pending_approvals'][0]['request_id'] == 'req-1'
+
+    def test_status_pending_approvals_empty_without_op_manager(self, client):
+        """GET /api/status returns an empty pending_approvals list when no op manager."""
+        token = self._token(client)
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, _FakePool())
+        real.operation_manager = None
+        try:
+            resp = client.get(f'/api/status?token={token}')
+        finally:
+            self._restore_pool(client, saved)
+        assert resp.status_code == 200
+        assert resp.json()['pending_approvals'] == []
+
+    # ── /api/stop ───────────────────────────────────────────────────────────
+
+    def test_stop_401_without_token(self, client):
+        """POST /api/stop with a bad token returns 401."""
+        assert client.post('/api/stop', params={'token': 'bad'}).status_code == 401
+
+    def test_stop_401_missing_token(self, client):
+        """POST /api/stop with no token returns 401."""
+        assert client.post('/api/stop').status_code == 401
+
+    def test_stop_happy_path_exercises_shared_helper(self, client):
+        """POST /api/stop (valid token) routes through the shared do_stop helper."""
+        token = self._token(client)
+        from agent_cascade.agent_instance import AgentState
+
+        fake = _FakePool(instances={'a': _FakeInstance(AgentState.RUNNING)})
+        saved = self._patch_pool(client, fake)
+        try:
+            resp = client.post('/api/stop', params={'token': token})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        assert resp.json()['status'] == 'ok'
+        assert fake.stop_session_calls == 1
+        assert fake.instances['a'].state == AgentState.IDLE
+
+    # ── /api/restart (auth gate only — never actually re-execs in tests) ─────
+
+    def test_restart_401_without_token(self, client):
+        """POST /api/restart with a bad token returns 401 (and does not spawn)."""
+        assert client.post('/api/restart', params={'token': 'bad'}).status_code == 401
+
+    def test_restart_401_missing_token(self, client):
+        """POST /api/restart with no token returns 401."""
+        assert client.post('/api/restart').status_code == 401
+
+    # ── /api/auto_security ──────────────────────────────────────────────────
+
+    def test_auto_security_401_without_token(self, client):
+        """POST /api/auto_security with a bad token returns 401."""
+        assert client.post('/api/auto_security', params={'token': 'bad'},
+                           json={'enabled': True}).status_code == 401
+
+    def test_auto_security_happy_path_exercises_shared_helper(self, client):
+        """POST /api/auto_security (valid token) routes through apply_auto_security."""
+        token = self._token(client)
+        fake = _FakePool()
+        saved = self._patch_pool(client, fake)
+        try:
+            resp = client.post('/api/auto_security', params={'token': token}, json={'enabled': True})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body['status'] == 'ok'
+        assert body['auto_security'] is True
+        # Shared helper wrote the flag onto the real app object + pool persistence.
+        assert client.app.current_auto_security is True
+        assert fake._loaded_auto_security is True
+        assert fake.save_pool_settings_calls == 1
+
+    def test_auto_security_defaults_to_disabled_when_no_body(self, client):
+        """POST /api/auto_security with no body disables (enabled defaults False)."""
+        token = self._token(client)
+        fake = _FakePool()
+        saved = self._patch_pool(client, fake)
+        try:
+            resp = client.post('/api/auto_security', params={'token': token})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        assert resp.json()['auto_security'] is False
+        assert client.app.current_auto_security is False
+
+    # ── /api/afk ────────────────────────────────────────────────────────────
+
+    def test_afk_401_without_token(self, client):
+        """POST /api/afk with a bad token returns 401."""
+        assert client.post('/api/afk', params={'token': 'bad'},
+                           json={'enabled': True}).status_code == 401
+
+    def test_afk_503_without_operation_manager(self, client):
+        """POST /api/afk returns 503 when there is no operation manager."""
+        token = self._token(client)
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, _FakePool())
+        real.operation_manager = None
+        try:
+            resp = client.post('/api/afk', params={'token': token}, json={'enabled': True})
+        finally:
+            self._restore_pool(client, saved)
+        assert resp.status_code == 503
+
+    def test_afk_enable_with_timeout(self, client):
+        """POST /api/afk {enabled:true, timeout_seconds} sets both + persists."""
+        token = self._token(client)
+        om = _StubOperationManager()
+        fake = _FakePool()
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, fake)
+        real.operation_manager = om
+        try:
+            resp = client.post('/api/afk', params={'token': token},
+                               json={'enabled': True, 'timeout_seconds': 120})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body['status'] == 'ok'
+        assert body['enabled'] is True
+        assert body['timeout_seconds'] == 120
+        assert om.enable_timeout is True
+        assert om.approval_timeout_seconds == 120
+        assert fake.save_pool_settings_calls == 1
+
+    def test_afk_disable_keeps_timeout(self, client):
+        """POST /api/afk {enabled:false} disables auto-reject; timeout untouched."""
+        token = self._token(client)
+        om = _StubOperationManager()
+        om.approval_timeout_seconds = 300
+        fake = _FakePool()
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, fake)
+        real.operation_manager = om
+        try:
+            resp = client.post('/api/afk', params={'token': token}, json={'enabled': False})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body['enabled'] is False
+        assert body['timeout_seconds'] == 300  # unchanged (no timeout_seconds supplied)
+
+    def test_afk_timeout_clamped(self, client):
+        """POST /api/afk clamps timeout_seconds via set_approval_timeout (10s floor)."""
+        token = self._token(client)
+        om = _StubOperationManager()
+        fake = _FakePool()
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, fake)
+        real.operation_manager = om
+        try:
+            resp = client.post('/api/afk', params={'token': token},
+                               json={'enabled': True, 'timeout_seconds': 1})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        assert resp.json()['timeout_seconds'] == 10  # clamped to the 10s floor
+
+    # ── /api/session/restore ────────────────────────────────────────────────
+
+    def test_restore_401_without_token(self, client):
+        """POST /api/session/restore with a bad token returns 401."""
+        assert client.post('/api/session/restore', params={'token': 'bad'},
+                           json={'name': 'x'}).status_code == 401
+
+    def test_restore_400_missing_name(self, client):
+        """POST /api/session/restore with no name returns 400."""
+        token = self._token(client)
+        assert client.post('/api/session/restore', params={'token': token}, json={}).status_code == 400
+
+    def test_restore_404_unknown_name(self, client):
+        """POST /api/session/restore for an unknown name returns 404."""
+        token = self._token(client)
+        fake = _FakePool()
+        saved = self._patch_pool(client, fake)
+        try:
+            resp = client.post('/api/session/restore', params={'token': token}, json={'name': 'nope_xyz'})
+        finally:
+            self._restore_pool(client, saved)
+        assert resp.status_code == 404
+
+    def test_restore_happy_path(self, client, tmp_path):
+        """POST /api/session/restore resolves name→log and loads via the pool."""
+        token = self._token(client)
+
+        # Build a log dir containing one session named 'restored'.
+        logs_dir = tmp_path / 'logs'
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / 'orchestrator_restored_20260101_000000.jsonl').write_text(
+            json.dumps({'metadata': {'instance_name': 'restored'}}) + '\n', encoding='utf-8')
+
+        fake = _FakePool()
+
+        class _FakeOM:
+            base_dir = tmp_path
+
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, fake)
+        real.operation_manager = _FakeOM()
+
+        import agent_cascade.instance_id as instance_id_mod
+        orig = instance_id_mod.get_session_log_dir
+        try:
+            instance_id_mod.get_session_log_dir = lambda pool: logs_dir
+            resp = client.post('/api/session/restore', params={'token': token}, json={'name': 'restored'})
+        finally:
+            instance_id_mod.get_session_log_dir = orig
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body['status'] == 'ok'
+        assert body['session_name'] == 'restored'
+        # The pool's standardized load path was invoked with the resolved log path.
+        assert len(fake.restore_calls) == 1
+        loaded_path, target = fake.restore_calls[0]
+        assert Path(loaded_path).name == 'orchestrator_restored_20260101_000000.jsonl'
+        assert target == 'restored'
+
+
+class _MISSING:
+    """Sentinel for pool attributes that did not exist before patching."""
+
+
 class TestWebSocket:
     """WebSocket message handling tests with behavior verification."""
 

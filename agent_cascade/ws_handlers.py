@@ -5,6 +5,7 @@ Each WebSocket message type has its own handler method dispatched via a lookup t
 """
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -222,6 +223,114 @@ class WsMessageHandler:
                         conv_snapshot = list(sa_inst.conversation)
                     self.agent_pool.instance_state[name]['messages'] = conv_snapshot
 
+    # ── Shared command helpers (used by both WS handlers and REST endpoints) ──
+    # These live here (not in api_server.py) so the WebSocket and REST paths share a
+    # single implementation and cannot drift. They take their dependencies explicitly
+    # rather than relying on self, so create_app() can call them directly too.
+
+    @staticmethod
+    def do_stop(session: Dict[str, Any], session_lock: threading.Lock, agent_pool) -> None:
+        """Core 'stop' logic — halt execution and transition active agents to IDLE.
+
+        Shared by the WS ``stop`` handler and the REST ``POST /api/stop`` endpoint so
+        the two paths stay in lockstep. Sets the stop flags under ``session_lock``,
+        transitions every active instance to IDLE, calls ``agent_pool.stop_session()``,
+        bumps the run generation, then cleans up the active stack / halted state.
+        """
+        from agent_cascade.log import logger
+
+        with session_lock:
+            session['stop_requested'] = True
+            session['generating'] = False
+            session['generation_id'] += 1
+
+        if not agent_pool:
+            return
+
+        # Transition ALL active agents to IDLE state (not just reset)
+        from agent_cascade.agent_instance import ACTIVE_STATES, AgentState, InvalidStateTransition
+
+        transitioned = 0
+        for inst_name, instance in list(agent_pool.instances.items()):
+            try:
+                agent_pool._mark_activity(inst_name)
+
+                with instance._state_lock:
+                    current_state = instance.state
+                    if current_state in ACTIVE_STATES:
+                        instance._transition(AgentState.IDLE)
+                        transitioned += 1
+                        logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
+
+                # Clear any pending continue merge state on stop
+                with instance._compression_lock:
+                    if instance._continue_saved_msg is not None:
+                        logger.debug(f"[CONTINUE_FIX] Stop handler cleared _continue_saved_msg for {inst_name}")
+                        instance._continue_saved_msg = None
+            except InvalidStateTransition as e:
+                logger.warning(f"[STOP_ERROR] Invalid state transition for {inst_name}: {e}")
+            except Exception as e:
+                logger.warning(f"[STOP_ERROR] Failed to transition {inst_name} to IDLE: {e}")
+
+        # Halt threads, release slots, and unblock pending approvals
+        agent_pool.stop_session()
+
+        # Increment run generation AFTER slot release
+        agent_pool._run_generation += 1
+
+        # Diagnostic: Check for stuck slots after stop (only pay the get_status()
+        # cost when debug logging is on — avoids per-stop I/O in production).
+        if logger.isEnabledFor(logging.DEBUG) and \
+                hasattr(agent_pool, 'api_router') and agent_pool.api_router:
+            sched = agent_pool.api_router.scheduler
+            status = sched.get_status()
+            stuck = {k: v for k, v in status.items() if v['active_count'] > 0}
+            if stuck:
+                logger.warning(f"Stuck slots detected after stop_session: "
+                               f"{stuck}")
+            else:
+                logger.debug('All slots released cleanly after stop_session')
+
+        logger.debug(
+            f"Transitioned {transitioned} agent(s) to IDLE, generation now={agent_pool._run_generation}")
+
+        # Clean up active stack and halted state after stop_session()
+        try:
+            if hasattr(agent_pool, '_execution') and hasattr(agent_pool._execution, 'active_stack'):
+                with agent_pool._execution._state_lock:
+                    original_len = len(agent_pool._execution.active_stack)
+                    # Mutate in place instead of replacing the list
+                    agent_pool._execution.active_stack[:] = [
+                        (name, depth)
+                        for name, depth in agent_pool._execution.active_stack
+                        if name not in agent_pool.terminated_instances
+                    ]
+                    removed_count = original_len - len(agent_pool._execution.active_stack)
+                    if removed_count > 0:
+                        logger.debug(
+                            f"[STOP_STACK_CLEANUP] Removed {removed_count} terminated entries from active_stack")
+
+            # Clear _halted_instances to prevent stale pause state after stop
+            if hasattr(agent_pool, '_halted_instances'):
+                agent_pool._halted_instances.clear()
+        except Exception as e:
+            logger.warning(f"[STOP_CLEANUP_ERROR] Error during slot/stack cleanup: {e}")
+
+    @staticmethod
+    def apply_auto_security(app, agent_pool, enabled: bool) -> None:
+        """Toggle Auto-Ask Security mode (shared by WS and REST paths).
+
+        Stores the flag on the FastAPI ``app`` object (read at runtime by the security
+        handler via ``getattr(app, 'current_auto_security', ...)``), mirrors it onto
+        ``agent_pool._loaded_auto_security`` for persistence, and saves pool settings.
+        """
+        app.current_auto_security = enabled
+        if agent_pool:
+            agent_pool._loaded_auto_security = enabled
+            # Persist to disk
+            if hasattr(agent_pool, '_save_pool_settings'):
+                agent_pool._save_pool_settings()
+
     def _start_gen_thread(self, history_copy=None, instance_name: str = '') -> None:
         """Launch the generation thread (shared boilerplate)."""
         gen_id = self._start_generation()
@@ -316,85 +425,12 @@ class WsMessageHandler:
         await self._broadcast(generating=True)
 
     async def handle_stop(self, data: dict) -> None:
-        """Handle 'stop' — stop all streaming and set ALL active agents to IDLE."""
-        from agent_cascade.log import logger
+        """Handle 'stop' — stop all streaming and set ALL active agents to IDLE.
 
-        with self._session_lock:
-            self.session['stop_requested'] = True
-            self.session['generating'] = False
-            self.session['generation_id'] += 1
-
-        if self.agent_pool:
-            # Transition ALL active agents to IDLE state (not just reset)
-            from agent_cascade.agent_instance import ACTIVE_STATES, AgentState, InvalidStateTransition
-
-            transitioned = 0
-            for inst_name, instance in list(self.agent_pool.instances.items()):
-                try:
-                    self.agent_pool._mark_activity(inst_name)
-
-                    with instance._state_lock:
-                        current_state = instance.state
-                        if current_state in ACTIVE_STATES:
-                            instance._transition(AgentState.IDLE)
-                            transitioned += 1
-                            logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
-
-                    # Clear any pending continue merge state on stop
-                    with instance._compression_lock:
-                        if instance._continue_saved_msg is not None:
-                            logger.debug(f"[CONTINUE_FIX] Stop handler cleared _continue_saved_msg for {inst_name}")
-                            instance._continue_saved_msg = None
-                except InvalidStateTransition as e:
-                    logger.warning(f"[STOP_ERROR] Invalid state transition for {inst_name}: {e}")
-                except Exception as e:
-                    logger.warning(f"[STOP_ERROR] Failed to transition {inst_name} to IDLE: {e}")
-
-            # Halt threads, release slots, and unblock pending approvals
-            self.agent_pool.stop_session()
-
-            # Increment run generation AFTER slot release
-            self.agent_pool._run_generation += 1
-
-            # Diagnostic: Check for stuck slots after stop
-            if hasattr(self.agent_pool, 'api_router') and self.agent_pool.api_router:
-                sched = self.agent_pool.api_router.scheduler
-                status = sched.get_status()
-                stuck = {k: v for k, v in status.items() if v['active_count'] > 0}
-                if stuck:
-                    logger.warning(f"Stuck slots detected after stop_session: "
-                                   f"{stuck}")
-                else:
-                    logger.debug('All slots released cleanly after stop_session')
-
-            logger.debug(
-                f"Transitioned {transitioned} agent(s) to IDLE, generation now={self.agent_pool._run_generation}")
-
-        # Clean up active stack and halted state after stop_session()
-        if self.agent_pool:
-            try:
-                from agent_cascade.log import logger
-
-                if hasattr(self.agent_pool, '_execution') and hasattr(self.agent_pool._execution, 'active_stack'):
-                    with self.agent_pool._execution._state_lock:
-                        original_len = len(self.agent_pool._execution.active_stack)
-                        # Mutate in place instead of replacing the list
-                        self.agent_pool._execution.active_stack[:] = [
-                            (name, depth)
-                            for name, depth in self.agent_pool._execution.active_stack
-                            if name not in self.agent_pool.terminated_instances
-                        ]
-                        removed_count = original_len - len(self.agent_pool._execution.active_stack)
-                        if removed_count > 0:
-                            logger.debug(
-                                f"[STOP_STACK_CLEANUP] Removed {removed_count} terminated entries from active_stack")
-
-                # Clear _halted_instances to prevent stale pause state after stop
-                if hasattr(self.agent_pool, '_halted_instances'):
-                    self.agent_pool._halted_instances.clear()
-            except Exception as e:
-                logger.warning(f"[STOP_CLEANUP_ERROR] Error during slot/stack cleanup: {e}")
-
+        Delegates the core logic to :meth:`do_stop` (shared with ``POST /api/stop``)
+        so the WS and REST paths cannot drift, then broadcasts a ``done`` frame.
+        """
+        WsMessageHandler.do_stop(self.session, self._session_lock, self.agent_pool)
         await self._broadcast('done')
 
     async def handle_pause(self, data: dict) -> None:
@@ -1020,16 +1056,13 @@ class WsMessageHandler:
         await sec.run_check(data)
 
     async def handle_set_auto_security(self, data: dict) -> None:
-        """Handle 'set_auto_security' — toggle Auto-Ask mode."""
+        """Handle 'set_auto_security' — toggle Auto-Ask mode.
+
+        Delegates to :meth:`apply_auto_security` (shared with ``POST /api/auto_security``)
+        so the WS and REST paths cannot drift, then broadcasts updated state.
+        """
         enabled = data.get('enabled', False)
-        # Store on app object so SecurityAdvisorHandler can read it via _get_auto_security_enabled()
-        self.app.current_auto_security = enabled
-        # Sync to agent_pool for persistence
-        if self.agent_pool:
-            self.agent_pool._loaded_auto_security = enabled
-            # Persist to disk
-            if hasattr(self.agent_pool, '_save_pool_settings'):
-                self.agent_pool._save_pool_settings()
+        WsMessageHandler.apply_auto_security(self.app, self.agent_pool, enabled)
         # Broadcast updated state to all clients immediately, preventing stale overrides from pending messages
         await self._broadcast()
 

@@ -48,6 +48,7 @@ from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting)
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.log import logger
 
 try:
     from agent_cascade.agents.user_agent import PENDING_USER_INPUT
@@ -266,6 +267,8 @@ def _scan_sessions_sync(log_dir: Path) -> list[dict]:
     listing itself — avoids a separate stat() syscall per file (~1.7x faster on Windows).
     """
     sessions = []
+    if not log_dir.exists():
+        return sessions
     try:
         entries = list(os.scandir(log_dir))
     except OSError as e:
@@ -492,9 +495,14 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         return []
 
     def get_approvals():
-        if agent_pool and hasattr(agent_pool, 'operation_manager'):
-            return agent_pool.operation_manager.list_pending_approvals()
-        return []
+        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
+        if om is None:
+            return []
+        try:
+            return om.list_pending_approvals()
+        except Exception as e:
+            logger.debug(f"Failed to list pending approvals (returning empty): {e}")
+            return []
 
     def _safe_get_telemetry():
         """Get telemetry summary safely — never crash state serialization."""
@@ -982,6 +990,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             'agents': agent_pool.list_agents() if agent_pool else [],
             'active_stack': get_active_stack(),
             'instance_halted': agent_pool.is_instance_halted(sess_name) if (agent_pool and hasattr(agent_pool, 'is_instance_halted')) else False,
+            # Pending approvals so a token-auth client (e.g. the Telegram bridge) can read
+            # request_ids securely over loopback to drive approve/reject. Empty list when
+            # there is no operation manager or nothing pending.
+            'pending_approvals': get_approvals(),
         }
 
     # ── REST endpoints ────────────────────────────────────────────────────
@@ -1199,6 +1211,149 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             agent_pool.resume()  # clear global pause flag — agents wake naturally from sleep loop
             return {'status': 'ok', 'message': 'All instances resumed'}
         return {'status': 'error', 'message': 'Agent pool not available'}
+
+    # ── Authenticated command endpoints (Telegram bridge, Phase 1) ──────────
+    # Each is a thin wrapper reusing an existing internal path. All are gated by the
+    # session_token (same check as GET /api/status) — do NOT replicate the open
+    # approve/reject pattern here. Shared stop/auto-security logic lives in
+    # ws_handlers.WsMessageHandler so the WS and REST paths cannot drift.
+
+    def _invalid_token_response():
+        return JSONResponse(status_code=401, content={'message': 'Invalid session token'})
+
+    @app.post('/api/stop')
+    async def api_stop(token: str = None):
+        """Stop all streaming and set active agents to IDLE (mirrors WS 'stop')."""
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
+        WsMessageHandler.do_stop(session, session_lock, agent_pool)
+        await _broadcast_state('done')
+        return {'status': 'ok'}
+
+    @app.post('/api/restart')
+    async def api_restart(token: str = None):
+        """Restart the AC server process.
+
+        Windows does not implement os.execl (the POSIX in-place re-exec used by the WS
+        path), so we spawn a detached child with the same argv and exit this process.
+        Destructive — strictly gated by session_token.
+        """
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
+
+        import subprocess
+
+        logger.warning('Server restart requested via REST /api/restart')
+        # Notify connected clients before the process exits so they can reconnect.
+        try:
+            await broadcast({'type': 'error', 'message': 'Server is restarting... Please wait.'})
+        except Exception as e:
+            # Warning (not debug): operators should notice if clients fail to get the notice.
+            logger.warning(f"Restart notice broadcast failed (non-critical): {e}")
+
+        # Spawn a detached child running the same interpreter + argv, then exit.
+        # CREATE_NO_WINDOW prevents a console pop-up on Windows; DETACHED_PROCESS lets it
+        # survive this process's termination. The parent exits immediately after spawn.
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags |= 0x08000000  # CREATE_NO_WINDOW
+            creationflags |= 0x00000008  # DETACHED_PROCESS
+        subprocess.Popen(
+            [sys.executable, *sys.argv],
+            creationflags=creationflags,
+            close_fds=True,
+            cwd=os.getcwd(),
+        )
+        os._exit(0)
+
+    @app.post('/api/auto_security')
+    async def api_set_auto_security(token: str = None, data: dict = None):
+        """Toggle Auto-Ask Security mode (mirrors WS 'set_auto_security')."""
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
+        enabled = bool((data or {}).get('enabled', False))
+        WsMessageHandler.apply_auto_security(app, agent_pool, enabled)
+        await _broadcast_state()
+        return {'status': 'ok', 'auto_security': enabled}
+
+    @app.post('/api/afk')
+    async def api_set_afk(token: str = None, data: dict = None):
+        """Toggle AFK mode — the approval-timeout auto-reject.
+
+        Semantics (see build plan Decision 2): ``enabled=true`` means pending approvals
+        auto-reject after ``timeout_seconds`` so agents don't hang while the user is away;
+        ``enabled=false`` means wait indefinitely. Persists to pool_settings.json so it
+        survives restart (mirrors how approval-timeout settings persist).
+        """
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
+
+        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
+        if om is None:
+            return JSONResponse(status_code=503, content={'message': 'No operation manager'})
+
+        payload = data or {}
+        enabled = bool(payload.get('enabled', False))
+        timeout_raw = payload.get('timeout_seconds')
+
+        try:
+            om.set_enable_timeout(enabled)
+            if timeout_raw is not None:
+                om.set_approval_timeout(int(timeout_raw))  # clamps to 10s–2h internally
+        except Exception as e:
+            logger.warning(f"Failed to apply AFK settings: {e}")
+            # Generic message — don't leak internal exception details to the caller.
+            return JSONResponse(status_code=400, content={'message': 'Failed to set AFK mode'})
+
+        # Persist so the setting survives a restart (same path as the config handlers).
+        if hasattr(agent_pool, '_save_pool_settings'):
+            agent_pool._save_pool_settings()
+
+        await _broadcast_state()
+        return {
+            'status': 'ok',
+            'enabled': om.enable_timeout,
+            'timeout_seconds': om.approval_timeout_seconds,
+        }
+
+    @app.post('/api/session/restore')
+    async def api_restore_session(token: str = None, data: dict = None):
+        """Restore a named session from its log (mirrors WS 'load_session')."""
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
+
+        name = ((data or {}).get('name') or '').strip()
+        if not name:
+            return JSONResponse(status_code=400, content={'message': 'Missing session name'})
+        if not agent_pool:
+            return JSONResponse(status_code=503, content={'message': 'Agent pool not available'})
+
+        # Resolve the newest log for this name (same listing used by GET /api/sessions).
+        from agent_cascade.instance_id import get_session_log_dir
+        log_dir = get_session_log_dir(agent_pool)
+        sessions = await asyncio.to_thread(_scan_sessions_sync, log_dir)
+        matches = [s for s in sessions if s.get('name') == name]
+        if not matches:
+            return JSONResponse(status_code=404, content={'message': f"No session found with name '{name}'"})
+        path = matches[0]['path']  # _scan_sessions_sync sorts newest-first
+
+        # Load via the pool's standardized path (mirrors handle_load_session).
+        status = agent_pool.load_session_from_log(
+            path, target_instance=name, clear_sub_agents_before_load=True)
+        if isinstance(status, str) and status.startswith('Error'):
+            return JSONResponse(status_code=400, content={'message': status})
+
+        # Mirror WS handle_load_session exactly (_stop_generation + _signal_stop):
+        # set generating=False and stop_requested=True, but do NOT bump generation_id.
+        with session_lock:
+            session['session_name'] = name
+            session['generating'] = False
+            session['stop_requested'] = True
+        if agent_pool.stopped:
+            agent_pool.stopped = False
+        _clear_caches_safely()
+        await _broadcast_state()
+        return {'status': 'ok', 'session_name': name}
 
     @app.get('/api/sessions')
     async def api_list_sessions():
