@@ -9,6 +9,7 @@ import copy
 import json
 import os
 import platform
+import re
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -792,11 +793,14 @@ class SecurityAdvisorHandler:
                     is_no = True
 
                 if is_yes or is_no:
-                    # Extract justification from the matching line
+                    # line_upper drives the case-insensitive [YES]/[NO] match; line_orig
+                    # preserves original casing so the reason isn't rendered in ALL CAPS.
                     for line in lines:
-                        lc = _MARKDOWN_BOLD_RE.sub('', line).strip().upper()
-                        if (is_yes and '[YES]' in lc) or (is_no and '[NO]' in lc):
-                            just_text = lc.replace('[YES]', '', 1).replace('[NO]', '', 1).strip()
+                        line_orig = _MARKDOWN_BOLD_RE.sub('', line).strip()
+                        line_upper = line_orig.upper()
+                        if (is_yes and '[YES]' in line_upper) or (is_no and '[NO]' in line_upper):
+                            just_text = re.sub(r'\[YES\]', '', line_orig, count=1, flags=re.IGNORECASE)
+                            just_text = re.sub(r'\[NO\]', '', just_text, count=1, flags=re.IGNORECASE).strip()
                             justification = _JUSTIFICATION_PREFIX_RE.sub('', just_text).strip()
                             break
 
