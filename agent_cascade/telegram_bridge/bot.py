@@ -28,7 +28,7 @@ from .waiter import WaiterResult, wait_for_completion, fetch_final_message
 # Telegram's hard limit is 4096 chars/message. Chunk at exactly that so we only
 # split when a single reply genuinely exceeds the limit (per v1 spec).
 TG_MAX_LEN = 4096
-CHUNK_SIZE = 4096
+CHUNK_SIZE = TG_MAX_LEN
 
 
 def chunk_text(text: str, limit: int = CHUNK_SIZE) -> List[str]:

@@ -28,14 +28,14 @@ def main() -> int:
     cfg = load_config()
 
     if not cfg.enabled:
-        print('Telegram bridge is disabled (TG_BRIDGE_ENABLED is not true). Exiting.')
+        logger.info('Telegram bridge is disabled (TG_BRIDGE_ENABLED is not true). Exiting.')
         return 0
 
     problems = validate_config(cfg)
     if problems:
         for p in problems:
             logger.error('Config problem: %s', p)
-        print('\n'.join(problems), file=sys.stderr)
+        logger.error('Telegram bridge config invalid — %d problem(s); see above.', len(problems))
         return 2
 
     # Open the AC httpx client in a one-shot event loop. PTB's run_polling() is a
