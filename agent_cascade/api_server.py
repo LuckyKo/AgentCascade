@@ -806,6 +806,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         asyncio.create_task(_sender_loop())
         asyncio.create_task(_approval_loop())
 
+        # Start-on-boot: if the Telegram bridge toggle was persisted ON, spawn the
+        # bridge now (uvicorn is serving, so the child's ac.open() can reach AC).
+        tg_sup = getattr(agent_pool, 'telegram_supervisor', None) if agent_pool else None
+        if tg_sup and getattr(getattr(agent_pool, 'settings', None), 'telegram_bridge_enabled', False):
+            try:
+                tg_sup.start()
+            except Exception as e:
+                logger.warning(f"Telegram bridge start-on-boot failed (non-critical): {e}")
+
         # Register dismissal callback for real-time UI tab removal when LLM calls dismiss_agent
         if agent_pool and hasattr(agent_pool, 'on_dismissed'):
             def _on_dismiss_callback(instance_name, log_path):
@@ -1812,6 +1821,22 @@ if __name__ == '__main__':
 
     operation_mgr.agent_pool = agent_pool
 
+    # Attach the Telegram bridge supervisor (Phase 3). It is constructed here where
+    # args.port is known so the child's AC_BASE_URL uses the ACTUAL runtime port.
+    # It is NOT started here — uvicorn has not bound yet; start-on-boot happens in
+    # the startup event, and the UI toggle drives it at runtime via the config handler.
+    from agent_cascade.telegram_bridge.supervisor import TelegramBridgeSupervisor
+    try:
+        tg_supervisor = TelegramBridgeSupervisor(
+            ac_base_url=f'http://127.0.0.1:{args.port}',
+            project_root=PROJECT_ROOT,
+            workspace_dir=args.workspace,
+        )
+        agent_pool.telegram_supervisor = tg_supervisor
+        logger.debug('Telegram bridge supervisor attached (base_url=http://127.0.0.1:%d)', args.port)
+    except Exception as e:
+        logger.warning('[INIT] Telegram bridge supervisor init failed (non-critical): %s', e)
+
     # Apply CLI/env overrides via config handlers (before any WebSocket connections exist).
     # Uses handlers directly for validation and consistency with runtime updates.
     from agent_cascade.config_handlers import CONFIG_HANDLERS
@@ -1899,6 +1924,13 @@ if __name__ == '__main__':
     def handle_shutdown(signum, frame):
         logger.info('\n[INFO] Initiating graceful shutdown...')
         agent_pool.stopped = True
+        # Stop the Telegram bridge child (terminate -> wait -> kill) before exiting.
+        tg_supervisor = getattr(agent_pool, 'telegram_supervisor', None)
+        if tg_supervisor is not None:
+            try:
+                tg_supervisor.stop()
+            except Exception as e:
+                logger.debug(f"Telegram bridge stop during shutdown failed (non-critical): {e}")
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()

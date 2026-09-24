@@ -428,6 +428,9 @@ def build_state_from_pool(
                 getattr(ps, 'auto_skill_min_turns', 20),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
+            # Telegram bridge (Phase 3)
+            'telegram_bridge_enabled':
+                getattr(ps, 'telegram_bridge_enabled', False),
             # Retry policy settings (Phase 6)
             'retry_max_attempts':
                 getattr(ps, 'retry_max_attempts', 3),
@@ -654,6 +657,9 @@ def build_stream_update_from_pool(
                 getattr(ps, 'auto_skill_min_turns', 20),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
+            # Telegram bridge (Phase 3)
+            'telegram_bridge_enabled':
+                getattr(ps, 'telegram_bridge_enabled', False),
             # Retry policy settings (Phase 6)
             'retry_max_attempts':
                 getattr(ps, 'retry_max_attempts', 3),

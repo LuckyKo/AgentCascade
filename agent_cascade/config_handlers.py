@@ -139,6 +139,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'stream_max_total_seconds',
     # Dismiss thread join timeout
     'dismiss_thread_join_timeout',
+    # Telegram bridge (Phase 3) — UI toggle; spawns/stops the bridge child process.
+    'telegram_bridge_enabled',
 })
 
 # ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
@@ -418,6 +420,25 @@ def _handle_auto_skill_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: 
     """Toggle auto-skill generation/proposal on/off."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.auto_skill_enabled = bool(ui_cfg.get('auto_skill_enabled', True))
+
+
+@register_config_handler('telegram_bridge_enabled')
+def _handle_telegram_bridge_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle the AC-owned Telegram bridge child process on/off.
+
+    Sets the persisted PoolSettings field AND drives the supervisor (attached as
+    ``agent_pool.telegram_supervisor`` by api_server.main()). The UI sends a full
+    settings snapshot on every save, so this handler fires on *every* save — the
+    supervisor's set_enabled() is idempotent (no double-spawn on repeated "on",
+    safe no-op on "off" when not running).
+    """
+    if agent_pool is None or not hasattr(agent_pool, 'settings'):
+        return
+    enabled = bool(ui_cfg.get('telegram_bridge_enabled', False))
+    agent_pool.settings.telegram_bridge_enabled = enabled
+    supervisor = getattr(agent_pool, 'telegram_supervisor', None)
+    if supervisor is not None:
+        supervisor.set_enabled(enabled)
 
 
 @register_config_handler('auto_skill_mode')

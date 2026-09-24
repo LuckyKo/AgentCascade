@@ -610,6 +610,17 @@
                       </div>
                     </details>
 
+                    <!-- Telegram Bridge -->
+                    <details class="settings-section">
+                      <summary class="settings-section-title">Telegram Bridge</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span title="When enabled, AC spawns and owns the Telegram bridge as a child process (long-polls Telegram and routes messages to the target agent). Requires telegram_bot_token in config/secrets.json and ALLOWED_USERS set; on failure AC logs the error and does not crash-loop.">Enable Telegram Bridge</span>
+                          <input type="checkbox" id="setting-telegram-bridge-enabled" />
+                        </label>
+                      </div>
+                    </details>
+
                     <!-- Loop Detection -->
                     <details class="settings-section">
                       <summary class="settings-section-title">Loop Detection</summary>
