@@ -1,0 +1,99 @@
+"""Configuration loading for the v1 Telegram bridge.
+
+Secrets (bot token) come from AC's existing ``config/secrets.json`` via
+``config.secrets_loader.get_secret`` (gitignored), with an env-var fallback.
+All non-secret settings are plain env vars so a standalone process needs no
+extra machinery.
+
+Env keys (see plan §8 / V1 SCOPE ADDENDUM):
+    TG_BRIDGE_ENABLED      bool   default False  (master switch)
+    TELEGRAM_BOT_TOKEN     str    secret; secrets.json key ``telegram_bot_token`` first, else env
+    ALLOWED_USERS          str    comma-separated Telegram user IDs (single id in v1)
+    AC_BASE_URL            str    default http://127.0.0.1:12345  (port MUST be configurable)
+    TG_TARGET_AGENT        str    default Maine (root/orchestrator)
+    TG_POLL_INTERVAL_SEC   float  default 2.5   (/api/status poll cadence)
+    TG_TASK_TIMEOUT_SEC    int    default 1800  (max wait per task)
+"""
+
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+def _load_bot_token() -> str:
+    """Return the Telegram bot token from secrets.json, else env, else ''."""
+    try:
+        from config.secrets_loader import get_secret
+        val = get_secret('telegram_bot_token')
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    except Exception:
+        # config package unavailable (e.g. running outside the repo) -> fall through to env
+        pass
+    return os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
+
+
+def _parse_bool(raw: str, default: bool = False) -> bool:
+    if raw is None or raw == '':
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _parse_allowed_users(raw: str) -> List[int]:
+    """Parse a comma-separated list of Telegram user IDs into ints."""
+    ids: List[int] = []
+    for part in (raw or '').replace(';', ',').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            # Ignore non-numeric tokens rather than crashing startup.
+            pass
+    return ids
+
+
+@dataclass
+class BridgeConfig:
+    """Runtime configuration for the bridge process."""
+
+    enabled: bool = False
+    bot_token: str = ''
+    allowed_users: List[int] = field(default_factory=list)
+    ac_base_url: str = 'http://127.0.0.1:12345'
+    target_agent: str = 'Maine'
+    poll_interval_sec: float = 2.5
+    task_timeout_sec: int = 1800
+
+    def is_allowed(self, user_id) -> bool:
+        try:
+            return int(user_id) in self.allowed_users
+        except (TypeError, ValueError):
+            return False
+
+
+def load_config() -> BridgeConfig:
+    """Build a BridgeConfig from secrets.json + environment variables."""
+    return BridgeConfig(
+        enabled=_parse_bool(os.environ.get('TG_BRIDGE_ENABLED'), default=False),
+        bot_token=_load_bot_token(),
+        allowed_users=_parse_allowed_users(os.environ.get('ALLOWED_USERS', '')),
+        ac_base_url=os.environ.get('AC_BASE_URL', 'http://127.0.0.1:12345').rstrip('/'),
+        target_agent=os.environ.get('TG_TARGET_AGENT', 'Maine') or 'Maine',
+        poll_interval_sec=float(os.environ.get('TG_POLL_INTERVAL_SEC', '2.5') or 2.5),
+        task_timeout_sec=int(os.environ.get('TG_TASK_TIMEOUT_SEC', '1800') or 1800),
+    )
+
+
+def validate_config(cfg: BridgeConfig) -> List[str]:
+    """Return a list of human-readable problems (empty list == OK to start)."""
+    problems: List[str] = []
+    if not cfg.bot_token:
+        problems.append(
+            "TELEGRAM_BOT_TOKEN is empty. Set the 'telegram_bot_token' key in "
+            'config/secrets.json or the TELEGRAM_BOT_TOKEN env var.'
+        )
+    if not cfg.allowed_users:
+        problems.append('ALLOWED_USERS is empty. Set at least one Telegram user id.')
+    return problems

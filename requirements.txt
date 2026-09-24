@@ -3,42 +3,49 @@
 # Generated from setup.py + runtime discovery during import migration
 # ============================================================
 
+aiohttp                    # Async HTTP client
+
+# ── Web Content Parsing ─────────────────────────────────────
+beautifulsoup4             # HTML parsing (web_extractor / simple_doc_parser)
+
+# ── Cryptography ────────────────────────────────────────────
+cryptography               # X25519 + AES-GCM (API E2E encryption; used by telegram bridge)
 # ── Core LLM & Agent Framework ──────────────────────────────
 dashscope>=1.11.0          # Alibaba Cloud LLM SDK
-openai                     # OpenAI-compatible API client
-pydantic>=2.3.0            # Data validation for agent configs
 eval_type_backport         # Type evaluation backport
 
-# ── Tokenization & Text Processing ──────────────────────────
-tiktoken                   # Token counting for context management
-regex                      # Advanced regex (tiktoken dependency)
+# ── Web Server (API) ────────────────────────────────────────
+fastapi                    # ASGI web framework for API server
+httpx                      # Async HTTP client (telegram bridge)
 
 # ── JSON Handling ───────────────────────────────────────────
 json5                      # Lenient JSON parsing
 jsonlines                  # Streaming JSONL format
 jsonschema                 # JSON Schema validation
+lxml                       # Fast XML/HTML parser backend for BeautifulSoup
+mss>=9.0.0                 # Cross-platform screen capture (fallback + Linux window capture)
+openai                     # OpenAI-compatible API client
 
-# ── HTTP & Networking ───────────────────────────────────────
-requests                   # HTTP client
-aiohttp                    # Async HTTP client
-
-# ── Web Server (API) ────────────────────────────────────────
-fastapi                    # ASGI web framework for API server
-uvicorn                    # ASGI server for FastAPI
-websockets                 # WebSocket support
+# ── Image Processing ────────────────────────────────────────
+pillow                     # Image manipulation
+pydantic>=2.3.0            # Data validation for agent configs
 
 # ── Configuration & Environment ─────────────────────────────
 python-dotenv              # .env file loading
+
+# ── Telegram Bridge (optional, standalone process) ──────────
+python-telegram-bot>=22.8,<22.9   # PTB for the v1 Telegram bridge (agent_cascade/telegram_bridge)
+pywin32>=306; sys_platform == 'win32'  # Windows window capture via PrintWindow API
 pyyaml                     # YAML config parsing
+regex                      # Advanced regex (tiktoken dependency)
+
+# ── HTTP & Networking ───────────────────────────────────────
+requests                   # HTTP client
 
 # ── Audio Processing ────────────────────────────────────────
 soundfile                  # Audio file I/O (for voice tools)
 
-# ── Image Processing ────────────────────────────────────────
-pillow                     # Image manipulation
-mss>=9.0.0                 # Cross-platform screen capture (fallback + Linux window capture)
-pywin32>=306; sys_platform == 'win32'  # Windows window capture via PrintWindow API
-
-# ── Web Content Parsing ─────────────────────────────────────
-beautifulsoup4             # HTML parsing (web_extractor / simple_doc_parser)
-lxml                       # Fast XML/HTML parser backend for BeautifulSoup
+# ── Tokenization & Text Processing ──────────────────────────
+tiktoken                   # Token counting for context management
+uvicorn                    # ASGI server for FastAPI
+websockets                 # WebSocket support
