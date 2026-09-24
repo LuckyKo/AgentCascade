@@ -55,6 +55,14 @@ All other settings are plain environment variables (or `.env`):
 
 ## Run
 
+Simplest — use the launcher (validates config, fills env vars, no need to remember them):
+
+```bash
+python -m agent_cascade.telegram_bridge.run_bridge --base-url http://127.0.0.1:8126 --allowed-users <YOUR_TELEGRAM_USER_ID>
+```
+
+Or run the module directly with env vars set yourself:
+
 ```bash
 python -m agent_cascade.telegram_bridge
 ```

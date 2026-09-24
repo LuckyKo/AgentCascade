@@ -497,3 +497,87 @@ def test_inject_re_handshakes_on_401_then_succeeds():
     assert did_reject is True                 # the 401 path was actually exercised
     assert resp['status'] == 'success'        # ...and the retry after re-handshake worked
     assert mock.injected == [{'target': 'Maine', 'text': 'after restart'}]
+
+
+# ---------------------------------------------------------------------------
+# 7. run_bridge launcher (env-var handling)
+# ---------------------------------------------------------------------------
+
+def test_run_bridge_apply_env_sets_unset_vars_and_enables(monkeypatch):
+    """apply_env fills unset vars from CLI args and force-enables the bridge."""
+    from types import SimpleNamespace
+    from agent_cascade.telegram_bridge.run_bridge import apply_env
+
+    # Start from a clean slate for the relevant keys.
+    for k in ('AC_BASE_URL', 'ALLOWED_USERS', 'TG_TARGET_AGENT',
+              'TG_POLL_INTERVAL_SEC', 'TG_TASK_TIMEOUT_SEC', 'TG_BRIDGE_ENABLED'):
+        monkeypatch.delenv(k, raising=False)
+
+    args = SimpleNamespace(
+        base_url='http://127.0.0.1:8126', allowed_users='<YOUR_TELEGRAM_USER_ID>',
+        target_agent=None, poll_interval_sec='2.0', task_timeout_sec=None,
+    )
+    apply_env(args)
+
+    import os as _os
+    assert _os.environ['AC_BASE_URL'] == 'http://127.0.0.1:8126'
+    assert _os.environ['ALLOWED_USERS'] == '<YOUR_TELEGRAM_USER_ID>'
+    assert _os.environ['TG_POLL_INTERVAL_SEC'] == '2.0'
+    assert _os.environ['TG_BRIDGE_ENABLED'] == 'true'
+    # None-valued args must NOT create env vars.
+    assert 'TG_TARGET_AGENT' not in _os.environ
+    assert 'TG_TASK_TIMEOUT_SEC' not in _os.environ
+
+
+def test_run_bridge_apply_env_existing_env_wins(monkeypatch):
+    """A pre-set env var is never overwritten by a CLI arg (env-wins)."""
+    from types import SimpleNamespace
+    from agent_cascade.telegram_bridge.run_bridge import apply_env
+
+    monkeypatch.setenv('AC_BASE_URL', 'http://127.0.0.1:9999')
+    monkeypatch.setenv('TG_BRIDGE_ENABLED', 'false')  # explicit off must be respected
+
+    args = SimpleNamespace(
+        base_url='http://127.0.0.1:8126', allowed_users='1',
+        target_agent=None, poll_interval_sec=None, task_timeout_sec=None,
+    )
+    apply_env(args)
+
+    import os as _os
+    assert _os.environ['AC_BASE_URL'] == 'http://127.0.0.1:9999'   # env wins over CLI
+    assert _os.environ['TG_BRIDGE_ENABLED'] == 'false'             # explicit off not clobbered
+
+
+def test_run_bridge_apply_env_respects_explicit_empty_string(monkeypatch):
+    """An explicitly-set empty-string env var is still 'set', so a CLI arg must not clobber it."""
+    from types import SimpleNamespace
+    from agent_cascade.telegram_bridge.run_bridge import apply_env
+
+    # Explicitly set (to the empty string) — this is a deliberate, if broken, value.
+    monkeypatch.setenv('AC_BASE_URL', '')
+    monkeypatch.setenv('TG_BRIDGE_ENABLED', '')
+
+    args = SimpleNamespace(
+        base_url='http://127.0.0.1:8126', allowed_users=None,
+        target_agent=None, poll_interval_sec=None, task_timeout_sec=None,
+    )
+    apply_env(args)
+
+    import os as _os
+    # Empty string is an existing value -> must NOT be overwritten by the CLI arg.
+    assert _os.environ['AC_BASE_URL'] == ''
+    # Explicitly-set (even empty) TG_BRIDGE_ENABLED must not be force-enabled.
+    assert _os.environ['TG_BRIDGE_ENABLED'] == ''
+
+
+def test_run_bridge_parser_defaults_and_flags():
+    """The parser exposes all documented flags with correct dest names."""
+    from agent_cascade.telegram_bridge.run_bridge import _build_parser
+
+    p = _build_parser()
+    args = p.parse_args(['--base-url', 'http://x:1', '--allowed-users', '42'])
+    assert args.base_url == 'http://x:1'
+    assert args.allowed_users == '42'
+    assert args.target_agent is None
+    assert args.poll_interval_sec is None
+    assert args.task_timeout_sec is None
