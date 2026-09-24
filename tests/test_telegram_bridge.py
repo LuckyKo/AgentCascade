@@ -991,3 +991,158 @@ def test_token_post_body_only_token_would_401():
         assert resp.status_code == 401, 'body-only token must NOT authenticate'
 
     _run(_go())
+
+
+# ---------------------------------------------------------------------------
+# 9. Phase 4 (a) — END-TO-END hermetic integration: real on_message -> command
+# dispatcher -> REAL ACClient HTTP layer -> fake AC server (_MockACServer via
+# httpx.MockTransport). No live Telegram, no live AC, no subprocess.
+#
+# This is the test that proves the whole receiving path together in one shot:
+# a genuine PTB Update drives bot.on_message (auth gate included), which either
+# dispatches a system command through commands.dispatch_command into the REAL
+# ACClient's _token_post (query-param token, real handshake) — and returns
+# WITHOUT injecting — or falls through to ac.inject_message for plain text.
+# The section-8 dispatcher tests use an AsyncMock ACClient and therefore never
+# exercise the real HTTP layer; this one does.
+# ---------------------------------------------------------------------------
+
+def _tg_update(user_id: int, text: str, chat_id: int = 100) -> 'Update':
+    """Build a REAL telegram.Update (PTB 22.x) with an allowed-list user.
+
+    Carries the entity Telegram always attaches to slash commands — without it
+    filters.COMMAND would not match and any filter-level assertion is vacuous
+    (see test_build_application_routes_commands_to_on_message).
+    """
+    from telegram import Chat, Message, MessageEntity, Update, User
+
+    entities = None
+    if text.startswith('/'):
+        word = text[1:].split(' ', 1)[0]   # command word incl. any @bot mention
+        entities = [MessageEntity(type='bot_command', offset=0, length=len(word))]
+    return Update(
+        update_id=1,
+        message=Message(
+            message_id=1, date='2026-09-24T00:00:00',
+            chat=Chat(id=chat_id, type='private'), text=text,
+            from_user=User(id=user_id, is_bot=False, first_name='tester'),
+            entities=entities,
+        ),
+    )
+
+
+def _e2e_context(ac: ACClient):
+    """Build (context, sent_texts) wiring a REAL BridgeConfig + real ACClient into
+    the bot_data shape on_message expects, with a capturing mock Telegram bot."""
+    cfg = BridgeConfig(enabled=True, bot_token='fake-token',
+                       allowed_users=[FAKE_ALLOWED_USER_ID],
+                       target_agent='Maine')
+    sent_texts: List[str] = []
+
+    async def _capture(**kwargs):
+        sent_texts.append(kwargs['text'])
+        return None
+
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=_capture)
+    return context, sent_texts
+
+
+async def _drain_waiters(context) -> None:
+    """Await the fire-and-forget waiter tasks on_message spawns, so none leak out
+    of the event loop (and their real HTTP polls hit the fake server, not a live AC)."""
+    for t in list(context.bot_data.get('waiters', ()) or ()):
+        try:
+            await asyncio.wait_for(t, timeout=2.0)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - waiter outcome is asserted separately
+            pass
+
+
+def test_e2e_stop_command_hits_api_stop_and_never_injects():
+    """/stop end-to-end: real on_message -> dispatcher -> REAL ACClient HTTP -> fake AC.
+
+    Proves the core Phase 4 guarantee through the real HTTP layer: the fake AC
+    server receives an authenticated POST /api/stop (token as query param), and
+    ac.inject_message is NEVER called — system commands never reach the agent/logs.
+    """
+    mock = _MockACServer()
+    client = _make_client(mock)   # REAL ACClient on the fake transport
+    context, sent_texts = _e2e_context(client)
+
+    async def go():
+        await client.open()
+        update = _tg_update(FAKE_ALLOWED_USER_ID, '/stop')
+        await on_message(update, context)
+        await _drain_waiters(context)
+        await client.close()
+
+    _run(go())
+
+    # The real HTTP layer delivered the command to the right endpoint...
+    assert mock.command_calls == ['/api/stop']
+    # ...and it authenticated: the mock only returns 200 when a VALID token is in
+    # the query string (a missing/body-only token would have surfaced as an ACError
+    # reply, not this success path).
+    assert sent_texts == ['🛑 Stopped the current agent']
+    # Core guarantee: NOTHING reached the agent — no encrypted /api/message at all.
+    assert mock.injected == []
+    # The dispatcher returned early, so no waiter was ever spawned either.
+    assert context.bot_data.get('waiters') in (None, set())
+
+
+def test_e2e_normal_text_injects_through_real_http():
+    """Plain text end-to-end: real on_message -> REAL ACClient.inject_message -> fake AC.
+
+    The encrypted payload is decrypted server-side by the mock and must equal the
+    exact {target, text} that flowed through — proving the inject path (not just
+    'no exception') over the real HTTP layer.
+    """
+    mock = _MockACServer()
+    client = _make_client(mock)
+    context, sent_texts = _e2e_context(client)
+
+    async def go():
+        await client.open()
+        update = _tg_update(FAKE_ALLOWED_USER_ID, 'run the integration build')
+        await on_message(update, context)
+        await _drain_waiters(context)
+        await client.close()
+
+    _run(go())
+
+    # The inject path was taken: exactly one decrypted payload reached the agent.
+    assert mock.injected == [{'target': 'Maine', 'text': 'run the integration build'}]
+    # No command endpoint was hit for plain text.
+    assert mock.command_calls == []
+    # Ack reply went out, and the waiter polled the real (fake) AC status endpoint.
+    assert sent_texts[0].startswith('🏃 Started → Maine')
+    assert mock.status_calls >= 1
+
+
+def test_e2e_status_command_routes_to_api_status_not_inject():
+    """/status end-to-end: dispatcher -> REAL ACClient.get_status (query token) -> fake AC.
+
+    Shows the dispatcher routes different commands to different endpoints through
+    the real HTTP layer, and that /status — like every system command — never
+    injects into the agent.
+    """
+    mock = _MockACServer()
+    client = _make_client(mock)
+    context, sent_texts = _e2e_context(client)
+
+    async def go():
+        await client.open()
+        update = _tg_update(FAKE_ALLOWED_USER_ID, '/status')
+        await on_message(update, context)
+        await _drain_waiters(context)
+        await client.close()
+
+    _run(go())
+
+    # /status is served by the token-auth GET /api/status (not a command endpoint).
+    assert mock.status_calls == 1
+    assert mock.command_calls == []
+    assert 'Idle' in sent_texts[0] and 'No pending approvals' in sent_texts[0]
+    # Never reached the agent.
+    assert mock.injected == []
