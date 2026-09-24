@@ -10,9 +10,9 @@ mode (name + rating, no content) records a rating without modifying content.
 import logging
 import re
 
-from agent_cascade.skills.matcher import find_similar_skills
+from agent_cascade.skills.matcher import find_similar_skills, skill_frontmatter_text
 from agent_cascade.skills.parser import normalize_version, parse_frontmatter
-from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD
+from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
@@ -208,6 +208,35 @@ class ProposeSkill(BaseTool):
                     "\nIf this is an update, use the existing skill's name. Otherwise differentiate "
                     'the name/description/triggers and re-propose.')
 
+        # ── Soft keyword-overlap gate (NEW + UPDATE) ───────────────────────────
+        # After the hard-duplicate check above, nudge on WEAKER keyword collisions: report the
+        # top-3 existing skills whose keywords/triggers overlap this proposal, so a new skill does
+        # not silently steal discovery matches from one that already covers the same vocabulary.
+        # SOFT by design (D1): advisory text only — no early return; the proposal still proceeds to
+        # approval and registers exactly as today. The floor reuses SKILL_MATCH_THRESHOLD (D2) — the
+        # same "is this a real match?" bar AUTO-mode skill loading uses, so we flag precisely the
+        # strength at which keywords start competing in discovery. Reuse match_skills with
+        # include_inactive=True for the FULL list (active + inactive/disabled), since retired skills
+        # still occupy their keyword index and can crowd matches; exclude the incumbent name (D3) so
+        # an update/re-proposal never "overlaps" with itself.
+        # prop_fm is the fully-parsed frontmatter (block-style trigger lists included), so it is
+        # the correct source for the overlap query — not the lightweight line-based `fm`.
+        overlap_query = skill_frontmatter_text(
+            proposed_name,
+            str(prop_fm.get('description', '') or ''),
+            prop_fm.get('triggers'),
+        )
+        try:
+            all_matches = skill_manager.match_skills(overlap_query, include_inactive=True)   # FULL list incl. inactive
+        except Exception as e:  # pragma: no cover - defensive; gate must not break propose
+            logger.warning('[PROPOSE-SKILL] overlap gate skipped (match_skills failed): %s', e)
+            all_matches = []
+        # Exclude the incumbent (an update/re-proposal overlapping its own name is expected), keep top-3 above floor.
+        overlap_top3 = [
+            (n, s) for n, s in all_matches
+            if n.lower() != proposed_name.lower() and s >= SKILL_MATCH_THRESHOLD
+        ][:3]
+
         if is_update:
             existing_version = existing_meta.get('version', '1.0.0')
 
@@ -270,6 +299,15 @@ class ProposeSkill(BaseTool):
                            f"Justification: {justification}\n\n"
                            f"This will be registered and available to all agents via scan_skills/load_skill.")
 
+        # Soft keyword-overlap notice (D1): advisory only, appended for the user to weigh at
+        # approval time. Rendered only when the gate found overlapping skills above the floor.
+        if overlap_top3:
+            overlap_lines = [f"  - '{n}' (overlap: {s * 100:.0f}%)" for n, s in overlap_top3]
+            description += ("\n\n⚠️  Keyword-overlap notice: this proposal's keywords/triggers "
+                            'overlap with existing skills and may make discovery noisy (steal their '
+                            'matches). Consider upgrading one of these instead of creating a duplicate:\n'
+                            + '\n'.join(overlap_lines))
+
         # Request user approval (same pattern as shell_cmd)
         approved, reason = self.agent_pool.operation_manager.request_user_approval(
             agent_name=agent_name,
@@ -288,12 +326,34 @@ class ProposeSkill(BaseTool):
         # name it routes to _register_candidate_upgrade (candidate folder + decision gate), so
         # an update creates a candidate that the gate later promotes/discards — it never
         # overwrites the production file directly. A new name registers/auto-promotes as before.
+
+        # Capture "was inactive" BEFORE register: a disabled/inactive skill is dropped from the
+        # registry by discover(), so get_skill_metadata returns None and is_update=False above, but
+        # re-proposing it under the same name should re-activate it (D4). No pre-gate mutates
+        # _disabled_names, so this value stably reflects "inactive before this operation".
+        was_inactive = skill_manager.is_skill_disabled(proposed_name)
+
         success, errors = skill_manager.register_skill_from_content(
             skill_content=skill_content,
             source='auto-generated',
         )
 
         if success:
+            # Re-activate a previously-inactive skill that this proposal re-proposed. register's
+            # new-skill path (and the candidate-upgrade path) never clear _disabled_names, so the
+            # skill would otherwise stay disabled after a "successful" registration — enable_skill
+            # is what actually flips it active. Guarded: a re-enable failure degrades to a warning
+            # and must never break the success return (mirrors the defensive pre-check above).
+            reenabled_note = ''
+            if was_inactive:
+                try:
+                    ok, emsg = skill_manager.enable_skill(proposed_name)
+                    if ok:
+                        reenabled_note = ' (re-enabled: was inactive)'
+                    else:
+                        logger.warning('[PROPOSE-SKILL] re-enable of %s failed: %s', proposed_name, emsg)
+                except Exception as e:  # pragma: no cover - defensive; never break the success path
+                    logger.warning('[PROPOSE-SKILL] re-enable of %s raised: %s', proposed_name, e)
             # If a rating was supplied alongside content, record it after successful
             # registration/update. New skills already got an initial 5.0 in the manager; this
             # records the caller's explicit assessment on top of that.
@@ -303,7 +363,7 @@ class ProposeSkill(BaseTool):
                 except ValueError as e:
                     logger.warning('[PROPOSE-SKILL] Failed to record rating for %s: %s', proposed_name, e)
             verb = 'updated' if is_update else 'registered'
-            return f"Skill '{proposed_name}' {verb} successfully (v{effective_version})."
+            return f"Skill '{proposed_name}' {verb} successfully (v{effective_version}).{reenabled_note}"
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'
             action = 'update' if is_update else 'register'

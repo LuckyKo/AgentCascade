@@ -2452,6 +2452,335 @@ class TestProposeSkillPreApprovalHealthCheck:
         assert m.get_skill_metadata(name) is None
 
 
+class TestProposeSkillOverlapGate:
+    """Soft keyword-overlap gate in propose_skill (top-3 FULL-list overlap notice, advisory)."""
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        # Auto-approve by default so the NEW-skill path reaches registration when not rejected.
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    def _approval_description(self, pool):
+        """Return the description string passed to request_user_approval (the approval prompt)."""
+        call_kwargs = pool.operation_manager.request_user_approval.call_args.kwargs
+        return call_kwargs.get('description', '')
+
+    def test_new_skill_overlap_produces_top3_feedback(self, fresh_manager):
+        """REVERT-PROOF: a NEW skill overlapping >=3 incumbents yields a SOFT top-3 notice.
+
+        Pre-feature there is no overlap text in the approval description → the 'overlap:' assertion
+        fails. The gate must be soft (proceeds to approval + registration), never a hard reject.
+        """
+        m = self.manager
+        import json as _json
+        base = _uid()
+        # Three distinct incumbents that share a common keyword cluster with the incoming proposal.
+        for i, name in enumerate([f"overlap-inc-a-{base}", f"overlap-inc-b-{base}", f"overlap-inc-c-{base}"]):
+            content = _make_skill_content(
+                name=name,
+                description=f'Shared cluster topic {i} about docker compose orchestration workflows',
+                triggers=['docker', 'compose'],
+                generated_from_task='docker compose workflow')
+            assert m.register_skill_from_content(content, task_text='docker compose workflow')[0]
+
+        # Propose a NEW skill whose keywords/triggers overlap all three incumbents. The extra
+        # distinct tokens ("and deployment pipelines") keep the difflib similarity under 0.95 so it
+        # passes the HARD gate, while the shared keyword cluster still scores >= SKILL_MATCH_THRESHOLD
+        # in the soft overlap gate (verified: difflib ~0.86, match-score ~0.67).
+        new_name = f"overlap-new-{base}"
+        new_content = _make_skill_content(
+            name=new_name,
+            description='Shared cluster topic about docker compose orchestration workflows and deployment pipelines',
+            triggers=['docker', 'compose'],
+            generated_from_task='docker compose workflow')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': new_content,
+                                        'justification': 'j'}))
+        # SOFT (D1): not rejected; proceeds to approval and registers.
+        assert not result.startswith('REJECTED:'), f'overlap gate must be soft, got: {result!r}'
+        pool.operation_manager.request_user_approval.assert_called_once()
+        assert 'registered successfully' in result
+
+        desc = self._approval_description(pool)
+        # The notice + all three incumbent names with overlap percentages must be present.
+        assert 'Keyword-overlap notice' in desc, f'missing overlap notice in: {desc!r}'
+        assert 'overlap:' in desc
+        for name in [f"overlap-inc-a-{base}", f"overlap-inc-b-{base}", f"overlap-inc-c-{base}"]:
+            assert name in desc, f'incumbent {name!r} missing from overlap notice: {desc!r}'
+
+    def test_overlap_includes_inactive_skill(self, fresh_manager):
+        """REVERT-PROOF (full list): a DISABLED incumbent appears in the overlap feedback.
+
+        Proves include_inactive=True is used (FULL list), not active-only. Pre-feature / with an
+        active-only match the disabled skill would be absent from the notice → assertion fails.
+        """
+        m = self.manager
+        import json as _json
+        base = _uid()
+        inc_name = f"overlap-inactive-inc-{base}"
+        content = _make_skill_content(
+            name=inc_name,
+            description='Specialized topic about kubernetes helm chart templating patterns',
+            triggers=['kubernetes', 'helm'],
+            generated_from_task='kubernetes helm')
+        assert m.register_skill_from_content(content, task_text='kubernetes helm')[0]
+        # Disable it: drops from the registry but keeps a servable on-disk file (re-surfaced by the index).
+        ok, _ = m.disable_skill(inc_name)
+        assert ok
+        assert m.is_skill_disabled(inc_name) is True
+
+        # The proposal shares the keyword cluster with the (disabled) incumbent but adds distinct
+        # tokens so it passes the HARD similarity gate (<0.95); the shared cluster keeps the soft
+        # overlap score >= SKILL_MATCH_THRESHOLD (verified: difflib ~0.90, match-score ~0.67).
+        new_name = f"overlap-inactive-new-{base}"
+        new_content = _make_skill_content(
+            name=new_name,
+            description='Specialized topic about kubernetes helm chart templating patterns and rollout strategy',
+            triggers=['kubernetes', 'helm'],
+            generated_from_task='kubernetes helm')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': new_content,
+                                        'justification': 'j'}))
+        assert not result.startswith('REJECTED:'), f'overlap gate must be soft, got: {result!r}'
+        desc = self._approval_description(pool)
+        # The disabled incumbent MUST appear — proof the FULL list (incl. inactive) was matched.
+        assert 'Keyword-overlap notice' in desc, f'missing overlap notice in: {desc!r}'
+        assert inc_name in desc, f'disabled incumbent {inc_name!r} missing from FULL-list notice: {desc!r}'
+
+    def test_update_excludes_own_incumbent_from_overlap(self, fresh_manager):
+        """Self-exclusion (D3): an update's own incumbent name is NOT listed in the overlap notice."""
+        m = self.manager
+        import json as _json
+        # Isolated candidate/production dirs + neutralized discovery refresh so the update's
+        # candidate-flow registration (which runs AFTER the gate) succeeds in this test.
+        tmp_path = Path(m._metrics_file).parent
+        m._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
+        m._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
+        m._skill_paths = []
+        m.invalidate_cache = lambda *a, **k: None
+        m._ensure_discovered = lambda *a, **k: None
+
+        base = _uid()
+        # A second, overlapping incumbent so the notice is non-empty (self-exclusion is observable).
+        other_name = f"overlap-other-{base}"
+        other_content = _make_skill_content(
+            name=other_name,
+            description='Shared topic about redis caching and eviction strategies',
+            triggers=['redis', 'cache'],
+            generated_from_task='redis cache')
+        assert m.register_skill_from_content(other_content, task_text='redis cache')[0]
+
+        # The incumbent being updated. Its description carries extra distinct tokens ("and session
+        # storage") so the re-proposal passes the HARD gate (<0.95) against BOTH its own name and the
+        # other incumbent, while the shared cluster keeps the soft overlap score >= floor (verified:
+        # difflib ~0.87 vs other, match-score ~0.75).
+        name = f"overlap-self-{base}"
+        content = _make_skill_content(
+            name=name,
+            description='Shared topic about redis caching and eviction strategies and session storage',
+            triggers=['redis', 'cache'],
+            generated_from_task='redis cache')
+        assert m.register_skill_from_content(content, task_text='redis cache')[0]
+
+        updated = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        assert not result.startswith('REJECTED:'), f'update must pass gate, got: {result!r}'
+        desc = self._approval_description(pool)
+        # The notice should be present (the OTHER incumbent overlaps), and the own name must NOT be
+        # in the overlap LIST. Scope to the list lines (name + 'overlap:' on one line): the header
+        # legitimately contains the name ("Update Existing Skill: <name>"), so a whole-desc check is wrong.
+        assert 'Keyword-overlap notice' in desc, f'expected overlap notice from other incumbent: {desc!r}'
+        list_lines = [ln for ln in desc.splitlines() if 'overlap:' in ln]
+        assert list_lines, f'no overlap-list lines found in description: {desc!r}'
+        own_in_list = any(name in ln for ln in list_lines)
+        assert not own_in_list, f'own incumbent {name!r} must be excluded from overlap list: {list_lines!r}'
+
+    def test_no_overlap_no_notice(self, fresh_manager):
+        """A NEW skill with disjoint keywords produces NO overlap notice and still registers."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        inc_name = f"overlap-none-inc-{base}"
+        content = _make_skill_content(
+            name=inc_name,
+            description='Best practices for Docker builds and images',
+            triggers=['docker', 'compose'],
+            generated_from_task='docker best practices')
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+
+        new_name = f"overlap-none-new-{base}"
+        distinct = _make_skill_content(
+            name=new_name,
+            description='Run PostgreSQL database migrations safely with rollback',
+            triggers=['sql', 'postgres'],
+            generated_from_task='postgres migration')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': distinct,
+                                        'justification': 'j'}))
+        assert not result.startswith('REJECTED:'), f'distinct skill must pass gate, got: {result!r}'
+        assert 'registered successfully' in result
+        desc = self._approval_description(pool)
+        assert 'Keyword-overlap notice' not in desc, f'unexpected overlap notice for disjoint skill: {desc!r}'
+
+    def test_floor_filters_trivial_overlap(self, fresh_manager):
+        """D2 floor: a proposal sharing only ~1 common token scores below SKILL_MATCH_THRESHOLD and is omitted."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        inc_name = f"overlap-floor-inc-{base}"
+        # Incumbent with a distinct keyword set; the proposal shares at most one generic token.
+        content = _make_skill_content(
+            name=inc_name,
+            description='Quantum chromodynamics lattice simulation annealing protocol',
+            triggers=['lattice', 'chromodynamics'],
+            generated_from_task='lattice chromodynamics')
+        assert m.register_skill_from_content(content, task_text='lattice chromodynamics')[0]
+
+        new_name = f"overlap-floor-new-{base}"
+        # Shares only the generic token "protocol" with the incumbent → trivial overlap, below floor.
+        distinct = _make_skill_content(
+            name=new_name,
+            description='Culinary pastry recipe baking protocol for laminated dough',
+            triggers=['pastry', 'baking'],
+            generated_from_task='pastry baking')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': distinct,
+                                        'justification': 'j'}))
+        assert not result.startswith('REJECTED:'), f'distinct skill must pass gate, got: {result!r}'
+        desc = self._approval_description(pool)
+        # The trivially-overlapping incumbent must NOT be listed (below the 0.15 floor).
+        if 'Keyword-overlap notice' in desc:
+            assert inc_name not in desc, f'trivial overlap {inc_name!r} should be filtered by floor: {desc!r}'
+
+
+class TestProposeSkillAutoActivateInactive:
+    """Req 3 — auto-activate upgraded-inactive skills via enable_skill on successful registration."""
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        # Auto-approve by default so the re-proposal reaches registration.
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    def _isolate_dirs(self, m):
+        """Isolated candidate/production dirs + neutralized discovery refresh so re-proposal registration succeeds."""
+        tmp_path = Path(m._metrics_file).parent
+        m._candidates_dir = tmp_path / 'agents' / 'global' / 'candidates'
+        m._production_skills_dir = tmp_path / 'agents' / 'global' / 'skills'
+        m._skill_paths = []
+        m.invalidate_cache = lambda *a, **k: None
+        m._ensure_discovered = lambda *a, **k: None
+
+    def test_upgrade_of_inactive_skill_reactivates(self, fresh_manager):
+        """REVERT-PROOF (inactive→active flip): re-proposing a disabled skill re-enables it.
+
+        Pre-feature register never clears _disabled_names → the skill stays disabled → the final
+        `is_skill_disabled is False` assertion fails. This is the load-bearing proof for Req 3.
+        """
+        m = self.manager
+        import json as _json
+        self._isolate_dirs(m)
+        name = f"autoact-inactive-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Best practices for Docker builds and images',
+            triggers=['docker', 'compose'],
+            generated_from_task='docker best practices')
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+
+        ok, _ = m.disable_skill(name)
+        assert ok
+        assert m.is_skill_disabled(name) is True
+
+        # Re-propose the SAME (now-inactive) name with updated content.
+        updated = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        tool, _ = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        # Success + the flip: skill is back in the registry and no longer disabled.
+        assert not result.startswith('REJECTED:'), f're-proposal must succeed, got: {result!r}'
+        assert 'successfully' in result
+        assert m.get_skill_metadata(name) is not None
+        assert m.is_skill_disabled(name) is False, 're-proposed inactive skill must be re-enabled (Req 3 flip)'
+
+    def test_active_upgrade_not_reenabled_no_side_effect(self, fresh_manager):
+        """An ACTIVE re-proposal succeeds and stays enabled (guard is a no-op path; enable not needed)."""
+        m = self.manager
+        import json as _json
+        self._isolate_dirs(m)
+        name = f"autoact-active-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Best practices for Docker builds and images',
+            triggers=['docker', 'compose'],
+            generated_from_task='docker best practices')
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+        assert m.is_skill_disabled(name) is False
+
+        updated = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        tool, _ = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        assert not result.startswith('REJECTED:'), f'active re-proposal must succeed, got: {result!r}'
+        assert 'successfully' in result
+        # Was never disabled → still enabled; the re-enable note must NOT appear.
+        assert m.is_skill_disabled(name) is False
+        assert 're-enabled' not in result
+
+    def test_failed_registration_does_not_enable(self, fresh_manager):
+        """If registration fails, enable_skill must NOT fire (a disabled skill stays disabled)."""
+        m = self.manager
+        import json as _json
+        self._isolate_dirs(m)
+        name = f"autoact-fail-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Best practices for Docker builds and images',
+            triggers=['docker', 'compose'],
+            generated_from_task='docker best practices')
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+
+        ok, _ = m.disable_skill(name)
+        assert ok
+        assert m.is_skill_disabled(name) is True
+
+        # Force register failure: the proposal passes pre-checks but register returns (False, [...]).
+        # Wrap only register_skill_from_content on the REAL manager (keep it a real SkillManager so
+        # enable_skill stays callable); spy on enable_skill to prove the re-enable guard did NOT fire.
+        tool, pool = self._make_tool(m)
+        _orig_register = m.register_skill_from_content
+        m.register_skill_from_content = MagicMock(return_value=(False, ['forced failure']))
+        _enable_calls = []
+        _orig_enable = m.enable_skill
+        m.enable_skill = lambda *a, **k: _enable_calls.append((a, k)) or (True, 'enabled')
+        try:
+            result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'refine'}))
+        finally:
+            m.register_skill_from_content = _orig_register
+            m.enable_skill = _orig_enable
+        assert not 'successfully' in result or result.startswith('Failed'), f'unexpected success: {result!r}'
+        # enable_skill must NOT have been called on a failed registration.
+        assert _enable_calls == [], f'enable_skill must not fire on register failure, got: {_enable_calls}'
+        # The disabled skill stays disabled.
+        assert m.is_skill_disabled(name) is True
+
+
 # ===========================================================================
 # Candidate flow — live-serving upgrade candidates (Phase 2 of skill evolution)
 # ===========================================================================
