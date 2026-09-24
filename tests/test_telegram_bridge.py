@@ -13,7 +13,7 @@ import base64
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import httpx
 import pytest
@@ -26,6 +26,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_cascade.telegram_bridge.ac_client import ACClient, ACError, encrypt_payload  # noqa: E402
 from agent_cascade.telegram_bridge.bot import chunk_text, send_chunked, on_message  # noqa: E402
+from agent_cascade.telegram_bridge.commands import (  # noqa: E402
+    COMMANDS,
+    parse_command,
+)
 from agent_cascade.telegram_bridge.config import BridgeConfig  # noqa: E402
 from agent_cascade.telegram_bridge.waiter import (  # noqa: E402
     WaiterResult,
@@ -33,6 +37,11 @@ from agent_cascade.telegram_bridge.waiter import (  # noqa: E402
     fetch_final_message,
     wait_for_completion,
 )
+
+# Deliberately fake Telegram user IDs for tests — never a real identifier, so
+# no personal data is ever committed.
+FAKE_ALLOWED_USER_ID = 1111111111
+FAKE_STRANGER_USER_ID = 9999999999
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +68,7 @@ class _MockACServer:
         self.injected = []          # list of decrypted {target, text}
         self.status_calls = 0
         self.state_calls = 0
+        self.command_calls = []     # paths of command endpoints hit (token-auth)
         self.fail_status_once_with_401 = False
         self._status_script = []    # queued 'generating' values to return in order
 
@@ -122,6 +132,16 @@ class _MockACServer:
         if path == '/api/state':
             self.state_calls += 1
             return httpx.Response(200, json=self._state_payload())
+
+        # Command endpoints read the token from the QUERY string (mirrors the real
+        # api_server.py signatures `token: str = None`). A body-only token must 401.
+        if path in ('/api/stop', '/api/restart', '/api/auto_security',
+                    '/api/afk', '/api/session/restore'):
+            self.command_calls.append(path)
+            token = request.url.params.get('token')
+            if not token or token not in self.sessions:
+                return httpx.Response(401, json={'message': 'Invalid session token'})
+            return httpx.Response(200, json={'status': 'ok', 'path': path})
 
         return httpx.Response(404, json={'message': f'no route {path}'})
 
@@ -331,14 +351,14 @@ def _make_update(user_id, text='hello', chat_id=100):
 
 
 def test_auth_gate_rejects_non_allowlisted_user():
-    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[<YOUR_TELEGRAM_USER_ID>])
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
     ac = MagicMock()
     ac.inject_message = MagicMock(side_effect=AssertionError('AC must not be called'))
     context = MagicMock()
     context.bot_data = {'config': cfg, 'ac_client': ac}
     context.bot.send_message = MagicMock()
 
-    update = _make_update(user_id=1234567890)   # NOT in allowlist
+    update = _make_update(user_id=FAKE_STRANGER_USER_ID)   # NOT in allowlist
     _run(on_message(update, context))
 
     ac.inject_message.assert_not_called()
@@ -346,7 +366,7 @@ def test_auth_gate_rejects_non_allowlisted_user():
 
 
 def test_auth_gate_allows_listed_user_and_injects():
-    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[<YOUR_TELEGRAM_USER_ID>])
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
     ac = MagicMock()
 
     async def _inject(text, target=None):
@@ -358,7 +378,7 @@ def test_auth_gate_allows_listed_user_and_injects():
     context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
 
     async def go():
-        await on_message(_make_update(user_id=<YOUR_TELEGRAM_USER_ID>, text='do it'), context)
+        await on_message(_make_update(user_id=FAKE_ALLOWED_USER_ID, text='do it'), context)
         # Drain the fire-and-forget waiter task so no pending task leaks out of the loop.
         for t in list(context.bot_data.get('waiters', ()) or ()):
             try:
@@ -371,14 +391,14 @@ def test_auth_gate_allows_listed_user_and_injects():
 
 
 def test_auth_gate_ignores_empty_text():
-    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[<YOUR_TELEGRAM_USER_ID>])
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
     ac = MagicMock()
     ac.inject_message = MagicMock(side_effect=AssertionError('must not inject empty'))
     context = MagicMock()
     context.bot_data = {'config': cfg, 'ac_client': ac}
     context.bot.send_message = MagicMock()
 
-    _run(on_message(_make_update(<YOUR_TELEGRAM_USER_ID>, text='   '), context))
+    _run(on_message(_make_update(FAKE_ALLOWED_USER_ID, text='   '), context))
     ac.inject_message.assert_not_called()
 
 
@@ -514,14 +534,14 @@ def test_run_bridge_apply_env_sets_unset_vars_and_enables(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
     args = SimpleNamespace(
-        base_url='http://127.0.0.1:8126', allowed_users='<YOUR_TELEGRAM_USER_ID>',
+        base_url='http://127.0.0.1:8126', allowed_users=str(FAKE_ALLOWED_USER_ID),
         target_agent=None, poll_interval_sec='2.0', task_timeout_sec=None,
     )
     apply_env(args)
 
     import os as _os
     assert _os.environ['AC_BASE_URL'] == 'http://127.0.0.1:8126'
-    assert _os.environ['ALLOWED_USERS'] == '<YOUR_TELEGRAM_USER_ID>'
+    assert _os.environ['ALLOWED_USERS'] == str(FAKE_ALLOWED_USER_ID)
     assert _os.environ['TG_POLL_INTERVAL_SEC'] == '2.0'
     assert _os.environ['TG_BRIDGE_ENABLED'] == 'true'
     # None-valued args must NOT create env vars.
@@ -581,3 +601,393 @@ def test_run_bridge_parser_defaults_and_flags():
     assert args.target_agent is None
     assert args.poll_interval_sec is None
     assert args.task_timeout_sec is None
+
+
+# ---------------------------------------------------------------------------
+# 8. Phase 2 — slash-command dispatcher (extensible COMMANDS registry)
+# ---------------------------------------------------------------------------
+
+def _cmd_ac(**overrides):
+    """A mock ACClient whose high-level methods are AsyncMocks (awaitable, like the
+    real client) returning {} by default. Production code that awaits them works
+    unchanged; call counts/args are assertable on each method.
+    """
+    ac = MagicMock()
+    for m in ('inject_message', 'reset', 'approve', 'reject', 'stop', 'restart',
+              'set_auto_security', 'set_afk', 'restore_session'):
+        setattr(ac, m, AsyncMock(return_value={}))
+    # ensure_token is async and returns (token, shared_secret).
+    ac.ensure_token = AsyncMock(return_value=('tok_test', b'secret'))
+    for k, v in overrides.items():
+        setattr(ac, k, v)
+    return ac
+
+
+def _cmd_context(text, user_id=FAKE_ALLOWED_USER_ID, ac=None):
+    """Build (update, context) for a command test with a capturing bot."""
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    if ac is None:
+        ac = _cmd_ac()
+    sent_texts = []
+
+    async def _capture(**kwargs):
+        sent_texts.append(kwargs['text'])
+        return None
+
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=_capture)
+    update = _make_update(user_id=user_id, text=text)
+    return update, context, ac, sent_texts
+
+
+def test_parse_command_shapes():
+    assert parse_command('/stop') == ('stop', '')
+    assert parse_command('/afk on 300') == ('afk', 'on 300')
+    assert parse_command('/help') == ('help', '')
+    assert parse_command('/?') == ('help', '')          # alias
+    assert parse_command('/STOP Now') == ('stop', 'Now')  # case-insensitive name
+    assert parse_command('/cmd@MyBot arg') == ('cmd', 'arg')  # bot mention stripped
+    assert parse_command('plain text') is None
+    assert parse_command('') is None
+
+
+def test_registry_contains_v1_command_set():
+    expected = {'new', 'status', 'yes', 'no', 'stop', 'restart',
+                'afk', 'security', 'restore', 'help'}
+    assert set(COMMANDS) == expected
+    # Every handler has a non-empty description (used by /help).
+    for name, cmd in COMMANDS.items():
+        assert cmd.name == name
+        assert cmd.description.strip()
+
+
+@pytest.mark.parametrize('text,method,expected', [
+    ('/new', 'reset', call()),
+    ('/stop', 'stop', call()),
+    ('/restart', 'restart', call()),
+    ('/security on', 'set_auto_security', call(True)),
+    ('/security off', 'set_auto_security', call(False)),
+    ('/afk on 300', 'set_afk', call(True, timeout_seconds=300)),
+    ('/afk off', 'set_afk', call(False, timeout_seconds=None)),
+    ('/restore mysession', 'restore_session', call('mysession')),
+])
+def test_command_calls_right_client_method(text, method, expected):
+    """Each registered command routes to the correct ACClient method with right args."""
+    update, context, ac, sent = _cmd_context(text)
+    _run(on_message(update, context))
+
+    getattr(ac, method).assert_called_once_with(*expected.args, **expected.kwargs)
+    # The reply was actually sent back to Telegram.
+    assert len(sent) == 1
+    # Critical guarantee: system commands NEVER reach the agent.
+    ac.inject_message.assert_not_called()
+
+
+def test_command_new_replies_confirmation():
+    update, context, ac, sent = _cmd_context('/new')
+    _run(on_message(update, context))
+    ac.reset.assert_called_once()
+    assert 'New session' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_command_status_lists_pending_approvals():
+    status_payload = {
+        'generating': True, 'active_agent': 'Maine', 'agents': [],
+        'active_stack': [], 'instance_halted': False,
+        'pending_approvals': [
+            {'request_id': 'abc123', 'agent_name': 'worker1', 'tool_name': 'shell_cmd',
+             'description': 'run build'},
+        ],
+    }
+    ac = _cmd_ac(get_status=AsyncMock(return_value=status_payload))
+    update, context, ac, sent = _cmd_context('/status', ac=ac)
+    _run(on_message(update, context))
+
+    # get_status was called with the (mocked) token and its coroutine was awaited.
+    assert ac.get_status.call_count == 1
+    assert ac.get_status.call_args.args == ('tok_test',)
+    assert 'Generating' in sent[0]
+    assert 'shell_cmd' in sent[0] and 'abc123' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_command_yes_approves_first_pending():
+    status_payload = {'generating': True, 'pending_approvals': [
+        {'request_id': 'rid_1', 'tool_name': 'shell_cmd'},
+        {'request_id': 'rid_2', 'tool_name': 'write_file'},
+    ]}
+
+    async def _approve(rid):
+        assert rid == 'rid_1'
+        return {'status': 'ok', 'result': 'Approved: rid_1'}
+
+    ac = _cmd_ac(get_status=AsyncMock(return_value=status_payload),
+                 approve=AsyncMock(side_effect=_approve))
+    update, context, ac, sent = _cmd_context('/yes', ac=ac)
+    _run(on_message(update, context))
+
+    ac.approve.assert_called_once_with('rid_1')
+    assert 'Approved' in sent[0] and 'shell_cmd' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_command_yes_matches_arg_request_id():
+    status_payload = {'pending_approvals': [
+        {'request_id': 'rid_1', 'tool_name': 'shell_cmd'},
+        {'request_id': 'rid_2', 'tool_name': 'write_file'},
+    ]}
+    ac = _cmd_ac(get_status=AsyncMock(return_value=status_payload))
+    update, context, ac, sent = _cmd_context('/yes rid_2', ac=ac)
+    _run(on_message(update, context))
+
+    ac.approve.assert_called_once_with('rid_2')
+    assert 'write_file' in sent[0]
+
+
+def test_command_no_rejects_first_pending():
+    status_payload = {'pending_approvals': [
+        {'request_id': 'rid_9', 'tool_name': 'delete_file'},
+    ]}
+
+    async def _reject(rid, reason='Rejected by user'):
+        assert rid == 'rid_9'
+        return {'status': 'ok', 'result': 'Rejected: rid_9'}
+
+    ac = _cmd_ac(get_status=AsyncMock(return_value=status_payload),
+                 reject=AsyncMock(side_effect=_reject))
+    update, context, ac, sent = _cmd_context('/no', ac=ac)
+    _run(on_message(update, context))
+
+    ac.reject.assert_called_once()
+    assert 'Rejected' in sent[0] and 'delete_file' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_command_yes_nothing_pending_is_benign():
+    ac = _cmd_ac(get_status=AsyncMock(return_value={'pending_approvals': []}))
+    update, context, ac, sent = _cmd_context('/yes', ac=ac)
+    _run(on_message(update, context))
+
+    assert 'Nothing pending' in sent[0]
+    ac.approve.assert_not_called()
+    ac.inject_message.assert_not_called()
+
+
+def test_command_yes_already_resolved_is_benign_noop():
+    """A race with the UI can make the approval resolve between status and approve;
+    the handler must not crash or report failure."""
+    status_payload = {'pending_approvals': [
+        {'request_id': 'rid_x', 'tool_name': 'shell_cmd'},
+    ]}
+
+    async def _approve(rid):
+        return {'status': 'ok',
+                'result': "ERROR: Request 'rid_x' not found or already resolved."}
+
+    ac = _cmd_ac(get_status=AsyncMock(return_value=status_payload),
+                 approve=AsyncMock(side_effect=_approve))
+    update, context, ac, sent = _cmd_context('/yes', ac=ac)
+    _run(on_message(update, context))
+
+    assert 'Already resolved' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_command_ac_error_replies_failure_without_crash():
+    """An ACError from a command call becomes a short failure reply, not an exception."""
+    async def _boom():
+        raise ACError('AC /api/stop failed (503): Agent pool not initialized')
+
+    ac = _cmd_ac(stop=AsyncMock(side_effect=_boom))
+    update, context, ac, sent = _cmd_context('/stop', ac=ac)
+    _run(on_message(update, context))
+
+    assert len(sent) == 1
+    assert 'failed' in sent[0].lower() or '⚠️' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_unknown_command_replies_and_lists_commands_without_injecting():
+    update, context, ac, sent = _cmd_context('/frobulate xyz')
+    _run(on_message(update, context))
+
+    assert len(sent) == 1
+    assert 'Unknown command' in sent[0]
+    # The reply proves extensibility: it lists the registered commands.
+    for name in ('/stop', '/status', '/help'):
+        assert name in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_help_lists_all_registered_commands():
+    update, context, ac, sent = _cmd_context('/help')
+    _run(on_message(update, context))
+
+    assert len(sent) == 1
+    for name in COMMANDS:
+        assert f'/{name}' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_help_alias_question_mark():
+    update, context, ac, sent = _cmd_context('/?')
+    _run(on_message(update, context))
+
+    assert len(sent) == 1
+    for name in COMMANDS:
+        assert f'/{name}' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_afk_and_security_usage_errors_reply_without_ac_call():
+    for text in ('/afk', '/afk maybe', '/security', '/restore'):
+        update, context, ac, sent = _cmd_context(text)
+        _run(on_message(update, context))
+        assert len(sent) == 1
+        assert 'Usage' in sent[0]
+        ac.set_afk.assert_not_called()
+        ac.set_auto_security.assert_not_called()
+        ac.restore_session.assert_not_called()
+        ac.inject_message.assert_not_called()
+
+
+def test_non_command_slash_text_falls_through_to_inject():
+    """Regression: text starting with '/' that is NOT a command still injects."""
+    update, context, ac, sent = _cmd_context('/not-a-command please')
+    # /not-a-command IS unknown -> it replies unknown and does NOT inject.
+    _run(on_message(update, context))
+    ac.inject_message.assert_not_called()
+    assert 'Unknown command' in sent[0]
+
+    # Plain (non-slash) text still goes through the inject path.
+    update2, context2, ac2, sent2 = _cmd_context('do the thing')
+
+    async def _inject(text, target=None):
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+    ac2.inject_message = MagicMock(side_effect=_inject)
+    context2.bot_data['ac_client'] = ac2
+
+    async def go():
+        await on_message(update2, context2)
+        for t in list(context2.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+    ac2.inject_message.assert_called_once()
+
+
+def test_allowlist_gate_still_applies_to_commands():
+    """A non-allowlisted user's /stop is ignored: no AC call, no reply."""
+    update, context, ac, sent = _cmd_context('/stop', user_id=FAKE_STRANGER_USER_ID)
+    _run(on_message(update, context))
+
+    ac.inject_message.assert_not_called()
+    ac.stop.assert_not_called()
+    context.bot.send_message.assert_not_called()
+
+
+def test_every_registered_command_never_injects():
+    """Parametrized guarantee: for EVERY command in the registry, on_message never
+    calls ac.inject_message (system commands must not reach the agent/logs)."""
+    texts = {
+        'new': '/new', 'status': '/status', 'yes': '/yes', 'no': '/no',
+        'stop': '/stop', 'restart': '/restart', 'help': '/help', '?': '/?',
+        'afk': '/afk on 300', 'security': '/security off', 'restore': '/restore s1',
+    }
+    for name, text in texts.items():
+        update, context, ac, sent = _cmd_context(text)
+        _run(on_message(update, context))
+        try:
+            ac.inject_message.assert_not_called()
+        except AssertionError:
+            raise AssertionError(f'/{name} must not call inject_message')
+        assert len(sent) >= 1, f'/{name} should reply'
+
+
+def test_build_application_routes_commands_to_on_message():
+    """CRITICAL: /stop must reach on_message through the registered PTB handler.
+
+    Uses a real telegram.Update (PTB 22.x check_update requires isinstance Update).
+    The message carries a bot_command entity so it is a genuine COMMAND update —
+    under the pre-Phase 2 filter (filters.TEXT & ~filters.COMMAND) this exact
+    update would NOT match, which is why that assertion is non-vacuous.
+    """
+    from telegram import Chat, Message, MessageEntity, Update
+    from agent_cascade.telegram_bridge.bot import build_application
+
+    cfg = BridgeConfig(enabled=True, bot_token='fake-token', allowed_users=[1])
+    ac = MagicMock()
+    app = build_application(cfg, ac)
+
+    handler = None
+    for h in app.handlers[0]:  # MessageHandler group
+        if h.callback is on_message:
+            handler = h
+            break
+    assert handler is not None, 'on_message must be registered'
+
+    update = Update(
+        update_id=1,
+        message=Message(
+            message_id=1, date='2026-09-24T00:00:00',
+            chat=Chat(id=1, type='private'), text='/stop',
+            entities=[MessageEntity(type='bot_command', offset=0, length=5)],
+        ),
+    )
+    match = handler.check_update(update)
+    assert match is not None, 'the registered filter must route /stop to on_message'
+
+    # Sanity: the old (pre-Phase 2) filter combo WOULD have excluded this update.
+    from telegram.ext import filters
+    old_filter = filters.TEXT & ~filters.COMMAND
+    assert not old_filter.check_update(update), 'test is vacuous if the old filter also matched'
+
+
+# ---------------------------------------------------------------------------
+# _token_post must send the session token as a QUERY param (the Phase 1 command
+# endpoints read `token` from the query string, not the JSON body). This test
+# exercises the REAL _token_post against a faithful mock server — the dispatcher
+# tests above use AsyncMock for ACClient and therefore never cover this. A
+# body-only token would 401 here, catching that regression class.
+# ---------------------------------------------------------------------------
+
+def test_token_post_sends_token_as_query_param():
+    mock = _MockACServer()
+    client = _make_client(mock)
+
+    async def _go():
+        await client.open()
+        # stop() -> _token_post('/api/stop', {}) must authenticate via query token.
+        res = await client.stop()
+        assert res['status'] == 'ok'
+        # A body-carrying endpoint too (auto_security) to cover the json=body path.
+        res2 = await client.set_auto_security(True)
+        assert res2['status'] == 'ok'
+
+    _run(_go())
+    assert mock.command_calls == ['/api/stop', '/api/auto_security']
+
+
+def test_token_post_body_only_token_would_401():
+    """Guard: if a client sent the token ONLY in the body (not query), it 401s.
+
+    This documents WHY the query-param convention matters — the mock rejects a
+    request whose token is absent from the query string, exactly like the real
+    api_server.py endpoints do.
+    """
+    mock = _MockACServer()
+    client = _make_client(mock)
+
+    async def _go():
+        await client.open()
+        token = (await client.ensure_token())[0]
+        # Deliberately send the token in the body only — must be rejected.
+        resp = await client._request('POST', '/api/stop', json={'session_token': token})
+        assert resp.status_code == 401, 'body-only token must NOT authenticate'
+
+    _run(_go())

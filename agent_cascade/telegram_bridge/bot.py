@@ -21,6 +21,7 @@ from telegram.error import BadRequest, RetryAfter
 from agent_cascade.log import logger
 
 from .ac_client import ACClient, ACError
+from .commands import dispatch_command
 from .config import BridgeConfig
 from .waiter import WaiterResult, wait_for_completion, fetch_final_message
 
@@ -158,6 +159,17 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
 
     chat_id = update.effective_chat.id
 
+    # System-command interception (Phase 2): registered slash-commands are handled
+    # locally / via AC REST endpoints and answered directly. They NEVER reach the
+    # agent — this early return guarantees ac.inject_message is not called for them,
+    # so they are never logged as agent messages. Unknown '/...' commands get an
+    # "unknown + available" reply; non-command text falls through unchanged.
+    if text.startswith('/'):
+        reply = await dispatch_command(text, ac, cfg)
+        if reply is not None:
+            await _safe_send(context.bot, chat_id, reply)
+            return
+
     try:
         result = await ac.inject_message(text, target=cfg.target_agent)
     except ACError as e:
@@ -201,5 +213,8 @@ def build_application(cfg: BridgeConfig, ac: ACClient):
     )
     app.bot_data['config'] = cfg
     app.bot_data['ac_client'] = ac
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    # NOTE: plain filters.TEXT (NOT `~filters.COMMAND`) — Phase 2 intercepts slash-
+    # commands inside on_message via the COMMANDS registry. Excluding COMMAND here
+    # would make /stop & co. unreachable dead code.
+    app.add_handler(MessageHandler(filters.TEXT, on_message))
     return app

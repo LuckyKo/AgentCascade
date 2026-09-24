@@ -167,6 +167,75 @@ class ACClient:
             raise ACError(f"/api/state failed ({resp.status_code}): {resp.text[:300]}")
         return resp.json()
 
+    # ── system-command calls (Phase 2) ───────────────────────────
+    # Thin wrappers over the Phase 1 REST endpoints. Token-auth ones follow the
+    # get_status pattern: ensure_token() + one re-handshake on 401. approve/reject
+    # and reset are OPEN endpoints (loopback only); passing the token is harmless,
+    # so we keep the same call shape for simplicity.
+
+    async def _token_post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST ``path`` with the session token as a QUERY param; re-handshake once on 401.
+
+        The Phase 1 command endpoints read the token from the query string
+        (``token: str = None`` in the FastAPI signature), NOT from the JSON body —
+        same convention as get_status(). Sending it in the body would 401.
+        """
+        for attempt in (1, 2):
+            token = (await self.ensure_token())[0]
+            resp = await self._request('POST', path, params={'token': token}, json=body)
+            if resp.status_code == 401 and attempt == 1:
+                logger.warning('AC %s 401; re-handshaking and retrying once', path)
+                self.invalidate_token()
+                continue
+            if resp.status_code != 200:
+                raise ACError(f"{path} failed ({resp.status_code}): {resp.text[:300]}")
+            return resp.json()
+        raise ACError(f'{path} retry loop exhausted')
+
+    async def approve(self, request_id: str) -> Dict[str, Any]:
+        """POST /api/approve/{request_id} (open endpoint)."""
+        resp = await self._request('POST', f'/api/approve/{request_id}')
+        if resp.status_code != 200:
+            raise ACError(f"/api/approve failed ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
+
+    async def reject(self, request_id: str, reason: str = 'Rejected by user') -> Dict[str, Any]:
+        """POST /api/reject/{request_id}?reason=... (open endpoint)."""
+        resp = await self._request('POST', f'/api/reject/{request_id}', params={'reason': reason})
+        if resp.status_code != 200:
+            raise ACError(f"/api/reject failed ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
+
+    async def stop(self) -> Dict[str, Any]:
+        """POST /api/stop (session_token)."""
+        return await self._token_post('/api/stop', {})
+
+    async def restart(self) -> Dict[str, Any]:
+        """POST /api/restart (session_token). The AC process exits right after replying."""
+        return await self._token_post('/api/restart', {})
+
+    async def reset(self) -> Dict[str, Any]:
+        """POST /api/reset (open endpoint) — start a new session."""
+        resp = await self._request('POST', '/api/reset')
+        if resp.status_code != 200:
+            raise ACError(f"/api/reset failed ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
+
+    async def set_auto_security(self, enabled: bool) -> Dict[str, Any]:
+        """POST /api/auto_security (session_token)."""
+        return await self._token_post('/api/auto_security', {'enabled': bool(enabled)})
+
+    async def set_afk(self, enabled: bool, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+        """POST /api/afk (session_token)."""
+        body: Dict[str, Any] = {'enabled': bool(enabled)}
+        if timeout_seconds is not None:
+            body['timeout_seconds'] = int(timeout_seconds)
+        return await self._token_post('/api/afk', body)
+
+    async def restore_session(self, name: str) -> Dict[str, Any]:
+        """POST /api/session/restore (session_token)."""
+        return await self._token_post('/api/session/restore', {'name': name})
+
     # ── low-level helper ─────────────────────────────────────────
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         if self._client is None or self._client.is_closed:
