@@ -538,3 +538,85 @@ def test_state_builder_serializes_telegram_bridge_in_both_blocks():
     src = inspect.getsource(sb)
     count = src.count("'telegram_bridge_enabled'")
     assert count >= 2, f"expected telegram_bridge_enabled in both serialization blocks, found {count}"
+
+
+# ---------------------------------------------------------------------------
+# H. Base URL lazy resolution (_resolve_base_url)
+# ---------------------------------------------------------------------------
+# The create_app() attach path constructs the supervisor with an EMPTY
+# ac_base_url (uvicorn has not bound yet), so the base URL is resolved lazily
+# at spawn time from agent_pool.server_info, falling back to AGENT_CASCADE_PORT
+# env, then default 8765. The host is ALWAYS forced to 127.0.0.1 — a launcher
+# may bind to 0.0.0.0 for LAN access, but 0.0.0.0 is a bind address, not a
+# valid connect target for the (always-local) bridge child. _resolve_base_url()
+# is pure (no spawn), so these tests call it directly with no popen_patching.
+
+class FakePool:
+    """Minimal agent_pool stand-in exposing only server_info."""
+    def __init__(self, server_info):
+        self.server_info = server_info
+
+
+def test_resolve_base_url_explicit_wins(tmp_path):
+    """An explicit ac_base_url always wins, even when server_info is set."""
+    sup = make_supervisor(tmp_path, ac_base_url='http://127.0.0.1:8126',
+                          agent_pool=FakePool(('0.0.0.0', 9999)))
+    assert sup._resolve_base_url() == 'http://127.0.0.1:8126'
+
+
+def test_resolve_base_url_from_server_info_tuple(tmp_path):
+    """server_info tuple -> port taken, host used (already localhost here)."""
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(('127.0.0.1', 9999)))
+    assert sup._resolve_base_url() == 'http://127.0.0.1:9999'
+
+
+def test_resolve_base_url_forces_localhost_when_server_info_is_bind_all(tmp_path):
+    """KEY REGRESSION: a 0.0.0.0 bind host must be forced to 127.0.0.1.
+
+    start_multi_agent.py sets server_info = ('0.0.0.0', port) for LAN access;
+    0.0.0.0 is not a valid connect target, so the client URL must use 127.0.0.1.
+    """
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(('0.0.0.0', 8765)))
+    assert sup._resolve_base_url() == 'http://127.0.0.1:8765'
+
+
+def test_resolve_base_url_server_info_none_falls_back_to_env(tmp_path, monkeypatch):
+    """server_info None -> AGENT_CASCADE_PORT env is used."""
+    monkeypatch.setenv('AGENT_CASCADE_PORT', '7331')
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(None))
+    assert sup._resolve_base_url() == 'http://127.0.0.1:7331'
+
+
+def test_resolve_base_url_no_server_info_no_env_defaults(tmp_path, monkeypatch):
+    """server_info None and env unset -> default 127.0.0.1:8765."""
+    monkeypatch.delenv('AGENT_CASCADE_PORT', raising=False)
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(None))
+    assert sup._resolve_base_url() == 'http://127.0.0.1:8765'
+
+
+def test_resolve_base_url_agent_pool_none_defaults(tmp_path, monkeypatch):
+    """agent_pool is None entirely -> default 127.0.0.1:8765, no raise."""
+    monkeypatch.delenv('AGENT_CASCADE_PORT', raising=False)
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=None)
+    assert sup._resolve_base_url() == 'http://127.0.0.1:8765'
+
+
+def test_resolve_base_url_malformed_server_info_port_defaults(tmp_path, monkeypatch):
+    """server_info port not int-able -> default 8765, no raise."""
+    monkeypatch.delenv('AGENT_CASCADE_PORT', raising=False)
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(('127.0.0.1', 'notaport')))
+    assert sup._resolve_base_url() == 'http://127.0.0.1:8765'
+
+
+def test_resolve_base_url_env_not_int_defaults(tmp_path, monkeypatch):
+    """AGENT_CASCADE_PORT set but not int-able -> default 8765, no raise."""
+    monkeypatch.setenv('AGENT_CASCADE_PORT', 'notaport')
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(None))
+    assert sup._resolve_base_url() == 'http://127.0.0.1:8765'
+
+
+def test_build_env_uses_resolved_base_url(tmp_path):
+    """_build_env must hand the child the RESOLVED url (not a frozen empty one)."""
+    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(('0.0.0.0', 9123)))
+    env = sup._build_env()
+    assert env['AC_BASE_URL'] == 'http://127.0.0.1:9123'

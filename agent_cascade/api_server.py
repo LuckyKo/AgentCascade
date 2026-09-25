@@ -335,6 +335,26 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     except MediaStorageError as e:
         logger.warning(f"Media directory unavailable at startup (will fall back to base64): {e}")
 
+    # Attach the Telegram bridge supervisor here (single source of truth) so EVERY launcher
+    # that calls create_app() gets it — start_api_server.py and start_multi_agent.py both run
+    # their own uvicorn and never execute this module's __main__ block, so attaching only there
+    # silently left agent_pool.telegram_supervisor unset on the production path. The base URL is
+    # resolved lazily at spawn time from agent_pool.server_info (set by the launcher before
+    # server.run()); NOT started here — uvicorn has not bound yet. Start-on-boot happens in the
+    # startup event; the UI toggle drives it at runtime via the config handler. Non-critical: a
+    # construction failure must never crash app creation.
+    if agent_pool is not None:
+        try:
+            from agent_cascade.telegram_bridge.supervisor import TelegramBridgeSupervisor
+            if getattr(agent_pool, 'telegram_supervisor', None) is None:
+                agent_pool.telegram_supervisor = TelegramBridgeSupervisor(
+                    ac_base_url='',          # resolved lazily from agent_pool.server_info at spawn
+                    agent_pool=agent_pool,
+                    project_root=Path(__file__).resolve().parent.parent,  # repo root (config/secrets.json)
+                )
+        except Exception as e:
+            logger.warning('[INIT] Telegram bridge supervisor init failed (non-critical): %s', e)
+
     # Initialize concurrency control for Security advisor checks.
     # Security runs on a separate daemon thread, so we use RLock-based locking
     # (created lazily in security_handler.py) to prevent unlimited parallelism
@@ -1820,22 +1840,6 @@ if __name__ == '__main__':
         raise SystemExit(1)
 
     operation_mgr.agent_pool = agent_pool
-
-    # Attach the Telegram bridge supervisor (Phase 3). It is constructed here where
-    # args.port is known so the child's AC_BASE_URL uses the ACTUAL runtime port.
-    # It is NOT started here — uvicorn has not bound yet; start-on-boot happens in
-    # the startup event, and the UI toggle drives it at runtime via the config handler.
-    from agent_cascade.telegram_bridge.supervisor import TelegramBridgeSupervisor
-    try:
-        tg_supervisor = TelegramBridgeSupervisor(
-            ac_base_url=f'http://127.0.0.1:{args.port}',
-            project_root=PROJECT_ROOT,
-            workspace_dir=args.workspace,
-        )
-        agent_pool.telegram_supervisor = tg_supervisor
-        logger.debug('Telegram bridge supervisor attached (base_url=http://127.0.0.1:%d)', args.port)
-    except Exception as e:
-        logger.warning('[INIT] Telegram bridge supervisor init failed (non-critical): %s', e)
 
     # Apply CLI/env overrides via config handlers (before any WebSocket connections exist).
     # Uses handlers directly for validation and consistency with runtime updates.

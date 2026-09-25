@@ -63,12 +63,23 @@ class TelegramBridgeSupervisor:
     """Spawn/own/watch the Telegram bridge child process on behalf of AC.
 
     Attached to ``agent_pool`` as ``agent_pool.telegram_supervisor`` by
-    ``api_server.main()``. Construct with the runtime AC base URL (the ACTUAL
-    bound port — never hardcoded) and a workspace dir for the log file.
+    ``create_app()`` (single source of truth — every launcher gets it). The AC
+    base URL can be given explicitly, or left empty and resolved lazily at
+    spawn time from ``agent_pool.server_info`` (the ACTUAL bound port, set by
+    the launcher right before ``server.run()``) when attached before uvicorn
+    binds. Also takes a workspace dir for the log file.
+
+    Base URL resolution precedence (see ``_resolve_base_url``):
+      1. ``ac_base_url`` if non-empty (trailing slash stripped) — used as-is.
+      2. Otherwise ``agent_pool.server_info`` (host ignored; child is always
+         local, so the host is forced to 127.0.0.1 and only the port is taken).
+      3. Otherwise the ``AGENT_CASCADE_PORT`` env var.
+      4. Otherwise the default ``http://127.0.0.1:8765``.
     """
 
     def __init__(self,
-                 ac_base_url: str,
+                 ac_base_url: str = '',
+                 agent_pool=None,
                  project_root: Optional[Path] = None,
                  workspace_dir: Optional[str] = None,
                  allowed_users: str = '',
@@ -79,7 +90,11 @@ class TelegramBridgeSupervisor:
                  healthy_window_sec: float = DEFAULT_HEALTHY_WINDOW_SEC,
                  stop_wait_sec: float = DEFAULT_STOP_WAIT_SEC,
                  watch_interval_sec: float = DEFAULT_WATCH_INTERVAL_SEC):
-        self.ac_base_url = ac_base_url.rstrip('/')
+        self.ac_base_url = (ac_base_url or '').rstrip('/')
+        # Lazily-resolved base URL source. When the supervisor is attached from create_app()
+        # (before uvicorn binds), ac_base_url is empty and we resolve the ACTUAL bound port
+        # from agent_pool.server_info at spawn time (set by the launcher right before server.run()).
+        self._agent_pool = agent_pool
         # CWD for the child so ``config.secrets_loader`` resolves to config/secrets.json.
         self.project_root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
         # Log file lives under <workspace>/logs/telegram_bridge.log (consistent with AC's logs).
@@ -183,6 +198,33 @@ class TelegramBridgeSupervisor:
         'TMPDIR', 'TEMP', 'TMP',    # temp dir for subprocess internals
     )
 
+    def _resolve_base_url(self) -> str:
+        """Return the base URL to hand the child, preferring an explicit ac_base_url.
+
+        When constructed without one (create_app attach path), resolve from
+        agent_pool.server_info (set by the launcher before server.run()); fall back to
+        AGENT_CASCADE_PORT env, then default 8765. Mirrors system_info.py resolution.
+        """
+        if self.ac_base_url:
+            return self.ac_base_url
+        # The bridge child is ALWAYS local to AC, so the client URL must always use
+        # 127.0.0.1 — never the bind host from server_info (a launcher may bind to
+        # 0.0.0.0 for LAN access; 0.0.0.0 is a bind address, not a valid connect target).
+        si = getattr(self._agent_pool, 'server_info', None) if self._agent_pool else None
+        port = 8765
+        if isinstance(si, (tuple, list)) and len(si) == 2 and si[0] and si[1]:
+            try:
+                port = int(si[1])
+            except (ValueError, TypeError):
+                port = 8765
+        else:
+            env_port = os.getenv('AGENT_CASCADE_PORT')
+            try:
+                port = int(env_port) if env_port is not None else 8765
+            except (ValueError, TypeError):
+                port = 8765
+        return f'http://127.0.0.1:{port}'
+
     def _build_env(self) -> dict:
         """Build a MINIMAL child env: safe runtime essentials + non-secret bridge vars.
 
@@ -197,7 +239,7 @@ class TelegramBridgeSupervisor:
         env['TG_BRIDGE_ENABLED'] = 'true'   # MUST be set or the child exits 0 doing nothing
         if self.allowed_users:
             env['ALLOWED_USERS'] = self.allowed_users
-        env['AC_BASE_URL'] = self.ac_base_url
+        env['AC_BASE_URL'] = self._resolve_base_url()
         if self.target_agent:
             env['TG_TARGET_AGENT'] = self.target_agent
         return env
@@ -237,7 +279,7 @@ class TelegramBridgeSupervisor:
             self._proc_started_at = time.monotonic()
             self._last_exit_code = None
             logger.info('[TelegramBridge] Spawned bridge pid=%s base_url=%s log=%s',
-                        self._proc.pid, self.ac_base_url, self._log_path)
+                        self._proc.pid, self._resolve_base_url(), self._log_path)
         except Exception as e:
             self._proc = None
             self._error = f'Failed to spawn Telegram bridge: {e}'
