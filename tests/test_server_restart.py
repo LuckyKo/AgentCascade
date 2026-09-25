@@ -1,7 +1,7 @@
 """Tests for the shared server-restart helper and the port-race bind retry.
 
-Covers plan §6 (server-restart-dedup-fix-plan.md):
-- A. ``agent_cascade.server_restart.restart_server_process`` branch selection & safety.
+Covers:
+- A. ``agent_cascade.server_restart.restart_server_process`` in-place re-exec & failure safety.
 - B. ``start_api_server._bind_socket_with_retry`` hermetic retry behavior.
 - C. CHECKPOINT 1: uvicorn ``server.run(sockets=[pre_bound_sock])`` starts cleanly
   alongside a custom (no-op) signal handler — no double-bind, no error.
@@ -11,7 +11,6 @@ Run with: python -m pytest tests/test_server_restart.py -v
 
 import os
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -44,88 +43,39 @@ def test_restart_posix_uses_execl(monkeypatch):
 
     monkeypatch.setattr(server_restart.os, 'name', 'posix')
     with patch.object(server_restart.os, 'execl') as mock_execl, \
-         patch.object(server_restart.subprocess, 'Popen') as mock_popen, \
          patch.object(server_restart.os, '_exit'):  # patched: execl "returns" without killing the test
         server_restart.restart_server_process()
 
     mock_execl.assert_called_once_with(sys.executable, sys.executable, *sys.argv)
-    mock_popen.assert_not_called()
 
 
-def test_restart_windows_spawns_detached_then_exits(monkeypatch):
-    """os.name='nt': spawns a detached Popen with the same argv and explicit std
-    handles (stdin=DEVNULL, stdout->log file, stderr=STDOUT), then os._exit(0)."""
+def test_restart_windows_uses_execl(monkeypatch):
+    """os.name='nt': re-execs in place via os.execl with the same interpreter + argv.
+
+    On success execl never returns, so the belt-and-braces os._exit(1) is only
+    reachable if a (mocked) execl returns — assert it's called with 1 in that case."""
     from agent_cascade import server_restart
 
     monkeypatch.setattr(server_restart.os, 'name', 'nt')
-    with patch.object(server_restart.subprocess, 'Popen') as mock_popen, \
+    with patch.object(server_restart.os, 'execl') as mock_execl, \
          patch.object(server_restart.os, '_exit') as mock_exit:
         server_restart.restart_server_process()
 
-    mock_popen.assert_called_once()
-    args, kwargs = mock_popen.call_args
-    assert args[0] == [sys.executable, *sys.argv]
-    flags = kwargs['creationflags']
-    assert flags & subprocess.DETACHED_PROCESS
-    assert flags & subprocess.CREATE_NO_WINDOW
-    assert kwargs['close_fds'] is True
-    # Explicit std handles: a detached no-window child must NOT inherit the
-    # parent's (invalid) console std handles.
-    assert kwargs['stdin'] == subprocess.DEVNULL
-    assert kwargs['stderr'] == subprocess.STDOUT
-    stdout = kwargs['stdout']
-    assert stdout != subprocess.DEVNULL
-    assert hasattr(stdout, 'write'), 'stdout must be an open file object'
-    # The log path is anchored to the project root (not cwd) — matches LOG_FILE.
-    assert Path(stdout.name).resolve() == server_restart.LOG_FILE.resolve()
-    mock_exit.assert_called_once_with(0)
+    mock_execl.assert_called_once_with(sys.executable, sys.executable, *sys.argv)
+    mock_exit.assert_called_once_with(1)  # unreachable in production (execl only returns on failure)
 
 
-def test_restart_windows_stdout_falls_back_to_devnull_when_log_unopenable(monkeypatch):
-    """os.name='nt' + log file open raising OSError: stdout falls back to DEVNULL,
-    spawn still proceeds and os._exit(0) is still called.
-
-    The real logs/ dir always exists (path is anchored to the project root), so we
-    force the failure deterministically by making builtins.open raise OSError."""
+def test_restart_execl_stays_alive_on_failure(monkeypatch):
+    """os.execl raising (re-exec failed): the OSError propagates and os._exit is NOT
+    called — the running server is left alive on the failure path."""
     from agent_cascade import server_restart
 
-    monkeypatch.setattr(server_restart.os, 'name', 'nt')
-
-    def _raise(*a, **k):
-        raise OSError('simulated: cannot open log file')
-
-    with patch.object(server_restart.subprocess, 'Popen') as mock_popen, \
-         patch.object(server_restart.os, '_exit') as mock_exit, \
-         patch('builtins.open', side_effect=_raise):
-        server_restart.restart_server_process()
-
-    mock_popen.assert_called_once()
-    args, kwargs = mock_popen.call_args
-    assert args[0] == [sys.executable, *sys.argv]
-    assert kwargs['stdin'] == subprocess.DEVNULL
-    assert kwargs['stdout'] == subprocess.DEVNULL  # fallback
-    assert kwargs['stderr'] == subprocess.STDOUT
-    flags = kwargs['creationflags']
-    assert flags & subprocess.DETACHED_PROCESS
-    assert flags & subprocess.CREATE_NO_WINDOW
-    mock_exit.assert_called_once_with(0)
-
-
-def test_restart_windows_no_exit_if_spawn_fails(monkeypatch):
-    """os.name='nt' + Popen raising: os._exit must NOT be called (server stays alive)
-    AND the opened log file handle must be closed (no fd leak on the failure path)."""
-    from agent_cascade import server_restart
-
-    monkeypatch.setattr(server_restart.os, 'name', 'nt')
-    with patch.object(server_restart.subprocess, 'Popen', side_effect=OSError('spawn failed')), \
-         patch.object(server_restart.os, '_exit') as mock_exit, \
-         patch('builtins.open') as mock_open:
-        mock_fh = mock_open.return_value  # the "opened" log file object
+    with patch.object(server_restart.os, 'execl', side_effect=OSError('spawn failed')), \
+         patch.object(server_restart.os, '_exit') as mock_exit:
         with pytest.raises(OSError, match='spawn failed'):
             server_restart.restart_server_process()
 
     mock_exit.assert_not_called()
-    mock_fh.close.assert_called_once_with()  # handle released despite the spawn failure
 
 
 # ---------------------------------------------------------------------------
