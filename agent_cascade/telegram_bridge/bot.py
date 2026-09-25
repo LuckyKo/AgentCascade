@@ -162,8 +162,9 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
     # System-command interception (Phase 2): registered slash-commands are handled
     # locally / via AC REST endpoints and answered directly. They NEVER reach the
     # agent — this early return guarantees ac.inject_message is not called for them,
-    # so they are never logged as agent messages. Unknown '/...' commands get an
-    # "unknown + available" reply; non-command text falls through unchanged.
+    # so they are never logged as agent messages. Unregistered '/...' commands and
+    # plain text both fall through to inject_message below (so AC-side slash commands
+    # like /compress x reach the agent).
     if text.startswith('/'):
         reply = await dispatch_command(text, ac, cfg)
         if reply is not None:

@@ -859,16 +859,26 @@ def test_command_ac_error_replies_failure_without_crash():
     ac.inject_message.assert_not_called()
 
 
-def test_unknown_command_replies_and_lists_commands_without_injecting():
+def test_unknown_command_forwarded_to_agent_without_unknown_reply():
+    """/frobulate xyz is unregistered -> forwarded to the agent (inject_message
+    called with the ORIGINAL text), and no "Unknown command" reply is sent."""
     update, context, ac, sent = _cmd_context('/frobulate xyz')
-    _run(on_message(update, context))
 
-    assert len(sent) == 1
-    assert 'Unknown command' in sent[0]
-    # The reply proves extensibility: it lists the registered commands.
-    for name in ('/stop', '/status', '/help'):
-        assert name in sent[0]
-    ac.inject_message.assert_not_called()
+    async def go():
+        await on_message(update, context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+
+    ac.inject_message.assert_called_once()
+    assert ac.inject_message.call_args.args[0] == '/frobulate xyz'
+    # Only the "Started" ack is sent — never an unknown-command reply.
+    for text in sent:
+        assert 'Unknown command' not in text
 
 
 def test_help_lists_all_registered_commands():
@@ -904,12 +914,23 @@ def test_afk_and_security_usage_errors_reply_without_ac_call():
 
 
 def test_non_command_slash_text_falls_through_to_inject():
-    """Regression: text starting with '/' that is NOT a command still injects."""
+    """Regression: unregistered '/...' text falls through to inject_message with
+    the original text (no "Unknown command" reply)."""
     update, context, ac, sent = _cmd_context('/not-a-command please')
-    # /not-a-command IS unknown -> it replies unknown and does NOT inject.
-    _run(on_message(update, context))
-    ac.inject_message.assert_not_called()
-    assert 'Unknown command' in sent[0]
+
+    async def go():
+        await on_message(update, context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+    ac.inject_message.assert_called_once()
+    assert ac.inject_message.call_args.args[0] == '/not-a-command please'
+    for text in sent:
+        assert 'Unknown command' not in text
 
     # Plain (non-slash) text still goes through the inject path.
     update2, context2, ac2, sent2 = _cmd_context('do the thing')

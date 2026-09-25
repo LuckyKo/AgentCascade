@@ -1,14 +1,18 @@
 """Extensible slash-command dispatcher for the Telegram bridge (Phase 2).
 
-System commands are intercepted by ``bot.on_message`` BEFORE any agent injection,
-dispatched through the ``COMMANDS`` registry below, and answered directly. They
-NEVER reach the AC agent and are never logged as agent messages — the only path
-into AC from this module is the thin ``ACClient`` REST methods (stop/restart/...),
-never ``inject_message``.
+Registered system commands are intercepted by ``bot.on_message`` BEFORE any agent
+injection, dispatched through the ``COMMANDS`` registry below, and answered
+directly. They NEVER reach the AC agent and are never logged as agent messages —
+the only path into AC from this module is the thin ``ACClient`` REST methods
+(stop/restart/...), never ``inject_message``.
+
+Unregistered ``/...`` commands (e.g. ``/compress x``) are NOT rejected here: they
+fall through (dispatch returns None) so ``bot.on_message`` forwards them to the AC
+agent via ``inject_message`` — AC-side slash commands keep working from Telegram.
 
 Design for easy expansion: adding a command = one ``CommandHandler`` entry in
-``COMMANDS``. No if/elif chains anywhere; /help and the unknown-command reply are
-generated from the registry, so new commands appear automatically.
+``COMMANDS``. No if/elif chains anywhere; /help is generated from the registry, so
+new commands appear automatically.
 """
 
 from dataclasses import dataclass
@@ -236,11 +240,12 @@ def parse_command(text: str) -> Optional[Tuple[str, str]]:
 async def dispatch_command(text: str, ac: ACClient, cfg: BridgeConfig) -> Optional[str]:
     """Handle one message if it is a registered command.
 
-    Returns the reply text to send to Telegram, or None when the text is not a
-    command (caller falls through to the normal inject-and-wait flow). Unknown
-    ``/...`` commands get an "unknown + available" reply so the user always gets
-    feedback. AC errors are converted to short human-readable failure replies —
-    this function never raises and never touches ``ac.inject_message``.
+    Returns the reply text to send to Telegram, or None when the caller should
+    fall through to the normal inject-and-wait flow — both for non-command text
+    and for UNREGISTERED ``/...`` commands (forwarded to the agent so AC-side
+    slash commands like /compress x reach it). Registered commands are intercepted
+    and answered directly. AC errors are converted to short human-readable failure
+    replies — this function never raises and never touches ``ac.inject_message``.
     """
     parsed = parse_command(text)
     if parsed is None:
@@ -248,9 +253,11 @@ async def dispatch_command(text: str, ac: ACClient, cfg: BridgeConfig) -> Option
     name, args = parsed
     cmd = COMMANDS.get(name)
     if cmd is None:
-        available = ', '.join(f'/{c.name}' for c in COMMANDS.values())
-        logger.info('Unknown command /%s from Telegram', name)
-        return f"Unknown command /{name}\n{available}"
+        # Unregistered slash command: forward to the agent (fall through). This lets
+        # AC-side slash commands like /compress x reach the agent instead of being
+        # rejected here. Returns None so bot.on_message proceeds to inject_message.
+        logger.info('Unregistered command /%s forwarded to agent', name)
+        return None
 
     ctx = CommandContext(ac=ac, cfg=cfg, args=args)
     try:
