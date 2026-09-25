@@ -20,7 +20,7 @@ from typing import List, Optional
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from agent_cascade.log import logger
 from agent_cascade.settings import (
@@ -40,6 +40,12 @@ from .waiter import WaiterResult, wait_for_completion, fetch_final_message
 # split when a single reply genuinely exceeds the limit (per v1 spec). The value
 # lives in settings (TG_MAX_MESSAGE_LEN) so it's tunable/overridable in one place.
 CHUNK_SIZE = TG_MAX_MESSAGE_LEN
+
+# Max send attempts on transient Telegram network errors (stale connection after
+# idle) before surfacing. 429 retries stay unbounded (per Telegram's retry_after),
+# so this bound applies ONLY to the NetworkError path below. At defaults
+# (base=1.0, cap=30.0) the backoff sleeps are 1+2+4+8 = ~15s of recovery window.
+_SEND_ONE_MAX_ATTEMPTS = 5
 
 
 def chunk_text(text: str, limit: int = CHUNK_SIZE) -> List[str]:
@@ -93,8 +99,16 @@ def _retry_after_seconds(exc, fallback: float) -> float:
 
 
 async def _send_one(bot, chat_id: int, text: str) -> None:
-    """Send a single message, retrying on Telegram 429 per its retry_after."""
+    """Send a single message, retrying on Telegram 429 per its retry_after and on
+    transient network errors (stale connection after idle) with bounded backoff.
+
+    ``BadRequest`` is re-raised immediately — a bad request will not heal by
+    retrying. PTB hierarchy note: BOTH ``TimedOut`` and ``BadRequest`` subclass
+    ``NetworkError``, so the ``except BadRequest`` branch MUST precede the
+    ``except NetworkError`` branch or it would be swallowed and retried.
+    """
     backoff = TG_SEND_RETRY_BACKOFF_BASE_SEC
+    net_attempts = 0
     while True:
         try:
             await bot.send_message(chat_id=chat_id, text=text)
@@ -108,6 +122,20 @@ async def _send_one(bot, chat_id: int, text: str) -> None:
             # E.g. message too long despite chunking (shouldn't happen). Surface it.
             logger.error('Telegram send failed (BadRequest): %s', e)
             raise
+        except NetworkError as e:
+            # Transient failure from a stale/dropped Telegram connection (covers
+            # TimedOut and plain NetworkError). Retry with exponential backoff, but
+            # bound the attempts so a persistently-dead connection surfaces.
+            net_attempts += 1
+            if net_attempts >= _SEND_ONE_MAX_ATTEMPTS:
+                logger.error('Telegram send failed after %d network retries: %s',
+                             net_attempts, e)
+                raise
+            logger.warning(
+                'Telegram network error (attempt %d/%d); sleeping %.1fs before retry',
+                net_attempts, _SEND_ONE_MAX_ATTEMPTS, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, TG_SEND_RETRY_BACKOFF_CAP_SEC)
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -171,7 +199,18 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
                 await _safe_send(bot, chat_id, '✅ Done (AC produced no text reply).')
                 return
 
-            await send_chunked(bot, chat_id, final_text)
+            try:
+                await send_chunked(bot, chat_id, final_text)
+            except Exception as e:
+                # The final reply failed to deliver (e.g. a stale Telegram
+                # connection after a long idle that exhausted _send_one's retries).
+                # Send an error notice instead of silently killing the fire-and-forget
+                # waiter task — mirrors the "couldn't read its reply" pattern above.
+                logger.error('waiter failed to deliver final reply: %s', e)
+                await _safe_send(
+                    bot, chat_id,
+                    "⚠️ AC finished but I couldn't deliver its reply. Try again.",
+                )
             return
 
         # result.status == TIMEOUT -> a "still working" checkpoint. If we've hit the

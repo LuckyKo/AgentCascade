@@ -1343,3 +1343,160 @@ def test_e2e_status_command_routes_to_api_status_not_inject():
     assert 'Idle' in sent_texts[0] and 'No pending approvals' in sent_texts[0]
     # Never reached the agent.
     assert mock.injected == []
+
+
+# ---------------------------------------------------------------------------
+# 8. BUG_0016: retry-with-reconnect for stale connections after idle
+# ---------------------------------------------------------------------------
+
+def test_send_one_retries_on_network_error_then_succeeds(monkeypatch):
+    """A transient NetworkError (stale connection) is retried with backoff, then succeeds."""
+    from telegram.error import NetworkError
+    from agent_cascade.telegram_bridge import bot as bot_mod
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_BASE_SEC', 0.0)
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_CAP_SEC', 0.0)
+
+    bot = MagicMock()
+    n = {'c': 0}
+    async def _flaky(**kwargs):
+        n['c'] += 1
+        if n['c'] == 1:
+            raise NetworkError('stale connection')
+        return None
+    bot.send_message.side_effect = _flaky
+
+    _run(send_chunked(bot, chat_id=7, text='hi'))
+    assert n['c'] == 2   # failed once (NetworkError), retried, succeeded
+
+
+def test_send_one_retries_on_timed_out(monkeypatch):
+    """TimedOut is a subclass of NetworkError -> must be retried like NetworkError."""
+    from telegram.error import TimedOut
+    from agent_cascade.telegram_bridge import bot as bot_mod
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_BASE_SEC', 0.0)
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_CAP_SEC', 0.0)
+
+    bot = MagicMock()
+    n = {'c': 0}
+    async def _flaky(**kwargs):
+        n['c'] += 1
+        if n['c'] == 1:
+            raise TimedOut('timed out')
+        return None
+    bot.send_message.side_effect = _flaky
+
+    _run(send_chunked(bot, chat_id=7, text='hi'))
+    assert n['c'] == 2
+
+
+def test_send_one_gives_up_after_bounded_network_retries(monkeypatch):
+    """A persistently-dead connection gives up after exactly the bounded attempts."""
+    from telegram.error import NetworkError
+    from agent_cascade.telegram_bridge import bot as bot_mod
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_BASE_SEC', 0.0)
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_CAP_SEC', 0.0)
+
+    bot = MagicMock()
+    n = {'c': 0}
+    async def _always_fail(**kwargs):
+        n['c'] += 1
+        raise NetworkError('dead connection')
+    bot.send_message.side_effect = _always_fail
+
+    with pytest.raises(NetworkError):
+        _run(send_chunked(bot, chat_id=7, text='hi'))
+    assert n['c'] == bot_mod._SEND_ONE_MAX_ATTEMPTS   # exactly the bound, then re-raise
+
+
+def test_send_one_bad_request_re_raises_without_retry():
+    """BadRequest is a NetworkError subclass but must still re-raise immediately."""
+    from telegram.error import BadRequest
+    bot = MagicMock()
+    n = {'c': 0}
+    async def _bad(**kwargs):
+        n['c'] += 1
+        raise BadRequest('message too long')
+    bot.send_message.side_effect = _bad
+
+    with pytest.raises(BadRequest):
+        _run(send_chunked(bot, chat_id=7, text='hi'))
+    assert n['c'] == 1   # no retry on BadRequest (ordering guard)
+
+
+def test_run_waiter_sends_error_notice_when_final_delivery_fails(monkeypatch):
+    """If the FINAL reply fails to deliver, the waiter sends an error notice instead of
+    letting the exception escape the fire-and-forget task."""
+    from telegram.error import NetworkError
+    from agent_cascade.telegram_bridge import bot as bot_mod
+    from agent_cascade.telegram_bridge.bot import _run_waiter
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_BASE_SEC', 0.0)
+    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_CAP_SEC', 0.0)
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[1],
+                       poll_interval_sec=0.02, task_timeout_sec=5,
+                       task_wait_ceiling_sec=30.0)
+    mock = _MockACServer()
+    mock._status_script = [False]   # AC already finished -> straight to FINISHED
+    client = _make_client(mock)
+
+    bot = MagicMock()
+    sent = []
+    async def _capture(**kwargs):
+        if kwargs['text'] == mock.final_text:
+            raise NetworkError('stale connection on final send')
+        sent.append(kwargs['text'])   # error notice (and any non-final text) succeeds
+        return None
+    bot.send_message.side_effect = _capture
+
+    async def go():
+        await client.open()
+        await _run_waiter(client, bot, chat_id=99, cfg=cfg)   # must NOT raise
+        await client.close()
+
+    _run(go())   # if the final send were unguarded, NetworkError would escape here
+    assert mock.final_text not in sent                 # final reply not delivered
+    assert any("couldn't deliver" in t for t in sent)   # error notice WAS sent
+
+
+def test_request_reconnects_on_transport_error_then_succeeds():
+    """A transport-level failure drops the connection and retries ONCE on a fresh client."""
+    calls = {'n': 0}
+    def handle(request):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise httpx.ConnectError('stale pooled socket')
+        return httpx.Response(200, json={'ok': True})
+    transport = httpx.MockTransport(handle)
+    client = ACClient(base_url='http://127.0.0.1:12345', transport=transport)
+
+    async def go():
+        await client.open()
+        before = client._client
+        resp = await client._request('GET', '/api/state')
+        return resp, before, client._client
+
+    resp, before, after = _run(go())
+    assert resp.status_code == 200 and resp.json() == {'ok': True}
+    assert calls['n'] == 2          # original attempt + exactly one reconnect retry
+    assert after is not before       # the AsyncClient was recreated (fresh connection)
+
+
+def test_request_propagates_after_one_reconnect_retry():
+    """If the reconnect retry ALSO fails, the error propagates (no further retries)."""
+    calls = {'n': 0}
+    def handle(request):
+        calls['n'] += 1
+        raise httpx.ConnectError('still dead')
+    transport = httpx.MockTransport(handle)
+    client = ACClient(base_url='http://127.0.0.1:12345', transport=transport)
+
+    async def go():
+        await client.open()
+        try:
+            await client._request('GET', '/api/state')
+            return 'no-raise'
+        except httpx.ConnectError:
+            return 'raised'
+
+    assert _run(go()) == 'raised'
+    assert calls['n'] == 2   # original + one reconnect retry, then propagate (no more)

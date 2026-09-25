@@ -264,4 +264,19 @@ class ACClient:
         if self._client is None or self._client.is_closed:
             await self.open()
         assert self._client is not None
-        return await self._client.request(method, path, **kwargs)
+        try:
+            return await self._client.request(method, path, **kwargs)
+        except httpx.TransportError as e:
+            # Transport-level failure (stale pooled socket after idle, OS sleep/wake,
+            # NAT expiry; covers ConnectError/ReadTimeout/RemoteProtocolError). Drop
+            # the connection and retry ONCE on a fresh AsyncClient — this is the
+            # reconnect that makes the stale-socket case recoverable. We do NOT catch
+            # httpx.HTTPStatusError (4xx/5xx): those are application-level responses
+            # handled by the callers, not transport failures. Token cache is untouched
+            # (open()/close() only touch _client), so no re-handshake is forced here.
+            logger.warning('AC %s %s transport error (%s); reconnecting and retrying once',
+                           method, path, e)
+            await self.close()   # aclose() + _client=None
+            await self.open()    # fresh AsyncClient (fresh connection pool)
+            assert self._client is not None
+            return await self._client.request(method, path, **kwargs)
