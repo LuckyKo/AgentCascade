@@ -118,3 +118,6 @@ agents/global/skills-metrics.json
 
 # xdist worker crash dumps (faulthandler diagnostics, see tests/conftest.py)
 tests/_crash_dumps/
+
+# git filter-branch / filter-repo scratch dir (accidentally committed; do not track)
+.git-rewrite/
