@@ -6,6 +6,10 @@ Receiving path (per incoming text message from the allowlisted user):
     3. Reply once with a short ack ("🏃 Started").
     4. Spawn a waiter coroutine that polls /api/status until generation ends,
        then sends the root agent's final assistant message (chunked if >4096).
+       A task timeout is NON-FATAL: it sends a "⏳ Still working" notice and keeps
+       polling (one notice per task-timeout interval) until AC finishes or the
+       outer ceiling (TG_TASK_WAIT_CEILING_SEC) is hit — so late completions still
+       get their reply delivered.
 
 Sending path helpers: ``chunk_text`` splits text into <=4096-char parts on line
 boundaries; ``send_chunked`` sends them sequentially and honors 429 retry_after.
@@ -24,6 +28,7 @@ from agent_cascade.settings import (
     TG_OFFLINE_AFTER_SEC,
     TG_SEND_RETRY_BACKOFF_BASE_SEC,
     TG_SEND_RETRY_BACKOFF_CAP_SEC,
+    TG_TASK_WAIT_CEILING_SEC,
 )
 
 from .ac_client import ACClient, ACError
@@ -105,40 +110,86 @@ async def _send_one(bot, chat_id: int, text: str) -> None:
             raise
 
 
+def _fmt_elapsed(seconds: float) -> str:
+    """Render an elapsed duration for the "still working" notice.
+
+    Pure function (unit-testable): <60s -> "45s", <1h -> "42m", else "1h 05m".
+    Negative/zero values render as "0s".
+    """
+    secs = max(0, int(seconds))
+    if secs < 60:
+        return f'{secs}s'
+    minutes, rem = divmod(secs, 60)
+    if minutes < 60:
+        return f'{minutes}m'
+    hours, minutes = divmod(minutes, 60)
+    return f'{hours}h {minutes:02d}m'
+
+
 async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> None:
-    """Wait for the current AC run to finish, then deliver the final message."""
-    try:
-        # Surface "AC appears offline" a bit sooner than the full task timeout so the
-        # user isn't left hanging if AC is down (still bounded by the task timeout).
-        offline_after = min(TG_OFFLINE_AFTER_SEC, cfg.task_timeout_sec)
-        result = await wait_for_completion(
-            ac, poll_interval=cfg.poll_interval_sec,
-            timeout=cfg.task_timeout_sec, offline_after=offline_after,
+    """Wait for the current AC run to finish, then deliver the final message.
+
+    A task timeout is NON-FATAL: it sends a "⏳ Still working" notice (one per
+    ``task_timeout_sec`` interval) and keeps polling until AC finishes or the
+    outer ceiling (``task_wait_ceiling_sec``, default TG_TASK_WAIT_CEILING_SEC)
+    is reached. This way late completions still get their reply delivered.
+    """
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    next_notify_at = start + cfg.task_timeout_sec
+    # Surface "AC appears offline" a bit sooner than the full task timeout so the
+    # user isn't left hanging if AC is down (still bounded by the task timeout).
+    # Re-evaluated relative to each wait_for_completion call, so it naturally
+    # re-arms per round: a transient blip won't kill us, sustained unreachability will.
+    offline_after = min(TG_OFFLINE_AFTER_SEC, cfg.task_timeout_sec)
+
+    while True:
+        try:
+            result = await wait_for_completion(
+                ac, poll_interval=cfg.poll_interval_sec,
+                timeout=max(0.1, next_notify_at - loop.time()),
+                offline_after=offline_after,
+            )
+        except Exception as e:
+            logger.error('waiter could not reach AC: %s', e)
+            await _safe_send(bot, chat_id, '⚠️ Could not reach AC. Try again later.')
+            return
+
+        if result.status == WaiterResult.OFFLINE:
+            await _safe_send(bot, chat_id, '⚠️ AC appears offline — I stopped waiting.')
+            return
+
+        if result.status == WaiterResult.FINISHED:
+            try:
+                final_text = await fetch_final_message(ac)
+            except Exception as e:
+                logger.error('waiter failed to read final message: %s', e)
+                await _safe_send(bot, chat_id, "⚠️ AC finished but I couldn't read its reply.")
+                return
+
+            if not final_text.strip():
+                await _safe_send(bot, chat_id, '✅ Done (AC produced no text reply).')
+                return
+
+            await send_chunked(bot, chat_id, final_text)
+            return
+
+        # result.status == TIMEOUT -> a "still working" checkpoint. If we've hit the
+        # outer ceiling, stop here (the "gave up" message is the final notice — no
+        # redundant "Still working" ping right before it). Otherwise notify and keep waiting.
+        elapsed = loop.time() - start
+        if elapsed >= cfg.task_wait_ceiling_sec:
+            await _safe_send(
+                bot, chat_id,
+                '⌛ Reached the max wait ceiling; stopping here. Check the AC session for the result.',
+            )
+            return
+        await _safe_send(
+            bot, chat_id,
+            f'⏳ Still working ({_fmt_elapsed(elapsed)}) — I\'ll keep waiting '
+            'and send the reply when it\'s done.',
         )
-    except Exception as e:
-        logger.error('waiter could not reach AC: %s', e)
-        await _safe_send(bot, chat_id, '⚠️ Could not reach AC. Try again later.')
-        return
-
-    if result.status == WaiterResult.OFFLINE:
-        await _safe_send(bot, chat_id, '⚠️ AC appears offline — I stopped waiting.')
-        return
-    if result.status == WaiterResult.TIMEOUT:
-        await _safe_send(bot, chat_id, '⏱️ Timed out waiting for AC — check the session.')
-        return
-
-    try:
-        final_text = await fetch_final_message(ac)
-    except Exception as e:
-        logger.error('waiter failed to read final message: %s', e)
-        await _safe_send(bot, chat_id, "⚠️ AC finished but I couldn't read its reply.")
-        return
-
-    if not final_text.strip():
-        await _safe_send(bot, chat_id, '✅ Done (AC produced no text reply).')
-        return
-
-    await send_chunked(bot, chat_id, final_text)
+        next_notify_at += cfg.task_timeout_sec  # next ping one task-timeout later
 
 
 async def _safe_send(bot, chat_id: int, text: str) -> None:

@@ -455,14 +455,16 @@ def test_retry_after_seconds_handles_int_float_and_timedelta():
     assert _retry_after_seconds(e_bad, fallback=4.0) == 4.0
 
 
-def test_waiter_task_timeout_path_sends_timeout_notice():
-    """When wait_for_completion times out, the waiter sends the timeout notice."""
+def test_waiter_task_timeout_is_non_fatal_and_ceiling_gives_up():
+    """A task timeout is NON-FATAL: the waiter sends a 'Still working' notice and
+    keeps polling until the outer ceiling, then gives up with a final message."""
     from agent_cascade.telegram_bridge.bot import _run_waiter
 
     cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[1],
-                       poll_interval_sec=0.02, task_timeout_sec=0.1)
+                       poll_interval_sec=0.02, task_timeout_sec=0.1,
+                       task_wait_ceiling_sec=0.2)   # tiny ceiling -> loop exits fast
     mock = _MockACServer()
-    mock._status_script = [True] * 1000   # never finishes -> timeout
+    mock._status_script = [True] * 100000   # never finishes -> repeated timeouts
     client = _make_client(mock)
 
     bot = MagicMock()
@@ -479,7 +481,60 @@ def test_waiter_task_timeout_path_sends_timeout_notice():
         await client.close()
 
     _run(go())
-    assert any('Timed out' in t for t in sent_texts)
+    # Non-fatal: a "still working" checkpoint notice is sent (at least one).
+    assert any('Still working' in t for t in sent_texts)
+    # Bounded: the ceiling "giving up" message is eventually sent.
+    assert any('max wait ceiling' in t for t in sent_texts)
+    # The old fatal "Timed out ... check the session" notice must be gone.
+    assert not any('Timed out' in t for t in sent_texts)
+
+
+def test_waiter_delivers_reply_when_ac_finishes_after_first_timeout():
+    """Core regression: AC finishes AFTER the first task-timeout -> the waiter sends
+    a 'Still working' notice AND still delivers the final message (no abandonment)."""
+    from agent_cascade.telegram_bridge.bot import _run_waiter
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[1],
+                       poll_interval_sec=0.02, task_timeout_sec=0.1,
+                       task_wait_ceiling_sec=30.0)
+    mock = _MockACServer()
+    # ~5s of generating (>> 0.1s first round -> that round times out), then idle:
+    # the next round sees generating=False and delivers the final message.
+    mock._status_script = [True] * 200 + [False]
+    client = _make_client(mock)
+
+    bot = MagicMock()
+    sent_texts = []
+
+    async def _capture(**kwargs):
+        sent_texts.append(kwargs['text'])
+        return None
+    bot.send_message.side_effect = _capture
+
+    async def go():
+        await client.open()
+        await _run_waiter(client, bot, chat_id=99, cfg=cfg)
+        await client.close()
+
+    _run(go())
+    # A 'still working' checkpoint fired while AC was still generating...
+    assert any('Still working' in t for t in sent_texts)
+    # ...and the final answer was still delivered afterwards.
+    assert mock.final_text in sent_texts
+
+
+def test_fmt_elapsed_formats_seconds_minutes_hours():
+    """_fmt_elapsed renders <60s as 'Ns', <1h as 'Nm', else 'Nh MMm'."""
+    from agent_cascade.telegram_bridge.bot import _fmt_elapsed
+
+    assert _fmt_elapsed(0) == '0s'
+    assert _fmt_elapsed(45) == '45s'
+    assert _fmt_elapsed(59.9) == '59s'
+    assert _fmt_elapsed(60) == '1m'
+    assert _fmt_elapsed(42 * 60 + 30) == '42m'
+    assert _fmt_elapsed(60 * 60) == '1h 00m'
+    assert _fmt_elapsed(3725) == '1h 02m'   # 1h 2m 5s -> "1h 02m"
+    assert _fmt_elapsed(-5) == '0s'          # negative clamps to zero
 
 
 # ---------------------------------------------------------------------------

@@ -12,14 +12,22 @@ Env keys (see plan §8 / V1 SCOPE ADDENDUM):
     AC_BASE_URL            str    default http://127.0.0.1:12345  (port MUST be configurable)
     TG_TARGET_AGENT        str    default Maine (root/orchestrator)
     TG_POLL_INTERVAL_SEC   float  default 2.5   (/api/status poll cadence)
-    TG_TASK_TIMEOUT_SEC    int    default 28800 (max wait per task; 8h — AC runs can be long)
+    TG_TASK_TIMEOUT_SEC    int    default 28800 (per-task wait window; timeout is non-fatal, see below)
+    AGENT_CASCADE_TG_TASK_WAIT_CEILING_SEC float default 86400 (outer ceiling after 'still working' notices; 24h)
+
+A task timeout no longer abandons delivery: the waiter sends a "⏳ Still working"
+notice and keeps polling until AC finishes or the ceiling is reached.
 """
 
 import os
 from dataclasses import dataclass, field
 from typing import List
 
-from agent_cascade.settings import TG_POLL_INTERVAL_SEC, TG_TASK_TIMEOUT_SEC
+from agent_cascade.settings import (
+    TG_POLL_INTERVAL_SEC,
+    TG_TASK_TIMEOUT_SEC,
+    TG_TASK_WAIT_CEILING_SEC,
+)
 
 
 def _load_bot_token() -> str:
@@ -87,6 +95,7 @@ class BridgeConfig:
     target_agent: str = 'Maine'
     poll_interval_sec: float = TG_POLL_INTERVAL_SEC
     task_timeout_sec: int = TG_TASK_TIMEOUT_SEC
+    task_wait_ceiling_sec: float = TG_TASK_WAIT_CEILING_SEC
 
     def is_allowed(self, user_id) -> bool:
         try:
@@ -108,6 +117,10 @@ def load_config() -> BridgeConfig:
         # typed constant via `or`.
         poll_interval_sec=float(os.environ.get('TG_POLL_INTERVAL_SEC') or TG_POLL_INTERVAL_SEC),
         task_timeout_sec=int(os.environ.get('TG_TASK_TIMEOUT_SEC') or TG_TASK_TIMEOUT_SEC),
+        # Newer knob: no legacy env var exists, so the AGENT_CASCADE_-prefixed name is
+        # the only one (the settings constant already reads it).
+        task_wait_ceiling_sec=float(
+            os.environ.get('AGENT_CASCADE_TG_TASK_WAIT_CEILING_SEC') or TG_TASK_WAIT_CEILING_SEC),
     )
 
 

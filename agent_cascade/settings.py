@@ -234,6 +234,7 @@ REASONING_EFFORT_VALUES: tuple = ('none', 'low', 'medium', 'high', 'xhigh')
 # knobs (offline cap, HTTP timeout, 429 backoff, message length) had no env var
 # before and follow the standard AGENT_CASCADE_ prefix convention.
 TG_TASK_TIMEOUT_SEC: int = int(os.getenv('TG_TASK_TIMEOUT_SEC', 28800))  # Max seconds to wait per task (8h — AC runs can be long); env: TG_TASK_TIMEOUT_SEC
+TG_TASK_WAIT_CEILING_SEC: float = float(os.getenv('AGENT_CASCADE_TG_TASK_WAIT_CEILING_SEC', 86400))  # Outer hard ceiling for how long the waiter keeps polling after task-timeout 'still working' notices before giving up entirely (24h)
 TG_POLL_INTERVAL_SEC: float = float(os.getenv('TG_POLL_INTERVAL_SEC', 2.5))  # /api/status poll cadence; env: TG_POLL_INTERVAL_SEC
 TG_OFFLINE_AFTER_SEC: float = float(os.getenv('AGENT_CASCADE_TG_OFFLINE_AFTER_SEC', 30.0))  # Surface "AC offline" after this many seconds unreachable (capped at task timeout)
 TG_HTTP_REQUEST_TIMEOUT_SEC: float = float(os.getenv('AGENT_CASCADE_TG_HTTP_REQUEST_TIMEOUT_SEC', 30.0))  # Per-request httpx timeout to the AC REST API
