@@ -782,7 +782,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     pass
 
             messages, llm_messages, response = self._setup_turn(instance)
-            logger.debug(f"[TURN_DONE] Got messages={len(messages)}, llm_messages={len(llm_messages)}")
+            # _setup_turn's documented contract (see its docstring) is to return
+            # (None, None, None) on the empty-conversation early exit, so guard the
+            # debug log against None — calling len() here crashed the early-exit path.
+            logger.debug(
+                f"[TURN_DONE] Got messages={len(messages) if messages is not None else 'None'}, "
+                f"llm_messages={len(llm_messages) if llm_messages is not None else 'None'}"
+            )
             if not messages:
                 # Safety: drain any queued user messages before exiting, so
                 # they aren't lost.
