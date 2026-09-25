@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from agent_cascade.log import logger
+from agent_cascade.settings import TG_POLL_INTERVAL_SEC, TG_TASK_TIMEOUT_SEC
 
 from .ac_client import ACClient, ACError
 
@@ -70,8 +71,8 @@ def extract_final_message(state: Dict[str, Any]) -> str:
 
 async def wait_for_completion(
     client: ACClient,
-    poll_interval: float = 2.5,
-    timeout: float = 1800.0,
+    poll_interval: float = TG_POLL_INTERVAL_SEC,
+    timeout: float = TG_TASK_TIMEOUT_SEC,
     offline_after: Optional[float] = None,
 ) -> WaiterResult:
     """Poll /api/status until ``generating`` is false, or the deadline passes.

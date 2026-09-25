@@ -226,6 +226,21 @@ ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_ENDPOINT_SLOT_
 # "xhigh" maps to "high" at the API level (future-proofing for extended levels).
 REASONING_EFFORT_VALUES: tuple = ('none', 'low', 'medium', 'high', 'xhigh')
 
+# Settings for the Telegram bridge (agent_cascade/telegram_bridge/)
+# NOTE on env-var naming: TG_TASK_TIMEOUT_SEC and TG_POLL_INTERVAL_SEC intentionally
+# read the SAME unprefixed user-facing env vars that config.py has always used —
+# live deployments set those exact names, so introducing AGENT_CASCADE_-prefixed
+# aliases for them would silently create two knobs for one setting. The newer
+# knobs (offline cap, HTTP timeout, 429 backoff, message length) had no env var
+# before and follow the standard AGENT_CASCADE_ prefix convention.
+TG_TASK_TIMEOUT_SEC: int = int(os.getenv('TG_TASK_TIMEOUT_SEC', 28800))  # Max seconds to wait per task (8h — AC runs can be long); env: TG_TASK_TIMEOUT_SEC
+TG_POLL_INTERVAL_SEC: float = float(os.getenv('TG_POLL_INTERVAL_SEC', 2.5))  # /api/status poll cadence; env: TG_POLL_INTERVAL_SEC
+TG_OFFLINE_AFTER_SEC: float = float(os.getenv('AGENT_CASCADE_TG_OFFLINE_AFTER_SEC', 30.0))  # Surface "AC offline" after this many seconds unreachable (capped at task timeout)
+TG_HTTP_REQUEST_TIMEOUT_SEC: float = float(os.getenv('AGENT_CASCADE_TG_HTTP_REQUEST_TIMEOUT_SEC', 30.0))  # Per-request httpx timeout to the AC REST API
+TG_SEND_RETRY_BACKOFF_BASE_SEC: float = float(os.getenv('AGENT_CASCADE_TG_SEND_RETRY_BACKOFF_BASE_SEC', 1.0))  # Initial delay for Telegram 429 retries (doubles each attempt)
+TG_SEND_RETRY_BACKOFF_CAP_SEC: float = float(os.getenv('AGENT_CASCADE_TG_SEND_RETRY_BACKOFF_CAP_SEC', 30.0))  # Ceiling for any single 429 retry delay
+TG_MAX_MESSAGE_LEN: int = int(os.getenv('AGENT_CASCADE_TG_MAX_MESSAGE_LEN', 4096))  # Telegram hard limit of chars per message (chunking boundary)
+
 
 # Settings for endpoint cooldown (time-based skip of failed endpoints)
 def _parse_endpoint_cooldown():

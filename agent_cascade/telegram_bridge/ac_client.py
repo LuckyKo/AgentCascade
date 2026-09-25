@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent_cascade.log import logger
+from agent_cascade.settings import TG_HTTP_REQUEST_TIMEOUT_SEC
 
 
 class ACError(Exception):
@@ -75,7 +76,7 @@ class ACClient:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 transport=self._transport,
-                timeout=httpx.Timeout(30.0),
+                timeout=httpx.Timeout(TG_HTTP_REQUEST_TIMEOUT_SEC),
             )
 
     async def close(self) -> None:

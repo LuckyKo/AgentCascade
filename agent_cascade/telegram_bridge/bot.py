@@ -19,6 +19,12 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 
 from agent_cascade.log import logger
+from agent_cascade.settings import (
+    TG_MAX_MESSAGE_LEN,
+    TG_OFFLINE_AFTER_SEC,
+    TG_SEND_RETRY_BACKOFF_BASE_SEC,
+    TG_SEND_RETRY_BACKOFF_CAP_SEC,
+)
 
 from .ac_client import ACClient, ACError
 from .commands import dispatch_command
@@ -26,9 +32,9 @@ from .config import BridgeConfig
 from .waiter import WaiterResult, wait_for_completion, fetch_final_message
 
 # Telegram's hard limit is 4096 chars/message. Chunk at exactly that so we only
-# split when a single reply genuinely exceeds the limit (per v1 spec).
-TG_MAX_LEN = 4096
-CHUNK_SIZE = TG_MAX_LEN
+# split when a single reply genuinely exceeds the limit (per v1 spec). The value
+# lives in settings (TG_MAX_MESSAGE_LEN) so it's tunable/overridable in one place.
+CHUNK_SIZE = TG_MAX_MESSAGE_LEN
 
 
 def chunk_text(text: str, limit: int = CHUNK_SIZE) -> List[str]:
@@ -83,7 +89,7 @@ def _retry_after_seconds(exc, fallback: float) -> float:
 
 async def _send_one(bot, chat_id: int, text: str) -> None:
     """Send a single message, retrying on Telegram 429 per its retry_after."""
-    backoff = 1.0
+    backoff = TG_SEND_RETRY_BACKOFF_BASE_SEC
     while True:
         try:
             await bot.send_message(chat_id=chat_id, text=text)
@@ -92,7 +98,7 @@ async def _send_one(bot, chat_id: int, text: str) -> None:
             wait = _retry_after_seconds(e, backoff)
             logger.warning('Telegram 429; sleeping %.1fs before retry', wait)
             await asyncio.sleep(wait)
-            backoff = min(backoff * 2, 30.0)
+            backoff = min(backoff * 2, TG_SEND_RETRY_BACKOFF_CAP_SEC)
         except BadRequest as e:
             # E.g. message too long despite chunking (shouldn't happen). Surface it.
             logger.error('Telegram send failed (BadRequest): %s', e)
@@ -104,7 +110,7 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
     try:
         # Surface "AC appears offline" a bit sooner than the full task timeout so the
         # user isn't left hanging if AC is down (still bounded by the task timeout).
-        offline_after = min(30.0, cfg.task_timeout_sec)
+        offline_after = min(TG_OFFLINE_AFTER_SEC, cfg.task_timeout_sec)
         result = await wait_for_completion(
             ac, poll_interval=cfg.poll_interval_sec,
             timeout=cfg.task_timeout_sec, offline_after=offline_after,

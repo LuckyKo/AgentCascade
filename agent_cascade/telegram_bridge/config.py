@@ -12,12 +12,14 @@ Env keys (see plan §8 / V1 SCOPE ADDENDUM):
     AC_BASE_URL            str    default http://127.0.0.1:12345  (port MUST be configurable)
     TG_TARGET_AGENT        str    default Maine (root/orchestrator)
     TG_POLL_INTERVAL_SEC   float  default 2.5   (/api/status poll cadence)
-    TG_TASK_TIMEOUT_SEC    int    default 1800  (max wait per task)
+    TG_TASK_TIMEOUT_SEC    int    default 28800 (max wait per task; 8h — AC runs can be long)
 """
 
 import os
 from dataclasses import dataclass, field
 from typing import List
+
+from agent_cascade.settings import TG_POLL_INTERVAL_SEC, TG_TASK_TIMEOUT_SEC
 
 
 def _load_bot_token() -> str:
@@ -83,8 +85,8 @@ class BridgeConfig:
     allowed_users: List[int] = field(default_factory=list)
     ac_base_url: str = 'http://127.0.0.1:12345'
     target_agent: str = 'Maine'
-    poll_interval_sec: float = 2.5
-    task_timeout_sec: int = 1800
+    poll_interval_sec: float = TG_POLL_INTERVAL_SEC
+    task_timeout_sec: int = TG_TASK_TIMEOUT_SEC
 
     def is_allowed(self, user_id) -> bool:
         try:
@@ -101,8 +103,11 @@ def load_config() -> BridgeConfig:
         allowed_users=_parse_allowed_users(_load_allowed_users_raw()),
         ac_base_url=os.environ.get('AC_BASE_URL', 'http://127.0.0.1:12345').rstrip('/'),
         target_agent=os.environ.get('TG_TARGET_AGENT', 'Maine') or 'Maine',
-        poll_interval_sec=float(os.environ.get('TG_POLL_INTERVAL_SEC', '2.5') or 2.5),
-        task_timeout_sec=int(os.environ.get('TG_TASK_TIMEOUT_SEC', '1800') or 1800),
+        # Existing user-facing env vars (unprefixed) still win; the settings constants
+        # are only the fallback defaults. An empty/absent env value falls back to the
+        # typed constant via `or`.
+        poll_interval_sec=float(os.environ.get('TG_POLL_INTERVAL_SEC') or TG_POLL_INTERVAL_SEC),
+        task_timeout_sec=int(os.environ.get('TG_TASK_TIMEOUT_SEC') or TG_TASK_TIMEOUT_SEC),
     )
 
 

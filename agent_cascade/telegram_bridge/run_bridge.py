@@ -41,7 +41,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--poll-interval-sec', dest='poll_interval_sec', default=None,
                    help='/api/status poll cadence in seconds (sets TG_POLL_INTERVAL_SEC). Default: 2.5')
     p.add_argument('--task-timeout-sec', dest='task_timeout_sec', default=None,
-                   help='Max seconds to wait per task (sets TG_TASK_TIMEOUT_SEC). Default: 1800')
+                   help='Max seconds to wait per task (sets TG_TASK_TIMEOUT_SEC). Default: 28800 (8h)')
     return p
 
 

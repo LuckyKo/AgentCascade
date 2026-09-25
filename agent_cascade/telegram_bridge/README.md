@@ -48,7 +48,7 @@ All other settings are plain environment variables (or `.env`):
 | `AC_BASE_URL` | `http://127.0.0.1:12345` | AC REST base URL. **Port must match how AC is actually launched.** |
 | `TG_TARGET_AGENT` | `Maine` | `target` for `/api/message` (the root/orchestrator). |
 | `TG_POLL_INTERVAL_SEC` | `2.5` | `/api/status` poll cadence while waiting for completion. |
-| `TG_TASK_TIMEOUT_SEC` | `1800` | Max seconds to wait per task before giving up ("⏱️ Timed out"). |
+| `TG_TASK_TIMEOUT_SEC` | `28800` | Max seconds to wait per task before giving up ("⏱️ Timed out"); 8h since AC runs can be long. |
 
 > The bot token may also be supplied via the `TELEGRAM_BOT_TOKEN` env var as a
 > fallback, but prefer `config/secrets.json` (it is gitignored).

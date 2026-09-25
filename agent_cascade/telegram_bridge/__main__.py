@@ -11,7 +11,7 @@ Required config (see config.py):
     ALLOWED_USERS=<telegram user id>
 Optional:
     AC_BASE_URL=http://127.0.0.1:12345   TG_TARGET_AGENT=Maine
-    TG_POLL_INTERVAL_SEC=2.5             TG_TASK_TIMEOUT_SEC=1800
+    TG_POLL_INTERVAL_SEC=2.5             TG_TASK_TIMEOUT_SEC=28800
 """
 
 import asyncio
