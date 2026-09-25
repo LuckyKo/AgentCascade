@@ -402,6 +402,30 @@ def test_auth_gate_ignores_empty_text():
     ac.inject_message.assert_not_called()
 
 
+def test_on_message_stores_last_chat_id_in_bot_data():
+    """on_message persists chat_id into bot_data so notify_user can find it later."""
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+
+    async def _inject(text, target=None):
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+    ac.inject_message.side_effect = _inject
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    async def go():
+        await on_message(_make_update(user_id=FAKE_ALLOWED_USER_ID, text='hi', chat_id=777), context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+    assert context.bot_data['last_chat_id'] == 777
+
+
 # ---------------------------------------------------------------------------
 # 5. 429 handling and task-timeout path
 # ---------------------------------------------------------------------------

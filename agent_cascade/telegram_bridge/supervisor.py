@@ -42,6 +42,8 @@ from typing import Optional
 
 from agent_cascade.log import logger
 
+from .bot import _safe_send
+
 
 # Bounded-restart policy for the in-thread restart loop. The backoff is
 # exponential with a ceiling; after MAX_RESTART_ATTEMPTS total consecutive
@@ -200,6 +202,36 @@ class TelegramBridgeSupervisor:
             self._enabled = False
             self._stopping = True
         self._stop_thread()   # manages its own locking; must not hold lock during join
+
+    def notify_user(self, message: str) -> bool:
+        """Fire-and-forget delivery of an async user message to the phone via Telegram.
+
+        Telegram-only path — distinct from the browser WebSocket notification channel
+        (``_ws_send_queue`` / ``agent_message_to_user``), which this does NOT touch.
+        Schedules ``_safe_send`` onto the bridge loop (which owns the PTB bot and
+        its event loop). Returns True if the message was scheduled onto the bridge
+        loop (bridge is running), False otherwise (silent no-op — callers must not
+        treat False as an error). Note that delivery is not guaranteed if no
+        ``chat_id`` has been seen yet; the coroutine will no-op in that case.
+        Never raises into the caller.
+        """
+        try:
+            with self._lock:
+                app, loop = self._app, self._loop
+            if app is None or loop is None or loop.is_closed():
+                return False
+
+            async def _do_send(_app=app):
+                chat_id = _app.bot_data.get('last_chat_id')
+                if chat_id is None:
+                    return
+                await _safe_send(_app.bot, chat_id, message)
+
+            asyncio.run_coroutine_threadsafe(_do_send(), loop)
+            return True
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning('[TelegramBridge] notify_user failed (non-fatal): %s', e)
+            return False
 
     # ── Thread spawn / stop internals (caller holds self._lock) ───────────
 

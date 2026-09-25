@@ -215,6 +215,7 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
         return  # empty / whitespace-only -> ignore
 
     chat_id = update.effective_chat.id
+    context.bot_data['last_chat_id'] = chat_id
 
     # System-command interception (Phase 2): registered slash-commands are handled
     # locally / via AC REST endpoints and answered directly. They NEVER reach the

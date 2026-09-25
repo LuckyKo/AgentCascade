@@ -82,7 +82,21 @@ class SendMessage(BaseTool):
             event = {'type': 'agent_message_to_user', 'sender': sender, 'message': message, 'timestamp': time.time()}
 
             asyncio.run_coroutine_threadsafe(_put_stream_update(ws_queue, event), ws_loop)
-            return 'Message sent successfully to the user. They will see it in their notifications.'
+
+            # Also deliver to the Telegram bridge (phone) if one is attached. This is
+            # best-effort and separate from the guaranteed WS push above: it no-ops
+            # silently when the bridge isn't running or the phone hasn't messaged us
+            # first (no chat_id yet). hasattr guards against a partial/foreign supervisor
+            # object; the try/except keeps a bridge failure from breaking the tool.
+            supervisor = getattr(pool, 'telegram_supervisor', None)
+            if supervisor is not None and hasattr(supervisor, 'notify_user'):
+                try:
+                    supervisor.notify_user(message)
+                except Exception:
+                    logger.warning('Telegram notify_user failed (non-fatal)', exc_info=True)
+
+            return ('Message sent successfully to the user (browser notification). '
+                    'Phone delivery is best-effort via the Telegram bridge if it is active.')
         except Exception:
             # Log full traceback, don't expose details to caller
             logger.exception('Failed to send message to user via WebSocket')
