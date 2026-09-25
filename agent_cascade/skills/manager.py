@@ -1220,7 +1220,7 @@ class SkillManager:
                     name = frontmatter.get('name', skill_dir.name)
 
                     if name.lower() in self._disabled_names:
-                        logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
+                        # logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
                         skipped_count += 1
                         continue
 
@@ -1291,7 +1291,7 @@ class SkillManager:
                 return
 
             if name.lower() in self._disabled_names:
-                logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
+                # logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
                 return
 
         existing = self._skills_registry.get(name)

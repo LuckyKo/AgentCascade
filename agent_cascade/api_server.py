@@ -339,10 +339,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # that calls create_app() gets it — start_api_server.py and start_multi_agent.py both run
     # their own uvicorn and never execute this module's __main__ block, so attaching only there
     # silently left agent_pool.telegram_supervisor unset on the production path. The base URL is
-    # resolved lazily at spawn time from agent_pool.server_info (set by the launcher before
+    # resolved lazily at start time from agent_pool.server_info (set by the launcher before
     # server.run()); NOT started here — uvicorn has not bound yet. Start-on-boot happens in the
-    # startup event; the UI toggle drives it at runtime via the config handler. Non-critical: a
-    # construction failure must never crash app creation.
+    # startup event; the UI toggle drives it at runtime via the config handler. The bridge runs
+    # as an in-process daemon thread (nothing to orphan on os._exit(0) restart). Non-critical:
+    # a construction failure must never crash app creation.
     if agent_pool is not None:
         try:
             from agent_cascade.telegram_bridge.supervisor import TelegramBridgeSupervisor
@@ -826,8 +827,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         asyncio.create_task(_sender_loop())
         asyncio.create_task(_approval_loop())
 
-        # Start-on-boot: if the Telegram bridge toggle was persisted ON, spawn the
-        # bridge now (uvicorn is serving, so the child's ac.open() can reach AC).
+        # Start-on-boot: if the Telegram bridge toggle was persisted ON, start the
+        # in-process daemon thread now (uvicorn is serving, so the client can reach AC).
         tg_sup = getattr(agent_pool, 'telegram_supervisor', None) if agent_pool else None
         if tg_sup and getattr(getattr(agent_pool, 'settings', None), 'telegram_bridge_enabled', False):
             try:
@@ -1261,16 +1262,14 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.post('/api/restart')
     async def api_restart(token: str = None):
-        """Restart the AC server process.
+        """Restart the AC server process (shared helper with the WS restart path).
 
-        Windows does not implement os.execl (the POSIX in-place re-exec used by the WS
-        path), so we spawn a detached child with the same argv and exit this process.
         Destructive — strictly gated by session_token.
         """
         if not token or token not in api_sessions:
             return _invalid_token_response()
 
-        import subprocess
+        from agent_cascade.server_restart import restart_server_process
 
         logger.warning('Server restart requested via REST /api/restart')
         # Notify connected clients before the process exits so they can reconnect.
@@ -1280,20 +1279,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # Warning (not debug): operators should notice if clients fail to get the notice.
             logger.warning(f"Restart notice broadcast failed (non-critical): {e}")
 
-        # Spawn a detached child running the same interpreter + argv, then exit.
-        # CREATE_NO_WINDOW prevents a console pop-up on Windows; DETACHED_PROCESS lets it
-        # survive this process's termination. The parent exits immediately after spawn.
-        creationflags = 0
-        if os.name == 'nt':
-            creationflags |= 0x08000000  # CREATE_NO_WINDOW
-            creationflags |= 0x00000008  # DETACHED_PROCESS
-        subprocess.Popen(
-            [sys.executable, *sys.argv],
-            creationflags=creationflags,
-            close_fds=True,
-            cwd=os.getcwd(),
-        )
-        os._exit(0)
+        restart_server_process()
 
     @app.post('/api/auto_security')
     async def api_set_auto_security(token: str = None, data: dict = None):
@@ -1928,7 +1914,7 @@ if __name__ == '__main__':
     def handle_shutdown(signum, frame):
         logger.info('\n[INFO] Initiating graceful shutdown...')
         agent_pool.stopped = True
-        # Stop the Telegram bridge child (terminate -> wait -> kill) before exiting.
+        # Stop the Telegram bridge in-process daemon thread (PTB stop + join) before exiting.
         tg_supervisor = getattr(agent_pool, 'telegram_supervisor', None)
         if tg_supervisor is not None:
             try:

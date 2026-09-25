@@ -574,6 +574,53 @@ def test_inject_re_handshakes_on_401_then_succeeds():
     assert mock.injected == [{'target': 'Maine', 'text': 'after restart'}]
 
 
+def test_restart_treats_dropped_connection_as_success():
+    """CHECKPOINT 2: os._exit(0) in AC can preempt the HTTP 200 — a connection reset on
+    /api/restart must NOT raise (the request was delivered; the process is exiting by
+    design), so the TG user still gets the "Restarting…" confirmation."""
+    def reset_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == '/api/restart':
+            raise httpx.ConnectError('connection reset by peer')
+        return _MockACServer().handle(request)
+
+    transport = httpx.MockTransport(reset_handler)
+    client = ACClient(base_url='http://127.0.0.1:12345', target_agent='Maine',
+                      transport=transport)
+
+    async def go():
+        await client.open()
+        try:
+            return await client.restart()
+        finally:
+            await client.close()
+
+    result = _run(go())
+    assert result == {'status': 'restarting'}
+
+
+def test_restart_still_raises_on_non_200_response():
+    """CHECKPOINT 2 (negative): a real HTTP error response (e.g. 500) is still raised —
+    only transport-level drops are treated as success."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == '/api/restart':
+            return httpx.Response(500, json={'message': 'boom'})
+        return _MockACServer().handle(request)
+
+    transport = httpx.MockTransport(handler)
+    client = ACClient(base_url='http://127.0.0.1:12345', target_agent='Maine',
+                      transport=transport)
+
+    async def go():
+        await client.open()
+        try:
+            return await client.restart()
+        finally:
+            await client.close()
+
+    with pytest.raises(ACError, match=r'/api/restart failed \(500\)'):
+        _run(go())
+
+
 # ---------------------------------------------------------------------------
 # 7. run_bridge launcher (env-var handling)
 # ---------------------------------------------------------------------------

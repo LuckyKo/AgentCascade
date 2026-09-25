@@ -84,6 +84,44 @@ llm_cfg = {
 # no handlers are attached yet. See the `logger.info(...Tier-4 fallback...)` call below.
 
 
+def _bind_socket_with_retry(host: str, port: int, *, max_attempts: int = 20, delay: float = 0.5):
+    """Bind a listening socket on ``host:port``, retrying EADDRINUSE for up to ~10 s.
+
+    Needed because after a restart (detached child spawned by the exiting parent) the
+    port can still be held in the parent-teardown window; uvicorn's own bind path does
+    not set SO_REUSEADDR and treats EADDRINUSE as fatal ``sys.exit(1)``. Returns the
+    bound socket, ready to hand to ``uvicorn.Server.run(sockets=[sock])``.
+
+    - EADDRINUSE (errno 98 POSIX / 10048 Windows, or 'address already in use' in str):
+      close + warn + sleep(delay) + retry.
+    - Any other OSError: re-raised immediately (do not retry unrelated errors).
+    - Budget exhausted: raises a clear RuntimeError.
+    """
+    import socket
+    import time
+
+    from agent_cascade.log import logger
+
+    budget = max_attempts * delay
+    for attempt in range(1, max_attempts + 1):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+            sock.listen()
+            return sock
+        except OSError as e:
+            is_eaddrinuse = (e.errno in (98, 10048)) or ('address already in use' in str(e).lower())
+            if not is_eaddrinuse:
+                sock.close()
+                raise
+            logger.warning('[startup] Port %d still in use (attempt %d/%d): %s — retrying in %.1fs',
+                           port, attempt, max_attempts, e, delay)
+            sock.close()
+            time.sleep(delay)
+    raise RuntimeError(f"Port {port} still in use after {max_attempts} attempts (~{budget:.0f}s)")
+
+
 def initialize_agents():
     """Set up agents, pool, and config. Returns (all_agents, agent_pool, chatbot_config)."""
     logger.info('Initializing Agent Orchestrator (API Server)...')
@@ -195,7 +233,20 @@ if __name__ == '__main__':
     logger.info('\n[TIP] Type in this terminal to inject messages into the active agent.')
     logger.info('=' * 50)
 
-    # Create server first so signal handler can reference it
+    # Pre-bind the listening socket ourselves (SO_REUSEADDR + bounded EADDRINUSE retry).
+    # uvicorn's bare server.run() path creates the socket via asyncio WITHOUT SO_REUSEADDR
+    # and turns an EADDRINUSE into an internal sys.exit(1) — so after a restart, while the
+    # parent is still tearing down, the child dies with nothing left running. Pre-binding
+    # here (and handing the socket to uvicorn below) makes every restart path robust.
+    try:
+        sock = _bind_socket_with_retry('127.0.0.1', port)
+    except Exception as e:
+        logger.error('[FATAL] Port %d is already in use after ~%ds; another process may be holding it. '
+                     'Use --port <PORT> or stop the other process. (%s)', port, 20 * 0.5, e)
+        raise SystemExit(1)
+
+    # Create server first so signal handler can reference it. host/port are still passed to
+    # Config for logging/messages; uvicorn skips its own bind because we pass sockets=[sock].
     config = uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning')
     server = uvicorn.Server(config)
     agent_pool.server_info = ('127.0.0.1', port)
@@ -208,13 +259,11 @@ if __name__ == '__main__':
     server.install_signal_handlers = lambda: None
 
     try:
-        server.run()
-    except OSError as e:
-        if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error('[FATAL] Port %d is already in use. Use --port <PORT> or stop the other process.', port)
-        else:
-            logger.error('[FATAL] Server failed to start: %s', e)
-        raise SystemExit(1)
+        # NOTE: do NOT revert to bare server.run() — it re-introduces the port-bind race:
+        # uvicorn 0.34.x binds internally without SO_REUSEADDR and calls sys.exit(1) on
+        # EADDRINUSE (surfacing as SystemExit, not OSError), so the old errno-98 handler
+        # was dead code. The pre-bound socket above makes that path unreachable.
+        server.run(sockets=[sock])
     except Exception as e:
         logger.error('[FATAL] Server crashed: %s', e)
         raise SystemExit(1)

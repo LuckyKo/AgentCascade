@@ -201,6 +201,7 @@ AUTO_SKILL_REFLECTION_PROMPT = (
     'The `name` argument is authoritative — it becomes the registered name. New skills start at '
     'rating 5.0 automatically.\n\n'
     '### 3. Optionally leave a project memory for any non-obvious failure or gotcha worth avoiding next time (see Self-Augmentation)\n'
+    '### 4. If you noticed any bugs/issues/unnecessary friction with the AgentCascade tooling/helper systems, log them using the established bug tracking methods.\n'
     '### Skill creation guide\n\n{skill_creator_body}\n')
 
 # --- Knowledge Base Templates ---
@@ -627,7 +628,7 @@ TOOL_METADATA = {
                         'Fails if the destination is not actively running.'),
         'parameters': {
             'destination':
-                ("Target of the message. Use an exact agent instance name (e.g., 'worker1') to send to another agent"
+                ("Target of the message. Use an exact agent instance name (e.g., 'Maine', 'supervisor', 'worker1') to send to another agent"
                  "or 'user' to send to the human user."),
             'message': 'The message content to send.'
         }

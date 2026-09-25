@@ -1032,6 +1032,30 @@ class TestAuthenticatedCommandEndpoints:
         """POST /api/restart with no token returns 401."""
         assert client.post('/api/restart').status_code == 401
 
+    def test_restart_valid_token_calls_shared_helper(self, client):
+        """POST /api/restart (valid token) routes through the shared restart helper.
+
+        Mirrors test_stop_happy_path_exercises_shared_helper: patch
+        restart_server_process so nothing actually re-execs; assert the helper is
+        called exactly once and agents are NOT stopped (restart != stop). The
+        "restarting" notice broadcast fires inside the endpoint before the call —
+        with no connected WS clients it is a safe no-op.
+        """
+        from unittest.mock import patch
+
+        token = self._token(client)
+        fake = _FakePool(instances={})
+        saved = self._patch_pool(client, fake)
+        with patch('agent_cascade.server_restart.restart_server_process') as mock_restart:
+            try:
+                resp = client.post('/api/restart', params={'token': token})
+            finally:
+                self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        mock_restart.assert_called_once()
+        assert fake.stop_session_calls == 0  # restart must not stop agents
+
     # ── /api/auto_security ──────────────────────────────────────────────────
 
     def test_auto_security_401_without_token(self, client):

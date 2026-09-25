@@ -139,7 +139,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'stream_max_total_seconds',
     # Dismiss thread join timeout
     'dismiss_thread_join_timeout',
-    # Telegram bridge (Phase 3) — UI toggle; spawns/stops the bridge child process.
+    # Telegram bridge (Phase 3) — UI toggle; starts/stops the in-process daemon thread.
     'telegram_bridge_enabled',
 })
 
@@ -424,12 +424,12 @@ def _handle_auto_skill_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: 
 
 @register_config_handler('telegram_bridge_enabled')
 def _handle_telegram_bridge_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle the AC-owned Telegram bridge child process on/off.
+    """Toggle the AC-owned Telegram bridge in-process daemon thread on/off.
 
     Sets the persisted PoolSettings field AND drives the supervisor (attached as
     ``agent_pool.telegram_supervisor`` by api_server.main()). The UI sends a full
     settings snapshot on every save, so this handler fires on *every* save — the
-    supervisor's set_enabled() is idempotent (no double-spawn on repeated "on",
+    supervisor's set_enabled() is idempotent (no double-start on repeated "on",
     safe no-op on "off" when not running).
     """
     if agent_pool is None or not hasattr(agent_pool, 'settings'):

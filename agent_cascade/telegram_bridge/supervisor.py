@@ -1,38 +1,40 @@
-"""Supervisor that lets AC spawn/own the Telegram bridge as a child process.
+"""Supervisor that runs the Telegram bridge as an in-process daemon thread.
 
-Phase 3 of the AC Telegram bridge integration. The bridge (``python -m
-agent_cascade.telegram_bridge``) is a standalone long-polling process; this
-supervisor gives AC control over its lifecycle behind the UI toggle
-(``PoolSettings.telegram_bridge_enabled``):
+Phase 3 of the AC Telegram bridge integration. The bridge (PTB long-polling
+app) now runs inside AC's own process as a **daemon thread** instead of a
+separate supervised child process. This eliminates the duplicate-bridge-on-
+restart bug by construction: when AC restarts via ``os._exit(0)``, the daemon
+thread dies with the process — there is nothing to orphan.
 
-- ``start()`` spawns the child with a controlled, non-secret env and logs its
-  stdout/stderr to ``<workspace>/logs/telegram_bridge.log``.
-- ``stop()`` runs the Windows shutdown sequence: ``terminate()`` -> wait up to
-  N seconds -> ``kill()`` if still alive. (On Windows ``terminate()`` is a hard
-  kill, not a graceful SIGTERM — see plan §5/E7.)
-- A daemon watcher thread polls the child and applies an **exit-code-aware**
-  restart policy so a misconfigured bridge can never crash-loop:
+Lifecycle (driven by the UI toggle, ``PoolSettings.telegram_bridge_enabled``):
 
-    exit 0  -> clean stop (or master switch off)      -> NO restart
-    exit 2  -> config problem (missing token / empty  -> PERMANENT: log + surface,
-               ALLOWED_USERS)                           NO restart until re-toggled
-    exit 3  -> AC client open failed (transient, e.g. -> bounded restart with
-               spawned before uvicorn was ready)        exponential backoff + cap
-    other   -> crash                                    -> same bounded restart
+- ``start()`` / ``set_enabled(True)`` spawns one daemon thread (``tg-bridge``).
+  The thread body builds a fresh PTB Application + ACClient per attempt and
+  runs ``app.run_polling(stop_signals=None)``.
+- ``stop()`` / ``set_enabled(False)`` schedules ``app.stop()`` onto the bridge
+  loop via ``asyncio.run_coroutine_threadsafe`` (NOT ``app.stop_running()``,
+  which raises RuntimeError off-loop), then joins the thread with a bounded
+  timeout. If the thread is still alive after the timeout we log a warning and
+  move on — it's daemon, so it dies at interpreter exit anyway.
+- Crash containment: exceptions from ``run_polling`` are contained in the
+  thread; the body applies a **bounded auto-restart with exponential backoff**
+  (max ``max_restart_attempts`` consecutive failures). A config-class failure
+  (``validate_config`` problems — missing token / empty allowlist) is a
+  PERMANENT stop: no retry until the toggle is re-enabled. A clean return from
+  ``run_polling`` means "someone stopped it" -> no restart either; the restart
+  debt resets on any clean run.
 
-The bot token is NEVER passed via env or argv: the child reads it itself from
-``config/secrets.json`` because its CWD is the repo root (matching the bridge's
-existing "secret never a CLI arg / env" convention).
+The bot token is NEVER passed via env or argv: config loading reads it itself
+from ``config/secrets.json`` (the thread's CWD is the repo root).
 
-All state is guarded by a lock: the watcher thread and event-loop callers
+All state is guarded by a lock: the bridge thread and event-loop callers
 (config handler, startup/shutdown hooks) both touch it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
-import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -41,38 +43,38 @@ from typing import Optional
 from agent_cascade.log import logger
 
 
-# Bridge exit codes (see telegram_bridge/__main__.py::main):
-_BRIDGE_EXIT_CLEAN = 0      # clean stop / master switch off -> never restart
-_BRIDGE_EXIT_CONFIG = 2     # config problem (missing token / empty ALLOWED_USERS) -> permanent
-_BRIDGE_EXIT_AC_OPEN = 3    # AC client open failed (transient) -> bounded restart
-
-# Bounded-restart policy. The backoff is exponential with a ceiling; after
-# MAX_RESTART_ATTEMPTS consecutive failed starts (no healthy run in between) the
-# supervisor gives up and requires the user to toggle off->on to retry. This is
-# what prevents an infinite restart loop when, e.g., the token is missing or the
-# AC port is wrong.
+# Bounded-restart policy for the in-thread restart loop. The backoff is
+# exponential with a ceiling; after MAX_RESTART_ATTEMPTS total consecutive
+# failed starts (no clean run in between) the supervisor gives up and requires
+# the user to toggle off->on to retry. This is what prevents an infinite restart
+# loop when, e.g., the token is missing or the AC port is wrong.
 DEFAULT_BACKOFF_BASE = 1.0      # seconds; delay for attempt n = base * 2**(n-1)
 DEFAULT_BACKOFF_CAP = 30.0      # seconds; ceiling for any single backoff delay
-DEFAULT_MAX_RESTART_ATTEMPTS = 5
-DEFAULT_HEALTHY_WINDOW_SEC = 60.0   # child alive this long resets the restart debt
-DEFAULT_STOP_WAIT_SEC = 5.0         # terminate() -> wait -> kill() window
-DEFAULT_WATCH_INTERVAL_SEC = 1.0    # watcher poll cadence
+DEFAULT_MAX_RESTART_ATTEMPTS = 5   # TOTAL attempts (initial + retries)
+DEFAULT_STOP_JOIN_TIMEOUT_SEC = 5.0   # bounded join window after scheduling PTB stop
+
+
+def _build_app(cfg, ac):
+    """Module-level seam around ``bot.build_application`` (tests patch this)."""
+    from .bot import build_application
+    return build_application(cfg, ac)
 
 
 class TelegramBridgeSupervisor:
-    """Spawn/own/watch the Telegram bridge child process on behalf of AC.
+    """Run/own the Telegram bridge in-process (daemon thread) on behalf of AC.
 
     Attached to ``agent_pool`` as ``agent_pool.telegram_supervisor`` by
     ``create_app()`` (single source of truth — every launcher gets it). The AC
     base URL can be given explicitly, or left empty and resolved lazily at
-    spawn time from ``agent_pool.server_info`` (the ACTUAL bound port, set by
+    start time from ``agent_pool.server_info`` (the ACTUAL bound port, set by
     the launcher right before ``server.run()``) when attached before uvicorn
-    binds. Also takes a workspace dir for the log file.
+    binds.
 
     Base URL resolution precedence (see ``_resolve_base_url``):
       1. ``ac_base_url`` if non-empty (trailing slash stripped) — used as-is.
-      2. Otherwise ``agent_pool.server_info`` (host ignored; child is always
-         local, so the host is forced to 127.0.0.1 and only the port is taken).
+      2. Otherwise ``agent_pool.server_info`` (host ignored; the bridge is
+         always local, so the host is forced to 127.0.0.1 and only the port
+         is taken).
       3. Otherwise the ``AGENT_CASCADE_PORT`` env var.
       4. Otherwise the default ``http://127.0.0.1:8765``.
     """
@@ -87,20 +89,18 @@ class TelegramBridgeSupervisor:
                  backoff_base: float = DEFAULT_BACKOFF_BASE,
                  backoff_cap: float = DEFAULT_BACKOFF_CAP,
                  max_restart_attempts: int = DEFAULT_MAX_RESTART_ATTEMPTS,
-                 healthy_window_sec: float = DEFAULT_HEALTHY_WINDOW_SEC,
-                 stop_wait_sec: float = DEFAULT_STOP_WAIT_SEC,
-                 watch_interval_sec: float = DEFAULT_WATCH_INTERVAL_SEC):
+                 stop_join_timeout_sec: float = DEFAULT_STOP_JOIN_TIMEOUT_SEC):
         self.ac_base_url = (ac_base_url or '').rstrip('/')
-        # Lazily-resolved base URL source. When the supervisor is attached from create_app()
-        # (before uvicorn binds), ac_base_url is empty and we resolve the ACTUAL bound port
-        # from agent_pool.server_info at spawn time (set by the launcher right before server.run()).
+        # Lazily-resolved base URL source. When the supervisor is attached from
+        # create_app() (before uvicorn binds), ac_base_url is empty and we resolve
+        # the ACTUAL bound port from agent_pool.server_info at start time (set by
+        # the launcher right before server.run()).
         self._agent_pool = agent_pool
-        # CWD for the child so ``config.secrets_loader`` resolves to config/secrets.json.
+        # CWD for config/secrets.json resolution (kept for parity with the old
+        # child process, whose CWD was the repo root).
         self.project_root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
-        # Log file lives under <workspace>/logs/telegram_bridge.log (consistent with AC's logs).
         ws = Path(workspace_dir) if workspace_dir else self.project_root / 'AgentWorkspace'
         self._log_dir = ws / 'logs'
-        self._log_path = self._log_dir / 'telegram_bridge.log'
         self.allowed_users = allowed_users or ''
         self.target_agent = target_agent or 'Maine'
 
@@ -108,27 +108,23 @@ class TelegramBridgeSupervisor:
         self.backoff_base = float(backoff_base)
         self.backoff_cap = float(backoff_cap)
         self.max_restart_attempts = int(max_restart_attempts)
-        self.healthy_window_sec = float(healthy_window_sec)
-        self.stop_wait_sec = float(stop_wait_sec)
-        self.watch_interval_sec = float(watch_interval_sec)
+        self.stop_join_timeout_sec = float(stop_join_timeout_sec)
 
         # Runtime state (all accessed under self._lock).
         self._lock = threading.RLock()
-        self._proc: Optional[subprocess.Popen] = None
+        self._thread: Optional[threading.Thread] = None
+        self._app = None                     # current PTB Application (stop target)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None  # bridge thread's loop
         self._enabled = False          # toggle intent (drives restart decisions)
         self._stopping = False         # True while an explicit stop() is in flight
-        self._last_exit_code: Optional[int] = None
         self._error: str = ''
-        self._restart_attempts = 0     # consecutive failed starts since last healthy run
-        self._proc_started_at: Optional[float] = None
-        self._watcher: Optional[threading.Thread] = None
 
     # ── Public API ────────────────────────────────────────────────────────
 
     def is_running(self) -> bool:
-        """True if a live child process is currently managed."""
+        """True if a live bridge thread is currently managed."""
         with self._lock:
-            return self._proc is not None and self._proc.poll() is None
+            return self._thread is not None and self._thread.is_alive()
 
     def status(self) -> dict:
         """Snapshot of supervisor state (for status reporting / debugging)."""
@@ -136,9 +132,7 @@ class TelegramBridgeSupervisor:
             return {
                 'enabled': self._enabled,
                 'running': self.is_running(),
-                'last_exit_code': self._last_exit_code,
                 'error': self._error,
-                'restart_attempts': self._restart_attempts,
             }
 
     def set_enabled(self, enabled: bool) -> None:
@@ -146,60 +140,71 @@ class TelegramBridgeSupervisor:
 
         Because the UI sends a full settings snapshot on every save, this fires
         on every save — not only on flips. So it is a strict no-op when already
-        in the requested state (no double-spawn on repeated "on"; safe no-op on
+        in the requested state (no double-start on repeated "on"; safe no-op on
         "off" when nothing is running).
+
+        NOTE: the stop path must NOT hold self._lock while _stop_thread joins,
+        because the thread body needs that lock on its exit path. We therefore
+        release the lock before calling _stop_thread (which manages its own).
         """
         enabled = bool(enabled)
         with self._lock:
             if enabled and not self._enabled:
                 self._enabled = True
                 self._error = ''
-                self._restart_attempts = 0   # fresh user intent -> clear any restart debt
                 self._stopping = False       # clear any stale stop flag from a prior stop()
-                self._spawn()
+                self._spawn_thread()          # safe under lock (no join)
+                return
             elif not enabled and self._enabled:
                 self._enabled = False
                 self._stopping = True
-                self._stop_child()
+            else:
+                # Already in the requested state — no-op.
+                return
+        # Stop path: _stop_thread handles its own locking (must not hold lock during join).
+        self._stop_thread()
 
     def start(self) -> None:
-        """Start the bridge (idempotent — no double-spawn if already running).
+        """Start the bridge (idempotent — no double-start if already running).
 
-        If already enabled AND running, this is a clean no-op (it does NOT reset the
-        restart-debt counters), so repeated calls from the config handler can't mask
-        a backoff in progress. A genuine re-enable after a stop goes through
-        set_enabled(), which handles the state transition explicitly.
+        If a previous thread is still shutting down (slow stop), this does a
+        bounded wait-then-spawn so we never have two concurrent bridge threads
+        holding the bot token. The join here is done WITHOUT holding self._lock
+        (same deadlock constraint as _stop_thread).
         """
         with self._lock:
-            if self._enabled and self._proc is not None and self._proc.poll() is None:
-                return  # already running — no double-spawn, no counter reset
+            thread = self._thread
+        if thread is not None and thread.is_alive():
+            # Either already running, or a slow stop in flight — wait it out
+            # (bounded) so we never double-start while the old loop still holds
+            # the bot token. Join WITHOUT the lock (thread body needs it on exit).
+            deadline = time.monotonic() + self.stop_join_timeout_sec
+            while thread.is_alive() and time.monotonic() < deadline:
+                thread.join(timeout=0.1)
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                logger.warning(
+                    '[TelegramBridge] start() skipped: previous bridge thread still '
+                    'alive after %.1fs (refusing to double-start)',
+                    self.stop_join_timeout_sec,
+                )
+                return
             self._enabled = True
             self._error = ''
-            self._restart_attempts = 0
-            self._spawn()
+            self._stopping = False
+            self._spawn_thread()
 
     def stop(self) -> None:
         """Stop the bridge (idempotent — safe no-op when nothing is running)."""
         with self._lock:
             self._enabled = False
             self._stopping = True
-            self._stop_child()
+        self._stop_thread()   # manages its own locking; must not hold lock during join
 
-    # ── Spawn / stop internals (caller holds self._lock) ──────────────────
-
-    # Minimal set of host env vars the child legitimately needs to launch a Python
-    # interpreter. Deliberately NOT the full os.environ — inheriting it would leak
-    # any secrets present in the parent (AWS creds, DB URLs, API keys) into the
-    # bridge process, violating the "pass only non-secret env" requirement.
-    _ENV_ESSENTIALS = (
-        'PATH', 'PATHEXT',          # locate the interpreter + .py resolution
-        'SYSTEMROOT', 'WINDIR',     # Windows runtime
-        'PYTHONIOENCODING', 'PYTHONUTF8',  # consistent text I/O
-        'TMPDIR', 'TEMP', 'TMP',    # temp dir for subprocess internals
-    )
+    # ── Thread spawn / stop internals (caller holds self._lock) ───────────
 
     def _resolve_base_url(self) -> str:
-        """Return the base URL to hand the child, preferring an explicit ac_base_url.
+        """Return the base URL to hand the in-process client, preferring an explicit ac_base_url.
 
         When constructed without one (create_app attach path), resolve from
         agent_pool.server_info (set by the launcher before server.run()); fall back to
@@ -207,7 +212,7 @@ class TelegramBridgeSupervisor:
         """
         if self.ac_base_url:
             return self.ac_base_url
-        # The bridge child is ALWAYS local to AC, so the client URL must always use
+        # The bridge client is ALWAYS local to AC, so the URL must always use
         # 127.0.0.1 — never the bind host from server_info (a launcher may bind to
         # 0.0.0.0 for LAN access; 0.0.0.0 is a bind address, not a valid connect target).
         si = getattr(self._agent_pool, 'server_info', None) if self._agent_pool else None
@@ -225,212 +230,202 @@ class TelegramBridgeSupervisor:
                 port = 8765
         return f'http://127.0.0.1:{port}'
 
-    def _build_env(self) -> dict:
-        """Build a MINIMAL child env: safe runtime essentials + non-secret bridge vars.
+    def _spawn_thread(self) -> None:
+        """Spawn the daemon bridge thread. Caller must hold self._lock."""
+        if self._thread is not None and self._thread.is_alive():
+            logger.debug('[TelegramBridge] start() no-op: already running')
+            return
+        thread = threading.Thread(target=self._run_loop, name='tg-bridge', daemon=True)
+        # Tag with owner so test fixtures can find the supervisor for cleanup.
+        thread._owner_supervisor = self
+        self._thread = thread
+        thread.start()
+        logger.info('[TelegramBridge] Started bridge thread base_url=%s', self._resolve_base_url())
 
-        The bot token is deliberately NOT included — the child reads it itself from
-        config/secrets.json (CWD = repo root). We do NOT inherit the full os.environ;
-        we copy only a small allowlist of harmless runtime variables so no parent
-        secrets leak into the bridge process.
+    def _stop_thread(self) -> None:
+        """Schedule PTB stop on the bridge loop and join (bounded).
+
+        IMPORTANT: this method must NOT hold self._lock while joining. The thread
+        body takes self._lock on its exit path; if we held it during join(), the
+        thread would deadlock waiting for us to release — and the join would time
+        out every time. So we snapshot what we need under the lock, release it,
+        then schedule + join outside.
+
+        The crux of the in-process design: ``app.stop_running()`` calls
+        ``asyncio.get_running_loop().stop()`` and raises RuntimeError when called
+        off-loop, so we must schedule ``app.stop()`` onto the bridge loop instead.
+        Awaiting it resolves the coroutine ``run_forever`` is waiting on; PTB then
+        runs its full graceful teardown (updater stopped -> post_shutdown cancels
+        waiters + closes the AC client) and ``run_polling`` returns.
         """
-        env = {k: v for k, v in os.environ.items() if k in self._ENV_ESSENTIALS}
-        # Authoritative bridge vars (stale host values are never carried over because
-        # we built `env` from scratch).
-        env['TG_BRIDGE_ENABLED'] = 'true'   # MUST be set or the child exits 0 doing nothing
-        if self.allowed_users:
-            env['ALLOWED_USERS'] = self.allowed_users
-        env['AC_BASE_URL'] = self._resolve_base_url()
-        if self.target_agent:
-            env['TG_TARGET_AGENT'] = self.target_agent
-        return env
+        with self._lock:
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                # Nothing alive to stop — clear state and return (idempotent no-op).
+                self._thread = None
+                self._app = None
+                self._loop = None
+                return
+            app, loop = self._app, self._loop
 
-    def _open_log(self):
-        """Open (append) the bridge log file, creating its directory if needed."""
-        try:
-            self._log_dir.mkdir(parents=True, exist_ok=True)
-            return open(self._log_path, 'a', encoding='utf-8')
-        except Exception as e:  # pragma: no cover - disk/path edge cases
-            logger.warning('[TelegramBridge] Cannot open log %s (%s); using DEVNULL', self._log_path, e)
-            return subprocess.DEVNULL
-
-    def _spawn(self) -> None:
-        """Spawn the child process. Caller must hold self._lock."""
-        if self._proc is not None and self._proc.poll() is None:
-            logger.debug('[TelegramBridge] start() no-op: already running (pid=%s)', self._proc.pid)
-            return
-
-        log_file = self._open_log()
-        try:
-            # Log file is a real object -> pass it to Popen. On the DEVNULL fallback
-            # path Popen accepts DEVNULL directly for stdout/stderr.
-            kwargs = {}
-            if log_file is not subprocess.DEVNULL:
-                kwargs['stdout'] = log_file
-                kwargs['stderr'] = subprocess.STDOUT
-
-            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-            self._proc = subprocess.Popen(
-                [sys.executable, '-m', 'agent_cascade.telegram_bridge'],
-                cwd=str(self.project_root),
-                env=self._build_env(),
-                creationflags=creationflags,
-                **kwargs,
-            )
-            self._proc_started_at = time.monotonic()
-            self._last_exit_code = None
-            logger.info('[TelegramBridge] Spawned bridge pid=%s base_url=%s log=%s',
-                        self._proc.pid, self._resolve_base_url(), self._log_path)
-        except Exception as e:
-            self._proc = None
-            self._error = f'Failed to spawn Telegram bridge: {e}'
-            logger.error('[TelegramBridge] %s', self._error)
-        finally:
-            if log_file is not subprocess.DEVNULL:
-                try:
-                    log_file.close()
-                except Exception:
-                    pass
-
-        # (Re)start the watcher thread if it isn't already running.
-        if self._watcher is None or not self._watcher.is_alive():
-            self._watcher = threading.Thread(target=self._watch_loop, name='tg-bridge-watcher', daemon=True)
-            self._watcher.start()
-
-    def _stop_child(self) -> None:
-        """Run the shutdown sequence on the current child. Caller holds self._lock."""
-        proc = self._proc
-        if proc is None or proc.poll() is not None:
-            # Nothing alive to stop — clear state and return (idempotent no-op).
-            self._proc = None
-            return
-
-        pid = proc.pid
-        try:
-            proc.terminate()   # on Windows this is a hard kill (TerminateProcess)
-        except Exception as e:
-            logger.warning('[TelegramBridge] terminate(pid=%s) failed: %s', pid, e)
-        try:
-            proc.wait(timeout=self.stop_wait_sec)
-        except subprocess.TimeoutExpired:
-            logger.warning('[TelegramBridge] pid=%s still alive after %.1fs; killing', pid, self.stop_wait_sec)
+        if app is not None and loop is not None:
             try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception as e:
-                logger.warning('[TelegramBridge] kill(pid=%s) failed: %s', pid, e)
-        # Reap the exit code defensively: after a kill path returncode may be None
-        # (process not yet reaped), so prefer poll() and fall back to None.
+                asyncio.run_coroutine_threadsafe(app.stop(), loop)
+                logger.debug('[TelegramBridge] PTB stop scheduled on bridge loop')
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning('[TelegramBridge] scheduling PTB stop failed: %s', e)
+
         try:
-            exit_code = proc.poll() if proc.poll() is not None else getattr(proc, 'returncode', None)
-        except Exception:
-            exit_code = None
-        self._last_exit_code = exit_code
-        self._proc = None
-        logger.info('[TelegramBridge] Stopped bridge pid=%s (exit=%s)', pid, exit_code)
+            thread.join(timeout=self.stop_join_timeout_sec)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning('[TelegramBridge] join error: %s', e)
 
-    # ── Watcher / restart policy ──────────────────────────────────────────
+        with self._lock:
+            if thread.is_alive():
+                logger.warning(
+                    '[TelegramBridge] bridge thread still alive after %.1fs; leaving it to '
+                    'interpreter exit (daemon)', self.stop_join_timeout_sec,
+                )
+                self._error = f'bridge stop timed out after {self.stop_join_timeout_sec:.1f}s'
+            else:
+                logger.info('[TelegramBridge] Stopped bridge thread')
+                # Clear state once the thread is gone.
+                if self._thread is thread:
+                    self._thread = None
+                    self._app = None
+                    self._loop = None
 
-    def _watch_loop(self) -> None:
-        """Daemon thread: poll the child and apply the exit-code-aware restart policy.
+    # ── Thread body / restart policy ──────────────────────────────────────
 
-        Handles the case where the child is *already dead* on the first iteration
-        (e.g. it crashed between spawn and the watcher's first poll, or a test fake
-        reports an immediate exit). In that case we skip the wait() call and go
-        straight to the death-handling path.
+    def _run_loop(self) -> None:
+        """Daemon-thread body: run the bridge with a bounded auto-restart loop.
+
+        All failures are contained here — nothing in this thread can take down AC.
+        Restart policy (per plan §2.3):
+          - config-class failure (validate_config problems) -> PERMANENT stop, no retry
+          - clean return from run_polling -> no restart (someone stopped it); resets debt
+          - other exception -> bounded restart with exponential backoff; after
+            max_restart_attempts consecutive failures, give up with a clear _error.
         """
+        # Make config/secrets.json resolvable regardless of how AC was launched.
+        try:
+            os.chdir(str(self.project_root))
+        except Exception as e:  # pragma: no cover - CWD edge cases
+            logger.debug('[TelegramBridge] Failed to chdir to %s (continuing): %s',
+                         self.project_root, e)
+
+        attempts = 0
         while True:
-            with self._lock:
-                proc = self._proc
-                if proc is None:
-                    return  # stopped / never started
-                already_dead = proc.poll() is not None
+            # Import inside the loop so tests can patch these at their source.
+            from .ac_client import ACClient
+            from .config import load_config, validate_config
 
-            if already_dead:
-                # Child died before we could wait on it — process the death directly.
-                rc = proc.returncode if proc.returncode is not None else -1
-                self._handle_child_exit(proc, rc)
-                return
-
+            cfg = None
+            app = None
             try:
-                rc = proc.wait(timeout=self.watch_interval_sec)
-            except subprocess.TimeoutExpired:
-                # Still alive — clear restart debt if it has been healthy long enough.
+                # The in-process client reads its config from the SAME process env +
+                # config/secrets.json (CWD = repo root). TG_BRIDGE_ENABLED is forced on
+                # because the toggle IS the master switch here.
+                os.environ['TG_BRIDGE_ENABLED'] = 'true'
+                cfg = load_config()
+                problems = validate_config(cfg)
+                if problems:
+                    # Config-class failure (missing token / empty ALLOWED_USERS):
+                    # permanent stop — surface the problem, no retry until re-toggled.
+                    self._set_error(
+                        'Telegram bridge config problem: ' + '; '.join(problems) +
+                        ' Fix it, then re-enable the toggle to retry.'
+                    )
+                    logger.error('[TelegramBridge] %s', self._error)
+                    break
+
+                # Fresh client per attempt. Do NOT pre-open: _request auto-opens on
+                # the PTB loop for the first real request, and bot.py's post_shutdown
+                # closes it on the same loop — no cross-loop fds.
+                ac = ACClient(base_url=self._resolve_base_url(), target_agent=self.target_agent)
+                app = _build_app(cfg, ac)
+
+                # Publish the app under lock BEFORE run_polling so a concurrent
+                # stop() can find it to schedule app.stop(). The loop is created by
+                # run_polling itself; we capture it via a post_init hook (runs inside
+                # PTB's loop, right after initialize) so stop() always has a valid
+                # target. For the brief window before post_init fires there is nothing
+                # to stop — run_polling returns immediately on failure.
                 with self._lock:
-                    self._reset_restart_debt_if_healthy()
-                continue
-            except Exception as e:  # pragma: no cover - unexpected wait errors
-                logger.warning('[TelegramBridge] watcher wait error: %s', e)
-                continue
+                    self._app = app
+                    self._loop = None
 
-            self._handle_child_exit(proc, rc)
-            return  # _handle_child_exit either returns (no restart) or respawns+re-loops
+                async def _publish_loop(_app=app):
+                    # Runs on the bridge loop (PTB post_init). Publish the loop so a
+                    # concurrent stop() can schedule app.stop() onto it.
+                    with self._lock:
+                        if self._app is _app:
+                            self._loop = asyncio.get_running_loop()
 
-    def _handle_child_exit(self, proc, rc) -> None:
-        """Apply the exit-code-aware restart policy for a dead child.
+                try:
+                    # PTB Application.post_init is a settable property (v22.x) — assign,
+                    # don't call. Fakes that model it as a method are handled below.
+                    app.post_init = _publish_loop
+                except AttributeError:  # pragma: no cover - defensive (non-PTB fakes)
+                    try:
+                        app.post_init(_publish_loop)
+                    except Exception as e:
+                        logger.debug('[TelegramBridge] post_init hook not supported: %s', e)
 
-        May call ``self._spawn()`` to restart; in that case the caller (_watch_loop)
-        must continue its loop. Returns silently when no restart is warranted.
-        """
-        with self._lock:
-            if self._proc is not proc:
-                # We were stopped/replaced while waiting — ignore this death.
-                return
-            self._last_exit_code = rc
-            self._proc = None
-            logger.info('[TelegramBridge] Bridge exited with code %s', rc)
-
-            if not self._enabled or self._stopping:
-                # Explicitly disabled/stopped -> do not restart.
-                self._stopping = False
-                return
-
-            if rc == _BRIDGE_EXIT_CLEAN:
-                logger.info('[TelegramBridge] Clean exit (0); not restarting.')
-                return
-
-            if rc == _BRIDGE_EXIT_CONFIG:
-                self._error = (
-                    'Telegram bridge exited with a config problem (exit 2): missing bot token '
-                    "or empty ALLOWED_USERS. Set 'telegram_bot_token' in config/secrets.json and "
-                    'ALLOWED_USERS, then re-enable the toggle to retry.'
+                logger.info('[TelegramBridge] Bridge starting (attempt %d)', attempts + 1)
+                app.run_polling(
+                    allowed_updates=['message'],
+                    drop_pending_updates=False,
+                    stop_signals=None,   # portable across Windows/POSIX; AC drives shutdown
                 )
-                logger.error('[TelegramBridge] %s', self._error)
-                return
+                # Clean return -> someone stopped it (or PTB exited cleanly). No restart.
+                logger.info('[TelegramBridge] Bridge stopped cleanly')
+                break
 
-            # rc == 3 (transient AC-open failure) or any other crash code.
-            if self._restart_attempts >= self.max_restart_attempts:
-                self._error = (
-                    f'Telegram bridge failed to start {self._restart_attempts} times in a row '
-                    f'(last exit code {rc}); giving up to avoid a restart loop. '
-                    'Check AC reachability / logs, then re-enable the toggle to retry.'
+            except Exception as e:
+                with self._lock:
+                    stopping = self._stopping
+                    enabled = self._enabled
+
+                if stopping or not enabled:
+                    # Explicit stop raced the failure — do not restart.
+                    logger.info('[TelegramBridge] Bridge run ended (stop in progress); not restarting')
+                    break
+
+                # max_restart_attempts = TOTAL number of attempts (initial + retries).
+                # Once we've exhausted the budget, give up with a clear error.
+                if attempts + 1 >= self.max_restart_attempts:
+                    self._set_error(
+                        f'Telegram bridge failed to start {attempts + 1} times in a row '
+                        f'(last error: {e}); giving up to avoid a restart loop. '
+                        'Check AC reachability / logs, then re-enable the toggle to retry.'
+                    )
+                    logger.error('[TelegramBridge] %s', self._error)
+                    break
+
+                attempts += 1
+                delay = min(self.backoff_cap, self.backoff_base * (2 ** (attempts - 1)))
+                logger.warning(
+                    '[TelegramBridge] Bridge run failed; retrying (attempt %d/%d): %s in %.1fs',
+                    attempts, self.max_restart_attempts, e, delay,
                 )
-                logger.error('[TelegramBridge] %s', self._error)
-                return
+                if delay > 0:
+                    time.sleep(delay)
+            finally:
+                # Drop the published app reference once this attempt is over.
+                with self._lock:
+                    if self._app is app:
+                        self._app = None
+                        self._loop = None
 
-            self._restart_attempts += 1
-            delay = min(self.backoff_cap, self.backoff_base * (2 ** (self._restart_attempts - 1)))
-            attempt = self._restart_attempts
-
-        # Sleep OUTSIDE the lock so we never block event-loop callers.
-        if delay > 0:
-            time.sleep(delay)
-
+        # Thread exiting: clear any stale references (the thread object itself is
+        # only cleared by _stop_thread when it observes the join complete).
         with self._lock:
-            if not self._enabled or self._stopping or self.is_running():
-                return
-            logger.info('[TelegramBridge] Restarting bridge (attempt %d/%d, exit=%s, backoff=%.1fs)',
-                        attempt, self.max_restart_attempts, rc, delay)
-            # Clear the old watcher reference so _spawn() starts a fresh one.
-            # The current watcher thread is about to return anyway.
-            self._watcher = None
-            self._spawn()
+            if self._thread is not None and not self._thread.is_alive():
+                self._app = None
+                self._loop = None
 
-    def _reset_restart_debt_if_healthy(self) -> None:
-        """Reset the consecutive-failure counter once the child has been alive long enough.
-
-        Called from the watcher between polls; keeps a long-lived bridge from
-        accumulating restart debt across its lifetime. Caller holds self._lock.
-        """
-        if (self._restart_attempts > 0 and self._proc_started_at is not None
-                and (time.monotonic() - self._proc_started_at) >= self.healthy_window_sec):
-            self._restart_attempts = 0
+    def _set_error(self, msg: str) -> None:
+        """Record an error message (caller may or may not hold the lock)."""
+        with self._lock:
+            self._error = msg

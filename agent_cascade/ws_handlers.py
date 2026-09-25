@@ -755,10 +755,10 @@ class WsMessageHandler:
     async def handle_restart_server(self, data: dict) -> None:
         """Handle 'restart_server' — restart the server process."""
         from agent_cascade.log import logger
+        from agent_cascade.server_restart import restart_server_process
         logger.warning('Server restart requested via UI')
-        import sys
         await self.broadcast_fn({'type': 'error', 'message': 'Server is restarting... Please wait.'})
-        os.execl(sys.executable, sys.executable, *sys.argv)
+        restart_server_process()
 
     async def handle_update_config(self, data: dict) -> None:
         """Handle 'update_config' — delegate to ConfigUpdateRouter for key dispatch.

@@ -1,16 +1,17 @@
-"""Hermetic unit tests for the Telegram bridge supervisor (Phase 3).
+"""Hermetic unit tests for the Telegram bridge supervisor (in-process daemon thread).
 
-No live Telegram, no real subprocess spawning a bot, no live AC. The child
-process is a fake ``Popen``-like object so nothing OS-level is exercised.
-``subprocess.Popen`` is patched for the ENTIRE duration of each test (via the
-``popen_patched`` fixture) so the supervisor never spawns a real process — even
-while the watcher thread runs in the background.
+No live Telegram, no real PTB Application, no live AC. The thread body builds the
+app through a module-level ``_build_app`` seam; tests patch it with a fake app
+whose ``run_polling(...)`` records kwargs and blocks on an Event until stop is
+driven (or raises/returns per test). This keeps everything deterministic — no
+fixed sleep-settle windows, no subprocess.
 
 Run serially (pytest.ini pins xdist in addopts):
-    python -m pytest tests/test_telegram_bridge_supervisor.py -o addopts="" --timeout=60
+    python -m pytest tests/test_telegram_bridge_supervisor.py -o addopts="" --timeout=90
 """
 
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -35,71 +36,89 @@ from agent_cascade.telegram_bridge.supervisor import TelegramBridgeSupervisor  #
 # Fakes + fixtures
 # ---------------------------------------------------------------------------
 
-class FakeProcess:
-    """Minimal stand-in for subprocess.Popen that records lifecycle calls.
+class FakeApp:
+    """Stand-in for a PTB Application that models the real loop lifecycle.
 
-    Models the real Popen contract: once ``terminate()`` is called the process
-    dies (``poll()`` returns non-None), mirroring a well-behaved child that
-    honours SIGTERM/TerminateProcess. A test that needs a child which *ignores*
-    terminate (to prove stop() escalates to kill()) subclasses and overrides
-    ``terminate``/``wait`` — see StubbornProcess below.
+    ``run_polling(**kwargs)`` records kwargs, tracks concurrency (exactly one
+    bridge thread may hold the bot token at a time), then runs a REAL asyncio
+    loop in the calling (bridge) thread — mirroring PTB's ``run_forever()``:
 
-    ``exit_code`` is what poll()/wait() report once set.
+      * a watcher task waits on an ``asyncio.Event``;
+      * ``stop()`` is the coroutine the supervisor schedules onto that loop via
+        ``run_coroutine_threadsafe(app.stop(), loop)`` — awaiting it sets the
+        event, the watcher returns, and run_polling tears down (loop closed).
+
+    This makes the stop path behave exactly like PTB: if the supervisor calls
+    ``stop_running()`` directly (RuntimeError off-loop) or skips the join, the
+    tests fail. Behavior knobs:
+      - ``raise_exc``: if set, run_polling raises it before starting the loop.
+      - ``clean_return``: if True, run_polling returns immediately (no loop).
+      - ``stop_delay_sec``: extra sleep inside stop() before signaling (slow-stop test).
     """
 
-    def __init__(self, exit_code=None):
-        self.exit_code = exit_code
-        self.pid = 424242
-        self.terminated = False
-        self.killed = False
-        self.wait_calls = []
+    _concurrency = 0
+    _max_concurrency = 0
+    _lock = threading.Lock()
 
-    @property
-    def returncode(self):
-        # Real Popen.returncode is None until reaped; after poll() it's the code.
-        return self.exit_code if self.poll() is not None else None
+    def __init__(self, base_url=None, raise_exc=None, clean_return=False, stop_delay_sec=0.0):
+        self.base_url = base_url
+        self.raise_exc = raise_exc
+        self.clean_return = clean_return
+        self.stop_delay_sec = stop_delay_sec
+        self.run_kwargs = None
+        self.run_calls = 0
+        self._loop = None            # the "bridge loop" (real, per run)
+        self._stop_event = None      # asyncio.Event on that loop
+        self.post_init = None        # coroutine fn; supervisor assigns it (PTB-style)
 
-    def poll(self):
-        return self.exit_code
+    @classmethod
+    def reset_concurrency(cls):
+        with cls._lock:
+            cls._concurrency = 0
+            cls._max_concurrency = 0
 
-    def wait(self, timeout=None):
-        self.wait_calls.append(timeout)
-        return self.exit_code
+    async def stop(self):
+        """The coroutine the supervisor schedules onto the bridge loop."""
+        if self.stop_delay_sec > 0:
+            await asyncio.sleep(self.stop_delay_sec)
+        if self._stop_event is not None:
+            self._stop_event.set()
 
-    def terminate(self):
-        self.terminated = True
-        # A well-behaved child dies on terminate: become "reaped" so stop() can
-        # read its exit code. (StubbornProcess overrides this to stay alive.)
-        if self.exit_code is None:
-            self.exit_code = 143   # conventional SIGTERM/kill-on-Windows exit
+    def run_polling(self, **kwargs):
+        self.run_kwargs = kwargs
+        self.run_calls += 1
+        with FakeApp._lock:
+            FakeApp._concurrency += 1
+            FakeApp._max_concurrency = max(FakeApp._max_concurrency, FakeApp._concurrency)
+        try:
+            if self.raise_exc is not None:
+                raise self.raise_exc
+            if self.clean_return:
+                return
+            # Model PTB: own a real loop in this (bridge) thread. The supervisor
+            # publishes it via the post_init hook; app.stop() is scheduled onto it.
+            import asyncio as _aio
 
-    def kill(self):
-        self.killed = True
-        if self.exit_code is None:
-            self.exit_code = -9
+            async def _run():
+                self._stop_event = _aio.Event()
+                # PTB runs post_init (assigned by the supervisor) right after init,
+                # inside the loop — this is what publishes the loop to the supervisor.
+                hook = getattr(self, 'post_init', None)
+                if hook is not None:
+                    await hook(self)
+                await self._stop_event.wait()
 
-
-@pytest.fixture
-def popen_patched():
-    """Patch supervisor_mod.subprocess.Popen for the whole test.
-
-    Yields a MagicMock whose return_value is replaced per-spawn via
-    ``queue_fake(proc)`` (a FIFO of FakeProcess objects). Keeps the patch active
-    while the watcher thread runs so no real process is ever spawned.
-    """
-    popen = MagicMock()
-    fakes = []
-
-    def _side_effect(*args, **kwargs):
-        return fakes.pop(0) if fakes else FakeProcess()
-
-    popen.side_effect = _side_effect
-
-    with patch.object(supervisor_mod.subprocess, 'Popen', popen):
-        yield {
-            'popen': popen,
-            'queue_fake': lambda p: fakes.append(p),
-        }
+            loop = _aio.new_event_loop()
+            self._loop = loop
+            try:
+                loop.run_until_complete(_run())
+            finally:
+                self._loop = None
+                self._stop_event = None
+                loop.close()
+        finally:
+            with FakeApp._lock:
+                FakeApp._concurrency -= 1
 
 
 def make_supervisor(tmp_path, **kw):
@@ -108,351 +127,264 @@ def make_supervisor(tmp_path, **kw):
         ac_base_url='http://127.0.0.1:8126',
         project_root=PROJECT_ROOT,
         workspace_dir=str(tmp_path),
-        backoff_base=0.0,          # no sleep between restarts
-        backoff_cap=0.0,
+        backoff_base=0.01,         # tiny sleep between restarts
+        backoff_cap=0.02,
         max_restart_attempts=3,
-        healthy_window_sec=0.0,
-        stop_wait_sec=0.05,
-        watch_interval_sec=0.01,
+        stop_join_timeout_sec=5.0,
     )
     defaults.update(kw)
     return TelegramBridgeSupervisor(**defaults)
 
 
 def _wait_until(cond, timeout=6.0):
-    """Poll cond() until true or timeout (for watcher-thread-driven assertions)."""
+    """Poll cond() until true or timeout (for thread-driven assertions)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if cond():
             return True
-        time.sleep(0.02)
+        time.sleep(0.01)
     return cond()
 
 
-# ---------------------------------------------------------------------------
-# A. Spawn args / env / CWD / CREATE_NO_WINDOW
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def fake_app_patched(tmp_path):
+    """Patch supervisor_mod._build_app so no real PTB Application is constructed.
 
-def test_start_spawns_with_correct_args_env_cwd(tmp_path, popen_patched):
-    fake = FakeProcess()
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path, allowed_users='123,456', target_agent='Maine')
-    try:
-        sup.start()
-    finally:
-        sup.stop()
-
-    assert popen_patched['popen'].call_count == 1
-    args, kwargs = popen_patched['popen'].call_args
-    # Command: [sys.executable, '-m', 'agent_cascade.telegram_bridge']
-    assert args[0] == [sys.executable, '-m', 'agent_cascade.telegram_bridge']
-    # CWD = repo root (so config.secrets_loader resolves)
-    assert kwargs['cwd'] == str(PROJECT_ROOT)
-    # CREATE_NO_WINDOW on Windows (no console pop-up); 0 elsewhere.
-    import subprocess as _sp
-    expected_flags = getattr(_sp, 'CREATE_NO_WINDOW', 0)
-    assert kwargs.get('creationflags', 0) == expected_flags
-    if sys.platform == 'win32':
-        assert kwargs['creationflags'] == 0x08000000
-
-    # Env: non-secret vars set, token NOT passed.
-    env = kwargs['env']
-    assert env['TG_BRIDGE_ENABLED'] == 'true'
-    assert env['ALLOWED_USERS'] == '123,456'
-    assert env['AC_BASE_URL'] == 'http://127.0.0.1:8126'
-    assert env['TG_TARGET_AGENT'] == 'Maine'
-    # The bot token must never be in the child's environment.
-    assert 'TELEGRAM_BOT_TOKEN' not in env
-
-
-def test_start_env_omits_empty_allowed_users(tmp_path, popen_patched):
-    """When allowed_users is empty, ALLOWED_USERS must NOT be in the child env.
-
-    (target_agent defaults to 'Maine' so TG_TARGET_AGENT will be present — that's
-    correct behavior, not a leak.)
+    Yields a dict with the queue of FakeApp instances and helpers. Each bridge
+    attempt pops the next queued app (or reuses the last one if the queue is
+    empty — useful for restart loops that rebuild on every attempt).
     """
-    fake = FakeProcess()
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path, allowed_users='', target_agent='Maine')
-    try:
-        sup.start()
-    finally:
-        sup.stop()
-    env = popen_patched['popen'].call_args[1]['env']
-    assert env['TG_BRIDGE_ENABLED'] == 'true'
-    assert 'ALLOWED_USERS' not in env, 'empty allowed_users must not be passed to child'
-    # TG_TARGET_AGENT is set (default 'Maine') — verify it's the right value.
-    assert env.get('TG_TARGET_AGENT') == 'Maine'
+    fakes = []
+    built = []
+
+    def _side_effect(cfg, ac):
+        app = fakes.pop(0) if fakes else (built[-1] if built else FakeApp())
+        built.append(app)
+        return app
+
+    with patch.object(supervisor_mod, '_build_app', side_effect=_side_effect):
+        FakeApp.reset_concurrency()
+        yield {
+            'queue': lambda a: fakes.append(a),
+            'built': built,
+            'max_concurrency': lambda: FakeApp._max_concurrency,
+        }
 
 
-def test_start_env_no_stale_host_vars_leak(tmp_path, popen_patched):
-    """Stale bridge vars in os.environ must NOT leak into the child env."""
-    import os
-    # Simulate a host that has stale bridge vars set.
-    old_tg = os.environ.get('TG_TARGET_AGENT')
-    old_au = os.environ.get('ALLOWED_USERS')
-    try:
-        os.environ['TG_TARGET_AGENT'] = 'StaleAgent'
-        os.environ['ALLOWED_USERS'] = '999,888'
-        fake = FakeProcess()
-        popen_patched['queue_fake'](fake)
-        sup = make_supervisor(tmp_path, allowed_users='123', target_agent='Maine')
+def _bridge_threads():
+    return [t for t in threading.enumerate() if t.name == 'tg-bridge' and t.is_alive()]
+
+
+@pytest.fixture(autouse=True)
+def _reap_stale_bridge_threads():
+    """Safety net: unblock + join any tg-bridge thread leaked by a previous test.
+
+    A stop() that hits its join timeout leaves the (daemon) thread alive; if it
+    is still blocked in run_polling when the NEXT test starts, that test's fresh
+    supervisor would see two concurrent bridge threads. Reaping here keeps each
+    test hermetic. In a healthy implementation no thread ever survives stop().
+
+    Strategy: for each leaked thread, find its owner supervisor and try to drive
+    app.stop() onto the bridge loop. If the supervisor already cleared _app/_loop
+    (normal stop path), the thread should be exiting on its own — just wait.
+    """
+    yield
+    # Best-effort teardown: a leaked-thread cleanup failure must NOT fail the test,
+    # so we swallow errors here deliberately. In a healthy implementation no thread
+    # ever survives stop(), so this path is only hit if a test left a stuck daemon
+    # thread behind — unblocking it keeps the NEXT test hermetic.
+    for t in _bridge_threads():
         try:
-            sup.start()
-        finally:
-            sup.stop()
-        env = popen_patched['popen'].call_args[1]['env']
-        # The supervisor's values must win over the stale host values.
-        assert env['TG_TARGET_AGENT'] == 'Maine', 'stale TG_TARGET_AGENT leaked'
-        assert env['ALLOWED_USERS'] == '123', 'stale ALLOWED_USERS leaked'
-    finally:
-        # Restore original env.
-        if old_tg is None:
-            os.environ.pop('TG_TARGET_AGENT', None)
-        else:
-            os.environ['TG_TARGET_AGENT'] = old_tg
-        if old_au is None:
-            os.environ.pop('ALLOWED_USERS', None)
-        else:
-            os.environ['ALLOWED_USERS'] = old_au
-
-
-def test_start_env_is_minimal_no_parent_secrets_leak(tmp_path, popen_patched):
-    """The child env must NOT inherit the full parent environment.
-
-    Regression guard for a critical security finding: _build_env() used to start
-    from dict(os.environ), leaking any parent secrets (AWS creds, DB URLs, API
-    keys) into the bridge process. It must now build a minimal allowlist instead.
-    """
-    import os
-    sentinel_secret = 'FAKE_SECRET_VALUE_DO_NOT_LEAK'
-    try:
-        # Simulate sensitive vars present in the parent environment.
-        os.environ['AWS_SECRET_ACCESS_KEY'] = sentinel_secret
-        os.environ['DATABASE_URL'] = sentinel_secret
-        os.environ['SOME_API_KEY'] = sentinel_secret
-
-        fake = FakeProcess()
-        popen_patched['queue_fake'](fake)
-        sup = make_supervisor(tmp_path, allowed_users='123', target_agent='Maine')
-        try:
-            sup.start()
-        finally:
-            sup.stop()
-        env = popen_patched['popen'].call_args[1]['env']
-
-        # None of the parent's secrets may be present in the child env.
-        for secret_key in ('AWS_SECRET_ACCESS_KEY', 'DATABASE_URL', 'SOME_API_KEY'):
-            assert secret_key not in env, f"parent secret {secret_key} leaked into child env"
-            assert sentinel_secret not in env.values(), 'sentinel secret value leaked into child env'
-
-        # The 4 authoritative bridge vars are still present and correct.
-        assert env['TG_BRIDGE_ENABLED'] == 'true'
-        assert env['ALLOWED_USERS'] == '123'
-        assert env['TG_TARGET_AGENT'] == 'Maine'
-        # PATH is kept so the interpreter can launch (a legitimate essential).
-        assert 'PATH' in env
-    finally:
-        for k in ('AWS_SECRET_ACCESS_KEY', 'DATABASE_URL', 'SOME_API_KEY'):
-            os.environ.pop(k, None)
-
-
-def test_healthy_run_resets_restart_debt(tmp_path):
-    """Once the child has been alive >= healthy_window_sec, restart debt is cleared.
-
-    Guards _reset_restart_debt_if_healthy(): a long-lived bridge must not keep
-    accumulating consecutive-failure debt across its lifetime, otherwise it would
-    eventually hit the cap and refuse to restart after a genuine transient blip.
-    """
-    sup = make_supervisor(tmp_path, healthy_window_sec=1.0)
-    with sup._lock:
-        # Simulate accumulated restart debt + a proc that started long enough ago.
-        sup._restart_attempts = 3
-        import time as _t
-        sup._proc_started_at = _t.monotonic() - 5.0  # well past the 1s healthy window
-        sup._reset_restart_debt_if_healthy()
-        assert sup._restart_attempts == 0, 'healthy run must clear restart debt'
-
-    with sup._lock:
-        # But a freshly-started proc (not yet healthy) must NOT clear the debt.
-        sup._restart_attempts = 2
-        import time as _t
-        sup._proc_started_at = _t.monotonic()  # just started
-        sup._reset_restart_debt_if_healthy()
-        assert sup._restart_attempts == 2, 'not-yet-healthy proc must keep restart debt'
-
-
-def test_start_uses_actual_runtime_port_not_hardcoded(tmp_path, popen_patched):
-    fake = FakeProcess()
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path)   # base_url http://127.0.0.1:8126
-    try:
-        sup.start()
-    finally:
-        sup.stop()
-    assert popen_patched['popen'].call_args[1]['env']['AC_BASE_URL'] == 'http://127.0.0.1:8126'
+            sup = getattr(t, '_owner_supervisor', None)
+            if sup is not None:
+                with sup._lock:
+                    app, loop = sup._app, sup._loop
+                if app is not None and loop is not None and not loop.is_closed():
+                    import asyncio as _aio
+                    fut = _aio.run_coroutine_threadsafe(app.stop(), loop)
+                    fut.result(timeout=1.0)  # may raise on timeout — fine, thread is daemon
+        except Exception:
+            # Intentional: teardown must never fail the test (see note above).
+            continue
+    # Wait for all leaked threads to finish (they should exit shortly after unblock).
+    deadline = time.monotonic() + 3.0
+    while _bridge_threads() and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 # ---------------------------------------------------------------------------
-# B. Idempotency (start/stop)
+# A. Start / thread lifecycle
 # ---------------------------------------------------------------------------
 
-def test_start_idempotent_no_double_spawn(tmp_path, popen_patched):
-    fake = FakeProcess()
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path)
-    try:
-        sup.start()
-        sup.start()   # second call must be a no-op
-        assert popen_patched['popen'].call_count == 1
-        assert sup.is_running() is True
-    finally:
-        sup.stop()
-
-
-def test_set_enabled_on_twice_spawns_once(tmp_path, popen_patched):
-    fake = FakeProcess()
-    popen_patched['queue_fake'](fake)
+def test_start_spawns_one_daemon_thread_idempotent(tmp_path, fake_app_patched):
+    """set_enabled(True) spawns exactly one daemon thread named 'tg-bridge';
+    a second set_enabled(True) is a no-op (idempotency)."""
+    app = FakeApp(base_url='http://127.0.0.1:8126')
+    fake_app_patched['queue'](app)
     sup = make_supervisor(tmp_path)
     try:
         sup.set_enabled(True)
-        sup.set_enabled(True)   # UI re-sends full snapshot -> must not double-spawn
-        assert popen_patched['popen'].call_count == 1
+        assert _wait_until(sup.is_running), 'bridge thread should be running'
+        threads = _bridge_threads()
+        assert len(threads) == 1, f'expected exactly one tg-bridge thread, got {len(threads)}'
+        assert threads[0].daemon is True
+        # Wait for the app to be built (happens in the bridge thread).
+        assert _wait_until(lambda: fake_app_patched['built']), 'app should be built'
+        assert fake_app_patched['built'][-1] is app, 'the queued app should be the one built'
+        assert app.base_url == 'http://127.0.0.1:8126'
+
+        sup.set_enabled(True)   # UI re-sends full snapshot -> must not double-start
+        time.sleep(0.1)
+        assert len(_bridge_threads()) == 1, 'second set_enabled(True) must not spawn a second thread'
     finally:
         sup.stop()
 
 
-def test_stop_when_not_running_is_safe_noop(tmp_path):
+def test_stop_drives_ptb_stop_and_joins_cleanly(tmp_path, fake_app_patched):
+    """KEY REGRESSION: stop() schedules app.stop() onto the bridge loop (NOT
+    app.stop_running(), which raises off-loop) and joins cleanly."""
+    app = FakeApp()
+    fake_app_patched['queue'](app)
+    sup = make_supervisor(tmp_path, stop_join_timeout_sec=5.0)
+    sup.set_enabled(True)
+    assert _wait_until(sup.is_running), 'bridge thread should be running'
+    # run_polling must have been called with the plan's exact kwargs.
+    assert _wait_until(lambda: app.run_kwargs is not None), 'run_polling should be called'
+    assert app.run_kwargs == {
+        'allowed_updates': ['message'],
+        'drop_pending_updates': False,
+        'stop_signals': None,
+    }
+
+    t0 = time.monotonic()
+    sup.stop()
+    elapsed = time.monotonic() - t0
+
+    # stop() returned => the thread was joined (not abandoned). Clean join is fast.
+    assert elapsed < 5.0, f'stop() should join within timeout, took {elapsed:.2f}s'
+    assert sup.is_running() is False
+    assert _wait_until(lambda: len(_bridge_threads()) == 0), 'thread should be gone after stop'
+
+    # set_enabled(False) again is a safe no-op (nothing running).
+    sup.set_enabled(False)
+    assert sup.is_running() is False
+
+
+def test_stop_when_never_started_is_safe_noop(tmp_path, fake_app_patched):
     sup = make_supervisor(tmp_path)
     sup.stop()   # nothing running — must not raise
     assert sup.is_running() is False
     assert sup.status()['enabled'] is False
 
 
-def test_set_enabled_off_when_not_running_is_safe(tmp_path, popen_patched):
-    sup = make_supervisor(tmp_path)
-    sup.set_enabled(False)   # off when never started
-    assert popen_patched['popen'].call_count == 0
-    assert sup.is_running() is False
+# ---------------------------------------------------------------------------
+# B. Crash containment / restart policy
+# ---------------------------------------------------------------------------
 
+def test_crash_contained_bounded_restart_then_give_up(tmp_path, fake_app_patched):
+    """A RuntimeError from run_polling never escapes the thread; with
+    max_restart_attempts=2 (TOTAL attempts) the bridge runs exactly 2 times
+    then stops with an error. The main test thread is never interrupted."""
+    sup = make_supervisor(tmp_path, backoff_base=0.01, backoff_cap=0.02, max_restart_attempts=2)
+    # Every attempt gets a fresh crashing app (queue empty -> reuse last built).
+    fake_app_patched['queue'](FakeApp(raise_exc=RuntimeError('boom')))
 
-def test_set_enabled_off_stops_running_child(tmp_path, popen_patched):
-    fake = FakeProcess()
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path)
     sup.set_enabled(True)
-    assert popen_patched['popen'].call_count == 1
-    sup.set_enabled(False)
-    assert fake.terminated is True
-    assert sup.is_running() is False
+    assert _wait_until(lambda: not sup.is_running() and sup.status()['error'], timeout=10), \
+        'bridge should have given up after max_restart_attempts'
+    time.sleep(0.2)   # settle: make sure no late restart sneaks in
+
+    # Count attempts by how many times _build_app was called (each attempt builds fresh).
+    # Note: the fixture reuses built[-1] when the queue is empty, so run_calls on a
+    # single object accumulates; len(built) is the reliable attempt count.
+    total_attempts = len(fake_app_patched['built'])
+    assert total_attempts == 2, f'expected exactly 2 attempts (1 initial + 1 retry), got {total_attempts}'
+    assert 'giving up' in sup.status()['error'].lower()
+    # The main test thread was never interrupted — we're still here.
+    assert True
 
 
-# ---------------------------------------------------------------------------
-# C. Exit-code-aware restart policy
-# ---------------------------------------------------------------------------
-
-def test_exit_2_config_problem_no_restart(tmp_path, popen_patched):
-    """Exit 2 = config problem -> PERMANENT, no restart, error surfaced."""
-    fake = FakeProcess(exit_code=2)
-    popen_patched['queue_fake'](fake)
+def test_config_failure_is_permanent_stop(tmp_path, fake_app_patched):
+    """validate_config problems -> permanent stop, no retry; re-enabling after
+    the "fix" starts again."""
     sup = make_supervisor(tmp_path)
-    try:
+
+    # The thread body imports these from .config, so patch them at the source.
+    with patch('agent_cascade.telegram_bridge.config.load_config') as mock_load, \
+         patch('agent_cascade.telegram_bridge.config.validate_config',
+               return_value=['ALLOWED_USERS is empty']):
+        mock_load.return_value = MagicMock(bot_token='x', allowed_users=[])
         sup.set_enabled(True)
-        # Watcher detects the exit-2 death and must NOT respawn.
-        assert _wait_until(lambda: sup.is_running() is False), 'child should be dead'
-        time.sleep(0.3)   # settle window to be sure no late restart happens
-        assert popen_patched['popen'].call_count == 1, 'exit 2 must not trigger a restart'
-        err = sup.status()['error']
-        assert 'config problem' in err.lower() or 'exit 2' in err
-    finally:
-        sup.stop()
+        assert _wait_until(lambda: not sup.is_running() and sup.status()['error'], timeout=10)
+        time.sleep(0.2)
+        # No app was ever built (config failed before _build_app).
+        assert fake_app_patched['built'] == [], 'config failure must happen before app build'
+        err = sup.status()['error'].lower()
+        assert 'allowlist' in err or 'allowed_users' in err
 
-
-def test_exit_3_transient_restarts_with_cap(tmp_path, popen_patched):
-    """Exit 3 = transient AC-open failure -> bounded restart, then give up at cap."""
-    # max_restart_attempts=3 (make_supervisor default) -> total spawns = 1 + 3.
-    for _ in range(5):
-        popen_patched['queue_fake'](FakeProcess(exit_code=3))
-    sup = make_supervisor(tmp_path)
-    try:
-        sup.set_enabled(True)
-        # Wait until the cap is reached (4 spawns) or a generous timeout.
-        assert _wait_until(lambda: popen_patched['popen'].call_count >= 4, timeout=10), \
-            f"expected restarts up to cap, got {popen_patched['popen'].call_count}"
-        time.sleep(0.3)   # let any (incorrect) further restarts surface
-        assert popen_patched['popen'].call_count == 4, \
-            f"expected exactly 1+cap spawns, got {popen_patched['popen'].call_count}"
-        assert sup.is_running() is False
-        err = sup.status()['error']
-        assert 'giving up' in err.lower() or 'restart loop' in err
-    finally:
-        sup.stop()
-
-
-def test_exit_0_clean_stop_no_restart(tmp_path, popen_patched):
-    fake = FakeProcess(exit_code=0)
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path)
-    try:
-        sup.set_enabled(True)
-        assert _wait_until(lambda: sup.is_running() is False), 'child should be dead'
-        time.sleep(0.3)
-        assert popen_patched['popen'].call_count == 1, 'clean exit 0 must not restart'
-    finally:
-        sup.stop()
-
-
-def test_restart_respects_disable_during_backoff(tmp_path, popen_patched):
-    """If the user disables while a transient failure is in flight, no restart happens."""
-    fake = FakeProcess(exit_code=3)
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path)
-    sup.set_enabled(True)
-    # Immediately disable — watcher must not respawn.
-    sup.set_enabled(False)
-    time.sleep(0.3)
-    assert popen_patched['popen'].call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# D. stop() shutdown sequence (terminate -> wait -> kill)
-# ---------------------------------------------------------------------------
-
-def test_stop_terminates_and_waits(tmp_path, popen_patched):
-    fake = FakeProcess()   # alive until terminated; terminate records the call
-    popen_patched['queue_fake'](fake)
-    sup = make_supervisor(tmp_path)
-    sup.set_enabled(True)
+    # "Fix" the config: now validate passes and a real (fake) app runs.
+    # Must explicitly stop first to reset _enabled=False, since the config-failure
+    # path leaves _enabled=True (the toggle is still on; the bridge just can't start).
     sup.stop()
-    assert fake.terminated is True
-    assert fake.killed is False       # process exited in time -> no kill needed
-    assert any(t is not None for t in fake.wait_calls), 'stop() must wait after terminate'
-
-
-def test_stop_escalates_to_kill_on_timeout(tmp_path, popen_patched):
-    """Simulate a child that ignores terminate (still alive) -> stop() kills it."""
-    import subprocess as _sp
-
-    class StubbornProcess(FakeProcess):
-        """A child that ignores terminate AND kill (stays alive forever)."""
-        def terminate(self):
-            self.terminated = True   # record the call, but do NOT reap (stay alive)
-        def wait(self, timeout=None):
-            self.wait_calls.append(timeout)
-            # Always still alive -> raise TimeoutExpired to force the kill path.
-            raise _sp.TimeoutExpired(cmd='bridge', timeout=timeout)
-
-    stubborn = StubbornProcess()
-    popen_patched['queue_fake'](stubborn)
-    sup = make_supervisor(tmp_path)
+    good_app = FakeApp(base_url='http://127.0.0.1:8126')
+    fake_app_patched['queue'](good_app)
     sup.set_enabled(True)
+    try:
+        assert _wait_until(sup.is_running, timeout=10), 're-enable after fix should start the bridge'
+    finally:
+        sup.stop()
+
+
+def test_clean_return_no_restart(tmp_path, fake_app_patched):
+    """A clean return from run_polling means "someone stopped it" -> no restart,
+    even though _enabled is still True. Re-enabling starts a fresh run."""
+    app = FakeApp(clean_return=True)
+    fake_app_patched['queue'](app)
+    sup = make_supervisor(tmp_path)
+
+    sup.set_enabled(True)
+    assert _wait_until(lambda: not sup.is_running(), timeout=10), 'clean return should end the thread'
+    time.sleep(0.2)
+    assert app.run_calls == 1, 'clean return must NOT trigger a restart'
+    assert sup.status()['error'] == '', 'a clean stop is not an error'
+
+    # Re-enable -> fresh run with a new (blocking) app.
+    # Must explicitly stop first to reset _enabled=False (clean return leaves it True).
     sup.stop()
-    assert stubborn.terminated is True
-    assert stubborn.killed is True, 'stop() must kill() when terminate does not reap the child'
+    app2 = FakeApp(base_url='http://127.0.0.1:8126')
+    fake_app_patched['queue'](app2)
+    sup.set_enabled(True)
+    try:
+        assert _wait_until(sup.is_running, timeout=10), 're-enable after clean return should start fresh'
+    finally:
+        sup.stop()
+
+
+def test_start_while_previous_still_shutting_down_no_double_start(tmp_path, fake_app_patched):
+    """stop() then immediately start(): the new thread must wait for the old one
+    to finish — max concurrency of bridge threads is 1."""
+    slow_app = FakeApp(stop_delay_sec=0.3)   # PTB stop takes a bit
+    fake_app_patched['queue'](slow_app)
+    sup = make_supervisor(tmp_path, stop_join_timeout_sec=5.0)
+
+    sup.set_enabled(True)
+    assert _wait_until(sup.is_running), 'bridge thread should be running'
+
+    # Drive stop (schedules app.stop(); join waits for the 0.3s teardown).
+    sup.stop()
+    # Immediately start again — must wait out the old thread, not double-start.
+    fresh_app = FakeApp(base_url='http://127.0.0.1:8126')
+    fake_app_patched['queue'](fresh_app)
+    sup.start()
+    assert _wait_until(sup.is_running, timeout=10), 'new bridge should be running'
+
+    assert fake_app_patched['max_concurrency']() <= 1, \
+        f"never more than one concurrent bridge thread (got {fake_app_patched['max_concurrency']()})"
+    sup.stop()
 
 
 # ---------------------------------------------------------------------------
-# E. Config handler
+# C. Config handler (contract preserved — same calls as before)
 # ---------------------------------------------------------------------------
 
 def test_handler_registered_and_in_persist_keys():
@@ -497,7 +429,7 @@ def test_handler_idempotent_on_repeated_full_snapshot():
 
     assert pool.settings.telegram_bridge_enabled is True
     # set_enabled called twice (once per snapshot) but the SUPERVISOR itself is
-    # idempotent — verified separately in test_set_enabled_on_twice_spawns_once.
+    # idempotent — verified separately in test_start_spawns_one_daemon_thread_idempotent.
     assert sup.set_enabled.call_count == 2
 
 
@@ -513,7 +445,7 @@ def test_handler_no_supervisor_attached_is_safe():
 
 
 # ---------------------------------------------------------------------------
-# F. Persistence round-trip
+# D. Persistence round-trip
 # ---------------------------------------------------------------------------
 
 def test_pool_settings_roundtrip():
@@ -527,7 +459,7 @@ def test_pool_settings_roundtrip():
 
 
 # ---------------------------------------------------------------------------
-# G. State serialization (both blocks must carry the field)
+# E. State serialization (both blocks must carry the field)
 # ---------------------------------------------------------------------------
 
 def test_state_builder_serializes_telegram_bridge_in_both_blocks():
@@ -541,15 +473,15 @@ def test_state_builder_serializes_telegram_bridge_in_both_blocks():
 
 
 # ---------------------------------------------------------------------------
-# H. Base URL lazy resolution (_resolve_base_url)
+# F. Base URL lazy resolution (_resolve_base_url) — unchanged contract
 # ---------------------------------------------------------------------------
 # The create_app() attach path constructs the supervisor with an EMPTY
 # ac_base_url (uvicorn has not bound yet), so the base URL is resolved lazily
-# at spawn time from agent_pool.server_info, falling back to AGENT_CASCADE_PORT
+# at start time from agent_pool.server_info, falling back to AGENT_CASCADE_PORT
 # env, then default 8765. The host is ALWAYS forced to 127.0.0.1 — a launcher
 # may bind to 0.0.0.0 for LAN access, but 0.0.0.0 is a bind address, not a
-# valid connect target for the (always-local) bridge child. _resolve_base_url()
-# is pure (no spawn), so these tests call it directly with no popen_patching.
+# valid connect target for the (always-local) bridge client. _resolve_base_url()
+# is pure (no thread spawn), so these tests call it directly.
 
 class FakePool:
     """Minimal agent_pool stand-in exposing only server_info."""
@@ -565,7 +497,7 @@ def test_resolve_base_url_explicit_wins(tmp_path):
 
 
 def test_resolve_base_url_from_server_info_tuple(tmp_path):
-    """server_info tuple -> port taken, host used (already localhost here)."""
+    """server_info tuple -> port taken, host forced to localhost."""
     sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(('127.0.0.1', 9999)))
     assert sup._resolve_base_url() == 'http://127.0.0.1:9999'
 
@@ -613,10 +545,3 @@ def test_resolve_base_url_env_not_int_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv('AGENT_CASCADE_PORT', 'notaport')
     sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(None))
     assert sup._resolve_base_url() == 'http://127.0.0.1:8765'
-
-
-def test_build_env_uses_resolved_base_url(tmp_path):
-    """_build_env must hand the child the RESOLVED url (not a frozen empty one)."""
-    sup = make_supervisor(tmp_path, ac_base_url='', agent_pool=FakePool(('0.0.0.0', 9123)))
-    env = sup._build_env()
-    assert env['AC_BASE_URL'] == 'http://127.0.0.1:9123'

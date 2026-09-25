@@ -2993,3 +2993,129 @@ class TestTokenEstimatorUndercountFixes:
         assert parsed[0]['function']['name'] == ''
         stats = get_message_stats(malformed)  # must not raise
         assert 'tokens' in stats and 'words' in stats
+
+
+# ──────────────────────────────────────────────
+# Regression: llm_messages identity preserved after fallback compression
+# ──────────────────────────────────────────────
+
+
+class TestLlmMessagesIdentityPreserved:
+    """Regression: the llm_messages parameter passed to _execute_llm_call_with_retry must be
+    the SAME list object after the FallbackCompressionRequired handler runs.
+
+    Bug: line 835 reassigned `llm_messages = []` (new list), severing identity with the
+    caller's list held by run() in core.py. After compression + return, run() still held
+    the stale pre-compression list → same payload every turn → infinite context-exceeded loop.
+
+    Fix: `llm_messages.clear()` preserves object identity so _rebuild_working_set's
+    clear()+extend() mutates the caller-held list in-place.
+    """
+
+    def test_llm_messages_identity_preserved_after_compression(self):
+        """The original list object passed as llm_messages param must be mutated in-place."""
+        from agent_cascade.compression.result import CompressResult
+        from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_INITIAL_FRACTION
+        from agent_cascade.execution_engine import ExecutionEngine
+
+        pool = MagicMock()
+        instance = MagicMock()
+        compression_lock = MagicMock()
+        compression_lock.__enter__ = MagicMock()
+        compression_lock.__exit__ = MagicMock()
+        instance._compression_lock = compression_lock
+        instance._streaming_responses = []
+        instance.instance_name = 'identity-test'
+        instance._force_compress_count = 0
+        instance.compression_summary = None
+        instance.latest_marker_index = -1
+
+        pool.stopped = False
+        pool.is_instance_terminated.return_value = False
+        pool._run_generation = 1
+        pool.get_instance.return_value = instance
+
+        # Simulate a compressed conversation (fewer messages than original)
+        history = [Message(role=SYSTEM, content='sys')] + [Message(role=USER, content=f'm{i}') for i in range(5)]
+        pool.get_conversation.return_value = history
+        pool.get_compression_target_set_from_conversation.return_value = (1, history[1:], -1)
+        pool.slice_history_for_llm.return_value = history[1:]
+
+        # Compressor window lookup
+        comp_chain = [{'max_input_tokens': 32768}]
+        pool.api_router = MagicMock()
+        pool.api_router.get_endpoint_chain.side_effect = lambda agent_type, **kw: comp_chain if agent_type == 'Compressor' else [
+            {'max_input_tokens': 10000}
+        ]
+
+        comp_agent = MagicMock()
+        comp_agent.system_message = 'You are a compressor.'
+        pool.get_agent.return_value = comp_agent
+
+        class Settings:
+            retry_max_attempts = 2
+            retry_base_delay = 0.1
+            retry_max_delay = 1.0
+            loop_min_chars = 4000
+            loop_max_chars = 40960
+            loop_char_run_enabled = True
+            loop_char_run_limit = 129
+            loop_max_chars_enabled = True
+            loop_two_phase_enabled = False
+            loop_suspicion_threshold = 7
+            loop_confirm_required = 3
+            loop_cooldown_feeds = 50
+
+        pool.settings = Settings()
+
+        engine = ExecutionEngine(pool)
+        engine._my_generation = 1
+
+        # The ORIGINAL list object — this is what the caller (run() in core.py) holds.
+        original_llm_messages = [Message(role=SYSTEM, content='sys')] + [
+            Message(role=USER, content=f'original{i}') for i in range(20)
+        ]
+        # Wire it to _cached_llm_messages so the identity check in the handler sees it.
+        instance._cached_llm_messages = original_llm_messages
+
+        success_result = CompressResult(
+            success=True, summary_text='compressed', marker_message=None,
+            messages_discarded=10, tail_count=3, error=None, mode='auto',
+            tokens_before=5000, tokens_after=2000,
+        )
+
+        call_count = 0
+
+        def mock_execute(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise FallbackCompressionRequired('identity-test', 'Coder', 'small-model')
+            yield [Message(role=ASSISTANT, content='done')]
+
+        with patch.object(engine, '_execute_llm_call', side_effect=mock_execute):
+            with patch('agent_cascade.compression.core.compress_context', return_value=success_result):
+                template = MagicMock()
+                template.llm_cfg = {'model': 'test'}
+                template.function_map = {}
+                template.llm = MagicMock()
+                template.llm.generate_cfg = {}
+
+                list(engine._execute_llm_call_with_retry(
+                    instance, original_llm_messages, template, []))
+
+        # KEY ASSERTION 1: object identity must be preserved.
+        # If the handler reassigned llm_messages to a new list (the old bug),
+        # original_llm_messages would still contain the pre-compression messages.
+        assert len(original_llm_messages) < 20, (
+            f"original_llm_messages was NOT mutated in-place: "
+            f"len={len(original_llm_messages)}, expected compressed (<20). "
+            f"The handler likely reassigned the parameter to a new list."
+        )
+
+        # KEY ASSERTION 2: the identity invariant guarded by llm_call.py must hold.
+        assert original_llm_messages is instance._cached_llm_messages, (
+            f"llm_messages identity diverged from _cached_llm_messages "
+            f"(id={id(original_llm_messages)} vs id={id(instance._cached_llm_messages)}). "
+            f"The guard at llm_call.py would fire on the next turn."
+        )

@@ -59,7 +59,7 @@ Include code examples, commands, or config snippets.
 
 ## Quality checklist
 
-- [ ] Name is unique (check existing skills via `scan_skills`)
+- [ ] Name and coverage is unique (check existing skills via `scan_skills`)
 - [ ] Description is specific (not generic like "coding" or "debugging")
 - [ ] Triggers cover how the skill will be matched in practice
 - [ ] Body has concrete, actionable steps (not vague advice)

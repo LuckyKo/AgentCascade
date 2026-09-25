@@ -212,8 +212,30 @@ class ACClient:
         return await self._token_post('/api/stop', {})
 
     async def restart(self) -> Dict[str, Any]:
-        """POST /api/restart (session_token). The AC process exits right after replying."""
-        return await self._token_post('/api/restart', {})
+        """POST /api/restart (session_token). The AC process exits right after replying.
+
+        The server spawns a detached child and then os._exit(0)s, which can preempt the
+        HTTP 200 — so a connection reset/timeout here does NOT mean the restart failed;
+        it is treated as success (the /restart request was delivered). A 401 still
+        re-handshakes once before being raised.
+        """
+        for attempt in (1, 2):
+            token = (await self.ensure_token())[0]
+            try:
+                resp = await self._request('POST', '/api/restart', params={'token': token}, json={})
+            except httpx.HTTPError as e:
+                logger.warning('AC /api/restart connection dropped (%s) — treating as success '
+                               '(the AC process exits right after the request)', e)
+                return {'status': 'restarting'}
+            if resp.status_code == 401 and attempt == 1:
+                # Token went stale (e.g. AC restarted since our last handshake) — retry once.
+                logger.warning('AC /api/restart 401; re-handshaking and retrying once')
+                self.invalidate_token()
+                continue
+            break
+        if resp.status_code != 200:
+            raise ACError(f"/api/restart failed ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
 
     async def reset(self) -> Dict[str, Any]:
         """POST /api/reset (open endpoint) — start a new session."""

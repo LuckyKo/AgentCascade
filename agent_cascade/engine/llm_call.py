@@ -832,7 +832,7 @@ class LLMCallMixin:
                             break
 
                         messages = []
-                        llm_messages = []
+                        llm_messages.clear()  # Preserve object identity with caller's list
                         self._rebuild_working_set(messages, llm_messages, inst_name)
 
                         if not llm_messages:
@@ -1089,6 +1089,15 @@ class LLMCallMixin:
 
                     # If we got here, compression succeeded and payload fits — continue retry loop
                     # llm_messages has been updated in-place by _rebuild_working_set
+
+                    # Guard: ensure llm_messages identity matches _cached_llm_messages to prevent stale payload.
+                    if instance._cached_llm_messages is not llm_messages:
+                        logger.warning(
+                            f"[FALLBACK_COMPRESSION] llm_messages identity diverged from "
+                            f"_cached_llm_messages for {inst_name} "
+                            f"(id={id(llm_messages)} vs id={id(instance._cached_llm_messages)}). "
+                            f"Next turn may send stale payload.")
+
                     continue
 
                 except Exception as e:
