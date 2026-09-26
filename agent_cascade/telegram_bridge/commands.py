@@ -61,6 +61,35 @@ def _approval_label(approval: Dict[str, Any]) -> str:
     return f'{tool} ({rid})'
 
 
+# State emoji per AgentState.name — keep short for mobile width.
+_TG_STATE_ICONS = {
+    'RUNNING': '\U0001F3A2',   # 🎢 actively working
+    'SLEEPING': '\u23F8',      # ⏸️  waiting on async tool
+    'COMPLETING': '\u2705',    # ✅ wrapping up
+}
+
+
+def _fmt_usage(n: int | None) -> str:
+    """Compact human token/word count: 999 -> '999', 12400 -> '12.4k', 1_200_000 -> '1.2M'."""
+    if n is None:
+        return ''
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n / 1_000_000:.1f}M"
+
+
+def _active_inst_line(inst: dict) -> str:
+    """One compact line per active agent: icon, name, [turn/max], ~tokens."""
+    name = inst.get('name') or inst.get('agent_class') or '?'
+    icon = _TG_STATE_ICONS.get(inst.get('state'), '•')
+    turns = inst.get('max_turns')
+    turn_txt = f"  [{inst.get('turn', 0)}/{turns}]" if turns else ''
+    tok = _fmt_usage(inst.get('tokens'))
+    return f"  • {icon} {name}{turn_txt}  ~{tok}tok" if tok else f"  • {icon} {name}{turn_txt}"
+
+
 def _find_pending(status: Dict[str, Any], arg: str) -> Optional[Dict[str, Any]]:
     """Pick the pending approval to act on.
 
@@ -90,6 +119,19 @@ async def _cmd_status(ctx: CommandContext) -> str:
         lines.append(f"🏃 Generating (active agent: {status.get('active_agent') or '?'})")
     else:
         lines.append('💤 Idle (not generating)')
+
+    # ── Non-idle agents with turns + context usage ────────────────────────────
+    instances = status.get('active_instances') or []
+    if instances:
+        lines.append(f"🤖 Active agents ({len(instances)}):")
+        shown = instances[:8]                       # mobile width budget
+        for inst in shown:
+            lines.append(_active_inst_line(inst))
+        if len(instances) > 8:
+            lines.append(f'  … and {len(instances) - 8} more')
+    else:
+        lines.append('🤖 No active agents')
+
     pending = status.get('pending_approvals') or []
     if pending:
         lines.append(f'⏳ Pending approvals ({len(pending)}):')

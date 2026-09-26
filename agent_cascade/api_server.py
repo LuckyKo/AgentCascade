@@ -1019,6 +1019,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     @app.get('/api/status')
     async def api_get_status(token: str = None):
         """Returns the current state of the agents."""
+        # Local imports keep module import graph light and avoid any circular risk.
+        from agent_cascade.agent_instance import ACTIVE_STATES, AgentState
+        from agent_cascade.settings import DEFAULT_MAX_TURNS
+        from agent_cascade.utils.utils import get_history_stats
+
         if not token or token not in api_sessions:
              return JSONResponse(status_code=401, content={'message': 'Invalid session token'})
 
@@ -1027,10 +1032,46 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             gen = session['generating']
             sess_name = session['session_name']
 
+        # ── Live per-instance snapshot for /status (additive `active_instances` field) ──
+        # Only non-idle (ACTIVE_STATES) instances are surfaced. Reads are taken under each
+        # instance's _state_lock; the dict is snapshotted first because pool.instances is
+        # mutated in-place by create/remove without a lock.
+        active_instances: list[dict] = []
+        if agent_pool is not None:
+            try:
+                snapshot = list(agent_pool.instances.items())   # name -> AgentInstance (atomic-ish)
+            except RuntimeError:
+                snapshot = []                                   # dict resized mid-copy; harmless empty pass
+
+            for name, inst in snapshot:
+                if getattr(inst, 'state', None) not in ACTIVE_STATES:
+                    continue
+                with inst._state_lock:                          # consistent single-view read
+                    current_turn = int(getattr(inst, '_current_turn', 0) or 0)
+                    effective_max = getattr(inst, 'max_turns', None) or DEFAULT_MAX_TURNS
+                    agent_class = getattr(inst, 'agent_class', '') or ''
+                    conv = list(inst.conversation)              # snapshot list under the lock
+
+                try:
+                    stats = get_history_stats(conv)             # cached; O(active msgs) once warm
+                except Exception:
+                    stats = {'tokens': 0, 'words': 0}
+
+                active_instances.append({
+                    'name': name,
+                    'agent_class': agent_class,
+                    'state': (getattr(inst, 'state', None) or AgentState.IDLE).name,  # "RUNNING" etc.
+                    'turn': current_turn,
+                    'max_turns': effective_max,
+                    'tokens': int(stats.get('tokens', 0)),
+                    'words': int(stats.get('words', 0)),
+                })
+
         return {
             'generating': gen,
             'active_agent': sess_name,
             'agents': agent_pool.list_agents() if agent_pool else [],
+            'active_instances': active_instances,  # NEW: non-idle instances with turns + context usage
             'active_stack': get_active_stack(),
             'instance_halted': agent_pool.is_instance_halted(sess_name) if (agent_pool and hasattr(agent_pool, 'is_instance_halted')) else False,
             # Pending approvals so a token-auth client (e.g. the Telegram bridge) can read
