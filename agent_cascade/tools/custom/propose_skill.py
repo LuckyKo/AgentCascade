@@ -272,15 +272,18 @@ class ProposeSkill(BaseTool):
         # are unaffected. Defensive: a pre-check error must not break propose — fall through to the
         # authoritative register validation.
         try:
-            passed, health_errors = skill_manager.prevalidate_skill(skill_content)
+            # prevalidate_skill returns (passed, messages); on the not-passed path below,
+            # messages holds only blocking errors (warnings are non-blocking and never set
+            # alongside them).
+            passed, health_messages = skill_manager.prevalidate_skill(skill_content)
         except Exception as e:  # pragma: no cover - defensive; pre-check must not break propose
             logger.warning('[PROPOSE-SKILL] pre-approval health check skipped (error): %s: %r',
                            type(e).__name__, e)
-            passed, health_errors = True, []
+            passed, health_messages = True, []
         if not passed:
-            lines = [f"  - {err}" for err in health_errors]
+            lines = [f"  - {msg}" for msg in health_messages]
             logger.warning('[PROPOSE-SKILL] REJECTED health check %s (%d issues)',
-                           proposed_name, len(health_errors))
+                           proposed_name, len(health_messages))
             return (f"REJECTED: proposed skill '{proposed_name}' failed pre-approval health checks:\n"
                     + '\n'.join(lines) +
                     '\nFix the issues and re-propose.')

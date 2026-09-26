@@ -1887,7 +1887,10 @@ class SkillManager:
                     # was winning before. If a candidate already exists its file is replaced
                     # (newest proposal wins); old per-version ratings stay in metrics history.
                     if self._register_candidate_upgrade(name, pending_file, parsed, frontmatter, source):
-                        return True, []
+                        # Same invariant as the new-skill path: on success `errors` holds only
+                        # non-blocking warnings (validate_skill early-returned before reaching
+                        # here when any structural errors were present) — propagate them.
+                        return True, errors
                     # Candidate write failed (I/O error) — do NOT fall through to the
                     # new-skill path: that would overwrite the existing production file
                     # and bypass the candidate flow. Clean up and report the failure.
