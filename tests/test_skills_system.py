@@ -168,6 +168,68 @@ class TestParseFrontmatter:
         assert fm['description'] == 'Fix connection reuse issues'
         assert fm['source'] == 'auto-skill'
 
+    # --- BUG_0018: lenient fallback parser (unescaped colons, BOM) -----------
+
+    def test_unescaped_colon_in_description_parses(self):
+        """BUG_0018: unescaped colon in a scalar value must survive via the lenient fallback."""
+        content = ('---\n'
+                   'name: my-skill\n'
+                   'description: This is: x\n'
+                   '---\nBody text\n')
+        fm, body = parse_frontmatter(content)
+        assert fm['description'] == 'This is: x'
+        assert fm['name'] == 'my-skill'
+        assert 'Body text' in body
+
+    def test_colon_in_generated_from_task_parses(self):
+        """BUG_0018: verbatim task text with colons must be preserved."""
+        content = ('---\n'
+                   'name: my-skill\n'
+                   'generated_from_task: Fix X: do Y properly\n'
+                   'description: A skill for testing purposes with enough characters\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['generated_from_task'] == 'Fix X: do Y properly'
+
+    def test_lenient_fallback_preserves_block_trigger_list_with_colon_in_scalar(self):
+        """BUG_0018: when the unescaped colon is in a SCALAR field (which makes safe_load raise),
+        the fallback must still recover a genuine list of str for a block-style triggers: key."""
+        content = ('---\n'
+                   'name: test-skill\n'
+                   'generated_from_task: Fix X: do Y properly\n'
+                   'triggers:\n'
+                   '  - trigger one\n'
+                   '  - trigger two\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['name'] == 'test-skill'
+        assert fm['generated_from_task'] == 'Fix X: do Y properly'
+        assert fm['triggers'] == ['trigger one', 'trigger two']
+        assert all(isinstance(t, str) for t in fm['triggers'])
+
+    def test_lenient_parse_strips_surrounding_quotes(self):
+        """BUG_0018 helper-level test: _lenient_parse strips one layer of matching surrounding
+        quotes from scalar values (rule 4). A quoted value containing a colon-space is used so the
+        same input would also fail yaml.safe_load, keeping this aligned with real fallback usage."""
+        from agent_cascade.skills.parser import _lenient_parse
+        lines = ['name: my-skill', 'description: "Fix X: do Y"']
+        result = _lenient_parse(lines)
+        assert result is not None
+        assert result['description'] == 'Fix X: do Y'
+
+    def test_lenient_fallback_returns_none_on_garbage_line(self):
+        """BUG_0018 guard (expected to pass pre-fix): a stray non-key line must NOT be
+        partially parsed — the fallback bails and the existing {} contract is kept."""
+        content = '---\nname: my-skill\ntriggers:\n- trigger1\nsub\n---\nBody text'
+        fm, body = parse_frontmatter(content)
+        assert fm == {}
+
+    def test_bom_before_opening_delimiter_parses(self):
+        """BUG_0018: a UTF-8 BOM before the opening '---' must not defeat delimiter detection."""
+        content = '\ufeff---\nname: x\n---\nBody text\n'
+        fm, _ = parse_frontmatter(content)
+        assert fm['name'] == 'x'
+
 
 class TestParseSkillFile:
     """Test parse_skill_file with real SKILL.md files."""

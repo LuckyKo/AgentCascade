@@ -31,7 +31,7 @@ from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 from agent_cascade.settings import (AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS, AUTO_SKILL_PROMOTION_THRESHOLD,
                                     CANDIDATE_MIN_RATINGS, DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE)
 from agent_cascade.skills.manager import SkillManager
-from agent_cascade.skills.matcher import SkillMatcher
+from agent_cascade.skills.matcher import SkillMatcher, skill_frontmatter_text
 from agent_cascade.skills.parser import parse_frontmatter
 from agent_cascade.skills.validator import validate_skill
 
@@ -200,12 +200,14 @@ class TestValidation:
         assert len(errors) > 0
 
     def test_frontmatter_error_is_actionable(self):
-        """Change 2: an unescaped colon in a frontmatter value makes yaml.safe_load fail; the
-        validator error must surface the YAML reason / actionable guidance instead of the bare
-        'No valid YAML frontmatter found'."""
+        """The validator error for a frontmatter that both strict AND lenient parsing reject must
+        surface the YAML reason / actionable guidance instead of the bare 'No valid YAML frontmatter
+        found'. (BUG_0018: the original unescaped-colon input now parses via the lenient fallback —
+        see test_colon_in_value_now_parses; this test keeps covering the still-invalid case with a
+        stray non-key line that the fallback also bails on.)"""
         raw = ('---\n'
                'name: test-skill\n'
-               'generated_from_task: Fix X: do Y properly\n'
+               'this line is not valid frontmatter at all\n'
                'description: A skill for testing purposes with enough characters\n'
                '---\n\n'
                '## Instructions\n\n'
@@ -220,6 +222,56 @@ class TestValidation:
         # Either the underlying YAML reason or the actionable "unescaped" guidance must be present.
         assert ('mapping values are not allowed here' in msg) or ('unescaped' in msg), \
             f"frontmatter error should be actionable, got: {msg!r}"
+
+    def test_colon_in_value_now_parses(self):
+        """BUG_0018 positive: the BUG_0017 trigger input (unescaped colon in generated_from_task)
+        now parses via the lenient fallback with the value intact."""
+        raw = ('---\n'
+               'name: test-skill\n'
+               'generated_from_task: Fix X: do Y properly\n'
+               'description: A skill for testing purposes with enough characters\n'
+               '---\n\nBody text here.\n')
+        fm, body = parse_frontmatter(raw)
+        assert fm.get('generated_from_task') == 'Fix X: do Y properly'
+        assert fm.get('name') == 'test-skill'
+
+    def test_validate_skill_accepts_colon_in_generated_from_task(self):
+        """BUG_0018 integration: a fully valid skill whose generated_from_task contains colons must
+        pass the frontmatter stage (no 'No valid YAML frontmatter found' error)."""
+        raw = ('---\n'
+               'name: test-skill\n'
+               'description: A skill for testing purposes with enough characters\n'
+               'triggers:\n'
+               '  - test\n'
+               '  - skill\n'
+               'generated_from_task: Fix X: do Y properly (todo.md:125)\n'
+               '---\n\n'
+               '## Instructions\n\n'
+               'Follow these steps carefully to complete the task. '
+               'This body has enough characters to pass validation.\n\n'
+               '1. Step one\n2. Step two\n3. Step three\n')
+        passed, errors = validate_skill(raw, 'test-skill', set())
+        assert passed, f"expected pass, got errors: {errors}"
+        assert 'No valid YAML frontmatter found' not in str(errors)
+
+    def test_colon_in_value_does_not_emit_matcher_dict_garbage(self):
+        """BUG_0018 guard for plan §7: when the fallback recovers frontmatter (colon in a scalar
+        field), triggers must be list[str] so the matcher's ' '.join never renders dict reprs."""
+        raw = ('---\n'
+               'name: test-skill\n'
+               'description: A skill for testing purposes with enough characters\n'
+               'triggers:\n'
+               '  - trigger one\n'
+               '  - plain item\n'
+               'generated_from_task: Fix X: do Y properly\n'
+               '---\n\nBody text here.\n')
+        fm, _ = parse_frontmatter(raw)
+        triggers = fm.get('triggers')
+        assert isinstance(triggers, list), f"expected list of str, got {type(triggers)}: {triggers!r}"
+        assert all(isinstance(t, str) for t in triggers), f"non-str trigger leaked: {triggers!r}"
+        text = skill_frontmatter_text(
+            fm.get('name', ''), fm.get('description', ''), triggers)
+        assert '{' not in text, f"dict repr leaked into matcher text: {text!r}"
 
     def test_duplicate_name(self):
         content = _make_skill_content(name='test-skill')

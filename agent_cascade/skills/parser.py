@@ -11,8 +11,9 @@ Parses SKILL.md files following the standard YAML frontmatter format:
     Markdown instructions...
 """
 
+import re
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -35,6 +36,48 @@ def normalize_version(raw) -> str:
     return '1.0.0'
 
 
+_KEY_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$')
+_LIST_ITEM_RE = re.compile(r'^\s*-\s+(.*)$')
+
+
+def _strip_quotes(value: str) -> str:
+    """Remove one layer of matching surrounding single/double quotes."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
+def _lenient_parse(yaml_lines: List[str]) -> Optional[Dict[str, Any]]:
+    """Best-effort line-based `key: value` parse used ONLY when yaml.safe_load fails.
+
+    Returns None when the block cannot be confidently interpreted, so the caller keeps its
+    existing "return {}" behaviour for genuinely malformed input.
+    """
+    out: Dict[str, Any] = {}
+    current_key: Optional[str] = None
+    for line in yaml_lines:
+        if not line.strip():
+            continue
+        m = _LIST_ITEM_RE.match(line)
+        if m:
+            if current_key is None:
+                return None
+            out[current_key].append(_strip_quotes(m.group(1).strip()))
+            continue
+        m = _KEY_RE.match(line)
+        if m:
+            key, raw = m.group(1), m.group(2).strip()
+            if raw == '':
+                current_key = key
+                out[key] = []
+            else:
+                current_key = None
+                out[key] = _strip_quotes(raw)
+        else:
+            return None  # unrecognized line -> do not guess
+    return out or None
+
+
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     """Split content into YAML frontmatter dict and remaining body text.
 
@@ -52,7 +95,7 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     Returns:
         Tuple of (frontmatter_dict, body_text).
     """
-    stripped = content.strip()
+    stripped = content.lstrip('\ufeff').strip()
     if not stripped.startswith('---'):
         logger.debug('[SKILLS] No YAML frontmatter delimiter found in content')
         return {}, content
@@ -80,19 +123,23 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     # Reconstruct YAML text from collected lines
     yaml_text = '\n'.join(yaml_lines)
 
+    # Body is everything after the closing delimiter
+    body = '\n'.join(lines[body_start:])
+
     # Parse YAML frontmatter using safe_load
     try:
         frontmatter = yaml.safe_load(yaml_text) or {}
     except yaml.YAMLError as e:
         logger.warning('[SKILLS] Failed to parse YAML frontmatter: %s', e)
+        lenient = _lenient_parse(yaml_lines)
+        if lenient is not None:
+            logger.info('[SKILLS] Frontmatter recovered by lenient parse: keys=%s', sorted(lenient))
+            return lenient, body.strip()
         return {}, content
 
     if not isinstance(frontmatter, dict):
         logger.debug('[SKILLS] Frontmatter parsed as non-dict type: %s', type(frontmatter).__name__)
         return {}, content
-
-    # Body is everything after the closing delimiter
-    body = '\n'.join(lines[body_start:])
 
     return frontmatter, body.strip()
 
