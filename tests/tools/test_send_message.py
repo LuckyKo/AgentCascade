@@ -247,20 +247,25 @@ class TestSendMessageEdgeCases:
     """Test edge cases like missing params, malformed JSON, etc."""
 
     def test_missing_destination_param(self, send_message_tool):
-        """Missing destination key in JSON → jsonschema validation error."""
-        import jsonschema
+        """Missing destination key → friendly ValueError naming the missing param.
+
+        (BUG_0022/BUG_0024: BaseTool._verify_json_format_args now converts
+        required-missing ValidationErrors into a friendly ValueError so tools can
+        return them as normal tool results instead of crash lines.)
+        """
         params = json.dumps({'message': 'hello'})
-        with pytest.raises(jsonschema.ValidationError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             send_message_tool.call(params)
-        assert "'destination' is a required property" in str(exc_info.value)
+        assert 'missing required parameter' in str(exc_info.value)
+        assert "'destination'" in str(exc_info.value)
 
     def test_missing_message_param(self, send_message_tool):
-        """Missing message key in JSON → jsonschema validation error."""
-        import jsonschema
+        """Missing message key → friendly ValueError naming the missing param."""
         params = json.dumps({'destination': 'user'})
-        with pytest.raises(jsonschema.ValidationError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             send_message_tool.call(params)
-        assert "'message' is a required property" in str(exc_info.value)
+        assert 'missing required parameter' in str(exc_info.value)
+        assert "'message'" in str(exc_info.value)
 
     def test_malformed_json_args_handled(self, send_message_tool):
         """Malformed JSON input should raise or return an error (BaseTool behavior)."""

@@ -14,6 +14,7 @@ parsing path — the layer that actually broke. Fixtures live under DEFAULT_WORK
 (tmp_path) because the standalone path resolver (agent_pool=None) only allows
 paths inside DEFAULT_WORKSPACE.
 """
+import json
 import jsonschema
 from pathlib import Path
 
@@ -101,3 +102,39 @@ def test_schema_rejects_additional_properties():
     assert ReadFile.parameters.get('additionalProperties') is False
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({'path': 'x.py', 'offset': 5}, ReadFile.parameters)
+
+
+def test_offset_alias_via_json_string(big_file):
+    """T7 (revert-proof, production shape): the model sends arguments as a JSON STRING.
+
+    The alias coercion must work on the string path too — this is the exact shape the
+    engine hands to tool.call() (a fresh dict after ToolDispatcher deep-copy, but the
+    coercion must not depend on that).
+    """
+    out = ReadFile().call(json.dumps({'path': str(big_file), 'offset': 478, 'limit': 44}))
+    assert not out.startswith('ERROR'), out
+    assert 'LINE_00478' in out
+    assert 'LINE_00479' in out
+    assert 'LINE_00477' not in out
+
+
+def test_non_integer_offset_errors(big_file):
+    """T8: a non-integer offset is rejected with a clear message, not silently dropped."""
+    out = ReadFile().call({'path': str(big_file), 'offset': 'abc'})
+    assert out.startswith('ERROR'), out
+    assert "'offset' must be an integer" in out
+
+
+def test_caller_dict_not_mutated(big_file):
+    """T9: the coercion must not mutate the caller's dict (direct-call safety)."""
+    args = {'path': str(big_file), 'offset': 478, 'limit': 44}
+    ReadFile().call(dict(args))
+    assert 'offset' in args and 'start_line' not in args
+
+
+def test_invalid_json_string_errors_cleanly():
+    """T10: an unparseable JSON string yields a normal tool error, not an exception."""
+    out = ReadFile().call('{not valid json')
+    assert out.startswith('ERROR'), out
+    # Pin the expected message so a regression to a different error path is caught.
+    assert 'missing required parameter' in out or 'valid JSON' in out, out

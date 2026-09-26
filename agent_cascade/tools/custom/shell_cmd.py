@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import time
+from typing import Union
 
 from agent_cascade.async_shell import _elapsed_for_task
 from agent_cascade.operation_manager.shell import ShellMixin
@@ -202,17 +203,21 @@ class ShellCmd(BaseTool):
             logger.debug(f"[shell_cmd] _truncate_shell_message failed for {agent_name}: {e}")
         return text
 
-    def call(self, params: str, **kwargs) -> str:
-        import json
-
+    def call(self, params: Union[str, dict], **kwargs) -> str:
         from agent_cascade.utils.utils import json_loads
 
-        try:
-            if isinstance(params, str):
-                p = json_loads(params)
-                params = json.dumps(p)
-        except Exception:
-            pass
+        # Normalize to a dict up front so the alias coercion below works on BOTH input
+        # shapes. The production path hands us a fresh dict (ToolDispatcher deep-copies
+        # args), but direct callers may pass a JSON string or their own dict — never mutate
+        # a caller's dict in place. Unparseable/non-dict input becomes {} so that
+        # _verify_json_format_args reports the missing 'command' as a normal tool error.
+        if isinstance(params, str):
+            try:
+                params = json_loads(params)
+            except Exception:
+                params = None
+            if not isinstance(params, dict):
+                params = {}
 
         # BUG_0024 (defence in depth): the schema rejects unknown keys (e.g. the legacy
         # 'async_mode' after the execution_mode rename). The common case is coerced with a
@@ -220,8 +225,10 @@ class ShellCmd(BaseTool):
         # instead of silently running sync. Returned as an ERROR string so the model sees it
         # as a normal tool result rather than a crash line.
         try:
-            if isinstance(params, dict) and 'async_mode' in params and 'execution_mode' not in params:
-                v = params.pop('async_mode')
+            if 'async_mode' in params and 'execution_mode' not in params:
+                v = params['async_mode']
+                params = dict(params)
+                del params['async_mode']
                 params['execution_mode'] = 'async' if bool(v) else 'sync'
                 logger.info("shell_cmd: coerced legacy alias 'async_mode' -> 'execution_mode'=%s",
                             params['execution_mode'])

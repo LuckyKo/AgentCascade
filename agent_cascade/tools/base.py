@@ -183,6 +183,15 @@ class BaseTool(ABC):
                         f"unknown parameter(s) for tool '{self.name}': {sorted(bad)}. "
                         f"Valid parameters: {valid}"
                     ) from e
+                # BUG_0022/BUG_0024: required-missing (e.g. an empty {} after a failed JSON
+                # parse, or a dropped 'path'/'command') used to escape as a raw
+                # jsonschema.ValidationError crash line. Convert it to the same friendly
+                # ValueError shape so tools can return it as a normal tool result.
+                if e.validator == 'required':
+                    missing = [p for p in self.parameters.get('required', []) if p not in params_json]
+                    raise ValueError(
+                        f"missing required parameter(s) for tool '{self.name}': {sorted(missing)}"
+                    ) from e
                 raise
         else:
             raise ValueError

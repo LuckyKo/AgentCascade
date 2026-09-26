@@ -672,11 +672,17 @@ class TestReturnFormat:
             assert APIRouter._has_uncaptioned_images([fn_msg]) is False
 
     def test_missing_prompt_raises_validation_error(self):
-        """jsonschema validation rejects missing required 'prompt' field."""
-        import jsonschema
+        """Missing required 'prompt' → clean ERROR ContentItem (not a crash).
+
+        (BUG_0022/BUG_0024: BaseTool._verify_json_format_args now converts
+        required-missing ValidationErrors into a friendly ValueError; ImageGen.call
+        catches it and returns an ERROR ContentItem so the model sees a normal tool result.)
+        """
         tool = ImageGen()
-        with pytest.raises(jsonschema.ValidationError, match='prompt'):
-            tool.call({})
+        result = tool.call({})
+        assert len(result) == 1
+        assert 'ERROR' in result[0].text
+        assert 'prompt' in result[0].text
 
     def test_empty_prompt_returns_error(self):
         tool = ImageGen()

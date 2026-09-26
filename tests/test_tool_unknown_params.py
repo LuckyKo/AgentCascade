@@ -16,6 +16,7 @@ Fix under test:
 The coercion tests monkeypatch _execute_sync / _launch_async so no real shell is
 spawned; the rejection test proves the command never executes at all.
 """
+import json
 import jsonschema
 import pytest
 
@@ -80,3 +81,51 @@ def test_shell_cmd_unknown_param_errors_loudly_and_never_runs(monkeypatch):
     assert out.startswith('ERROR'), out
     assert 'unknown parameter' in out
     assert 'wrong_key' in out
+
+
+def test_shell_cmd_async_mode_alias_via_json_string(monkeypatch):
+    """Production shape: the model sends arguments as a JSON STRING (revert-proof)."""
+    calls = {}
+
+    def fake_launch(self, agent_name, command, justification, cwd, timeout, heartbeat_interval):
+        calls['launched'] = True
+        return 'LAUNCHED'
+
+    monkeypatch.setattr(ShellCmd, '_launch_async', fake_launch)
+    out = ShellCmd().call(json.dumps({'command': 'echo hi', 'justification': 't', 'async_mode': True}))
+    assert not out.startswith('ERROR'), out
+    assert calls.get('launched') is True
+
+
+def test_shell_cmd_async_mode_false_maps_to_sync(monkeypatch):
+    """async_mode=false must map to execution_mode=sync (blocking), not async."""
+    calls = {}
+
+    def fake_sync(self, agent_name, command, justification, cwd, timeout):
+        calls['synced'] = True
+        return 'SYNCED'
+
+    monkeypatch.setattr(ShellCmd, '_execute_sync', fake_sync)
+    out = ShellCmd().call({'command': 'echo hi', 'justification': 't', 'async_mode': False})
+    assert not out.startswith('ERROR'), out
+    assert calls.get('synced') is True
+
+
+def test_shell_cmd_caller_dict_not_mutated(monkeypatch):
+    """The coercion must not mutate the caller's dict (direct-call safety)."""
+
+    def fake_launch(self, agent_name, command, justification, cwd, timeout, heartbeat_interval):
+        return 'LAUNCHED'
+
+    monkeypatch.setattr(ShellCmd, '_launch_async', fake_launch)
+    args = {'command': 'echo hi', 'justification': 't', 'async_mode': True}
+    ShellCmd().call(dict(args))
+    assert 'async_mode' in args and 'execution_mode' not in args
+
+
+def test_shell_cmd_invalid_json_string_errors_cleanly():
+    """An unparseable JSON string yields a normal tool error, not an exception."""
+    out = ShellCmd().call('{not valid json')
+    assert out.startswith('ERROR'), out
+    # Pin the expected message so a regression to a different error path is caught.
+    assert 'missing required parameter' in out or 'valid JSON' in out, out

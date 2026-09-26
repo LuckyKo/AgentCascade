@@ -372,8 +372,17 @@ class ReadFile(BaseTool, PathResolutionMixin):
         # 'offset'. The schema above rejects unknown keys loudly; this narrow alias makes
         # the common case succeed on the first retry. It must run BEFORE validation, which
         # is why it operates on the raw params — no other wrong key has been observed, so
-        # do not extend the allowlist speculatively.
-        if isinstance(params, dict) and 'offset' in params and 'start_line' not in params:
+        # do not extend the allowlist speculatively. The coercion works on a copy: the
+        # production path hands us a fresh dict (ToolDispatcher deep-copies args), but
+        # direct callers may pass their own, and we must never mutate it.
+        if isinstance(params, str):
+            try:
+                params = json_loads(params)
+            except Exception:
+                params = None  # let _verify_json_format_args report the parse failure
+            if not isinstance(params, dict):
+                params = {}
+        if 'offset' in params and 'start_line' not in params:
             try:
                 coerced = int(params['offset'])
             except (TypeError, ValueError):
