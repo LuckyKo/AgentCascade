@@ -115,6 +115,18 @@ def validate_skill(
     triggers = frontmatter.get('triggers', [])
     if not triggers or not isinstance(triggers, list) or len(triggers) < 1:
         errors.append("Missing or empty 'triggers' list (requires at least 1 entry)")
+    else:
+        # BUG_0019: a block-list item with an unescaped colon parses SUCCESSFULLY into a
+        # one-key dict (``- fix parser: do Y`` -> {'fix parser': 'do Y'}), so safe_load never
+        # raises and the BUG_0018 lenient fallback never sees it. Such an item would then raise
+        # TypeError in ' '.join(triggers) downstream. Reject with an actionable message.
+        bad = [i for i, t in enumerate(triggers) if not isinstance(t, str)]
+        if bad:
+            shown = ', '.join(repr(triggers[i]) for i in bad[:3])
+            errors.append(
+                f"Trigger items must be strings; item(s) at position "
+                f"{', '.join(str(i) for i in bad[:3])} are not ({shown}). "
+                f"Quote values containing a colon, e.g. \"fix parser: do Y\".")
 
     # Version format check (soft — warns but allows registration, defaults to 1.0.0 if invalid)
     version = frontmatter.get('version')

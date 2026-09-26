@@ -299,6 +299,47 @@ class TestValidation:
 
 
 # ===========================================================================
+# 1b. Unit: Triggers item types (BUG_0019)
+# ===========================================================================
+
+# Raw-string fixture: a block-list item with an unescaped colon parses SUCCESSFULLY into a
+# one-key dict ('- fix parser: do Y' -> {'fix parser': 'do Y'}), so safe_load never raises and
+# the BUG_0018 lenient fallback never sees it. Built as a raw string (NOT via _make_skill_content,
+# which yaml.dumps and would quote the value, defeating the repro).
+_COLON_TRIGGER_SKILL = (
+    '---\n'
+    'name: colon-trigger-skill\n'
+    'description: A skill whose trigger list contains an unescaped colon item\n'
+    'source: auto-generated\n'
+    'triggers:\n'
+    '  - fix parser: do Y\n'
+    '  - plain item\n'
+    '---\n'
+    '\n'
+    '## Instructions\n\n'
+    'Follow these steps carefully to complete the task. '
+    'This body has enough characters to pass validation.\n'
+)
+
+
+class TestTriggersItemTypes:
+    """BUG_0019: non-string trigger items must be rejected, not crash downstream."""
+
+    def test_block_list_colon_trigger_is_rejected(self):
+        passed, errors = validate_skill(_COLON_TRIGGER_SKILL, 'colon-trigger-skill', set())
+        assert not passed
+        msgs = [e for e in errors if 'must be strings' in e and 'Quote' in e]
+        assert msgs, f"expected a 'must be strings ... Quote' error, got: {errors}"
+
+    def test_validator_non_string_trigger_item_does_not_raise(self):
+        # Exercises the Tier 2 self-match join (validator.py L154) with task_text non-empty.
+        # Pre-fix this raised TypeError inside validate_skill; post-fix it returns a rejection.
+        passed, errors = validate_skill(
+            _COLON_TRIGGER_SKILL, 'colon-trigger-skill', set(), task_text='fix the parser to do Y')
+        assert not passed
+
+
+# ===========================================================================
 # 2. Unit: Registration — SkillManager.register_skill_from_content
 # ===========================================================================
 
@@ -519,6 +560,66 @@ class TestMatcherTriggerIndexing:
         results = matcher.match('hello world')
         assert len(results) > 0
         assert results[0][0] == 'only-triggers-match'
+
+    def test_build_index_ignores_non_string_trigger_items(self):
+        """BUG_0019: a dict trigger item must be dropped, not str()-ed or joined (TypeError)."""
+        matcher = SkillMatcher()
+        meta = [
+            {
+                'name': 'colon-trigger-skill',
+                'description': 'd',
+                'triggers': [{'fix parser': 'do Y'}, 'plain item'],
+            },
+        ]
+        matcher.build_index(meta)  # must not raise TypeError pre-fix
+        assert 'plain' in matcher._inverted_index
+        for key in matcher._inverted_index:
+            assert '{' not in key and "'" not in key and '}' not in key, (
+                f"index key {key!r} looks like str()-coerced dict repr; sanitisation must drop "
+                f"non-string items, not coerce them")
+
+    def test_one_bad_skill_does_not_abort_index_build(self):
+        """BUG_0019: one corrupt skill must not truncate the whole index (pre-fix TypeError
+        aborted build_index mid-loop, silently killing matching for every later skill)."""
+        matcher = SkillMatcher()
+        meta = [
+            {'name': 'first-good', 'description': 'zzz alpha', 'triggers': ['alpha', 'beta']},
+            {'name': 'bad-skill', 'description': 'd',
+             'triggers': [{'fix parser': 'do Y'}, 'plain item']},
+            {'name': 'last-good', 'description': 'www omega', 'triggers': ['omega', 'delta']},
+        ]
+        matcher.build_index(meta)  # must not raise pre-fix
+        assert 'alpha' in matcher._inverted_index, "first good skill's keywords missing"
+        assert 'omega' in matcher._inverted_index, (
+            "last good skill's keywords missing — index build aborted before completing the loop")
+
+    def test_quoted_colon_trigger_still_passes_and_indexes(self):
+        """BUG_0019 over-rejection guard: a well-formed quoted-colon trigger (the form the error
+        message recommends) must still pass validation and still be indexed."""
+        content = (
+            '---\n'
+            'name: quoted-colon-skill\n'
+            'description: A skill with a properly quoted colon trigger\n'
+            'source: auto-generated\n'
+            'triggers:\n'
+            '  - "fix parser: do Y"\n'
+            '---\n'
+            '\n'
+            '## Instructions\n\n'
+            'Follow these steps carefully to complete the task. '
+            'This body has enough characters to pass validation.\n'
+        )
+        passed, errors = validate_skill(content, 'quoted-colon-skill', set())
+        assert passed, f"quoted colon trigger must not be over-rejected: {errors}"
+
+        matcher = SkillMatcher()
+        meta = [
+            {'name': 'quoted-colon-skill', 'description': 'd',
+             'triggers': ['fix parser: do Y']},
+        ]
+        matcher.build_index(meta)
+        assert 'fix' in matcher._inverted_index
+        assert 'parser' in matcher._inverted_index
 
 
 # ===========================================================================

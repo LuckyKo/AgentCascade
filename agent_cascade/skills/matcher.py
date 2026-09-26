@@ -103,7 +103,15 @@ class SkillMatcher:
 
             description = meta.get('description', '')
             triggers = meta.get('triggers', [])
-            trigger_text = ' '.join(triggers) if isinstance(triggers, list) else ''
+            # BUG_0019 defense-in-depth: disk-loaded skills never pass through validate_skill
+            # (discover -> _register_single), so a block-list item with an unescaped colon can
+            # reach here as a dict. Join used to raise TypeError and abort the whole index build.
+            # Drop non-string items rather than str()-ing them: the repr glyphs ("{'", "': '")
+            # would be compared character-wise by difflib in skill_frontmatter_text.
+            if isinstance(triggers, list):
+                trigger_text = ' '.join(t for t in triggers if isinstance(t, str))
+            else:
+                trigger_text = ''
             text = f"{skill_name} {description} {trigger_text}"
             keywords = _TOKEN_RE.findall(text.lower())
 
