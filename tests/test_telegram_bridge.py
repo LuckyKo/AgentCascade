@@ -1233,17 +1233,23 @@ def _tg_update(user_id: int, text: str, chat_id: int = 100) -> 'Update':
     Carries the entity Telegram always attaches to slash commands — without it
     filters.COMMAND would not match and any filter-level assertion is vacuous
     (see test_build_application_routes_commands_to_on_message).
+
+    Each update gets a UNIQUE update_id/message_id: on_message now dedups inbound
+    events by those ids (tg-dup-delivery plan §4.1), so reusing id=1 across tests
+    would make every second update in the suite look like a redelivery and get dropped.
     """
     from telegram import Chat, Message, MessageEntity, Update, User
 
+    _tg_update._n = getattr(_tg_update, '_n', 0) + 1
+    uid = _tg_update._n
     entities = None
     if text.startswith('/'):
         word = text[1:].split(' ', 1)[0]   # command word incl. any @bot mention
         entities = [MessageEntity(type='bot_command', offset=0, length=len(word))]
     return Update(
-        update_id=1,
+        update_id=uid,
         message=Message(
-            message_id=1, date='2026-09-24T00:00:00',
+            message_id=uid, date='2026-09-24T00:00:00',
             chat=Chat(id=chat_id, type='private'), text=text,
             from_user=User(id=user_id, is_bot=False, first_name='tester'),
             entities=entities,

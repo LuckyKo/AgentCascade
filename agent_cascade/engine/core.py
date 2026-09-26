@@ -1116,7 +1116,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             # instance (e.g. AgentInstance.__new__ in tests, which bypasses the
                             # dataclass default for parent_instance) degrades to "no push"
                             # instead of raising AttributeError into the run loop.
-                            if getattr(instance, 'parent_instance', None) is None:
+                            if (getattr(instance, 'parent_instance', None) is None
+                                    and not getattr(instance, '_tg_pushed', False)):
                                 from agent_cascade.compression.helpers import extract_instance_output
                                 pre_text = extract_instance_output(
                                     list(instance.conversation), instance.instance_name,

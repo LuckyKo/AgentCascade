@@ -16,6 +16,7 @@ boundaries; ``_safe_send`` chunks long messages and honors 429 retry_after.
 """
 
 import asyncio
+import hashlib
 from typing import List, Optional
 
 from telegram import Update
@@ -46,6 +47,12 @@ CHUNK_SIZE = TG_MAX_MESSAGE_LEN
 # so this bound applies ONLY to the NetworkError path below. At defaults
 # (base=1.0, cap=30.0) the backoff sleeps are 1+2+4+8 = ~15s of recovery window.
 _SEND_ONE_MAX_ATTEMPTS = 5
+
+# Inbound idempotency: Telegram update ids already processed by on_message. A
+# redelivered update (PTB long-poll reconnect, sleep-wake, NAT expiry) must not
+# start a second AC run — the per-run push model would deliver the answer N times.
+_SEEN_TG_IDS: set = set()
+_SEEN_TG_IDS_MAX = 1000
 
 
 def chunk_text(text: str, limit: int = CHUNK_SIZE) -> List[str]:
@@ -125,9 +132,13 @@ async def _send_one(bot, chat_id: int, text: str) -> None:
                 logger.error('Telegram send failed after %d network retries: %s',
                              net_attempts, e)
                 raise
+            # Content fingerprint (first 8 hex chars of sha1) so repeated retries of the
+            # SAME payload are correlatable across log lines. Used ONLY in this log line —
+            # never stored, and the full text is never logged.
             logger.warning(
-                'Telegram network error (attempt %d/%d); sleeping %.1fs before retry',
-                net_attempts, _SEND_ONE_MAX_ATTEMPTS, backoff)
+                'Telegram network error (attempt %d/%d); sleeping %.1fs before retry; content=%s',
+                net_attempts, _SEND_ONE_MAX_ATTEMPTS, backoff,
+                hashlib.sha1(text.encode('utf-8')).hexdigest()[:8])
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, TG_SEND_RETRY_BACKOFF_CAP_SEC)
 
@@ -208,8 +219,13 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
 
 async def _safe_send(bot, chat_id: int, text: str) -> None:
     try:
+        n_chunks = 0
         for part in chunk_text(text):          # chunk long answers (short messages are byte-identical: [text])
             await _send_one(bot, chat_id, part)
+            n_chunks += 1
+        # Success-side observability (tg-dup-delivery plan §4.2): chunk count and char
+        # length ONLY — no message content, so a push can never leak into logs.
+        logger.info('[TG-PUSH] delivered %d chunk(s), %d chars', n_chunks, len(text))
     except Exception as e:
         logger.error('failed to send notification to Telegram: %s', e)
 
@@ -231,6 +247,25 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
 
     chat_id = update.effective_chat.id
     context.bot_data['last_chat_id'] = chat_id
+
+    # Idempotency on the inbound event. A redelivered update (PTB long-poll
+    # reconnect, sleep-wake, NAT expiry) must not start a second AC run, or the
+    # per-run push model delivers the answer N times.
+    tg_id = getattr(update, 'update_id', None)
+    if tg_id is None:
+        _msg = getattr(update, 'effective_message', None)
+        tg_id = getattr(_msg, 'message_id', None) if _msg is not None else None
+
+    if tg_id is None:
+        # No usable key — proceed rather than risk dropping a real message.
+        logger.debug('TG update has no update_id/message_id; skipping inbound dedup')
+    else:
+        if tg_id in _SEEN_TG_IDS:
+            logger.debug('ignoring duplicate Telegram event id=%s', tg_id)
+            return
+        _SEEN_TG_IDS.add(tg_id)
+        if len(_SEEN_TG_IDS) > _SEEN_TG_IDS_MAX:   # bounded; clear on overflow
+            _SEEN_TG_IDS.clear()
 
     # System-command interception (Phase 2): registered slash-commands are handled
     # locally / via AC REST endpoints and answered directly. They NEVER reach the
