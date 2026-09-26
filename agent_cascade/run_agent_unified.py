@@ -234,11 +234,25 @@ def run_agent_thread_unified(
         # NEW (tg push model): push the final answer to the phone once, at natural end of this root run.
         # Suppressed on an explicit stop; a crash skips this line entirely (exception path). Skipped if the
         # pre-reflection hook already delivered it (instance._tg_pushed True). Best-effort, never breaks the run.
-        if not is_stopped():
+        #
+        # TG-DEDUP (2026-09-26): the push is now gated on THIS thread's generation still being current
+        # AND the instance having no queued/async-pending work left. Why: engine.run()'s exit-finally
+        # (engine/core.py ~L1257-1280) drains the message queue WITHOUT appending to the conversation
+        # unless it was a suspension-driven exit — so a phone message that arrives while this run is
+        # finishing (or during the sub-agent slot wait before its own run starts) is silently consumed,
+        # and api_server.py's `session['generating']` guard then blocks /api/message from starting a
+        # second thread for it. Without this gate the push would ship the answer to the PREVIOUS
+        # question while the new one never gets a run — the "same message again" symptom class.
+        # With the gate, the queued message survives in the queue and the next generation's post-run
+        # push delivers its own answer. (The bridge-side waiter still prints its ceiling notice when
+        # it gives up; that is observability, not delivery.)
+        if not is_stopped() and current_generation == pool._run_generation:
             try:
                 from agent_cascade.compression.helpers import extract_instance_output
                 _ri = pool.get_instance(instance_name)  # re-fetch: the run may have recycled/replaced this instance
-                if _ri is not None and not getattr(_ri, '_tg_pushed', False):
+                _outstanding = (pool.has_pending(instance_name) or pool.has_messages(instance_name)) \
+                    if hasattr(pool, 'has_pending') else False
+                if _ri is not None and not getattr(_ri, '_tg_pushed', False) and not _outstanding:
                     post_text = extract_instance_output(
                         list(_ri.conversation), instance_name, pool=pool, instance=_ri)
                     if post_text and post_text.strip():
