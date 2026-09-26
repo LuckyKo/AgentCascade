@@ -15,6 +15,12 @@ the engine test reuses the real-ExecutionEngine harness from ``tests/test_tg_pus
 
 Run serially (pytest.ini pins xdist in addopts):
     python -m pytest tests/test_tg_dup_delivery.py -v -o addopts="" --timeout=120
+
+NOT safe for xdist parallel runs: the production code keeps a module-level
+``_SEEN_TG_IDS`` set shared across all tests in this process. Even with the
+autouse clear fixture, concurrent workers executing these tests can interleave
+add/clear operations and produce flaky ordering (an id added by one test may be
+seen as "already processed" by another). Always run this file with xdist off.
 """
 
 import asyncio

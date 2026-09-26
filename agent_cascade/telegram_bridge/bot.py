@@ -51,7 +51,7 @@ _SEND_ONE_MAX_ATTEMPTS = 5
 # Inbound idempotency: Telegram update ids already processed by on_message. A
 # redelivered update (PTB long-poll reconnect, sleep-wake, NAT expiry) must not
 # start a second AC run — the per-run push model would deliver the answer N times.
-_SEEN_TG_IDS: set = set()
+_SEEN_TG_IDS: set[int] = set()
 _SEEN_TG_IDS_MAX = 1000
 
 
@@ -264,7 +264,7 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
             logger.debug('ignoring duplicate Telegram event id=%s', tg_id)
             return
         _SEEN_TG_IDS.add(tg_id)
-        if len(_SEEN_TG_IDS) > _SEEN_TG_IDS_MAX:   # bounded; clear on overflow
+        if len(_SEEN_TG_IDS) > _SEEN_TG_IDS_MAX:   # Bounded size; clear all on overflow to prevent unbounded growth.
             _SEEN_TG_IDS.clear()
 
     # System-command interception (Phase 2): registered slash-commands are handled
