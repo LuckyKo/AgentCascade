@@ -1,15 +1,18 @@
-"""Minimal v1 Telegram bridge for AgentCascade.
+"""Telegram bridge for AgentCascade.
 
-A standalone long-polling process that lets a single allowlisted user drive AC
-from a phone: send a task -> AC runs it -> the root agent's final assistant
-message is sent back as one reply (chunked only if it exceeds 4096 chars).
+Lets a single allowlisted user drive AC from a phone: send a task -> AC runs it
+-> the root agent's final answer is pushed back once per run (chunked only if it
+exceeds 4096 chars). The bridge runs as an in-process daemon thread on the agent
+pool, not a separate process.
 
-v1 scope (see plans/telegram-bridge-implementation-plan.md, V1 SCOPE ADDENDUM):
+Scope notes (see plans/telegram-bridge-implementation-plan.md and
+plans/tg-bridge-push-model_PLAN.md):
   - NO streaming / WebSocket client.
   - NO approval buttons.
   - Receiving: PTB long-poll -> auth gate -> X25519+AES-GCM handshake -> POST /api/message.
-  - Completion: a per-task waiter polls GET /api/status until generating==false,
-    then reads the last assistant message from the open GET /api/state.
+  - Completion: AC pushes the final answer at natural end of the root run (pre- and
+    post-skill-reflection, deduped to one message per run). A per-task waiter still
+    polls GET /api/status for "still working" pings and offline notices only.
 
 Run with:  python -m agent_cascade.telegram_bridge
 """

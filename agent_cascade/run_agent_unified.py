@@ -132,10 +132,10 @@ def run_agent_thread_unified(
             return stopped
 
         # NEW (tg push model): reset this run's TG dedup flag so a stale True from a previous reflection run
-        # can't suppress this run's push. Re-fetched below; the local `instance` (L102) may be stale if created at L104-108.
-        _ri0 = pool.get_instance(instance_name)
-        if _ri0 is not None:
-            _ri0._tg_pushed = False
+        # can't suppress this run's push. Re-fetched here; the local `instance` (L102) may be stale if created at L104-108.
+        _tg_instance = pool.get_instance(instance_name)
+        if _tg_instance is not None:
+            _tg_instance._tg_pushed = False
 
         for turn_output_raw in run_agent_in_pool_with_recovery(
                 pool=pool,
@@ -217,19 +217,19 @@ def run_agent_thread_unified(
         if not is_stopped():
             try:
                 from agent_cascade.compression.helpers import extract_instance_output
-                _ri = pool.get_instance(instance_name)
+                _ri = pool.get_instance(instance_name)  # re-fetch: the run may have recycled/replaced this instance
                 if _ri is not None and not getattr(_ri, '_tg_pushed', False):
                     post_text = extract_instance_output(
                         list(_ri.conversation), instance_name, pool=pool, instance=_ri)
                     if post_text and post_text.strip():
                         sup = getattr(pool, 'telegram_supervisor', None)
                         if sup is not None and hasattr(sup, 'notify_user'):
-                            try:
-                                sup.notify_user(post_text)
-                            except Exception:
-                                logger.debug('TG post-run push failed (non-fatal)', exc_info=True)
+                            # notify_user returns True only if the message was scheduled onto a live bridge
+                            # loop (False = silent no-op). Unlike the pre hook there is no dedup flag to set:
+                            # this is the last push of the run.
+                            sup.notify_user(post_text)
             except Exception as e:  # noqa: BLE001 - best-effort, never break the run
-                logger.debug(f"TG post-run push failed (non-critical): {e}")
+                logger.debug('[TG-PUSH] post-run push failed for %s: %s', instance_name, e)
 
         # ── Final state broadcast ────────────────────────────────────────
         final_state = build_state_from_pool(

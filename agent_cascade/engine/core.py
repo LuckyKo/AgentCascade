@@ -1108,12 +1108,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                 instance, messages, llm_messages,
                                 loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
                         # NEW (tg push model): deliver the committed final answer NOW, before the reflection
-                        # turns run. Root-only: parent_instance is None == root/main (agent_instance.py:249; same
-                        # idiom as engine/helpers.py:685). Reuse caveat: find_or_create_instance reassigns
-                        # parent_instance on sub-agent reuse (lifecycle_manager.py:154), but the root is only ever
-                        # created via create_main_agent_instance (parent=None) and acquired via get_instance.
-                        # Best-effort (mirrors _maybe_submit_memory_hint: never raises/blocks). Deduped against the
-                        # post-run push via instance._tg_pushed.
+                        # turns run. Root-only (parent_instance is None; same idiom as engine/helpers.py:685 —
+                        # sub-agents must not push to the phone). Best-effort like _maybe_submit_memory_hint
+                        # (never raises/blocks); deduped against the post-run push via instance._tg_pushed.
                         try:
                             # getattr (not a bare attribute read) so a minimally-constructed
                             # instance (e.g. AgentInstance.__new__ in tests, which bypasses the
