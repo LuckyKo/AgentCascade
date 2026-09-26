@@ -120,12 +120,12 @@ def validate_skill(
         # one-key dict (``- fix parser: do Y`` -> {'fix parser': 'do Y'}), so safe_load never
         # raises and the BUG_0018 lenient fallback never sees it. Such an item would then raise
         # TypeError in ' '.join(triggers) downstream. Reject with an actionable message.
-        bad = [i for i, t in enumerate(triggers) if not isinstance(t, str)]
-        if bad:
-            shown = ', '.join(repr(triggers[i]) for i in bad[:3])
+        non_string_indices = [i for i, t in enumerate(triggers) if not isinstance(t, str)]
+        if non_string_indices:
+            shown = ', '.join(repr(triggers[i]) for i in non_string_indices[:3])
             errors.append(
                 f"Trigger items must be strings; item(s) at position "
-                f"{', '.join(str(i) for i in bad[:3])} are not ({shown}). "
+                f"{', '.join(str(i) for i in non_string_indices[:3])} are not ({shown}). "
                 f"Quote values containing a colon, e.g. \"fix parser: do Y\".")
 
     # Version format check (soft — warns but allows registration, defaults to 1.0.0 if invalid)
