@@ -169,7 +169,21 @@ class BaseTool(ABC):
                         raise ValueError('Parameters %s is required!' % param['name'])
         elif isinstance(self.parameters, dict):
             import jsonschema
-            jsonschema.validate(instance=params_json, schema=self.parameters)
+            try:
+                jsonschema.validate(instance=params_json, schema=self.parameters)
+            except jsonschema.ValidationError as e:
+                # BUG_0024 (and BUG_0022's sibling class): schemas without
+                # additionalProperties:false silently accept unknown keys and the tool then
+                # runs with defaults — a silent wrong-behaviour. Surface the offending key
+                # names in the message so the caller can self-correct on retry.
+                if e.validator == 'additionalProperties':
+                    bad = [p for p in params_json if p not in self.parameters.get('properties', {})]
+                    valid = sorted(self.parameters.get('properties', {}))
+                    raise ValueError(
+                        f"unknown parameter(s) for tool '{self.name}': {sorted(bad)}. "
+                        f"Valid parameters: {valid}"
+                    ) from e
+                raise
         else:
             raise ValueError
         return params_json

@@ -115,6 +115,10 @@ class ShellCmd(BaseTool):
     description = TOOL_METADATA['shell_cmd']['description']
     parameters = {
         'type': 'object',
+        # BUG_0024: reject unknown keys loudly (e.g. the legacy 'async_mode' after the
+        # execution_mode rename) instead of silently running with defaults. BaseTool
+        # converts the rejection into a friendly "unknown parameter(s) ..." ValueError.
+        'additionalProperties': False,
         'properties': {
             'command': {
                 'type': 'string',
@@ -210,7 +214,20 @@ class ShellCmd(BaseTool):
         except Exception:
             pass
 
-        params = self._verify_json_format_args(params)
+        # BUG_0024 (defence in depth): the schema rejects unknown keys (e.g. the legacy
+        # 'async_mode' after the execution_mode rename). The common case is coerced with a
+        # nudge so the caller succeeds on the first retry; anything else unknown errors loudly
+        # instead of silently running sync. Returned as an ERROR string so the model sees it
+        # as a normal tool result rather than a crash line.
+        try:
+            if isinstance(params, dict) and 'async_mode' in params and 'execution_mode' not in params:
+                v = params.pop('async_mode')
+                params['execution_mode'] = 'async' if bool(v) else 'sync'
+                logger.info("shell_cmd: coerced legacy alias 'async_mode' -> 'execution_mode'=%s",
+                            params['execution_mode'])
+            params = self._verify_json_format_args(params)
+        except ValueError as e:
+            return f"ERROR: {e}"
         command = params['command']
         justification = params.get('justification')
         cwd = params.get('cwd', '.')

@@ -117,6 +117,10 @@ class ReadFile(BaseTool, PathResolutionMixin):
     description = TOOL_METADATA['read_file']['description']
     parameters = {
         'type': 'object',
+        # BUG_0022: reject unknown keys loudly (e.g. the model's 'offset' habit) instead of
+        # silently dropping them and reading from line 1. BaseTool converts the rejection
+        # into a friendly "unknown parameter(s) ..." ValueError naming the valid params.
+        'additionalProperties': False,
         'properties': {
             'path': {
                 'type': 'string',
@@ -364,7 +368,29 @@ class ReadFile(BaseTool, PathResolutionMixin):
     #  Main call()                                                        #
     # ------------------------------------------------------------------ #
     def call(self, params: Union[str, dict], **kwargs: Any) -> str:
-        params = self._verify_json_format_args(params)
+        # BUG_0022 Layer 2 (defence in depth): models habitually send the line offset as
+        # 'offset'. The schema above rejects unknown keys loudly; this narrow alias makes
+        # the common case succeed on the first retry. It must run BEFORE validation, which
+        # is why it operates on the raw params — no other wrong key has been observed, so
+        # do not extend the allowlist speculatively.
+        if isinstance(params, dict) and 'offset' in params and 'start_line' not in params:
+            try:
+                coerced = int(params['offset'])
+            except (TypeError, ValueError):
+                return f"ERROR: 'offset' must be an integer, got: {params['offset']!r}"
+            params = dict(params)
+            del params['offset']
+            params['start_line'] = coerced
+            logger.info("read_file: coerced alias 'offset' -> 'start_line'=%s", coerced)
+
+        try:
+            params = self._verify_json_format_args(params)
+        except ValueError as e:
+            # BUG_0022 Layer 2: the schema rejects unknown keys (additionalProperties:false);
+            # convert to a returned ERROR string so the model sees it as a normal tool result
+            # and can retry with the correct key, instead of a crash line.
+            return f"ERROR: {e}"
+
         path = params.get('path')
         if not path:
             return "ERROR: Missing 'path' parameter. Please provide a file path."

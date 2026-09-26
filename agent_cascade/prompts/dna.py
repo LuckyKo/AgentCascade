@@ -250,7 +250,9 @@ TOOL_METADATA = {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'D:/data/input.csv').",
             'start_line':
-                'Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.',
+                ('Optional: 1-based line number to start reading from. This parameter is named '
+                 "'start_line', not 'offset'. Supports negative values (-1 = last line, -3 = "
+                 'third-to-last). Default is 1.'),
             'limit':
                 "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
         }
