@@ -1130,7 +1130,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                         # Set _tg_pushed ONLY on success so a failed pre-push doesn't suppress
                                         # the post-run push (which could still deliver if the bridge comes up);
                                         # otherwise we'd silently drop the final answer for that run.
-                                        if sup.notify_user(pre_text):
+                                        # instance_name/run_generation as keywords (tg-dup v3 F3a): getattr keeps a
+                                        # minimally-constructed pool from raising into the run loop.
+                                        if sup.notify_user(pre_text, instance_name=instance.instance_name,
+                                                           run_generation=getattr(self.pool, '_run_generation', None)):
                                             instance._tg_pushed = True
                         except Exception as e:  # noqa: BLE001 - best-effort, never break the run
                             logger.debug('[TG-PUSH] pre-reflection push failed for %s: %s',

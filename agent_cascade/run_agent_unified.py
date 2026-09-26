@@ -33,6 +33,25 @@ from .execution_engine import ExecutionEngine
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _reset_run_scoped_tg_state(instance) -> None:
+    """Reset per-run Telegram/auto-skill state on a root instance at the run boundary.
+
+    The in-loop auto-skill snapshot is per-INSTANCE, but a root run reuses the same
+    instance across every user turn. Without this reset, extract_instance_output()
+    returns the PREVIOUS run's final answer (compression/helpers.py:612-623) and every
+    push ships the same stale text. lifecycle_manager.py:157-163 already does this for
+    the sub-agent reuse path; this is the main-agent equivalent.
+
+    ``_auto_skill_proposed`` is documented as one-shot per run (agent_instance.py), so
+    it must be re-armed here too — otherwise the P1 pre-reflection push stays dead for
+    the root agent after its first auto-skill trigger.
+    """
+    instance._tg_pushed = False
+    instance._auto_skill_task_output = None
+    instance._auto_skill_dirty_stop = False
+    instance._auto_skill_proposed = False
+
+
 def run_agent_thread_unified(
     pool: AgentPool,
     instance_name: str,
@@ -131,11 +150,12 @@ def run_agent_thread_unified(
                        instance_name in pool._halted_instances or pool.is_instance_terminated(instance_name))
             return stopped
 
-        # NEW (tg push model): reset this run's TG dedup flag so a stale True from a previous reflection run
-        # can't suppress this run's push. Re-fetched here; the local `instance` (L102) may be stale if created at L104-108.
+        # NEW (tg push model): reset this run's per-run TG/auto-skill state so stale values from a
+        # previous run can't suppress this run's push or replay the previous run's answer.
+        # Re-fetched here; the local `instance` (L102) may be stale if created at L104-108.
         _tg_instance = pool.get_instance(instance_name)
         if _tg_instance is not None:
-            _tg_instance._tg_pushed = False
+            _reset_run_scoped_tg_state(_tg_instance)
 
         for turn_output_raw in run_agent_in_pool_with_recovery(
                 pool=pool,
@@ -226,8 +246,10 @@ def run_agent_thread_unified(
                         if sup is not None and hasattr(sup, 'notify_user'):
                             # notify_user returns True only if the message was scheduled onto a live bridge
                             # loop (False = silent no-op). Unlike the pre hook there is no dedup flag to set:
-                            # this is the last push of the run.
-                            sup.notify_user(post_text)
+                            # this is the last push of the run. instance_name/run_generation are passed as
+                            # keywords (tg-dup v3 F3a) so the [TG-PUSH] log line can correlate pushes across runs.
+                            sup.notify_user(post_text, instance_name=instance_name,
+                                            run_generation=current_generation)
             except Exception as e:  # noqa: BLE001 - best-effort, never break the run
                 logger.debug('[TG-PUSH] post-run push failed for %s: %s', instance_name, e)
 

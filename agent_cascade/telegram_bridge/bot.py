@@ -217,15 +217,25 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
         next_notify_at += cfg.task_timeout_sec  # next ping one task-timeout later
 
 
-async def _safe_send(bot, chat_id: int, text: str) -> None:
+async def _safe_send(bot, chat_id: int, text: str,
+                     instance_name: str | None = None,
+                     run_generation: int | None = None) -> None:
     try:
         n_chunks = 0
         for part in chunk_text(text):          # chunk long answers (short messages are byte-identical: [text])
             await _send_one(bot, chat_id, part)
             n_chunks += 1
-        # Success-side observability (tg-dup-delivery plan §4.2): chunk count and char
-        # length ONLY — no message content, so a push can never leak into logs.
-        logger.info('[TG-PUSH] delivered %d chunk(s), %d chars', n_chunks, len(text))
+        # Success-side observability (tg-dup-delivery plan §4.2, extended by tg-dup v3 F3b):
+        # chunk count and char length ONLY — no message content, so a push can never leak
+        # into logs. The sha1[:8] fingerprint (same construction as the retry WARNING above)
+        # makes a stale cross-run replay diagnosable; inst/gen appear only when BOTH are
+        # provided, keeping P3/P4/bridge-internal lines unchanged in shape.
+        fingerprint = hashlib.sha1(text.encode('utf-8')).hexdigest()[:8]
+        suffix = ''
+        if instance_name is not None and run_generation is not None:
+            suffix = f', inst={instance_name}, gen={run_generation}'
+        logger.info('[TG-PUSH] delivered %d chunk(s), %d chars, fp=%s%s',
+                    n_chunks, len(text), fingerprint, suffix)
     except Exception as e:
         logger.error('failed to send notification to Telegram: %s', e)
 

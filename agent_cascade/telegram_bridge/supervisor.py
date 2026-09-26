@@ -209,7 +209,8 @@ class TelegramBridgeSupervisor:
             self._stopping = True
         self._stop_thread()   # manages its own locking; must not hold lock during join
 
-    def notify_user(self, message: str) -> bool:
+    def notify_user(self, message: str, instance_name: str | None = None,
+                    run_generation: int | None = None) -> bool:
         """Fire-and-forget delivery of an async user message to the phone via Telegram.
 
         Telegram-only path — distinct from the browser WebSocket notification channel
@@ -220,6 +221,10 @@ class TelegramBridgeSupervisor:
         treat False as an error). Note that delivery is not guaranteed if no
         ``chat_id`` has been seen yet; the coroutine will no-op in that case.
         Never raises into the caller.
+
+        ``instance_name``/``run_generation`` are optional observability context,
+        forwarded to ``_safe_send`` for the [TG-PUSH] log line (tg-dup v3 F3a);
+        callers that pass nothing keep the previous log shape.
         """
         try:
             with self._lock:
@@ -231,7 +236,8 @@ class TelegramBridgeSupervisor:
                 chat_id = _app.bot_data.get('last_chat_id')
                 if chat_id is None:
                     return
-                await _safe_send(_app.bot, chat_id, message)
+                await _safe_send(_app.bot, chat_id, message,
+                                 instance_name=instance_name, run_generation=run_generation)
 
             asyncio.run_coroutine_threadsafe(_do_send(), loop)
             return True
