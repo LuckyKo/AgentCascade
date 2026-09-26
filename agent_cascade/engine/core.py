@@ -701,6 +701,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         messages = None
         llm_messages = None
         response = None
+        early_exit = False  # Set True on empty-conversation early exit so the finally block does not double-drain the queue.
 
         # ── Acquire concurrency slot for this agent's endpoint ───────────────
         # On sequential endpoints (concurrency_limit=0), only one agent should
@@ -831,6 +832,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         tel.record_turn_end(inst_name)
                     except Exception:
                         pass
+                early_exit = True  # Queued messages were drained above; the exit
+                                   # finally must NOT drain again (double-drain race).
                 return  # Manual command handled or error
 
             max_turns = instance.max_turns or DEFAULT_MAX_TURNS
@@ -1104,6 +1107,37 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             self._try_auto_skill_extension(
                                 instance, messages, llm_messages,
                                 loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
+                        # NEW (tg push model): deliver the committed final answer NOW, before the reflection
+                        # turns run. Root-only: parent_instance is None == root/main (agent_instance.py:249; same
+                        # idiom as engine/helpers.py:685). Reuse caveat: find_or_create_instance reassigns
+                        # parent_instance on sub-agent reuse (lifecycle_manager.py:154), but the root is only ever
+                        # created via create_main_agent_instance (parent=None) and acquired via get_instance.
+                        # Best-effort (mirrors _maybe_submit_memory_hint: never raises/blocks). Deduped against the
+                        # post-run push via instance._tg_pushed.
+                        try:
+                            # getattr (not a bare attribute read) so a minimally-constructed
+                            # instance (e.g. AgentInstance.__new__ in tests, which bypasses the
+                            # dataclass default for parent_instance) degrades to "no push"
+                            # instead of raising AttributeError into the run loop.
+                            if getattr(instance, 'parent_instance', None) is None:
+                                from agent_cascade.compression.helpers import extract_instance_output
+                                pre_text = extract_instance_output(
+                                    list(instance.conversation), instance.instance_name,
+                                    pool=self.pool, instance=instance)
+                                if pre_text and pre_text.strip():
+                                    sup = getattr(self.pool, 'telegram_supervisor', None)
+                                    if sup is not None and hasattr(sup, 'notify_user'):
+                                        # notify_user returns True only if the message was scheduled onto a
+                                        # live bridge loop (False = silent no-op: bridge down / not started).
+                                        # Set _tg_pushed ONLY on success so a failed pre-push doesn't suppress
+                                        # the post-run push (which could still deliver if the bridge comes up);
+                                        # otherwise we'd silently drop the final answer for that run.
+                                        if sup.notify_user(pre_text):
+                                            instance._tg_pushed = True
+                        except Exception as e:  # noqa: BLE001 - best-effort, never break the run
+                            logger.debug('[TG-PUSH] pre-reflection push failed for %s: %s',
+                                         getattr(instance, 'instance_name', '?'), e)
+
                         # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh
                         # turns for the reflection. Instance-state mutations are shared with the
                         # Phase-4 tool-call path via _grant_auto_skill_extension; the loop-local
@@ -1223,7 +1257,15 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # work behind. Normal completions and terminal stops behave exactly as before.
             preserve = suspended_this_run and not terminated and outstanding
 
-            if not preserve:
+            # Early-exit (empty conversation) runs already drained the message queue
+            # in their safety drain — draining again here would silently discard any
+            # user message enqueued between the two drains (e.g. the first message of
+            # a session after server restart). Skip the exit-finally cleanup entirely
+            # for those runs: clear_pending is also unnecessary since no LLM call ran.
+            if early_exit:
+                logger.debug('early-exit drain already handled — skipping exit-finally queue drain for %s', inst_name)
+
+            elif not preserve:
                 if hasattr(self.pool, '_async_registry'):
                     try:
                         self.pool._async_registry.clear_pending(instance.instance_name)
@@ -3766,8 +3808,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # Phase 4.4: Delegate to StreamPublisher for WebSocket push
         self.stream_publisher.push_initial_state(inst, caller)
 
-        # System-invoked agents have no human in the loop for shell approval:
-        # restrict their shell_cmd to read-only commands only.
+        # System-invoked agents have no human in the loop for shell approval. Keep shell_cmd
+        # AVAILABLE but restrict it to read-only/auto-approved commands: safe commands
+        # (git status, dir, …) run without a prompt; anything else is hard-REJECTED (never
+        # prompted). See ShellMixin.execute_shell_command / ShellCmd._launch_async gates.
         inst.restricted_shell = True
 
         return inst

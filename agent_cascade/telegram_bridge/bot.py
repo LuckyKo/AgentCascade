@@ -4,15 +4,15 @@ Receiving path (per incoming text message from the allowlisted user):
     1. Auth gate — non-allowlisted users are ignored (no reply, no AC call).
     2. Inject the task into AC via /api/message (handshake cached in ACClient).
     3. Reply once with a short ack ("🏃 Started").
-    4. Spawn a waiter coroutine that polls /api/status until generation ends,
-       then sends the root agent's final assistant message (chunked if >4096).
+    4. Spawn a waiter coroutine that polls /api/status until generation ends, then
+       exits quietly: final-answer delivery is push-based at run end (the engine's
+       pre-reflection hook and the post-run push in run_agent_unified deliver it).
        A task timeout is NON-FATAL: it sends a "⏳ Still working" notice and keeps
        polling (one notice per task-timeout interval) until AC finishes or the
-       outer ceiling (TG_TASK_WAIT_CEILING_SEC) is hit — so late completions still
-       get their reply delivered.
+       outer ceiling (TG_TASK_WAIT_CEILING_SEC) is hit.
 
 Sending path helpers: ``chunk_text`` splits text into <=4096-char parts on line
-boundaries; ``send_chunked`` sends them sequentially and honors 429 retry_after.
+boundaries; ``_safe_send`` chunks long messages and honors 429 retry_after.
 """
 
 import asyncio
@@ -34,7 +34,7 @@ from agent_cascade.settings import (
 from .ac_client import ACClient, ACError
 from .commands import dispatch_command
 from .config import BridgeConfig
-from .waiter import WaiterResult, wait_for_completion, fetch_final_message
+from .waiter import WaiterResult, wait_for_completion
 
 # Telegram's hard limit is 4096 chars/message. Chunk at exactly that so we only
 # split when a single reply genuinely exceeds the limit (per v1 spec). The value
@@ -71,12 +71,6 @@ def chunk_text(text: str, limit: int = CHUNK_SIZE) -> List[str]:
     if remaining:
         parts.append(remaining)
     return parts
-
-
-async def send_chunked(bot, chat_id: int, text: str) -> None:
-    """Send ``text`` to a chat as one or more messages (each <=4096), honoring 429."""
-    for part in chunk_text(text):
-        await _send_one(bot, chat_id, part)
 
 
 def _retry_after_seconds(exc, fallback: float) -> float:
@@ -188,29 +182,10 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
             return
 
         if result.status == WaiterResult.FINISHED:
-            try:
-                final_text = await fetch_final_message(ac)
-            except Exception as e:
-                logger.error('waiter failed to read final message: %s', e)
-                await _safe_send(bot, chat_id, "⚠️ AC finished but I couldn't read its reply.")
-                return
-
-            if not final_text.strip():
-                await _safe_send(bot, chat_id, '✅ Done (AC produced no text reply).')
-                return
-
-            try:
-                await send_chunked(bot, chat_id, final_text)
-            except Exception as e:
-                # The final reply failed to deliver (e.g. a stale Telegram
-                # connection after a long idle that exhausted _send_one's retries).
-                # Send an error notice instead of silently killing the fire-and-forget
-                # waiter task — mirrors the "couldn't read its reply" pattern above.
-                logger.error('waiter failed to deliver final reply: %s', e)
-                await _safe_send(
-                    bot, chat_id,
-                    "⚠️ AC finished but I couldn't deliver its reply. Try again.",
-                )
+            # Final-answer delivery is now push-based at run end (see plans/tg-bridge-push-model_PLAN.md).
+            # The waiter only provides progress/offline notices; it no longer fetches or sends the reply,
+            # which is what caused N waiters to send the same answer N times.
+            logger.debug('waiter: run finished; final answer delivered via push')
             return
 
         # result.status == TIMEOUT -> a "still working" checkpoint. If we've hit the
@@ -233,7 +208,8 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
 
 async def _safe_send(bot, chat_id: int, text: str) -> None:
     try:
-        await _send_one(bot, chat_id, text)
+        for part in chunk_text(text):          # chunk long answers (short messages are byte-identical: [text])
+            await _send_one(bot, chat_id, part)
     except Exception as e:
         logger.error('failed to send notification to Telegram: %s', e)
 

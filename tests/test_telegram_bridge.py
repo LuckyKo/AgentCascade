@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_cascade.telegram_bridge.ac_client import ACClient, ACError, encrypt_payload  # noqa: E402
-from agent_cascade.telegram_bridge.bot import chunk_text, send_chunked, on_message  # noqa: E402
+from agent_cascade.telegram_bridge.bot import _safe_send, _send_one, chunk_text, on_message  # noqa: E402
 from agent_cascade.telegram_bridge.commands import (  # noqa: E402
     COMMANDS,
     parse_command,
@@ -33,10 +33,24 @@ from agent_cascade.telegram_bridge.commands import (  # noqa: E402
 from agent_cascade.telegram_bridge.config import BridgeConfig  # noqa: E402
 from agent_cascade.telegram_bridge.waiter import (  # noqa: E402
     WaiterResult,
-    extract_final_message,
-    fetch_final_message,
     wait_for_completion,
 )
+
+
+def _extract_final_message(state):
+    """Last assistant message text from an /api/state payload (multimodal list content
+    flattened). Kept as a test helper: final-answer delivery is now push-based at run end
+    (plans/tg-bridge-push-model_PLAN.md), so the bridge package no longer ships this reader."""
+    msgs = (state or {}).get('messages') or []
+    for m in reversed(msgs):
+        if m.get('role') != 'assistant':
+            continue
+        c = m.get('content', '')
+        if isinstance(c, list):
+            parts = [p.get('text', '') if isinstance(p, dict) else str(p) for p in c]
+            return ''.join(parts)
+        return c or ''
+    return ''
 
 # Deliberately fake Telegram user IDs for tests — never a real identifier, so
 # no personal data is ever committed.
@@ -225,6 +239,10 @@ def test_encrypt_payload_nonce_is_12_bytes_and_b64():
 # ---------------------------------------------------------------------------
 
 def test_waiter_returns_last_assistant_message():
+    """wait_for_completion reports FINISHED; the /api/state payload carries the last
+    assistant message (read via the local _extract_final_message helper — the waiter no
+    longer fetches or sends it itself since final-answer delivery moved to push-based
+    delivery)."""
     mock = _MockACServer()
     mock._status_script = [True, True, False]   # generating true twice, then false
     client = _make_client(mock)
@@ -233,7 +251,8 @@ def test_waiter_returns_last_assistant_message():
         await client.open()
         result = await wait_for_completion(client, poll_interval=0.01, timeout=5)
         assert result.status == WaiterResult.FINISHED
-        text = await fetch_final_message(client)
+        state = await client.get_state()
+        text = _extract_final_message(state)
         await client.close()
         return text
 
@@ -288,12 +307,12 @@ def test_extract_final_message_handles_multimodal_list_content():
         {'role': 'assistant', 'content': [{'type': 'text', 'text': 'A'}]},
         {'role': 'assistant', 'content': [{'type': 'text', 'text': 'B'}, 'C']},
     ]}
-    assert extract_final_message(state) == 'BC'
+    assert _extract_final_message(state) == 'BC'
 
 
 def test_extract_final_message_no_assistant_returns_empty():
-    assert extract_final_message({'messages': [{'role': 'user', 'content': 'x'}]}) == ''
-    assert extract_final_message({}) == ''
+    assert _extract_final_message({'messages': [{'role': 'user', 'content': 'x'}]}) == ''
+    assert _extract_final_message({}) == ''
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +348,7 @@ def test_send_chunked_sends_all_parts_in_order():
 
     text = ('word ' * 1000).strip()   # ~5000 chars, single logical line with spaces
     assert len(text) > 4096
-    _run(send_chunked(bot, chat_id=42, text=text))
+    _run(_safe_send(bot, chat_id=42, text=text))
 
     sent = [c.kwargs['text'] for c in bot.send_message.call_args_list]
     assert all(len(p) <= 4096 for p in sent)
@@ -444,7 +463,7 @@ def test_send_one_honors_retry_after_on_429():
         return None
 
     bot.send_message.side_effect = _flaky
-    _run(send_chunked(bot, chat_id=7, text='hi'))
+    _run(_safe_send(bot, chat_id=7, text='hi'))
 
     assert call_count['n'] == 2   # failed once, then succeeded
     assert bot.send_message.call_args_list[0].kwargs.get('chat_id') == 7
@@ -513,9 +532,11 @@ def test_waiter_task_timeout_is_non_fatal_and_ceiling_gives_up():
     assert not any('Timed out' in t for t in sent_texts)
 
 
-def test_waiter_delivers_reply_when_ac_finishes_after_first_timeout():
-    """Core regression: AC finishes AFTER the first task-timeout -> the waiter sends
-    a 'Still working' notice AND still delivers the final message (no abandonment)."""
+def test_waiter_exits_without_delivering_reply_when_ac_finishes_after_first_timeout():
+    """Push-model behavior: AC finishes AFTER the first task-timeout -> the waiter sends
+    a 'Still working' notice but then EXITS without fetching or sending the final message.
+    Final-answer delivery moved to the once-per-run push at natural end of the root run
+    (plans/tg-bridge-push-model_PLAN.md); N waiters no longer each send the same reply."""
     from agent_cascade.telegram_bridge.bot import _run_waiter
 
     cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[1],
@@ -523,7 +544,7 @@ def test_waiter_delivers_reply_when_ac_finishes_after_first_timeout():
                        task_wait_ceiling_sec=30.0)
     mock = _MockACServer()
     # ~5s of generating (>> 0.1s first round -> that round times out), then idle:
-    # the next round sees generating=False and delivers the final message.
+    # the next round sees generating=False and exits WITHOUT delivering the final message.
     mock._status_script = [True] * 200 + [False]
     client = _make_client(mock)
 
@@ -543,8 +564,10 @@ def test_waiter_delivers_reply_when_ac_finishes_after_first_timeout():
     _run(go())
     # A 'still working' checkpoint fired while AC was still generating...
     assert any('Still working' in t for t in sent_texts)
-    # ...and the final answer was still delivered afterwards.
-    assert mock.final_text in sent_texts
+    # ...but the waiter no longer delivers the final answer itself (push model).
+    assert mock.final_text not in sent_texts
+    # And it did not even fetch /api/state to read a reply.
+    assert mock.state_calls == 0
 
 
 def test_fmt_elapsed_formats_seconds_minutes_hours():
@@ -1365,7 +1388,7 @@ def test_send_one_retries_on_network_error_then_succeeds(monkeypatch):
         return None
     bot.send_message.side_effect = _flaky
 
-    _run(send_chunked(bot, chat_id=7, text='hi'))
+    _run(_safe_send(bot, chat_id=7, text='hi'))
     assert n['c'] == 2   # failed once (NetworkError), retried, succeeded
 
 
@@ -1385,7 +1408,7 @@ def test_send_one_retries_on_timed_out(monkeypatch):
         return None
     bot.send_message.side_effect = _flaky
 
-    _run(send_chunked(bot, chat_id=7, text='hi'))
+    _run(_safe_send(bot, chat_id=7, text='hi'))
     assert n['c'] == 2
 
 
@@ -1403,8 +1426,10 @@ def test_send_one_gives_up_after_bounded_network_retries(monkeypatch):
         raise NetworkError('dead connection')
     bot.send_message.side_effect = _always_fail
 
+    # E3 made _safe_send swallow send errors (log + return); the bounded-retry/re-raise contract
+    # now lives in _send_one, which is what these two tests exercise directly.
     with pytest.raises(NetworkError):
-        _run(send_chunked(bot, chat_id=7, text='hi'))
+        _run(_send_one(bot, chat_id=7, text='hi'))
     assert n['c'] == bot_mod._SEND_ONE_MAX_ATTEMPTS   # exactly the bound, then re-raise
 
 
@@ -1418,19 +1443,18 @@ def test_send_one_bad_request_re_raises_without_retry():
         raise BadRequest('message too long')
     bot.send_message.side_effect = _bad
 
+    # E3 made _safe_send swallow send errors; the no-retry-on-BadRequest contract is on _send_one.
     with pytest.raises(BadRequest):
-        _run(send_chunked(bot, chat_id=7, text='hi'))
+        _run(_send_one(bot, chat_id=7, text='hi'))
     assert n['c'] == 1   # no retry on BadRequest (ordering guard)
 
 
-def test_run_waiter_sends_error_notice_when_final_delivery_fails(monkeypatch):
-    """If the FINAL reply fails to deliver, the waiter sends an error notice instead of
-    letting the exception escape the fire-and-forget task."""
-    from telegram.error import NetworkError
-    from agent_cascade.telegram_bridge import bot as bot_mod
+def test_run_waiter_exits_quietly_on_finished_with_no_final_send():
+    """Push-model behavior: on FINISHED the waiter exits QUIETLY — it neither fetches
+    /api/state nor sends the final answer, so there is no "couldn't deliver" error notice.
+    Final-answer delivery now happens once at natural end of the root run via the push
+    (plans/tg-bridge-push-model_PLAN.md); the waiter only provides progress/offline notices."""
     from agent_cascade.telegram_bridge.bot import _run_waiter
-    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_BASE_SEC', 0.0)
-    monkeypatch.setattr(bot_mod, 'TG_SEND_RETRY_BACKOFF_CAP_SEC', 0.0)
 
     cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[1],
                        poll_interval_sec=0.02, task_timeout_sec=5,
@@ -1442,9 +1466,7 @@ def test_run_waiter_sends_error_notice_when_final_delivery_fails(monkeypatch):
     bot = MagicMock()
     sent = []
     async def _capture(**kwargs):
-        if kwargs['text'] == mock.final_text:
-            raise NetworkError('stale connection on final send')
-        sent.append(kwargs['text'])   # error notice (and any non-final text) succeeds
+        sent.append(kwargs['text'])
         return None
     bot.send_message.side_effect = _capture
 
@@ -1453,9 +1475,10 @@ def test_run_waiter_sends_error_notice_when_final_delivery_fails(monkeypatch):
         await _run_waiter(client, bot, chat_id=99, cfg=cfg)   # must NOT raise
         await client.close()
 
-    _run(go())   # if the final send were unguarded, NetworkError would escape here
-    assert mock.final_text not in sent                 # final reply not delivered
-    assert any("couldn't deliver" in t for t in sent)   # error notice WAS sent
+    _run(go())
+    assert mock.final_text not in sent       # final reply NOT delivered by the waiter
+    assert mock.state_calls == 0             # waiter did not even fetch /api/state
+    assert sent == []                        # quiet exit: no progress/offline/final notice at all
 
 
 def test_request_reconnects_on_transport_error_then_succeeds():

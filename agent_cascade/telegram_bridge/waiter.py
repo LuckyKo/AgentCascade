@@ -2,8 +2,9 @@
 
 After a task is injected into AC, this coroutine polls ``GET /api/status`` until
 ``generating`` flips to false (the run thread sets it on natural completion), or
-until the per-task timeout elapses. It then fetches the root agent's final answer
-from the open ``GET /api/state`` endpoint.
+until the per-task timeout elapses. Final-answer delivery itself is push-based at
+run end (see plans/tg-bridge-push-model_PLAN.md) — the waiter only provides
+progress/offline notices and exits quietly on FINISHED.
 
 The session token is obtained fresh on each poll via ``client.ensure_token()`` so
 that an AC restart mid-wait (which invalidates the in-memory, no-TTL token) is
@@ -11,13 +12,12 @@ recovered automatically: a 401 from ``get_status`` invalidates the cache, and th
 next iteration re-handshakes.
 
 v1 limitation (documented in the plan): if AC was already generating before our
-message, we simply wait for the next transition to false and attribute that final
-message to us. This is "correct enough" for a single-operator bridge; tracking a
-monotonic generation_id is future work.
+message, we simply wait for the next transition to false. This is "correct enough"
+for a single-operator bridge; tracking a monotonic generation_id is future work.
 """
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 import httpx
 
@@ -36,37 +36,6 @@ class WaiterResult:
 
     def __init__(self, status: str):
         self.status = status
-
-
-def extract_final_message(state: Dict[str, Any]) -> str:
-    """Return the text of the LAST assistant message in ``state['messages']``.
-
-    ``serialize_message`` normally normalizes multimodal list content to a string,
-    but we guard defensively: if content is still a list, extract the text parts;
-    if it's neither str nor list, coerce with str(). Returns '' when there is no
-    assistant message (caller decides how to surface that).
-    """
-    messages = state.get('messages') or []
-    for msg in reversed(messages):
-        if not isinstance(msg, dict):
-            continue
-        if msg.get('role') != 'assistant':
-            continue
-        content = msg.get('content', '')
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: List[str] = []
-            for item in content:
-                if isinstance(item, dict) and 'text' in item:
-                    parts.append(str(item['text']))
-                elif isinstance(item, str):
-                    parts.append(item)
-            return ''.join(parts)
-        # Non-empty non-str/non-list (e.g. number) -> coerce; None/empty -> keep looking.
-        if content is not None and content != '':
-            return str(content)
-    return ''
 
 
 async def wait_for_completion(
@@ -114,9 +83,3 @@ async def wait_for_completion(
                 return WaiterResult(WaiterResult.OFFLINE)
 
         await asyncio.sleep(min(poll_interval, remaining))
-
-
-async def fetch_final_message(client: ACClient) -> str:
-    """Fetch /api/state and return the root agent's final assistant message text."""
-    state = await client.get_state()
-    return extract_final_message(state)

@@ -266,6 +266,7 @@ class AgentInstance:
         default=False)  # True when the in-loop trigger fired via the LAST-TURN-TOOL-CALL path — i.e. the run did not end on a clean no-tool answer before reflecting. extract_instance_output returns the LAST reflection message (not the pre-reflection snapshot) when this is set. Reset alongside _auto_skill_proposed/_auto_skill_task_output on instance reuse/recall (lifecycle_manager.py).
     _loaded_skill_names: Optional[List[str]] = field(
         default=None)  # This run's resolved skill names, set in _create_and_run_agent so the in-loop auto-skill trigger can render them in the reflection prompt
+    _tg_pushed: bool = field(default=False)  # True once this run's pre-reflection TG push fired; post-run push skips when set. Reset at each run start (run_agent_thread_unified).
 
     # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
     _system_prompt_initialized: bool = field(
