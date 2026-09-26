@@ -436,18 +436,23 @@ class ConfigPersistMixin:
 
         # Persist the sentinel as a top-level key (read-modify-write; NOT via _save_pool_settings,
         # which rebuilds its dict and would drop it). All other keys are preserved.
-        with self._settings_save_lock:
-            data = {}
-            if self._pool_settings_path.exists():
-                try:
-                    with open(self._pool_settings_path, 'r', encoding='utf-8-sig') as f:
-                        data = json.load(f)
-                except Exception:
-                    data = {}
-            data[_CLASS_DEFAULTS_MIGRATED] = True
-            self._pool_settings_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+        # Best-effort: in tests with mocked api_router the path may not be a real Path object.
+        try:
+            with self._settings_save_lock:
+                data = {}
+                if self._pool_settings_path.exists():
+                    try:
+                        with open(self._pool_settings_path, 'r', encoding='utf-8-sig') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data[_CLASS_DEFAULTS_MIGRATED] = True
+                self._pool_settings_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+        except (OSError, TypeError, AttributeError):
+            logger.debug('[MIGRATION] Could not persist sentinel to disk (non-Path or I/O error); '
+                         'in-memory seeding still applied.')
 
         logger.info(
             '[MIGRATION] Seeded class defaults into UI config for %d agents '

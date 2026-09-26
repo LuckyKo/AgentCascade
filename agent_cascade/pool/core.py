@@ -132,10 +132,6 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         self._settings_save_lock = threading.Lock()  # guards concurrent save operations
         self._loaded_auto_security = None  # persisted auto-security toggle (None = not loaded)
         self._load_pool_settings()  # load persisted values, overriding defaults
-        # One-time migration: seed per-class tool defaults into UI config so the UI is the single
-        # source of truth after Layer 3 removal. Runs for fresh installs too (called here, not at
-        # the end of _load_pool_settings, which early-returns when no settings file exists yet).
-        self._migrate_class_defaults_to_ui_config()
         self._apply_pending_config()  # apply work folders/workspace that need operation_manager
 
         # ── Focused managers (delegation targets) ───────────────────────────
@@ -208,6 +204,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # All agent instances read from this during each turn for real-time updates.
         self._ui_disabled_tools: Dict[str, Any] = {}
         self._ui_disabled_tools_lock = threading.RLock()
+
+        # One-time migration: seed per-class tool defaults into UI config so the UI is the single
+        # source of truth after Layer 3 removal. Must run after _ui_disabled_tools_lock exists.
+        self._migrate_class_defaults_to_ui_config()
 
         # Dismissal callbacks (used by api_server to broadcast real-time tab removal)
         self._on_dismissed_callbacks: list = []
