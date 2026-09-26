@@ -24,11 +24,12 @@ ALL_USER_APPROVAL_TOOLS: frozenset[str] = frozenset({
 })
 
 # ── Agent-class default disabled tools (defense-in-depth) ────────────────────
-# These frozensets are the authoritative source for Security and Compressor tool
-# restrictions.  They are enforced automatically by the centralized resolver:
-#     agent_cascade.utils.disabled_tools.resolve_disabled_tools_for_agent()
-# Do NOT duplicate these constants in inline code — the resolver applies them
-# as a final safety net regardless of upstream config overrides.
+# DEPRECATED: These per-class defaults are no longer applied by the resolver (Layer 3 removed).
+# The UI (pool_settings.json → _ui_disabled_tools) is now the single source of truth for
+# per-agent tool restrictions. These constants are retained ONLY for the one-time config
+# migration in pool/config_persist.py (_migrate_class_defaults_to_ui_config) that seeds
+# pool_settings.json on first run after upgrade. Remove them once every deployed instance
+# has been migrated (sentinel `_class_defaults_migrated` present).
 
 # Default disabled tools for Security agent.
 # Security agent performs read-only analysis, so it should not use user-approval tools.
@@ -104,9 +105,9 @@ DEFAULT_WRITER_DISABLED_TOOLS: frozenset[str] = frozenset({
 
 # Default disabled tools for dynamically discovered agents without explicit config.
 # Security baseline: newly loaded agents start READ-ONLY until user grants more access.
-# Applied ONLY when agent has zero disabled_tools configuration from Layers 1-2 AND is not
-# orchestrator/security/compressor (core system agents excluded). See Layer 4 in
-# agent_cascade.utils.disabled_tools.resolve_disabled_tools_for_agent().
+# Applied ONLY when agent has zero disabled_tools configuration AND is not one of the
+# core system agents (orchestrator/security/compressor/generalist/reviewer/writer).
+# See resolve_disabled_tools_for_agent() in agent_cascade.utils.disabled_tools.
 DEFAULT_NEW_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset({
     # Host/system access
     'shell_cmd',  # Execute shell commands on host system

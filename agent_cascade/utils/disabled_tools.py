@@ -19,11 +19,10 @@ from typing import Dict, List, Optional, Set, Union
 logger = logging.getLogger(__name__)
 
 # Import from constants — DO NOT duplicate these defaults here.
-# They are the authoritative source and enforced by this module automatically.
-from agent_cascade.constants import (DEFAULT_COMPRESSOR_DISABLED_TOOLS, DEFAULT_GENERALIST_DISABLED_TOOLS,
-                                     DEFAULT_NEW_AGENT_DISABLED_TOOLS, DEFAULT_ORCHESTRATOR_DISABLED_TOOLS,
-                                     DEFAULT_REVIEWER_DISABLED_TOOLS, DEFAULT_SECURITY_DISABLED_TOOLS,
-                                     DEFAULT_WRITER_DISABLED_TOOLS)
+# Only the safe baseline is applied by this resolver; per-agent-class restrictions come from
+# user config (UI / pool_settings.json), seeded on first run by the migration in
+# pool/config_persist.py (_migrate_class_defaults_to_ui_config).
+from agent_cascade.constants import DEFAULT_NEW_AGENT_DISABLED_TOOLS
 
 
 def normalize_disabled_tools(raw: Optional[Union[Dict, List, Set, tuple]]) -> Set[str]:
@@ -75,13 +74,18 @@ def resolve_disabled_tools_for_agent(
 
     Resolution order (layers are accumulated top-down):
       1. Instance override  — ``instance._generate_cfg_override['disabled_tools']``
-         Always merged into the result set.
+          Always merged into the result set.
       2. Template config   — ``template.llm.generate_cfg['disabled_tools']``
-         Always merged with Layer 1 (union of both sources).
-      3. Agent-class defaults — Security / Compressor defense-in-depth
-         **Always applied** regardless of Layers 1–2.
-      4. Default safe baseline — Applied ONLY when no explicit config exists
-         from Layers 1-2 AND agent is not orchestrator/security/compressor.
+          Always merged with Layer 1 (union of both sources).
+      3. Default safe baseline — Applied ONLY when no explicit config exists
+          from Layers 1-2 AND agent is not orchestrator/security/compressor/
+          generalist/reviewer/writer (core system agents excluded; their per-class
+          restrictions come from user config, seeded by the one-time migration in
+          pool/config_persist.py).
+
+    Note: per-agent-class hardcoded defaults (former "Layer 3") were removed so the UI
+    (pool_settings.json → _ui_disabled_tools) is the single source of truth for tool
+    restrictions. The migration seeds those old defaults into user config on first run.
 
     For dict-format disabled_tools the function looks up by:
       - ``agent_name`` (exact match, e.g. ``"Coder"``)
@@ -124,30 +128,17 @@ def resolve_disabled_tools_for_agent(
         has_explicit_config = True
         disabled |= _extract(template_cfg['disabled_tools'], agent_name, agent_type)
 
-    # ── Layer 3: Agent-class defaults (defense-in-depth, ALWAYS applied) ────
-    atype_lower = agent_type.lower() if agent_type else ''
-    if atype_lower == 'security':
-        disabled |= DEFAULT_SECURITY_DISABLED_TOOLS
-    elif atype_lower == 'compressor':
-        disabled |= DEFAULT_COMPRESSOR_DISABLED_TOOLS
-    elif atype_lower == 'generalist':
-        disabled |= DEFAULT_GENERALIST_DISABLED_TOOLS
-    elif atype_lower == 'orchestrator':
-        disabled |= DEFAULT_ORCHESTRATOR_DISABLED_TOOLS
-    elif atype_lower == 'reviewer':
-        disabled |= DEFAULT_REVIEWER_DISABLED_TOOLS
-    elif atype_lower == 'writer':
-        disabled |= DEFAULT_WRITER_DISABLED_TOOLS
-
-    # ── Layer 4: Default safe baseline for agents with no explicit config ────
+    # ── Safe baseline for agents with no explicit config ─────────────────────
     # Security rationale: dynamically discovered agents loaded from soul files
     # should start READ-ONLY until the user explicitly grants more capabilities.
     # Applied ONLY when:
     #   - No explicit disabled_tools was set by Layers 1-2 (has_explicit_config is False)
     #   - Agent is not orchestrator/security/compressor/generalist/reviewer/writer (core system agents excluded;
-    #     they have Layer 3 defaults or need full coordination)
+    #     their per-class restrictions now come from user config — see the one-time migration in
+    #     pool/config_persist.py that seeds those defaults into pool_settings.json)
+    atype_lower = agent_type.lower() if agent_type else ''
     if not has_explicit_config and atype_lower not in ('orchestrator', 'security', 'compressor', 'generalist',
-                                                       'reviewer', 'writer'):
+                                                        'reviewer', 'writer'):
         disabled |= DEFAULT_NEW_AGENT_DISABLED_TOOLS
 
     return disabled

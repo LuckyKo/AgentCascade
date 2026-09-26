@@ -207,9 +207,11 @@ def _configure_compressor_instance(
     comp_instance: Any,
     caller_name: str,
 ) -> None:
-    """Configure Compressor instance settings with defense-in-depth disabled_tools.
+    """Configure Compressor instance settings from the caller's UI-disabled tools.
 
-    Reads the caller's UI-disabled tools config and merges it with defaults.
+    Passes through the caller's UI-disabled tools if present; otherwise leaves disabled_tools
+    unset so the resolver applies its safe baseline at runtime (no hardcoded merge — the UI is
+    the single source of truth, seeded by the one-time class-defaults migration).
     Mutates comp_instance._generate_cfg_override in-place.
 
     Args:
@@ -217,9 +219,6 @@ def _configure_compressor_instance(
         comp_instance: The Compressor AgentInstance to configure.
         caller_name: Name of the calling agent instance.
     """
-    from agent_cascade.constants import DEFAULT_COMPRESSOR_DISABLED_TOOLS
-    from agent_cascade.utils import merge_disabled_tools_for_auto_agent
-
     template = agent_pool.get_template('Compressor')
     cfg = (template.llm.generate_cfg or {}).copy() if template and hasattr(template, 'llm') else {}
 
@@ -243,15 +242,12 @@ def _configure_compressor_instance(
                 # Flat list applies to all agents
                 ui_disabled_tools = list(raw_dt)
 
-    # Merge with defense-in-depth defaults
+    # No hardcoded merge — UI config is authoritative (seeded by the one-time migration).
+    # Pass through the caller's UI-disabled tools if present; otherwise leave unset so the
+    # resolver applies the Layer 4 safe baseline at runtime. Compressor keeps shell_cmd available
+    # in restricted mode (the migration seeds its config without shell_cmd).
     if ui_disabled_tools:
-        merged = merge_disabled_tools_for_auto_agent(
-            ui_disabled_tools, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS
-        )
-    else:
-        merged = merge_disabled_tools_for_auto_agent(None, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS)
-
-    cfg['disabled_tools'] = merged
+        cfg['disabled_tools'] = ui_disabled_tools
 
     if template and hasattr(template, 'llm'):
         comp_instance._generate_cfg_override = cfg

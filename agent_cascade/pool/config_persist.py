@@ -14,6 +14,9 @@ from agent_cascade.log import logger
 
 from ..agent_instance import PoolSettings
 
+# Sentinel key marking that the one-time class-defaults migration has been applied.
+_CLASS_DEFAULTS_MIGRATED = '_class_defaults_migrated'
+
 
 class ConfigPersistMixin:
 
@@ -65,6 +68,17 @@ class ConfigPersistMixin:
                 # Add compression_fraction as percentage (runtime-modifiable module-level setting)
                 from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
                 data['compression_fraction'] = round(COMPRESSION_DEFAULT_FRACTION * 100, 1)
+
+                # Preserve the one-time class-defaults migration sentinel across saves. This method
+                # rebuilds `data` from settings.to_dict() + live state, which would otherwise drop a
+                # disk-only key; carry it forward so _migrate_class_defaults_to_ui_config stays idempotent.
+                if self._pool_settings_path.exists():
+                    try:
+                        with open(self._pool_settings_path, 'r', encoding='utf-8-sig') as f:
+                            if json.load(f).get(_CLASS_DEFAULTS_MIGRATED):
+                                data[_CLASS_DEFAULTS_MIGRATED] = True
+                    except Exception:
+                        pass
 
                 # Persist llm_cfg tool char limits and grep_spillover to pool_settings.json
                 if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
@@ -371,6 +385,74 @@ class ConfigPersistMixin:
         except Exception as e:
             logger.warning(f"[disabled_tools] Failed to apply loaded disabled tools config: {e}")
 
+    def _migrate_class_defaults_to_ui_config(self):
+        """One-time migration: seed pool_settings.json with the old per-class tool defaults.
+
+        Background: per-agent-class hardcoded tool defaults (resolver "Layer 3") were removed so
+        the UI (pool_settings.json → _ui_disabled_tools) becomes the single source of truth. To
+        avoid a behavior regression for users who never opened the UI, this migration seeds the
+        user config with those same defaults on first run after upgrade.
+
+        - Runs only if sentinel ``_class_defaults_migrated`` is absent from the saved file.
+        - Never overrides an agent key the user already configured (``setdefault``).
+        - For SYSTEM agents (Security, Compressor) we EXCLUDE ``shell_cmd`` so they keep read-only
+          shell access via restricted_shell=True instead of losing the tool entirely.
+
+        Called from AgentPool.__init__ after _load_pool_settings() (see pool/core.py), so it runs
+        for BOTH fresh installs (no settings file yet) and existing installs (file present).
+        """
+        # Already migrated? Return early without touching anything.
+        if self._pool_settings_path.exists():
+            try:
+                with open(self._pool_settings_path, 'r', encoding='utf-8-sig') as f:
+                    if json.load(f).get(_CLASS_DEFAULTS_MIGRATED):
+                        return  # already migrated
+            except Exception:
+                pass  # unreadable — proceed to migrate
+
+        from agent_cascade.constants import (
+            DEFAULT_SECURITY_DISABLED_TOOLS, DEFAULT_COMPRESSOR_DISABLED_TOOLS,
+            DEFAULT_GENERALIST_DISABLED_TOOLS, DEFAULT_ORCHESTRATOR_DISABLED_TOOLS,
+            DEFAULT_REVIEWER_DISABLED_TOOLS, DEFAULT_WRITER_DISABLED_TOOLS,
+        )
+        # System agents get restricted_shell=True via _create_system_agent — keep shell_cmd available.
+        SYSTEM_CLASSES = {'Security', 'Compressor'}
+        seed_full = {
+            'Security': set(DEFAULT_SECURITY_DISABLED_TOOLS),
+            'Compressor': set(DEFAULT_COMPRESSOR_DISABLED_TOOLS),
+            'Generalist': set(DEFAULT_GENERALIST_DISABLED_TOOLS),
+            'Orchestrator': set(DEFAULT_ORCHESTRATOR_DISABLED_TOOLS),
+            'Reviewer': set(DEFAULT_REVIEWER_DISABLED_TOOLS),
+            'Writer': set(DEFAULT_WRITER_DISABLED_TOOLS),
+        }
+        seed = {k: sorted(v - {'shell_cmd'} if k in SYSTEM_CLASSES else v) for k, v in seed_full.items()}
+
+        # Seed into the live UI config; user's explicit entry always wins.
+        with self._ui_disabled_tools_lock:
+            existing = dict(self._ui_disabled_tools) if self._ui_disabled_tools else {}
+        for agent_key, tools in seed.items():
+            existing.setdefault(agent_key, tools)  # user's explicit entry wins
+        self.set_ui_disabled_tools(existing)
+
+        # Persist the sentinel as a top-level key (read-modify-write; NOT via _save_pool_settings,
+        # which rebuilds its dict and would drop it). All other keys are preserved.
+        with self._settings_save_lock:
+            data = {}
+            if self._pool_settings_path.exists():
+                try:
+                    with open(self._pool_settings_path, 'r', encoding='utf-8-sig') as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            data[_CLASS_DEFAULTS_MIGRATED] = True
+            self._pool_settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+        logger.info(
+            '[MIGRATION] Seeded class defaults into UI config for %d agents '
+            '(shell_cmd kept available for system agents)', len(seed))
+
     def _apply_pending_config(self):
         """Apply configuration loaded from pool_settings.json that requires operation_manager.
 
@@ -487,9 +569,9 @@ class ConfigPersistMixin:
         # Use the centralized resolver to extract per-agent tools from our live cache.
         # We pass it as instance_override (highest priority layer) with no template_cfg,
         # so it only reads from the live cache and applies the standard lookup chain.
-        # Note: The resolver includes defense-in-depth defaults here as well. This is
-        # intentional because set union is idempotent and provides extra safety — any
-        # tool disabled by either source remains disabled.
+        # Note: after Layer 3 removal the resolver no longer unions hardcoded per-class
+        # defaults — the result is exactly the user's UI config for this agent (plus the
+        # safe baseline only when the agent has no explicit config at all).
         return resolve_disabled_tools_for_agent(
             instance_override={'disabled_tools': dt},
             template_cfg=None,

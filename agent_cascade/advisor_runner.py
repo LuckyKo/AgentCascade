@@ -70,11 +70,10 @@ def run_lightweight_advisor(
         ``was_timeout`` so the caller can fall back gracefully. This function never
         raises — all exceptions are captured into the result.
     """
-    from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS, NON_LLM_KEYS
+    from agent_cascade.constants import NON_LLM_KEYS
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.log import logger
     from agent_cascade.settings import SECURITY_AGENT_MAX_TURNS
-    from agent_cascade.utils import merge_disabled_tools_for_auto_agent
 
     result = AdvisorResult()
     start_time = time.perf_counter()
@@ -115,9 +114,7 @@ def run_lightweight_advisor(
         llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
         if 'disabled_tools' in ui_cfg:
             llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
-        existing_disabled = llm_safe_cfg.get('disabled_tools', [])
-        llm_safe_cfg['disabled_tools'] = merge_disabled_tools_for_auto_agent(existing_disabled, agent_class,
-                                                                             DEFAULT_SECURITY_DISABLED_TOOLS)
+        # No hardcoded merge — UI config is authoritative (seeded by the one-time migration).
 
         template = pool.get_template(agent_class) if hasattr(pool, 'get_template') else None
         if template is not None and hasattr(template, 'llm'):
