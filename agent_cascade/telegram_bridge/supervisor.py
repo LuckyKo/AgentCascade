@@ -209,8 +209,8 @@ class TelegramBridgeSupervisor:
             self._stopping = True
         self._stop_thread()   # manages its own locking; must not hold lock during join
 
-    def notify_user(self, message: str, instance_name: str | None = None,
-                    run_generation: int | None = None) -> bool:
+    def notify_user(self, message: str, instance_name: Optional[str] = None,
+                    run_generation: Optional[int] = None) -> bool:
         """Fire-and-forget delivery of an async user message to the phone via Telegram.
 
         Telegram-only path — distinct from the browser WebSocket notification channel

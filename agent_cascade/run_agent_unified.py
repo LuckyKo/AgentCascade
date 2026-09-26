@@ -34,17 +34,17 @@ from .execution_engine import ExecutionEngine
 
 
 def _reset_run_scoped_tg_state(instance) -> None:
-    """Reset per-run Telegram/auto-skill state on a root instance at the run boundary.
+    """Reset per-run Telegram/auto-skill state on a root instance.
 
-    The in-loop auto-skill snapshot is per-INSTANCE, but a root run reuses the same
+    The in-loop auto-skill snapshot is per-instance, but a root run reuses the same
     instance across every user turn. Without this reset, extract_instance_output()
     returns the PREVIOUS run's final answer (compression/helpers.py:612-623) and every
     push ships the same stale text. lifecycle_manager.py:157-163 already does this for
     the sub-agent reuse path; this is the main-agent equivalent.
 
-    ``_auto_skill_proposed`` is documented as one-shot per run (agent_instance.py), so
-    it must be re-armed here too — otherwise the P1 pre-reflection push stays dead for
-    the root agent after its first auto-skill trigger.
+    ``_auto_skill_proposed`` is one-shot per run (agent_instance.py), so it must be
+    re-armed here too — otherwise the P1 pre-reflection push stays dead for the root
+    agent after its first auto-skill trigger.
     """
     instance._tg_pushed = False
     instance._auto_skill_task_output = None

@@ -218,8 +218,8 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
 
 
 async def _safe_send(bot, chat_id: int, text: str,
-                     instance_name: str | None = None,
-                     run_generation: int | None = None) -> None:
+                     instance_name: Optional[str] = None,
+                     run_generation: Optional[int] = None) -> None:
     try:
         n_chunks = 0
         for part in chunk_text(text):          # chunk long answers (short messages are byte-identical: [text])
