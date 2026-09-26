@@ -81,10 +81,15 @@ def _lenient_parse(yaml_lines: List[str]) -> Optional[Dict[str, Any]]:
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     """Split content into YAML frontmatter dict and remaining body text.
 
-    Uses pyyaml's load_all for robust parsing that handles edge cases like:
+    Uses pyyaml's safe_load for robust parsing that handles edge cases like:
       - Body text containing '---' sequences
       - Whitespace before closing delimiter
       - Missing or malformed delimiters gracefully
+
+    If strict YAML parsing fails (e.g. an unescaped colon in a value), a lenient
+    line-based fallback (_lenient_parse) is attempted before giving up; it bails on
+    any line it cannot confidently interpret, so genuinely broken input still yields
+    an empty dict with the full content as body.
 
     Expects the first line to be '---' with a closing '---' delimiter.
     If no valid frontmatter is found, returns an empty dict with the full content as body.
@@ -138,8 +143,10 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
         return {}, content
 
     if not isinstance(frontmatter, dict):
+        # Delimiters were found and the block parsed (as a non-dict), so the body after
+        # the closing '---' is returned — consistent with every other exit path below.
         logger.debug('[SKILLS] Frontmatter parsed as non-dict type: %s', type(frontmatter).__name__)
-        return {}, content
+        return {}, body
 
     return frontmatter, body.strip()
 

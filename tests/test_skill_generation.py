@@ -219,9 +219,15 @@ class TestValidation:
         fm_errors = [e for e in errors if 'No valid YAML frontmatter found' in e]
         assert fm_errors, f"expected frontmatter error, got: {errors}"
         msg = fm_errors[0]
-        # Either the underlying YAML reason or the actionable "unescaped" guidance must be present.
-        assert ('mapping values are not allowed here' in msg) or ('unescaped' in msg), \
-            f"frontmatter error should be actionable, got: {msg!r}"
+        # The actionable hint must always be present...
+        assert 'unescaped' in msg, f"frontmatter error should carry the quoting hint, got: {msg!r}"
+        # ...AND the underlying YAML reason must actually be surfaced (not just the static hint).
+        # Without this check the test would pass even if _frontmatter_failure_reason regressed to ''.
+        # The exact PyYAML wording for a stray non-key line is "could not find expected ':'"
+        # ("mapping values are not allowed here" is the wording for the unescaped-colon case,
+        # which now parses via the lenient fallback — see test_colon_in_value_now_parses).
+        assert 'could not find expected' in msg, \
+            f"frontmatter error should include the YAML reason, got: {msg!r}"
 
     def test_colon_in_value_now_parses(self):
         """BUG_0018 positive: the BUG_0017 trigger input (unescaped colon in generated_from_task)
