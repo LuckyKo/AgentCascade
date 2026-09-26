@@ -8,6 +8,8 @@ Tier 2 (Self-Match): Dry-run match against the generating task text.
 import re
 from typing import List, Tuple
 
+import yaml
+
 from agent_cascade.log import logger
 from agent_cascade.settings import (AUTO_SKILL_MAX_SIZE_KB, AUTO_SKILL_PROMOTION_THRESHOLD, MIN_DESCRIPTION_LENGTH,
                                     MIN_SKILL_BODY_LENGTH)
@@ -17,6 +19,32 @@ from .parser import parse_frontmatter
 
 # Snake-case pattern: starts with lowercase letter, allows lowercase digits, underscore, hyphen
 _SNAKE_CASE_RE = re.compile(r'^[a-z][a-z0-9_-]*$')
+
+
+def _frontmatter_failure_reason(skill_content: str) -> str:
+    """Return the underlying YAML error message for a failed frontmatter parse (or '').
+
+    ``parse_frontmatter`` swallows the YAMLError (logs it, returns ``{}``), so re-probe here:
+    extract the first ``---``…``---`` block and try ``yaml.safe_load`` to surface an actionable
+    reason (e.g. unescaped colon in a value) for the validator error message.
+    """
+    stripped = skill_content.strip()
+    if not stripped.startswith('---'):
+        return ''
+    lines = stripped.split('\n')
+    yaml_lines = []
+    for line in lines[1:]:
+        if line.strip() == '---':
+            break
+        yaml_lines.append(line)
+    if not yaml_lines:
+        return ''
+    try:
+        yaml.safe_load('\n'.join(yaml_lines))
+        return ''
+    except yaml.YAMLError as e:
+        return str(e).replace('\n', ' ')
+
 
 # Prompt injection patterns (borrowed from Hermes)
 _INJECTION_PATTERNS: list = [
@@ -63,7 +91,10 @@ def validate_skill(
     # Parse frontmatter
     frontmatter, body = parse_frontmatter(skill_content)
     if not frontmatter:
-        errors.append('No valid YAML frontmatter found in skill content')
+        reason = _frontmatter_failure_reason(skill_content)
+        errors.append('No valid YAML frontmatter found in skill content'
+                      + (f' ({reason})' if reason else '')
+                      + ' — check for unescaped colons/quotes in values (quote generated_from_task).')
         return False, errors
 
     # Name check
@@ -113,20 +144,33 @@ def validate_skill(
         return False, errors + warnings
 
     if task_text:
-        # Lightweight self-match: check if enough skill keywords appear in the task text.
-        # Reuses the same tokenization as SkillMatcher without building a full index.
+        # Self-match vs the generating task. BUG_0017: the old score divided by len(query_tokens),
+        # so a wordy task sank an on-topic skill; and a correctly-generalized skill legitimately
+        # shares few tokens with the one-off task, so NO lexical threshold separates "generalized"
+        # from "unrelated". We therefore (1) score containment of the SMALLER set and (2) split the
+        # gate: zero shared vocabulary => hard reject (disconnected/hallucinated); some overlap but
+        # below threshold => ADVISORY warning (non-blocking), with actionable repair info.
         _token_re = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
         skill_text = f"{name} {description} {' '.join(triggers)}"
         skill_keywords = set(_token_re.findall(skill_text.lower()))
         query_tokens = set(_token_re.findall(task_text.lower()))
         if skill_keywords and query_tokens:
             overlap = len(skill_keywords & query_tokens)
-            score = min(overlap / max(len(query_tokens), 1), 1.0)
+            score = min(overlap / max(min(len(skill_keywords), len(query_tokens)), 1), 1.0)
         else:
-            score = 0.0
-        if score < AUTO_SKILL_PROMOTION_THRESHOLD:
-            errors.append(f"Self-match score {score:.3f} below threshold "
-                          f"{AUTO_SKILL_PROMOTION_THRESHOLD} — skill may not match its generating task")
+            overlap, score = 0, 0.0
+        if overlap == 0:
+            errors.append(
+                f"Self-match score {score:.3f} below threshold {AUTO_SKILL_PROMOTION_THRESHOLD} "
+                f"— skill shares NO vocabulary with its generating task; it may be unrelated or "
+                f"mis-scoped. Echo key task terms in name/description/triggers, or set "
+                f"generated_from_task to reflect the skill's actual scope.")
+        elif score < AUTO_SKILL_PROMOTION_THRESHOLD:
+            missing = sorted(query_tokens - skill_keywords)
+            warnings.append(
+                f"Self-match score {score:.3f} below threshold {AUTO_SKILL_PROMOTION_THRESHOLD} "
+                f"(advisory, non-blocking). Task terms not echoed by the skill: "
+                f"{', '.join(missing[:8])}. Consider adding relevant task vocabulary.")
 
     if errors:
         logger.debug("[SKILLS] Tier 2 validation failed for '%s': %s", skill_name, errors)

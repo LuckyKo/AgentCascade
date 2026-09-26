@@ -199,6 +199,28 @@ class TestValidation:
         assert not passed
         assert len(errors) > 0
 
+    def test_frontmatter_error_is_actionable(self):
+        """Change 2: an unescaped colon in a frontmatter value makes yaml.safe_load fail; the
+        validator error must surface the YAML reason / actionable guidance instead of the bare
+        'No valid YAML frontmatter found'."""
+        raw = ('---\n'
+               'name: test-skill\n'
+               'generated_from_task: Fix X: do Y properly\n'
+               'description: A skill for testing purposes with enough characters\n'
+               '---\n\n'
+               '## Instructions\n\n'
+               'Follow these steps carefully to complete the task. '
+               'This body has enough characters to pass validation.\n\n'
+               '1. Step one\n2. Step two\n3. Step three\n')
+        passed, errors = validate_skill(raw, 'test-skill', set())
+        assert not passed
+        fm_errors = [e for e in errors if 'No valid YAML frontmatter found' in e]
+        assert fm_errors, f"expected frontmatter error, got: {errors}"
+        msg = fm_errors[0]
+        # Either the underlying YAML reason or the actionable "unescaped" guidance must be present.
+        assert ('mapping values are not allowed here' in msg) or ('unescaped' in msg), \
+            f"frontmatter error should be actionable, got: {msg!r}"
+
     def test_duplicate_name(self):
         content = _make_skill_content(name='test-skill')
         passed, errors = validate_skill(content, 'test-skill', {'test-skill'})
@@ -303,6 +325,72 @@ class TestSelfMatch:
 
     def test_self_match_threshold_is_0_3(self):
         assert AUTO_SKILL_PROMOTION_THRESHOLD == 0.3
+
+    def test_generalized_skill_passes_with_advisory_warning(self):
+        """BUG_0017 repro: a valid, on-topic skill with generic triggers that shares only a
+        couple of tokens with a wordy generating task must PASS (advisory warning), not be
+        hard-rejected. Verified score band: overlap=1, new score ~0.077 < 0.3 → advisory."""
+        content = _make_skill_content(
+            name='dedup-flag',
+            description='Deliver push notifications once per run using an idempotent delivery flag',
+            triggers=['dedup flag', 'push once per run', 'idempotent delivery'],
+            generated_from_task=(
+                'Finish the Telegram bridge push-model implementation (todo.md:125): engine/core.py '
+                'pre-reflection push + run_agent_unified.py post-run push deduped by '
+                'instance._tg_pushed, via TelegramBridgeSupervisor.notify_user.'),
+        )
+        passed, messages = validate_skill(content, 'dedup-flag', set(), task_text=(
+            'Finish the Telegram bridge push-model implementation (todo.md:125): engine/core.py '
+            'pre-reflection push + run_agent_unified.py post-run push deduped by '
+            'instance._tg_pushed, via TelegramBridgeSupervisor.notify_user.'))
+        assert passed, f"Generalized skill must pass with advisory warning, got: {messages}"
+        # No self-match entry in the (returned) messages — only warnings are returned on pass.
+        assert not any('Self-match' in m and 'NO vocabulary' in m for m in messages), \
+            f"self-match hard-reject leaked into pass path: {messages}"
+        # The advisory warning IS present (validate_skill returns warnings on pass).
+        assert any('Self-match score' in m and 'advisory, non-blocking' in m for m in messages), \
+            f"expected advisory self-match warning, got: {messages}"
+
+    def test_zero_overlap_still_hard_rejected(self):
+        """Lesson constraint: a genuinely unrelated skill (ZERO shared tokens with the task)
+        must still be hard-rejected — this is what the drift-guard encodes."""
+        content = _make_skill_content(
+            name='docker-containers',
+            description='Managing Docker containers and orchestration',
+            triggers=['docker', 'container', 'kubernetes', 'pod'],
+            generated_from_task='Write pytest unit tests for the parser module',
+        )
+        passed, errors = validate_skill(content, 'docker-containers', set(),
+                                        task_text='Write pytest unit tests for the parser module')
+        assert not passed
+        assert any('shares NO vocabulary' in e for e in errors), \
+            f"expected zero-overlap hard-reject message, got: {errors}"
+
+    def test_advisory_message_lists_missing_task_terms(self):
+        """The advisory warning must name at least one actually-missing task token (actionable)."""
+        task = ('Finish the Telegram bridge push-model implementation (todo.md:125): engine/core.py '
+                'pre-reflection push + run_agent_unified.py post-run push deduped by '
+                'instance._tg_pushed, via TelegramBridgeSupervisor.notify_user.')
+        content = _make_skill_content(
+            name='dedup-flag',
+            description='Deliver push notifications once per run using an idempotent delivery flag',
+            triggers=['dedup flag', 'push once per run', 'idempotent delivery'],
+            generated_from_task=task,
+        )
+        passed, messages = validate_skill(content, 'dedup-flag', set(), task_text=task)
+        assert passed, f"Expected pass (advisory band), got: {messages}"
+        advisory = [m for m in messages if 'advisory, non-blocking' in m]
+        assert advisory, f"expected an advisory self-match warning, got: {messages}"
+        # At least one actually-missing task token must be named (verified missing set is non-empty).
+        import re as _re
+        _token_re = _re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
+        query_tokens = set(_token_re.findall(task.lower()))
+        skill_text = 'dedup-flag Deliver push notifications once per run using an idempotent delivery flag dedup flag push once per run idempotent delivery'
+        skill_keywords = set(_token_re.findall(skill_text.lower()))
+        missing = query_tokens - skill_keywords
+        assert missing, 'fixture must have missing task tokens for this assertion to be meaningful'
+        assert any(tok in advisory[0] for tok in sorted(missing)[:8]), \
+            f"advisory warning should list a missing task token; missing={sorted(missing)[:8]}, msg={advisory[0]!r}"
 
 
 # ===========================================================================
